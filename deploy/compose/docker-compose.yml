@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: ojos-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ojos
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8
+    container_name: ojos-redis
+    ports:
+      - "6379:6379"
+
+  nats:
+    image: nats:latest
+    container_name: ojos-nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  gateway:
+    build:
+      context: ../../services
+      dockerfile: gateway/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://postgres:password@postgres:5432/ojos?sslmode=disable"
+    ports:
+      - "8080:8080"
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: ojos-jaeger
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+
+volumes:
+  postgres-data:

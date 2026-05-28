@@ -1,0 +1,9 @@
+service:
+  name: gateway-service
+  port: 8080
+
+database:
+  url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
+
+jaeger:
+  endpoint: ojos-jaeger:4317
