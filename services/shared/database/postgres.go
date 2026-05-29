@@ -1,4 +1,4 @@
-package db
+package database
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func Connect(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {
+func NewPostgresPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {
 	if cfg.Database.URL == "" {
 		return nil, fmt.Errorf("database url is empty")
 	}
@@ -35,6 +35,5 @@ func Connect(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {
 		return nil, err
 	}
 
-	fmt.Println("postgres pool connected")
 	return pool, nil
 }

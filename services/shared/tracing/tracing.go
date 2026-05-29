@@ -2,7 +2,6 @@ package tracing
 
 import (
 	"context"
-
 	"ojos-shared/config"
 
 	"go.opentelemetry.io/otel"
@@ -14,15 +13,24 @@ import (
 )
 
 func Init(ctx context.Context, cfg *config.Config) (*sdktrace.TracerProvider, error) {
+	//fmt.Println("otel endpoint:", cfg.Jaeger.Endpoint)
+
 	client := otlptracegrpc.NewClient(
 		otlptracegrpc.WithEndpoint(cfg.Jaeger.Endpoint),
 		otlptracegrpc.WithInsecure(),
 	)
 
-	exporter, err := otlptrace.New(ctx, client)
+	otlpExporter, err := otlptrace.New(ctx, client)
 	if err != nil {
 		return nil, err
 	}
+
+	//stdoutExporter, err := stdouttrace.New(
+	//	stdouttrace.WithPrettyPrint(),
+	//)
+	//if err != nil {
+	//	return nil, err
+	//}
 
 	res, err := resource.Merge(
 		resource.Default(),
@@ -36,10 +44,20 @@ func Init(ctx context.Context, cfg *config.Config) (*sdktrace.TracerProvider, er
 	}
 
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
+
+		//sdktrace.WithSpanProcessor(
+		//	sdktrace.NewSimpleSpanProcessor(otlpExporter),
+		//),
+
+		sdktrace.WithBatcher(otlpExporter),
+
+		//sdktrace.WithSpanProcessor(
+		//	sdktrace.NewSimpleSpanProcessor(stdoutExporter),
+		//),
 	)
 
 	otel.SetTracerProvider(tp)
+
 	return tp, nil
 }

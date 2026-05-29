@@ -4,6 +4,7 @@ type Config struct {
 	Service  ServiceConfig  `mapstructure:"service"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Jaeger   JaegerConfig   `mapstructure:"jaeger"`
+	Nats     NatsConfig     `mapstructure:"nats"`
 }
 
 type ServiceConfig struct {
@@ -17,4 +18,8 @@ type DatabaseConfig struct {
 
 type JaegerConfig struct {
 	Endpoint string `mapstructure:"endpoint"`
+}
+
+type NatsConfig struct {
+	URL string `mapstructure:"url"`
 }

@@ -7,3 +7,6 @@ database:
 
 jaeger:
   endpoint: ojos-jaeger:4317
+
+nats:
+  url: nats://ojos-nats:4222

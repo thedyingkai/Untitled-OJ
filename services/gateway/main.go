@@ -4,68 +4,69 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"ojos-shared/logger"
+	"ojos-gateway/internal/router"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"ojos-gateway/internal/app"
 	sharedmw "ojos-shared/middleware"
-	"strconv"
 
-	"ojos-gateway/internal/db"
-	"ojos-gateway/internal/tracing"
-
-	"ojos-shared/config"
-
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel"
+	"github.com/zeromicro/go-zero/rest"
 	"go.uber.org/zap"
 )
 
 func main() {
 	ctx := context.Background()
 
-	cfg, err := config.Load()
+	a, err := app.New(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	logg, err := logger.New(cfg.Service.Name)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer logg.Sync()
-
-	tp, err := tracing.Init(ctx, cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer tp.Shutdown(ctx)
-
-	pool, err := db.Connect(ctx, cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer pool.Close()
-
-	tracer := otel.Tracer("gateway")
-	_, span := tracer.Start(ctx, "gateway.startup")
-	span.End()
-	_ = tp.ForceFlush(ctx)
-
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+	server := rest.MustNewServer(rest.RestConf{
+		Host: "0.0.0.0",
+		Port: a.Cfg.Service.Port,
 	})
 
-	tracedHandler := otelhttp.NewHandler(
-		sharedmw.Logging(logg, mux),
-		"gateway-http",
-	)
+	server.Use(func(next http.HandlerFunc) http.HandlerFunc {
+		return sharedmw.Recovery(a.Logger, next)
+	})
 
-	addr := ":" + strconv.Itoa(cfg.Service.Port)
-	logg.Info("gateway listening", zap.String("addr", addr))
+	server.Use(a.LoggingMiddleware)
 
-	if err := http.ListenAndServe(addr, tracedHandler); err != nil {
-		log.Fatal(err)
+	router.Register(server, a)
+
+	//server.AddRoute(rest.Route{
+	//	Method: http.MethodGet,
+	//	Path:   "/trace-test",
+	//	Handler: func(w http.ResponseWriter, r *http.Request) {
+	//		ctx, span := otel.Tracer("gateway").Start(r.Context(), "TRACE_TEST")
+	//		span.End()
+	//
+	//		_ = a.Tracer.ForceFlush(ctx)
+	//
+	//		w.WriteHeader(http.StatusOK)
+	//		_, _ = w.Write([]byte("trace-test-ok"))
+	//	},
+	//})
+
+	a.Logger.Info("gateway listening", zap.Int("port", a.Cfg.Service.Port))
+
+	go server.Start()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	<-quit
+
+	a.Logger.Info("gateway shutting down")
+
+	server.Stop()
+
+	if err := a.Close(context.Background()); err != nil {
+		a.Logger.Error("gateway close failed", zap.Error(err))
 	}
 
+	a.Logger.Info("gateway stopped")
 }
