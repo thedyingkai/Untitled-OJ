@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"ojos-shared/config"
+	"ojos-shared/configs"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func NewPostgresPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {
+func NewPostgresPool(ctx context.Context, cfg *configs.Config) (*pgxpool.Pool, error) {
 	if cfg.Database.URL == "" {
 		return nil, fmt.Errorf("database url is empty")
 	}

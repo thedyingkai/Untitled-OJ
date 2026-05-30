@@ -1,4 +1,4 @@
-package config
+package configs
 
 import (
 	"github.com/spf13/viper"
@@ -7,7 +7,7 @@ import (
 func Load() (*Config, error) {
 	v := viper.New()
 
-	v.SetConfigName("configs")
+	v.SetConfigName("config")
 	v.SetConfigType("yaml")
 
 	v.AddConfigPath("./configs")

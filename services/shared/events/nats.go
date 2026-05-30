@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"ojos-shared/config"
+	"ojos-shared/configs"
 
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
@@ -16,7 +16,7 @@ type Bus struct {
 	producer string
 }
 
-func NewBus(cfg *config.Config) (*Bus, error) {
+func NewBus(cfg *configs.Config) (*Bus, error) {
 	if cfg.Nats.URL == "" {
 		return nil, fmt.Errorf("nats url is empty")
 	}

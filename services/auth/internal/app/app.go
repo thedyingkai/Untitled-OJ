@@ -3,16 +3,15 @@ package app
 import (
 	"context"
 	"net/http"
+
+	"ojos-shared/configs"
 	"ojos-shared/database"
 	"ojos-shared/events"
+	"ojos-shared/logger"
 	sharedmw "ojos-shared/middleware"
 	"ojos-shared/tracing"
 
-	"ojos-shared/configs"
-	"ojos-shared/logger"
-
 	"github.com/jackc/pgx/v5/pgxpool"
-	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.uber.org/zap"
 )
@@ -51,8 +50,8 @@ func New(ctx context.Context) (*App, error) {
 		return nil, err
 	}
 
-	tracer := otel.Tracer("gateway")
-	_, span := tracer.Start(ctx, "gateway.startup")
+	tracer := tp.Tracer("auth")
+	_, span := tracer.Start(ctx, "auth.startup")
 	span.End()
 	_ = tp.ForceFlush(ctx)
 
@@ -74,6 +73,10 @@ func (a *App) Close(ctx context.Context) error {
 		a.DB.Close()
 	}
 
+	if a.EventBus != nil {
+		a.EventBus.Close()
+	}
+
 	if a.Tracer != nil {
 		if err := a.Tracer.Shutdown(ctx); err != nil {
 			return err
@@ -82,10 +85,6 @@ func (a *App) Close(ctx context.Context) error {
 
 	if a.Logger != nil {
 		_ = a.Logger.Sync()
-	}
-
-	if a.EventBus != nil {
-		a.EventBus.Close()
 	}
 
 	return nil

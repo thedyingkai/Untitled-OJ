@@ -2,7 +2,7 @@ package tracing
 
 import (
 	"context"
-	"ojos-shared/config"
+	"ojos-shared/configs"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -12,7 +12,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 )
 
-func Init(ctx context.Context, cfg *config.Config) (*sdktrace.TracerProvider, error) {
+func Init(ctx context.Context, cfg *configs.Config) (*sdktrace.TracerProvider, error) {
 	//fmt.Println("otel endpoint:", cfg.Jaeger.Endpoint)
 
 	client := otlptracegrpc.NewClient(
