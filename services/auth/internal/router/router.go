@@ -5,6 +5,7 @@ import (
 
 	"ojos-auth/internal/app"
 	"ojos-auth/internal/handler"
+	authmw "ojos-auth/internal/middleware"
 	"ojos-auth/internal/repository"
 	"ojos-auth/internal/service"
 
@@ -36,5 +37,11 @@ func Register(server *rest.Server, a *app.App) {
 		Method:  http.MethodPost,
 		Path:    "/auth/login",
 		Handler: handler.Login(authService),
+	})
+
+	server.AddRoute(rest.Route{
+		Method:  http.MethodGet,
+		Path:    "/auth/profile",
+		Handler: authmw.JWT(a.Cfg.JWT.Secret, handler.Profile()),
 	})
 }

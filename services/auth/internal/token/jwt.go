@@ -41,3 +41,33 @@ func Generate(secret string, expireHours int, userID int64, username string, rol
 
 	return t.SignedString([]byte(secret))
 }
+
+func Parse(secret string, tokenString string) (*Claims, error) {
+	if secret == "" {
+		return nil, fmt.Errorf("jwt secret is empty")
+	}
+
+	claims := &Claims{}
+
+	t, err := jwt.ParseWithClaims(
+		tokenString,
+		claims,
+		func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+
+			return []byte(secret), nil
+		},
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if !t.Valid {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	return claims, nil
+}

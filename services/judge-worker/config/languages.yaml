@@ -1,0 +1,116 @@
+languages:
+  cpp17:
+    source_file: main.cpp
+    exe_file: main
+    compile:
+      enabled: true
+      command: g++
+      args:
+        - "-std=c++17"
+        - "-O2"
+        - "-pipe"
+        - "{source}"
+        - "-o"
+        - "{exe}"
+      timeout_ms: 10000
+    run:
+      command: "{exe}"
+      args: []
+
+  cpp20:
+    source_file: main.cpp
+    exe_file: main
+    compile:
+      enabled: true
+      command: g++
+      args:
+        - "-std=c++20"
+        - "-O2"
+        - "-pipe"
+        - "{source}"
+        - "-o"
+        - "{exe}"
+      timeout_ms: 10000
+    run:
+      command: "{exe}"
+      args: []
+
+  c11:
+    source_file: main.c
+    exe_file: main
+    compile:
+      enabled: true
+      command: gcc
+      args:
+        - "-std=c11"
+        - "-O2"
+        - "-pipe"
+        - "{source}"
+        - "-o"
+        - "{exe}"
+      timeout_ms: 10000
+    run:
+      command: "{exe}"
+      args: []
+
+  python3:
+    source_file: main.py
+    exe_file: ""
+    compile:
+      enabled: false
+      command: ""
+      args: []
+      timeout_ms: 0
+    run:
+      command: python3
+      args:
+        - "{source}"
+
+  java17:
+    source_file: Main.java
+    exe_file: ""
+    compile:
+      enabled: true
+      command: javac
+      args:
+        - "{source}"
+      timeout_ms: 10000
+    run:
+      command: java
+      args:
+        - "-cp"
+        - "{workdir}"
+        - "Main"
+
+  rust:
+    source_file: main.rs
+    exe_file: main
+    compile:
+      enabled: true
+      command: rustc
+      args:
+        - "--edition=2021"
+        - "-O"
+        - "{source}"
+        - "-o"
+        - "{exe}"
+      timeout_ms: 15000
+    run:
+      command: "{exe}"
+      args: []
+
+  go:
+    source_file: main.go
+    exe_file: main
+    compile:
+      enabled: true
+      command: go
+      args:
+        - "build"
+        - "-o"
+        - "{exe}"
+        - "{source}"
+      timeout_ms: 15000
+    run:
+      command: "{exe}"
+      args: []
