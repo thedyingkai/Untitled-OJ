@@ -32,6 +32,7 @@ Online Judge Infrastructure Platform
 支持多题型
 支持多赛制
 支持插件式模块安装
+支持完整资源级权限控制
 ```
 
 核心理念：
@@ -56,11 +57,13 @@ Everything is Extensible
 认证服务
 统一网关
 公共基础库
+完整资源级权限核心
 真实判题闭环
 多语言评测配置
 日志与链路追踪
 Gateway 统一鉴权
 用户上下文透传
+Judge API 权限检查
 Judge PENDING 兜底恢复
 Judge 原子抢任务
 ```
@@ -69,10 +72,11 @@ Judge 原子抢任务
 
 ```text
 Infrastructure Foundation
-Shared v0.2
+Shared v0.3
 Gateway v0.3
 Auth v0.2
-Judge API MVP v0.2
+Permission Core v1
+Judge API MVP v0.3
 Judge Worker Reliability v0.2
 ```
 
@@ -98,6 +102,7 @@ Judge Worker Reliability v0.2
 | Logger                 | Zap / tracing                    |
 | Deployment             | Docker Compose                   |
 | Auth                   | JWT / bcrypt                     |
+| Permission             | Resource-level RBAC / ACL        |
 | C++ Judge Toolchain    | g++                              |
 | Other Judge Toolchains | gcc / python3 / Java / Go / Rust |
 
@@ -141,6 +146,13 @@ judge-api     判题 API 服务
 judge-worker  Rust 判题执行器
 ```
 
+说明：
+
+```text
+Permission Core 当前位于 shared/security/permission。
+它不是独立 HTTP 服务，而是所有业务服务共享的权限核心库。
+```
+
 ---
 
 ## 六、基础设施
@@ -165,7 +177,7 @@ Judge Worker
 启动命令：
 
 ```powershell
-cd deploy/compose
+cd D:\Untitled-OJ\deploy\compose
 
 docker compose up -d --build
 ```
@@ -174,6 +186,15 @@ docker compose up -d --build
 
 ```powershell
 docker ps
+```
+
+查看日志：
+
+```powershell
+docker logs ojos-gateway
+docker logs ojos-auth
+docker logs ojos-judge-api
+docker logs ojos-judge-worker
 ```
 
 ---
@@ -191,6 +212,7 @@ PostgreSQL 用于存储：
 ```text
 用户
 角色
+完整资源级权限
 题目
 测试点
 提交记录
@@ -203,10 +225,20 @@ PostgreSQL 用于存储：
 users
 roles
 user_roles
+
+resource_types
+permissions
+role_permissions
+role_bindings
+permission_assignments
+resource_edges
+permission_audit_logs
+
 problems
 test_cases
 submissions
 submission_cases
+
 schema_migrations
 ```
 
@@ -225,6 +257,7 @@ golang-migrate
 ```text
 000001_init_schema
 000002_judge_schema
+000003_permission_core
 ```
 
 执行迁移：
@@ -234,6 +267,16 @@ migrate `
   -path deploy/migrations `
   -database "postgres://postgres:password@localhost:5433/ojos?sslmode=disable" `
   up
+```
+
+查看迁移状态：
+
+```powershell
+docker exec -it ojos-postgres psql -U postgres -d ojos
+```
+
+```sql
+SELECT * FROM schema_migrations;
 ```
 
 ---
@@ -331,7 +374,7 @@ services/shared
 
 Shared 是公共基础库，不是独立 HTTP 服务。
 
-当前 Shared 已完成 go-zero 适配和旧兼容层清理。
+当前 Shared 已完成 go-zero 适配、旧兼容层清理，并升级到 v0.3。
 
 当前目录：
 
@@ -344,7 +387,8 @@ services/shared/
 ├── middleware/
 ├── security/
 │   ├── authctx/
-│   └── jwt/
+│   ├── jwt/
+│   └── permission/
 ├── tracing/
 ├── go.mod
 └── go.sum
@@ -370,6 +414,12 @@ go-zero Recovery Middleware
 go-zero Logging Middleware
 JWT 生成与解析
 可信用户上下文 Header 解析
+完整资源级权限检查
+角色绑定
+直接授权 / 拒绝
+资源继承关系维护
+权限点注册
+资源类型注册
 ```
 
 Shared 当前原则：
@@ -379,7 +429,7 @@ Shared 当前原则：
 shared 只接收参数并创建基础设施对象
 业务逻辑不进入 shared
 业务配置不进入 shared
-新增业务模块不修改 shared
+新增业务模块不修改 shared 核心结构
 ```
 
 ---
@@ -421,6 +471,8 @@ Judge API 服务代理
 ```text
 8080
 ```
+
+---
 
 ### 8.1 Gateway API
 
@@ -506,7 +558,38 @@ X-Roles: user
 
 ---
 
-### 8.5 当前限制
+### 8.5 Gateway 与权限边界
+
+Gateway 不做具体业务权限判断。
+
+Gateway 只负责：
+
+```text
+JWT 验证
+用户上下文透传
+```
+
+业务服务负责选择具体权限点并调用 Permission Core。
+
+例如：
+
+```text
+POST /judge/submissions
+    -> judge.submit @ system:0
+
+POST /problems
+    -> problem.create @ system:0
+
+POST /problems/:id/testcases
+    -> problem.manage.data @ problem:{id}
+
+POST /contests/:id/freeze
+    -> contest.freeze @ contest:{id}
+```
+
+---
+
+### 8.6 当前限制
 
 Gateway 当前仍未实现：
 
@@ -517,7 +600,6 @@ Gateway 当前仍未实现：
 服务发现
 配置热更新
 统一响应格式
-权限点检查
 ```
 
 ---
@@ -549,6 +631,8 @@ JWT 解析
 ```text
 8081
 ```
+
+---
 
 ### 9.1 Auth API
 
@@ -622,7 +706,318 @@ Jwt:
 
 ---
 
-## 十、Judge API 模块
+## 十、Permission Core 模块
+
+路径：
+
+```text
+services/shared/security/permission
+```
+
+Permission Core 是 OJOS 的完整资源级权限核心，用于判断：
+
+```text
+谁可以在什么资源范围内执行什么操作
+```
+
+统一抽象为：
+
+```text
+Can(principal, permission, scope)
+```
+
+例如：
+
+```text
+Can(user:1, "judge.submit", system:0)
+Can(user:2, "problem.edit", problem:7)
+Can(user:3, "contest.manage", contest:5)
+Can(user:4, "balloon.manage", contest:5)
+Can(user:5, "module.install", system:0)
+```
+
+当前版本：
+
+```text
+Permission Core v1
+```
+
+---
+
+### 10.1 当前能力
+
+当前 Permission Core 已完成：
+
+```text
+完整资源级权限数据库模型
+Principal / Scope 抽象
+resource_types
+permissions
+role_permissions
+role_bindings
+permission_assignments
+resource_edges
+permission_audit_logs
+
+保留并兼容 users / roles / user_roles
+
+shared permission checker
+HasUserPermission
+RequireUserPermission
+BindRole
+AssignPermission
+AddResourceEdge
+RegisterResourceType
+RegisterPermission
+GrantRolePermission
+
+judge-api 接入 judge.submit
+普通 user 角色允许提交
+permission_assignments.deny 可以覆盖普通角色权限
+删除 deny 后权限恢复
+```
+
+---
+
+### 10.2 Principal
+
+权限主体使用：
+
+```text
+principal_type
+principal_id
+```
+
+当前主要使用：
+
+```text
+user:{id}
+```
+
+未来可扩展：
+
+```text
+team:{id}
+group:{id}
+service:{id}
+```
+
+---
+
+### 10.3 Scope
+
+权限作用域使用：
+
+```text
+scope_type
+scope_id
+```
+
+示例：
+
+```text
+system:0
+problem:7
+contest:3
+group:2
+team:5
+submission:100
+module:0
+```
+
+约定：
+
+```text
+system:0 表示全局作用域
+problem:0 表示所有题目
+contest:0 表示所有比赛
+scope_id = 0 表示某类资源的全局范围
+```
+
+---
+
+### 10.4 权限核心表
+
+Permission Core 新增核心表：
+
+```text
+resource_types
+permissions
+role_permissions
+role_bindings
+permission_assignments
+resource_edges
+permission_audit_logs
+```
+
+含义：
+
+```text
+resource_types          资源类型注册表
+permissions             权限点注册表
+role_permissions         角色拥有哪些权限
+role_bindings            某个主体在某个资源范围内拥有某个角色
+permission_assignments   直接授权 / 直接拒绝
+resource_edges           资源继承关系
+permission_audit_logs    权限变更审计日志
+```
+
+---
+
+### 10.5 权限判断规则
+
+权限判断顺序：
+
+```text
+1. 如果用户拥有 super_admin，则直接允许
+2. 收集当前 scope、父级 scope、type:0、system:0
+3. 检查 permission_assignments.deny
+4. 检查 permission_assignments.allow
+5. 检查全局 user_roles
+6. 检查资源级 role_bindings
+7. 默认拒绝
+```
+
+说明：
+
+```text
+deny 优先于普通 allow 和角色权限
+super_admin 高于 deny
+role_permissions 不带 scope
+role_bindings 带 scope
+```
+
+---
+
+### 10.6 当前内置资源类型
+
+```text
+system
+module
+problem
+contest
+group
+team
+submission
+post
+clarification
+balloon
+print
+```
+
+未来新增资源类型只需要注册到 `resource_types`，不需要修改权限核心表。
+
+---
+
+### 10.7 当前内置权限点
+
+当前已内置：
+
+```text
+system.admin
+
+module.install
+module.enable
+module.disable
+module.configure
+
+launcher.view
+launcher.install
+launcher.uninstall
+launcher.enable
+launcher.disable
+
+problem.create
+problem.view
+problem.view.private
+problem.edit
+problem.delete
+problem.manage.data
+problem.manage.asset
+
+judge.submit
+
+submission.view.own
+submission.view.all
+submission.rejudge
+submission.delete
+
+contest.create
+contest.view
+contest.manage
+contest.manage.participant
+contest.manage.problem
+contest.freeze
+contest.roll
+contest.publish
+
+scoreboard.view
+scoreboard.view.admin
+scoreboard.freeze
+scoreboard.roll
+scoreboard.export
+
+balloon.manage
+balloon.deliver
+
+print.request
+print.manage
+print.operate
+
+forum.post
+forum.moderate
+
+clarification.ask
+clarification.answer
+clarification.publish
+```
+
+未来新增模块只需要注册新的权限点，不需要修改权限核心表。
+
+---
+
+### 10.8 当前真实验证
+
+当前已经验证：
+
+```text
+permtest 用户只有 user 角色
+permtest 可以提交代码
+submission 正确写入 user_id = 2
+提交最终 ACCEPTED
+写入 judge.submit @ system:0 deny 后提交被 forbidden 拦截
+删除 deny 后提交恢复
+```
+
+该验证说明：
+
+```text
+普通 user 角色通过 role_permissions 获得 judge.submit
+permission_assignments.deny 可以覆盖普通 user 角色权限
+删除 deny 后权限恢复
+judge-api 已经真实接入 shared permission checker
+```
+
+---
+
+### 10.9 当前限制
+
+当前 Permission Core 仍缺少：
+
+```text
+统一 JSON 错误响应
+permission-api / admin API
+权限管理前端
+resource_edges 在 problem / contest 创建时的自动写入
+权限审计日志查询接口
+role revoke / permission revoke API
+```
+
+这些属于权限管理能力，不影响当前权限核心模型。
+
+---
+
+## 十一、Judge API 模块
 
 路径：
 
@@ -648,9 +1043,17 @@ GET  /judge/submissions/:id
 GET  /judge/submissions/:id/cases
 ```
 
+说明：
+
+```text
+POST /judge/problems 和 POST /judge/test-cases 是早期 MVP 接口。
+后续会迁移到 problem-api。
+judge-api 最终只负责 submissions / submission_cases。
+```
+
 ---
 
-### 10.1 用户身份来源
+### 11.1 用户身份来源
 
 当前 `POST /judge/submissions` 不再信任请求体里的 `user_id`。
 
@@ -694,7 +1097,7 @@ submissions.user_id
 
 ---
 
-### 10.2 创建提交
+### 11.2 创建提交
 
 ```http
 POST /judge/submissions
@@ -722,13 +1125,30 @@ POST /judge/submissions
 提交后，Judge API 会：
 
 ```text
+检查 judge.submit @ system:0 权限
 写入 submissions
 发布 NATS 事件 submission.created
 ```
 
+当前普通 `user` 角色默认拥有：
+
+```text
+judge.submit
+```
+
+因此普通登录用户可以提交代码。
+
+如果在 `permission_assignments` 中对某个用户写入：
+
+```text
+deny judge.submit @ system:0
+```
+
+则该用户提交会被拒绝。
+
 ---
 
-### 10.3 查询提交结果
+### 11.3 查询提交结果
 
 ```http
 GET /judge/submissions/:id
@@ -758,7 +1178,7 @@ GET /judge/submissions/:id
 
 ---
 
-## 十一、Judge Worker 模块
+## 十二、Judge Worker 模块
 
 路径：
 
@@ -790,7 +1210,7 @@ Judge Worker 使用 Rust 实现，是实际执行判题的模块。
 
 ---
 
-### 11.1 当前可靠性机制
+### 12.1 当前可靠性机制
 
 当前 Judge Worker 已经从：
 
@@ -831,7 +1251,7 @@ RETURNING id;
 
 ---
 
-### 11.2 启动扫描
+### 12.2 启动扫描
 
 worker 启动后会扫描：
 
@@ -855,7 +1275,7 @@ worker 不在线
 
 ---
 
-### 11.3 定时扫描
+### 12.3 定时扫描
 
 worker 运行期间会周期性扫描 PENDING。
 
@@ -869,7 +1289,7 @@ worker 运行期间会周期性扫描 PENDING。
 
 ---
 
-### 11.4 当前评测状态
+### 12.4 当前评测状态
 
 当前支持状态：
 
@@ -901,7 +1321,7 @@ submission_cases 正常
 
 ---
 
-### 11.5 当前 Judge 限制
+### 12.5 当前 Judge 限制
 
 当前 Judge 是 MVP，不是安全生产级 Judge。
 
@@ -933,7 +1353,7 @@ SPJ / checker
 
 ---
 
-## 十二、当前服务端口
+## 十三、当前服务端口
 
 | 服务                   | 端口    |
 | -------------------- | ----- |
@@ -948,9 +1368,9 @@ SPJ / checker
 
 ---
 
-## 十三、快速启动
+## 十四、快速启动
 
-### 13.1 启动全部服务
+### 14.1 启动全部服务
 
 ```powershell
 cd D:\Untitled-OJ\deploy\compose
@@ -958,13 +1378,13 @@ cd D:\Untitled-OJ\deploy\compose
 docker compose up -d --build
 ```
 
-### 13.2 查看服务
+### 14.2 查看服务
 
 ```powershell
 docker ps
 ```
 
-### 13.3 查看日志
+### 14.3 查看日志
 
 ```powershell
 docker logs ojos-gateway
@@ -975,9 +1395,9 @@ docker logs ojos-judge-worker
 
 ---
 
-## 十四、常用验收命令
+## 十五、常用验收命令
 
-### 14.1 Gateway Health
+### 15.1 Gateway Health
 
 ```powershell
 Invoke-RestMethod `
@@ -993,7 +1413,7 @@ status = ok
 
 ---
 
-### 14.2 Auth Login
+### 15.2 Auth Login
 
 ```powershell
 $body = @{
@@ -1012,7 +1432,7 @@ $token = $res.data.token
 
 ---
 
-### 14.3 Auth Profile
+### 15.3 Auth Profile
 
 ```powershell
 Invoke-RestMethod `
@@ -1031,7 +1451,7 @@ data.username = admin
 
 ---
 
-### 14.4 Judge 不带 token 应失败
+### 15.4 Judge 不带 token 应失败
 
 ```powershell
 Invoke-WebRequest `
@@ -1048,7 +1468,7 @@ Invoke-WebRequest `
 
 ---
 
-### 14.5 Judge 提交代码
+### 15.5 Judge 提交代码
 
 ```powershell
 $code = @'
@@ -1086,7 +1506,9 @@ submission_id = 新 ID
 status = PENDING
 ```
 
-### 14.6 查询提交结果
+---
+
+### 15.6 查询提交结果
 
 ```powershell
 Start-Sleep -Seconds 2
@@ -1107,9 +1529,67 @@ score = 100
 
 ---
 
-## 十五、本地编译
+### 15.7 Permission deny 验证
 
-### 15.1 Shared
+创建普通用户 `permtest` 后，确认其只有 `user` 角色：
+
+```sql
+SELECT u.id, u.username, r.name
+FROM users u
+JOIN user_roles ur ON ur.user_id = u.id
+JOIN roles r ON r.id = ur.role_id
+WHERE u.username = 'permtest'
+ORDER BY r.name;
+```
+
+写入 deny：
+
+```sql
+INSERT INTO permission_assignments(
+    principal_type,
+    principal_id,
+    permission_code,
+    scope_type,
+    scope_id,
+    effect,
+    reason
+)
+SELECT
+    'user',
+    u.id,
+    'judge.submit',
+    'system',
+    0,
+    'deny',
+    'test deny judge.submit'
+FROM users u
+WHERE u.username = 'permtest'
+ON CONFLICT(principal_type, principal_id, permission_code, scope_type, scope_id)
+DO UPDATE SET
+    effect = EXCLUDED.effect,
+    reason = EXCLUDED.reason;
+```
+
+此时 `permtest` 再提交代码应被拒绝。
+
+删除 deny：
+
+```sql
+DELETE FROM permission_assignments
+WHERE principal_type = 'user'
+  AND principal_id = (SELECT id FROM users WHERE username = 'permtest')
+  AND permission_code = 'judge.submit'
+  AND scope_type = 'system'
+  AND scope_id = 0;
+```
+
+删除后 `permtest` 应恢复提交权限。
+
+---
+
+## 十六、本地编译
+
+### 16.1 Shared
 
 ```powershell
 cd D:\Untitled-OJ\services\shared
@@ -1118,7 +1598,7 @@ go mod tidy
 go build ./...
 ```
 
-### 15.2 Gateway
+### 16.2 Gateway
 
 ```powershell
 cd D:\Untitled-OJ\services\gateway
@@ -1127,7 +1607,7 @@ go mod tidy
 go build .
 ```
 
-### 15.3 Auth
+### 16.3 Auth
 
 ```powershell
 cd D:\Untitled-OJ\services\auth
@@ -1136,7 +1616,7 @@ go mod tidy
 go build .
 ```
 
-### 15.4 Judge API
+### 16.4 Judge API
 
 ```powershell
 cd D:\Untitled-OJ\services\judge-api
@@ -1145,7 +1625,7 @@ go mod tidy
 go build .
 ```
 
-### 15.5 Judge Worker
+### 16.5 Judge Worker
 
 ```powershell
 cd D:\Untitled-OJ\services\judge-worker
@@ -1156,33 +1636,36 @@ cargo build
 
 ---
 
-## 十六、当前完成情况
+## 十七、当前完成情况
 
-| 模块               | 状态                  |
-| ---------------- | ------------------- |
-| Docker Compose   | 完成                  |
-| PostgreSQL       | 完成                  |
-| Redis            | 完成                  |
-| NATS             | 完成                  |
-| Jaeger           | 完成                  |
-| Migration        | 完成                  |
-| Shared           | v0.2 完成             |
-| Gateway          | v0.3 完成             |
-| Auth             | v0.2 完成             |
-| Judge API        | MVP v0.2 完成         |
-| Judge Worker     | Reliability v0.2 完成 |
-| 多语言评测配置          | MVP 完成              |
-| Gateway 用户上下文透传  | 完成                  |
-| Judge PENDING 恢复 | 完成                  |
-| Judge 原子抢任务      | 完成                  |
-| 安全沙箱             | 未完成                 |
-| 多题型系统            | 未完成                 |
-| 子任务 / 捆绑点        | 未完成                 |
-| Gateway 权限点检查    | 未完成                 |
+| 模块                         | 状态                  |
+| -------------------------- | ------------------- |
+| Docker Compose             | 完成                  |
+| PostgreSQL                 | 完成                  |
+| Redis                      | 完成                  |
+| NATS                       | 完成                  |
+| Jaeger                     | 完成                  |
+| Migration                  | 完成                  |
+| Shared                     | v0.3 完成             |
+| Gateway                    | v0.3 完成             |
+| Auth                       | v0.2 完成             |
+| Permission Core            | v1 完成               |
+| Judge API                  | MVP v0.3 完成         |
+| Judge Worker               | Reliability v0.2 完成 |
+| 多语言评测配置                    | MVP 完成              |
+| Gateway 用户上下文透传            | 完成                  |
+| Judge API 权限检查             | `judge.submit` 已接入  |
+| Judge PENDING 恢复           | 完成                  |
+| Judge 原子抢任务                | 完成                  |
+| 安全沙箱                       | 未完成                 |
+| 多题型系统                      | 未完成                 |
+| 子任务 / 捆绑点                  | 未完成                 |
+| Permission 管理 API / UI     | 未完成                 |
+| Module Registry / Launcher | 未完成                 |
 
 ---
 
-## 十七、当前不是完整生产级系统的部分
+## 十八、当前不是完整生产级系统的部分
 
 当前系统仍然存在以下关键缺口：
 
@@ -1195,7 +1678,7 @@ Judge 没有真实内存限制
 没有交互题
 没有通信题
 没有提交答案题
-没有完整权限点系统
+权限核心已完成，但缺少权限管理 API / UI
 没有统一错误码体系
 没有模块注册与启动器
 ```
@@ -1214,48 +1697,51 @@ Judge 没有真实内存限制
 
 ---
 
-## 十八、下一阶段计划
+## 十九、下一阶段计划
 
 推荐下一阶段开发顺序：
 
 ```text
-1. Problem / Dataset 正规化
-2. 测试数据文件化
-3. checker / special judge 抽象
-4. 子任务 / 捆绑点
-5. problem-type-traditional
-6. contest-core
-7. contest-rule-acm
-8. scoreboard-acm
-9. Gateway 权限点检查
-10. permission-core
-11. module-registry
-12. feature-flag-core
-13. runner 安全隔离
+1. 统一错误响应，尤其是 forbidden -> JSON
+2. Problem Core / Dataset Core 正规化
+3. problem-api 接入 Permission Core
+4. 创建 problem 后自动绑定 problem_owner
+5. 测试数据文件化
+6. checker / special judge 抽象
+7. 子任务 / 捆绑点
+8. problem-type-traditional
+9. contest-core
+10. contest-rule-acm
+11. scoreboard-acm
+12. module-registry
+13. feature-flag-core
+14. runner 安全隔离
 ```
 
 短期最建议进入：
 
 ```text
-Problem / Dataset 正规化
+1. 统一错误响应
+2. Problem Core / Dataset Core 正规化
+3. problem-api 接入 Permission Core
 ```
-
-因为后续 OI、NOI、IOI、交互题、通信题、提交答案题，都依赖更规范的数据集与题型配置。
 
 ---
 
-## 十九、项目当前结论
+## 二十、项目当前结论
 
 OJOS 当前已经完成基础平台和核心 MVP：
 
 ```text
 Gateway 可以作为统一入口
 Auth 可以完成登录鉴权
+Permission Core 已完成完整资源级权限核心
 Judge 可以真实评测代码
 Shared 已成为纯公共基础库
 Docker Compose 可以启动完整本地环境
 历史 PENDING 可以被恢复
 新提交可以完成可信用户身份绑定和评测
+judge-api 已接入 judge.submit 权限检查
 ```
 
 当前系统已经具备继续开发：
@@ -1279,10 +1765,11 @@ Launcher
 下一阶段重点应从“能跑通”转向：
 
 ```text
+统一错误响应
 数据模型正规化
 题型扩展
 赛制扩展
 安全隔离
-权限体系
+权限管理 API / UI
 模块化安装
 ```
