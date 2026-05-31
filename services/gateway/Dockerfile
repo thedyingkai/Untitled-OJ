@@ -9,10 +9,12 @@ WORKDIR /app/gateway
 RUN go mod download
 
 WORKDIR /app
+
 COPY gateway ./gateway
 COPY shared ./shared
 
 WORKDIR /app/gateway
+
 RUN go build -o gateway .
 
-CMD ["./gateway"]
+CMD ["./gateway", "-f", "etc/gateway.yaml"]

@@ -44,6 +44,7 @@ services:
     build:
       context: ../../services
       dockerfile: gateway/Dockerfile
+    container_name: ojos-gateway
     depends_on:
       postgres:
         condition: service_healthy

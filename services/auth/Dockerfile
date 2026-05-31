@@ -17,4 +17,4 @@ WORKDIR /app/auth
 
 RUN go build -o auth .
 
-CMD ["./auth"]
+CMD ["./auth", "-f", "etc/auth.yaml"]

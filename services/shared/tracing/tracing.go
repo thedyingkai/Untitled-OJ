@@ -2,41 +2,32 @@ package tracing
 
 import (
 	"context"
-	"ojos-shared/configs"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 )
 
-func Init(ctx context.Context, cfg *configs.Config) (*sdktrace.TracerProvider, error) {
-	//fmt.Println("otel endpoint:", cfg.Jaeger.Endpoint)
-
+func InitOTLP(ctx context.Context, serviceName string, endpoint string) (*sdktrace.TracerProvider, error) {
 	client := otlptracegrpc.NewClient(
-		otlptracegrpc.WithEndpoint(cfg.Jaeger.Endpoint),
+		otlptracegrpc.WithEndpoint(endpoint),
 		otlptracegrpc.WithInsecure(),
 	)
 
-	otlpExporter, err := otlptrace.New(ctx, client)
+	exporter, err := otlptrace.New(ctx, client)
 	if err != nil {
 		return nil, err
 	}
-
-	//stdoutExporter, err := stdouttrace.New(
-	//	stdouttrace.WithPrettyPrint(),
-	//)
-	//if err != nil {
-	//	return nil, err
-	//}
 
 	res, err := resource.Merge(
 		resource.Default(),
 		resource.NewWithAttributes(
 			semconv.SchemaURL,
-			semconv.ServiceName(cfg.Service.Name),
+			semconv.ServiceName(serviceName),
 		),
 	)
 	if err != nil {
@@ -45,19 +36,18 @@ func Init(ctx context.Context, cfg *configs.Config) (*sdktrace.TracerProvider, e
 
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
-
-		//sdktrace.WithSpanProcessor(
-		//	sdktrace.NewSimpleSpanProcessor(otlpExporter),
-		//),
-
-		sdktrace.WithBatcher(otlpExporter),
-
-		//sdktrace.WithSpanProcessor(
-		//	sdktrace.NewSimpleSpanProcessor(stdoutExporter),
-		//),
+		sdktrace.WithSpanProcessor(
+			sdktrace.NewSimpleSpanProcessor(exporter),
+		),
 	)
 
 	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(
+		propagation.NewCompositeTextMapPropagator(
+			propagation.TraceContext{},
+			propagation.Baggage{},
+		),
+	)
 
 	return tp, nil
 }

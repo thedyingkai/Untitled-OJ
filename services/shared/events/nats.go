@@ -3,9 +3,6 @@ package events
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-
-	"ojos-shared/configs"
 
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
@@ -16,19 +13,15 @@ type Bus struct {
 	producer string
 }
 
-func NewBus(cfg *configs.Config) (*Bus, error) {
-	if cfg.Nats.URL == "" {
-		return nil, fmt.Errorf("nats url is empty")
-	}
-
-	conn, err := nats.Connect(cfg.Nats.URL)
+func NewBusByURL(url string, producer string) (*Bus, error) {
+	nc, err := nats.Connect(url)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Bus{
-		conn:     conn,
-		producer: cfg.Service.Name,
+		conn:     nc,
+		producer: producer,
 	}, nil
 }
 
@@ -51,7 +44,7 @@ func (b *Bus) Publish(ctx context.Context, subject string, eventType string, pay
 }
 
 func (b *Bus) Close() {
-	if b.conn != nil {
+	if b != nil && b.conn != nil {
 		b.conn.Close()
 	}
 }

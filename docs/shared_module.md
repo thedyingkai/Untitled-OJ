@@ -2,52 +2,67 @@
 
 ## 一、模块定位
 
-`services/shared` 是 OJOS Go 微服务体系中的公共基础设施 SDK。
+`services/shared` 是 OJOS 平台的公共基础库，不是独立 HTTP 服务，也不应该被 `goctl api new` 生成。
 
-它本身不是一个独立运行的服务，不监听端口，也不直接被 Docker Compose 单独启动。
-
-它的作用是为所有 Go 微服务提供统一的基础能力，包括：
+Shared 的职责是为各个 Go 微服务提供稳定、通用、可复用的基础能力，包括：
 
 ```text
-配置加载
+数据库连接
+NATS 事件总线
 结构化日志
-数据库连接池
 链路追踪
 HTTP 中间件
-事件总线
-统一响应格式
 ```
 
-当前已经接入 shared 的服务包括：
+Shared 不负责业务逻辑，不保存业务配置，不依赖某一个具体服务。
+
+当前 Shared 已经完成旧兼容模块清理，不再保留：
 
 ```text
-services/gateway
-services/auth
+shared/config
+shared/response
 ```
 
-后续服务也应直接复用 shared，例如：
+当前 Shared 是一个纯公共库。
+
+---
+
+## 二、当前完成状态
+
+当前 Shared 已完成：
 
 ```text
-services/user
-services/problem
-services/contest
-services/submission
-services/judge-api
+Go module 独立化
+旧 config 模块删除
+旧 response 模块删除
+PostgreSQL URL 初始化
+NATS EventBus 初始化
+统一 Event 结构
+zap logger
+trace_id / span_id 日志注入
+OpenTelemetry OTLP 初始化
+go-zero Recovery 中间件适配
+go-zero Logging 中间件适配
+shared 自身 go build ./... 通过
+gateway 接入通过
+auth 接入通过
+```
+
+当前状态可以记为：
+
+```text
+Shared go-zero 适配 v0.2 完成
 ```
 
 ---
 
-# 二、目录结构
+## 三、目录结构
 
-当前 shared 模块结构如下：
+当前目录结构：
 
 ```text
 services/shared/
 
-├── config/
-│   ├── config.go
-│   └── load.go
-│
 ├── database/
 │   └── postgres.go
 │
@@ -59,11 +74,9 @@ services/shared/
 │   └── logger.go
 │
 ├── middleware/
+│   ├── gozero.go
 │   ├── logging.go
 │   └── recovery.go
-│
-├── response/
-│   └── response.go
 │
 ├── tracing/
 │   └── tracing.go
@@ -72,1400 +85,742 @@ services/shared/
 └── go.sum
 ```
 
----
-
-# 三、config 配置模块
-
-## 3.1 作用
-
-`config` 模块负责统一加载服务配置。
-
-当前使用：
+当前不应存在：
 
 ```text
-Viper
+services/shared/config
+services/shared/response
 ```
 
-每个服务都需要在自己的服务目录下提供：
+---
 
-```text
-configs/config.yaml
+## 四、go.mod
+
+Shared 是独立 Go module。
+
+模块名：
+
+```go
+module ojos-shared
+```
+
+其他服务使用 Shared 时，需要在自己的 `go.mod` 中加入：
+
+```go
+require ojos-shared v0.0.0
+
+replace ojos-shared => ../shared
 ```
 
 例如：
 
-```text
-services/gateway/configs/config.yaml
-services/auth/configs/config.yaml
+```go
+module ojos-auth
+
+go 1.26
+
+require ojos-shared v0.0.0
+
+replace ojos-shared => ../shared
 ```
 
-## 3.2 配置结构
+---
 
-当前统一配置结构包括：
+## 五、database 模块
 
-```yaml
-service:
-  name: gateway-service
-  port: 8080
+路径：
 
-database:
-  url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
+```text
+services/shared/database/postgres.go
+```
 
-jaeger:
-  endpoint: ojos-jaeger:4317
+### 5.1 职责
 
-nats:
-  url: nats://ojos-nats:4222
+`database` 模块负责创建 PostgreSQL 连接池。
+
+当前只保留 URL 驱动的初始化方式，不再依赖旧的 shared/config。
+
+### 5.2 推荐函数
+
+```go
+func NewPostgresPoolByURL(ctx context.Context, databaseURL string) (*pgxpool.Pool, error)
+```
+
+功能：
+
+```text
+解析 PostgreSQL URL
+创建 pgxpool 连接池
+Ping 数据库
+连接失败时关闭连接池
+返回可复用的 *pgxpool.Pool
+```
+
+示例：
+
+```go
+db, err := database.NewPostgresPoolByURL(ctx, c.Database.Url)
+if err != nil {
+    log.Fatalf("connect postgres failed: %v", err)
+}
+```
+
+### 5.3 当前约束
+
+Shared 不再提供：
+
+```go
+NewPostgresPool(ctx, cfg)
+```
+
+服务必须自己在 `internal/config/config.go` 中定义数据库配置，然后把 URL 传给 Shared。
+
+---
+
+## 六、events 模块
+
+路径：
+
+```text
+services/shared/events/
+```
+
+当前包含：
+
+```text
+event.go
+nats.go
+```
+
+### 6.1 Event 结构
+
+`event.go` 定义统一事件模型：
+
+```go
+type Event struct {
+    ID        string          `json:"id"`
+    Type      string          `json:"type"`
+    Producer  string          `json:"producer"`
+    Timestamp time.Time       `json:"timestamp"`
+    Payload   json.RawMessage `json:"payload"`
+}
+```
+
+字段说明：
+
+| 字段          | 含义    |
+| ----------- | ----- |
+| `ID`        | 事件 ID |
+| `Type`      | 事件类型  |
+| `Producer`  | 事件生产者 |
+| `Timestamp` | 事件时间  |
+| `Payload`   | 业务载荷  |
+
+推荐事件时间使用 UTC：
+
+```go
+Timestamp: time.Now().UTC()
+```
+
+### 6.2 Event 构造函数
+
+```go
+func New(eventType string, producer string, payload any) (*Event, error)
+```
+
+功能：
+
+```text
+生成 UUID
+设置事件类型
+设置生产者
+设置当前 UTC 时间
+序列化 payload
+返回 Event
+```
+
+---
+
+### 6.3 Bus 结构
+
+`nats.go` 中定义：
+
+```go
+type Bus struct {
+    conn     *nats.Conn
+    producer string
+}
 ```
 
 其中：
 
-```text
-service.name
+| 字段         | 含义      |
+| ---------- | ------- |
+| `conn`     | NATS 连接 |
+| `producer` | 当前服务名   |
+
+### 6.4 创建 Bus
+
+```go
+func NewBusByURL(url string, producer string) (*Bus, error)
 ```
 
-用于日志服务名、Jaeger service name 等。
+示例：
 
-```text
-service.port
+```go
+bus, err := events.NewBusByURL(c.Nats.Url, c.Name)
+if err != nil {
+    log.Fatalf("connect nats failed: %v", err)
+}
 ```
 
-用于 go-zero HTTP Server 监听端口。
+### 6.5 发布事件
 
-```text
-database.url
+```go
+func (b *Bus) Publish(
+    ctx context.Context,
+    subject string,
+    eventType string,
+    payload map[string]any,
+) error
 ```
 
-用于 PostgreSQL 连接池。
+示例：
 
-```text
-jaeger.endpoint
+```go
+err := bus.Publish(
+    ctx,
+    "submission.created",
+    "submission.created",
+    map[string]any{
+        "submission_id": id,
+    },
+)
 ```
 
-用于 OpenTelemetry OTLP gRPC exporter。
-
-```text
-nats.url
-```
-
-用于 NATS EventBus。
-
-## 3.3 注意事项
-
-在 Docker 容器内部，数据库地址必须写：
-
-```text
-postgres:5432
-```
-
-不能写：
-
-```text
-localhost:5433
-```
-
-因为容器内的 `localhost` 指的是当前容器本身，而不是宿主机。
-
----
-
-# 四、logger 日志模块
-
-## 4.1 作用
-
-`logger` 模块负责创建统一的结构化日志器。
-
-当前使用：
-
-```text
-Zap
-```
-
-每条日志默认带有：
-
-```text
-service
-```
-
-字段。
-
-## 4.2 trace 日志注入
-
-`logger.WithTrace(ctx, log)` 会从请求上下文中读取：
-
-```text
-trace_id
-span_id
-```
-
-并写入日志。
-
-示例日志：
+事件最终结构类似：
 
 ```json
 {
-  "level": "info",
-  "msg": "http request",
-  "service": "gateway-service",
-  "trace_id": "56af8e5d99c1e0f39afcc2f144f63101",
-  "span_id": "aa96fb71d55bb95f",
-  "method": "GET",
-  "path": "/health",
-  "status": 200,
-  "duration": 0.000309788
+  "id": "uuid",
+  "type": "submission.created",
+  "producer": "judge-api-service",
+  "timestamp": "2026-05-31T04:00:00Z",
+  "payload": {
+    "submission_id": 1
+  }
 }
 ```
 
-## 4.3 重要说明
+### 6.6 关闭 Bus
 
-`logger.WithTrace` 只负责读取 trace 信息并写入日志。
-
-它不负责：
-
-```text
-创建 span
-结束 span
-导出 span
-上报 Jaeger
+```go
+func (b *Bus) Close()
 ```
 
-HTTP 请求的 tracing 由 `middleware` 模块中的 OpenTelemetry HTTP instrumentation 负责。
+服务退出时应调用：
+
+```go
+if s.Bus != nil {
+    s.Bus.Close()
+}
+```
+
+### 6.7 当前限制
+
+当前 events 基于 NATS Core Pub/Sub。
+
+它适合普通事件广播，但不适合作为可靠任务队列。
+
+对于 Judge 任务，后续需要补：
+
+```text
+worker 扫描 PENDING 任务
+或 NATS JetStream
+或 Redis Stream
+或数据库任务队列
+```
 
 ---
 
-# 五、database 数据库模块
+## 七、logger 模块
 
-## 5.1 作用
-
-`database` 模块负责统一创建 PostgreSQL 连接池。
-
-当前使用：
+路径：
 
 ```text
-pgxpool
+services/shared/logger/logger.go
 ```
 
-## 5.2 当前能力
-
-`database.NewPostgresPool(ctx, cfg)` 完成：
-
-```text
-读取 database.url
-解析 pgxpool 配置
-设置连接池参数
-创建连接池
-Ping 检查
-返回 *pgxpool.Pool
-```
-
-## 5.3 连接池管理
-
-连接池由每个服务的 `App` 持有，并在服务关闭时统一释放。
-
-典型使用方式：
+### 7.1 创建 Logger
 
 ```go
-pool, err := database.NewPostgresPool(ctx, cfg)
+func New(service string) (*zap.Logger, error)
+```
+
+示例：
+
+```go
+zlog, err := logger.New(c.Name)
 if err != nil {
-    return nil, err
+    log.Fatalf("init logger failed: %v", err)
 }
 ```
 
-关闭方式：
+创建出的日志会包含服务名字段：
+
+```json
+{
+  "service": "auth-service"
+}
+```
+
+### 7.2 Trace 注入
 
 ```go
-pool.Close()
+func WithTrace(ctx context.Context, log *zap.Logger) *zap.Logger
+```
+
+功能：
+
+```text
+从 context 中读取 OpenTelemetry SpanContext
+如果存在合法 trace_id / span_id，则写入日志字段
+否则返回原 logger
+```
+
+示例：
+
+```go
+logger.WithTrace(r.Context(), log).Info(
+    "http request",
+    zap.String("method", r.Method),
+    zap.String("path", r.URL.Path),
+)
 ```
 
 ---
 
-# 六、tracing 链路追踪模块
+## 八、tracing 模块
 
-## 6.1 作用
-
-`tracing` 模块负责初始化 OpenTelemetry TracerProvider。
-
-当前链路为：
+路径：
 
 ```text
-OpenTelemetry SDK
-    ↓
-OTLP gRPC Exporter
-    ↓
-Jaeger Collector
-    ↓
-Jaeger UI
+services/shared/tracing/tracing.go
 ```
 
-## 6.2 Jaeger 配置
+### 8.1 职责
 
-Docker Compose 中 Jaeger 需要开启 OTLP：
+`tracing` 模块负责初始化 OpenTelemetry，并通过 OTLP gRPC 上报到 Jaeger。
 
-```yaml
-jaeger:
-  image: jaegertracing/all-in-one:latest
-  container_name: ojos-jaeger
-  environment:
-    COLLECTOR_OTLP_ENABLED: "true"
-  ports:
-    - "16686:16686"
-    - "4317:4317"
-    - "4318:4318"
-    - "14268:14268"
-```
-
-服务配置中使用：
-
-```yaml
-jaeger:
-  endpoint: ojos-jaeger:4317
-```
-
-## 6.3 当前能力
-
-每个服务启动时调用：
+### 8.2 初始化函数
 
 ```go
-tp, err := tracing.Init(ctx, cfg)
+func InitOTLP(
+    ctx context.Context,
+    serviceName string,
+    endpoint string,
+) (*sdktrace.TracerProvider, error)
 ```
 
-初始化成功后，服务会在 Jaeger 中显示为：
-
-```text
-gateway-service
-auth-service
-```
-
-## 6.4 重要经验
-
-开发过程中曾出现：
-
-```text
-日志中有 trace_id / span_id
-但 Jaeger 中只有 gateway.startup
-没有 GET /health
-```
-
-最终确认原因是：手写 HTTP span 没有稳定接入 go-zero 的 HTTP 请求链路。
-
-最终解决方式是：
-
-```text
-HTTP 请求 tracing 统一交给 otelhttp.NewHandler
-并显式传入当前 TracerProvider
-```
-
-关键代码：
+示例：
 
 ```go
-otelhttp.WithTracerProvider(tp)
+tp, err := tracing.InitOTLP(ctx, c.Name, c.Jaeger.Endpoint)
+if err != nil {
+    log.Fatalf("init tracing failed: %v", err)
+}
 ```
 
-以及：
-
-```go
-otelhttp.WithSpanNameFormatter(func(operation string, r *http.Request) string {
-    return r.Method + " " + r.URL.Path
-})
-```
-
-当前原则：
+该函数负责：
 
 ```text
-tracing 包只初始化 TracerProvider
-middleware 负责 HTTP trace
-logger 只读取 trace_id / span_id
-handler 不手写 HTTP span
+创建 OTLP gRPC exporter
+设置 service.name
+创建 sdktrace.TracerProvider
+注册全局 TracerProvider
+注册 TraceContext propagator
+注册 Baggage propagator
+```
+
+### 8.3 Trace Context 传播
+
+`InitOTLP` 应设置：
+
+```go
+otel.SetTextMapPropagator(
+    propagation.NewCompositeTextMapPropagator(
+        propagation.TraceContext{},
+        propagation.Baggage{},
+    ),
+)
+```
+
+这样 Gateway 转发请求时可以把 trace 上下文注入 HTTP Header，下游服务可以继续同一条 trace。
+
+### 8.4 当前限制
+
+当前 tracing 使用 SimpleSpanProcessor。
+
+后续可以改进为：
+
+```text
+BatchSpanProcessor
+采样率配置
+按环境开关 tracing
+超时控制
+失败降级
 ```
 
 ---
 
-# 七、middleware 中间件模块
+## 九、middleware 模块
 
-## 7.1 Recovery Middleware
-
-`Recovery` 中间件用于捕获 handler 中的 panic，避免服务直接崩溃。
-
-作用：
+路径：
 
 ```text
-捕获 panic
+services/shared/middleware/
+```
+
+当前包含：
+
+```text
+recovery.go
+logging.go
+gozero.go
+```
+
+### 9.1 Recovery
+
+底层 Recovery 函数用于捕获 panic。
+
+典型签名：
+
+```go
+func Recovery(log *zap.Logger, next http.HandlerFunc) http.HandlerFunc
+```
+
+功能：
+
+```text
+recover panic
 记录错误日志
-返回 500 响应
+返回 HTTP 500
+避免服务进程崩溃
 ```
 
-注册方式：
+### 9.2 go-zero RecoveryMiddleware
 
 ```go
-server.Use(func(next http.HandlerFunc) http.HandlerFunc {
-    return sharedmw.Recovery(a.Logger, next)
-})
+func RecoveryMiddleware(log *zap.Logger) func(http.HandlerFunc) http.HandlerFunc
 ```
 
-## 7.2 Logging + HTTP Tracing Middleware
-
-该中间件负责：
-
-```text
-记录 HTTP 请求日志
-创建 HTTP server span
-向 Jaeger 上报请求 trace
-将 trace_id / span_id 注入日志
-记录 method / path / status / duration
-```
-
-当前实现基于：
-
-```text
-otelhttp.NewHandler
-```
-
-而不是手写：
+用于 go-zero：
 
 ```go
-tracer.Start(...)
+server.Use(sharedmw.RecoveryMiddleware(svcCtx.Logger))
 ```
 
-这样可以保证 HTTP 请求被正确识别为 server span，并在 Jaeger Operation 中显示，例如：
+### 9.3 go-zero LoggingMiddleware
+
+```go
+func LoggingMiddleware(
+    log *zap.Logger,
+    tp *sdktrace.TracerProvider,
+) func(http.HandlerFunc) http.HandlerFunc
+```
+
+用于 go-zero：
+
+```go
+server.Use(sharedmw.LoggingMiddleware(svcCtx.Logger, svcCtx.Tracer))
+```
+
+当前功能：
+
+```text
+创建 HTTP span
+执行 handler
+记录 method
+记录 path
+记录 duration
+从 context 注入 trace_id / span_id 到日志
+```
+
+### 9.4 当前限制
+
+当前 LoggingMiddleware 还可以增强：
+
+```text
+记录 HTTP status
+记录 client_ip
+记录 user_agent
+记录 response_size
+记录 request_id
+支持慢请求日志
+支持日志采样
+```
+
+---
+
+## 十、Shared 与 go-zero 服务的关系
+
+Shared 本身不是 go-zero 服务。
+
+go-zero 服务通过自己的 `ServiceContext` 注入 Shared 能力。
+
+示例：
+
+```go
+type ServiceContext struct {
+    Config config.Config
+
+    Logger *zap.Logger
+    DB     *pgxpool.Pool
+    Tracer *sdktrace.TracerProvider
+    Bus    *events.Bus
+}
+```
+
+初始化：
+
+```go
+zlog, _ := logger.New(c.Name)
+tp, _ := tracing.InitOTLP(ctx, c.Name, c.Jaeger.Endpoint)
+db, _ := database.NewPostgresPoolByURL(ctx, c.Database.Url)
+bus, _ := events.NewBusByURL(c.Nats.Url, c.Name)
+```
+
+每个服务自己维护自己的配置结构：
+
+```go
+type Config struct {
+    rest.RestConf
+
+    Database DatabaseConfig
+    Nats     NatsConfig
+    Jaeger   JaegerConfig
+}
+```
+
+Shared 不再主动加载配置。
+
+---
+
+## 十一、当前已接入服务
+
+当前已接入 Shared 的服务：
+
+```text
+gateway
+auth
+```
+
+### 11.1 Gateway
+
+Gateway 使用：
+
+```text
+database
+events
+logger
+middleware
+tracing
+```
+
+已验证：
 
 ```text
 GET /health
+POST /api/auth/login
+GET /api/auth/profile
+GET /api/judge/submissions/:id/cases
+```
+
+### 11.2 Auth
+
+Auth 使用：
+
+```text
+database
+events
+logger
+middleware
+tracing
+```
+
+Auth 已完成 go-zero 化，并成功编译通过。
+
+### 11.3 Judge API
+
+Judge API 当前是 go-zero 服务，但还没有完全接入 Shared。
+
+它目前直接使用：
+
+```text
+pgxpool
+nats.go
+go-zero config
+```
+
+后续可以迁移到：
+
+```text
+shared/database
+shared/events
+shared/logger
+shared/tracing
+shared/middleware
 ```
 
 ---
 
-# 八、events 事件模块
+## 十二、编译检查
 
-## 8.1 作用
-
-`events` 模块封装 NATS EventBus。
-
-当前使用：
-
-```text
-NATS
-```
-
-## 8.2 事件结构
-
-事件基础字段包括：
-
-```text
-id
-type
-producer
-timestamp
-payload
-```
-
-## 8.3 当前能力
-
-提供：
-
-```go
-events.NewBus(cfg)
-bus.Publish(ctx, subject, eventType, payload)
-bus.Close()
-```
-
-## 8.4 当前已验证事件
-
-Gateway health 会发布：
-
-```text
-gateway.health.checked
-```
-
-Auth health 会发布：
-
-```text
-auth.health.checked
-```
-
-后续业务事件可以继续扩展：
-
-```text
-user.registered
-user.login
-submission.created
-submission.finished
-contest.started
-contest.ended
-```
-
----
-
-# 九、response 响应模块
-
-## 9.1 作用
-
-`response` 模块负责统一 HTTP JSON 返回格式。
-
-## 9.2 成功响应
-
-```json
-{
-  "code": 0,
-  "msg": "success",
-  "data": {}
-}
-```
-
-## 9.3 错误响应
-
-```json
-{
-  "code": 10001,
-  "msg": "error message"
-}
-```
-
-## 9.4 使用方式
-
-```go
-response.Success(w, data)
-response.Error(w, code, msg)
-```
-
-## 9.5 示例
-
-Gateway health：
-
-```json
-{
-  "code": 0,
-  "msg": "success",
-  "data": {
-    "status": "ok"
-  }
-}
-```
-
-Auth health：
-
-```json
-{
-  "code": 0,
-  "msg": "success",
-  "data": {
-    "service": "auth",
-    "status": "ok"
-  }
-}
-```
-
----
-
-# 十、Shared 当前完成状态
-
-当前 shared 已经完成：
-
-```text
-config      ✅
-logger      ✅
-database    ✅
-tracing     ✅
-events      ✅
-middleware  ✅
-response    ✅
-```
-
-可以支撑后续微服务开发。
-
----
-
-# 十一、后续可扩展方向
-
-后续 shared 可以继续加入：
-
-```text
-JWT 工具
-RBAC 中间件
-Request ID 中间件
-CORS 中间件
-统一错误码
-统一 validator
-Redis client
-gRPC client/server helper
-Prometheus metrics
-```
-
-当前阶段 shared MVP 已经完成，可以稳定复用于 Gateway、Auth 以及后续服务。
-
-
-
-
-
-
-
-
-
-
-
-
-对。你现在只写了 `config.rs` 和 `main.rs`，那还差这 3 个文件：
-
-```text
-src/event.rs
-src/db.rs
-src/judge.rs
-```
-
-另外还要有：
-
-```text
-config/languages.yaml
-```
-
-你先按下面补齐。
-
----
-
-## 1. 确认目录结构
-
-在：
+### 12.1 编译 Shared
 
 ```powershell
-cd D:\Untitled-OJ\services\judge-worker
+cd D:\Untitled-OJ\services\shared
+
+go mod tidy
+go build ./...
 ```
 
-应该最终是：
+### 12.2 检查旧模块是否删除
+
+```powershell
+cd D:\Untitled-OJ\services\shared
+
+Test-Path .\config
+Test-Path .\response
+```
+
+期望：
 
 ```text
-judge-worker
-├── Cargo.toml
-├── config
-│   └── languages.yaml
-└── src
-    ├── main.rs
-    ├── config.rs
-    ├── event.rs
-    ├── db.rs
-    └── judge.rs
+False
+False
 ```
+
+### 12.3 检查旧引用
+
+```powershell
+cd D:\Untitled-OJ\services
+
+Select-String -Path .\*\**\*.go -Pattern 'ojos-shared/config'
+Select-String -Path .\*\**\*.go -Pattern 'ojos-shared/response'
+Select-String -Path .\*\**\*.go -Pattern 'config.Load'
+Select-String -Path .\*\**\*.go -Pattern 'database.NewPostgresPool\('
+Select-String -Path .\*\**\*.go -Pattern 'events.NewBus\('
+Select-String -Path .\*\**\*.go -Pattern 'tracing.Init\('
+```
+
+期望没有输出。
 
 ---
 
-## 2. config/languages.yaml
+## 十三、Docker 构建注意事项
 
-先建目录：
+依赖 Shared 的服务，Dockerfile 必须复制 Shared。
 
-```powershell
-mkdir config
+例如 Gateway / Auth：
+
+```dockerfile
+FROM golang:1.26.3
+
+WORKDIR /app
+
+COPY auth/go.mod auth/go.sum ./auth/
+COPY shared/go.mod shared/go.sum ./shared/
+
+WORKDIR /app/auth
+RUN go mod download
+
+WORKDIR /app
+
+COPY auth ./auth
+COPY shared ./shared
+
+WORKDIR /app/auth
+
+RUN go build -o auth .
+
+CMD ["./auth", "-f", "etc/auth.yaml"]
 ```
 
-新建：
-
-```text
-D:\Untitled-OJ\services\judge-worker\config\languages.yaml
-```
-
-写：
+Compose build context 必须是：
 
 ```yaml
-languages:
-  cpp17:
-    source_file: main.cpp
-    exe_file: main
-    compile:
-      enabled: true
-      command: g++
-      args:
-        - "-std=c++17"
-        - "-O2"
-        - "-pipe"
-        - "{source}"
-        - "-o"
-        - "{exe}"
-      timeout_ms: 10000
-    run:
-      command: "{exe}"
-      args: []
-
-  cpp20:
-    source_file: main.cpp
-    exe_file: main
-    compile:
-      enabled: true
-      command: g++
-      args:
-        - "-std=c++20"
-        - "-O2"
-        - "-pipe"
-        - "{source}"
-        - "-o"
-        - "{exe}"
-      timeout_ms: 10000
-    run:
-      command: "{exe}"
-      args: []
-
-  c11:
-    source_file: main.c
-    exe_file: main
-    compile:
-      enabled: true
-      command: gcc
-      args:
-        - "-std=c11"
-        - "-O2"
-        - "-pipe"
-        - "{source}"
-        - "-o"
-        - "{exe}"
-      timeout_ms: 10000
-    run:
-      command: "{exe}"
-      args: []
-
-  python3:
-    source_file: main.py
-    exe_file: ""
-    compile:
-      enabled: false
-      command: ""
-      args: []
-      timeout_ms: 0
-    run:
-      command: python3
-      args:
-        - "{source}"
-
-  java17:
-    source_file: Main.java
-    exe_file: ""
-    compile:
-      enabled: true
-      command: javac
-      args:
-        - "{source}"
-      timeout_ms: 10000
-    run:
-      command: java
-      args:
-        - "-cp"
-        - "{workdir}"
-        - "Main"
-
-  rust:
-    source_file: main.rs
-    exe_file: main
-    compile:
-      enabled: true
-      command: rustc
-      args:
-        - "--edition=2021"
-        - "-O"
-        - "{source}"
-        - "-o"
-        - "{exe}"
-      timeout_ms: 15000
-    run:
-      command: "{exe}"
-      args: []
-
-  go:
-    source_file: main.go
-    exe_file: main
-    compile:
-      enabled: true
-      command: go
-      args:
-        - "build"
-        - "-o"
-        - "{exe}"
-        - "{source}"
-      timeout_ms: 15000
-    run:
-      command: "{exe}"
-      args: []
+build:
+  context: ../../services
+  dockerfile: auth/Dockerfile
 ```
+
+不能只以单个服务目录作为 context。
 
 ---
 
-## 3. src/event.rs
+## 十四、当前完成状态
 
-新建：
+当前 Shared 状态：
 
 ```text
-D:\Untitled-OJ\services\judge-worker\src\event.rs
+config 旧模块删除                     ✅
+response 旧模块删除                   ✅
+database 仅保留 URL 初始化             ✅
+events 保留 Event + NATS Bus           ✅
+logger 保留 service logger + trace      ✅
+tracing 保留 InitOTLP                  ✅
+middleware 保留 go-zero 适配            ✅
+shared go build ./... 通过              ✅
+gateway go build . 通过                 ✅
+auth go build . 通过                    ✅
 ```
 
-写：
-
-```rust
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-pub struct Event {
-    pub id: String,
-
-    #[serde(rename = "type")]
-    pub event_type: String,
-
-    pub producer: String,
-    pub timestamp: String,
-    pub payload: serde_json::Value,
-}
-
-impl Event {
-    pub fn submission_id(&self) -> Option<i64> {
-        self.payload
-            .get("submission_id")
-            .and_then(|v| v.as_i64())
-    }
-}
-```
-
----
-
-## 4. src/db.rs
-
-新建：
+当前可以确认：
 
 ```text
-D:\Untitled-OJ\services\judge-worker\src\db.rs
-```
-
-写：
-
-```rust
-use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
-
-#[derive(Debug)]
-pub struct Submission {
-    pub id: i64,
-    pub problem_id: i64,
-    pub user_id: i64,
-    pub language: String,
-    pub code: String,
-}
-
-#[derive(Debug)]
-pub struct Problem {
-    pub id: i64,
-    pub time_limit_ms: i32,
-    pub memory_limit_mb: i32,
-}
-
-#[derive(Debug)]
-pub struct TestCase {
-    pub id: i64,
-    pub input: String,
-    pub output: String,
-    pub score: i32,
-}
-
-#[derive(Debug)]
-pub struct CaseResult {
-    pub test_case_id: i64,
-    pub status: String,
-    pub time_ms: i32,
-    pub memory_kb: i32,
-    pub message: String,
-    pub passed_score: i32,
-}
-
-#[derive(Debug)]
-pub struct JudgeResult {
-    pub status: String,
-    pub score: i32,
-    pub time_ms: i32,
-    pub memory_kb: i32,
-    pub message: String,
-    pub cases: Vec<CaseResult>,
-}
-
-pub async fn load_submission(db: &PgPool, submission_id: i64) -> Result<Submission> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, problem_id, user_id, language, code
-        FROM submissions
-        WHERE id = $1
-        "#,
-    )
-    .bind(submission_id)
-    .fetch_one(db)
-    .await
-    .context("submission not found")?;
-
-    Ok(Submission {
-        id: row.try_get("id")?,
-        problem_id: row.try_get("problem_id")?,
-        user_id: row.try_get("user_id")?,
-        language: row.try_get("language")?,
-        code: row.try_get("code")?,
-    })
-}
-
-pub async fn load_problem(db: &PgPool, problem_id: i64) -> Result<Problem> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, time_limit_ms, memory_limit_mb
-        FROM problems
-        WHERE id = $1
-        "#,
-    )
-    .bind(problem_id)
-    .fetch_one(db)
-    .await
-    .context("problem not found")?;
-
-    Ok(Problem {
-        id: row.try_get("id")?,
-        time_limit_ms: row.try_get("time_limit_ms")?,
-        memory_limit_mb: row.try_get("memory_limit_mb")?,
-    })
-}
-
-pub async fn load_test_cases(db: &PgPool, problem_id: i64) -> Result<Vec<TestCase>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT id, input, output, score
-        FROM test_cases
-        WHERE problem_id = $1
-        ORDER BY id
-        "#,
-    )
-    .bind(problem_id)
-    .fetch_all(db)
-    .await?;
-
-    let mut cases = Vec::with_capacity(rows.len());
-
-    for row in rows {
-        cases.push(TestCase {
-            id: row.try_get("id")?,
-            input: row.try_get("input")?,
-            output: row.try_get("output")?,
-            score: row.try_get("score")?,
-        });
-    }
-
-    Ok(cases)
-}
-
-pub async fn update_submission_status(
-    db: &PgPool,
-    submission_id: i64,
-    status: &str,
-    score: i32,
-    time_ms: i32,
-    memory_kb: i32,
-    message: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE submissions
-        SET status = $2,
-            score = $3,
-            time_ms = $4,
-            memory_kb = $5,
-            message = $6,
-            updated_at = NOW()
-        WHERE id = $1
-        "#,
-    )
-    .bind(submission_id)
-    .bind(status)
-    .bind(score)
-    .bind(time_ms)
-    .bind(memory_kb)
-    .bind(message)
-    .execute(db)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn mark_submission_failed(
-    db: &PgPool,
-    submission_id: i64,
-    status: &str,
-    message: &str,
-) -> Result<()> {
-    update_submission_status(db, submission_id, status, 0, 0, 0, message).await
-}
-
-pub async fn save_judge_result(
-    db: &PgPool,
-    submission_id: i64,
-    result: JudgeResult,
-) -> Result<()> {
-    let mut tx = db.begin().await?;
-
-    sqlx::query(
-        r#"
-        DELETE FROM submission_cases
-        WHERE submission_id = $1
-        "#,
-    )
-    .bind(submission_id)
-    .execute(&mut *tx)
-    .await?;
-
-    for case in &result.cases {
-        sqlx::query(
-            r#"
-            INSERT INTO submission_cases(
-                submission_id,
-                test_case_id,
-                status,
-                time_ms,
-                memory_kb,
-                message
-            )
-            VALUES($1, $2, $3, $4, $5, $6)
-            "#,
-        )
-        .bind(submission_id)
-        .bind(case.test_case_id)
-        .bind(&case.status)
-        .bind(case.time_ms)
-        .bind(case.memory_kb)
-        .bind(&case.message)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    sqlx::query(
-        r#"
-        UPDATE submissions
-        SET status = $2,
-            score = $3,
-            time_ms = $4,
-            memory_kb = $5,
-            message = $6,
-            updated_at = NOW()
-        WHERE id = $1
-        "#,
-    )
-    .bind(submission_id)
-    .bind(&result.status)
-    .bind(result.score)
-    .bind(result.time_ms)
-    .bind(result.memory_kb)
-    .bind(&result.message)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-
-    Ok(())
-}
+Shared v0.2 已完成
 ```
 
 ---
 
-## 5. src/judge.rs
+## 十五、当前限制与后续计划
 
-新建：
+Shared 后续还可以继续增强：
 
 ```text
-D:\Untitled-OJ\services\judge-worker\src\judge.rs
+middleware 记录 HTTP status
+middleware 增加 request_id
+tracing 改为 BatchSpanProcessor
+tracing 增加采样率配置
+events 增加 JetStream 支持
+database 增加事务 helper
+统一 go-zero response wrapper
 ```
 
-写：
+优先级建议：
 
-```rust
-use anyhow::{Context, Result};
-use sqlx::PgPool;
-use std::path::Path;
-use std::process::Stdio;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tempfile::TempDir;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
-use tokio::time::timeout;
-use tracing::info;
-
-use crate::config::{render_arg, LanguageConfig, LanguagesConfig};
-use crate::db::{
-    load_problem, load_submission, load_test_cases, mark_submission_failed, save_judge_result,
-    update_submission_status, CaseResult, JudgeResult, Problem, Submission, TestCase,
-};
-
-pub async fn handle_submission(
-    db: &PgPool,
-    languages: Arc<LanguagesConfig>,
-    submission_id: i64,
-) -> Result<()> {
-    info!(submission_id, "start judging");
-
-    update_submission_status(db, submission_id, "RUNNING", 0, 0, 0, "").await?;
-
-    let submission = load_submission(db, submission_id).await?;
-    let problem = load_problem(db, submission.problem_id).await?;
-    let test_cases = load_test_cases(db, submission.problem_id).await?;
-
-    if test_cases.is_empty() {
-        mark_submission_failed(db, submission_id, "SYSTEM_ERROR", "no test cases").await?;
-        return Ok(());
-    }
-
-    let result = judge_submission(&submission, &problem, &test_cases, &languages).await?;
-
-    save_judge_result(db, submission_id, result).await?;
-
-    info!(submission_id, "judge finished");
-
-    Ok(())
-}
-
-async fn judge_submission(
-    submission: &Submission,
-    problem: &Problem,
-    test_cases: &[TestCase],
-    languages: &LanguagesConfig,
-) -> Result<JudgeResult> {
-    let Some(lang) = languages.get(&submission.language) else {
-        return Ok(JudgeResult {
-            status: "UNSUPPORTED_LANGUAGE".to_string(),
-            score: 0,
-            time_ms: 0,
-            memory_kb: 0,
-            message: format!("unsupported language: {}", submission.language),
-            cases: vec![],
-        });
-    };
-
-    let work_dir = TempDir::new().context("create temp dir failed")?;
-    let work_path = work_dir.path().to_path_buf();
-
-    let source_path = work_path.join(&lang.source_file);
-
-    let exe_path = if lang.exe_file.is_empty() {
-        work_path.join("unused-exe")
-    } else {
-        work_path.join(&lang.exe_file)
-    };
-
-    fs::write(&source_path, &submission.code)
-        .await
-        .context("write source failed")?;
-
-    if lang.compile.enabled {
-        let compile_error = compile(lang, &source_path, &exe_path, &work_path).await?;
-
-        if let Some(message) = compile_error {
-            return Ok(JudgeResult {
-                status: "COMPILE_ERROR".to_string(),
-                score: 0,
-                time_ms: 0,
-                memory_kb: 0,
-                message,
-                cases: vec![],
-            });
-        }
-    }
-
-    let mut case_results = Vec::new();
-    let mut total_score = 0;
-    let mut max_time_ms = 0;
-    let mut final_status = "ACCEPTED".to_string();
-    let mut final_message = String::new();
-
-    for tc in test_cases {
-        let case_result = run_case(lang, &source_path, &exe_path, &work_path, problem, tc).await?;
-
-        if case_result.status == "ACCEPTED" {
-            total_score += case_result.passed_score;
-        } else if final_status == "ACCEPTED" {
-            final_status = case_result.status.clone();
-            final_message = case_result.message.clone();
-        }
-
-        max_time_ms = max_time_ms.max(case_result.time_ms);
-        case_results.push(case_result);
-
-        if final_status != "ACCEPTED" {
-            break;
-        }
-    }
-
-    Ok(JudgeResult {
-        status: final_status,
-        score: total_score,
-        time_ms: max_time_ms,
-        memory_kb: 0,
-        message: final_message,
-        cases: case_results,
-    })
-}
-
-async fn compile(
-    lang: &LanguageConfig,
-    source_path: &Path,
-    exe_path: &Path,
-    work_path: &Path,
-) -> Result<Option<String>> {
-    let args: Vec<String> = lang
-        .compile
-        .args
-        .iter()
-        .map(|arg| render_arg(arg, source_path, exe_path, work_path))
-        .collect();
-
-    let mut cmd = Command::new(&lang.compile.command);
-    cmd.args(args);
-    cmd.current_dir(work_path);
-
-    let compile_future = cmd.output();
-
-    let output = if lang.compile.timeout_ms > 0 {
-        match timeout(Duration::from_millis(lang.compile.timeout_ms), compile_future).await {
-            Ok(result) => result.context("run compile command failed")?,
-            Err(_) => {
-                return Ok(Some("compile timeout".to_string()));
-            }
-        }
-    } else {
-        compile_future.await.context("run compile command failed")?
-    };
-
-    if output.status.success() {
-        Ok(None)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Ok(Some(truncate_message(&stderr)))
-    }
-}
-
-async fn run_case(
-    lang: &LanguageConfig,
-    source_path: &Path,
-    exe_path: &Path,
-    work_path: &Path,
-    problem: &Problem,
-    tc: &TestCase,
-) -> Result<CaseResult> {
-    let run_command = render_arg(&lang.run.command, source_path, exe_path, work_path);
-
-    let run_args: Vec<String> = lang
-        .run
-        .args
-        .iter()
-        .map(|arg| render_arg(arg, source_path, exe_path, work_path))
-        .collect();
-
-    let mut child = Command::new(run_command)
-        .args(run_args)
-        .current_dir(work_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("spawn user program failed")?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(tc.input.as_bytes())
-            .await
-            .context("write stdin failed")?;
-    }
-
-    let start = Instant::now();
-    let limit = Duration::from_millis(problem.time_limit_ms.max(1) as u64);
-
-    let output = match timeout(limit, child.wait_with_output()).await {
-        Ok(result) => result.context("wait user program failed")?,
-        Err(_) => {
-            return Ok(CaseResult {
-                test_case_id: tc.id,
-                status: "TIME_LIMIT_EXCEEDED".to_string(),
-                time_ms: problem.time_limit_ms,
-                memory_kb: 0,
-                message: "time limit exceeded".to_string(),
-                passed_score: 0,
-            });
-        }
-    };
-
-    let elapsed_ms = start.elapsed().as_millis() as i32;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        return Ok(CaseResult {
-            test_case_id: tc.id,
-            status: "RUNTIME_ERROR".to_string(),
-            time_ms: elapsed_ms,
-            memory_kb: 0,
-            message: truncate_message(&stderr),
-            passed_score: 0,
-        });
-    }
-
-    let actual = String::from_utf8_lossy(&output.stdout).to_string();
-
-    if normalize_output(&actual) == normalize_output(&tc.output) {
-        Ok(CaseResult {
-            test_case_id: tc.id,
-            status: "ACCEPTED".to_string(),
-            time_ms: elapsed_ms,
-            memory_kb: 0,
-            message: String::new(),
-            passed_score: tc.score,
-        })
-    } else {
-        Ok(CaseResult {
-            test_case_id: tc.id,
-            status: "WRONG_ANSWER".to_string(),
-            time_ms: elapsed_ms,
-            memory_kb: 0,
-            message: format!(
-                "expected `{}`, got `{}`",
-                truncate_message(&tc.output),
-                truncate_message(&actual)
-            ),
-            passed_score: 0,
-        })
-    }
-}
-
-fn normalize_output(s: &str) -> String {
-    s.replace("\r\n", "\n").trim_end().to_string()
-}
-
-fn truncate_message(s: &str) -> String {
-    const LIMIT: usize = 512;
-
-    let s = s.trim();
-
-    if s.len() <= LIMIT {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..LIMIT])
-    }
-}
+```text
+1. middleware 记录 status
+2. 统一 response wrapper
+3. events 可靠队列能力
+4. tracing batch + sampling
 ```
 
 ---
 
-## 6. 再确认 src/main.rs
+## 十六、当前结论
 
-你的 `main.rs` 应该是这个结构：
+Shared 当前已经从旧的“配置中心式公共模块”重构为“纯公共基础库”。
 
-```rust
-mod config;
-mod db;
-mod event;
-mod judge;
+新的原则是：
 
-use anyhow::{Context, Result};
-use futures_util::StreamExt;
-use sqlx::PgPool;
-use std::sync::Arc;
-use tracing::{error, info, warn};
-
-use crate::config::LanguagesConfig;
-use crate::event::Event;
-use crate::judge::handle_submission;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt().json().init();
-
-    let nats_url =
-        std::env::var("NATS_URL").unwrap_or_else(|_| "nats://ojos-nats:4222".to_string());
-
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://postgres:password@postgres:5432/ojos?sslmode=disable".to_string()
-    });
-
-    let languages_path =
-        std::env::var("LANGUAGES_CONFIG").unwrap_or_else(|_| "config/languages.yaml".to_string());
-
-    let languages = Arc::new(
-        LanguagesConfig::load(&languages_path)
-            .await
-            .context("load languages config failed")?,
-    );
-
-    info!(%nats_url, %database_url, %languages_path, "judge-worker starting");
-
-    let db = PgPool::connect(&database_url)
-        .await
-        .context("connect postgres failed")?;
-
-    let client = async_nats::connect(nats_url)
-        .await
-        .context("connect nats failed")?;
-
-    let mut subscriber = client
-        .subscribe("submission.created")
-        .await
-        .context("subscribe submission.created failed")?;
-
-    info!("judge-worker subscribed submission.created");
-
-    while let Some(message) = subscriber.next().await {
-        let raw = String::from_utf8_lossy(&message.payload);
-
-        match serde_json::from_slice::<Event>(&message.payload) {
-            Ok(event) => {
-                let submission_id = event.submission_id();
-
-                info!(
-                    event_id = %event.id,
-                    event_type = %event.event_type,
-                    producer = %event.producer,
-                    timestamp = %event.timestamp,
-                    submission_id = ?submission_id,
-                    "received submission.created"
-                );
-
-                if let Some(submission_id) = submission_id {
-                    if let Err(err) =
-                        handle_submission(&db, languages.clone(), submission_id).await
-                    {
-                        error!(
-                            submission_id,
-                            error = %err,
-                            "judge submission failed"
-                        );
-
-                        let _ = crate::db::mark_submission_failed(
-                            &db,
-                            submission_id,
-                            "SYSTEM_ERROR",
-                            &err.to_string(),
-                        )
-                        .await;
-                    }
-                } else {
-                    warn!(raw = %raw, "submission.created missing submission_id");
-                }
-            }
-            Err(err) => {
-                error!(
-                    error = %err,
-                    raw = %raw,
-                    "failed to parse submission.created event"
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
+```text
+服务自己定义配置
+shared 只接收参数并创建基础设施对象
+业务逻辑不进入 shared
+业务配置不进入 shared
+新增业务模块不修改 shared
 ```
 
----
-
-## 7. 编译
-
-执行：
-
-```powershell
-cd D:\Untitled-OJ\services\judge-worker
-cargo fmt
-cargo build
-```
-
-如果这里报错，把报错贴出来。
-
-编译过了，再改 Dockerfile 和 compose。
+该结构可以支撑后续所有 go-zero 服务继续接入。

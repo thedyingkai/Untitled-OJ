@@ -2,30 +2,17 @@ package database
 
 import (
 	"context"
-	"fmt"
-	"time"
-
-	"ojos-shared/configs"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func NewPostgresPool(ctx context.Context, cfg *configs.Config) (*pgxpool.Pool, error) {
-	if cfg.Database.URL == "" {
-		return nil, fmt.Errorf("database url is empty")
-	}
-
-	poolConfig, err := pgxpool.ParseConfig(cfg.Database.URL)
+func NewPostgresPoolByURL(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, err
 	}
 
-	poolConfig.MaxConns = 10
-	poolConfig.MinConns = 1
-	poolConfig.MaxConnLifetime = time.Hour
-	poolConfig.MaxConnIdleTime = 30 * time.Minute
-
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
