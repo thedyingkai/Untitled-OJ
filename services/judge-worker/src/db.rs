@@ -218,3 +218,36 @@ pub async fn save_judge_result(db: &PgPool, submission_id: i64, result: JudgeRes
 
     Ok(())
 }
+
+pub async fn list_pending_submission_ids(db: &PgPool, limit: i64) -> Result<Vec<i64>> {
+    let ids = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT id
+        FROM submissions
+        WHERE status = 'PENDING'
+        ORDER BY id ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+
+    Ok(ids)
+}
+
+pub async fn try_claim_submission(db: &PgPool, submission_id: i64) -> Result<bool> {
+    let claimed: Option<i64> = sqlx::query_scalar::<_, i64>(
+        r#"
+        UPDATE submissions
+        SET status = 'RUNNING', updated_at = NOW()
+        WHERE id = $1 AND status = 'PENDING'
+        RETURNING id
+        "#,
+    )
+    .bind(submission_id)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(claimed.is_some())
+}

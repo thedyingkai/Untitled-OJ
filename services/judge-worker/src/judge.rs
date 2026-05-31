@@ -14,7 +14,7 @@ use tracing::info;
 use crate::config::{LanguageConfig, LanguagesConfig, render_arg};
 use crate::db::{
     CaseResult, JudgeResult, Problem, Submission, TestCase, load_problem, load_submission,
-    load_test_cases, mark_submission_failed, save_judge_result, update_submission_status,
+    load_test_cases, mark_submission_failed, save_judge_result, try_claim_submission,
 };
 
 pub async fn handle_submission(
@@ -22,9 +22,18 @@ pub async fn handle_submission(
     languages: Arc<LanguagesConfig>,
     submission_id: i64,
 ) -> Result<()> {
-    info!(submission_id, "start judging");
+    let claimed = try_claim_submission(db, submission_id).await?;
 
-    update_submission_status(db, submission_id, "RUNNING", 0, 0, 0, "").await?;
+    if !claimed {
+        info!(
+            submission_id,
+            "submission skipped because it is not pending"
+        );
+        return Ok(());
+    }
+
+    info!(submission_id, "submission claimed");
+    info!(submission_id, "start judging");
 
     let submission = load_submission(db, submission_id).await?;
     let problem = load_problem(db, submission.problem_id).await?;

@@ -29,7 +29,9 @@ Online Judge Infrastructure Platform
 可观测
 可扩展
 支持多语言评测
-支持多服务独立演进
+支持多题型
+支持多赛制
+支持插件式模块安装
 ```
 
 核心理念：
@@ -57,16 +59,21 @@ Everything is Extensible
 真实判题闭环
 多语言评测配置
 日志与链路追踪
+Gateway 统一鉴权
+用户上下文透传
+Judge PENDING 兜底恢复
+Judge 原子抢任务
 ```
 
 当前可以认为已经完成：
 
 ```text
 Infrastructure Foundation
-Auth MVP
-Gateway MVP
-Judge MVP
-Shared Common Library
+Shared v0.2
+Gateway v0.3
+Auth v0.2
+Judge API MVP v0.2
+Judge Worker Reliability v0.2
 ```
 
 但仍然不是生产级完整 OJ。当前 Judge 仍处于 MVP 阶段，用户代码尚未通过独立安全沙箱隔离执行。
@@ -82,13 +89,13 @@ Shared Common Library
 | Judge Worker           | Rust                             |
 | Judge Language Config  | YAML                             |
 | Database               | PostgreSQL 17                    |
-| DB Driver              | pgx / pgxpool                    |
+| DB Driver              | pgx / pgxpool / sqlx             |
 | Migration              | golang-migrate                   |
 | Message Queue          | NATS                             |
 | Cache                  | Redis                            |
 | Tracing                | OpenTelemetry                    |
 | Trace UI               | Jaeger                           |
-| Logger                 | Zap                              |
+| Logger                 | Zap / tracing                    |
 | Deployment             | Docker Compose                   |
 | Auth                   | JWT / bcrypt                     |
 | C++ Judge Toolchain    | g++                              |
@@ -124,9 +131,7 @@ Untitled-OJ/
 
 ---
 
-## 五、服务模块概览
-
-当前核心服务包括：
+## 五、当前核心服务
 
 ```text
 shared        公共基础库
@@ -231,13 +236,6 @@ migrate `
   up
 ```
 
-当前已验证：
-
-```text
-schema_migrations.version = 2
-schema_migrations.dirty = false
-```
-
 ---
 
 ### 6.4 Redis
@@ -277,19 +275,21 @@ NATS submission.created
 judge-worker
 ```
 
-当前限制：
+当前已经补充数据库兜底机制：
 
 ```text
-当前使用 NATS Core Pub/Sub
-消息不持久
-worker 离线期间可能丢任务
+worker 启动扫描 PENDING
+worker 定时扫描 PENDING
+worker 原子抢任务
 ```
 
-后续需要引入：
+因此，即使 NATS Core 消息丢失，历史 `PENDING` 提交也可以被 worker 后续扫描恢复。
+
+当前仍需注意：
 
 ```text
-PENDING 任务扫描
-或 NATS JetStream
+NATS Core 本身不持久化消息
+可靠任务最终仍建议升级到 JetStream / DB Queue / Redis Stream
 ```
 
 ---
@@ -342,6 +342,9 @@ services/shared/
 ├── events/
 ├── logger/
 ├── middleware/
+├── security/
+│   ├── authctx/
+│   └── jwt/
 ├── tracing/
 ├── go.mod
 └── go.sum
@@ -365,6 +368,8 @@ trace_id / span_id 日志注入
 OpenTelemetry OTLP 初始化
 go-zero Recovery Middleware
 go-zero Logging Middleware
+JWT 生成与解析
+可信用户上下文 Header 解析
 ```
 
 Shared 当前原则：
@@ -389,7 +394,7 @@ services/gateway
 
 Gateway 是 OJOS 的统一 HTTP 入口。
 
-当前 Gateway 已完成 go-zero 重构。
+当前 Gateway 已完成 go-zero 重构，并升级到 v0.3。
 
 当前能力：
 
@@ -403,8 +408,12 @@ shared NATS 接入
 Recovery middleware
 Logging middleware
 配置驱动反向代理
+ReverseProxy Rewrite
 Auth 服务代理
 Judge API 服务代理
+统一 JWT 鉴权
+用户上下文透传
+按路由配置 AuthMode
 ```
 
 当前监听端口：
@@ -429,6 +438,8 @@ GET /health
 }
 ```
 
+---
+
 ### 8.2 配置驱动代理
 
 Gateway 当前通过 `gateway.yaml` 配置代理规则。
@@ -441,10 +452,12 @@ Proxy:
     - Prefix: /api/auth
       Target: http://auth:8081
       StripPrefix: /api
+      AuthMode: optional
 
     - Prefix: /api/judge
       Target: http://judge-api:8082
       StripPrefix: /api
+      AuthMode: required
 ```
 
 转发规则：
@@ -453,32 +466,58 @@ Proxy:
 /api/auth/login
     -> http://auth:8081/auth/login
 
-/api/judge/submissions/3/cases
-    -> http://judge-api:8082/judge/submissions/3/cases
+/api/judge/submissions
+    -> http://judge-api:8082/judge/submissions
 ```
 
-当前已验证：
+---
+
+### 8.3 AuthMode
+
+当前支持三种鉴权模式：
+
+| AuthMode   | 含义                |
+| ---------- | ----------------- |
+| `none`     | 不解析 token         |
+| `optional` | 有 token 就解析，没有也放行 |
+| `required` | 必须有合法 token       |
+
+当前配置：
 
 ```text
-GET  /health
-POST /api/auth/login
-GET  /api/auth/profile
-GET  /api/judge/submissions/3/cases
+/api/auth   optional
+/api/judge  required
 ```
 
-### 8.3 当前限制
+---
+
+### 8.4 用户上下文透传
+
+Gateway 验证 JWT 后，会清理客户端伪造的可信 Header，并重新注入：
+
+```text
+X-Auth-Verified: true
+X-User-Id: 1
+X-Username: admin
+X-Roles: user
+```
+
+下游服务不应信任客户端直接传入的这些 Header，只应信任 Gateway 注入后的 Header。
+
+---
+
+### 8.5 当前限制
 
 Gateway 当前仍未实现：
 
 ```text
-统一 JWT 鉴权
-X-User-Id / X-Username / X-Roles 透传
 限流
 熔断
 重试
 服务发现
 配置热更新
 统一响应格式
+权限点检查
 ```
 
 ---
@@ -530,6 +569,8 @@ GET /auth/profile
 
 受 JWT 中间件保护。
 
+---
+
 ### 9.2 Gateway 访问方式
 
 通过 Gateway：
@@ -545,7 +586,17 @@ Gateway 会转发到：
 auth:8081
 ```
 
+---
+
 ### 9.3 JWT
+
+当前 JWT 能力已迁移到：
+
+```text
+services/shared/security/jwt
+```
+
+Auth 使用 shared JWT 签发 token，Gateway 使用 shared JWT 解析 token。
 
 当前 JWT Claims 至少包含：
 
@@ -568,44 +619,6 @@ Jwt:
 ```
 
 生产环境必须替换为强随机密钥。
-
-### 9.4 RBAC 基础表
-
-当前数据库角色系统：
-
-```text
-users
-roles
-user_roles
-```
-
-默认角色：
-
-| 角色          | 描述      |
-| ----------- | ------- |
-| super_admin | 系统超级管理员 |
-| admin       | 管理员     |
-| user        | 普通用户    |
-
-当前新注册用户默认分配：
-
-```text
-user
-```
-
-### 9.5 当前限制
-
-Auth 当前未实现：
-
-```text
-refresh token
-token revoke
-登出
-修改密码
-权限点表
-角色管理接口
-Gateway 统一鉴权
-```
 
 ---
 
@@ -635,60 +648,53 @@ GET  /judge/submissions/:id
 GET  /judge/submissions/:id/cases
 ```
 
-### 10.1 创建题目
-
-```http
-POST /judge/problems
-```
-
-请求示例：
-
-```json
-{
-  "title": "A+B Problem",
-  "time_limit_ms": 1000,
-  "memory_limit_mb": 256
-}
-```
-
-响应示例：
-
-```json
-{
-  "problem_id": 1
-}
-```
-
 ---
 
-### 10.2 添加测试点
+### 10.1 用户身份来源
 
-```http
-POST /judge/test-cases
-```
+当前 `POST /judge/submissions` 不再信任请求体里的 `user_id`。
 
-请求示例：
+旧请求：
 
 ```json
 {
   "problem_id": 1,
-  "input": "1 2\n",
-  "output": "3\n",
-  "score": 100
+  "user_id": 1,
+  "language": "cpp17",
+  "code": "..."
 }
 ```
 
-响应示例：
+新请求：
 
 ```json
 {
-  "test_case_id": 1
+  "problem_id": 1,
+  "language": "cpp17",
+  "code": "..."
 }
 ```
 
+`judge-api` 通过 `UserContextMiddleware` 从 Gateway 注入的 Header 中读取用户身份：
+
+```text
+X-Auth-Verified
+X-User-Id
+X-Username
+X-Roles
+```
+
+最终写入：
+
+```text
+submissions.user_id
+```
+
+因此前端无法通过伪造请求体 `user_id` 来替别人提交。
+
 ---
 
-### 10.3 提交代码
+### 10.2 创建提交
 
 ```http
 POST /judge/submissions
@@ -699,7 +705,6 @@ POST /judge/submissions
 ```json
 {
   "problem_id": 1,
-  "user_id": 1,
   "language": "cpp17",
   "code": "#include <bits/stdc++.h>\nusing namespace std;\nint main(){int a,b;cin>>a>>b;cout<<a+b<<endl;}"
 }
@@ -709,7 +714,7 @@ POST /judge/submissions
 
 ```json
 {
-  "submission_id": 1,
+  "submission_id": 10,
   "status": "PENDING"
 }
 ```
@@ -723,7 +728,7 @@ POST /judge/submissions
 
 ---
 
-### 10.4 查询提交结果
+### 10.3 查询提交结果
 
 ```http
 GET /judge/submissions/:id
@@ -733,42 +738,22 @@ GET /judge/submissions/:id
 
 ```json
 {
-  "id": 3,
+  "id": 10,
   "problem_id": 1,
   "user_id": 1,
   "language": "cpp17",
   "status": "ACCEPTED",
   "score": 100,
-  "time_ms": 4,
+  "time_ms": 0,
   "memory_kb": 0,
   "message": ""
 }
 ```
 
----
+说明：
 
-### 10.5 查询测试点详情
-
-```http
-GET /judge/submissions/:id/cases
-```
-
-响应示例：
-
-```json
-{
-  "cases": [
-    {
-      "id": 1,
-      "submission_id": 3,
-      "test_case_id": 1,
-      "status": "ACCEPTED",
-      "time_ms": 4,
-      "memory_kb": 0,
-      "message": ""
-    }
-  ]
-}
+```text
+0ms 在算法竞赛系统中是正常显示，不需要强制改为 1ms。
 ```
 
 ---
@@ -798,79 +783,93 @@ Judge Worker 使用 Rust 实现，是实际执行判题的模块。
 比较输出
 写入 submission_cases
 更新 submissions
+启动扫描 PENDING
+定时扫描 PENDING
+原子抢任务
 ```
 
 ---
 
-### 11.1 languages.yaml
+### 11.1 当前可靠性机制
 
-路径：
-
-```text
-services/judge-worker/config/languages.yaml
-```
-
-语言配置示例：
-
-```yaml
-languages:
-  cpp17:
-    source_file: main.cpp
-    exe_file: main
-    compile:
-      enabled: true
-      command: g++
-      args:
-        - "-std=c++17"
-        - "-O2"
-        - "-pipe"
-        - "{source}"
-        - "-o"
-        - "{exe}"
-      timeout_ms: 10000
-    run:
-      command: "{exe}"
-      args: []
-
-  python3:
-    source_file: main.py
-    exe_file: ""
-    compile:
-      enabled: false
-      command: ""
-      args: []
-      timeout_ms: 0
-    run:
-      command: python3
-      args:
-        - "{source}"
-```
-
-支持占位符：
-
-| 占位符         | 含义      |
-| ----------- | ------- |
-| `{source}`  | 源文件路径   |
-| `{exe}`     | 可执行文件路径 |
-| `{workdir}` | 临时工作目录  |
-
-当前配置支持：
+当前 Judge Worker 已经从：
 
 ```text
-cpp17
-cpp20
-c11
-python3
-java17
-rust
-go
+只依赖 NATS 实时事件
 ```
 
-实际可用语言取决于 judge-worker Docker 镜像中安装的工具链。
+升级为：
+
+```text
+NATS 实时事件
++
+数据库 PENDING 兜底扫描
++
+原子抢任务
+```
+
+核心机制：
+
+```sql
+UPDATE submissions
+SET status = 'RUNNING', updated_at = NOW()
+WHERE id = $1 AND status = 'PENDING'
+RETURNING id;
+```
+
+只有成功返回一行的 worker 才能继续判题。
+
+如果返回空，说明：
+
+```text
+任务已经被其他 worker 抢走
+或任务已经被判完
+或任务状态不再是 PENDING
+```
+
+当前该 worker 会跳过该 submission。
 
 ---
 
-### 11.2 当前评测状态
+### 11.2 启动扫描
+
+worker 启动后会扫描：
+
+```sql
+SELECT id
+FROM submissions
+WHERE status = 'PENDING'
+ORDER BY id ASC
+LIMIT $1;
+```
+
+这可以恢复由于以下原因导致的历史 PENDING：
+
+```text
+NATS 消息丢失
+worker 重启
+judge-api 发布事件失败
+worker 不在线
+旧版本 bug
+```
+
+---
+
+### 11.3 定时扫描
+
+worker 运行期间会周期性扫描 PENDING。
+
+当前周期：
+
+```text
+10 秒
+```
+
+这使系统即使错过实时事件，也能在后续扫描中恢复任务。
+
+---
+
+### 11.4 当前评测状态
 
 当前支持状态：
 
@@ -896,11 +895,13 @@ TLE 正常
 C++17 正常
 Python3 正常
 submission_cases 正常
+历史 PENDING 可恢复
+新提交可正常评测
 ```
 
 ---
 
-### 11.3 当前 Judge 限制
+### 11.5 当前 Judge 限制
 
 当前 Judge 是 MVP，不是安全生产级 Judge。
 
@@ -910,12 +911,12 @@ submission_cases 正常
 用户代码直接运行在 judge-worker 容器内
 没有独立安全沙箱
 没有真实内存限制
-NATS Core 消息不持久
-多 worker 可能重复判题
 测试点直接存数据库 TEXT 字段
 不支持 Special Judge
 不支持 OI 子任务计分
 不支持交互题
+不支持通信题
+不支持提交答案题
 ```
 
 后续必须补：
@@ -924,94 +925,15 @@ NATS Core 消息不持久
 runner 隔离容器
 network none
 cpu / memory / pids 限制
-PENDING 任务扫描
-原子抢任务
 测试数据文件化
 SPJ / checker
+子任务 / 捆绑点
+多题型执行计划
 ```
 
 ---
 
-## 十二、当前数据库表
-
-当前核心数据库表：
-
-```text
-schema_migrations
-users
-roles
-user_roles
-problems
-test_cases
-submissions
-submission_cases
-```
-
-### 12.1 users
-
-存储用户信息。
-
-### 12.2 roles
-
-存储角色信息。
-
-### 12.3 user_roles
-
-存储用户和角色关系。
-
-### 12.4 problems
-
-存储题目信息：
-
-```text
-title
-time_limit_ms
-memory_limit_mb
-```
-
-### 12.5 test_cases
-
-存储测试点：
-
-```text
-problem_id
-input
-output
-score
-```
-
-### 12.6 submissions
-
-存储提交：
-
-```text
-problem_id
-user_id
-language
-code
-status
-score
-time_ms
-memory_kb
-message
-```
-
-### 12.7 submission_cases
-
-存储每个测试点的评测结果：
-
-```text
-submission_id
-test_case_id
-status
-time_ms
-memory_kb
-message
-```
-
----
-
-## 十三、当前服务端口
+## 十二、当前服务端口
 
 | 服务                   | 端口    |
 | -------------------- | ----- |
@@ -1026,9 +948,9 @@ message
 
 ---
 
-## 十四、快速启动
+## 十三、快速启动
 
-### 14.1 启动全部服务
+### 13.1 启动全部服务
 
 ```powershell
 cd D:\Untitled-OJ\deploy\compose
@@ -1036,35 +958,26 @@ cd D:\Untitled-OJ\deploy\compose
 docker compose up -d --build
 ```
 
-### 14.2 查看服务
+### 13.2 查看服务
 
 ```powershell
 docker ps
 ```
 
-### 14.3 查看 Gateway 日志
+### 13.3 查看日志
 
 ```powershell
 docker logs ojos-gateway
-```
-
-### 14.4 查看 Auth 日志
-
-```powershell
 docker logs ojos-auth
-```
-
-### 14.5 查看 Judge Worker 日志
-
-```powershell
+docker logs ojos-judge-api
 docker logs ojos-judge-worker
 ```
 
 ---
 
-## 十五、常用验收命令
+## 十四、常用验收命令
 
-### 15.1 Gateway Health
+### 14.1 Gateway Health
 
 ```powershell
 Invoke-RestMethod `
@@ -1080,7 +993,7 @@ status = ok
 
 ---
 
-### 15.2 Auth Login
+### 14.2 Auth Login
 
 ```powershell
 $body = @{
@@ -1094,24 +1007,14 @@ $res = Invoke-RestMethod `
   -ContentType "application/json" `
   -Body $body
 
-$res
-```
-
-预期：
-
-```text
-code = 0
-msg = success
-data.token 存在
+$token = $res.data.token
 ```
 
 ---
 
-### 15.3 Auth Profile
+### 14.3 Auth Profile
 
 ```powershell
-$token = $res.data.token
-
 Invoke-RestMethod `
   -Method Get `
   -Uri "http://localhost:8080/api/auth/profile" `
@@ -1128,10 +1031,10 @@ data.username = admin
 
 ---
 
-### 15.4 Judge Cases
+### 14.4 Judge 不带 token 应失败
 
 ```powershell
-Invoke-RestMethod `
+Invoke-WebRequest `
   -Method Get `
   -Uri "http://localhost:8080/api/judge/submissions/3/cases"
 ```
@@ -1139,14 +1042,74 @@ Invoke-RestMethod `
 预期：
 
 ```text
-cases.status = ACCEPTED
+401
+{"code":40101,"msg":"missing authorization header"}
 ```
 
 ---
 
-## 十六、本地编译
+### 14.5 Judge 提交代码
 
-### 16.1 Shared
+```powershell
+$code = @'
+#include <bits/stdc++.h>
+using namespace std;
+
+int main() {
+    int a, b;
+    cin >> a >> b;
+    cout << a + b << endl;
+    return 0;
+}
+'@
+
+$body = @{
+  problem_id = 1
+  language = "cpp17"
+  code = $code
+} | ConvertTo-Json -Compress
+
+$res = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://localhost:8080/api/judge/submissions" `
+  -ContentType "application/json" `
+  -Headers @{ Authorization = "Bearer $token" } `
+  -Body $body
+
+$res
+```
+
+预期：
+
+```text
+submission_id = 新 ID
+status = PENDING
+```
+
+### 14.6 查询提交结果
+
+```powershell
+Start-Sleep -Seconds 2
+
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://localhost:8080/api/judge/submissions/$($res.submission_id)" `
+  -Headers @{ Authorization = "Bearer $token" }
+```
+
+预期：
+
+```text
+status = ACCEPTED
+user_id = 1
+score = 100
+```
+
+---
+
+## 十五、本地编译
+
+### 15.1 Shared
 
 ```powershell
 cd D:\Untitled-OJ\services\shared
@@ -1155,7 +1118,7 @@ go mod tidy
 go build ./...
 ```
 
-### 16.2 Gateway
+### 15.2 Gateway
 
 ```powershell
 cd D:\Untitled-OJ\services\gateway
@@ -1164,7 +1127,7 @@ go mod tidy
 go build .
 ```
 
-### 16.3 Auth
+### 15.3 Auth
 
 ```powershell
 cd D:\Untitled-OJ\services\auth
@@ -1173,7 +1136,7 @@ go mod tidy
 go build .
 ```
 
-### 16.4 Judge API
+### 15.4 Judge API
 
 ```powershell
 cd D:\Untitled-OJ\services\judge-api
@@ -1182,7 +1145,7 @@ go mod tidy
 go build .
 ```
 
-### 16.5 Judge Worker
+### 15.5 Judge Worker
 
 ```powershell
 cd D:\Untitled-OJ\services\judge-worker
@@ -1193,45 +1156,48 @@ cargo build
 
 ---
 
-## 十七、当前完成情况
+## 十六、当前完成情况
 
-| 模块             | 状态          |
-| -------------- | ----------- |
-| Docker Compose | 完成          |
-| PostgreSQL     | 完成          |
-| Redis          | 完成          |
-| NATS           | 完成          |
-| Jaeger         | 完成          |
-| Migration      | 完成          |
-| Shared         | v0.2 完成     |
-| Gateway        | v0.2 完成     |
-| Auth           | v0.2 完成     |
-| Judge API      | MVP v0.1 完成 |
-| Judge Worker   | MVP v0.1 完成 |
-| 多语言评测配置        | MVP 完成      |
-| 安全沙箱           | 未完成         |
-| PENDING 任务兜底   | 未完成         |
-| 多 Worker 并发安全  | 未完成         |
-| Gateway 统一鉴权   | 未完成         |
+| 模块               | 状态                  |
+| ---------------- | ------------------- |
+| Docker Compose   | 完成                  |
+| PostgreSQL       | 完成                  |
+| Redis            | 完成                  |
+| NATS             | 完成                  |
+| Jaeger           | 完成                  |
+| Migration        | 完成                  |
+| Shared           | v0.2 完成             |
+| Gateway          | v0.3 完成             |
+| Auth             | v0.2 完成             |
+| Judge API        | MVP v0.2 完成         |
+| Judge Worker     | Reliability v0.2 完成 |
+| 多语言评测配置          | MVP 完成              |
+| Gateway 用户上下文透传  | 完成                  |
+| Judge PENDING 恢复 | 完成                  |
+| Judge 原子抢任务      | 完成                  |
+| 安全沙箱             | 未完成                 |
+| 多题型系统            | 未完成                 |
+| 子任务 / 捆绑点        | 未完成                 |
+| Gateway 权限点检查    | 未完成                 |
 
 ---
 
-## 十八、当前不是完整生产级系统的部分
+## 十七、当前不是完整生产级系统的部分
 
 当前系统仍然存在以下关键缺口：
 
 ```text
 Judge 没有安全沙箱
 Judge 没有真实内存限制
-NATS 任务消息不持久
-多 worker 可能重复评测
-Gateway 没有统一 JWT 鉴权
-Gateway 没有用户信息透传
 测试数据没有文件化
 没有 Special Judge
 没有 OI 子任务计分
+没有交互题
+没有通信题
+没有提交答案题
 没有完整权限点系统
 没有统一错误码体系
+没有模块注册与启动器
 ```
 
 因此当前系统应定义为：
@@ -1248,37 +1214,37 @@ Gateway 没有用户信息透传
 
 ---
 
-## 十九、下一阶段计划
+## 十八、下一阶段计划
 
 推荐下一阶段开发顺序：
 
 ```text
-1. Gateway JWT 鉴权
-2. Gateway 用户信息透传
-3. Judge Worker 原子抢任务
-4. Judge Worker 扫描 PENDING
-5. Judge Runner 隔离容器
-6. CPU / memory / pids / network 限制
-7. 测试数据文件化
-8. Problem 模块
-9. Contest 模块
-10. Special Judge
-11. OI 计分模式
-12. 权限点系统
-13. 统一错误码体系
+1. Problem / Dataset 正规化
+2. 测试数据文件化
+3. checker / special judge 抽象
+4. 子任务 / 捆绑点
+5. problem-type-traditional
+6. contest-core
+7. contest-rule-acm
+8. scoreboard-acm
+9. Gateway 权限点检查
+10. permission-core
+11. module-registry
+12. feature-flag-core
+13. runner 安全隔离
 ```
 
-优先级最高的是：
+短期最建议进入：
 
 ```text
-Gateway 鉴权
-Judge 任务可靠性
-Judge 安全隔离
+Problem / Dataset 正规化
 ```
+
+因为后续 OI、NOI、IOI、交互题、通信题、提交答案题，都依赖更规范的数据集与题型配置。
 
 ---
 
-## 二十、项目当前结论
+## 十九、项目当前结论
 
 OJOS 当前已经完成基础平台和核心 MVP：
 
@@ -1288,18 +1254,24 @@ Auth 可以完成登录鉴权
 Judge 可以真实评测代码
 Shared 已成为纯公共基础库
 Docker Compose 可以启动完整本地环境
+历史 PENDING 可以被恢复
+新提交可以完成可信用户身份绑定和评测
 ```
 
 当前系统已经具备继续开发：
 
 ```text
 Problem
+Dataset
 Contest
+Scoreboard
 Training
 Ranking
 Submission
 WebSocket
 Frontend
+Module Registry
+Launcher
 ```
 
 等模块的基础。
@@ -1307,9 +1279,10 @@ Frontend
 下一阶段重点应从“能跑通”转向：
 
 ```text
-安全
-可靠
-权限
-可维护
-可扩展
+数据模型正规化
+题型扩展
+赛制扩展
+安全隔离
+权限体系
+模块化安装
 ```
