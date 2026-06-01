@@ -1,0 +1,92 @@
+syntax = "v1"
+
+info (
+	title:   "OJOS Auth API"
+	desc:    "OJOS authentication service"
+	author:  "thedyingkai"
+	version: "v1"
+)
+
+type HealthData {
+	Service string `json:"service"`
+	Status  string `json:"status"`
+}
+
+type HealthResp {
+	Code int        `json:"code"`
+	Msg  string     `json:"msg"`
+	Data HealthData `json:"data"`
+}
+
+type RegisterReq {
+	Username string `json:"username"`
+	Email    string `json:"email,optional"`
+	Password string `json:"password"`
+}
+
+type RegisterData {
+	UserId   int64  `json:"user_id"`
+	Username string `json:"username"`
+}
+
+type RegisterResp {
+	Code int          `json:"code"`
+	Msg  string       `json:"msg"`
+	Data RegisterData `json:"data,optional"`
+}
+
+type LoginReq {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type LoginData {
+	Token    string   `json:"token"`
+	UserId   int64    `json:"user_id"`
+	Username string   `json:"username"`
+	Roles    []string `json:"roles"`
+}
+
+type LoginResp {
+	Code int       `json:"code"`
+	Msg  string    `json:"msg"`
+	Data LoginData `json:"data,optional"`
+}
+
+type ProfileData {
+	UserId   int64    `json:"user_id"`
+	Username string   `json:"username"`
+	Roles    []string `json:"roles"`
+}
+
+type ProfileResp {
+	Code int         `json:"code"`
+	Msg  string      `json:"msg"`
+	Data ProfileData `json:"data,optional"`
+}
+
+service auth {
+	@handler health
+	get /health returns (HealthResp)
+}
+
+@server (
+	prefix: /auth
+)
+service auth {
+	@handler register
+	post /register (RegisterReq) returns (RegisterResp)
+
+	@handler login
+	post /login (LoginReq) returns (LoginResp)
+}
+
+@server (
+	prefix:     /auth
+	middleware: AuthMiddleware
+)
+service auth {
+	@handler profile
+	get /profile returns (ProfileResp)
+}
+

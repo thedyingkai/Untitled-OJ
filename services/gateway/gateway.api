@@ -1,0 +1,18 @@
+syntax = "v1"
+
+info (
+	title:   "OJOS Gateway API"
+	desc:    "OJOS API Gateway"
+	author:  "thedyingkai"
+	version: "v1"
+)
+
+type HealthResp {
+	Status string `json:"status"`
+}
+
+service gateway {
+	@handler health
+	get /health returns (HealthResp)
+}
+

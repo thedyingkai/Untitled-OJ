@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"ojos-auth/internal/repository"
-	"ojos-shared/events"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -20,20 +19,17 @@ var (
 
 type AuthService struct {
 	userRepo       *repository.UserRepository
-	bus            *events.Bus
 	jwtSecret      string
 	jwtExpireHours int
 }
 
 func NewAuthService(
 	userRepo *repository.UserRepository,
-	bus *events.Bus,
 	jwtSecret string,
 	jwtExpireHours int,
 ) *AuthService {
 	return &AuthService{
 		userRepo:       userRepo,
-		bus:            bus,
 		jwtSecret:      jwtSecret,
 		jwtExpireHours: jwtExpireHours,
 	}
@@ -85,18 +81,6 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (*Regis
 		}
 
 		return nil, err
-	}
-
-	if s.bus != nil {
-		_ = s.bus.Publish(
-			ctx,
-			"user.registered",
-			"user.registered",
-			map[string]any{
-				"user_id":  userID,
-				"username": username,
-			},
-		)
 	}
 
 	return &RegisterResult{
@@ -155,18 +139,6 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 
 	if err != nil {
 		return nil, err
-	}
-
-	if s.bus != nil {
-		_ = s.bus.Publish(
-			ctx,
-			"user.login",
-			"user.login",
-			map[string]any{
-				"user_id":  userID,
-				"username": username,
-			},
-		)
 	}
 
 	return &LoginResult{

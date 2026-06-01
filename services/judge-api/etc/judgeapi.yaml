@@ -1,0 +1,12 @@
+Name: judge.rs-api-service
+Host: 0.0.0.0
+Port: 8082
+
+Database:
+  Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
+
+Jaeger:
+  Endpoint: ojos-jaeger:4317
+
+Redis:
+  Url: redis://ojos-redis:6379/0

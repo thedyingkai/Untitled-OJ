@@ -1,0 +1,24 @@
+Name: gateway-service
+Host: 0.0.0.0
+Port: 8080
+
+Database:
+  Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
+
+Jaeger:
+  Endpoint: ojos-jaeger:4317
+
+Jwt:
+  Secret: ojos-dev-secret-change-me
+
+Proxy:
+  Routes:
+    - Prefix: /api/auth
+      Target: http://auth:8081
+      StripPrefix: /api
+      AuthMode: optional
+
+    - Prefix: /api/judge
+      Target: http://judge-api:8082
+      StripPrefix: /api
+      AuthMode: required

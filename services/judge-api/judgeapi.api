@@ -1,0 +1,96 @@
+syntax = "v1"
+
+info (
+	title:   "OJOS Judge API"
+	desc:    "Problem, test case and submission API"
+	author:  "thedyingkai"
+	version: "v1"
+)
+
+type CreateProblemReq {
+	Title         string `json:"title"`
+	TimeLimitMs   int    `json:"time_limit_ms,optional"`
+	MemoryLimitMb int    `json:"memory_limit_mb,optional"`
+}
+
+type CreateProblemResp {
+	ProblemId int64 `json:"problem_id"`
+}
+
+type AddTestCaseReq {
+	ProblemId int64  `json:"problem_id"`
+	Input     string `json:"input"`
+	Output    string `json:"output"`
+	Score     int    `json:"score,optional"`
+}
+
+type AddTestCaseResp {
+	TestCaseId int64 `json:"test_case_id"`
+}
+
+type CreateSubmissionReq {
+	ProblemId int64  `json:"problem_id"`
+	Language  string `json:"language,optional"`
+	Code      string `json:"code"`
+}
+
+type CreateSubmissionResp {
+	SubmissionId int64  `json:"submission_id"`
+	Status       string `json:"status"`
+}
+
+type GetSubmissionReq {
+	Id int64 `path:"id"`
+}
+
+type GetSubmissionResp {
+	Id        int64  `json:"id"`
+	ProblemId int64  `json:"problem_id"`
+	UserId    int64  `json:"user_id"`
+	Language  string `json:"language"`
+	Status    string `json:"status"`
+	Score     int    `json:"score"`
+	TimeMs    int    `json:"time_ms"`
+	MemoryKb  int    `json:"memory_kb"`
+	Message   string `json:"message,optional"`
+}
+
+@server (
+	prefix:     /judge
+	middleware: UserContextMiddleware
+)
+service judgeapi {
+	@handler createProblem
+	post /problems (CreateProblemReq) returns (CreateProblemResp)
+
+	@handler addTestCase
+	post /test-cases (AddTestCaseReq) returns (AddTestCaseResp)
+
+	@handler createSubmission
+	post /submissions (CreateSubmissionReq) returns (CreateSubmissionResp)
+
+	@handler getSubmission
+	get /submissions/:id (GetSubmissionReq) returns (GetSubmissionResp)
+
+	@handler getSubmissionCases
+	get /submissions/:id/cases (GetSubmissionCasesReq) returns (GetSubmissionCasesResp)
+}
+
+type GetSubmissionCasesReq {
+	Id int64 `path:"id"`
+}
+
+type SubmissionCaseItem {
+	Id           int64  `json:"id"`
+	SubmissionId int64  `json:"submission_id"`
+	TestCaseId   int64  `json:"test_case_id"`
+	Status       string `json:"status"`
+	TimeMs       int    `json:"time_ms"`
+	MemoryKb     int    `json:"memory_kb"`
+	Message      string `json:"message,optional"`
+}
+
+type GetSubmissionCasesResp {
+	Cases []SubmissionCaseItem `json:"cases"`
+}
+
