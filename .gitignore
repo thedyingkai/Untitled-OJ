@@ -155,6 +155,8 @@ data/
 *.dump
 *.sql.gz
 *.tar.gz
+*.zip
+*.rar
 
 # -------------------------
 # Exported binary documents
@@ -163,6 +165,7 @@ data/
 *.docx
 *.pptx
 *.xlsx
+/storage
 
 # -------------------------
 # Project-critical files that must NOT be ignored:

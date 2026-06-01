@@ -22,3 +22,8 @@ Proxy:
       Target: http://judge-api:8082
       StripPrefix: /api
       AuthMode: required
+
+    - Prefix: /api/problem
+      Target: http://problem-api:8083
+      StripPrefix: /api
+      AuthMode: required

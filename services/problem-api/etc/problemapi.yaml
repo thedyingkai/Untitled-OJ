@@ -1,0 +1,12 @@
+Name: problem-api-service
+Host: 0.0.0.0
+Port: 8083
+
+Database:
+  Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
+
+Jaeger:
+  Endpoint: ojos-jaeger:4317
+
+Storage:
+  ProblemsRoot: /data/ojos/problems

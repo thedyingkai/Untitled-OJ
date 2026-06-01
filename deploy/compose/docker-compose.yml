@@ -41,6 +41,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      problem-api:
+        condition: service_started
     environment:
       DATABASE_URL: "postgres://postgres:password@postgres:5432/ojos?sslmode=disable"
     ports:
@@ -88,6 +90,21 @@ services:
       DATABASE_URL: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
       REDIS_URL: redis://ojos-redis:6379/0
       LANGUAGES_CONFIG: config/languages.yaml
+
+  problem-api:
+    build:
+      context: ../../services
+      dockerfile: problem-api/Dockerfile
+    container_name: ojos-problem-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    ports:
+      - "8083:8083"
+    volumes:
+      - ../../storage/problems:/data/ojos/problems
 
 volumes:
   postgres-data:
