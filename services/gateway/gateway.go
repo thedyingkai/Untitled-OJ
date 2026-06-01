@@ -7,10 +7,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/http"
 
 	"ojos-gateway/internal/config"
 	"ojos-gateway/internal/handler"
+	"ojos-gateway/internal/proxy"
 	"ojos-gateway/internal/svc"
 
 	sharedmw "ojos-shared/middleware"
@@ -30,20 +30,15 @@ func main() {
 	svcCtx := svc.NewServiceContext(c)
 	defer svcCtx.Close(context.Background())
 
-	notFoundHandler := svcCtx.Proxy
-	notFoundHandler = sharedmw.RecoveryMiddleware(svcCtx.Logger)(notFoundHandler)
-	notFoundHandler = sharedmw.LoggingMiddleware(svcCtx.Logger, svcCtx.Tracer)(notFoundHandler)
-
-	server := rest.MustNewServer(
-		c.RestConf,
-		rest.WithNotFoundHandler(http.HandlerFunc(notFoundHandler)),
-	)
+	server := rest.MustNewServer(c.RestConf)
 	defer server.Stop()
 
 	server.Use(sharedmw.RecoveryMiddleware(svcCtx.Logger))
 	server.Use(sharedmw.LoggingMiddleware(svcCtx.Logger, svcCtx.Tracer))
 
 	handler.RegisterHandlers(server, svcCtx)
+
+	proxy.RegisterRoutes(server, c.Proxy.Routes, svcCtx.Proxy)
 
 	fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
 	server.Start()

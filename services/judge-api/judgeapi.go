@@ -4,12 +4,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 
 	"ojos-judge-api/internal/config"
 	"ojos-judge-api/internal/handler"
 	"ojos-judge-api/internal/svc"
+
+	sharedmw "ojos-shared/middleware"
 
 	"github.com/zeromicro/go-zero/core/conf"
 	"github.com/zeromicro/go-zero/rest"
@@ -23,11 +26,16 @@ func main() {
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
 
+	svcCtx := svc.NewServiceContext(c)
+	defer svcCtx.Close(context.Background())
+
 	server := rest.MustNewServer(c.RestConf)
 	defer server.Stop()
 
-	ctx := svc.NewServiceContext(c)
-	handler.RegisterHandlers(server, ctx)
+	server.Use(sharedmw.RecoveryMiddleware(svcCtx.Logger))
+	server.Use(sharedmw.LoggingMiddleware(svcCtx.Logger, svcCtx.Tracer))
+
+	handler.RegisterHandlers(server, svcCtx)
 
 	fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
 	server.Start()

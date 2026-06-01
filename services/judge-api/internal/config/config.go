@@ -10,6 +10,7 @@ type Config struct {
 
 	Database DatabaseConfig
 	Redis    RedisConfig
+	Jaeger   JaegerConfig
 }
 
 type DatabaseConfig struct {
@@ -18,4 +19,8 @@ type DatabaseConfig struct {
 
 type RedisConfig struct {
 	Url string
+}
+
+type JaegerConfig struct {
+	Endpoint string
 }
