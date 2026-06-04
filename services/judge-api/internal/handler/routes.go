@@ -18,8 +18,8 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 			[]rest.Route{
 				{
 					Method:  http.MethodPost,
-					Path:    "/problems",
-					Handler: createProblemHandler(serverCtx),
+					Path:    "/problems/:id/rejudge",
+					Handler: rejudgeProblemHandler(serverCtx),
 				},
 				{
 					Method:  http.MethodPost,
@@ -32,14 +32,14 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 					Handler: getSubmissionHandler(serverCtx),
 				},
 				{
+					Method:  http.MethodPost,
+					Path:    "/submissions/:id/cancel",
+					Handler: cancelSubmissionHandler(serverCtx),
+				},
+				{
 					Method:  http.MethodGet,
 					Path:    "/submissions/:id/cases",
 					Handler: getSubmissionCasesHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/test-cases",
-					Handler: addTestCaseHandler(serverCtx),
 				},
 			}...,
 		),

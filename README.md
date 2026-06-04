@@ -7,7 +7,7 @@
 
 ## 一、项目定位
 
-Untitled-OJ 当前定位不是一个传统的单体 Online Judge 网站，而是一个：
+Untitled-OJ 当前定位不是一个传统单体 Online Judge 网站，而是一个：
 
 ```text
 OJ Operating System（OJOS）
@@ -21,26 +21,7 @@ Online Judge Infrastructure Platform
 
 它的目标不是只实现“能提交代码、能返回 AC/WA”的普通 OJ，而是构建一个可以长期演进、可以按模块安装、可以支持多题型、多赛制、多运行器、多权限范围、多比赛运营能力的 OJ 基础设施平台。
 
-OJOS 的核心目标包括：
-
-```text
-高性能
-分布式
-模块化
-可观测
-可扩展
-可配置
-可插拔
-支持完整资源级权限控制
-支持多语言评测
-支持多题型评测
-支持多赛制比赛
-支持模块化安装与禁用
-支持比赛运营能力
-支持后续通过 PR 增加新模块
-```
-
-项目的长期设计理念是：
+OJOS 的核心设计理念是：
 
 ```text
 Everything is a Module
@@ -56,16 +37,18 @@ Everything is Permission-Controlled
 权限是模块
 题库是模块
 判题是模块
+Runner 是模块
+Checker 是模块
+Scorer 是模块
 赛制是模块
 榜单是模块
 气球是模块
 打印是模块
-帖子是模块
 Clarification 是模块
 Module Registry / Launcher 也是模块
 ```
 
-但模块化不等于“每个能力都必须一个 Docker 容器”。OJOS 的模块需要分成：
+但模块化不等于“每个能力都必须拆成一个 Docker 容器”。OJOS 的模块需要分成：
 
 ```text
 服务级模块
@@ -80,9 +63,9 @@ Module Registry / Launcher 也是模块
 ```text
 gateway
 auth
+problem-api
 judge-api
 judge-worker
-problem-api
 contest-api
 scoreboard-api
 launcher
@@ -91,13 +74,15 @@ launcher
 能力级模块可以嵌入在某个核心服务内部，例如：
 
 ```text
-contest-rule-acm
-contest-rule-oi
-contest-rule-ioi
 problem-type-traditional
 problem-type-interactive
-checker-standard
-checker-special
+traditional-runner
+interactive-runner
+default-trim-checker
+special-checker
+default-sum-scorer
+contest-rule-acm
+contest-rule-ioi
 ```
 
 这种设计可以避免把系统拆成几十个微服务，导致本地开发、日志排查、网络调用、数据库一致性全部变得不可控。
@@ -106,9 +91,9 @@ checker-special
 
 ## 二、当前总体状态
 
-当前 OJOS 已经完成了从“基础设施空壳”到“可运行 OJ 原型”的第一阶段跨越。
+当前 OJOS 已经完成了从“基础设施空壳”到“可运行、安全隔离判题原型”的阶段跨越。
 
-目前已经完成的能力包括：
+目前已经完成的核心能力包括：
 
 ```text
 Docker Compose 本地编排
@@ -121,14 +106,20 @@ Auth 认证服务
 Gateway 统一入口
 Shared 公共基础库
 完整资源级 Permission Core
-Judge API MVP
+Problem API 基础 CRUD
+题目包文件化存储
+Judge API 提交 / 查询 / cancel / rejudge
 Rust Judge Worker
 Redis Streams Judge Queue
-多语言评测配置
+nsjail 沙箱编译与运行
+submission 文件化存储
+result.json 完整评测结果落盘
+default-trim-checker
+default-sum-scorer
 Gateway JWT 鉴权
 可信用户上下文透传
 Judge API 权限检查
-Judge Worker PENDING 兜底恢复
+Judge Worker PENDING 兜底扫描
 Judge Worker 原子抢任务
 Redis Stream 消费确认
 ```
@@ -137,13 +128,16 @@ Redis Stream 消费确认
 
 ```text
 Infrastructure Foundation
-Shared v0.3+
-Gateway v0.3+
-Auth v0.2+
+Shared Core
+Gateway Core
+Auth Core
 Permission Core v1
-Judge API MVP v0.3+
-Judge Worker Reliability v0.3
-Judge Queue Redis Streams v0.3
+Problem API v0.1
+Judge API v0.4
+Judge Worker v0.4
+Judge Queue Redis Streams
+Package-based Judge Pipeline
+nsjail Sandbox Pipeline
 ```
 
 当前系统已经可以跑通：
@@ -154,57 +148,59 @@ Judge Queue Redis Streams v0.3
 JWT 签发
 Gateway 验证 JWT
 Gateway 注入可信用户上下文
-Judge API 读取可信用户身份
+业务服务读取可信用户身份
 Judge API 检查 judge.submit 权限
+Problem API 管理题目包
 Judge API 创建 submission
+Judge API 将源码写入 storage/submissions
 Judge API 写入 Redis Stream
-Judge Worker 通过 Redis Consumer Group 消费任务
+Judge Worker 消费 Redis Stream
 Judge Worker 原子抢占 submission
-Judge Worker 编译运行代码
-Judge Worker 写入 submission_cases
-Judge Worker 更新 submissions
-Judge Worker XACK Redis Stream 消息
-用户查询提交结果
+Judge Worker 读取 problem.yaml / tests/cases.yaml
+Judge Worker 使用 nsjail 编译代码
+Judge Worker 使用 nsjail 按测试点运行代码
+Judge Worker 使用 default-trim-checker 判定输出
+Judge Worker 写入 result.json
+Judge Worker 更新 submissions 摘要
+用户查询提交结果和 case 结果
 ```
 
-当前已经完成的真实验证包括：
+当前已经完成的真实验收包括：
 
 ```text
-permtest 普通用户可以登录
-permtest 只有 user 角色
-user 角色拥有 judge.submit
-permtest 可以正常提交代码
-提交记录 user_id 正确写入为 permtest 的用户 ID
-提交可以通过 Redis Streams 被 worker 实时消费
-worker 可以完成判题并写回 ACCEPTED
-Redis XPENDING 为 0
-给 permtest 写入 judge.submit deny 后提交被 forbidden 拦截
-删除 deny 后提交恢复正常
+AC 正常
+WA 正常
+COMPILE_ERROR 正常
+RUNTIME_ERROR 正常
+TIME_LIMIT_EXCEEDED 正常
+末尾空格和末尾空行忽略正常
+行内空格不同判 WRONG_ANSWER 正常
+用户程序无法读取题目答案文件
+cancel 单份提交正常
+rejudge problem 会重测该题全部提交，包括 CANCELLED
+/submissions/:id/cases 从 result.json 正常读取
+Redis Stream 消息可以被 worker 消费并 XACK
 ```
 
-但是当前仍然不是生产级完整 OJ。原因是：
+当前仍然不是生产级完整 OJ。原因是：
 
 ```text
-Judge Runner 仍未安全沙箱化
-用户程序仍直接运行在 judge-worker 容器内
-没有真实内存限制
-测试数据仍直接存储在数据库 TEXT 字段中
-没有文件化测试数据管理
-没有 Special Judge
-没有子任务 / 捆绑点
-没有交互题
-没有通信题
-没有提交答案题
-没有正式 contest-core
-没有正式 scoreboard-core
-没有 module-registry / launcher
+memory_kb 当前暂未接入 cgroup v2 峰值统计
+scorer 当前只有默认 sum scorer
+runner 当前主要验证 traditional runner
+checker 当前主要验证 default-trim-checker
+多语言只完成基础配置，仍需逐种语言验收
+交互题 / 通信题 / 提交答案题尚未实现
+contest-core 尚未实现
+scoreboard-core 尚未实现
+module-registry / launcher 尚未实现
 权限核心已完成，但还没有权限管理 API / UI
 ```
 
 因此，当前系统定义为：
 
 ```text
-可运行 OJ 原型 / 基础设施 MVP
+可运行、安全隔离的 OJ 核心原型
 ```
 
 而不是：
@@ -222,6 +218,7 @@ Judge Runner 仍未安全沙箱化
 | Backend API           | Go                                 |
 | API Framework         | go-zero                            |
 | Judge Worker          | Rust                               |
+| Judge Sandbox         | nsjail                             |
 | Judge Queue           | Redis Streams                      |
 | Judge Queue Mode      | Consumer Group / XREADGROUP / XACK |
 | Judge Language Config | YAML                               |
@@ -241,8 +238,6 @@ Judge Runner 仍未安全沙箱化
 | C Toolchain           | gcc                                |
 | Script Language       | Python 3                           |
 | JVM Language          | OpenJDK                            |
-| Go Judge Toolchain    | Go                                 |
-| Rust Judge Toolchain  | Rust                               |
 
 当前已经从旧的：
 
@@ -258,14 +253,7 @@ Redis Streams Reliable Queue
 
 当前 Judge 任务链路不再依赖 NATS。
 
-Redis 在当前系统中承担两类职责：
-
-```text
-可靠任务队列
-后续缓存基础设施
-```
-
-其中 Judge 队列使用：
+Judge 队列使用：
 
 ```text
 Stream: ojos:judge:submissions
@@ -276,7 +264,7 @@ Group:  judge-workers
 
 ## 四、当前 Monorepo 结构
 
-当前项目结构建议保持如下：
+推荐项目结构如下：
 
 ```text
 Untitled-OJ/
@@ -293,6 +281,7 @@ Untitled-OJ/
 │   ├── shared/
 │   ├── gateway/
 │   ├── auth/
+│   ├── problem-api/
 │   ├── judge-api/
 │   └── judge-worker/
 │
@@ -300,30 +289,34 @@ Untitled-OJ/
 │   ├── compose/
 │   │   └── docker-compose.yml
 │   ├── migrations/
-│   │   ├── 000001_init_schema.up.sql
-│   │   ├── 000001_init_schema.down.sql
-│   │   ├── 000002_judge_schema.up.sql
-│   │   ├── 000002_judge_schema.down.sql
-│   │   ├── 000003_permission_core.up.sql
-│   │   └── 000003_permission_core.down.sql
 │   └── observability/
 │
+├── storage/
+│   ├── problems/
+│   └── submissions/
+│
 ├── docs/
-│   ├── index.md
-│   ├── architecture_overview.md
-│   ├── shared_module.md
-│   ├── auth_module.md
-│   ├── gateway_module.md
-│   ├── permission_core_module.md
-│   ├── judge_module.md
-│   ├── judge_worker_module.md
-│   └── development_workflow.md
+│   ├── architecture.md
+│   ├── database.md
+│   ├── deployment.md
+│   │
+│   ├── problem/
+│   │   └── package-format.md
+│   │
+│   ├── judge/
+│   │   ├── overview.md
+│   │   ├── api.md
+│   │   ├── worker.md
+│   │   ├── sandbox.md
+│   │   ├── submission-storage.md
+│   │   ├── result-format.md
+│   │   └── validation.md
+│   │
+│   └── changelog/
+│       └── judge-nsjail-pipeline.md
 │
 ├── proto/
-│
 ├── scripts/
-│   └── gen-gozero.ps1
-│
 ├── README.md
 └── .gitignore
 ```
@@ -334,6 +327,7 @@ Untitled-OJ/
 services/shared
 services/gateway
 services/auth
+services/problem-api
 services/judge-api
 services/judge-worker
 ```
@@ -393,19 +387,8 @@ HTTP 路由
 具体服务启动
 题库逻辑
 比赛逻辑
-判题逻辑
+判题执行逻辑
 ```
-
-Shared 当前已经删除旧的：
-
-```text
-shared/config
-shared/response
-shared/events
-shared/events/nats.go
-```
-
-也就是说，Shared 当前不再提供 NATS EventBus。
 
 ---
 
@@ -419,6 +402,7 @@ shared/events/nats.go
 监听 8080
 提供 /health
 通过配置代理 /api/auth
+通过配置代理 /api/problem
 通过配置代理 /api/judge
 JWT 验证
 AuthMode 判断
@@ -436,13 +420,13 @@ Gateway 不负责具体业务权限判断。
 POST /api/judge/submissions
 ```
 
-Gateway 只负责判断请求是否已登录，并将用户身份透传给 judge-api。至于该用户是否拥有：
+Gateway 只负责判断请求是否已登录，并将用户身份透传给 `judge-api`。至于该用户是否拥有：
 
 ```text
 judge.submit @ system:0
 ```
 
-由 judge-api 调用 Permission Core 判断。
+由 `judge-api` 调用 Permission Core 判断。
 
 ---
 
@@ -513,77 +497,160 @@ super_admin 最高权限
 资源级角色绑定
 ```
 
-当前已经接入的真实权限检查是：
+当前已经接入的真实权限检查包括：
 
 ```text
 POST /judge/submissions
     -> judge.submit @ system:0
+
+POST /judge/submissions/:id/cancel
+    -> problem.manage.data @ problem:<problem_id>
+
+POST /judge/problems/:id/rejudge
+    -> problem.manage.data @ problem:<problem_id>
 ```
 
 ---
 
-### 5.5 judge-api
+### 5.5 problem-api
+
+`services/problem-api` 是题目与题目包管理服务。
+
+它负责：
+
+```text
+创建题目
+查询题目
+更新题目
+删除题目
+管理题目包目录
+写入 problem.yaml
+写入 statement
+写入 tutorial
+写入 tests/cases.yaml
+写入 tests/groups.yaml
+写入 checker / runner / scorer 配置
+维护 problems.package_dir
+```
+
+题目数据不再直接塞入 Judge 数据库表中，而是文件化存储在：
+
+```text
+storage/problems/{id}-{slug}/
+```
+
+当前题目包核心结构为：
+
+```text
+storage/problems/{id}-{slug}/
+
+├── problem.yaml
+├── statement/
+├── tests/
+│   ├── cases.yaml
+│   ├── groups.yaml
+│   ├── 001.in
+│   └── 001.ans
+├── checker/
+├── runner/
+├── scorer/
+└── tutorial/
+```
+
+---
+
+### 5.6 judge-api
 
 `services/judge-api` 是 Judge 的 HTTP API 层。
 
-当前负责：
+它负责：
 
 ```text
-创建题目 MVP
-添加测试点 MVP
 创建提交
-查询提交
-查询测试点结果
+查询提交摘要
+查询提交 case 结果
+cancel 单份提交成绩
+rejudge 某题全部提交
 读取 Gateway 注入用户上下文
 检查 judge.submit 权限
-写入 submissions
+检查 problem.manage.data 权限
+将提交源码写入 storage/submissions
+写入 submissions 摘要
 向 Redis Stream 投递判题任务
 ```
 
-当前 judge-api 仍然保留了早期 MVP 接口：
+当前接口：
+
+```http
+POST /judge/submissions
+GET  /judge/submissions/:id
+GET  /judge/submissions/:id/cases
+POST /judge/submissions/:id/cancel
+POST /judge/problems/:id/rejudge
+```
+
+`judge-api` 不再负责：
 
 ```text
+创建题目
+添加测试点
+管理题面
+管理题目数据
+执行代码
+比较输出
+写入每个 case 的数据库记录
+```
+
+以下旧接口已经废弃：
+
+```http
 POST /judge/problems
 POST /judge/test-cases
 ```
 
-这些接口后续应该迁移到：
+题目与测试数据管理已经迁移到：
 
 ```text
 problem-api
 ```
 
-迁移完成后，judge-api 应只负责：
+完整 case 结果不再写入 `submission_cases`，而是写入：
 
 ```text
-submissions
-submission_cases
-judge task
-rejudge task
+storage/submissions/{submission_id}/result.json
 ```
 
 ---
 
-### 5.6 judge-worker
+### 5.7 judge-worker
 
 `services/judge-worker` 是 Rust 判题执行器。
+
+它不是 HTTP 服务，而是后台任务进程。
 
 它负责：
 
 ```text
 连接 PostgreSQL
 连接 Redis
+加载 languages.yaml
 确保 Redis Consumer Group 存在
 启动时扫描 PENDING submissions
 定时扫描 PENDING submissions
 通过 XREADGROUP 消费 Redis Stream
 解析 submission_id
-执行 try_claim_submission
-编译用户代码
-运行测试点
-比较输出
-写入 submission_cases
-更新 submissions
+try_claim_submission
+读取 submissions.code_path
+读取 problems.package_dir
+加载 problem.yaml
+加载 tests/cases.yaml
+使用 nsjail 编译用户代码
+使用 nsjail 按 case 运行用户程序
+执行 default-trim-checker
+执行默认分数汇总
+写入 stdout / stderr / checker.log
+写入 result.json
+更新 submissions 摘要
 XACK Redis Stream 消息
 ```
 
@@ -595,15 +662,293 @@ Redis Streams
 PostgreSQL PENDING 扫描
 +
 数据库原子抢任务
++
+nsjail 沙箱
 ```
 
 实现可靠判题任务处理。
 
 ---
 
-## 六、基础设施
+## 六、Judge 数据流
 
-### 6.1 Docker Compose
+当前一次提交的完整数据流如下：
+
+```text
+User
+  ↓
+Gateway /api/judge/submissions
+  ↓
+judge-api
+  ↓
+检查 JWT 用户上下文
+  ↓
+检查 judge.submit @ system:0
+  ↓
+读取 problems.package_dir
+  ↓
+创建 submissions 记录
+  ↓
+写入 storage/submissions/{submission_id}/source/main.cpp
+  ↓
+写入 result.json 初始文件
+  ↓
+XADD ojos:judge:submissions
+  ↓
+judge-worker
+  ↓
+XREADGROUP 消费消息
+  ↓
+try_claim_submission: PENDING -> JUDGING
+  ↓
+读取 submissions.code_path
+  ↓
+读取 problems.package_dir
+  ↓
+读取 problem.yaml / tests/cases.yaml
+  ↓
+nsjail 编译
+  ↓
+每个 case 独立 nsjail 运行
+  ↓
+default-trim-checker
+  ↓
+写入 stdout.txt / stderr.txt / checker.log
+  ↓
+写入 result.json
+  ↓
+更新 submissions 摘要
+  ↓
+XACK Redis Stream 消息
+```
+
+---
+
+## 七、文件存储模型
+
+### 7.1 题目包存储
+
+题目包位于：
+
+```text
+storage/problems/{id}-{slug}/
+```
+
+例如：
+
+```text
+storage/problems/2-a-plus-b/
+```
+
+核心文件：
+
+```text
+problem.yaml
+tests/cases.yaml
+tests/groups.yaml
+tests/*.in
+tests/*.ans
+checker/checker.yaml
+runner/runner.yaml
+scorer/scorer.yaml
+tutorial/zh-cn.md
+tutorial/std.cpp
+statement/zh-cn.md
+```
+
+### 7.2 提交存储
+
+提交文件位于：
+
+```text
+storage/submissions/{submission_id}/
+```
+
+例如：
+
+```text
+storage/submissions/20/
+```
+
+核心结构：
+
+```text
+storage/submissions/{submission_id}/
+
+├── source/
+│   └── main.cpp
+│
+├── build/
+│   ├── main
+│   ├── compile.log
+│   ├── compile.stdout.log
+│   └── compile.stderr.log
+│
+├── cases/
+│   └── 001/
+│       ├── stdin.txt
+│       ├── stdout.txt
+│       ├── stderr.txt
+│       └── checker.log
+│
+└── result.json
+```
+
+其中：
+
+```text
+source/      保存用户源码
+build/       保存编译产物和编译日志
+cases/       保存每个测试点的运行输入输出和 checker 日志
+result.json  保存完整评测结果
+```
+
+数据库中的 `submissions` 表只保存摘要与路径，不保存源码正文和完整 case 结果。
+
+---
+
+## 八、数据库模型总览
+
+当前核心表包括：
+
+```text
+users
+roles
+user_roles
+
+resource_types
+permissions
+role_permissions
+role_bindings
+permission_assignments
+resource_edges
+permission_audit_logs
+
+problems
+submissions
+
+schema_migrations
+```
+
+当前已经删除或废弃：
+
+```text
+test_cases
+submission_cases
+submissions.code
+```
+
+`problems` 当前重点字段包括：
+
+```text
+id
+slug
+title
+statement
+tutorial
+time_limit_ms
+memory_limit_mb
+package_dir
+visibility
+status
+owner_id
+created_at
+updated_at
+```
+
+`submissions` 当前重点字段包括：
+
+```text
+id
+problem_id
+user_id
+language
+status
+score
+time_ms
+memory_kb
+message
+code_path
+code_sha256
+result_path
+judged_at
+cancelled_at
+cancelled_by
+cancel_reason
+created_at
+updated_at
+```
+
+说明：
+
+```text
+code_path 指向 storage/submissions/{id}/source/*
+result_path 指向 storage/submissions/{id}/result.json
+code_sha256 用于源码内容校验和去重辅助
+memory_kb 当前暂为 0，后续通过 cgroup v2 统计峰值内存
+```
+
+---
+
+## 九、nsjail 沙箱边界
+
+Judge Worker 当前使用 `nsjail` 执行编译和运行。
+
+当前安全边界：
+
+```text
+用户程序运行在独立 mount namespace
+用户程序运行在独立 pid namespace
+用户程序运行在独立 ipc namespace
+用户程序运行在独立 uts namespace
+用户程序运行在独立 net namespace
+用户程序 uid/gid = 10001
+用户程序只看到 /work
+用户程序看不到 /data/ojos/problems
+用户程序不能读取 *.ans
+用户程序不能覆盖题目 *.in / *.ans
+每个测试点独立运行目录
+运行时 stdin/stdout/stderr 通过 /work 内文件重定向
+```
+
+Docker Compose 中 `judge-worker` 不使用：
+
+```text
+privileged: true
+```
+
+但需要最小 capability 支持 nsjail：
+
+```text
+SYS_ADMIN
+SYS_CHROOT
+SETUID
+SETGID
+NET_ADMIN
+```
+
+当前已验证：
+
+```text
+jail 内 /data/ojos/problems 不存在
+jail 内 uid=10001 gid=10001
+/work 可写
+用户程序尝试读取 /data/ojos/problems/.../*.ans 会失败
+```
+
+当前限制：
+
+```text
+memory_kb 暂未采集
+内存限制当前主要通过 rlimit_as 实现
+后续应接入 cgroup v2 做内存峰值统计
+```
+
+---
+
+## 十、基础设施
+
+### 10.1 Docker Compose
 
 当前使用 Docker Compose 编排本地开发环境。
 
@@ -615,6 +960,7 @@ Redis
 Jaeger
 Gateway
 Auth
+Problem API
 Judge API
 Judge Worker
 ```
@@ -636,7 +982,7 @@ docker compose up -d --build
 查看运行状态：
 
 ```powershell
-docker ps
+docker compose ps
 ```
 
 查看日志：
@@ -644,6 +990,7 @@ docker ps
 ```powershell
 docker logs ojos-gateway
 docker logs ojos-auth
+docker logs ojos-problem-api
 docker logs ojos-judge-api
 docker logs ojos-judge-worker
 docker logs ojos-redis
@@ -653,10 +1000,15 @@ docker logs ojos-postgres
 重建单个服务：
 
 ```powershell
-docker compose up -d --build gateway
-docker compose up -d --build auth
-docker compose up -d --build judge-api
-docker compose up -d --build judge-worker
+docker compose build judge-worker
+docker compose up -d judge-worker
+```
+
+或：
+
+```powershell
+docker compose build judge-api
+docker compose up -d --no-deps judge-api
 ```
 
 清理已删除服务：
@@ -677,49 +1029,12 @@ docker compose config | Select-String -Pattern "nats|4222"
 
 ---
 
-### 6.2 PostgreSQL
+### 10.2 PostgreSQL
 
 当前数据库名：
 
 ```text
 ojos
-```
-
-PostgreSQL 用于存储：
-
-```text
-用户
-角色
-用户角色
-完整资源级权限
-题目 MVP 数据
-测试点 MVP 数据
-提交记录
-测试点评测结果
-数据库迁移状态
-```
-
-当前核心表：
-
-```text
-users
-roles
-user_roles
-
-resource_types
-permissions
-role_permissions
-role_bindings
-permission_assignments
-resource_edges
-permission_audit_logs
-
-problems
-test_cases
-submissions
-submission_cases
-
-schema_migrations
 ```
 
 进入数据库：
@@ -740,40 +1055,34 @@ docker exec -it ojos-postgres psql -U postgres -d ojos
 SELECT * FROM schema_migrations;
 ```
 
-查看用户和角色：
+查看提交：
 
 ```sql
-SELECT u.id, u.username, r.name
-FROM users u
-JOIN user_roles ur ON ur.user_id = u.id
-JOIN roles r ON r.id = ur.role_id
-ORDER BY u.id, r.name;
-```
-
-查看权限点：
-
-```sql
-SELECT code, module_code, name
-FROM permissions
-ORDER BY code;
+SELECT
+    id,
+    problem_id,
+    user_id,
+    language,
+    status,
+    score,
+    time_ms,
+    memory_kb,
+    code_path,
+    result_path,
+    judged_at
+FROM submissions
+ORDER BY id DESC
+LIMIT 10;
 ```
 
 ---
 
-### 6.3 Migration
+### 10.3 Migration
 
 当前使用：
 
 ```text
 golang-migrate
-```
-
-当前 migration 文件：
-
-```text
-000001_init_schema
-000002_judge_schema
-000003_permission_core
 ```
 
 执行迁移：
@@ -785,6 +1094,15 @@ migrate `
   -path deploy/migrations `
   -database "postgres://postgres:password@localhost:5433/ojos?sslmode=disable" `
   up
+```
+
+查看版本：
+
+```powershell
+migrate `
+  -path deploy/migrations `
+  -database "postgres://postgres:password@localhost:5433/ojos?sslmode=disable" `
+  version
 ```
 
 回滚一步：
@@ -802,21 +1120,21 @@ migrate `
 migrate create `
   -ext sql `
   -dir deploy/migrations `
-  -seq problem_core
+  -seq <migration_name>
 ```
 
 当前迁移原则：
 
 ```text
-已经上线或被多人使用的 migration 不要随意改历史文件
+已经被执行过的 migration 不要随意重写历史
 新增结构应通过新的 migration 引入
 down 文件应谨慎，避免误删核心数据
-权限相关表的 down 可以删除权限核心表，但生产环境不应随意执行
+开发阶段可以清库重建，但仍应保持 migration 可重复执行
 ```
 
 ---
 
-### 6.4 Redis
+### 10.4 Redis
 
 Redis 当前用于：
 
@@ -853,8 +1171,8 @@ created_at
 ```text
 type          submission.created
 producer      judge-api-service
-submission_id 16
-created_at    2026-05-31T23:39:20Z
+submission_id 20
+created_at    2026-06-04T13:28:02Z
 ```
 
 查看 Stream：
@@ -898,7 +1216,7 @@ XTRIM ojos:judge:submissions MAXLEN ~ 10000
 
 ---
 
-### 6.5 Jaeger / OpenTelemetry
+### 10.5 Jaeger / OpenTelemetry
 
 当前使用：
 
@@ -919,436 +1237,35 @@ http://localhost:16686
 ```text
 Gateway tracing
 Auth tracing
+Problem API tracing
 Judge API tracing
 Shared tracing 初始化
 HTTP middleware trace_id / span_id 注入日志
 ```
 
-当前 tracing 仍有待完善：
+后续仍需完善：
 
 ```text
 采样率配置
 超时控制
 失败降级
 BatchSpanProcessor
-跨服务 trace 串联验收
 Redis queue trace propagation
-Judge worker trace span
-```
-
-当前 GoLand 可能提示：
-
-```text
-go.opentelemetry.io/otel/exporters/zipkin 已弃用
-```
-
-这是因为 go-zero 当前版本的 trace 包仍可能间接依赖 zipkin exporter。只要业务代码没有直接使用 zipkin，并且 go build 可以通过，当前可暂时接受。后续应通过升级 go-zero 或替换 trace 初始化策略解决。
-
----
-
-## 七、数据库模型总览
-
-### 7.1 用户认证相关表
-
-```text
-users
-roles
-user_roles
-```
-
-`users` 存储：
-
-```text
-id
-username
-email
-password_hash
-created_at
-updated_at
-```
-
-`roles` 存储：
-
-```text
-id
-name
-module_code
-description
-is_system
-created_at
-```
-
-`user_roles` 存储：
-
-```text
-user_id
-role_id
-```
-
-`user_roles` 当前定义为：
-
-```text
-用户的系统级全局角色
-```
-
-例如：
-
-```text
-permtest -> user
-admin    -> user
-admin    -> super_admin
+Judge Worker trace span
+跨服务 trace 串联验收
 ```
 
 ---
 
-### 7.2 权限核心表
+## 十一、当前 API 概览
 
-```text
-resource_types
-permissions
-role_permissions
-role_bindings
-permission_assignments
-resource_edges
-permission_audit_logs
-```
-
-`resource_types` 用于注册资源类型：
-
-```text
-system
-module
-problem
-contest
-group
-team
-submission
-post
-clarification
-balloon
-print
-```
-
-`permissions` 用于注册权限点：
-
-```text
-judge.submit
-problem.create
-problem.edit
-problem.manage.data
-contest.manage
-scoreboard.freeze
-balloon.manage
-print.operate
-module.install
-```
-
-`role_permissions` 表示：
-
-```text
-某个角色拥有哪些权限点
-```
-
-`role_bindings` 表示：
-
-```text
-某个主体在某个资源作用域上拥有某个角色
-```
-
-`permission_assignments` 表示：
-
-```text
-直接 allow / deny 某个权限
-```
-
-`resource_edges` 表示：
-
-```text
-资源之间的包含 / 从属关系
-```
-
-例如：
-
-```text
-contest:3 -> problem:7
-contest:3 -> submission:100
-group:1   -> contest:3
-```
-
-`permission_audit_logs` 用于记录权限变更审计。
-
----
-
-### 7.3 Judge MVP 表
-
-```text
-problems
-test_cases
-submissions
-submission_cases
-```
-
-`problems` 当前是 MVP 题目表，存储：
-
-```text
-id
-title
-time_limit_ms
-memory_limit_mb
-created_at
-updated_at
-```
-
-`test_cases` 当前是 MVP 测试点表，存储：
-
-```text
-id
-problem_id
-input
-output
-score
-created_at
-```
-
-当前输入输出直接存在数据库中，后续要迁移到文件化测试数据。
-
-`submissions` 存储：
-
-```text
-id
-problem_id
-user_id
-language
-code
-status
-score
-time_ms
-memory_kb
-message
-created_at
-updated_at
-```
-
-`submission_cases` 存储：
-
-```text
-id
-submission_id
-test_case_id
-status
-time_ms
-memory_kb
-message
-created_at
-```
-
-后续 Problem Core 正规化后，题目和测试数据管理将从 judge-api 移动到 problem-api。
-
----
-
-## 八、Shared 公共模块
-
-路径：
-
-```text
-services/shared
-```
-
-Shared 当前是 Go 微服务公共基础库，不是服务，不监听端口，不单独 Docker 部署。
-
-当前目录建议为：
-
-```text
-services/shared/
-
-├── database/
-│   └── postgres.go
-│
-├── logger/
-│   └── logger.go
-│
-├── middleware/
-│   ├── gozero.go
-│   ├── logging.go
-│   └── recovery.go
-│
-├── security/
-│   ├── authctx/
-│   ├── jwt/
-│   └── permission/
-│
-├── tracing/
-│   └── tracing.go
-│
-├── go.mod
-└── go.sum
-```
-
-当前不应再存在：
-
-```text
-services/shared/config
-services/shared/response
-services/shared/events
-```
-
-Shared 的职责边界：
-
-```text
-提供基础设施能力
-不提供业务逻辑
-不加载各服务配置
-不持有服务生命周期
-不依赖具体服务
-```
-
-Shared 提供的主要能力：
-
-```text
-database.NewPostgresPoolByURL
-logger.New
-logger.WithTrace
-tracing.InitOTLP
-middleware.RecoveryMiddleware
-middleware.LoggingMiddleware
-security/jwt
-security/authctx
-security/permission
-```
-
-各 Go 服务应自己定义：
-
-```text
-internal/config/config.go
-etc/*.yaml
-ServiceContext
-```
-
-然后将必要参数传给 Shared。
-
----
-
-## 九、Gateway 模块
-
-路径：
-
-```text
-services/gateway
-```
-
-Gateway 是统一 HTTP 入口。
-
-当前监听：
-
-```text
-0.0.0.0:8080
-```
-
-当前对外入口：
-
-```text
-http://localhost:8080
-```
-
-当前自身接口：
+### 11.1 Gateway
 
 ```http
 GET /health
 ```
 
-当前代理接口：
-
-```text
-/api/auth/*
-/api/judge/*
-```
-
-Gateway 当前能力：
-
-```text
-go-zero 标准服务结构
-配置驱动代理
-ReverseProxy Rewrite
-AuthMode
-JWT 验证
-可信用户上下文 Header 注入
-Header 清理
-trace context 传播
-日志中间件
-panic recovery
-```
-
-当前配置示例：
-
-```yaml
-Name: gateway-service
-Host: 0.0.0.0
-Port: 8080
-
-Database:
-  Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
-
-Jaeger:
-  Endpoint: ojos-jaeger:4317
-
-Jwt:
-  Secret: ojos-dev-secret-change-me
-
-Proxy:
-  Routes:
-    - Prefix: /api/auth
-      Target: http://auth:8081
-      StripPrefix: /api
-      AuthMode: optional
-
-    - Prefix: /api/judge
-      Target: http://judge-api:8082
-      StripPrefix: /api
-      AuthMode: required
-```
-
-Gateway 不应再包含：
-
-```text
-Nats
-NatsConfig
-EventBus
-events.NewBusByURL
-nats://ojos-nats:4222
-```
-
-Gateway 对权限的边界：
-
-```text
-Gateway 负责认证
-业务服务负责授权
-```
-
-也就是说：
-
-```text
-Gateway 判断请求有没有合法 JWT
-judge-api 判断是否拥有 judge.submit
-problem-api 判断是否拥有 problem.create / problem.edit
-contest-api 判断是否拥有 contest.manage
-launcher 判断是否拥有 module.install
-```
-
----
-
-## 十、Auth 模块
-
-路径：
-
-```text
-services/auth
-```
-
-Auth 当前监听：
-
-```text
-0.0.0.0:8081
-```
+### 11.2 Auth
 
 Gateway 暴露：
 
@@ -1356,7 +1273,7 @@ Gateway 暴露：
 /api/auth/*
 ```
 
-Auth 内部路径：
+内部路径：
 
 ```text
 /auth/*
@@ -1371,177 +1288,25 @@ POST /auth/login
 GET  /auth/profile
 ```
 
-Auth 当前能力：
+### 11.3 Problem API
+
+Gateway 暴露：
 
 ```text
-go-zero 标准结构
-auth.api
-用户注册
-用户登录
-bcrypt 密码哈希
-JWT 签发
-JWT 解析
-Profile 查询
-默认 user 角色绑定
-PostgreSQL 持久化
-OpenTelemetry tracing
-Zap logging
-Docker Compose 部署
+/api/problem/*
 ```
 
-Auth 当前不应再包含：
+当前主要负责：
 
 ```text
-Nats
-NatsConfig
-EventBus
-shared/events
-user.registered event publish
-user.login event publish
+题目 CRUD
+题目包生成
+测试点与数据文件管理
 ```
 
-Auth 当前配置示例：
+具体接口以 `services/problem-api/problemapi.api` 为准。
 
-```yaml
-Name: auth-service
-Host: 0.0.0.0
-Port: 8081
-
-Database:
-  Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
-
-Jaeger:
-  Endpoint: ojos-jaeger:4317
-
-Jwt:
-  Secret: ojos-dev-secret-change-me
-  ExpireHours: 24
-```
-
-Auth 的职责边界：
-
-```text
-负责用户身份
-不负责资源级权限
-```
-
-注册用户时默认绑定：
-
-```text
-user
-```
-
-如果需要超级管理员，可通过数据库插入：
-
-```sql
-INSERT INTO user_roles(user_id, role_id)
-SELECT u.id, r.id
-FROM users u
-JOIN roles r ON r.name = 'super_admin'
-WHERE u.username = 'admin'
-ON CONFLICT DO NOTHING;
-```
-
----
-
-## 十一、Permission Core 模块
-
-路径：
-
-```text
-services/shared/security/permission
-```
-
-Permission Core 是 OJOS 的完整资源级权限核心。
-
-统一判断形式：
-
-```text
-HasUserPermission(user_id, permission_code, scope)
-```
-
-例如：
-
-```text
-HasUserPermission(2, "judge.submit", system:0)
-HasUserPermission(3, "problem.edit", problem:7)
-HasUserPermission(4, "contest.manage", contest:5)
-```
-
-主要类型：
-
-```go
-type Principal struct {
-    Type string
-    ID   int64
-}
-
-type Scope struct {
-    Type string
-    ID   int64
-}
-```
-
-主要函数：
-
-```text
-HasUserPermission
-RequireUserPermission
-HasPermission
-BindRole
-AssignPermission
-AddResourceEdge
-RegisterResourceType
-RegisterPermission
-GrantRolePermission
-```
-
-权限判断顺序：
-
-```text
-1. super_admin 直接允许
-2. 收集当前 scope、父级 scope、type:0、system:0
-3. 检查直接 deny
-4. 检查直接 allow
-5. 检查全局 user_roles
-6. 检查资源级 role_bindings
-7. 默认拒绝
-```
-
-当前已验证：
-
-```text
-普通 user 角色拥有 judge.submit
-permtest 可以提交
-给 permtest 写入 deny judge.submit @ system:0 后提交失败
-删除 deny 后提交恢复
-```
-
-当前 Permission Core 的目标是：
-
-```text
-后续新增模块不改权限核心表
-后续新增资源类型只注册 resource_type
-后续新增权限点只注册 permission
-后续新增角色只注册 role 和 role_permissions
-后续新增资源关系只写 resource_edges
-```
-
----
-
-## 十二、Judge API 模块
-
-路径：
-
-```text
-services/judge-api
-```
-
-Judge API 当前监听：
-
-```text
-0.0.0.0:8082
-```
+### 11.4 Judge API
 
 Gateway 暴露：
 
@@ -1558,279 +1323,18 @@ Gateway 暴露：
 当前接口：
 
 ```http
-POST /judge/problems
-POST /judge/test-cases
 POST /judge/submissions
 GET  /judge/submissions/:id
 GET  /judge/submissions/:id/cases
-```
-
-说明：
-
-```text
-POST /judge/problems
-POST /judge/test-cases
-```
-
-是早期 MVP 接口，后续应迁移到 `problem-api`。
-
-Judge API 创建提交时的流程：
-
-```text
-读取 Gateway 注入的用户上下文
-检查用户是否登录
-检查 judge.submit @ system:0
-检查 problem_id
-检查 language
-检查 code
-写入 submissions(status=PENDING)
-写入 Redis Stream ojos:judge:submissions
-返回 submission_id 和 PENDING
-```
-
-Redis XADD 消息字段：
-
-```text
-type          submission.created
-producer      judge-api-service
-submission_id <id>
-created_at    <utc timestamp>
-```
-
-当前 judge-api 不应再包含：
-
-```text
-Nats
-NatsConfig
-nats.Connect
-svcCtx.Nats
-Nats.Publish
-```
-
-当前 judge-api 依赖：
-
-```text
-PostgreSQL
-Redis
-Gateway 用户上下文
-Permission Core
+POST /judge/submissions/:id/cancel
+POST /judge/problems/:id/rejudge
 ```
 
 ---
 
-## 十三、Judge Worker 模块
+## 十二、当前 Judge 验收命令
 
-路径：
-
-```text
-services/judge-worker
-```
-
-Judge Worker 使用 Rust 实现。
-
-它不是 HTTP 服务，而是后台任务进程。
-
-当前职责：
-
-```text
-连接 PostgreSQL
-连接 Redis
-加载 languages.yaml
-确保 Redis Consumer Group 存在
-启动扫描 PENDING
-定时扫描 PENDING
-XREADGROUP 消费 Redis Stream
-解析 submission_id
-try_claim_submission
-编译用户代码
-运行测试点
-比较标准输出
-写入 submission_cases
-更新 submissions
-XACK Redis Stream 消息
-```
-
-当前环境变量：
-
-```text
-REDIS_URL
-DATABASE_URL
-LANGUAGES_CONFIG
-JUDGE_WORKER_ID
-```
-
-默认值示例：
-
-```text
-REDIS_URL=redis://ojos-redis:6379/0
-DATABASE_URL=postgres://postgres:password@postgres:5432/ojos?sslmode=disable
-LANGUAGES_CONFIG=config/languages.yaml
-```
-
-当前队列：
-
-```text
-Stream: ojos:judge:submissions
-Group:  judge-workers
-```
-
-Judge Worker 当前可靠性模型：
-
-```text
-Redis Streams Consumer Group
-+
-PostgreSQL PENDING 扫描
-+
-数据库原子抢任务
-+
-Redis XACK
-```
-
-核心抢任务 SQL：
-
-```sql
-UPDATE submissions
-SET status = 'RUNNING', updated_at = NOW()
-WHERE id = $1 AND status = 'PENDING'
-RETURNING id;
-```
-
-含义：
-
-```text
-只有 PENDING 状态的 submission 才能被当前 worker 抢到
-抢不到就跳过
-防止重复判题
-```
-
-当前已验证：
-
-```text
-Redis Stream 实时消息可以被 worker 收到
-submission 可以被 claimed
-判题可以完成
-消息可以 XACK
-XPENDING 为 0
-历史 PENDING 可以被启动扫描恢复
-已经判完的任务再次收到 Stream 消息会被 skip 并 ACK
-```
-
-当前限制：
-
-```text
-没有独立安全沙箱
-没有真实 memory limit
-没有网络隔离
-没有进程数限制
-没有文件系统隔离
-没有 Special Judge
-没有交互题 runner
-没有通信题 runner
-没有提交答案题 runner
-```
-
----
-
-## 十四、语言配置
-
-Judge Worker 使用：
-
-```text
-services/judge-worker/config/languages.yaml
-```
-
-该文件定义每种语言的：
-
-```text
-source_file
-exe_file
-compile.enabled
-compile.command
-compile.args
-compile.timeout_ms
-run.command
-run.args
-```
-
-示例：
-
-```yaml
-languages:
-  cpp17:
-    source_file: main.cpp
-    exe_file: main
-    compile:
-      enabled: true
-      command: g++
-      args:
-        - "-std=c++17"
-        - "-O2"
-        - "-pipe"
-        - "{source}"
-        - "-o"
-        - "{exe}"
-      timeout_ms: 10000
-    run:
-      command: "{exe}"
-      args: []
-```
-
-支持占位符：
-
-```text
-{source}
-{exe}
-{workdir}
-```
-
-当前设计原则：
-
-```text
-一个 judge-worker 可以支持多语言
-语言命令不应硬编码在 Rust 代码里
-新增语言优先修改 languages.yaml
-后续可以把语言包做成独立模块
-```
-
----
-
-## 十五、当前 API 验收命令
-
-### 15.1 Gateway Health
-
-```powershell
-Invoke-RestMethod `
-  -Method Get `
-  -Uri "http://localhost:8080/health"
-```
-
-预期：
-
-```text
-status = ok
-```
-
----
-
-### 15.2 注册用户
-
-```powershell
-$body = @{
-  username = "permtest"
-  email = "permtest@example.com"
-  password = "123456"
-} | ConvertTo-Json -Compress
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://localhost:8080/api/auth/register" `
-  -ContentType "application/json" `
-  -Body $body
-```
-
----
-
-### 15.3 登录
+### 12.1 登录
 
 ```powershell
 $body = @{
@@ -1841,74 +1345,60 @@ $body = @{
 $res = Invoke-RestMethod `
   -Method Post `
   -Uri "http://localhost:8080/api/auth/login" `
-  -ContentType "application/json" `
-  -Body $body
+  -ContentType "application/json; charset=utf-8" `
+  -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
 
 $token = $res.data.token
+$headers = @{ Authorization = "Bearer $token" }
 ```
 
----
-
-### 15.4 查询 Profile
+### 12.2 提交代码
 
 ```powershell
-Invoke-RestMethod `
-  -Method Get `
-  -Uri "http://localhost:8080/api/auth/profile" `
-  -Headers @{ Authorization = "Bearer $token" }
-```
-
----
-
-### 15.5 提交代码
-
-```powershell
-$code = @'
+$submitObj = @{
+  problem_id = 2
+  language = "cpp17"
+  code = @'
 #include <bits/stdc++.h>
 using namespace std;
 
 int main() {
-    int a, b;
+    long long a, b;
     cin >> a >> b;
-    cout << a + b << endl;
+    cout << a + b << '\n';
     return 0;
 }
 '@
+}
 
-$body = @{
-  problem_id = 1
-  language = "cpp17"
-  code = $code
-} | ConvertTo-Json -Compress
+$json = $submitObj | ConvertTo-Json -Compress
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
 
-$res = Invoke-RestMethod `
+$sub = Invoke-RestMethod `
   -Method Post `
   -Uri "http://localhost:8080/api/judge/submissions" `
-  -ContentType "application/json" `
-  -Headers @{ Authorization = "Bearer $token" } `
-  -Body $body
+  -ContentType "application/json; charset=utf-8" `
+  -Headers $headers `
+  -Body $bytes
 
-$res
+$sub
 ```
 
 预期：
 
 ```text
-submission_id = 新 ID
 status = PENDING
+code_path 非空
+result_path 非空
 ```
 
----
-
-### 15.6 查询提交结果
+### 12.3 查询结果
 
 ```powershell
-Start-Sleep -Seconds 2
-
 Invoke-RestMethod `
   -Method Get `
-  -Uri "http://localhost:8080/api/judge/submissions/$($res.submission_id)" `
-  -Headers @{ Authorization = "Bearer $token" }
+  -Uri "http://localhost:8080/api/judge/submissions/$($sub.submission_id)" `
+  -Headers $headers
 ```
 
 预期：
@@ -1916,92 +1406,28 @@ Invoke-RestMethod `
 ```text
 status = ACCEPTED
 score = 100
-user_id = 当前用户 ID
 ```
 
----
-
-### 15.7 查询 Redis Pending
+### 12.4 查看 result.json
 
 ```powershell
-docker exec -it ojos-redis redis-cli XPENDING ojos:judge:submissions judge-workers
+Get-Content "D:\Untitled-OJ\storage\submissions\$($sub.submission_id)\result.json" -Encoding UTF8
 ```
 
-预期：
+### 12.5 查询 case 结果
 
-```text
-0
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://localhost:8080/api/judge/submissions/$($sub.submission_id)/cases" `
+  -Headers $headers
 ```
 
 ---
 
-## 十六、权限验收命令
+## 十三、本地编译
 
-### 16.1 查看用户角色
-
-```sql
-SELECT u.id, u.username, r.name
-FROM users u
-JOIN user_roles ur ON ur.user_id = u.id
-JOIN roles r ON r.id = ur.role_id
-WHERE u.username = 'permtest'
-ORDER BY r.name;
-```
-
-预期：
-
-```text
-permtest | user
-```
-
-### 16.2 写入 deny
-
-```sql
-INSERT INTO permission_assignments(
-    principal_type,
-    principal_id,
-    permission_code,
-    scope_type,
-    scope_id,
-    effect,
-    reason
-)
-SELECT
-    'user',
-    u.id,
-    'judge.submit',
-    'system',
-    0,
-    'deny',
-    'test deny judge.submit'
-FROM users u
-WHERE u.username = 'permtest'
-ON CONFLICT(principal_type, principal_id, permission_code, scope_type, scope_id)
-DO UPDATE SET
-    effect = EXCLUDED.effect,
-    reason = EXCLUDED.reason;
-```
-
-此时 `permtest` 再提交应被拒绝。
-
-### 16.3 删除 deny
-
-```sql
-DELETE FROM permission_assignments
-WHERE principal_type = 'user'
-  AND principal_id = (SELECT id FROM users WHERE username = 'permtest')
-  AND permission_code = 'judge.submit'
-  AND scope_type = 'system'
-  AND scope_id = 0;
-```
-
-删除后提交应恢复。
-
----
-
-## 十七、本地编译
-
-### 17.1 Shared
+### 13.1 Shared
 
 ```powershell
 cd D:\Untitled-OJ\services\shared
@@ -2010,7 +1436,7 @@ go mod tidy
 go build ./...
 ```
 
-### 17.2 Auth
+### 13.2 Auth
 
 ```powershell
 cd D:\Untitled-OJ\services\auth
@@ -2019,7 +1445,7 @@ go mod tidy
 go build .
 ```
 
-### 17.3 Gateway
+### 13.3 Gateway
 
 ```powershell
 cd D:\Untitled-OJ\services\gateway
@@ -2028,7 +1454,16 @@ go mod tidy
 go build .
 ```
 
-### 17.4 Judge API
+### 13.4 Problem API
+
+```powershell
+cd D:\Untitled-OJ\services\problem-api
+
+go mod tidy
+go build .
+```
+
+### 13.5 Judge API
 
 ```powershell
 cd D:\Untitled-OJ\services\judge-api
@@ -2037,16 +1472,17 @@ go mod tidy
 go build .
 ```
 
-### 17.5 Judge Worker
+### 13.6 Judge Worker
 
 ```powershell
 cd D:\Untitled-OJ\services\judge-worker
 
 cargo fmt
+cargo check
 cargo build
 ```
 
-### 17.6 Frontend
+### 13.7 Frontend
 
 ```powershell
 cd D:\Untitled-OJ\frontend
@@ -2058,9 +1494,9 @@ npm run build
 
 ---
 
-## 十八、go-zero 生成流程
+## 十四、go-zero 生成流程
 
-Auth、Gateway、Judge API 都是 go-zero API 服务。
+Auth、Gateway、Problem API、Judge API 都是 go-zero API 服务。
 
 `.api` 文件修改后，需要重新生成：
 
@@ -2070,6 +1506,9 @@ goctl api go -api auth.api -dir . --style gozero
 
 cd D:\Untitled-OJ\services\gateway
 goctl api go -api gateway.api -dir . --style gozero
+
+cd D:\Untitled-OJ\services\problem-api
+goctl api go -api problemapi.api -dir . --style gozero
 
 cd D:\Untitled-OJ\services\judge-api
 goctl api go -api judgeapi.api -dir . --style gozero
@@ -2081,23 +1520,7 @@ goctl api go -api judgeapi.api -dir . --style gozero
 scripts/gen-gozero.ps1
 ```
 
-脚本可以支持：
-
-```powershell
-.\scripts\gen-gozero.ps1
-.\scripts\gen-gozero.ps1 -Service auth
-.\scripts\gen-gozero.ps1 -Service gateway
-.\scripts\gen-gozero.ps1 -Service judge-api
-```
-
-GoLand 中可以配置：
-
-```text
-External Tools
-File Watcher
-```
-
-让 `.api` 文件保存后自动执行 goctl。
+生成出来的 `handler / logic / types / routes` 是源码，应进入版本管理。
 
 注意：
 
@@ -2108,11 +1531,9 @@ File Watcher
 
 否则会出现生成文件触发 watcher、watcher 再生成文件的循环。
 
-生成出来的 `handler / logic / types / routes` 是源码，应进入版本管理。
-
 ---
 
-## 十九、Git 版本管理规则
+## 十五、Git 版本管理规则
 
 应该提交：
 
@@ -2124,6 +1545,7 @@ deploy/migrations/*.sql
 
 services/auth/**
 services/gateway/**
+services/problem-api/**
 services/judge-api/**
 services/shared/**
 services/judge-worker/src/**
@@ -2150,6 +1572,15 @@ services/*/*.exe
 tmp/
 dist/
 build/
+storage/problems/*
+storage/submissions/*
+```
+
+可以保留：
+
+```text
+storage/problems/.gitkeep
+storage/submissions/.gitkeep
 ```
 
 确认未跟踪文件：
@@ -2165,6 +1596,7 @@ git ls-files --others --exclude-standard
 git status --ignored -uall
 git check-ignore -v frontend/node_modules
 git check-ignore -v services/judge-worker/target
+git check-ignore -v storage/submissions
 ```
 
 确认 NATS 已清理：
@@ -2176,66 +1608,59 @@ Get-ChildItem .\services,.\deploy -Recurse -Include *.go,*.rs,*.toml,*.yaml,*.ym
 
 预期无输出。
 
-如果 `Cargo.lock` 中出现：
+---
 
-```text
-event-listener
-```
+## 十六、当前完成情况
 
-这是 Redis / async 依赖链正常内容，不是 NATS。
+| 模块                         | 状态                            |
+| -------------------------- | ----------------------------- |
+| Docker Compose             | 完成                            |
+| PostgreSQL                 | 完成                            |
+| Redis                      | 完成                            |
+| Jaeger                     | 完成                            |
+| NATS                       | 已移除                           |
+| Migration                  | 完成                            |
+| Shared                     | 完成                            |
+| Gateway                    | 完成                            |
+| Auth                       | 完成                            |
+| Permission Core            | v1 完成                         |
+| Problem API                | 基础 CRUD 完成                    |
+| Problem Package            | 基础格式完成                        |
+| Judge API                  | 提交 / 查询 / cancel / rejudge 完成 |
+| Judge Worker               | nsjail pipeline 完成            |
+| Judge Queue                | Redis Streams 完成              |
+| 多语言评测配置                    | 基础配置完成                        |
+| Gateway 用户上下文透传            | 完成                            |
+| Judge API 权限检查             | 完成                            |
+| Judge PENDING 恢复           | 完成                            |
+| Judge 原子抢任务                | 完成                            |
+| Redis XACK                 | 完成                            |
+| nsjail 安全沙箱                | 基础完成                          |
+| default-trim-checker       | 完成                            |
+| default-sum-scorer         | 完成                            |
+| result.json                | 完成                            |
+| memory_kb 统计               | 未完成                           |
+| 多题型系统                      | 未完成                           |
+| 子任务 / 捆绑点                  | 未完成                           |
+| Permission 管理 API / UI     | 未完成                           |
+| Contest Core               | 未完成                           |
+| Module Registry / Launcher | 未完成                           |
 
 ---
 
-## 二十、当前完成情况
-
-| 模块                         | 状态                    |
-| -------------------------- | --------------------- |
-| Docker Compose             | 完成                    |
-| PostgreSQL                 | 完成                    |
-| Redis                      | 完成                    |
-| Jaeger                     | 完成                    |
-| NATS                       | 已移除                   |
-| Migration                  | 完成                    |
-| Shared                     | v0.3+ 完成              |
-| Gateway                    | v0.3+ 完成              |
-| Auth                       | v0.2+ 完成              |
-| Permission Core            | v1 完成                 |
-| Judge API                  | MVP v0.3+ 完成          |
-| Judge Worker               | Reliability v0.3 完成   |
-| Judge Queue                | Redis Streams v0.3 完成 |
-| 多语言评测配置                    | MVP 完成                |
-| Gateway 用户上下文透传            | 完成                    |
-| Judge API 权限检查             | judge.submit 已接入      |
-| Judge PENDING 恢复           | 完成                    |
-| Judge 原子抢任务                | 完成                    |
-| Redis XACK                 | 完成                    |
-| 安全沙箱                       | 未完成                   |
-| 多题型系统                      | 未完成                   |
-| 子任务 / 捆绑点                  | 未完成                   |
-| Permission 管理 API / UI     | 未完成                   |
-| Problem Core               | 未完成                   |
-| Contest Core               | 未完成                   |
-| Module Registry / Launcher | 未完成                   |
-
----
-
-## 二十一、当前不是生产级系统的部分
+## 十七、当前不是生产级系统的部分
 
 当前仍然缺少：
 
 ```text
 统一 JSON 错误响应
-Problem Core / Dataset Core
-problem-api
-题目数据文件化
+完整 Problem Core / Dataset Core
 Special Judge
-Checker 抽象
-Runner Core 抽象
-安全沙箱
-真实内存限制
-进程数限制
-网络隔离
-文件系统隔离
+Checker 插件化
+Runner 插件化
+Scorer 插件化
+真实 memory_kb 峰值统计
+cgroup v2 内存统计
 子任务
 捆绑点
 交互题
@@ -2254,45 +1679,31 @@ launcher
 当前最不应该忽视的是：
 
 ```text
-Runner 安全隔离
+Runner / Checker / Scorer 的稳定抽象
+memory 统计
+多语言逐项验收
 ```
-
-因为后续做 SPJ、交互题、通信题时，如果仍然让用户代码直接在 judge-worker 容器内运行，风险会明显扩大。
 
 ---
 
-## 二十二、下一阶段计划
+## 十八、下一阶段计划
 
 推荐下一阶段开发顺序：
 
 ```text
-1. 清理 NATS 残留，确认源码 / 配置 / Compose / 依赖中不再包含 NATS
-2. 更新 README / Docs，记录 Redis Streams Judge Queue
-3. 统一错误响应，尤其是 forbidden -> JSON
-4. Problem Core / Dataset Core 正规化
-5. problem-api 接入 Permission Core
-6. 创建 problem 后自动绑定 problem_owner
-7. 将 judge-api 中的 problem / test-case 管理接口迁移到 problem-api
-8. Runner Core 抽象与基础安全隔离
-9. 测试数据文件化
-10. checker / special judge 抽象
-11. 子任务 / 捆绑点
-12. problem-type-traditional
-13. contest-core
-14. contest-rule-acm
-15. scoreboard-acm
-16. module-registry
-17. feature-flag-core
-18. launcher / 模块安装器
-```
-
-短期最建议进入：
-
-```text
-1. 清理 NATS 残留
-2. 统一错误响应
-3. Problem Core / Dataset Core 正规化
-4. problem-api 接入 Permission Core
+1. 重构并补全文档
+2. 多语言验收：c11 / python3 / java17
+3. memory_kb 接入 cgroup v2 统计
+4. scorer 抽象：ACM / IOI / Subtask / Bundle
+5. checker 抽象：default / special judge
+6. runner 抽象：traditional / interactive / communication / output-only
+7. Problem Core / Dataset Core 深化
+8. Contest Core
+9. contest-rule-acm
+10. scoreboard-acm
+11. permission-api
+12. module-registry
+13. launcher / 模块安装器
 ```
 
 当前不建议立刻做：
@@ -2317,116 +1728,63 @@ launcher
 现在最应该先稳定的是：
 
 ```text
-错误响应
-Problem Core
-Dataset Core
-Runner Core
+文档结构
+Problem Package
+Judge Pipeline
+Runner / Checker / Scorer 抽象
+内存统计
 ```
 
 ---
 
-## 二十三、长期架构方向
+## 十九、文档导航
 
-长期推荐架构为：
+当前推荐文档结构：
 
 ```text
-Platform Kernel
-    ↓
-Domain Core Modules
-    ↓
-Capability Modules
-    ↓
-Adapter Modules
-    ↓
-Launcher / Module Registry
+docs/
+
+├── architecture.md
+├── database.md
+├── deployment.md
+│
+├── problem/
+│   └── package-format.md
+│
+├── judge/
+│   ├── overview.md
+│   ├── api.md
+│   ├── worker.md
+│   ├── sandbox.md
+│   ├── submission-storage.md
+│   ├── result-format.md
+│   └── validation.md
+│
+└── changelog/
+    └── judge-nsjail-pipeline.md
 ```
 
-### Platform Kernel
-
-包括：
+其中：
 
 ```text
-gateway
-auth
-permission
-shared
-module-registry
-feature-flag-core
-observability
+README.md
 ```
 
-### Domain Core Modules
+只作为项目入口和状态总览，不继续堆积所有实现细节。
 
-包括：
-
-```text
-problem-core
-judge-core
-runner-core
-contest-core
-scoreboard-core
-team-core
-storage-core
-```
-
-### Capability Modules
-
-包括：
+详细设计应拆到：
 
 ```text
-problem-type-traditional
-problem-type-interactive
-problem-type-communication
-problem-type-output-only
-
-contest-rule-acm
-contest-rule-oi
-contest-rule-ioi
-contest-rule-noi
-contest-rule-heuristic
-
-checker-standard
-checker-special
-scorer-heuristic
-
-balloon-service
-print-service
-forum-service
-clarification-service
-```
-
-### Adapter Modules
-
-包括：
-
-```text
-icpctools-adapter
-polygon-adapter
-import-export-adapter
-vjudge-adapter
-remote-oj-adapter
-```
-
-### Launcher / Module Registry
-
-负责：
-
-```text
-模块发现
-模块依赖检查
-模块安装
-模块启用
-模块禁用
-Gateway 路由注册
-权限点注册
-资源类型注册
-数据库迁移注册
-前端入口注册
+docs/architecture.md
+docs/problem/package-format.md
+docs/judge/*
+docs/database.md
+docs/deployment.md
 ```
 
 ---
 
-## 二十四、项目当前结论
+## 二十、项目当前结论
 
 OJOS 当前已经完成：
 
@@ -2435,28 +1793,20 @@ OJOS 当前已经完成：
 认证
 网关
 权限核心
-Judge MVP
+Problem API 基础能力
+题目包文件化
+Judge API
 Redis Streams Judge Queue
-多语言配置
+nsjail Judge Worker
+提交文件化存储
+result.json
+default-trim-checker
+default-sum-scorer
 可靠 PENDING 恢复
 原子抢任务
 ```
 
-当前已经具备继续开发以下模块的基础：
-
-```text
-Problem Core
-Dataset Core
-Runner Core
-Contest Core
-Scoreboard Core
-Permission API
-Module Registry
-Launcher
-Frontend
-```
-
-当前系统已经不是“空架子”，而是一个可以真实登录、真实鉴权、真实提交、真实判题、真实返回结果的 OJ 原型。
+当前系统已经不是“空架子”，而是一个可以真实登录、真实鉴权、真实建题、真实提交、真实沙箱判题、真实返回结果的 OJ 核心原型。
 
 下一阶段重点应从：
 
@@ -2472,22 +1822,15 @@ Frontend
 错误响应稳定
 执行安全稳定
 数据管理稳定
+Runner / Checker / Scorer 抽象稳定
 ```
 
-在继续做新功能之前，应优先保证：
+完成文档重构和 Judge 子系统收口后，再进入：
 
 ```text
-NATS 清理干净
-文档与当前状态一致
-Git 版本管理完整
-go build / cargo build / npm build 全部通过
-Redis Streams Judge Queue 验收通过
-```
-
-完成这些后，再进入：
-
-```text
-Problem Core / Dataset Core
+Scorer / Runner / Checker 深化
+Problem Core / Dataset Core 深化
+Contest Core
 ```
 
 这是后续支持：

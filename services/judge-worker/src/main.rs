@@ -1,6 +1,10 @@
+mod checker;
 mod config;
 mod db;
 mod judge;
+mod problem_package;
+mod result;
+mod sandbox;
 
 use anyhow::{Context, Result};
 use redis::streams::StreamReadReply;
@@ -72,10 +76,7 @@ async fn main() -> Result<()> {
     ensure_consumer_group(&redis_client).await?;
 
     if let Err(err) = scan_pending_submissions(&db, languages.clone(), 100).await {
-        error!(
-            error = %err,
-            "initial pending scan failed"
-        );
+        error!(error = %err, "initial pending scan failed");
     }
 
     {
@@ -89,10 +90,7 @@ async fn main() -> Result<()> {
                 if let Err(err) =
                     scan_pending_submissions(&scan_db, scan_languages.clone(), 100).await
                 {
-                    error!(
-                        error = %err,
-                        "periodic pending scan failed"
-                    );
+                    error!(error = %err, "periodic pending scan failed");
                 }
             }
         });
@@ -127,17 +125,11 @@ async fn main() -> Result<()> {
 
         let reply = match read_result {
             Ok(reply) => reply,
-
             Err(err) if err.is_timeout() || err.to_string().contains("timed out") => {
                 continue;
             }
-
             Err(err) => {
-                error!(
-                    error = %err,
-                    "xreadgroup failed"
-                );
-
+                error!(error = %err, "xreadgroup failed");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
@@ -177,10 +169,7 @@ async fn main() -> Result<()> {
                         .await;
                     }
                 } else {
-                    warn!(
-                        message_id = %message_id,
-                        "judge stream message missing valid submission_id"
-                    );
+                    warn!(message_id = %message_id, "judge stream message missing valid submission_id");
                 }
 
                 if let Err(err) = ack_stream_message(&mut conn, &message_id).await {
@@ -245,11 +234,7 @@ async fn ack_stream_message(
         .await
         .context("xack failed")?;
 
-    info!(
-        message_id = %message_id,
-        acked,
-        "judge stream message acked"
-    );
+    info!(message_id = %message_id, acked, "judge stream message acked");
 
     Ok(())
 }

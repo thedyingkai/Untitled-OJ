@@ -24,9 +24,14 @@ type IndexedFile struct {
 	MimeType    string
 }
 
-type Limits struct {
+type LimitConfig struct {
 	TimeMs   int `yaml:"time_ms"`
 	MemoryMb int `yaml:"memory_mb"`
+}
+
+type Limits struct {
+	Default   LimitConfig            `yaml:"default"`
+	Languages map[string]LimitConfig `yaml:"languages"`
 }
 
 type StatementRef struct {
@@ -255,8 +260,32 @@ int main() {
 		Visibility: arg.Visibility,
 		Status:     "draft",
 		Limits: Limits{
-			TimeMs:   arg.TimeLimitMs,
-			MemoryMb: arg.MemoryLimitMb,
+			Default: LimitConfig{
+				TimeMs:   arg.TimeLimitMs,
+				MemoryMb: arg.MemoryLimitMb,
+			},
+			Languages: map[string]LimitConfig{
+				"cpp17": {
+					TimeMs:   arg.TimeLimitMs,
+					MemoryMb: arg.MemoryLimitMb,
+				},
+				"cpp20": {
+					TimeMs:   arg.TimeLimitMs,
+					MemoryMb: arg.MemoryLimitMb,
+				},
+				"c11": {
+					TimeMs:   arg.TimeLimitMs,
+					MemoryMb: arg.MemoryLimitMb,
+				},
+				"python3": {
+					TimeMs:   arg.TimeLimitMs * 3,
+					MemoryMb: arg.MemoryLimitMb * 2,
+				},
+				"java17": {
+					TimeMs:   arg.TimeLimitMs * 2,
+					MemoryMb: arg.MemoryLimitMb * 2,
+				},
+			},
 		},
 		Statement: StatementRef{
 			DefaultLocale: "zh-cn",

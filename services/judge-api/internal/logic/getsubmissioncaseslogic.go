@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 
+	"ojos-judge-api/internal/repository"
 	"ojos-judge-api/internal/svc"
 	"ojos-judge-api/internal/types"
 
@@ -32,26 +33,20 @@ func (l *GetSubmissionCasesLogic) GetSubmissionCases(req *types.GetSubmissionCas
 		return nil, errors.New("invalid submission id")
 	}
 
-	cases, err := l.svcCtx.Repo.GetSubmissionCases(l.ctx, req.Id)
+	submission, err := l.svcCtx.Repo.GetSubmission(l.ctx, req.Id)
+	if err != nil {
+		if errors.Is(err, repository.ErrSubmissionNotFound) {
+			return nil, errors.New("submission not found")
+		}
+		return nil, err
+	}
+
+	cases, err := readResultCases(submission.ResultPath)
 	if err != nil {
 		return nil, err
 	}
 
-	items := make([]types.SubmissionCaseItem, 0, len(cases))
-
-	for _, c := range cases {
-		items = append(items, types.SubmissionCaseItem{
-			Id:           c.ID,
-			SubmissionId: c.SubmissionID,
-			TestCaseId:   c.TestCaseID,
-			Status:       c.Status,
-			TimeMs:       c.TimeMS,
-			MemoryKb:     c.MemoryKB,
-			Message:      c.Message,
-		})
-	}
-
 	return &types.GetSubmissionCasesResp{
-		Cases: items,
+		Cases: cases,
 	}, nil
 }

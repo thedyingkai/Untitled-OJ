@@ -5,8 +5,11 @@ Port: 8082
 Database:
   Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
 
+Redis:
+  Url: redis://ojos-redis:6379/0
+
 Jaeger:
   Endpoint: ojos-jaeger:4317
 
-Redis:
-  Url: redis://ojos-redis:6379/0
+Storage:
+  SubmissionsRoot: /data/ojos/submissions

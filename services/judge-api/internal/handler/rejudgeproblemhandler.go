@@ -12,16 +12,16 @@ import (
 	"ojos-judge-api/internal/types"
 )
 
-func addTestCaseHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func rejudgeProblemHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req types.AddTestCaseReq
+		var req types.RejudgeProblemReq
 		if err := httpx.Parse(r, &req); err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 			return
 		}
 
-		l := logic.NewAddTestCaseLogic(r.Context(), svcCtx)
-		resp, err := l.AddTestCase(&req)
+		l := logic.NewRejudgeProblemLogic(r.Context(), svcCtx)
+		resp, err := l.RejudgeProblem(&req)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 		} else {

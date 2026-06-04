@@ -1,96 +1,81 @@
-# OJOS Judge Worker 模块开发文档
+# Judge Worker 文档
 
 ## 一、模块定位
 
 `services/judge-worker` 是 OJOS 的判题执行模块。
 
-它使用 Rust 编写，是一个后台任务进程，不是 HTTP 服务，不监听端口，也不对外暴露 API。
+它使用 Rust 编写，是一个后台任务进程，不是 HTTP 服务，不监听业务端口，也不对外暴露 API。
 
 Judge Worker 的职责是：
 
 ```text
 消费判题任务
 读取提交记录
-读取题目信息
-读取测试点
+读取题目包
+读取测试点清单
 加载语言配置
-编译用户代码
-运行用户程序
-执行测试点
-比较输出
-记录测试点结果
-汇总提交结果
-写回 PostgreSQL
+使用 nsjail 编译用户代码
+使用 nsjail 运行用户程序
+执行 checker
+执行 scorer
+写入 case 输出与日志
+写入 result.json
+更新 submissions 摘要
 确认 Redis Stream 消息
 恢复历史 PENDING 任务
 ```
-
-Judge Worker 是当前 OJOS 中真正执行用户代码的模块。
 
 当前 Judge Worker 已经完成：
 
 ```text
 Redis Streams 判题任务消费
 PostgreSQL 提交读取
-PostgreSQL 结果写回
-多语言配置
-基础编译运行
-标准输出比较
+PostgreSQL 结果摘要写回
+Problem Package 读取
+tests/cases.yaml 读取
+多语言配置加载
+nsjail 编译
+nsjail 逐 case 运行
+default-trim-checker
+default-sum-scorer
+submission 文件化存储
+result.json 写入
 PENDING 兜底扫描
 数据库原子抢任务
 Redis XACK 消息确认
 ```
 
-但当前 Judge Worker 不是最终安全 Runner。
-
-当前用户代码仍然直接运行在 `judge-worker` 容器内部，因此它只适合：
+当前 Judge Worker 是：
 
 ```text
-本地开发
-可信环境测试
-功能链路验证
-MVP 演示
+Package-based nsjail Judge Worker
 ```
 
-不适合：
+不是最终完整生产级 Runner Core。
+
+当前仍然需要后续继续完善：
 
 ```text
-公网开放
-陌生用户提交
-正式比赛
-高安全隔离需求场景
+memory_kb cgroup v2 峰值统计
+输出大小限制
+多语言逐项验收
+checker 插件化
+runner 插件化
+scorer 插件化
+交互题 / 通信题 / 提交答案题
 ```
-
-后续必须把当前 Worker 演进为：
-
-```text
-judge-worker 调度器
-+
-runner-core 安全执行器
-+
-sandbox-provider
-+
-checker-core
-+
-dataset-core
-```
-
-当前文档描述的是 **Judge Worker Reliability v0.3** 的状态。
 
 ---
 
 ## 二、当前版本状态
 
-当前 Judge Worker 版本状态：
+当前 Judge Worker 可以记为：
 
 ```text
-Judge Worker Reliability v0.3
-```
-
-当前 Judge Queue 版本：
-
-```text
-Judge Queue Redis Streams v0.3
+Judge Worker v0.4
+Judge Queue Redis Streams
+Package-based Judge Pipeline
+nsjail Sandbox Pipeline
 ```
 
 当前已经完成：
@@ -104,12 +89,17 @@ Redis XREADGROUP 消费
 Redis XACK 确认
 Redis 超时不退出
 多语言配置加载
-C++ / C / Python / Java / Go / Rust 等语言配置
-编译阶段
-运行阶段
-标准输出比较
-测试点结果写入
-提交总结果写入
+题目包 problem.yaml 读取
+测试点 tests/cases.yaml 读取
+编译阶段 nsjail 隔离
+运行阶段 nsjail 隔离
+用户程序 uid/gid = 10001
+用户程序只看到 /work
+用户程序看不到 /data/ojos/problems
+default-trim-checker
+default-sum-scorer
+result.json 写入
+submissions 摘要更新
 启动扫描 PENDING
 定时扫描 PENDING
 原子抢任务
@@ -123,18 +113,17 @@ C++ / C / Python / Java / Go / Rust 等语言配置
 ```text
 AC 正常
 WA 正常
-CE 正常
-TLE 正常
-Python3 正常
-C++17 正常
-submission_cases 正常写入
-submissions 正常更新
+COMPILE_ERROR 正常
+RUNTIME_ERROR 正常
+TIME_LIMIT_EXCEEDED 正常
+末尾空格和末尾空行忽略正常
+行内空格不同判 WRONG_ANSWER 正常
+用户程序无法读取题目答案文件
+cancel 单份提交正常
+rejudge problem 会重测该题全部提交，包括 CANCELLED
+/submissions/:id/cases 从 result.json 正常读取
 Redis Stream 实时消费正常
 Redis XACK 正常
-XPENDING 为 0
-历史 PENDING 自动恢复
-新提交 PENDING -> ACCEPTED
-已经判完的 Stream 消息会 skip 并 ACK
 ```
 
 当前已经移除：
@@ -166,7 +155,7 @@ nats://ojos-nats:4222
 
 ## 三、模块目录结构
 
-当前 `judge-worker` 目录结构应为：
+当前 `judge-worker` 推荐目录结构：
 
 ```text
 services/judge-worker/
@@ -175,10 +164,14 @@ services/judge-worker/
 │   └── languages.yaml
 │
 ├── src/
+│   ├── checker.rs
 │   ├── config.rs
 │   ├── db.rs
 │   ├── judge.rs
-│   └── main.rs
+│   ├── main.rs
+│   ├── problem_package.rs
+│   ├── result.rs
+│   └── sandbox.rs
 │
 ├── Cargo.toml
 ├── Cargo.lock
@@ -203,13 +196,37 @@ src/config.rs
 src/db.rs
 ```
 
-负责访问 PostgreSQL，包括读取提交、读取题目、读取测试点、写回结果、原子抢任务、扫描 PENDING。
+负责访问 PostgreSQL，包括读取提交、读取题目、更新提交摘要、原子抢任务、扫描 PENDING。
+
+```text
+src/problem_package.rs
+```
+
+负责读取题目包，包括 `problem.yaml` 和 `tests/cases.yaml`。
+
+```text
+src/sandbox.rs
+```
+
+负责封装 nsjail 编译和运行。
+
+```text
+src/checker.rs
+```
+
+负责默认输出比较逻辑。
+
+```text
+src/result.rs
+```
+
+负责 result.json 的结构定义和序列化。
 
 ```text
 src/judge.rs
 ```
 
-负责单个 submission 的具体评测流程，包括 claim、编译、运行、比较输出、保存结果。
+负责单个 submission 的完整评测流程，包括 claim、加载题目包、编译、运行、checker、scorer、保存结果。
 
 ```text
 src/main.rs
@@ -236,7 +253,10 @@ Judge Worker 通过 Docker Compose 启动。
 ```text
 PostgreSQL
 Redis
+storage/problems
+storage/submissions
 languages.yaml
+nsjail
 系统语言工具链
 ```
 
@@ -246,15 +266,24 @@ languages.yaml
 NATS
 ```
 
-当前 Docker 镜像中应安装：
+当前 Docker 镜像中应安装或提供：
 
 ```text
+nsjail
+bash
+coreutils
 g++
 gcc
 python3
-openjdk
+openjdk-17-jdk
+```
+
+后续如果需要支持更多语言，再补充：
+
+```text
 golang-go
-rust
+rustc / cargo
+nodejs
 ```
 
 实际支持哪些语言，由以下文件决定：
@@ -263,7 +292,7 @@ rust
 services/judge-worker/config/languages.yaml
 ```
 
-也就是说，Docker 镜像中安装了工具链只是前提，真正对外可用的语言必须在 `languages.yaml` 中声明。
+也就是说，Docker 镜像中安装工具链只是前提，真正对外可用的语言必须在 `languages.yaml` 中声明。
 
 ---
 
@@ -276,7 +305,7 @@ Judge Worker 当前使用以下环境变量：
 | `REDIS_URL`        | Redis 地址           | `redis://ojos-redis:6379/0`                                       |
 | `DATABASE_URL`     | PostgreSQL 地址      | `postgres://postgres:password@postgres:5432/ojos?sslmode=disable` |
 | `LANGUAGES_CONFIG` | 语言配置文件路径           | `config/languages.yaml`                                           |
-| `JUDGE_WORKER_ID`  | worker consumer 名称 | 未设置时使用 `HOSTNAME` 或 `judge-worker-local`                          |
+| `JUDGE_WORKER_ID`  | worker consumer 名称 | 未设置时使用 `HOSTNAME` 或 fallback                                      |
 
 当前不再使用：
 
@@ -313,15 +342,29 @@ judge-worker:
     DATABASE_URL: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
     REDIS_URL: redis://ojos-redis:6379/0
     LANGUAGES_CONFIG: config/languages.yaml
+  volumes:
+    - ../../storage:/data/ojos
+  cap_add:
+    - SYS_ADMIN
+    - SYS_CHROOT
+    - SETUID
+    - SETGID
+    - NET_ADMIN
 ```
 
-不应再有：
+不应使用：
+
+```yaml
+privileged: true
+```
+
+也不应再有：
 
 ```yaml
 NATS_URL: nats://ojos-nats:4222
 ```
 
-也不应再有：
+或：
 
 ```yaml
 depends_on:
@@ -329,13 +372,26 @@ depends_on:
     condition: service_started
 ```
 
-如果 Redis 的 service 名不是 `ojos-redis`，而是 `redis`，则容器内 URL 应写为：
+说明：
 
 ```text
-redis://redis:6379/0
+../../storage:/data/ojos
 ```
 
-需要和 `docker-compose.yml` 中的 service 名保持一致。
+用于让 worker 读写：
+
+```text
+/data/ojos/problems
+/data/ojos/submissions
+```
+
+其中：
+
+```text
+/data/ojos/problems
+```
+
+只在 worker 容器中可见，用户程序的 nsjail 内不可见。
 
 ---
 
@@ -350,9 +406,11 @@ tokio = { version = "...", features = ["full"] }
 sqlx = { version = "...", features = ["runtime-tokio", "postgres"] }
 redis = { version = "...", features = ["tokio-comp"] }
 serde = { version = "...", features = ["derive"] }
+serde_json = "..."
 serde_yaml = "..."
 tracing = "..."
 tracing-subscriber = "..."
+sha2 = "..."
 ```
 
 当前不应再包含：
@@ -404,11 +462,12 @@ services/judge-worker/config/languages.yaml
 编译命令
 编译参数
 编译超时
+编译内存限制
 运行命令
 运行参数
 ```
 
-示例：
+推荐示例：
 
 ```yaml
 languages:
@@ -417,15 +476,17 @@ languages:
     exe_file: main
     compile:
       enabled: true
-      command: g++
+      command: /usr/bin/g++
       args:
         - "-std=c++17"
         - "-O2"
         - "-pipe"
+        - "-B/usr/bin/"
         - "{source}"
         - "-o"
         - "{exe}"
       timeout_ms: 10000
+      memory_mb: 2048
     run:
       command: "{exe}"
       args: []
@@ -435,15 +496,37 @@ languages:
     exe_file: main
     compile:
       enabled: true
-      command: g++
+      command: /usr/bin/g++
       args:
         - "-std=c++20"
         - "-O2"
         - "-pipe"
+        - "-B/usr/bin/"
         - "{source}"
         - "-o"
         - "{exe}"
       timeout_ms: 10000
+      memory_mb: 2048
+    run:
+      command: "{exe}"
+      args: []
+
+  c11:
+    source_file: main.c
+    exe_file: main
+    compile:
+      enabled: true
+      command: /usr/bin/gcc
+      args:
+        - "-std=c11"
+        - "-O2"
+        - "-pipe"
+        - "-B/usr/bin/"
+        - "{source}"
+        - "-o"
+        - "{exe}"
+      timeout_ms: 10000
+      memory_mb: 1024
     run:
       command: "{exe}"
       args: []
@@ -456,10 +539,28 @@ languages:
       command: ""
       args: []
       timeout_ms: 0
+      memory_mb: 512
     run:
-      command: python3
+      command: /usr/bin/python3
       args:
         - "{source}"
+
+  java17:
+    source_file: Main.java
+    exe_file: ""
+    compile:
+      enabled: true
+      command: /usr/bin/javac
+      args:
+        - "{source}"
+      timeout_ms: 10000
+      memory_mb: 2048
+    run:
+      command: /usr/bin/java
+      args:
+        - "-cp"
+        - "{workdir}"
+        - "Main"
 ```
 
 支持占位符：
@@ -468,19 +569,7 @@ languages:
 | ----------- | ------- |
 | `{source}`  | 源文件路径   |
 | `{exe}`     | 可执行文件路径 |
-| `{workdir}` | 临时工作目录  |
-
-推荐支持语言：
-
-```text
-cpp17
-cpp20
-c11
-python3
-java17
-go
-rust
-```
+| `{workdir}` | 工作目录    |
 
 语言配置原则：
 
@@ -490,6 +579,8 @@ rust
 编译命令和运行命令分开配置
 编译超时和运行超时分开处理
 不支持的语言返回 UNSUPPORTED_LANGUAGE
+命令建议使用绝对路径
+C/C++ 建议使用 -B/usr/bin/ 保证 ld 可被找到
 ```
 
 后续可以把语言支持演进为：
@@ -607,8 +698,8 @@ created_at
 ```text
 type          submission.created
 producer      judge-api-service
-submission_id 16
-created_at    2026-05-31T23:39:20Z
+submission_id 20
+created_at    2026-06-04T13:28:02Z
 ```
 
 ---
@@ -729,43 +820,15 @@ worker 停止
 后续 submission 一直 PENDING
 ```
 
-之前曾经出现过 worker 因 timeout 退出的问题，当前应已修复为：
+如果 Redis crate 版本支持 timeout 判断，可以写：
 
 ```rust
-let read_result: redis::RedisResult<StreamReadReply> = redis::cmd("XREADGROUP")
-    .arg("GROUP")
-    .arg(JUDGE_GROUP)
-    .arg(&consumer_name)
-    .arg("COUNT")
-    .arg(1)
-    .arg("BLOCK")
-    .arg(5000)
-    .arg("STREAMS")
-    .arg(JUDGE_STREAM)
-    .arg(">")
-    .query_async(&mut conn)
-    .await;
-
-let reply = match read_result {
-    Ok(reply) => reply,
-
-    Err(err) if err.is_timeout() || err.to_string().contains("timed out") => {
-        continue;
-    }
-
-    Err(err) => {
-        error!(
-            error = %err,
-            "xreadgroup failed"
-        );
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        continue;
-    }
-};
+Err(err) if err.is_timeout() || err.to_string().contains("timed out") => {
+    continue;
+}
 ```
 
-如果当前 Redis crate 版本没有 `err.is_timeout()`，可以只使用：
+如果没有 `is_timeout()`，可以退化为：
 
 ```rust
 Err(err) if err.to_string().contains("timed out") => {
@@ -773,13 +836,23 @@ Err(err) if err.to_string().contains("timed out") => {
 }
 ```
 
+其他错误建议：
+
+```text
+记录 error
+sleep 1 秒
+continue
+```
+
+不要直接退出 worker 主循环。
+
 ---
 
 ## 十四、消息解析
 
 Redis Stream 消息中 `submission_id` 是字符串字段。
 
-Worker 需要从消息 map 中读取：
+Worker 需要从 message map 中读取：
 
 ```text
 submission_id
@@ -950,7 +1023,7 @@ LIMIT $1;
 
 ```text
 恢复历史 PENDING
-处理 worker 停机期间创建的提交
+处理 worker 停机时创建的提交
 处理 Redis XADD 失败但 DB 写入成功的提交
 处理旧版本遗留提交
 ```
@@ -1012,7 +1085,7 @@ Worker 在真正判题前必须先执行原子抢任务。
 
 ```sql
 UPDATE submissions
-SET status = 'RUNNING', updated_at = NOW()
+SET status = 'JUDGING', updated_at = NOW()
 WHERE id = $1 AND status = 'PENDING'
 RETURNING id;
 ```
@@ -1080,7 +1153,7 @@ worker 启动扫描和 Redis 实时消息重复处理
 因此必须保留：
 
 ```text
-PENDING -> RUNNING -> FINAL
+PENDING -> JUDGING -> FINAL
 ```
 
 这个数据库状态流转。
@@ -1091,7 +1164,7 @@ PENDING -> RUNNING -> FINAL
 
 `handle_submission` 是单个提交的核心处理函数。
 
-推荐流程：
+当前流程：
 
 ```text
 接收 submission_id
@@ -1104,52 +1177,62 @@ try_claim_submission
     ↓
 读取 problem
     ↓
-读取 test_cases
+读取 problems.package_dir
+    ↓
+读取 problem.yaml
+    ↓
+读取 tests/cases.yaml
     ↓
 检查 language 是否支持
     ↓
-创建临时工作目录
+准备 submission 目录
     ↓
-写入用户代码
+复制用户源码到 build 目录
     ↓
-如果需要编译，执行编译命令
+如果需要编译，使用 nsjail 编译
     ↓
 编译失败 -> COMPILE_ERROR
     ↓
-逐个运行测试点
+逐个 case 创建独立目录
     ↓
-收集 stdout / stderr / exit status / time
+复制 input 到 stdin.txt
     ↓
-判断 AC / WA / TLE / RE
+复制可执行文件到 case 目录
     ↓
-写入 submission_cases
+使用 nsjail 运行用户程序
     ↓
-汇总 score / max_time / status
+收集 stdout.txt / stderr.txt / exit status / time
     ↓
-更新 submissions
+读取 answer
+    ↓
+default-trim-checker
+    ↓
+写 checker.log
+    ↓
+生成 case result
+    ↓
+default-sum-scorer 汇总
+    ↓
+写 result.json
+    ↓
+更新 submissions 摘要
 ```
 
-如果任何系统级错误导致流程无法正常完成，应调用：
-
-```text
-mark_submission_failed
-```
-
-将提交标记为：
+如果任何系统级错误导致流程无法正常完成，应调用失败标记逻辑，将提交标记为：
 
 ```text
 SYSTEM_ERROR
 ```
 
-避免 submission 永久停留在 RUNNING 或 PENDING。
+避免 submission 永久停留在 `JUDGING` 或 `PENDING`。
 
 ---
 
-## 二十三、src/db.rs
+## 二十三、db.rs 职责
 
 `src/db.rs` 是数据库访问层。
 
-推荐包含以下结构：
+当前推荐核心结构：
 
 ```rust
 pub struct Submission {
@@ -1157,15 +1240,21 @@ pub struct Submission {
     pub problem_id: i64,
     pub user_id: i64,
     pub language: String,
-    pub code: String,
+    pub code_path: String,
+    pub result_path: String,
 }
 
 pub struct Problem {
     pub id: i64,
+    pub package_dir: String,
     pub time_limit_ms: i32,
     pub memory_limit_mb: i32,
 }
+```
 
+不应再使用：
+
+```rust
 pub struct TestCase {
     pub id: i64,
     pub input: String,
@@ -1174,25 +1263,13 @@ pub struct TestCase {
 }
 ```
 
-如果编译时提示：
+因为测试点已经来自：
 
 ```text
-fields id and user_id are never read
+tests/cases.yaml
 ```
 
-这只是 Rust dead_code warning，不影响功能。
-
-当前可以接受。
-
-后续如果想消除 warning，可以：
-
-```text
-实际使用这些字段
-或允许 dead_code
-或精简结构体字段
-```
-
-但不急。
+而不是数据库 `test_cases`。
 
 ---
 
@@ -1215,13 +1292,6 @@ pub async fn load_problem(
 ```
 
 ```rust
-pub async fn load_test_cases(
-    db: &PgPool,
-    problem_id: i64,
-) -> anyhow::Result<Vec<TestCase>>
-```
-
-```rust
 pub async fn try_claim_submission(
     db: &PgPool,
     submission_id: i64,
@@ -1236,10 +1306,14 @@ pub async fn list_pending_submission_ids(
 ```
 
 ```rust
-pub async fn save_judge_result(
+pub async fn update_submission_summary(
     db: &PgPool,
     submission_id: i64,
-    results: ...
+    status: &str,
+    score: i32,
+    time_ms: i32,
+    memory_kb: i32,
+    message: &str,
 ) -> anyhow::Result<()>
 ```
 
@@ -1259,19 +1333,13 @@ list_pending_submission_ids 和 try_claim_submission 是普通函数
 不要写成带 &self 的函数，除非它们在 impl 块里
 ```
 
-之前曾经出现过：
-
-```text
-self parameter is only allowed in associated functions
-```
-
-原因就是在自由函数中写了：
+错误写法：
 
 ```rust
 pub async fn list_pending_submission_ids(&self, limit: i64)
 ```
 
-正确写法应是：
+正确写法：
 
 ```rust
 pub async fn list_pending_submission_ids(db: &PgPool, limit: i64)
@@ -1279,332 +1347,350 @@ pub async fn list_pending_submission_ids(db: &PgPool, limit: i64)
 
 ---
 
-## 二十五、src/config.rs
+## 二十五、problem_package.rs 职责
 
-`src/config.rs` 负责读取 `languages.yaml`。
+`src/problem_package.rs` 负责读取题目包。
 
-推荐结构：
-
-```rust
-#[derive(Debug, Clone, Deserialize)]
-pub struct LanguagesConfig {
-    pub languages: HashMap<String, LanguageConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LanguageConfig {
-    pub source_file: String,
-    pub exe_file: String,
-    pub compile: CompileConfig,
-    pub run: RunConfig,
-}
-```
-
-编译配置：
-
-```rust
-#[derive(Debug, Clone, Deserialize)]
-pub struct CompileConfig {
-    pub enabled: bool,
-    pub command: String,
-    pub args: Vec<String>,
-    pub timeout_ms: u64,
-}
-```
-
-运行配置：
-
-```rust
-#[derive(Debug, Clone, Deserialize)]
-pub struct RunConfig {
-    pub command: String,
-    pub args: Vec<String>,
-}
-```
-
-加载函数：
-
-```rust
-impl LanguagesConfig {
-    pub async fn load(path: &str) -> anyhow::Result<Self> {
-        ...
-    }
-}
-```
-
-加载失败时，worker 应启动失败。
-
-原因：
+它需要读取：
 
 ```text
-没有语言配置就无法判题
-继续运行只会制造 SYSTEM_ERROR
+problem.yaml
+tests/cases.yaml
+```
+
+核心结构建议：
+
+```rust
+pub struct ProblemManifest {
+    pub schema: String,
+    pub id: i64,
+    pub slug: String,
+    pub title: String,
+    pub limits: Limits,
+    pub tests: TestsConfig,
+    pub runner: RunnerConfig,
+    pub checker: CheckerConfig,
+    pub scorer: ScorerConfig,
+}
+```
+
+```rust
+pub struct TestsConfig {
+    pub root: String,
+    pub cases: String,
+    pub groups: String,
+}
+```
+
+```rust
+pub struct CaseManifest {
+    pub case_no: i32,
+    pub input: String,
+    pub answer: String,
+    pub score: i32,
+    pub group: i32,
+    pub sample: bool,
+    pub hidden: bool,
+}
+```
+
+路径规则：
+
+```text
+package_dir + problem.yaml
+package_dir + tests.cases
+package_dir + tests.root + case.input
+package_dir + tests.root + case.answer
+```
+
+注意：
+
+```text
+tests.cases 是相对 package_dir 的路径，例如 tests/cases.yaml
+case.input / case.answer 是相对 tests.root 的路径
+```
+
+不要把：
+
+```text
+tests.root + tests.cases
+```
+
+再拼一次，否则会变成：
+
+```text
+tests/tests/cases.yaml
+```
+
+旧格式：
+
+```yaml
+cases:
+  - "no": 0
+```
+
+不再兼容。
+
+当前要求：
+
+```yaml
+cases:
+  - case_no: 1
 ```
 
 ---
 
-## 二十六、src/judge.rs
+## 二十六、sandbox.rs 职责
 
-`src/judge.rs` 负责具体评测。
+`src/sandbox.rs` 负责封装 nsjail。
 
-核心函数：
-
-```rust
-pub async fn handle_submission(
-    db: &PgPool,
-    languages: Arc<LanguagesConfig>,
-    submission_id: i64,
-) -> anyhow::Result<()>
-```
-
-流程：
+它需要支持：
 
 ```text
-try_claim_submission
-    ↓
-load_submission
-    ↓
-load_problem
-    ↓
-load_test_cases
-    ↓
-find language config
-    ↓
-prepare workdir
-    ↓
-write source file
-    ↓
-compile if enabled
-    ↓
-run test cases
-    ↓
-compare output
-    ↓
-save results
+编译命令执行
+运行命令执行
+超时控制
+地址空间限制
+stdin/stdout/stderr 文件重定向
+exit code 解析
+TLE / RE / MLE 状态识别
 ```
 
-如果语言不存在：
+当前 nsjail 基础参数类似：
 
 ```text
-UNSUPPORTED_LANGUAGE
+nsjail
+  --mode o
+  --user 10001
+  --group 10001
+  --disable_clone_newuser
+  --time_limit <sec>
+  --rlimit_as <memory_mb>
+  --rlimit_nofile 64
+  --rlimit_nproc 64
+  --cwd /work
+  --chroot /jail/root
+  --bindmount_ro /bin:/bin
+  --bindmount_ro /lib:/lib
+  --bindmount_ro /lib64:/lib64
+  --bindmount_ro /usr:/usr
+  --bindmount_ro /etc/alternatives:/etc/alternatives
+  --bindmount_ro /dev/null:/dev/null
+  --bindmount_ro /dev/zero:/dev/zero
+  --bindmount_ro /dev/urandom:/dev/urandom
+  --bindmount <case_or_build_dir>:/work
+  --tmpfsmount /tmp
+  --
+  /bin/bash -lc "<command>"
 ```
 
-如果编译失败：
+注意：
 
 ```text
-COMPILE_ERROR
+所有 nsjail 参数必须放在 -- 前面
+-- 后面才是真正执行的命令
 ```
 
-如果运行超时：
+错误写法：
 
 ```text
-TIME_LIMIT_EXCEEDED
+nsjail ... -- /bin/bash -lc "<command>" --user 10001
 ```
 
-如果输出不匹配：
-
-```text
-WRONG_ANSWER
-```
-
-如果全部通过：
-
-```text
-ACCEPTED
-```
-
-如果系统错误：
-
-```text
-SYSTEM_ERROR
-```
+这种情况下 `--user 10001` 已经不是 nsjail 参数，而是 bash 参数。
 
 ---
 
 ## 二十七、编译阶段
 
-对于需要编译的语言：
+对于需要编译的语言，例如：
 
 ```text
 cpp17
 cpp20
 c11
 java17
-go
-rust
 ```
 
 Worker 应执行 `languages.yaml` 中的 compile 配置。
 
-编译参数中的占位符：
+编译工作目录：
 
 ```text
-{source}
-{exe}
-{workdir}
+storage/submissions/{id}/build/
 ```
 
-需要替换为实际路径。
-
-编译超时使用：
+编译日志：
 
 ```text
-compile.timeout_ms
+storage/submissions/{id}/build/compile.log
+storage/submissions/{id}/build/compile.stdout.log
+storage/submissions/{id}/build/compile.stderr.log
 ```
 
-如果编译进程超时，可以返回：
+编译命令在 jail 内执行时，应使用 `/work` 路径。
+
+例如 C++：
 
 ```text
-COMPILE_ERROR
+/usr/bin/g++ -std=c++17 -O2 -pipe -B/usr/bin/ /work/main.cpp -o /work/main
 ```
 
-或者后续细分为：
+编译日志应通过 jail 内重定向写入：
 
 ```text
-COMPILE_TIMEOUT
+/work/compile.stdout.log
+/work/compile.stderr.log
 ```
 
-当前 MVP 使用 `COMPILE_ERROR` 可以接受。
+不要依赖父进程 FD 捕获，否则在某些场景下日志可能为空。
 
-编译失败时，应记录：
+编译失败时：
 
 ```text
-stderr
-exit code
+status = COMPILE_ERROR
+message = compile.log 中的摘要
+cases = []
 ```
-
-并写入 `submissions.message` 或相关字段。
 
 ---
 
 ## 二十八、运行阶段
 
-对于每个测试点，Worker 应执行 run 配置。
-
-运行时：
+对于每个测试点，Worker 应创建独立 case 目录：
 
 ```text
-向 stdin 写入 test_case.input
-收集 stdout
-收集 stderr
-等待进程退出
-记录耗时
-处理超时
-处理非零 exit code
+storage/submissions/{id}/cases/{case_no:03}/
 ```
 
-如果超时：
+例如：
 
 ```text
-TIME_LIMIT_EXCEEDED
+storage/submissions/20/cases/001/
 ```
 
-如果非零退出：
+每个 case 目录包含：
 
 ```text
-RUNTIME_ERROR
+stdin.txt
+stdout.txt
+stderr.txt
+checker.log
 ```
 
-如果正常退出但输出不匹配：
+运行时应在 jail 内执行：
 
 ```text
-WRONG_ANSWER
+/work/main < /work/stdin.txt > /work/stdout.txt 2> /work/stderr.txt
 ```
 
-如果输出匹配：
+也就是说：
 
 ```text
-ACCEPTED
+stdin/stdout/stderr 通过 /work 内文件重定向
 ```
 
-当前时间限制来自：
+不要依赖父进程 FD 传递。
+
+这样可以避免：
 
 ```text
-problems.time_limit_ms
+stdout 为空
+stderr 捕获不稳定
+Windows bind mount + nsjail FD 行为异常
 ```
 
-当前内存限制字段：
+每次运行 case 前，应删除旧文件：
 
 ```text
-problems.memory_limit_mb
+stdout.txt
+stderr.txt
+checker.log
 ```
 
-尚未真实使用。
+否则旧文件可能属于 root 且权限为 `0644`，用户程序 `uid=10001` 无法截断，导致 bash 在重定向阶段直接失败。
 
 ---
 
-## 二十九、输出比较
+## 二十九、Checker
 
-当前 MVP 使用标准输出比较。
-
-推荐比较规则：
+当前默认 checker：
 
 ```text
-去除末尾空白
-统一换行差异
-整体字符串比较
+default-trim-checker
 ```
 
-也就是类似：
+规则：
 
 ```text
-trim_end(stdout) == trim_end(expected)
+统一 CRLF / CR 为 LF
+去除每行末尾空格和 Tab
+去除末尾空行
+不忽略行内空格
+不忽略多余非空行
 ```
 
-当前不支持：
+示例：
 
 ```text
-Special Judge
-浮点误差
-多答案
-忽略空白 checker
-交互 checker
-提交答案 checker
+actual:   "3\n"
+expected: "3\n"
+=> AC
+
+actual:   "3   \n\n"
+expected: "3\n"
+=> AC
+
+actual:   "3 4\n"
+expected: "3\n"
+=> WA
 ```
 
-后续应抽象为：
+WA 时 `checker.log` 应写入类似：
 
 ```text
-checker-core
+expected: 3
+actual: 0
 ```
 
-并支持：
+AC 时 `checker.log` 应写入：
 
 ```text
-checker-standard
-checker-special
-checker-float
-checker-output-only
-checker-interactive
+accepted
+```
+
+后续需要扩展：
+
+```text
+special judge
+float checker
+ignore whitespace checker
+interactive checker
+output-only checker
 ```
 
 ---
 
-## 三十、结果汇总
+## 三十、Scorer
 
-当前每个测试点会写入：
-
-```text
-submission_cases
-```
-
-总结果写入：
+当前默认 scorer：
 
 ```text
-submissions
+default-sum-scorer
 ```
 
-汇总规则可以是：
+规则：
 
 ```text
-如果编译失败 -> COMPILE_ERROR
-如果任一测试点 TLE -> TIME_LIMIT_EXCEEDED
-如果任一测试点 RE -> RUNTIME_ERROR
-如果任一测试点 WA -> WRONG_ANSWER
-否则 -> ACCEPTED
+每个测试点 AC 得该测试点分数
+非 AC 得 0
+总分为所有测试点得分之和
+全部测试点 AC -> ACCEPTED
+存在 WA -> WRONG_ANSWER
+存在 TLE -> TIME_LIMIT_EXCEEDED
+存在 RE -> RUNTIME_ERROR
+存在 SYSTEM_ERROR -> SYSTEM_ERROR
 ```
-
-当前 score 可以简单累加通过测试点分数。
 
 当前传统题如果全部通过：
 
@@ -1616,24 +1702,79 @@ status = ACCEPTED
 如果部分通过：
 
 ```text
-status = WRONG_ANSWER
 score = 已通过测试点分数
+status = WRONG_ANSWER 或其他失败状态
 ```
 
-后续 OI / IOI / 子任务 / 捆绑点需要更复杂 scoring-core。
+后续 OI / IOI / 子任务 / 捆绑点需要更复杂的 scoring-core。
 
-当前不要把复杂赛制规则硬编码到 judge-worker 中。
+当前不要把复杂赛制规则硬编码到 `judge.rs` 中。
 
 ---
 
-## 三十一、状态流转
+## 三十一、结果写入
+
+当前完整结果写入：
+
+```text
+storage/submissions/{id}/result.json
+```
+
+示例：
+
+```json
+{
+  "submission_id": 20,
+  "status": "ACCEPTED",
+  "score": 100,
+  "time_ms": 21,
+  "memory_kb": 0,
+  "message": "",
+  "cases": [
+    {
+      "case_no": 1,
+      "status": "ACCEPTED",
+      "score": 100,
+      "time_ms": 21,
+      "memory_kb": 0,
+      "stdout_path": "/data/ojos/submissions/20/cases/001/stdout.txt",
+      "stderr_path": "/data/ojos/submissions/20/cases/001/stderr.txt",
+      "checker_log_path": "/data/ojos/submissions/20/cases/001/checker.log",
+      "message": ""
+    }
+  ]
+}
+```
+
+数据库 `submissions` 表只更新摘要：
+
+```text
+status
+score
+time_ms
+memory_kb
+message
+result_path
+judged_at
+updated_at
+```
+
+当前不再写：
+
+```text
+submission_cases
+```
+
+---
+
+## 三十二、状态流转
 
 当前 submission 状态流转：
 
 ```text
 PENDING
     ↓
-RUNNING
+JUDGING
     ↓
 ACCEPTED
 WRONG_ANSWER
@@ -1644,55 +1785,92 @@ SYSTEM_ERROR
 UNSUPPORTED_LANGUAGE
 ```
 
-`PENDING -> RUNNING` 必须通过原子 SQL 完成。
+`PENDING -> JUDGING` 必须通过原子 SQL 完成。
 
 最终状态应只写一次。
 
-如果评测过程中出现系统错误，应尽量把 RUNNING 改成：
+如果评测过程中出现系统错误，应尽量把 `JUDGING` 改成：
 
 ```text
 SYSTEM_ERROR
 ```
 
-避免永久 RUNNING。
+避免永久 `JUDGING`。
+
+Cancel 和 Rejudge 由 `judge-api` 负责触发：
+
+```text
+CANCELLED
+```
+
+和：
+
+```text
+PENDING
+```
+
+Worker 只处理进入 `PENDING` 的任务。
 
 ---
 
-## 三十二、0ms 与 memory_kb=0
+## 三十三、时间与内存
 
-### 32.1 0ms
+### 33.1 time_ms
 
-运行时间显示为：
+`time_ms` 记录运行耗时。
+
+对于非常小的程序和小数据，测量结果可能低于 1ms。
+
+算法竞赛系统中：
 
 ```text
 0ms
 ```
 
-是正常现象。
-
-对于非常小的程序和小数据，测量结果可能低于 1ms。
-
-算法竞赛系统中 0ms 很常见，不需要强制改成 1ms。
+是正常现象，不需要强制改成 1ms。
 
 ---
 
-### 32.2 memory_kb=0
+### 33.2 memory_kb
 
-当前 `memory_kb=0` 是已知限制。
+当前：
+
+```text
+memory_kb = 0
+```
+
+是已知限制。
 
 原因：
 
 ```text
-当前没有 sandbox / cgroup / runner report
+当前只做了内存限制，没有做峰值内存采集
 ```
 
-后续 Runner Core 完成后，应统计真实内存峰值。
+当前内存限制主要依赖：
+
+```text
+nsjail --rlimit_as
+```
+
+后续应通过：
+
+```text
+cgroup v2
+```
+
+统计真实峰值内存，并写入：
+
+```text
+case.memory_kb
+submission.memory_kb
+```
 
 当前不要伪造 memory_kb。
 
 ---
 
-## 三十三、日志设计
+## 三十四、日志设计
 
 Judge Worker 当前使用：
 
@@ -1705,7 +1883,7 @@ JSON 日志
 推荐重要日志：
 
 ```text
-worker starting
+judge-worker starting
 connected redis successfully
 redis stream consumer group created / already exists
 judge-worker consuming redis stream
@@ -1713,9 +1891,6 @@ pending submissions found
 received judge stream message
 submission claimed
 submission skipped because it is not pending
-start judging
-compile failed
-test case finished
 judge finished
 judge stream message acked
 judge submission failed
@@ -1739,10 +1914,9 @@ error
 示例：
 
 ```text
-received judge stream message submission_id=16 message_id=...
-submission claimed submission_id=16
-start judging submission_id=16
-judge finished submission_id=16 status=ACCEPTED score=100
+received judge stream message submission_id=20 message_id=...
+submission claimed submission_id=20
+judge finished submission_id=20 status=ACCEPTED score=100
 judge stream message acked acked=1
 ```
 
@@ -1756,7 +1930,7 @@ no pending submissions found
 
 ---
 
-## 三十四、Redis 调试命令
+## 三十五、Redis 调试命令
 
 查看 Stream：
 
@@ -1794,7 +1968,7 @@ docker exec -it ojos-redis redis-cli XLEN ojos:judge:submissions
 docker exec -it ojos-redis redis-cli XTRIM ojos:judge:submissions MAXLEN "~" 10000
 ```
 
-当前正常状态：
+当前正常状态通常是：
 
 ```text
 XPENDING = 0
@@ -1804,7 +1978,7 @@ XPENDING = 0
 
 ---
 
-## 三十五、PostgreSQL 调试命令
+## 三十六、PostgreSQL 调试命令
 
 进入数据库：
 
@@ -1815,19 +1989,24 @@ docker exec -it ojos-postgres psql -U postgres -d ojos
 查看最近提交：
 
 ```sql
-SELECT id, problem_id, user_id, language, status, score, time_ms, memory_kb, message, created_at, updated_at
+SELECT
+    id,
+    problem_id,
+    user_id,
+    language,
+    status,
+    score,
+    time_ms,
+    memory_kb,
+    message,
+    code_path,
+    result_path,
+    created_at,
+    updated_at,
+    judged_at
 FROM submissions
 ORDER BY id DESC
 LIMIT 20;
-```
-
-查看某个提交测试点：
-
-```sql
-SELECT id, submission_id, test_case_id, status, time_ms, memory_kb, message
-FROM submission_cases
-WHERE submission_id = 16
-ORDER BY id;
 ```
 
 查看 PENDING：
@@ -1839,35 +2018,71 @@ WHERE status = 'PENDING'
 ORDER BY id;
 ```
 
-查看 RUNNING：
+查看 JUDGING：
 
 ```sql
 SELECT id, problem_id, user_id, language, status, created_at, updated_at
 FROM submissions
-WHERE status = 'RUNNING'
+WHERE status = 'JUDGING'
 ORDER BY id;
 ```
 
-手动恢复卡住的 RUNNING，开发环境可用：
+开发环境中，手动恢复卡住的 `JUDGING` 可用：
 
 ```sql
 UPDATE submissions
 SET status = 'PENDING', updated_at = NOW()
-WHERE id = 16 AND status = 'RUNNING';
+WHERE id = 20 AND status = 'JUDGING';
 ```
 
 生产环境不应随意手动改状态，需要审计和重测机制。
 
 ---
 
-## 三十六、验收流程
+## 三十七、文件调试命令
 
-### 36.1 编译 worker
+查看提交结果：
+
+```powershell
+Get-Content "D:\Untitled-OJ\storage\submissions\20\result.json" -Encoding UTF8
+```
+
+查看编译日志：
+
+```powershell
+Get-Content "D:\Untitled-OJ\storage\submissions\20\build\compile.log" -Encoding UTF8
+Get-Content "D:\Untitled-OJ\storage\submissions\20\build\compile.stdout.log" -Encoding UTF8
+Get-Content "D:\Untitled-OJ\storage\submissions\20\build\compile.stderr.log" -Encoding UTF8
+```
+
+查看测试点输出：
+
+```powershell
+Get-Content "D:\Untitled-OJ\storage\submissions\20\cases\001\stdin.txt" -Encoding UTF8
+Get-Content "D:\Untitled-OJ\storage\submissions\20\cases\001\stdout.txt" -Encoding UTF8
+Get-Content "D:\Untitled-OJ\storage\submissions\20\cases\001\stderr.txt" -Encoding UTF8
+Get-Content "D:\Untitled-OJ\storage\submissions\20\cases\001\checker.log" -Encoding UTF8
+```
+
+查看题目包：
+
+```powershell
+Get-Content "D:\Untitled-OJ\storage\problems\2-a-plus-b\problem.yaml" -Encoding UTF8
+Get-Content "D:\Untitled-OJ\storage\problems\2-a-plus-b\tests\cases.yaml" -Encoding UTF8
+Get-ChildItem "D:\Untitled-OJ\storage\problems\2-a-plus-b\tests" -Recurse
+```
+
+---
+
+## 三十八、验收流程
+
+### 38.1 编译 worker
 
 ```powershell
 cd D:\Untitled-OJ\services\judge-worker
 
 cargo fmt
+cargo check
 cargo build
 ```
 
@@ -1877,16 +2092,17 @@ cargo build
 Finished dev profile
 ```
 
-允许出现 dead_code warning，但不应有 error。
+允许出现不影响功能的 warning，但不应有 error。
 
 ---
 
-### 36.2 重建 Docker
+### 38.2 重建 Docker
 
 ```powershell
 cd D:\Untitled-OJ\deploy\compose
 
-docker compose up -d --build judge-worker
+docker compose build judge-worker
+docker compose up -d judge-worker
 ```
 
 查看日志：
@@ -1912,37 +2128,38 @@ judge-worker consuming redis stream
 
 ---
 
-### 36.3 提交代码
+### 38.3 提交代码
 
 通过 Gateway 登录后提交：
 
 ```powershell
-$code = @'
+$submitObj = @{
+  problem_id = 2
+  language = "cpp17"
+  code = @'
 #include <bits/stdc++.h>
 using namespace std;
 
 int main() {
-    int a, b;
+    long long a, b;
     cin >> a >> b;
-    cout << a + b << endl;
+    cout << a + b << '\n';
     return 0;
 }
 '@
+}
 
-$body = @{
-  problem_id = 1
-  language = "cpp17"
-  code = $code
-} | ConvertTo-Json -Compress
+$json = $submitObj | ConvertTo-Json -Compress
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
 
-$res = Invoke-RestMethod `
+$sub = Invoke-RestMethod `
   -Method Post `
   -Uri "http://localhost:8080/api/judge/submissions" `
-  -ContentType "application/json" `
-  -Headers @{ Authorization = "Bearer $token" } `
-  -Body $body
+  -ContentType "application/json; charset=utf-8" `
+  -Headers $headers `
+  -Body $bytes
 
-$res
+$sub
 ```
 
 预期：
@@ -1954,7 +2171,7 @@ status = PENDING
 
 ---
 
-### 36.4 查看 Worker 日志
+### 38.4 查看 Worker 日志
 
 ```powershell
 docker logs ojos-judge-worker --tail 100
@@ -1965,22 +2182,19 @@ docker logs ojos-judge-worker --tail 100
 ```text
 received judge stream message
 submission claimed
-start judging
 judge finished
 judge stream message acked
 ```
 
 ---
 
-### 36.5 查询结果
+### 38.5 查询结果
 
 ```powershell
-Start-Sleep -Seconds 2
-
 Invoke-RestMethod `
   -Method Get `
-  -Uri "http://localhost:8080/api/judge/submissions/$($res.submission_id)" `
-  -Headers @{ Authorization = "Bearer $token" }
+  -Uri "http://localhost:8080/api/judge/submissions/$($sub.submission_id)" `
+  -Headers $headers
 ```
 
 预期：
@@ -1992,7 +2206,7 @@ score = 100
 
 ---
 
-### 36.6 检查 Redis Pending
+### 38.6 检查 Redis Pending
 
 ```powershell
 docker exec -it ojos-redis redis-cli XPENDING ojos:judge:submissions judge-workers
@@ -2006,9 +2220,9 @@ docker exec -it ojos-redis redis-cli XPENDING ojos:judge:submissions judge-worke
 
 ---
 
-## 三十七、常见问题
+## 三十九、常见问题
 
-### 37.1 提交一直 PENDING
+### 39.1 提交一直 PENDING
 
 排查顺序：
 
@@ -2044,7 +2258,7 @@ LIMIT 10;
 
 ---
 
-### 37.2 worker 启动后退出
+### 39.2 worker 启动后退出
 
 如果日志出现：
 
@@ -2064,7 +2278,7 @@ timeout 时 continue
 
 ---
 
-### 37.3 submission skipped because it is not pending
+### 39.3 submission skipped because it is not pending
 
 这不是错误。
 
@@ -2082,7 +2296,7 @@ try_claim_submission 发现不是 PENDING
 
 ---
 
-### 37.4 XPENDING 不为 0
+### 39.4 XPENDING 不为 0
 
 说明某些消息被投递给 consumer，但没有被 ACK。
 
@@ -2107,75 +2321,128 @@ XAUTOCLAIM
 
 ---
 
-### 37.5 cargo build 报 self parameter 错误
+### 39.5 load cases.yaml failed
 
-错误：
+说明 worker 读取题目包失败。
 
-```text
-self parameter is only allowed in associated functions
-```
-
-原因：
+重点检查：
 
 ```text
-在自由函数中写了 &self
+problems.package_dir 是否正确
+problem.yaml 是否存在
+problem.yaml 中 tests.cases 是否正确
+tests/cases.yaml 是否存在
 ```
 
-错误写法：
+注意路径规则：
 
-```rust
-pub async fn list_pending_submission_ids(&self, limit: i64)
+```text
+tests.cases 是相对 package_dir 的路径
+case.input / case.answer 是相对 tests.root 的路径
 ```
 
-正确写法：
+如果出现：
 
-```rust
-pub async fn list_pending_submission_ids(db: &PgPool, limit: i64)
+```text
+tests/tests/cases.yaml
 ```
 
-除非函数在 `impl SomeStruct` 块里，否则不能有 `self` 参数。
+说明错误地把 `tests.root` 和 `tests.cases` 重复拼接了。
 
 ---
 
-### 37.6 Redis from_redis_value 类型错误
+### 39.6 compile error 但 compile.log 为空
 
-错误可能是：
+应检查编译日志是否在 jail 内重定向到：
 
 ```text
-expected Value, found &Value
+/work/compile.stdout.log
+/work/compile.stderr.log
 ```
 
-解决：
+不要依赖父进程 FD 捕获编译日志。
 
-```rust
-let text: String = redis::from_redis_value(value.clone()).ok()?;
+如果 C++ 编译提示：
+
+```text
+collect2: fatal error: cannot find 'ld'
 ```
 
-而不是：
+应确认：
 
-```rust
-redis::from_redis_value(value)
+```text
+languages.yaml 使用 /usr/bin/g++
+C/C++ compile args 包含 -B/usr/bin/
+shell PATH 包含 /usr/bin
 ```
-
-这是 redis crate 版本差异导致的。
 
 ---
 
-### 37.7 memory_kb 总是 0
+### 39.7 runtime error code 127
+
+`code 127` 通常表示：
+
+```text
+command not found
+```
+
+常见原因：
+
+```text
+languages.yaml 中 run.command = "{exe}"
+但 worker 没有对 command 本身做占位符替换
+```
+
+应确保 command 和 args 都会进行：
+
+```text
+{source}
+{exe}
+{workdir}
+```
+
+替换。
+
+---
+
+### 39.8 stdout.txt 为空但程序应该有输出
+
+排查：
+
+```text
+stdin.txt 是否有内容
+运行命令是否使用 /work/stdin.txt 重定向
+运行命令是否使用 /work/stdout.txt 重定向
+stdout.txt 是否旧文件权限导致无法截断
+```
+
+每次运行 case 前应删除：
+
+```text
+stdout.txt
+stderr.txt
+checker.log
+```
+
+让 `uid=10001` 在 jail 内重新创建。
+
+---
+
+### 39.9 memory_kb 总是 0
 
 这是当前已知限制。
 
 原因：
 
 ```text
-没有 sandbox / cgroup 统计
+当前没有 cgroup v2 峰值内存统计
 ```
 
-后续 Runner Core 实现后解决。
+后续解决，不要伪造。
 
 ---
 
-### 37.8 0ms 是否要改
+### 39.10 0ms 是否要改
 
 不需要。
 
@@ -2183,97 +2450,57 @@ redis::from_redis_value(value)
 
 ---
 
-### 37.9 编译失败但状态不是 COMPILE_ERROR
+## 四十、安全限制
 
-排查：
+当前 Worker 已经具备基础 nsjail 隔离，但仍不是最终生产级 Runner。
+
+当前已经做到：
 
 ```text
-compile command 是否正确
-compile args 占位符是否替换
-workdir 是否正确
-source 文件是否写入
-stderr 是否捕获
-编译失败路径是否调用 mark_submission_failed 或 save result
+用户程序不以 root 身份运行
+用户程序只看到 /work
+用户程序看不到 /data/ojos/problems
+用户程序不能读取 ans
+用户程序不能覆盖题目数据
+每个 case 独立运行
 ```
 
----
-
-### 37.10 Python TLE 或 RE
-
-排查：
+仍需继续完善：
 
 ```text
-python3 是否在 Docker 镜像中
-run.command 是否是 python3
-args 是否包含 {source}
-测试点 input 是否正确传入 stdin
-time_limit_ms 是否过小
-```
-
----
-
-## 三十八、安全限制
-
-当前 Judge Worker 最大风险：
-
-```text
-用户代码直接运行在 judge-worker 容器内
-```
-
-这意味着恶意代码可能：
-
-```text
-读取容器文件
-写大量文件
-占用 CPU
-占用内存
-创建大量子进程
-访问网络
-影响其他评测任务
-阻塞 worker
-```
-
-当前必须避免把该 Worker 暴露给不可信用户。
-
-后续必须实现：
-
-```text
-Runner Core
-Sandbox Provider
-独立运行容器
-network none
-只读文件系统
-临时工作目录隔离
-CPU 限制
-内存限制
-pids 限制
-进程超时强杀
+cgroup v2 memory peak
+更严格的 pids 限制
 输出大小限制
 stderr 大小限制
 文件大小限制
+系统调用策略
+多语言隔离策略
+worker 并发控制
+恶意编译器行为限制
 ```
 
 当前 Worker 可以视为：
 
 ```text
-调度器 + 简易执行器
+调度器 + 基础 nsjail 执行器
 ```
 
 后续应演进为：
 
 ```text
-调度器 + 安全 runner
+调度器 + Runner Core + Sandbox Provider
 ```
 
 ---
 
-## 三十九、后续架构演进
+## 四十一、后续架构演进
 
-当前 Judge Worker 负责太多事情：
+当前 Judge Worker 仍然负责较多事情：
 
 ```text
 消费任务
 抢任务
+加载题目包
 编译
 运行
 比较
@@ -2302,7 +2529,7 @@ scoring-core
 
 ---
 
-### 39.1 Runner Core
+### 41.1 Runner Core
 
 Runner Core 应负责：
 
@@ -2336,7 +2563,7 @@ OI 子任务
 
 ---
 
-### 39.2 Checker Core
+### 41.2 Checker Core
 
 Checker Core 应负责：
 
@@ -2357,7 +2584,7 @@ checker-standard
 
 ---
 
-### 39.3 Dataset Core
+### 41.3 Dataset Core
 
 Dataset Core 应负责：
 
@@ -2374,11 +2601,11 @@ Dataset Core 应负责：
 数据校验
 ```
 
-当前数据库 TEXT 测试点只是 MVP。
+当前题目包是 Dataset Core 的基础形态。
 
 ---
 
-### 39.4 Scoring Core
+### 41.4 Scoring Core
 
 Scoring Core 应负责：
 
@@ -2395,22 +2622,21 @@ ACM 只看 AC / WA
 
 ---
 
-## 四十、下一阶段建议
+## 四十二、下一阶段建议
 
 Judge Worker 下一阶段推荐顺序：
 
 ```text
-1. 降低无 PENDING 时的日志噪声
-2. 补充 XAUTOCLAIM 处理长时间 pending 的 Redis 消息
-3. 加入 Redis Stream XTRIM
-4. 统一 SYSTEM_ERROR / RUNNING 卡死恢复策略
-5. 抽象 Runner Core 接口
-6. 引入最小容器级 sandbox
-7. 实现真实 memory limit
-8. 测试数据文件化
-9. 抽象 checker-standard
-10. 支持 Special Judge
-11. 支持子任务 / 捆绑点
+1. 多语言验收：c11 / python3 / java17
+2. cgroup v2 memory peak 统计
+3. 输出大小限制
+4. XAUTOCLAIM 处理长时间 pending 的 Redis 消息
+5. Redis Stream XTRIM
+6. 统一 SYSTEM_ERROR / JUDGING 卡死恢复策略
+7. 抽象 Runner Core 接口
+8. 抽象 checker-standard
+9. 支持 Special Judge
+10. 支持子任务 / 捆绑点
 ```
 
 当前不建议立刻把：
@@ -2437,7 +2663,7 @@ Scoring Core 还没稳定
 
 ---
 
-## 四十一、当前结论
+## 四十三、当前结论
 
 Judge Worker 当前已经完成 OJOS 判题链路中最关键的执行闭环。
 
@@ -2445,6 +2671,10 @@ Judge Worker 当前已经完成 OJOS 判题链路中最关键的执行闭环。
 
 ```text
 NATS Core Pub/Sub 实时事件消费
++
+数据库测试点
++
+容器内裸跑用户程序
 ```
 
 升级为：
@@ -2456,7 +2686,11 @@ PostgreSQL PENDING 兜底扫描
 +
 数据库原子抢任务
 +
-Redis XACK
+Problem Package
++
+nsjail Sandbox
++
+File-based Result
 ```
 
 当前 Worker 可以可靠完成：
@@ -2465,17 +2699,18 @@ Redis XACK
 任务消费
 历史恢复
 防重复判题
-基础编译运行
+题目包读取
+基础沙箱编译运行
 基础输出比较
-结果写回
+结果落盘
+摘要回写
 ```
 
 当前 Worker 仍然缺少：
 
 ```text
-安全沙箱
 真实内存统计
-真实资源限制
+输出大小限制
 SPJ
 子任务
 捆绑点
@@ -2487,23 +2722,17 @@ SPJ
 因此当前 Worker 是：
 
 ```text
-可靠性 MVP Worker
-```
-
-而不是：
-
-```text
-生产级安全 Runner
+Package-based nsjail Judge Worker
 ```
 
 后续最重要的方向是：
 
 ```text
 Runner Core 抽象
-安全隔离
-测试数据文件化
+cgroup v2 内存统计
 Checker 抽象
 Scoring 抽象
+Dataset Core 深化
 ```
 
 只有这些稳定后，OJOS 才能继续安全地支持：

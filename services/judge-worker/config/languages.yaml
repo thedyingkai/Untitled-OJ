@@ -9,10 +9,12 @@ languages:
         - "-std=c++17"
         - "-O2"
         - "-pipe"
+        - "-B/usr/bin/"
         - "{source}"
         - "-o"
         - "{exe}"
       timeout_ms: 10000
+      memory_mb: 1024
     run:
       command: "{exe}"
       args: []
@@ -27,10 +29,12 @@ languages:
         - "-std=c++20"
         - "-O2"
         - "-pipe"
+        - "-B/usr/bin/"
         - "{source}"
         - "-o"
         - "{exe}"
       timeout_ms: 10000
+      memory_mb: 1024
     run:
       command: "{exe}"
       args: []
@@ -45,10 +49,12 @@ languages:
         - "-std=c11"
         - "-O2"
         - "-pipe"
+        - "-B/usr/bin/"
         - "{source}"
         - "-o"
         - "{exe}"
       timeout_ms: 10000
+      memory_mb: 1024
     run:
       command: "{exe}"
       args: []
@@ -61,6 +67,7 @@ languages:
       command: ""
       args: []
       timeout_ms: 0
+      memory_mb: 512
     run:
       command: python3
       args:
@@ -75,42 +82,10 @@ languages:
       args:
         - "{source}"
       timeout_ms: 10000
+      memory_mb: 1024
     run:
       command: java
       args:
         - "-cp"
         - "{workdir}"
         - "Main"
-
-  rust:
-    source_file: main.rs
-    exe_file: main
-    compile:
-      enabled: true
-      command: rustc
-      args:
-        - "--edition=2021"
-        - "-O"
-        - "{source}"
-        - "-o"
-        - "{exe}"
-      timeout_ms: 15000
-    run:
-      command: "{exe}"
-      args: []
-
-  go:
-    source_file: main.go
-    exe_file: main
-    compile:
-      enabled: true
-      command: go
-      args:
-        - "build"
-        - "-o"
-        - "{exe}"
-        - "{source}"
-      timeout_ms: 15000
-    run:
-      command: "{exe}"
-      args: []

@@ -6,12 +6,14 @@ package logic
 import (
 	"context"
 	"errors"
-	"ojos-shared/security/authctx"
 	"strconv"
+	"strings"
 	"time"
 
+	"ojos-judge-api/internal/submissionfs"
 	"ojos-judge-api/internal/svc"
 	"ojos-judge-api/internal/types"
+	"ojos-shared/security/authctx"
 	sharedperm "ojos-shared/security/permission"
 
 	"github.com/redis/go-redis/v9"
@@ -52,32 +54,66 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		return nil, errors.New("invalid problem id")
 	}
 
-	if req.Language == "" {
-		req.Language = "cpp17"
+	if strings.TrimSpace(req.Code) == "" {
+		return nil, errors.New("empty code")
 	}
 
-	if req.Code == "" {
-		return nil, errors.New("empty code")
+	language := strings.TrimSpace(req.Language)
+	if language == "" {
+		language = "cpp17"
+	}
+
+	problem, err := l.svcCtx.Repo.GetProblemMeta(l.ctx, req.ProblemId)
+	if err != nil {
+		return nil, err
+	}
+
+	if problem.PackageDir == "" {
+		return nil, errors.New("problem package dir is empty")
 	}
 
 	submissionID, err := l.svcCtx.Repo.CreateSubmission(
 		l.ctx,
 		req.ProblemId,
 		user.UserID,
-		req.Language,
-		req.Code,
+		language,
 	)
 	if err != nil {
 		return nil, err
 	}
 
+	files, err := submissionfs.CreateSubmissionFiles(submissionfs.CreateSubmissionFilesArgs{
+		Root:         l.svcCtx.Config.Storage.SubmissionsRoot,
+		SubmissionID: submissionID,
+		Language:     language,
+		Code:         req.Code,
+	})
+	if err != nil {
+		_ = l.svcCtx.Repo.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
+		return nil, err
+	}
+
+	if err := l.svcCtx.Repo.UpdateSubmissionSource(
+		l.ctx,
+		submissionID,
+		files.CodePath,
+		files.CodeSha256,
+		files.ResultPath,
+	); err != nil {
+		_ = l.svcCtx.Repo.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
+		return nil, err
+	}
+
 	if err := l.publishSubmissionCreated(submissionID); err != nil {
+		_ = l.svcCtx.Repo.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
 		return nil, err
 	}
 
 	return &types.CreateSubmissionResp{
 		SubmissionId: submissionID,
 		Status:       "PENDING",
+		CodePath:     files.CodePath,
+		ResultPath:   files.ResultPath,
 	}, nil
 }
 

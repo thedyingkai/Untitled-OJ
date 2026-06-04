@@ -75,6 +75,8 @@ services:
         condition: service_started
     ports:
       - "8082:8082"
+    volumes:
+      - ../../storage/submissions:/data/ojos/submissions
 
   judge-worker:
     build:
@@ -90,6 +92,20 @@ services:
       DATABASE_URL: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
       REDIS_URL: redis://ojos-redis:6379/0
       LANGUAGES_CONFIG: config/languages.yaml
+      RUST_LOG: info
+    cap_add:
+      - SYS_ADMIN
+      - SYS_CHROOT
+      - SETUID
+      - SETGID
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    volumes:
+      - ../../storage/problems:/data/ojos/problems:ro
+      - ../../storage/submissions:/data/ojos/submissions
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
 
   problem-api:
     build:

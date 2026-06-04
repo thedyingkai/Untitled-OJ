@@ -3,25 +3,14 @@
 
 package types
 
-type AddTestCaseReq struct {
-	ProblemId int64  `json:"problem_id"`
-	Input     string `json:"input"`
-	Output    string `json:"output"`
-	Score     int    `json:"score,optional"`
+type CancelSubmissionReq struct {
+	Id     int64  `path:"id"`
+	Reason string `json:"reason,optional"`
 }
 
-type AddTestCaseResp struct {
-	TestCaseId int64 `json:"test_case_id"`
-}
-
-type CreateProblemReq struct {
-	Title         string `json:"title"`
-	TimeLimitMs   int    `json:"time_limit_ms,optional"`
-	MemoryLimitMb int    `json:"memory_limit_mb,optional"`
-}
-
-type CreateProblemResp struct {
-	ProblemId int64 `json:"problem_id"`
+type CancelSubmissionResp struct {
+	SubmissionId int64  `json:"submission_id"`
+	Status       string `json:"status"`
 }
 
 type CreateSubmissionReq struct {
@@ -33,6 +22,8 @@ type CreateSubmissionReq struct {
 type CreateSubmissionResp struct {
 	SubmissionId int64  `json:"submission_id"`
 	Status       string `json:"status"`
+	CodePath     string `json:"code_path"`
+	ResultPath   string `json:"result_path"`
 }
 
 type GetSubmissionCasesReq struct {
@@ -48,23 +39,40 @@ type GetSubmissionReq struct {
 }
 
 type GetSubmissionResp struct {
-	Id        int64  `json:"id"`
-	ProblemId int64  `json:"problem_id"`
-	UserId    int64  `json:"user_id"`
-	Language  string `json:"language"`
-	Status    string `json:"status"`
-	Score     int    `json:"score"`
-	TimeMs    int    `json:"time_ms"`
-	MemoryKb  int    `json:"memory_kb"`
-	Message   string `json:"message,optional"`
-}
-
-type SubmissionCaseItem struct {
 	Id           int64  `json:"id"`
-	SubmissionId int64  `json:"submission_id"`
-	TestCaseId   int64  `json:"test_case_id"`
+	ProblemId    int64  `json:"problem_id"`
+	UserId       int64  `json:"user_id"`
+	Language     string `json:"language"`
 	Status       string `json:"status"`
+	Score        int    `json:"score"`
 	TimeMs       int    `json:"time_ms"`
 	MemoryKb     int    `json:"memory_kb"`
 	Message      string `json:"message,optional"`
+	CodePath     string `json:"code_path"`
+	CodeSha256   string `json:"code_sha256"`
+	ResultPath   string `json:"result_path"`
+	JudgedAt     string `json:"judged_at,optional"`
+	CancelledAt  string `json:"cancelled_at,optional"`
+	CancelReason string `json:"cancel_reason,optional"`
+}
+
+type RejudgeProblemReq struct {
+	Id int64 `path:"id"`
+}
+
+type RejudgeProblemResp struct {
+	ProblemId int64 `json:"problem_id"`
+	Enqueued  int   `json:"enqueued"`
+}
+
+type SubmissionCaseItem struct {
+	CaseNo         int    `json:"case_no"`
+	Status         string `json:"status"`
+	Score          int    `json:"score"`
+	TimeMs         int    `json:"time_ms"`
+	MemoryKb       int    `json:"memory_kb"`
+	StdoutPath     string `json:"stdout_path,optional"`
+	StderrPath     string `json:"stderr_path,optional"`
+	CheckerLogPath string `json:"checker_log_path,optional"`
+	Message        string `json:"message,optional"`
 }

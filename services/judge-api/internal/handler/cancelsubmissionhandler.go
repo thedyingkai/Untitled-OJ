@@ -12,16 +12,16 @@ import (
 	"ojos-judge-api/internal/types"
 )
 
-func createProblemHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func cancelSubmissionHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req types.CreateProblemReq
+		var req types.CancelSubmissionReq
 		if err := httpx.Parse(r, &req); err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 			return
 		}
 
-		l := logic.NewCreateProblemLogic(r.Context(), svcCtx)
-		resp, err := l.CreateProblem(&req)
+		l := logic.NewCancelSubmissionLogic(r.Context(), svcCtx)
+		resp, err := l.CancelSubmission(&req)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 		} else {

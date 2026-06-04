@@ -22,6 +22,7 @@ pub struct CompileConfig {
     pub command: String,
     pub args: Vec<String>,
     pub timeout_ms: u64,
+    pub memory_mb: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

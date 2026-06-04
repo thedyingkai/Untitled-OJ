@@ -2,11 +2,30 @@ FROM rust:1.89-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        g++ \
+        ca-certificates \
+        git \
+        autoconf \
+        bison \
+        flex \
         gcc \
+        g++ \
+        libprotobuf-dev \
+        libnl-route-3-dev \
+        libtool \
+        make \
+        pkg-config \
+        protobuf-compiler \
+        bash \
+        coreutils \
         python3 \
         openjdk-17-jdk \
-        golang-go \
+    && git clone --depth=1 https://github.com/google/nsjail.git /tmp/nsjail \
+    && make -C /tmp/nsjail \
+    && cp /tmp/nsjail/nsjail /usr/local/bin/nsjail \
+    && mkdir -p /jail/root /data/ojos/problems /data/ojos/submissions \
+    && groupadd -g 10001 sandbox \
+    && useradd -u 10001 -g 10001 -M -s /usr/sbin/nologin sandbox \
+    && rm -rf /tmp/nsjail \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

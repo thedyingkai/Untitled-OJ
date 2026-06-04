@@ -11,6 +11,7 @@ type Config struct {
 	Database DatabaseConfig
 	Redis    RedisConfig
 	Jaeger   JaegerConfig
+	Storage  StorageConfig
 }
 
 type DatabaseConfig struct {
@@ -23,4 +24,8 @@ type RedisConfig struct {
 
 type JaegerConfig struct {
 	Endpoint string
+}
+
+type StorageConfig struct {
+	SubmissionsRoot string
 }

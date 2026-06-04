@@ -6,8 +6,8 @@ package logic
 import (
 	"context"
 	"errors"
-	"ojos-judge-api/internal/repository"
 
+	"ojos-judge-api/internal/repository"
 	"ojos-judge-api/internal/svc"
 	"ojos-judge-api/internal/types"
 
@@ -34,19 +34,9 @@ func (l *GetSubmissionLogic) GetSubmission(req *types.GetSubmissionReq) (resp *t
 		if errors.Is(err, repository.ErrSubmissionNotFound) {
 			return nil, errors.New("submission not found")
 		}
-
 		return nil, err
 	}
 
-	return &types.GetSubmissionResp{
-		Id:        submission.ID,
-		ProblemId: submission.ProblemID,
-		UserId:    submission.UserID,
-		Language:  submission.Language,
-		Status:    submission.Status,
-		Score:     submission.Score,
-		TimeMs:    submission.TimeMS,
-		MemoryKb:  submission.MemoryKB,
-		Message:   submission.Message,
-	}, nil
+	result := convertSubmission(submission)
+	return &result, nil
 }
