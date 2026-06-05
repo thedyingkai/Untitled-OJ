@@ -351,6 +351,43 @@ int main() {
 	}, nil
 }
 
+func syncBuiltinLanguageLimits(manifest *ProblemManifest) {
+	if manifest.Limits.Languages == nil {
+		manifest.Limits.Languages = map[string]LimitConfig{}
+	}
+
+	t := manifest.Limits.Default.TimeMs
+	m := manifest.Limits.Default.MemoryMb
+
+	if t <= 0 {
+		t = 1000
+	}
+	if m <= 0 {
+		m = 256
+	}
+
+	manifest.Limits.Languages["cpp17"] = LimitConfig{
+		TimeMs:   t,
+		MemoryMb: m,
+	}
+	manifest.Limits.Languages["cpp20"] = LimitConfig{
+		TimeMs:   t,
+		MemoryMb: m,
+	}
+	manifest.Limits.Languages["c11"] = LimitConfig{
+		TimeMs:   t,
+		MemoryMb: m,
+	}
+	manifest.Limits.Languages["python3"] = LimitConfig{
+		TimeMs:   t * 3,
+		MemoryMb: m * 2,
+	}
+	manifest.Limits.Languages["java17"] = LimitConfig{
+		TimeMs:   t * 2,
+		MemoryMb: m * 2,
+	}
+}
+
 func UpdateManifest(
 	packageDir string,
 	title string,
@@ -381,10 +418,13 @@ func UpdateManifest(
 		manifest.Status = status
 	}
 	if timeLimitMs > 0 {
-		manifest.Limits.TimeMs = timeLimitMs
+		manifest.Limits.Default.TimeMs = timeLimitMs
 	}
 	if memoryLimitMb > 0 {
-		manifest.Limits.MemoryMb = memoryLimitMb
+		manifest.Limits.Default.MemoryMb = memoryLimitMb
+	}
+	if timeLimitMs > 0 || memoryLimitMb > 0 {
+		syncBuiltinLanguageLimits(&manifest)
 	}
 
 	if statement != "" {
@@ -677,9 +717,9 @@ func GuessFileKind(logical string) string {
 	case strings.HasPrefix(logical, "tests/") && strings.HasSuffix(logical, ".ans"):
 		return "test_answer"
 	case logical == "tests/cases.yaml":
-		return "test_cases_manifest"
+		return "cases_manifest"
 	case logical == "tests/groups.yaml":
-		return "test_groups_manifest"
+		return "groups_manifest"
 	case strings.HasPrefix(logical, "checker/"):
 		return "checker"
 	case strings.HasPrefix(logical, "runner/"):

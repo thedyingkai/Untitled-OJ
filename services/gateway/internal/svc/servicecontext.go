@@ -7,9 +7,11 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"ojos-gateway/internal/config"
 	"ojos-gateway/internal/proxy"
+	"ojos-shared/security/internalauth"
 
 	"ojos-shared/database"
 	sharedlogger "ojos-shared/logger"
@@ -27,7 +29,8 @@ type ServiceContext struct {
 	DB     *pgxpool.Pool
 	Tracer *sdktrace.TracerProvider
 
-	Proxy http.HandlerFunc
+	Proxy          http.HandlerFunc
+	InternalSigner *internalauth.Signer
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
@@ -48,17 +51,33 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		log.Fatalf("connect postgres failed: %v", err)
 	}
 
-	proxyHandler, err := proxy.NewConfigProxy(c.Proxy.Routes, c.Jwt.Secret, zlog)
+	internalAuthCfg := internalauth.Config{
+		Enabled:          c.InternalAuth.Enabled,
+		RotationInterval: time.Duration(c.InternalAuth.RotationIntervalSeconds) * time.Second,
+		VerifyGrace:      time.Duration(c.InternalAuth.VerifyGraceSeconds) * time.Second,
+		RotateBefore:     time.Duration(c.InternalAuth.RotateBeforeSeconds) * time.Second,
+		TimestampSkew:    time.Duration(c.InternalAuth.TimestampSkewSeconds) * time.Second,
+		NonceTTL:         time.Duration(c.InternalAuth.NonceTTLSeconds) * time.Second,
+	}
+
+	var internalSigner *internalauth.Signer
+	if c.InternalAuth.Enabled {
+		internalKeyManager := internalauth.NewKeyManager(db, internalAuthCfg)
+		internalSigner = internalauth.NewSigner(internalKeyManager)
+	}
+
+	proxyHandler, err := proxy.NewConfigProxy(c.Proxy.Routes, c.Jwt.Secret, internalSigner, zlog)
 	if err != nil {
 		log.Fatalf("init proxy failed: %v", err)
 	}
 
 	return &ServiceContext{
-		Config: c,
-		Logger: zlog,
-		DB:     db,
-		Tracer: tp,
-		Proxy:  proxyHandler,
+		Config:         c,
+		Logger:         zlog,
+		DB:             db,
+		Tracer:         tp,
+		Proxy:          proxyHandler,
+		InternalSigner: internalSigner,
 	}
 }
 

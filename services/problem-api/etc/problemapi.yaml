@@ -5,8 +5,16 @@ Port: 8083
 Database:
   Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
 
+Redis:
+  Url: redis://ojos-redis:6379/0
+
 Jaeger:
   Endpoint: ojos-jaeger:4317
 
 Storage:
   ProblemsRoot: /data/ojos/problems
+
+InternalAuth:
+  Enabled: true
+  TimestampSkewSeconds: 60
+  NonceTTLSeconds: 120

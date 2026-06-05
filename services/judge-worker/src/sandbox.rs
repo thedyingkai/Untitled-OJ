@@ -11,6 +11,12 @@ use crate::checker::truncate_message;
 use crate::config::{LanguageConfig, render_arg};
 use crate::problem_package::LimitConfig;
 
+const COMPILE_OUTPUT_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+const RUN_OUTPUT_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+
+const COMPILE_FILE_SIZE_LIMIT_MB: u64 = 256;
+const RUN_FILE_SIZE_LIMIT_MB: u64 = 64;
+
 #[derive(Debug, Clone)]
 pub struct SandboxOutput {
     pub status: SandboxStatus,
@@ -101,15 +107,51 @@ pub async fn compile_in_sandbox(
         None,
         lang.compile.timeout_ms.max(1000),
         lang.compile.memory_mb.unwrap_or(1024),
+        COMPILE_FILE_SIZE_LIMIT_MB,
+        COMPILE_OUTPUT_LIMIT_BYTES,
     )
     .await?;
 
-    let stdout_text = fs::read_to_string(&compile_stdout)
-        .await
-        .unwrap_or_default();
-    let stderr_text = fs::read_to_string(&compile_stderr)
-        .await
-        .unwrap_or_default();
+    let stdout_bytes = match read_file_limited(
+        &compile_stdout,
+        COMPILE_OUTPUT_LIMIT_BYTES,
+        "compile stdout",
+    )
+    .await
+    {
+        Ok(data) => data,
+        Err(err) => {
+            let message = truncate_message(&err.to_string());
+            let merged_log = format!(
+                "sandbox_status: RuntimeError\nsandbox_message: {}\n\n[stdout]\n\n\n[stderr]\n\n",
+                message
+            );
+            fs::write(&compile_log, &merged_log).await?;
+            return Ok(Some(message));
+        }
+    };
+
+    let stderr_bytes = match read_file_limited(
+        &compile_stderr,
+        COMPILE_OUTPUT_LIMIT_BYTES,
+        "compile stderr",
+    )
+    .await
+    {
+        Ok(data) => data,
+        Err(err) => {
+            let message = truncate_message(&err.to_string());
+            let merged_log = format!(
+                "sandbox_status: RuntimeError\nsandbox_message: {}\n\n[stdout]\n\n\n[stderr]\n\n",
+                message
+            );
+            fs::write(&compile_log, &merged_log).await?;
+            return Ok(Some(message));
+        }
+    };
+
+    let stdout_text = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let stderr_text = String::from_utf8_lossy(&stderr_bytes).to_string();
 
     let merged_log = format!(
         "sandbox_status: {:?}\nsandbox_message: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n",
@@ -181,7 +223,7 @@ pub async fn run_case_in_sandbox(
             shell
         );
 
-        return run_nsjail_shell(
+        let output = run_nsjail_shell(
             case_dir,
             &shell,
             None,
@@ -189,8 +231,12 @@ pub async fn run_case_in_sandbox(
             None,
             limit.time_ms,
             limit.memory_mb,
+            RUN_FILE_SIZE_LIMIT_MB,
+            RUN_OUTPUT_LIMIT_BYTES,
         )
-        .await;
+        .await?;
+
+        return attach_case_output(output, stdout_path, stderr_path).await;
     }
 
     let build_exe = submission_dir.join("build").join(&lang.exe_file);
@@ -230,7 +276,7 @@ pub async fn run_case_in_sandbox(
         shell
     );
 
-    run_nsjail_shell(
+    let output = run_nsjail_shell(
         case_dir,
         &shell,
         None,
@@ -238,8 +284,12 @@ pub async fn run_case_in_sandbox(
         None,
         limit.time_ms,
         limit.memory_mb,
+        RUN_FILE_SIZE_LIMIT_MB,
+        RUN_OUTPUT_LIMIT_BYTES,
     )
-    .await
+    .await?;
+
+    attach_case_output(output, stdout_path, stderr_path).await
 }
 
 async fn run_nsjail_shell(
@@ -250,6 +300,8 @@ async fn run_nsjail_shell(
     stderr_file: Option<&Path>,
     time_limit_ms: u64,
     memory_mb: u64,
+    file_size_limit_mb: u64,
+    output_limit_bytes: u64,
 ) -> Result<SandboxOutput> {
     #[cfg(unix)]
     {
@@ -277,6 +329,8 @@ async fn run_nsjail_shell(
         .arg(time_limit_sec.to_string())
         .arg("--rlimit_as")
         .arg(memory_mb.to_string())
+        .arg("--rlimit_fsize")
+        .arg(file_size_limit_mb.to_string())
         .arg("--rlimit_nofile")
         .arg("64")
         .arg("--rlimit_nproc")
@@ -357,12 +411,37 @@ async fn run_nsjail_shell(
     let mut stderr = output.stderr;
 
     if let Some(stderr_file) = stderr_file {
-        stderr = fs::read(stderr_file).await.unwrap_or_default();
+        match read_file_limited(stderr_file, output_limit_bytes, "stderr").await {
+            Ok(data) => stderr = data,
+            Err(err) => {
+                return Ok(SandboxOutput {
+                    status: SandboxStatus::RuntimeError,
+                    time_ms: elapsed_ms,
+                    memory_kb: 0,
+                    stdout: vec![],
+                    stderr: vec![],
+                    message: truncate_message(&err.to_string()),
+                });
+            }
+        }
     }
 
     let mut stdout = output.stdout;
+
     if let Some(stdout_file) = stdout_file {
-        stdout = fs::read(stdout_file).await.unwrap_or_default();
+        match read_file_limited(stdout_file, output_limit_bytes, "stdout").await {
+            Ok(data) => stdout = data,
+            Err(err) => {
+                return Ok(SandboxOutput {
+                    status: SandboxStatus::RuntimeError,
+                    time_ms: elapsed_ms,
+                    memory_kb: 0,
+                    stdout: vec![],
+                    stderr: vec![],
+                    message: truncate_message(&err.to_string()),
+                });
+            }
+        }
     }
 
     let stderr_text = String::from_utf8_lossy(&stderr).to_string();
@@ -409,6 +488,64 @@ async fn run_nsjail_shell(
         stderr,
         message,
     })
+}
+
+async fn attach_case_output(
+    mut output: SandboxOutput,
+    stdout_path: &Path,
+    stderr_path: &Path,
+) -> Result<SandboxOutput> {
+    match read_file_limited(stdout_path, RUN_OUTPUT_LIMIT_BYTES, "stdout").await {
+        Ok(data) => output.stdout = data,
+        Err(err) => {
+            return Ok(SandboxOutput {
+                status: SandboxStatus::RuntimeError,
+                time_ms: output.time_ms,
+                memory_kb: output.memory_kb,
+                stdout: vec![],
+                stderr: vec![],
+                message: truncate_message(&err.to_string()),
+            });
+        }
+    }
+
+    match read_file_limited(stderr_path, RUN_OUTPUT_LIMIT_BYTES, "stderr").await {
+        Ok(data) => output.stderr = data,
+        Err(err) => {
+            return Ok(SandboxOutput {
+                status: SandboxStatus::RuntimeError,
+                time_ms: output.time_ms,
+                memory_kb: output.memory_kb,
+                stdout: vec![],
+                stderr: vec![],
+                message: truncate_message(&err.to_string()),
+            });
+        }
+    }
+
+    Ok(output)
+}
+
+async fn read_file_limited(path: &Path, limit_bytes: u64, name: &str) -> Result<Vec<u8>> {
+    match fs::metadata(path).await {
+        Ok(meta) => {
+            let size = meta.len();
+            if size >= limit_bytes {
+                return Err(anyhow!(
+                    "{} output limit exceeded: {} bytes >= {} bytes",
+                    name,
+                    size,
+                    limit_bytes
+                ));
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(vec![]);
+        }
+        Err(err) => return Err(err.into()),
+    }
+
+    Ok(fs::read(path).await.unwrap_or_default())
 }
 
 fn shell_command(command: &str, args: &[String]) -> String {

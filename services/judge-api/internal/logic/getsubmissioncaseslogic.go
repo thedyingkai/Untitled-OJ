@@ -41,6 +41,10 @@ func (l *GetSubmissionCasesLogic) GetSubmissionCases(req *types.GetSubmissionCas
 		return nil, err
 	}
 
+	if err := requireSubmissionViewPermission(l.ctx, l.svcCtx, submission); err != nil {
+		return nil, err
+	}
+
 	cases, err := readResultCases(submission.ResultPath)
 	if err != nil {
 		return nil, err

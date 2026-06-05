@@ -8,12 +8,18 @@ import "github.com/zeromicro/go-zero/rest"
 type Config struct {
 	rest.RestConf
 
-	Database DatabaseConfig
-	Jaeger   JaegerConfig
-	Storage  StorageConfig
+	Database     DatabaseConfig
+	Redis        RedisConfig
+	Jaeger       JaegerConfig
+	Storage      StorageConfig
+	InternalAuth InternalAuthConfig
 }
 
 type DatabaseConfig struct {
+	Url string
+}
+
+type RedisConfig struct {
 	Url string
 }
 
@@ -23,4 +29,10 @@ type JaegerConfig struct {
 
 type StorageConfig struct {
 	ProblemsRoot string
+}
+
+type InternalAuthConfig struct {
+	Enabled              bool
+	TimestampSkewSeconds int64 `json:",optional"`
+	NonceTTLSeconds      int64 `json:",optional"`
 }

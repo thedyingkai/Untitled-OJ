@@ -29,11 +29,19 @@ func NewGetSubmissionLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Get
 }
 
 func (l *GetSubmissionLogic) GetSubmission(req *types.GetSubmissionReq) (resp *types.GetSubmissionResp, err error) {
+	if req.Id <= 0 {
+		return nil, errors.New("invalid submission id")
+	}
+
 	submission, err := l.svcCtx.Repo.GetSubmission(l.ctx, req.Id)
 	if err != nil {
 		if errors.Is(err, repository.ErrSubmissionNotFound) {
 			return nil, errors.New("submission not found")
 		}
+		return nil, err
+	}
+
+	if err := requireSubmissionViewPermission(l.ctx, l.svcCtx, submission); err != nil {
 		return nil, err
 	}
 

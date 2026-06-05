@@ -22,8 +22,6 @@ type CreateSubmissionReq struct {
 type CreateSubmissionResp struct {
 	SubmissionId int64  `json:"submission_id"`
 	Status       string `json:"status"`
-	CodePath     string `json:"code_path"`
-	ResultPath   string `json:"result_path"`
 }
 
 type GetSubmissionCasesReq struct {
@@ -48,9 +46,7 @@ type GetSubmissionResp struct {
 	TimeMs       int    `json:"time_ms"`
 	MemoryKb     int    `json:"memory_kb"`
 	Message      string `json:"message,optional"`
-	CodePath     string `json:"code_path"`
 	CodeSha256   string `json:"code_sha256"`
-	ResultPath   string `json:"result_path"`
 	JudgedAt     string `json:"judged_at,optional"`
 	CancelledAt  string `json:"cancelled_at,optional"`
 	CancelReason string `json:"cancel_reason,optional"`
@@ -66,13 +62,10 @@ type RejudgeProblemResp struct {
 }
 
 type SubmissionCaseItem struct {
-	CaseNo         int    `json:"case_no"`
-	Status         string `json:"status"`
-	Score          int    `json:"score"`
-	TimeMs         int    `json:"time_ms"`
-	MemoryKb       int    `json:"memory_kb"`
-	StdoutPath     string `json:"stdout_path,optional"`
-	StderrPath     string `json:"stderr_path,optional"`
-	CheckerLogPath string `json:"checker_log_path,optional"`
-	Message        string `json:"message,optional"`
+	CaseNo   int    `json:"case_no"`
+	Status   string `json:"status"`
+	Score    int    `json:"score"`
+	TimeMs   int    `json:"time_ms"`
+	MemoryKb int    `json:"memory_kb"`
+	Message  string `json:"message,optional"`
 }

@@ -201,7 +201,7 @@ async fn run_one_case(
 
     match sandbox_output.status {
         SandboxStatus::Ok => {
-            let actual = fs::read_to_string(&stdout_path).await.unwrap_or_default();
+            let actual = String::from_utf8_lossy(&sandbox_output.stdout).to_string();
             let expected = fs::read_to_string(&answer_path)
                 .await
                 .with_context(|| format!("read answer failed: {}", answer_path.display()))?;
@@ -240,18 +240,16 @@ async fn run_one_case(
             status = "RUNTIME_ERROR".to_string();
             score = 0;
 
-            let user_stderr = fs::read_to_string(&stderr_path).await.unwrap_or_default();
+            let user_stderr = String::from_utf8_lossy(&sandbox_output.stderr).to_string();
 
-            let exit_line = sandbox_output
-                .message
-                .lines()
-                .find(|line| line.starts_with("process "))
-                .unwrap_or("runtime error");
-
-            if user_stderr.trim().is_empty() {
-                message = exit_line.to_string();
+            if sandbox_output.message.trim().is_empty() {
+                if user_stderr.trim().is_empty() {
+                    message = "runtime error".to_string();
+                } else {
+                    message = truncate_message(&user_stderr);
+                }
             } else {
-                message = format!("{}\n{}", exit_line, truncate_message(&user_stderr));
+                message = truncate_message(&sandbox_output.message);
             }
 
             write_text(&checker_log_path, &message).await?;

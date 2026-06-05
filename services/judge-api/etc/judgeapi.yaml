@@ -13,3 +13,8 @@ Jaeger:
 
 Storage:
   SubmissionsRoot: /data/ojos/submissions
+
+InternalAuth:
+  Enabled: true
+  TimestampSkewSeconds: 60
+  NonceTTLSeconds: 120

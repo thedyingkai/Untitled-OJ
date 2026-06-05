@@ -27,3 +27,11 @@ Proxy:
       Target: http://problem-api:8083
       StripPrefix: /api
       AuthMode: required
+
+InternalAuth:
+  Enabled: true
+  RotationIntervalSeconds: 21600
+  VerifyGraceSeconds: 600
+  RotateBeforeSeconds: 120
+  TimestampSkewSeconds: 60
+  NonceTTLSeconds: 120

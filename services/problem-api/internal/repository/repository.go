@@ -161,6 +161,14 @@ SELECT
     id,
     COALESCE(slug, ''),
     title,
+    COALESCE(statement, ''),
+    COALESCE(problem_type, 'traditional'),
+    COALESCE(visibility, 'private'),
+    COALESCE(package_dir, ''),
+    COALESCE(manifest_path, ''),
+    COALESCE(manifest_sha256, ''),
+    COALESCE(source_format, 'ojos'),
+    COALESCE(status, 'draft'),
     time_limit_ms,
     memory_limit_mb,
     COALESCE(created_by, 0),
@@ -221,6 +229,14 @@ SELECT
     id,
     COALESCE(slug, ''),
     title,
+    COALESCE(statement, ''),
+    COALESCE(problem_type, 'traditional'),
+    COALESCE(visibility, 'private'),
+    COALESCE(package_dir, ''),
+    COALESCE(manifest_path, ''),
+    COALESCE(manifest_sha256, ''),
+    COALESCE(source_format, 'ojos'),
+    COALESCE(status, 'draft'),
     time_limit_ms,
     memory_limit_mb,
     COALESCE(created_by, 0),
@@ -392,19 +408,6 @@ func (r *Repository) DeleteProblem(ctx context.Context, problemID int64) error {
 		return fmt.Errorf("problem has submissions, refuse to delete: %d", submissionCount)
 	}
 
-	var legacyCaseCount int64
-	if err := tx.QueryRow(
-		ctx,
-		`SELECT COUNT(*) FROM test_cases WHERE problem_id = $1`,
-		problemID,
-	).Scan(&legacyCaseCount); err != nil {
-		return err
-	}
-
-	if legacyCaseCount > 0 {
-		return fmt.Errorf("problem has legacy test cases, refuse to delete: %d", legacyCaseCount)
-	}
-
 	if _, err := tx.Exec(ctx, `DELETE FROM problem_files WHERE problem_id = $1`, problemID); err != nil {
 		return err
 	}
@@ -427,6 +430,18 @@ WHERE scope_type = 'problem'
 DELETE FROM permission_assignments
 WHERE scope_type = 'problem'
   AND scope_id = $1
+`,
+		problemID,
+	); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(
+		ctx,
+		`
+DELETE FROM resource_edges
+WHERE (parent_type = 'problem' AND parent_id = $1)
+   OR (child_type = 'problem' AND child_id = $1)
 `,
 		problemID,
 	); err != nil {

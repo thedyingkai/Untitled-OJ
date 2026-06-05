@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"ojos-gateway/internal/config"
+	"ojos-shared/security/internalauth"
 
 	sharedjwt "ojos-shared/security/jwt"
 
@@ -37,6 +38,7 @@ type routeProxy struct {
 func NewConfigProxy(
 	routes []config.ProxyRouteConfig,
 	jwtSecret string,
+	internalSigner *internalauth.Signer,
 	log *zap.Logger,
 ) (http.HandlerFunc, error) {
 	if len(routes) == 0 {
@@ -103,7 +105,8 @@ func NewConfigProxy(
 
 				pr.SetXForwarded()
 
-				clearTrustedAuthHeaders(pr.Out.Header)
+				internalauth.ClearTrustedAuthHeaders(pr.Out.Header)
+				internalauth.ClearInternalAuthHeaders(pr.Out.Header)
 
 				if claims, ok := claimsFromContext(pr.In.Context()); ok && claims != nil {
 					pr.Out.Header.Set("X-Auth-Verified", "true")
@@ -116,6 +119,20 @@ func NewConfigProxy(
 
 				pr.Out.Header.Set("X-Forwarded-Prefix", routePrefix)
 				pr.Out.Header.Set("X-Gateway", "ojos-gateway")
+
+				if internalSigner != nil {
+					if err := internalSigner.SignRequest(pr.Out.Context(), pr.Out); err != nil {
+						log.Error(
+							"gateway internal auth sign failed",
+							zap.String("method", pr.In.Method),
+							zap.String("path", pr.In.URL.Path),
+							zap.String("target", targetURL.String()),
+							zap.Error(err),
+						)
+
+						pr.Out.Header.Set("X-OJOS-Internal-Sign-Error", "true")
+					}
+				}
 
 				otel.GetTextMapPropagator().Inject(
 					pr.Out.Context(),
@@ -213,13 +230,6 @@ func authenticateRequest(
 func claimsFromContext(ctx context.Context) (*sharedjwt.Claims, bool) {
 	claims, ok := ctx.Value(claimsContextKey{}).(*sharedjwt.Claims)
 	return claims, ok
-}
-
-func clearTrustedAuthHeaders(header http.Header) {
-	header.Del("X-Auth-Verified")
-	header.Del("X-User-Id")
-	header.Del("X-Username")
-	header.Del("X-Roles")
 }
 
 func normalizeAuthMode(mode string) (string, error) {

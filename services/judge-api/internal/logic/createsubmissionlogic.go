@@ -112,8 +112,6 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 	return &types.CreateSubmissionResp{
 		SubmissionId: submissionID,
 		Status:       "PENDING",
-		CodePath:     files.CodePath,
-		ResultPath:   files.ResultPath,
 	}, nil
 }
 

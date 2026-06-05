@@ -3,10 +3,12 @@ package svc
 import (
 	"context"
 	"log"
+	"time"
 
 	"ojos-judge-api/internal/config"
 	"ojos-judge-api/internal/middleware"
 	"ojos-judge-api/internal/repository"
+	"ojos-shared/security/internalauth"
 
 	"ojos-shared/database"
 	sharedlogger "ojos-shared/logger"
@@ -29,7 +31,8 @@ type ServiceContext struct {
 	Repo  *repository.Repository
 	Redis *redis.Client
 
-	UserContextMiddleware rest.Middleware
+	UserContextMiddleware  rest.Middleware
+	InternalAuthMiddleware rest.Middleware
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
@@ -60,7 +63,26 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		log.Fatalf("ping redis failed: %v", err)
 	}
 
-	repo := repository.New(db)
+	internalAuthCfg := internalauth.Config{
+		Enabled:       c.InternalAuth.Enabled,
+		TimestampSkew: time.Duration(c.InternalAuth.TimestampSkewSeconds) * time.Second,
+		NonceTTL:      time.Duration(c.InternalAuth.NonceTTLSeconds) * time.Second,
+	}
+
+	var internalVerifier *internalauth.Verifier
+	if c.InternalAuth.Enabled {
+		internalKeyManager := internalauth.NewKeyManager(db, internalAuthCfg)
+		internalNonceStore := internalauth.RedisNonceStore{
+			Client: redisClient,
+			Prefix: "ojos:internal-auth:nonce:",
+		}
+
+		internalVerifier = internalauth.NewVerifier(
+			internalKeyManager,
+			internalNonceStore,
+			internalAuthCfg,
+		)
+	}
 
 	return &ServiceContext{
 		Config: c,
@@ -69,10 +91,14 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		DB:     db,
 		Tracer: tp,
 
-		Repo:  repo,
+		Repo:  repository.New(db),
 		Redis: redisClient,
 
 		UserContextMiddleware: middleware.NewUserContextMiddleware().Handle,
+		InternalAuthMiddleware: middleware.NewInternalAuthMiddleware(
+			c.InternalAuth.Enabled,
+			internalVerifier,
+		).Handle,
 	}
 }
 

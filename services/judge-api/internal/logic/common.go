@@ -42,9 +42,7 @@ func convertSubmission(s *repository.SubmissionView) types.GetSubmissionResp {
 		TimeMs:       s.TimeMS,
 		MemoryKb:     s.MemoryKB,
 		Message:      s.Message,
-		CodePath:     s.CodePath,
 		CodeSha256:   s.CodeSha256,
-		ResultPath:   s.ResultPath,
 		CancelReason: s.CancelReason,
 	}
 
@@ -80,15 +78,12 @@ func readResultCases(resultPath string) ([]types.SubmissionCaseItem, error) {
 	items := make([]types.SubmissionCaseItem, 0, len(result.Cases))
 	for _, c := range result.Cases {
 		items = append(items, types.SubmissionCaseItem{
-			CaseNo:         c.CaseNo,
-			Status:         c.Status,
-			Score:          c.Score,
-			TimeMs:         c.TimeMS,
-			MemoryKb:       c.MemoryKB,
-			StdoutPath:     c.StdoutPath,
-			StderrPath:     c.StderrPath,
-			CheckerLogPath: c.CheckerLogPath,
-			Message:        c.Message,
+			CaseNo:   c.CaseNo,
+			Status:   c.Status,
+			Score:    c.Score,
+			TimeMs:   c.TimeMS,
+			MemoryKb: c.MemoryKB,
+			Message:  c.Message,
 		})
 	}
 
