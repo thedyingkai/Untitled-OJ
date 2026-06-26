@@ -3,6 +3,8 @@ package svc
 import (
 	"context"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"ojos-judge-api/internal/config"
@@ -33,10 +35,20 @@ type ServiceContext struct {
 
 	UserContextMiddleware  rest.Middleware
 	InternalAuthMiddleware rest.Middleware
+	WorkerAuthMiddleware   rest.Middleware
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
 	ctx := context.Background()
+	applyEnvOverrides(&c)
+	if token := os.Getenv("OJOS_WORKER_TOKEN"); token != "" {
+		c.WorkerAuth.Token = token
+	}
+	if leaseTTL := os.Getenv("OJOS_TASK_LEASE_TTL"); leaseTTL != "" && c.WorkerAuth.LeaseTTLSeconds <= 0 {
+		if parsed, err := time.ParseDuration(leaseTTL + "s"); err == nil {
+			c.WorkerAuth.LeaseTTLSeconds = int64(parsed.Seconds())
+		}
+	}
 
 	zlog, err := sharedlogger.New(c.Name)
 	if err != nil {
@@ -99,7 +111,32 @@ func NewServiceContext(c config.Config) *ServiceContext {
 			c.InternalAuth.Enabled,
 			internalVerifier,
 		).Handle,
+		WorkerAuthMiddleware: middleware.NewWorkerAuthMiddleware(c.WorkerAuth.Token).Handle,
 	}
+}
+
+func applyEnvOverrides(c *config.Config) {
+	if value := firstEnv("DATABASE_URL", "POSTGRES_DSN"); value != "" {
+		c.Database.Url = value
+	}
+	if value := strings.TrimSpace(os.Getenv("REDIS_URL")); value != "" {
+		c.Redis.Url = value
+	}
+	if value := strings.TrimSpace(os.Getenv("JAEGER_ENDPOINT")); value != "" {
+		c.Jaeger.Endpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_SUBMISSIONS_ROOT")); value != "" {
+		c.Storage.SubmissionsRoot = value
+	}
+}
+
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *ServiceContext) Close(ctx context.Context) {

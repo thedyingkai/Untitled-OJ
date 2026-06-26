@@ -6,3 +6,125 @@ package types
 type HealthResp struct {
 	Status string `json:"status"`
 }
+
+type HealthComponent struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Latency int64  `json:"latency_ms"`
+	Message string `json:"message,optional"`
+}
+
+type AdminHealthResp struct {
+	Status            string            `json:"status"`
+	Components        []HealthComponent `json:"components"`
+	WorkerOnlineCount int64             `json:"worker_online_count"`
+	QueuePending      int64             `json:"queue_pending"`
+	InternalAuth      string            `json:"internal_auth"`
+}
+
+type ModuleSetItem struct {
+	SetId       string `json:"set_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	SortOrder   int    `json:"sort_order"`
+}
+
+type ModuleNodeItem struct {
+	ModuleId    string `json:"module_id"`
+	SetId       string `json:"set_id"`
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Status      string `json:"status"`
+	Kind        string `json:"kind"`
+	Description string `json:"description"`
+	Manifest    any    `json:"manifest,omitempty"`
+}
+
+type ModuleEdgeItem struct {
+	FromModuleId      string `json:"from_module_id"`
+	ToModuleId        string `json:"to_module_id"`
+	EdgeType          string `json:"edge_type"`
+	VersionConstraint string `json:"version_constraint"`
+	Required          bool   `json:"required"`
+}
+
+type ModuleComponentItem struct {
+	ModuleId      string `json:"module_id"`
+	ComponentId   string `json:"component_id"`
+	ComponentType string `json:"component_type"`
+	Status        string `json:"status"`
+	Config        any    `json:"config"`
+}
+
+type ModuleInstallationItem struct {
+	ModuleId   string `json:"module_id"`
+	Name       string `json:"name"`
+	Version    string `json:"version"`
+	Status     string `json:"status"`
+	Manifest   any    `json:"manifest"`
+	EnabledAt  string `json:"enabled_at,omitempty"`
+	DisabledAt string `json:"disabled_at,omitempty"`
+}
+
+type ModulePermissionItem struct {
+	ModuleId      string `json:"module_id"`
+	PermissionKey string `json:"permission_key"`
+	Description   string `json:"description"`
+}
+
+type ModuleMenuItem struct {
+	ModuleId           string `json:"module_id"`
+	MenuKey            string `json:"menu_key"`
+	Title              string `json:"title"`
+	RoutePath          string `json:"route_path"`
+	Icon               string `json:"icon"`
+	ParentKey          string `json:"parent_key"`
+	SortOrder          int    `json:"sort_order"`
+	RequiredPermission string `json:"required_permission"`
+	Enabled            bool   `json:"enabled"`
+}
+
+type ModuleFrontendRouteItem struct {
+	ModuleId           string `json:"module_id"`
+	RoutePath          string `json:"route_path"`
+	RouteName          string `json:"route_name"`
+	ComponentKey       string `json:"component_key"`
+	RequiredPermission string `json:"required_permission"`
+	Enabled            bool   `json:"enabled"`
+}
+
+type ModuleGatewayRouteItem struct {
+	ModuleId      string `json:"module_id"`
+	Prefix        string `json:"prefix"`
+	TargetService string `json:"target_service"`
+	AuthMode      string `json:"auth_mode"`
+	Enabled       bool   `json:"enabled"`
+}
+
+type ListModulesResp struct {
+	Modules []ModuleNodeItem `json:"modules"`
+}
+
+type ListModuleSetsResp struct {
+	Sets []ModuleSetItem `json:"sets"`
+}
+
+type ModuleTopologyResp struct {
+	Sets       []ModuleSetItem       `json:"sets"`
+	Nodes      []ModuleNodeItem      `json:"nodes"`
+	Edges      []ModuleEdgeItem      `json:"edges"`
+	Components []ModuleComponentItem `json:"components"`
+}
+
+type ModuleDetailResp struct {
+	Module         ModuleNodeItem            `json:"module"`
+	Dependencies   []ModuleEdgeItem          `json:"dependencies"`
+	Dependents     []ModuleEdgeItem          `json:"dependents"`
+	Components     []ModuleComponentItem     `json:"components"`
+	Permissions    []ModulePermissionItem    `json:"permissions"`
+	Menus          []ModuleMenuItem          `json:"menus"`
+	FrontendRoutes []ModuleFrontendRouteItem `json:"frontend_routes"`
+	GatewayRoutes  []ModuleGatewayRouteItem  `json:"gateway_routes"`
+	Installations  []ModuleInstallationItem  `json:"installations"`
+	HealthChecks   []ModuleComponentItem     `json:"health_checks"`
+}

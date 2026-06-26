@@ -76,8 +76,6 @@ func (l *AddTestCaseLogic) AddTestCase(req *types.AddTestCaseReq) (resp *types.A
 	}
 
 	return &types.AddTestCaseResp{
-		CaseNo:     result.CaseNo,
-		InputPath:  result.InputPath,
-		AnswerPath: result.AnswerPath,
+		CaseNo: result.CaseNo,
 	}, nil
 }

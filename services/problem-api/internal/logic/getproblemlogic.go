@@ -7,10 +7,10 @@ import (
 	"context"
 	"errors"
 
+	"ojos-problem-api/internal/packagefs"
 	"ojos-problem-api/internal/svc"
 	"ojos-problem-api/internal/types"
 	"ojos-shared/security/authctx"
-	"ojos-shared/security/permission"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -39,22 +39,25 @@ func (l *GetProblemLogic) GetProblem(req *types.GetProblemReq) (resp *types.GetP
 		return nil, errors.New("invalid problem id")
 	}
 
-	if err := permission.RequireUserPermission(
-		l.ctx,
-		l.svcCtx.DB,
-		user.UserID,
-		"problem.view",
-		permission.Scope{Type: "problem", ID: req.Id},
-	); err != nil {
-		return nil, err
-	}
-
-	p, err := l.svcCtx.Repo.GetProblem(l.ctx, req.Id)
+	canViewPrivate, err := l.svcCtx.Repo.CanViewPrivateProblems(l.ctx, user.UserID)
 	if err != nil {
 		return nil, err
 	}
 
+	p, err := l.svcCtx.Repo.GetProblemVisibleToUser(l.ctx, req.Id, user.UserID, canViewPrivate)
+	if err != nil {
+		return nil, err
+	}
+
+	item := convertProblem(*p)
+
+	samples, err := packagefs.ReadSamples(p.PackageDir)
+	if err != nil {
+		return nil, err
+	}
+	item.Samples = convertSamples(samples)
+
 	return &types.GetProblemResp{
-		Problem: convertProblem(*p),
+		Problem: item,
 	}, nil
 }

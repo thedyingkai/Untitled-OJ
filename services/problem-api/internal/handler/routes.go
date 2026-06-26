@@ -41,6 +41,21 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				},
 				{
 					Method:  http.MethodGet,
+					Path:    "/problems/:id/package",
+					Handler: getProblemPackageHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/problems/:id/package/validate",
+					Handler: validateProblemPackageHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/problems/:id/package/cases",
+					Handler: listPackageCasesHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
 					Path:    "/problems/:id",
 					Handler: getProblemHandler(serverCtx),
 				},

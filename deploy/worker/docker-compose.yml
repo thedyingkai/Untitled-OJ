@@ -1,0 +1,32 @@
+services:
+  judge-worker:
+    build:
+      context: ../../services
+      dockerfile: judge-worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      LANGUAGES_CONFIG: config/languages.yaml
+      OJOS_WORKER_ID: ${OJOS_WORKER_ID}
+      OJOS_WORKER_NAME: ${OJOS_WORKER_NAME}
+      OJOS_CONTROL_PLANE_URL: ${OJOS_CONTROL_PLANE_URL}
+      OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN}
+      OJOS_MAX_CONCURRENCY: ${OJOS_MAX_CONCURRENCY:-1}
+      OJOS_WORK_DIR: /var/lib/ojos-worker/work
+      OJOS_ARTIFACT_CACHE_DIR: /var/lib/ojos-worker/cache
+      OJOS_SUPPORTED_LANGUAGES: ${OJOS_SUPPORTED_LANGUAGES:-cpp17,c11,python3,java17}
+      OJOS_HEARTBEAT_INTERVAL: ${OJOS_HEARTBEAT_INTERVAL:-10}
+      OJOS_TASK_LEASE_TTL: ${OJOS_TASK_LEASE_TTL:-60}
+      OJOS_CGROUP_V2_ROOT: /sys/fs/cgroup
+      RUST_LOG: ${OJOS_LOG_LEVEL:-info}
+    cap_add:
+      - SYS_ADMIN
+      - SYS_CHROOT
+      - SETUID
+      - SETGID
+      - NET_ADMIN
+    volumes:
+      - worker-data:/var/lib/ojos-worker
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+volumes:
+  worker-data:

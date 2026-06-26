@@ -46,10 +46,11 @@ func (l *LoginLogic) Login(req *types.LoginReq) (resp *types.LoginResp, err erro
 		Code: 0,
 		Msg:  "success",
 		Data: types.LoginData{
-			Token:    result.Token,
-			UserId:   result.UserID,
-			Username: result.Username,
-			Roles:    result.Roles,
+			Token:       result.Token,
+			UserId:      result.UserID,
+			Username:    result.Username,
+			Roles:       result.Roles,
+			Permissions: result.Permissions,
 		},
 	}, nil
 }

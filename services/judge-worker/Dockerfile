@@ -22,7 +22,7 @@ RUN apt-get update \
     && git clone --depth=1 https://github.com/google/nsjail.git /tmp/nsjail \
     && make -C /tmp/nsjail \
     && cp /tmp/nsjail/nsjail /usr/local/bin/nsjail \
-    && mkdir -p /jail/root /data/ojos/problems /data/ojos/submissions \
+    && mkdir -p /jail/root /var/lib/ojos-worker/work /var/lib/ojos-worker/cache \
     && groupadd -g 10001 sandbox \
     && useradd -u 10001 -g 10001 -M -s /usr/sbin/nologin sandbox \
     && rm -rf /tmp/nsjail \

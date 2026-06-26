@@ -15,7 +15,7 @@ type CancelSubmissionResp struct {
 
 type CreateSubmissionReq struct {
 	ProblemId int64  `json:"problem_id"`
-	Language  string `json:"language,optional"`
+	Language  string `json:"language"`
 	Code      string `json:"code"`
 }
 
@@ -24,12 +24,61 @@ type CreateSubmissionResp struct {
 	Status       string `json:"status"`
 }
 
+type ListSubmissionsReq struct {
+	Page        int    `form:"page,optional"`
+	PageSize    int    `form:"page_size,optional"`
+	Status      string `form:"status,optional"`
+	ProblemId   int64  `form:"problem_id,optional"`
+	UserId      int64  `form:"user_id,optional"`
+	Language    string `form:"language,optional"`
+	CreatedFrom string `form:"created_from,optional"`
+	CreatedTo   string `form:"created_to,optional"`
+}
+
+type SubmissionItem struct {
+	Id           int64  `json:"id"`
+	ProblemId    int64  `json:"problem_id"`
+	UserId       int64  `json:"user_id"`
+	Language     string `json:"language"`
+	Status       string `json:"status"`
+	Score        int    `json:"score"`
+	TimeMs       int    `json:"time_ms"`
+	MemoryKb     int    `json:"memory_kb"`
+	Message      string `json:"message,optional"`
+	CodeSha256   string `json:"code_sha256,optional"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+	JudgedAt     string `json:"judged_at,optional"`
+	CancelledAt  string `json:"cancelled_at,optional"`
+	CancelReason string `json:"cancel_reason,optional"`
+}
+
+type ListSubmissionsResp struct {
+	Submissions []SubmissionItem `json:"submissions"`
+	Total       int64            `json:"total"`
+}
+
 type GetSubmissionCasesReq struct {
 	Id int64 `path:"id"`
 }
 
 type GetSubmissionCasesResp struct {
 	Cases []SubmissionCaseItem `json:"cases"`
+}
+
+type GetSubmissionDebugLogsReq struct {
+	Id       int64 `path:"id"`
+	CaseNo   int   `form:"case_no,optional"`
+	MaxBytes int   `form:"max_bytes,optional"`
+}
+
+type SubmissionDebugLogsResp struct {
+	CaseNo     int    `json:"case_no"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	CheckerLog string `json:"checker_log"`
+	Truncated  bool   `json:"truncated"`
+	MaxBytes   int    `json:"max_bytes"`
 }
 
 type GetSubmissionReq struct {
@@ -47,9 +96,205 @@ type GetSubmissionResp struct {
 	MemoryKb     int    `json:"memory_kb"`
 	Message      string `json:"message,optional"`
 	CodeSha256   string `json:"code_sha256"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 	JudgedAt     string `json:"judged_at,optional"`
 	CancelledAt  string `json:"cancelled_at,optional"`
 	CancelReason string `json:"cancel_reason,optional"`
+}
+
+type JudgeLanguage struct {
+	Id          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	Version     string `json:"version,optional"`
+	Enabled     bool   `json:"enabled"`
+}
+
+type ListLanguagesResp struct {
+	Languages []JudgeLanguage `json:"languages"`
+}
+
+type WorkerRegisterReq struct {
+	WorkerId           string   `json:"worker_id"`
+	WorkerName         string   `json:"worker_name,optional"`
+	Hostname           string   `json:"hostname,optional"`
+	Version            string   `json:"version,optional"`
+	Capabilities       []string `json:"capabilities,optional"`
+	SupportedLanguages []string `json:"supported_languages,optional"`
+	MaxConcurrency     int      `json:"max_concurrency"`
+}
+
+type WorkerRegisterResp struct {
+	WorkerId        string `json:"worker_id"`
+	HeartbeatEveryS int    `json:"heartbeat_every_s"`
+	LeaseTtlSeconds int64  `json:"lease_ttl_seconds"`
+	Status          string `json:"status"`
+}
+
+type WorkerHeartbeatReq struct {
+	WorkerId      string   `json:"worker_id"`
+	RunningTasks  []string `json:"running_tasks,optional"`
+	RunningCount  int      `json:"running_count"`
+	AvailableSlot int      `json:"available_slots,optional"`
+}
+
+type WorkerHeartbeatResp struct {
+	WorkerId string `json:"worker_id"`
+	Status   string `json:"status"`
+}
+
+type WorkerClaimTasksReq struct {
+	WorkerId           string   `json:"worker_id"`
+	Capabilities       []string `json:"capabilities,optional"`
+	SupportedLanguages []string `json:"supported_languages,optional"`
+	AvailableSlots     int      `json:"available_slots"`
+}
+
+type WorkerArtifactRef struct {
+	Url         string `json:"url"`
+	Sha256      string `json:"sha256"`
+	SizeBytes   int64  `json:"size_bytes"`
+	ContentType string `json:"content_type"`
+}
+
+type WorkerTaskLease struct {
+	TaskId         string            `json:"task_id"`
+	SubmissionId   int64             `json:"submission_id"`
+	ProblemId      int64             `json:"problem_id"`
+	Language       string            `json:"language"`
+	Attempt        int               `json:"attempt"`
+	LeaseVersion   int               `json:"lease_version"`
+	LeaseExpiresAt string            `json:"lease_expires_at"`
+	Source         WorkerArtifactRef `json:"source"`
+	ProblemPackage WorkerArtifactRef `json:"problem_package"`
+}
+
+type WorkerClaimTasksResp struct {
+	Tasks []WorkerTaskLease `json:"tasks"`
+}
+
+type WorkerTaskHeartbeatReq struct {
+	TaskId       string `path:"task_id"`
+	WorkerId     string `json:"worker_id"`
+	LeaseVersion int    `json:"lease_version"`
+}
+
+type WorkerTaskHeartbeatResp struct {
+	TaskId         string `json:"task_id"`
+	LeaseVersion   int    `json:"lease_version"`
+	LeaseExpiresAt string `json:"lease_expires_at"`
+}
+
+type WorkerResultCase struct {
+	CaseNo     int    `json:"case_no"`
+	Status     string `json:"status"`
+	Score      int    `json:"score"`
+	TimeMs     int    `json:"time_ms"`
+	MemoryKb   int    `json:"memory_kb"`
+	Message    string `json:"message,optional"`
+	Stdout     string `json:"stdout,optional"`
+	Stderr     string `json:"stderr,optional"`
+	CheckerLog string `json:"checker_log,optional"`
+}
+
+type WorkerSubmitResultReq struct {
+	TaskId       string             `path:"task_id"`
+	WorkerId     string             `json:"worker_id"`
+	LeaseVersion int                `json:"lease_version"`
+	Status       string             `json:"status"`
+	Score        int                `json:"score"`
+	TimeMs       int                `json:"time_ms"`
+	MemoryKb     int                `json:"memory_kb"`
+	Message      string             `json:"message,optional"`
+	Cases        []WorkerResultCase `json:"cases,optional"`
+}
+
+type WorkerSubmitResultResp struct {
+	Accepted bool   `json:"accepted"`
+	Status   string `json:"status"`
+}
+
+type WorkerFailTaskReq struct {
+	TaskId       string `path:"task_id"`
+	WorkerId     string `json:"worker_id"`
+	LeaseVersion int    `json:"lease_version"`
+	ErrorType    string `json:"error_type"`
+	Message      string `json:"message"`
+	Retryable    bool   `json:"retryable"`
+}
+
+type WorkerFailTaskResp struct {
+	Accepted bool   `json:"accepted"`
+	Status   string `json:"status"`
+}
+
+type WorkerArtifactSourceReq struct {
+	Id           int64  `path:"id"`
+	TaskId       string `form:"task_id"`
+	WorkerId     string `form:"worker_id"`
+	LeaseVersion int    `form:"lease_version"`
+}
+
+type WorkerArtifactProblemPackageReq struct {
+	Id           int64  `path:"id"`
+	TaskId       string `form:"task_id"`
+	WorkerId     string `form:"worker_id"`
+	LeaseVersion int    `form:"lease_version"`
+}
+
+type AdminQueueResp struct {
+	StreamLength      int64  `json:"stream_length"`
+	PendingCount      int64  `json:"pending_count"`
+	ConsumerGroup     string `json:"consumer_group"`
+	LastId            string `json:"last_id"`
+	TrimStrategy      string `json:"trim_strategy"`
+	PendingOldestIdle int64  `json:"pending_oldest_idle_ms"`
+	Scheduled         int64  `json:"scheduled"`
+	Pending           int64  `json:"pending"`
+	Judging           int64  `json:"judging"`
+}
+
+type AdminWorkerItem struct {
+	WorkerId           string   `json:"worker_id"`
+	WorkerName         string   `json:"worker_name"`
+	Hostname           string   `json:"hostname"`
+	Version            string   `json:"version"`
+	Capabilities       []string `json:"capabilities"`
+	SupportedLanguages []string `json:"supported_languages"`
+	MaxConcurrency     int      `json:"max_concurrency"`
+	RunningCount       int      `json:"running_count"`
+	LastSeen           string   `json:"last_seen"`
+	Status             string   `json:"status"`
+}
+
+type AdminWorkersResp struct {
+	Workers []AdminWorkerItem `json:"workers"`
+}
+
+type AdminTaskItem struct {
+	TaskId         string `json:"task_id"`
+	SubmissionId   int64  `json:"submission_id"`
+	WorkerId       string `json:"worker_id,optional"`
+	Status         string `json:"status"`
+	LeaseExpiresAt string `json:"lease_expires_at,optional"`
+	Attempt        int    `json:"attempt"`
+	HeartbeatAt    string `json:"heartbeat_at,optional"`
+}
+
+type AdminTasksResp struct {
+	Tasks []AdminTaskItem `json:"tasks"`
+}
+
+type AdminWorkerActionReq struct {
+	Id string `path:"id"`
+}
+
+type AdminActionResp struct {
+	Ok bool `json:"ok"`
+}
+
+type AdminSubmissionActionReq struct {
+	Id int64 `path:"id"`
 }
 
 type RejudgeProblemReq struct {

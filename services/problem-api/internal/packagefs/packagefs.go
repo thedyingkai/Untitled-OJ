@@ -118,6 +118,12 @@ type CaseRecord struct {
 	MemoryLimitMb int    `yaml:"memory_limit_mb,omitempty"`
 }
 
+type SampleRecord struct {
+	CaseNo int
+	Input  string
+	Output string
+}
+
 type CreateProblemArgs struct {
 	Root          string
 	ID            int64
@@ -199,13 +205,13 @@ func CreateInitialPackage(arg CreateProblemArgs) (*CreateProblemResult, error) {
 
 	statement := strings.TrimSpace(arg.Statement)
 	if statement == "" {
-		statement = fmt.Sprintf("# %s\n\nTODO: write statement.\n", arg.Title)
+		statement = fmt.Sprintf("# %s\n\nDescribe the task, input format, output format, constraints and samples here.\n", arg.Title)
 	}
 
 	files := map[string][]byte{}
 
 	files["statement/zh-cn.md"] = []byte(statement + "\n")
-	files["tutorial/zh-cn.md"] = []byte("# Tutorial\n\nTODO: write tutorial.\n")
+	files["tutorial/zh-cn.md"] = []byte("# Tutorial\n\nAdd the official solution explanation here.\n")
 	files["tutorial/std.cpp"] = []byte(`#include <bits/stdc++.h>
 using namespace std;
 
@@ -576,6 +582,53 @@ func ListCases(packageDir string) ([]CaseRecord, error) {
 	return cases.Cases, nil
 }
 
+func ReadSamples(packageDir string) ([]SampleRecord, error) {
+	const maxSampleBytes = 64 * 1024
+
+	cases, err := ListCases(packageDir)
+	if err != nil {
+		return nil, err
+	}
+
+	testsRoot, err := safeJoin(packageDir, "tests")
+	if err != nil {
+		return nil, err
+	}
+
+	samples := make([]SampleRecord, 0)
+	for _, c := range cases {
+		if !c.Sample {
+			continue
+		}
+
+		inputPath, err := safeJoin(testsRoot, c.Input)
+		if err != nil {
+			return nil, err
+		}
+		answerPath, err := safeJoin(testsRoot, c.Answer)
+		if err != nil {
+			return nil, err
+		}
+
+		input, err := readSmallTextFile(inputPath, maxSampleBytes)
+		if err != nil {
+			return nil, err
+		}
+		answer, err := readSmallTextFile(answerPath, maxSampleBytes)
+		if err != nil {
+			return nil, err
+		}
+
+		samples = append(samples, SampleRecord{
+			CaseNo: c.No,
+			Input:  input,
+			Output: answer,
+		})
+	}
+
+	return samples, nil
+}
+
 func DeleteCase(packageDir string, caseNo int) ([]string, []IndexedFile, error) {
 	if caseNo <= 0 {
 		return nil, nil, errors.New("invalid case no")
@@ -803,6 +856,59 @@ func DeletePackageDir(root string, packageDir string) error {
 	}
 
 	return os.RemoveAll(absDir)
+}
+
+func safeJoin(base string, child string) (string, error) {
+	if strings.TrimSpace(child) == "" {
+		return "", errors.New("empty relative path")
+	}
+
+	cleanChild := filepath.Clean(filepath.FromSlash(child))
+	if filepath.IsAbs(cleanChild) {
+		return "", fmt.Errorf("absolute path is not allowed: %s", child)
+	}
+
+	for _, part := range strings.Split(cleanChild, string(filepath.Separator)) {
+		if part == ".." {
+			return "", fmt.Errorf("parent path is not allowed: %s", child)
+		}
+	}
+
+	full := filepath.Join(base, cleanChild)
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return "", err
+	}
+	absFull, err := filepath.Abs(full)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absBase, absFull)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("path escapes base: %s", child)
+	}
+
+	return full, nil
+}
+
+func readSmallTextFile(path string, maxBytes int64) (string, error) {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if stat.Size() > maxBytes {
+		return "", fmt.Errorf("sample file too large: %s", filepath.Base(path))
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	return string(data), nil
 }
 
 type UpdateCaseArgs struct {

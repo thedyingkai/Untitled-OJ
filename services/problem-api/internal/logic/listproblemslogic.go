@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 
+	"ojos-problem-api/internal/repository"
 	"ojos-problem-api/internal/svc"
 	"ojos-problem-api/internal/types"
 	"ojos-shared/security/authctx"
@@ -45,7 +46,24 @@ func (l *ListProblemsLogic) ListProblems(req *types.ListProblemsReq) (resp *type
 		return nil, err
 	}
 
-	problems, total, err := l.svcCtx.Repo.ListProblems(l.ctx, req.Page, req.PageSize)
+	canViewPrivate, err := l.svcCtx.Repo.CanViewPrivateProblems(l.ctx, user.UserID)
+	if err != nil {
+		return nil, err
+	}
+
+	problems, total, err := l.svcCtx.Repo.ListProblems(
+		l.ctx,
+		repository.ListProblemsFilter{
+			UserID:         user.UserID,
+			CanViewPrivate: canViewPrivate,
+			Page:           req.Page,
+			PageSize:       req.PageSize,
+			Keyword:        req.Keyword,
+			Visibility:     req.Visibility,
+			Difficulty:     req.Difficulty,
+			Tags:           parseTags(req.Tags),
+		},
+	)
 	if err != nil {
 		return nil, err
 	}

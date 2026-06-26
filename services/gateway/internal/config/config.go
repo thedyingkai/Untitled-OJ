@@ -9,13 +9,19 @@ type Config struct {
 	rest.RestConf
 
 	Database     DatabaseConfig
+	Redis        RedisConfig
 	Jaeger       JaegerConfig
 	Jwt          JwtConfig
+	Storage      StorageConfig
 	Proxy        ProxyConfig
 	InternalAuth InternalAuthConfig
 }
 
 type DatabaseConfig struct {
+	Url string
+}
+
+type RedisConfig struct {
 	Url string
 }
 
@@ -25,6 +31,11 @@ type JaegerConfig struct {
 
 type JwtConfig struct {
 	Secret string
+}
+
+type StorageConfig struct {
+	ProblemsRoot    string `json:",optional"`
+	SubmissionsRoot string `json:",optional"`
 }
 
 type ProxyConfig struct {

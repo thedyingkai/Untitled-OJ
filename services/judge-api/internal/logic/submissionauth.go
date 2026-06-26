@@ -24,6 +24,53 @@ func requireSubmissionViewPermission(
 		return nil
 	}
 
+	ok, err := sharedperm.HasUserPermission(
+		ctx,
+		svcCtx.DB,
+		user.UserID,
+		"submission.view.all",
+		sharedperm.SystemScope(),
+	)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+
+	return sharedperm.RequireUserPermission(
+		ctx,
+		svcCtx.DB,
+		user.UserID,
+		"problem.manage.data",
+		sharedperm.Scope{Type: "problem", ID: submission.ProblemID},
+	)
+}
+
+func requireSubmissionDebugPermission(
+	ctx context.Context,
+	svcCtx *svc.ServiceContext,
+	submission *repository.SubmissionView,
+) error {
+	user, ok := authctx.FromContext(ctx)
+	if !ok || user == nil || user.UserID <= 0 {
+		return errors.New("unauthorized")
+	}
+
+	ok, err := sharedperm.HasUserPermission(
+		ctx,
+		svcCtx.DB,
+		user.UserID,
+		"submission.view.all",
+		sharedperm.SystemScope(),
+	)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+
 	return sharedperm.RequireUserPermission(
 		ctx,
 		svcCtx.DB,

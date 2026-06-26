@@ -16,13 +16,90 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 		rest.WithMiddlewares(
 			[]rest.Middleware{
 				serverCtx.InternalAuthMiddleware,
-				serverCtx.UserContextMiddleware,
+				serverCtx.WorkerAuthMiddleware,
 			},
 			[]rest.Route{
 				{
 					Method:  http.MethodPost,
-					Path:    "/problems/:id/rejudge",
-					Handler: rejudgeProblemHandler(serverCtx),
+					Path:    "/worker/register",
+					Handler: workerRegisterHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/heartbeat",
+					Handler: workerHeartbeatHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/tasks/claim",
+					Handler: workerClaimTasksHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/tasks/:task_id/heartbeat",
+					Handler: workerTaskHeartbeatHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/tasks/:task_id/result",
+					Handler: workerSubmitResultHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/tasks/:task_id/fail",
+					Handler: workerFailTaskHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/worker/artifacts/submissions/:id/source",
+					Handler: workerArtifactSubmissionSourceHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/worker/artifacts/problems/:id/package",
+					Handler: workerArtifactProblemPackageHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/judge"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{
+				serverCtx.InternalAuthMiddleware,
+				serverCtx.UserContextMiddleware,
+			},
+			[]rest.Route{
+				{
+					Method:  http.MethodGet,
+					Path:    "/languages",
+					Handler: listLanguagesHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/queue",
+					Handler: adminQueueHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/workers",
+					Handler: adminWorkersHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/tasks",
+					Handler: adminTasksHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/workers/:id/drain",
+					Handler: adminDrainWorkerHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/submissions/:id/requeue",
+					Handler: adminRequeueSubmissionHandler(serverCtx),
 				},
 				{
 					Method:  http.MethodPost,
@@ -31,8 +108,18 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				},
 				{
 					Method:  http.MethodGet,
-					Path:    "/submissions/:id",
-					Handler: getSubmissionHandler(serverCtx),
+					Path:    "/submissions",
+					Handler: listSubmissionsHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/submissions/:id/cases",
+					Handler: getSubmissionCasesHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/submissions/:id/debug-logs",
+					Handler: getSubmissionDebugLogsHandler(serverCtx),
 				},
 				{
 					Method:  http.MethodPost,
@@ -41,8 +128,13 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				},
 				{
 					Method:  http.MethodGet,
-					Path:    "/submissions/:id/cases",
-					Handler: getSubmissionCasesHandler(serverCtx),
+					Path:    "/submissions/:id",
+					Handler: getSubmissionHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/problems/:id/rejudge",
+					Handler: rejudgeProblemHandler(serverCtx),
 				},
 			}...,
 		),

@@ -6,6 +6,8 @@ package svc
 import (
 	"context"
 	"log"
+	"os"
+	"strings"
 
 	"ojos-auth/internal/config"
 	authmw "ojos-auth/internal/middleware"
@@ -30,6 +32,7 @@ type ServiceContext struct {
 	Tracer *sdktrace.TracerProvider
 
 	UserRepo    *repository.UserRepository
+	AdminRepo   *repository.AdminRepository
 	AuthService *service.AuthService
 
 	AuthMiddleware rest.Middleware
@@ -37,6 +40,7 @@ type ServiceContext struct {
 
 func NewServiceContext(c config.Config) *ServiceContext {
 	ctx := context.Background()
+	applyEnvOverrides(&c)
 
 	zlog, err := sharedlogger.New(c.Name)
 	if err != nil {
@@ -54,6 +58,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	}
 
 	userRepo := repository.NewUserRepository(db)
+	adminRepo := repository.NewAdminRepository(db)
 
 	authService := service.NewAuthService(
 		userRepo,
@@ -69,10 +74,32 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		Tracer: tp,
 
 		UserRepo:    userRepo,
+		AdminRepo:   adminRepo,
 		AuthService: authService,
 
 		AuthMiddleware: authmw.NewAuthMiddleware(c.Jwt.Secret).Handle,
 	}
+}
+
+func applyEnvOverrides(c *config.Config) {
+	if value := firstEnv("DATABASE_URL", "POSTGRES_DSN"); value != "" {
+		c.Database.Url = value
+	}
+	if value := strings.TrimSpace(os.Getenv("JAEGER_ENDPOINT")); value != "" {
+		c.Jaeger.Endpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("JWT_SECRET")); value != "" {
+		c.Jwt.Secret = value
+	}
+}
+
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *ServiceContext) Close(ctx context.Context) {

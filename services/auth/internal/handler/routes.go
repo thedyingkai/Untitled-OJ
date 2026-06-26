@@ -47,6 +47,56 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 					Path:    "/profile",
 					Handler: profileHandler(serverCtx),
 				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/me",
+					Handler: profileHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/users",
+					Handler: listUsersHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/roles",
+					Handler: listRolesHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/permissions",
+					Handler: listPermissionsHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/users/roles",
+					Handler: addUserRoleHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodDelete,
+					Path:    "/admin/users/roles",
+					Handler: removeUserRoleHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/problems/roles",
+					Handler: addProblemRoleHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodDelete,
+					Path:    "/admin/problems/roles",
+					Handler: removeProblemRoleHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/permission-check",
+					Handler: permissionCheckHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/audit-logs",
+					Handler: listAuditLogsHandler(serverCtx),
+				},
 			}...,
 		),
 		rest.WithPrefix("/auth"),

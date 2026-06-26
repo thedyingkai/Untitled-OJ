@@ -3,10 +3,10 @@ Host: 0.0.0.0
 Port: 8083
 
 Database:
-  Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
+  Url: ""
 
 Redis:
-  Url: redis://ojos-redis:6379/0
+  Url: ""
 
 Jaeger:
   Endpoint: ojos-jaeger:4317

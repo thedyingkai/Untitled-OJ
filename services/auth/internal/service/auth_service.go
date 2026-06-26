@@ -97,10 +97,11 @@ type LoginRequest struct {
 }
 
 type LoginResult struct {
-	Token    string   `json:"token"`
-	UserID   int64    `json:"user_id"`
-	Username string   `json:"username"`
-	Roles    []string `json:"roles"`
+	Token       string   `json:"token"`
+	UserID      int64    `json:"user_id"`
+	Username    string   `json:"username"`
+	Roles       []string `json:"roles"`
+	Permissions []string `json:"permissions"`
 }
 
 func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult, error) {
@@ -129,6 +130,11 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 		return nil, err
 	}
 
+	permissions, err := s.userRepo.GetPermissionCodesByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
 	tokenString, err := token.Generate(
 		s.jwtSecret,
 		s.jwtExpireHours,
@@ -142,9 +148,10 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 	}
 
 	return &LoginResult{
-		Token:    tokenString,
-		UserID:   userID,
-		Username: username,
-		Roles:    roles,
+		Token:       tokenString,
+		UserID:      userID,
+		Username:    username,
+		Roles:       roles,
+		Permissions: permissions,
 	}, nil
 }

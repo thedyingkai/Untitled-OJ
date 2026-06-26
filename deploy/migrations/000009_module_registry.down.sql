@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS module_gateway_routes;
+DROP TABLE IF EXISTS module_frontend_routes;
+DROP TABLE IF EXISTS module_menus;
+DROP TABLE IF EXISTS module_permissions;
+DROP TABLE IF EXISTS module_migrations;
+DROP TABLE IF EXISTS module_installations;
+DROP TABLE IF EXISTS module_components;
+DROP TABLE IF EXISTS module_edges;
+DROP TABLE IF EXISTS module_nodes;
+DROP TABLE IF EXISTS module_sets;

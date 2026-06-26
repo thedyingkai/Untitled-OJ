@@ -12,6 +12,9 @@ type Config struct {
 	Redis        RedisConfig
 	Jaeger       JaegerConfig
 	Storage      StorageConfig
+	Submission   SubmissionConfig
+	Languages    LanguagesConfig
+	WorkerAuth   WorkerAuthConfig
 	InternalAuth InternalAuthConfig
 }
 
@@ -29,6 +32,26 @@ type JaegerConfig struct {
 
 type StorageConfig struct {
 	SubmissionsRoot string
+}
+
+type SubmissionConfig struct {
+	MaxCodeBytes int64 `json:",optional"`
+}
+
+type LanguagesConfig struct {
+	Items []LanguageConfig `json:",optional"`
+}
+
+type LanguageConfig struct {
+	Id          string
+	DisplayName string
+	Version     string `json:",optional"`
+	Enabled     bool
+}
+
+type WorkerAuthConfig struct {
+	Token           string `json:",optional"`
+	LeaseTTLSeconds int64  `json:",optional"`
 }
 
 type InternalAuthConfig struct {

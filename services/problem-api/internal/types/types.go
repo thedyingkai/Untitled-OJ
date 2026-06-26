@@ -17,9 +17,7 @@ type AddTestCaseReq struct {
 }
 
 type AddTestCaseResp struct {
-	CaseNo     int    `json:"case_no"`
-	InputPath  string `json:"input_path"`
-	AnswerPath string `json:"answer_path"`
+	CaseNo int `json:"case_no"`
 }
 
 type CreateProblemReq struct {
@@ -30,12 +28,13 @@ type CreateProblemReq struct {
 	MemoryLimitMb int    `json:"memory_limit_mb,optional"`
 	ProblemType   string `json:"problem_type,optional"`
 	Visibility    string `json:"visibility,optional"`
+	Difficulty    string `json:"difficulty,optional"`
+	Tags          string `json:"tags,optional"`
 }
 
 type CreateProblemResp struct {
-	ProblemId  int64  `json:"problem_id"`
-	Slug       string `json:"slug"`
-	PackageDir string `json:"package_dir"`
+	ProblemId int64  `json:"problem_id"`
+	Slug      string `json:"slug"`
 }
 
 type DeleteProblemReq struct {
@@ -68,8 +67,12 @@ type HealthResp struct {
 }
 
 type ListProblemsReq struct {
-	Page     int `form:"page,optional"`
-	PageSize int `form:"page_size,optional"`
+	Page       int    `form:"page,optional"`
+	PageSize   int    `form:"page_size,optional"`
+	Keyword    string `form:"keyword,optional"`
+	Visibility string `form:"visibility,optional"`
+	Difficulty string `form:"difficulty,optional"`
+	Tags       string `form:"tags,optional"`
 }
 
 type ListProblemsResp struct {
@@ -85,23 +88,107 @@ type ListTestCasesResp struct {
 	Cases []TestCaseItem `json:"cases"`
 }
 
+type GetProblemPackageReq struct {
+	ProblemId int64 `path:"id"`
+}
+
+type GetProblemPackageResp struct {
+	Package    PackageSummary          `json:"package"`
+	Validation PackageValidationResult `json:"validation"`
+}
+
+type ValidateProblemPackageReq struct {
+	ProblemId int64 `path:"id"`
+}
+
+type ValidateProblemPackageResp struct {
+	Validation PackageValidationResult `json:"validation"`
+}
+
+type ListPackageCasesReq struct {
+	ProblemId int64 `path:"id"`
+}
+
+type ListPackageCasesResp struct {
+	Cases []TestCaseItem `json:"cases"`
+}
+
+type PackageComponent struct {
+	Type       string `json:"type"`
+	Name       string `json:"name"`
+	ConfigPath string `json:"config_path"`
+}
+
+type PackageLanguageLimit struct {
+	Language      string `json:"language"`
+	TimeLimitMs   int    `json:"time_limit_ms"`
+	MemoryLimitMb int    `json:"memory_limit_mb"`
+}
+
+type PackageLimits struct {
+	DefaultTimeLimitMs   int                    `json:"default_time_limit_ms"`
+	DefaultMemoryLimitMb int                    `json:"default_memory_limit_mb"`
+	Languages            []PackageLanguageLimit `json:"languages"`
+}
+
+type PackageSummary struct {
+	Schema         string           `json:"schema"`
+	Slug           string           `json:"slug"`
+	Title          string           `json:"title"`
+	ProblemType    string           `json:"problem_type"`
+	Visibility     string           `json:"visibility"`
+	Status         string           `json:"status"`
+	SourceFormat   string           `json:"source_format"`
+	ManifestSha256 string           `json:"manifest_sha256"`
+	TotalCases     int              `json:"total_cases"`
+	TotalScore     int              `json:"total_score"`
+	SampleCount    int              `json:"sample_count"`
+	FileCount      int              `json:"file_count"`
+	SizeBytes      int64            `json:"size_bytes"`
+	Limits         PackageLimits    `json:"limits"`
+	Runner         PackageComponent `json:"runner"`
+	Checker        PackageComponent `json:"checker"`
+	Scorer         PackageComponent `json:"scorer"`
+}
+
+type PackageValidationIssue struct {
+	Level   string `json:"level"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Path    string `json:"path,optional"`
+	CaseNo  int    `json:"case_no,optional"`
+}
+
+type PackageValidationResult struct {
+	Valid    bool                     `json:"valid"`
+	Errors   []PackageValidationIssue `json:"errors"`
+	Warnings []PackageValidationIssue `json:"warnings"`
+}
+
 type ProblemItem struct {
-	Id             int64  `json:"id"`
-	Slug           string `json:"slug"`
-	Title          string `json:"title"`
-	Statement      string `json:"statement"`
-	ProblemType    string `json:"problem_type"`
-	Visibility     string `json:"visibility"`
-	PackageDir     string `json:"package_dir"`
-	ManifestPath   string `json:"manifest_path"`
-	ManifestSha256 string `json:"manifest_sha256"`
-	SourceFormat   string `json:"source_format"`
-	Status         string `json:"status"`
-	TimeLimitMs    int    `json:"time_limit_ms"`
-	MemoryLimitMb  int    `json:"memory_limit_mb"`
-	CreatedBy      int64  `json:"created_by"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
+	Id             int64           `json:"id"`
+	Slug           string          `json:"slug"`
+	Title          string          `json:"title"`
+	Statement      string          `json:"statement"`
+	ProblemType    string          `json:"problem_type"`
+	Visibility     string          `json:"visibility"`
+	ManifestSha256 string          `json:"manifest_sha256"`
+	SourceFormat   string          `json:"source_format"`
+	Status         string          `json:"status"`
+	Difficulty     string          `json:"difficulty"`
+	Tags           string          `json:"tags"`
+	TimeLimitMs    int             `json:"time_limit_ms"`
+	MemoryLimitMb  int             `json:"memory_limit_mb"`
+	CreatedBy      int64           `json:"created_by"`
+	CreatedAt      string          `json:"created_at"`
+	UpdatedAt      string          `json:"updated_at"`
+	Samples        []ProblemSample `json:"samples,optional"`
+}
+
+type ProblemSample struct {
+	CaseNo int    `json:"case_no"`
+	Input  string `json:"input"`
+	Output string `json:"output"`
 }
 
 type TestCaseItem struct {
@@ -124,6 +211,8 @@ type UpdateProblemReq struct {
 	MemoryLimitMb int    `json:"memory_limit_mb,optional"`
 	ProblemType   string `json:"problem_type,optional"`
 	Visibility    string `json:"visibility,optional"`
+	Difficulty    string `json:"difficulty,optional"`
+	Tags          string `json:"tags,optional"`
 	Status        string `json:"status,optional"`
 }
 
@@ -141,7 +230,5 @@ type UpdateTestCaseReq struct {
 }
 
 type UpdateTestCaseResp struct {
-	CaseNo     int    `json:"case_no"`
-	InputPath  string `json:"input_path"`
-	AnswerPath string `json:"answer_path"`
+	CaseNo int `json:"case_no"`
 }

@@ -38,10 +38,13 @@ log/
 # -------------------------
 tmp/
 temp/
+.tmp/
 .cache/
 .cache-*/
 *.tmp
 *.bak
+*.old
+*.orig
 *.backup
 
 # -------------------------

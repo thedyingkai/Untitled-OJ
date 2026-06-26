@@ -1,89 +1,41 @@
-use anyhow::{Context, Result, anyhow};
-use sqlx::PgPool;
-use std::path::{Path, PathBuf};
+use anyhow::{Context, Result};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
-use tracing::info;
 
 use crate::checker::{default_trim_equal, truncate_message};
 use crate::config::LanguagesConfig;
-use crate::db::{
-    is_submission_cancelled, load_problem, load_submission, mark_submission_failed,
-    save_judge_result, try_claim_submission,
-};
 use crate::problem_package::{CaseRecord, load_problem_package};
 use crate::result::{ResultCase, ResultFile};
 use crate::sandbox::{SandboxStatus, compile_in_sandbox, run_case_in_sandbox, write_text};
 
-pub async fn handle_submission(
-    db: &PgPool,
+pub async fn judge_artifacts(
     languages: Arc<LanguagesConfig>,
     submission_id: i64,
-) -> Result<()> {
-    let claimed = try_claim_submission(db, submission_id).await?;
-    if !claimed {
-        info!(
-            submission_id,
-            "submission skipped because it is not pending"
-        );
-        return Ok(());
-    }
+    language: &str,
+    source_path: &Path,
+    package_dir: &Path,
+    result_dir: &Path,
+) -> Result<ResultFile> {
+    fs::create_dir_all(result_dir).await?;
 
-    info!(submission_id, "submission claimed");
+    let package = load_problem_package(&package_dir.to_string_lossy()).await?;
 
-    let result = judge_submission(db, languages, submission_id).await;
-
-    match result {
-        Ok(_) => {
-            info!(submission_id, "judge finished");
-            Ok(())
-        }
-        Err(err) => {
-            mark_submission_failed(db, submission_id, "SYSTEM_ERROR", &err.to_string()).await?;
-            Err(err)
-        }
-    }
-}
-
-async fn judge_submission(
-    db: &PgPool,
-    languages: Arc<LanguagesConfig>,
-    submission_id: i64,
-) -> Result<()> {
-    let submission = load_submission(db, submission_id).await?;
-
-    if submission.status == "CANCELLED" {
-        return Ok(());
-    }
-
-    let problem = load_problem(db, submission.problem_id).await?;
-    if problem.package_dir.trim().is_empty() {
-        return Err(anyhow!("problem package_dir is empty"));
-    }
-
-    let package = load_problem_package(&problem.package_dir).await?;
-
-    let Some(lang) = languages.get(&submission.language) else {
-        let result = ResultFile {
+    let Some(lang) = languages.get(language) else {
+        return Ok(ResultFile {
             submission_id,
             status: "UNSUPPORTED_LANGUAGE".to_string(),
             score: 0,
             time_ms: 0,
             memory_kb: 0,
-            message: format!("unsupported language: {}", submission.language),
+            message: format!("unsupported language: {}", language),
             cases: vec![],
-        };
-
-        write_result_and_update(db, &submission.result_path, &result).await?;
-        return Ok(());
+        });
     };
 
-    let submission_dir = submission_root_from_result_path(&submission.result_path)?;
-
-    if let Some(message) =
-        compile_in_sandbox(lang, Path::new(&submission.code_path), &submission_dir)
-            .await
-            .context("compile in sandbox failed")?
+    if let Some(message) = compile_in_sandbox(lang, source_path, result_dir)
+        .await
+        .context("compile in sandbox failed")?
     {
         let result = ResultFile {
             submission_id,
@@ -94,9 +46,8 @@ async fn judge_submission(
             message,
             cases: vec![],
         };
-
-        write_result_and_update(db, &submission.result_path, &result).await?;
-        return Ok(());
+        write_local_result(result_dir, &result).await?;
+        return Ok(result);
     }
 
     let mut final_status = "ACCEPTED".to_string();
@@ -107,11 +58,8 @@ async fn judge_submission(
     let mut case_results = Vec::new();
 
     for case in &package.cases {
-        if is_submission_cancelled(db, submission_id).await? {
-            return Ok(());
-        }
-
-        let case_result = run_one_case(lang, &submission, &submission_dir, &package, case).await?;
+        let case_result =
+            run_one_artifact_case(lang, source_path, language, result_dir, &package, case).await?;
 
         if case_result.status == "ACCEPTED" {
             total_score += case_result.score;
@@ -136,20 +84,20 @@ async fn judge_submission(
         cases: case_results,
     };
 
-    write_result_and_update(db, &submission.result_path, &result).await?;
-
-    Ok(())
+    write_local_result(result_dir, &result).await?;
+    Ok(result)
 }
 
-async fn run_one_case(
+async fn run_one_artifact_case(
     lang: &crate::config::LanguageConfig,
-    submission: &crate::db::Submission,
-    submission_dir: &Path,
+    source_path: &Path,
+    language: &str,
+    result_dir: &Path,
     package: &crate::problem_package::LoadedProblemPackage,
     case: &CaseRecord,
 ) -> Result<ResultCase> {
     let case_name = format!("{:03}", case.case_no);
-    let case_dir = submission_dir.join("cases").join(&case_name);
+    let case_dir = result_dir.join("cases").join(&case_name);
 
     fs::create_dir_all(&case_dir).await?;
 
@@ -180,12 +128,12 @@ async fn run_one_case(
         fs::set_permissions(&stdin_path, perms).await?;
     }
 
-    let limit = package.limit_for(&submission.language, case);
+    let limit = package.limit_for(language, case);
 
     let sandbox_output = run_case_in_sandbox(
         lang,
-        Path::new(&submission.code_path),
-        submission_dir,
+        source_path,
+        result_dir,
         &case_dir,
         &stdin_path,
         &stdout_path,
@@ -236,6 +184,16 @@ async fn run_one_case(
             message = "memory limit exceeded".to_string();
             write_text(&checker_log_path, &message).await?;
         }
+        SandboxStatus::OutputLimitExceeded => {
+            status = "OUTPUT_LIMIT_EXCEEDED".to_string();
+            score = 0;
+            message = if sandbox_output.message.trim().is_empty() {
+                "output limit exceeded".to_string()
+            } else {
+                truncate_message(&sandbox_output.message)
+            };
+            write_text(&checker_log_path, &message).await?;
+        }
         SandboxStatus::RuntimeError => {
             status = "RUNTIME_ERROR".to_string();
             score = 0;
@@ -254,12 +212,6 @@ async fn run_one_case(
 
             write_text(&checker_log_path, &message).await?;
         }
-        SandboxStatus::SystemError => {
-            status = "SYSTEM_ERROR".to_string();
-            score = 0;
-            message = sandbox_output.message;
-            write_text(&checker_log_path, &message).await?;
-        }
     }
 
     Ok(ResultCase {
@@ -275,25 +227,10 @@ async fn run_one_case(
     })
 }
 
-async fn write_result_and_update(
-    db: &PgPool,
-    result_path: &str,
-    result: &ResultFile,
-) -> Result<()> {
+async fn write_local_result(result_dir: &Path, result: &ResultFile) -> Result<()> {
     let text = serde_json::to_string_pretty(result)?;
-    fs::write(result_path, text).await?;
-
-    save_judge_result(db, result.submission_id, result_path, result).await?;
-
+    fs::write(result_dir.join("result.json"), text).await?;
     Ok(())
-}
-
-fn submission_root_from_result_path(result_path: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(result_path);
-
-    path.parent()
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| anyhow!("invalid result_path: {}", result_path))
 }
 
 fn path_string(path: &Path) -> String {

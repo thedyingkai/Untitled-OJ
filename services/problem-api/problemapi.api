@@ -19,12 +19,13 @@ type CreateProblemReq {
 	MemoryLimitMb int    `json:"memory_limit_mb,optional"`
 	ProblemType   string `json:"problem_type,optional"`
 	Visibility    string `json:"visibility,optional"`
+	Difficulty    string `json:"difficulty,optional"`
+	Tags          string `json:"tags,optional"`
 }
 
 type CreateProblemResp {
-	ProblemId  int64  `json:"problem_id"`
-	Slug       string `json:"slug"`
-	PackageDir string `json:"package_dir"`
+	ProblemId int64  `json:"problem_id"`
+	Slug      string `json:"slug"`
 }
 
 type UpdateProblemReq {
@@ -35,6 +36,8 @@ type UpdateProblemReq {
 	MemoryLimitMb int    `json:"memory_limit_mb,optional"`
 	ProblemType   string `json:"problem_type,optional"`
 	Visibility    string `json:"visibility,optional"`
+	Difficulty    string `json:"difficulty,optional"`
+	Tags          string `json:"tags,optional"`
 	Status        string `json:"status,optional"`
 }
 
@@ -49,16 +52,23 @@ type ProblemItem {
 	Statement      string `json:"statement"`
 	ProblemType    string `json:"problem_type"`
 	Visibility     string `json:"visibility"`
-	PackageDir     string `json:"package_dir"`
-	ManifestPath   string `json:"manifest_path"`
 	ManifestSha256 string `json:"manifest_sha256"`
 	SourceFormat   string `json:"source_format"`
 	Status         string `json:"status"`
+	Difficulty     string `json:"difficulty"`
+	Tags           string `json:"tags"`
 	TimeLimitMs    int    `json:"time_limit_ms"`
 	MemoryLimitMb  int    `json:"memory_limit_mb"`
 	CreatedBy      int64  `json:"created_by"`
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt      string `json:"updated_at"`
+	Samples        []ProblemSample `json:"samples,optional"`
+}
+
+type ProblemSample {
+	CaseNo int    `json:"case_no"`
+	Input  string `json:"input"`
+	Output string `json:"output"`
 }
 
 type GetProblemResp {
@@ -66,8 +76,12 @@ type GetProblemResp {
 }
 
 type ListProblemsReq {
-	Page     int `form:"page,optional"`
-	PageSize int `form:"page_size,optional"`
+	Page       int    `form:"page,optional"`
+	PageSize   int    `form:"page_size,optional"`
+	Keyword    string `form:"keyword,optional"`
+	Visibility string `form:"visibility,optional"`
+	Difficulty string `form:"difficulty,optional"`
+	Tags       string `form:"tags,optional"`
 }
 
 type ListProblemsResp {
@@ -89,9 +103,7 @@ type AddTestCaseReq {
 }
 
 type AddTestCaseResp {
-	CaseNo     int    `json:"case_no"`
-	InputPath  string `json:"input_path"`
-	AnswerPath string `json:"answer_path"`
+	CaseNo int `json:"case_no"`
 }
 
 type ListTestCasesReq {
@@ -110,6 +122,83 @@ type TestCaseItem {
 	MemoryLimitMb int    `json:"memory_limit_mb"`
 }
 
+type PackageComponent {
+	Type       string `json:"type"`
+	Name       string `json:"name"`
+	ConfigPath string `json:"config_path"`
+}
+
+type PackageLanguageLimit {
+	Language      string `json:"language"`
+	TimeLimitMs   int    `json:"time_limit_ms"`
+	MemoryLimitMb int    `json:"memory_limit_mb"`
+}
+
+type PackageLimits {
+	DefaultTimeLimitMs   int                    `json:"default_time_limit_ms"`
+	DefaultMemoryLimitMb int                    `json:"default_memory_limit_mb"`
+	Languages            []PackageLanguageLimit `json:"languages"`
+}
+
+type PackageSummary {
+	Schema         string           `json:"schema"`
+	Slug           string           `json:"slug"`
+	Title          string           `json:"title"`
+	ProblemType    string           `json:"problem_type"`
+	Visibility     string           `json:"visibility"`
+	Status         string           `json:"status"`
+	SourceFormat   string           `json:"source_format"`
+	ManifestSha256 string           `json:"manifest_sha256"`
+	TotalCases     int              `json:"total_cases"`
+	TotalScore     int              `json:"total_score"`
+	SampleCount    int              `json:"sample_count"`
+	FileCount      int              `json:"file_count"`
+	SizeBytes      int64            `json:"size_bytes"`
+	Limits         PackageLimits    `json:"limits"`
+	Runner         PackageComponent `json:"runner"`
+	Checker        PackageComponent `json:"checker"`
+	Scorer         PackageComponent `json:"scorer"`
+}
+
+type PackageValidationIssue {
+	Level   string `json:"level"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Path    string `json:"path,optional"`
+	CaseNo  int    `json:"case_no,optional"`
+}
+
+type PackageValidationResult {
+	Valid    bool                     `json:"valid"`
+	Errors   []PackageValidationIssue `json:"errors"`
+	Warnings []PackageValidationIssue `json:"warnings"`
+}
+
+type GetProblemPackageReq {
+	ProblemId int64 `path:"id"`
+}
+
+type GetProblemPackageResp {
+	Package    PackageSummary          `json:"package"`
+	Validation PackageValidationResult `json:"validation"`
+}
+
+type ValidateProblemPackageReq {
+	ProblemId int64 `path:"id"`
+}
+
+type ValidateProblemPackageResp {
+	Validation PackageValidationResult `json:"validation"`
+}
+
+type ListPackageCasesReq {
+	ProblemId int64 `path:"id"`
+}
+
+type ListPackageCasesResp {
+	Cases []TestCaseItem `json:"cases"`
+}
+
 type UpdateTestCaseReq {
 	ProblemId     int64  `path:"id"`
 	CaseNo        int    `path:"case_no"`
@@ -124,9 +213,7 @@ type UpdateTestCaseReq {
 }
 
 type UpdateTestCaseResp {
-	CaseNo     int    `json:"case_no"`
-	InputPath  string `json:"input_path"`
-	AnswerPath string `json:"answer_path"`
+	CaseNo int `json:"case_no"`
 }
 
 type ListTestCasesResp {
@@ -166,6 +253,15 @@ service problemapi {
 	@handler listProblems
 	get /problems (ListProblemsReq) returns (ListProblemsResp)
 
+	@handler getProblemPackage
+	get /problems/:id/package (GetProblemPackageReq) returns (GetProblemPackageResp)
+
+	@handler validateProblemPackage
+	post /problems/:id/package/validate (ValidateProblemPackageReq) returns (ValidateProblemPackageResp)
+
+	@handler listPackageCases
+	get /problems/:id/package/cases (ListPackageCasesReq) returns (ListPackageCasesResp)
+
 	@handler getProblem
 	get /problems/:id (GetProblemReq) returns (GetProblemResp)
 
@@ -187,4 +283,3 @@ service problemapi {
 	@handler deleteProblem
 	delete /problems/:id (DeleteProblemReq) returns (DeleteProblemResp)
 }
-

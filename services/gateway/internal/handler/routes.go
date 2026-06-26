@@ -19,6 +19,31 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Path:    "/health",
 				Handler: healthHandler(serverCtx),
 			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/health",
+				Handler: adminHealthHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/modules",
+				Handler: adminModulesHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/modules/sets",
+				Handler: adminModuleSetsHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/modules/topology",
+				Handler: adminModuleTopologyHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/modules/:id",
+				Handler: adminModuleDetailHandler(serverCtx),
+			},
 		},
 	)
 }

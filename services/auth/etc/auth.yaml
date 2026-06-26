@@ -3,11 +3,11 @@ Host: 0.0.0.0
 Port: 8081
 
 Database:
-  Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
+  Url: ""
 
 Jaeger:
   Endpoint: ojos-jaeger:4317
 
 Jwt:
-  Secret: ojos-dev-secret-change-me
+  Secret: ""
   ExpireHours: 24

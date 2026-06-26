@@ -15,10 +15,11 @@ type HealthResp struct {
 }
 
 type LoginData struct {
-	Token    string   `json:"token"`
-	UserId   int64    `json:"user_id"`
-	Username string   `json:"username"`
-	Roles    []string `json:"roles"`
+	Token       string   `json:"token"`
+	UserId      int64    `json:"user_id"`
+	Username    string   `json:"username"`
+	Roles       []string `json:"roles"`
+	Permissions []string `json:"permissions"`
 }
 
 type LoginReq struct {
@@ -33,15 +34,116 @@ type LoginResp struct {
 }
 
 type ProfileData struct {
-	UserId   int64    `json:"user_id"`
-	Username string   `json:"username"`
-	Roles    []string `json:"roles"`
+	UserId      int64    `json:"user_id"`
+	Username    string   `json:"username"`
+	Roles       []string `json:"roles"`
+	Permissions []string `json:"permissions"`
 }
 
 type ProfileResp struct {
 	Code int         `json:"code"`
 	Msg  string      `json:"msg"`
 	Data ProfileData `json:"data,optional"`
+}
+
+type UserItem struct {
+	UserId    int64    `json:"user_id"`
+	Username  string   `json:"username"`
+	Email     string   `json:"email,optional"`
+	Roles     []string `json:"roles"`
+	CreatedAt string   `json:"created_at"`
+}
+
+type ListUsersResp struct {
+	Code int        `json:"code"`
+	Msg  string     `json:"msg"`
+	Data []UserItem `json:"data"`
+}
+
+type RoleItem struct {
+	Id          int64  `json:"id"`
+	Name        string `json:"name"`
+	ModuleCode  string `json:"module_code"`
+	Description string `json:"description"`
+	IsSystem    bool   `json:"is_system"`
+}
+
+type ListRolesResp struct {
+	Code int        `json:"code"`
+	Msg  string     `json:"msg"`
+	Data []RoleItem `json:"data"`
+}
+
+type PermissionItem struct {
+	Code        string `json:"code"`
+	ModuleCode  string `json:"module_code"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type ListPermissionsResp struct {
+	Code int              `json:"code"`
+	Msg  string           `json:"msg"`
+	Data []PermissionItem `json:"data"`
+}
+
+type UserRoleReq struct {
+	UserId int64  `json:"user_id"`
+	Role   string `json:"role"`
+}
+
+type ProblemRoleReq struct {
+	UserId    int64  `json:"user_id"`
+	ProblemId int64  `json:"problem_id"`
+	Role      string `json:"role"`
+}
+
+type PermissionCheckReq struct {
+	UserId     int64  `json:"user_id"`
+	Permission string `json:"permission"`
+	ScopeType  string `json:"scope_type,optional"`
+	ScopeId    int64  `json:"scope_id,optional"`
+}
+
+type PermissionCheckData struct {
+	Allowed bool `json:"allowed"`
+}
+
+type PermissionCheckResp struct {
+	Code int                 `json:"code"`
+	Msg  string              `json:"msg"`
+	Data PermissionCheckData `json:"data"`
+}
+
+type AuditLogItem struct {
+	Id             int64  `json:"id"`
+	ActorType      string `json:"actor_type"`
+	ActorId        int64  `json:"actor_id"`
+	Action         string `json:"action"`
+	TargetType     string `json:"target_type"`
+	TargetId       int64  `json:"target_id"`
+	PermissionCode string `json:"permission_code"`
+	RoleName       string `json:"role_name"`
+	ScopeType      string `json:"scope_type"`
+	ScopeId        int64  `json:"scope_id"`
+	Effect         string `json:"effect"`
+	CreatedAt      string `json:"created_at"`
+}
+
+type ListAuditLogsResp struct {
+	Code int            `json:"code"`
+	Msg  string         `json:"msg"`
+	Data []AuditLogItem `json:"data"`
+}
+
+type ActionData struct {
+	Ok bool `json:"ok"`
+}
+
+type AdminActionResp struct {
+	Code int        `json:"code"`
+	Msg  string     `json:"msg"`
+	Data ActionData `json:"data"`
 }
 
 type RegisterData struct {

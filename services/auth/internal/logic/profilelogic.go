@@ -36,13 +36,24 @@ func (l *ProfileLogic) Profile() (resp *types.ProfileResp, err error) {
 		}, nil
 	}
 
+	roles, err := l.svcCtx.UserRepo.GetRolesByUserID(l.ctx, claims.UserID)
+	if err != nil {
+		return nil, err
+	}
+
+	permissions, err := l.svcCtx.UserRepo.GetPermissionCodesByUserID(l.ctx, claims.UserID)
+	if err != nil {
+		return nil, err
+	}
+
 	return &types.ProfileResp{
 		Code: 0,
 		Msg:  "success",
 		Data: types.ProfileData{
-			UserId:   claims.UserID,
-			Username: claims.Username,
-			Roles:    claims.Roles,
+			UserId:      claims.UserID,
+			Username:    claims.Username,
+			Roles:       roles,
+			Permissions: permissions,
 		},
 	}, nil
 }

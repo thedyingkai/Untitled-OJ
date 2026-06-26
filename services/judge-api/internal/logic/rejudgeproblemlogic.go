@@ -6,15 +6,12 @@ package logic
 import (
 	"context"
 	"errors"
-	"strconv"
-	"time"
 
 	"ojos-judge-api/internal/svc"
 	"ojos-judge-api/internal/types"
 	"ojos-shared/security/authctx"
 	sharedperm "ojos-shared/security/permission"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/zeromicro/go-zero/core/logx"
 )
 
@@ -63,6 +60,9 @@ func (l *RejudgeProblemLogic) RejudgeProblem(req *types.RejudgeProblemReq) (resp
 
 	enqueued := 0
 	for _, submissionID := range ids {
+		if err := l.svcCtx.Repo.EnsureTaskForSubmission(l.ctx, submissionID); err != nil {
+			return nil, err
+		}
 		if err := l.publishSubmissionCreated(submissionID); err != nil {
 			return nil, err
 		}
@@ -76,16 +76,5 @@ func (l *RejudgeProblemLogic) RejudgeProblem(req *types.RejudgeProblemReq) (resp
 }
 
 func (l *RejudgeProblemLogic) publishSubmissionCreated(submissionID int64) error {
-	return l.svcCtx.Redis.XAdd(
-		l.ctx,
-		&redis.XAddArgs{
-			Stream: judgeSubmissionStream,
-			Values: map[string]any{
-				"type":          "submission.created",
-				"producer":      "judge-api-service",
-				"submission_id": strconv.FormatInt(submissionID, 10),
-				"created_at":    time.Now().UTC().Format(time.RFC3339Nano),
-			},
-		},
-	).Err()
+	return publishJudgeSignal(l.ctx, l.svcCtx, "submission.created", "judge-api-service", submissionID)
 }

@@ -3,13 +3,20 @@ Host: 0.0.0.0
 Port: 8080
 
 Database:
-  Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
+  Url: ""
+
+Redis:
+  Url: ""
 
 Jaeger:
   Endpoint: ojos-jaeger:4317
 
 Jwt:
-  Secret: ojos-dev-secret-change-me
+  Secret: ""
+
+Storage:
+  ProblemsRoot: /data/ojos/problems
+  SubmissionsRoot: /data/ojos/submissions
 
 Proxy:
   Routes:
@@ -17,6 +24,11 @@ Proxy:
       Target: http://auth:8081
       StripPrefix: /api
       AuthMode: optional
+
+    - Prefix: /api/judge/worker
+      Target: http://judge-api:8082
+      StripPrefix: /api
+      AuthMode: none
 
     - Prefix: /api/judge
       Target: http://judge-api:8082

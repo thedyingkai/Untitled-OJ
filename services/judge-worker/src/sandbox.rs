@@ -7,6 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::cgroup::CgroupRun;
 use crate::checker::truncate_message;
 use crate::config::{LanguageConfig, render_arg};
 use crate::problem_package::LimitConfig;
@@ -32,8 +33,8 @@ pub enum SandboxStatus {
     Ok,
     TimeLimitExceeded,
     MemoryLimitExceeded,
+    OutputLimitExceeded,
     RuntimeError,
-    SystemError,
 }
 
 pub async fn compile_in_sandbox(
@@ -186,7 +187,7 @@ pub async fn run_case_in_sandbox(
     source_path: &Path,
     submission_dir: &Path,
     case_dir: &Path,
-    stdin_path: &Path,
+    _stdin_path: &Path,
     stdout_path: &Path,
     stderr_path: &Path,
     limit: &LimitConfig,
@@ -375,31 +376,45 @@ async fn run_nsjail_shell(
         cmd.stdin(Stdio::null());
     }
 
-    if let Some(stdout_file) = stdout_file {
-        let stdout = std::fs::File::create(stdout_file)
-            .with_context(|| format!("create stdout failed: {}", stdout_file.display()))?;
-        cmd.stdout(Stdio::from(stdout));
-    } else {
-        cmd.stdout(Stdio::piped());
-    }
+    let stdout_capture_path = stdout_file
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| work_dir.join(".nsjail.stdout.log"));
+    let stderr_capture_path = stderr_file
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| work_dir.join(".nsjail.stderr.log"));
 
-    if let Some(stderr_file) = stderr_file {
-        let stderr = std::fs::File::create(stderr_file)
-            .with_context(|| format!("create stderr failed: {}", stderr_file.display()))?;
-        cmd.stderr(Stdio::from(stderr));
-    } else {
-        cmd.stderr(Stdio::piped());
-    }
+    let _ = std::fs::remove_file(&stdout_capture_path);
+    let _ = std::fs::remove_file(&stderr_capture_path);
+
+    let stdout = std::fs::File::create(&stdout_capture_path)
+        .with_context(|| format!("create stdout failed: {}", stdout_capture_path.display()))?;
+    cmd.stdout(Stdio::from(stdout));
+
+    let stderr = std::fs::File::create(&stderr_capture_path)
+        .with_context(|| format!("create stderr failed: {}", stderr_capture_path.display()))?;
+    cmd.stderr(Stdio::from(stderr));
 
     let start = Instant::now();
+    let cgroup =
+        CgroupRun::create(memory_mb, 64).context("create cgroup v2 sandbox context failed")?;
 
-    let output = match timeout(wall_timeout, cmd.output()).await {
-        Ok(result) => result.context("run nsjail failed")?,
+    let mut child = cmd.spawn().context("spawn nsjail failed")?;
+    if let Some(pid) = child.id() {
+        cgroup
+            .attach(pid)
+            .context("attach nsjail to cgroup failed")?;
+    }
+
+    let exit_status = match timeout(wall_timeout, child.wait()).await {
+        Ok(result) => result.context("wait nsjail failed")?,
         Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let memory_kb = cgroup.memory_peak_kb().unwrap_or(0);
             return Ok(SandboxOutput {
                 status: SandboxStatus::TimeLimitExceeded,
                 time_ms: time_limit_ms as i32,
-                memory_kb: 0,
+                memory_kb,
                 stdout: vec![],
                 stderr: vec![],
                 message: "time limit exceeded".to_string(),
@@ -408,56 +423,62 @@ async fn run_nsjail_shell(
     };
 
     let elapsed_ms = start.elapsed().as_millis() as i32;
-    let mut stderr = output.stderr;
+    let memory_kb = cgroup.memory_peak_kb().unwrap_or(0);
+    let oom_killed = cgroup.oom_killed().unwrap_or(false);
 
-    if let Some(stderr_file) = stderr_file {
-        match read_file_limited(stderr_file, output_limit_bytes, "stderr").await {
-            Ok(data) => stderr = data,
-            Err(err) => {
-                return Ok(SandboxOutput {
-                    status: SandboxStatus::RuntimeError,
-                    time_ms: elapsed_ms,
-                    memory_kb: 0,
-                    stdout: vec![],
-                    stderr: vec![],
-                    message: truncate_message(&err.to_string()),
-                });
-            }
+    let stdout = match read_file_limited(&stdout_capture_path, output_limit_bytes, "stdout").await {
+        Ok(data) => data,
+        Err(err) => {
+            return Ok(SandboxOutput {
+                status: SandboxStatus::OutputLimitExceeded,
+                time_ms: elapsed_ms,
+                memory_kb,
+                stdout: vec![],
+                stderr: vec![],
+                message: truncate_message(&err.to_string()),
+            });
         }
-    }
+    };
 
-    let mut stdout = output.stdout;
-
-    if let Some(stdout_file) = stdout_file {
-        match read_file_limited(stdout_file, output_limit_bytes, "stdout").await {
-            Ok(data) => stdout = data,
-            Err(err) => {
-                return Ok(SandboxOutput {
-                    status: SandboxStatus::RuntimeError,
-                    time_ms: elapsed_ms,
-                    memory_kb: 0,
-                    stdout: vec![],
-                    stderr: vec![],
-                    message: truncate_message(&err.to_string()),
-                });
-            }
+    let stderr = match read_file_limited(&stderr_capture_path, output_limit_bytes, "stderr").await {
+        Ok(data) => data,
+        Err(err) => {
+            return Ok(SandboxOutput {
+                status: SandboxStatus::OutputLimitExceeded,
+                time_ms: elapsed_ms,
+                memory_kb,
+                stdout: vec![],
+                stderr: vec![],
+                message: truncate_message(&err.to_string()),
+            });
         }
-    }
+    };
 
     let stderr_text = String::from_utf8_lossy(&stderr).to_string();
 
-    if output.status.success() {
+    if oom_killed {
+        return Ok(SandboxOutput {
+            status: SandboxStatus::MemoryLimitExceeded,
+            time_ms: elapsed_ms,
+            memory_kb,
+            stdout,
+            stderr,
+            message: "memory limit exceeded".to_string(),
+        });
+    }
+
+    if exit_status.success() {
         return Ok(SandboxOutput {
             status: SandboxStatus::Ok,
             time_ms: elapsed_ms,
-            memory_kb: 0,
+            memory_kb,
             stdout,
             stderr,
             message: String::new(),
         });
     }
 
-    let exit_message = match output.status.code() {
+    let exit_message = match exit_status.code() {
         Some(code) => format!("process exited with code {}", code),
         None => format!("process terminated by signal"),
     };
@@ -483,7 +504,7 @@ async fn run_nsjail_shell(
     Ok(SandboxOutput {
         status,
         time_ms: elapsed_ms,
-        memory_kb: 0,
+        memory_kb,
         stdout,
         stderr,
         message,
@@ -499,7 +520,7 @@ async fn attach_case_output(
         Ok(data) => output.stdout = data,
         Err(err) => {
             return Ok(SandboxOutput {
-                status: SandboxStatus::RuntimeError,
+                status: SandboxStatus::OutputLimitExceeded,
                 time_ms: output.time_ms,
                 memory_kb: output.memory_kb,
                 stdout: vec![],
@@ -513,7 +534,7 @@ async fn attach_case_output(
         Ok(data) => output.stderr = data,
         Err(err) => {
             return Ok(SandboxOutput {
-                status: SandboxStatus::RuntimeError,
+                status: SandboxStatus::OutputLimitExceeded,
                 time_ms: output.time_ms,
                 memory_kb: output.memory_kb,
                 stdout: vec![],

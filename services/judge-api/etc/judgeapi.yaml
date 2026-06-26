@@ -3,16 +3,42 @@ Host: 0.0.0.0
 Port: 8082
 
 Database:
-  Url: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
+  Url: ""
 
 Redis:
-  Url: redis://ojos-redis:6379/0
+  Url: ""
 
 Jaeger:
   Endpoint: ojos-jaeger:4317
 
 Storage:
   SubmissionsRoot: /data/ojos/submissions
+
+Submission:
+  MaxCodeBytes: 262144
+
+Languages:
+  Items:
+    - Id: cpp17
+      DisplayName: C++17
+      Version: GCC C++17
+      Enabled: true
+    - Id: c11
+      DisplayName: C11
+      Version: GCC C11
+      Enabled: true
+    - Id: python3
+      DisplayName: Python 3
+      Version: CPython 3
+      Enabled: true
+    - Id: java17
+      DisplayName: Java 17
+      Version: OpenJDK 17
+      Enabled: true
+
+WorkerAuth:
+  Token: ""
+  LeaseTTLSeconds: 60
 
 InternalAuth:
   Enabled: true

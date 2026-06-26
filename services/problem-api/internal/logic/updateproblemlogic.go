@@ -41,6 +41,18 @@ func (l *UpdateProblemLogic) UpdateProblem(req *types.UpdateProblemReq) (resp *t
 		return nil, errors.New("invalid problem id")
 	}
 
+	if strings.TrimSpace(req.Title) == "" &&
+		strings.TrimSpace(req.Statement) == "" &&
+		strings.TrimSpace(req.ProblemType) == "" &&
+		strings.TrimSpace(req.Visibility) == "" &&
+		strings.TrimSpace(req.Status) == "" &&
+		strings.TrimSpace(req.Difficulty) == "" &&
+		strings.TrimSpace(req.Tags) == "" &&
+		req.TimeLimitMs == 0 &&
+		req.MemoryLimitMb == 0 {
+		return nil, errors.New("empty update")
+	}
+
 	if err := permission.RequireUserPermission(
 		l.ctx,
 		l.svcCtx.DB,
@@ -56,13 +68,49 @@ func (l *UpdateProblemLogic) UpdateProblem(req *types.UpdateProblemReq) (resp *t
 		return nil, err
 	}
 
+	problemType := ""
+	if strings.TrimSpace(req.ProblemType) != "" {
+		problemType, err = normalizeProblemType(req.ProblemType)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	visibility := ""
+	if strings.TrimSpace(req.Visibility) != "" {
+		visibility, err = normalizeVisibility(req.Visibility)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	status := ""
+	if strings.TrimSpace(req.Status) != "" {
+		status, err = normalizeStatus(req.Status)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var difficulty string
+	if strings.TrimSpace(req.Difficulty) != "" {
+		difficulty, err = normalizeDifficulty(req.Difficulty)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if err := validateLimits(req.TimeLimitMs, req.MemoryLimitMb, true); err != nil {
+		return nil, err
+	}
+
 	manifestSha, files, err := packagefs.UpdateManifest(
 		p.PackageDir,
 		strings.TrimSpace(req.Title),
 		strings.TrimSpace(req.Statement),
-		strings.TrimSpace(req.ProblemType),
-		strings.TrimSpace(req.Visibility),
-		strings.TrimSpace(req.Status),
+		problemType,
+		visibility,
+		status,
 		req.TimeLimitMs,
 		req.MemoryLimitMb,
 	)
@@ -75,9 +123,11 @@ func (l *UpdateProblemLogic) UpdateProblem(req *types.UpdateProblemReq) (resp *t
 		req.Id,
 		strings.TrimSpace(req.Title),
 		strings.TrimSpace(req.Statement),
-		strings.TrimSpace(req.ProblemType),
-		strings.TrimSpace(req.Visibility),
-		strings.TrimSpace(req.Status),
+		problemType,
+		visibility,
+		status,
+		difficulty,
+		parseTagsForPut(req.Tags),
 		req.TimeLimitMs,
 		req.MemoryLimitMb,
 		manifestSha,

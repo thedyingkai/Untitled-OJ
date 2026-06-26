@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +25,8 @@ type ProblemMeta struct {
 	ID         int64
 	PackageDir string
 	Status     string
+	Visibility string
+	CreatedBy  int64
 }
 
 func (r *Repository) GetProblemMeta(ctx context.Context, id int64) (*ProblemMeta, error) {
@@ -34,12 +38,14 @@ func (r *Repository) GetProblemMeta(ctx context.Context, id int64) (*ProblemMeta
 SELECT
     id,
     package_dir,
-    status
+    status,
+    visibility,
+    COALESCE(created_by, 0)
 FROM problems
 WHERE id = $1
 `,
 		id,
-	).Scan(&p.ID, &p.PackageDir, &p.Status)
+	).Scan(&p.ID, &p.PackageDir, &p.Status, &p.Visibility, &p.CreatedBy)
 
 	if err != nil {
 		return nil, err
@@ -139,6 +145,8 @@ type SubmissionView struct {
 	CodePath     string
 	CodeSha256   string
 	ResultPath   string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 	JudgedAt     *time.Time
 	CancelledAt  *time.Time
 	CancelReason string
@@ -165,6 +173,8 @@ SELECT
     code_path,
     code_sha256,
     result_path,
+    created_at,
+    updated_at,
     judged_at,
     cancelled_at,
     cancel_reason
@@ -185,6 +195,8 @@ WHERE id = $1
 		&s.CodePath,
 		&s.CodeSha256,
 		&s.ResultPath,
+		&s.CreatedAt,
+		&s.UpdatedAt,
 		&s.JudgedAt,
 		&s.CancelledAt,
 		&cancelReason,
@@ -205,6 +217,157 @@ WHERE id = $1
 	}
 
 	return &s, nil
+}
+
+type ListSubmissionsFilter struct {
+	Page             int
+	PageSize         int
+	Status           string
+	ProblemID        int64
+	UserID           int64
+	Language         string
+	CreatedFrom      *time.Time
+	CreatedTo        *time.Time
+	RestrictToUserID int64
+}
+
+func (r *Repository) ListSubmissions(ctx context.Context, filter ListSubmissionsFilter) ([]SubmissionView, int64, error) {
+	page := filter.Page
+	pageSize := filter.PageSize
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
+	where, args := buildSubmissionListWhere(filter)
+
+	var total int64
+	if err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM submissions `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	queryArgs := append([]any{}, args...)
+	limitIndex := len(queryArgs) + 1
+	offsetIndex := len(queryArgs) + 2
+	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
+
+	rows, err := r.db.Query(
+		ctx,
+		fmt.Sprintf(`
+SELECT
+    id,
+    problem_id,
+    user_id,
+    language,
+    status,
+    score,
+    time_ms,
+    memory_kb,
+    message,
+    code_path,
+    code_sha256,
+    result_path,
+    created_at,
+    updated_at,
+    judged_at,
+    cancelled_at,
+    cancel_reason
+FROM submissions
+%s
+ORDER BY id DESC
+LIMIT $%d OFFSET $%d
+`, where, limitIndex, offsetIndex),
+		queryArgs...,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	submissions := make([]SubmissionView, 0)
+	for rows.Next() {
+		var s SubmissionView
+		var message *string
+		var cancelReason *string
+		if err := rows.Scan(
+			&s.ID,
+			&s.ProblemID,
+			&s.UserID,
+			&s.Language,
+			&s.Status,
+			&s.Score,
+			&s.TimeMS,
+			&s.MemoryKB,
+			&message,
+			&s.CodePath,
+			&s.CodeSha256,
+			&s.ResultPath,
+			&s.CreatedAt,
+			&s.UpdatedAt,
+			&s.JudgedAt,
+			&s.CancelledAt,
+			&cancelReason,
+		); err != nil {
+			return nil, 0, err
+		}
+		if message != nil {
+			s.Message = *message
+		}
+		if cancelReason != nil {
+			s.CancelReason = *cancelReason
+		}
+		submissions = append(submissions, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	return submissions, total, nil
+}
+
+func buildSubmissionListWhere(filter ListSubmissionsFilter) (string, []any) {
+	args := make([]any, 0)
+	clauses := []string{"TRUE"}
+
+	if filter.RestrictToUserID > 0 {
+		args = append(args, filter.RestrictToUserID)
+		clauses = append(clauses, fmt.Sprintf("user_id = $%d", len(args)))
+	} else if filter.UserID > 0 {
+		args = append(args, filter.UserID)
+		clauses = append(clauses, fmt.Sprintf("user_id = $%d", len(args)))
+	}
+
+	if filter.ProblemID > 0 {
+		args = append(args, filter.ProblemID)
+		clauses = append(clauses, fmt.Sprintf("problem_id = $%d", len(args)))
+	}
+
+	if status := strings.TrimSpace(filter.Status); status != "" {
+		args = append(args, status)
+		clauses = append(clauses, fmt.Sprintf("status = $%d", len(args)))
+	}
+
+	if language := strings.TrimSpace(filter.Language); language != "" {
+		args = append(args, language)
+		clauses = append(clauses, fmt.Sprintf("language = $%d", len(args)))
+	}
+
+	if filter.CreatedFrom != nil {
+		args = append(args, *filter.CreatedFrom)
+		clauses = append(clauses, fmt.Sprintf("created_at >= $%d", len(args)))
+	}
+
+	if filter.CreatedTo != nil {
+		args = append(args, *filter.CreatedTo)
+		clauses = append(clauses, fmt.Sprintf("created_at <= $%d", len(args)))
+	}
+
+	return "WHERE " + strings.Join(clauses, " AND "), args
 }
 
 func (r *Repository) CancelSubmission(ctx context.Context, submissionID int64, userID int64, reason string) error {

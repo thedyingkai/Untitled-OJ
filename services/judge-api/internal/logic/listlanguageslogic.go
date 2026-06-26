@@ -1,0 +1,33 @@
+// Code scaffolded by goctl. Safe to edit.
+// goctl 1.10.1
+
+package logic
+
+import (
+	"context"
+
+	"ojos-judge-api/internal/svc"
+	"ojos-judge-api/internal/types"
+
+	"github.com/zeromicro/go-zero/core/logx"
+)
+
+type ListLanguagesLogic struct {
+	logx.Logger
+	ctx    context.Context
+	svcCtx *svc.ServiceContext
+}
+
+func NewListLanguagesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *ListLanguagesLogic {
+	return &ListLanguagesLogic{
+		Logger: logx.WithContext(ctx),
+		ctx:    ctx,
+		svcCtx: svcCtx,
+	}
+}
+
+func (l *ListLanguagesLogic) ListLanguages() (resp *types.ListLanguagesResp, err error) {
+	return &types.ListLanguagesResp{
+		Languages: convertLanguages(l.svcCtx),
+	}, nil
+}

@@ -1,0 +1,101 @@
+id: ojos.judge-core
+name: Judge Core
+version: 0.1.0
+set: core-capability
+kind: feature
+status: builtin
+description: 题目、题目包、提交、评测、Worker Link、结果查询与评测集群管理模块。
+
+requires:
+  platform: ">=0.1.0"
+  modules:
+    - ojos.kernel.edge-ui-shell >= 0.1.0
+    - ojos.kernel.identity-access >= 0.1.0
+    - ojos.kernel.config-secret >= 0.1.0
+    - ojos.kernel.audit-policy >= 0.1.0
+
+provides:
+  permissions:
+    - problem.view
+    - problem.view.private
+    - problem.create
+    - problem.edit
+    - problem.delete
+    - problem.manage.data
+    - problem.manage.asset
+    - judge.submit
+    - submission.view.own
+    - submission.view.all
+
+  backend_services:
+    - id: problem-api
+      path: services/problem-api
+      health: /health
+      exposure: internal
+
+    - id: judge-api
+      path: services/judge-api
+      health: /health
+      exposure: internal
+
+  worker_services:
+    - id: judge-worker
+      path: services/judge-worker
+      mode: external-node
+
+  frontend:
+    routes:
+      - /problems
+      - /problems/new
+      - /problems/:id
+      - /problems/:id/edit
+      - /problems/:id/package
+      - /problems/:id/submit
+      - /submissions
+      - /submissions/:id
+      - /admin/judge
+
+    menus:
+      - key: problems
+        title: 题目
+        route: /problems
+      - key: submissions
+        title: 提交
+        route: /submissions
+      - key: admin-judge
+        title: 评测集群
+        route: /admin/judge
+        permission: system.admin
+
+  gateway_routes:
+    - prefix: /api/problem
+      service: problem-api
+      auth: user
+
+    - prefix: /api/judge
+      service: judge-api
+      auth: user
+
+    - prefix: /api/judge/worker
+      service: judge-api
+      auth: worker
+
+  storage:
+    buckets:
+      - problems
+      - submissions
+      - judge-artifacts
+
+  health_checks:
+    - problem-api
+    - judge-api
+    - worker-cluster
+    - queue
+    - artifact-storage
+
+  migrations:
+    - deploy/migrations/000002_judge_schema.up.sql
+    - deploy/migrations/000004_problem_package_core.up.sql
+    - deploy/migrations/000005_judge_sandbox_storage_cleanup.up.sql
+    - deploy/migrations/000007_problem_catalog_fields.up.sql
+    - deploy/migrations/000008_worker_link.up.sql

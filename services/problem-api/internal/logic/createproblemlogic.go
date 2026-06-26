@@ -53,14 +53,18 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 		return nil, errors.New("empty title")
 	}
 
-	problemType := strings.TrimSpace(req.ProblemType)
-	if problemType == "" {
-		problemType = "traditional"
+	if err := validateSlug(req.Slug); err != nil {
+		return nil, err
 	}
 
-	visibility := strings.TrimSpace(req.Visibility)
-	if visibility == "" {
-		visibility = "private"
+	problemType, err := normalizeProblemType(req.ProblemType)
+	if err != nil {
+		return nil, err
+	}
+
+	visibility, err := normalizeVisibility(req.Visibility)
+	if err != nil {
+		return nil, err
 	}
 
 	timeLimitMs := req.TimeLimitMs
@@ -73,6 +77,15 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 		memoryLimitMb = 256
 	}
 
+	if err := validateLimits(timeLimitMs, memoryLimitMb, false); err != nil {
+		return nil, err
+	}
+
+	difficulty, err := normalizeDifficulty(req.Difficulty)
+	if err != nil {
+		return nil, err
+	}
+
 	problemID, err := l.svcCtx.Repo.InsertProblem(
 		l.ctx,
 		repository.CreateProblemArg{
@@ -80,6 +93,8 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 			Statement:     strings.TrimSpace(req.Statement),
 			ProblemType:   problemType,
 			Visibility:    visibility,
+			Difficulty:    difficulty,
+			Tags:          parseTags(req.Tags),
 			TimeLimitMs:   timeLimitMs,
 			MemoryLimitMb: memoryLimitMb,
 			CreatedBy:     user.UserID,
@@ -108,7 +123,6 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 	if req.Slug == "" {
 		slug = packagefs.Slugify(title)
 	}
-	slug = string(rune(0)) + slug
 	slug = pkg.PackageDir[strings.LastIndex(pkg.PackageDir, "/")+1:]
 	if strings.Contains(pkg.PackageDir, "\\") {
 		slug = pkg.PackageDir[strings.LastIndex(pkg.PackageDir, "\\")+1:]
@@ -134,8 +148,7 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 	}
 
 	return &types.CreateProblemResp{
-		ProblemId:  problemID,
-		Slug:       slug,
-		PackageDir: pkg.PackageDir,
+		ProblemId: problemID,
+		Slug:      slug,
 	}, nil
 }

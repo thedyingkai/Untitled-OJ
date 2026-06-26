@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"ojos-problem-api/internal/packagefs"
@@ -30,6 +31,8 @@ type Problem struct {
 	ManifestSha256 string
 	SourceFormat   string
 	Status         string
+	Difficulty     string
+	Tags           []string
 	TimeLimitMs    int
 	MemoryLimitMb  int
 	CreatedBy      int64
@@ -42,6 +45,8 @@ type CreateProblemArg struct {
 	Statement     string
 	ProblemType   string
 	Visibility    string
+	Difficulty    string
+	Tags          []string
 	TimeLimitMs   int
 	MemoryLimitMb int
 	CreatedBy     int64
@@ -60,13 +65,15 @@ INSERT INTO problems(
     visibility,
     time_limit_ms,
     memory_limit_mb,
+    difficulty,
+    tags,
     status,
     source_format,
     created_by,
     created_at,
     updated_at
 )
-VALUES($1, $2, $3, $4, $5, $6, 'draft', 'ojos', $7, NOW(), NOW())
+VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'draft', 'ojos', $9, NOW(), NOW())
 RETURNING id
 `,
 		arg.Title,
@@ -75,6 +82,8 @@ RETURNING id
 		arg.Visibility,
 		arg.TimeLimitMs,
 		arg.MemoryLimitMb,
+		arg.Difficulty,
+		arg.Tags,
 		arg.CreatedBy,
 	).Scan(&id)
 
@@ -118,6 +127,8 @@ func (r *Repository) UpdateProblem(
 	problemType string,
 	visibility string,
 	status string,
+	difficulty string,
+	tags []string,
 	timeLimitMs int,
 	memoryLimitMb int,
 	manifestSha string,
@@ -132,9 +143,11 @@ SET
     problem_type = COALESCE(NULLIF($4, ''), problem_type),
     visibility = COALESCE(NULLIF($5, ''), visibility),
     status = COALESCE(NULLIF($6, ''), status),
-    time_limit_ms = CASE WHEN $7 > 0 THEN $7 ELSE time_limit_ms END,
-    memory_limit_mb = CASE WHEN $8 > 0 THEN $8 ELSE memory_limit_mb END,
-    manifest_sha256 = COALESCE(NULLIF($9, ''), manifest_sha256),
+    difficulty = COALESCE(NULLIF($7, ''), difficulty),
+    tags = CASE WHEN $8::text[] IS NULL THEN tags ELSE $8::text[] END,
+    time_limit_ms = CASE WHEN $9 > 0 THEN $9 ELSE time_limit_ms END,
+    memory_limit_mb = CASE WHEN $10 > 0 THEN $10 ELSE memory_limit_mb END,
+    manifest_sha256 = COALESCE(NULLIF($11, ''), manifest_sha256),
     updated_at = NOW()
 WHERE id = $1
 `,
@@ -144,6 +157,8 @@ WHERE id = $1
 		problemType,
 		visibility,
 		status,
+		difficulty,
+		nullableTags(tags),
 		timeLimitMs,
 		memoryLimitMb,
 		manifestSha,
@@ -169,6 +184,8 @@ SELECT
     COALESCE(manifest_sha256, ''),
     COALESCE(source_format, 'ojos'),
     COALESCE(status, 'draft'),
+    COALESCE(difficulty, 'medium'),
+    COALESCE(tags, '{}'::text[]),
     time_limit_ms,
     memory_limit_mb,
     COALESCE(created_by, 0),
@@ -190,6 +207,8 @@ WHERE id = $1
 		&p.ManifestSha256,
 		&p.SourceFormat,
 		&p.Status,
+		&p.Difficulty,
+		&p.Tags,
 		&p.TimeLimitMs,
 		&p.MemoryLimitMb,
 		&p.CreatedBy,
@@ -204,7 +223,20 @@ WHERE id = $1
 	return &p, nil
 }
 
-func (r *Repository) ListProblems(ctx context.Context, page int, pageSize int) ([]Problem, int64, error) {
+type ListProblemsFilter struct {
+	UserID         int64
+	CanViewPrivate bool
+	Page           int
+	PageSize       int
+	Keyword        string
+	Visibility     string
+	Difficulty     string
+	Tags           []string
+}
+
+func (r *Repository) ListProblems(ctx context.Context, filter ListProblemsFilter) ([]Problem, int64, error) {
+	page := filter.Page
+	pageSize := filter.PageSize
 	if page <= 0 {
 		page = 1
 	}
@@ -217,14 +249,22 @@ func (r *Repository) ListProblems(ctx context.Context, page int, pageSize int) (
 
 	offset := (page - 1) * pageSize
 
+	where, args := buildProblemListWhere(filter)
+
 	var total int64
-	if err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM problems`).Scan(&total); err != nil {
+	countSQL := `SELECT COUNT(*) FROM problems ` + where
+	if err := r.db.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
+	queryArgs := append([]any{}, args...)
+	limitIndex := len(queryArgs) + 1
+	offsetIndex := len(queryArgs) + 2
+	queryArgs = append(queryArgs, pageSize, offset)
+
 	rows, err := r.db.Query(
 		ctx,
-		`
+		fmt.Sprintf(`
 SELECT
     id,
     COALESCE(slug, ''),
@@ -237,17 +277,19 @@ SELECT
     COALESCE(manifest_sha256, ''),
     COALESCE(source_format, 'ojos'),
     COALESCE(status, 'draft'),
+    COALESCE(difficulty, 'medium'),
+    COALESCE(tags, '{}'::text[]),
     time_limit_ms,
     memory_limit_mb,
     COALESCE(created_by, 0),
     created_at,
     updated_at
 FROM problems
+%s
 ORDER BY id DESC
-LIMIT $1 OFFSET $2
-`,
-		pageSize,
-		offset,
+LIMIT $%d OFFSET $%d
+`, where, limitIndex, offsetIndex),
+		queryArgs...,
 	)
 	if err != nil {
 		return nil, 0, err
@@ -269,6 +311,8 @@ LIMIT $1 OFFSET $2
 			&p.ManifestSha256,
 			&p.SourceFormat,
 			&p.Status,
+			&p.Difficulty,
+			&p.Tags,
 			&p.TimeLimitMs,
 			&p.MemoryLimitMb,
 			&p.CreatedBy,
@@ -285,6 +329,193 @@ LIMIT $1 OFFSET $2
 	}
 
 	return problems, total, nil
+}
+
+func (r *Repository) GetProblemVisibleToUser(
+	ctx context.Context,
+	id int64,
+	userID int64,
+	canViewPrivate bool,
+) (*Problem, error) {
+	filter := ListProblemsFilter{
+		UserID:         userID,
+		CanViewPrivate: canViewPrivate,
+	}
+	where, args := buildProblemListWhere(filter)
+	args = append(args, id)
+
+	query := fmt.Sprintf(`
+SELECT
+    id,
+    COALESCE(slug, ''),
+    title,
+    COALESCE(statement, ''),
+    COALESCE(problem_type, 'traditional'),
+    COALESCE(visibility, 'private'),
+    COALESCE(package_dir, ''),
+    COALESCE(manifest_path, ''),
+    COALESCE(manifest_sha256, ''),
+    COALESCE(source_format, 'ojos'),
+    COALESCE(status, 'draft'),
+    COALESCE(difficulty, 'medium'),
+    COALESCE(tags, '{}'::text[]),
+    time_limit_ms,
+    memory_limit_mb,
+    COALESCE(created_by, 0),
+    created_at,
+    updated_at
+FROM problems
+%s
+  AND id = $%d
+`, where, len(args))
+
+	var p Problem
+	err := r.db.QueryRow(ctx, query, args...).Scan(
+		&p.ID,
+		&p.Slug,
+		&p.Title,
+		&p.Statement,
+		&p.ProblemType,
+		&p.Visibility,
+		&p.PackageDir,
+		&p.ManifestPath,
+		&p.ManifestSha256,
+		&p.SourceFormat,
+		&p.Status,
+		&p.Difficulty,
+		&p.Tags,
+		&p.TimeLimitMs,
+		&p.MemoryLimitMb,
+		&p.CreatedBy,
+		&p.CreatedAt,
+		&p.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &p, nil
+}
+
+func (r *Repository) CanViewPrivateProblems(ctx context.Context, userID int64) (bool, error) {
+	var ok bool
+
+	err := r.db.QueryRow(
+		ctx,
+		`
+SELECT EXISTS (
+    SELECT 1
+    FROM user_roles ur
+    JOIN roles r ON r.id = ur.role_id
+    WHERE ur.user_id = $1
+      AND r.name = 'super_admin'
+
+    UNION ALL
+
+    SELECT 1
+    FROM user_roles ur
+    JOIN role_permissions rp ON rp.role_id = ur.role_id
+    WHERE ur.user_id = $1
+      AND rp.permission_code IN ('system.admin', 'problem.view.private')
+
+    UNION ALL
+
+    SELECT 1
+    FROM role_bindings rb
+    JOIN role_permissions rp ON rp.role_id = rb.role_id
+    WHERE rb.principal_type = 'user'
+      AND rb.principal_id = $1
+      AND rb.scope_type = 'system'
+      AND rb.scope_id = 0
+      AND rp.permission_code IN ('system.admin', 'problem.view.private')
+      AND (rb.expires_at IS NULL OR rb.expires_at > NOW())
+
+    UNION ALL
+
+    SELECT 1
+    FROM permission_assignments pa
+    WHERE pa.principal_type = 'user'
+      AND pa.principal_id = $1
+      AND pa.scope_type = 'system'
+      AND pa.scope_id = 0
+      AND pa.effect = 'allow'
+      AND pa.permission_code IN ('system.admin', 'problem.view.private')
+      AND (pa.expires_at IS NULL OR pa.expires_at > NOW())
+)
+`,
+		userID,
+	).Scan(&ok)
+
+	return ok, err
+}
+
+func buildProblemListWhere(filter ListProblemsFilter) (string, []any) {
+	args := []any{filter.UserID, filter.CanViewPrivate}
+	clauses := []string{
+		`(
+    visibility = 'public'
+    OR created_by = $1
+    OR $2::boolean
+    OR EXISTS (
+        SELECT 1
+        FROM role_bindings rb
+        JOIN role_permissions rp ON rp.role_id = rb.role_id
+        WHERE rb.principal_type = 'user'
+          AND rb.principal_id = $1
+          AND rb.scope_type = 'problem'
+          AND rb.scope_id = problems.id
+          AND rp.permission_code IN (
+              'problem.view',
+              'problem.view.private',
+              'problem.edit',
+              'problem.manage.data',
+              'problem.manage.asset',
+              'problem.delete'
+          )
+          AND (rb.expires_at IS NULL OR rb.expires_at > NOW())
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM permission_assignments pa
+        WHERE pa.principal_type = 'user'
+          AND pa.principal_id = $1
+          AND pa.scope_type = 'problem'
+          AND pa.scope_id = problems.id
+          AND pa.effect = 'allow'
+          AND pa.permission_code IN ('problem.view', 'problem.view.private')
+          AND (pa.expires_at IS NULL OR pa.expires_at > NOW())
+    )
+)`,
+	}
+
+	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
+		args = append(args, "%"+keyword+"%")
+		clauses = append(clauses, fmt.Sprintf(`(title ILIKE $%d OR slug ILIKE $%d)`, len(args), len(args)))
+	}
+
+	if visibility := strings.TrimSpace(filter.Visibility); visibility != "" {
+		args = append(args, visibility)
+		clauses = append(clauses, fmt.Sprintf(`visibility = $%d`, len(args)))
+	}
+
+	if difficulty := strings.TrimSpace(filter.Difficulty); difficulty != "" {
+		args = append(args, difficulty)
+		clauses = append(clauses, fmt.Sprintf(`difficulty = $%d`, len(args)))
+	}
+
+	if len(filter.Tags) > 0 {
+		args = append(args, filter.Tags)
+		clauses = append(clauses, fmt.Sprintf(`tags && $%d::text[]`, len(args)))
+	}
+
+	return "WHERE " + strings.Join(clauses, "\n  AND "), args
+}
+
+func nullableTags(tags []string) any {
+	if tags == nil {
+		return nil
+	}
+	return tags
 }
 
 func (r *Repository) BindProblemOwner(ctx context.Context, userID int64, problemID int64) error {

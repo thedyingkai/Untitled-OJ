@@ -9,15 +9,47 @@ info (
 
 type CreateSubmissionReq {
 	ProblemId int64  `json:"problem_id"`
-	Language  string `json:"language,optional"`
+	Language  string `json:"language"`
 	Code      string `json:"code"`
 }
 
 type CreateSubmissionResp {
 	SubmissionId int64  `json:"submission_id"`
 	Status       string `json:"status"`
-	CodePath     string `json:"code_path"`
-	ResultPath   string `json:"result_path"`
+}
+
+type ListSubmissionsReq {
+	Page        int    `form:"page,optional"`
+	PageSize    int    `form:"page_size,optional"`
+	Status      string `form:"status,optional"`
+	ProblemId   int64  `form:"problem_id,optional"`
+	UserId      int64  `form:"user_id,optional"`
+	Language    string `form:"language,optional"`
+	CreatedFrom string `form:"created_from,optional"`
+	CreatedTo   string `form:"created_to,optional"`
+}
+
+type SubmissionItem {
+	Id           int64  `json:"id"`
+	ProblemId    int64  `json:"problem_id"`
+	UserId       int64  `json:"user_id"`
+	Language     string `json:"language"`
+	Status       string `json:"status"`
+	Score        int    `json:"score"`
+	TimeMs       int    `json:"time_ms"`
+	MemoryKb     int    `json:"memory_kb"`
+	Message      string `json:"message,optional"`
+	CodeSha256   string `json:"code_sha256,optional"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+	JudgedAt     string `json:"judged_at,optional"`
+	CancelledAt  string `json:"cancelled_at,optional"`
+	CancelReason string `json:"cancel_reason,optional"`
+}
+
+type ListSubmissionsResp {
+	Submissions []SubmissionItem `json:"submissions"`
+	Total       int64            `json:"total"`
 }
 
 type GetSubmissionReq {
@@ -34,9 +66,9 @@ type GetSubmissionResp {
 	TimeMs       int    `json:"time_ms"`
 	MemoryKb     int    `json:"memory_kb"`
 	Message      string `json:"message,optional"`
-	CodePath     string `json:"code_path"`
 	CodeSha256   string `json:"code_sha256"`
-	ResultPath   string `json:"result_path"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 	JudgedAt     string `json:"judged_at,optional"`
 	CancelledAt  string `json:"cancelled_at,optional"`
 	CancelReason string `json:"cancel_reason,optional"`
@@ -47,19 +79,225 @@ type GetSubmissionCasesReq {
 }
 
 type SubmissionCaseItem {
-	CaseNo         int    `json:"case_no"`
-	Status         string `json:"status"`
-	Score          int    `json:"score"`
-	TimeMs         int    `json:"time_ms"`
-	MemoryKb       int    `json:"memory_kb"`
-	StdoutPath     string `json:"stdout_path,optional"`
-	StderrPath     string `json:"stderr_path,optional"`
-	CheckerLogPath string `json:"checker_log_path,optional"`
-	Message        string `json:"message,optional"`
+	CaseNo   int    `json:"case_no"`
+	Status   string `json:"status"`
+	Score    int    `json:"score"`
+	TimeMs   int    `json:"time_ms"`
+	MemoryKb int    `json:"memory_kb"`
+	Message  string `json:"message,optional"`
 }
 
 type GetSubmissionCasesResp {
 	Cases []SubmissionCaseItem `json:"cases"`
+}
+
+type GetSubmissionDebugLogsReq {
+	Id       int64 `path:"id"`
+	CaseNo   int   `form:"case_no,optional"`
+	MaxBytes int   `form:"max_bytes,optional"`
+}
+
+type SubmissionDebugLogsResp {
+	CaseNo     int    `json:"case_no"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	CheckerLog string `json:"checker_log"`
+	Truncated  bool   `json:"truncated"`
+	MaxBytes   int    `json:"max_bytes"`
+}
+
+type JudgeLanguage {
+	Id          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	Version     string `json:"version,optional"`
+	Enabled     bool   `json:"enabled"`
+}
+
+type ListLanguagesResp {
+	Languages []JudgeLanguage `json:"languages"`
+}
+
+type WorkerRegisterReq {
+	WorkerId           string   `json:"worker_id"`
+	WorkerName         string   `json:"worker_name,optional"`
+	Hostname           string   `json:"hostname,optional"`
+	Version            string   `json:"version,optional"`
+	Capabilities       []string `json:"capabilities,optional"`
+	SupportedLanguages []string `json:"supported_languages,optional"`
+	MaxConcurrency     int      `json:"max_concurrency"`
+}
+
+type WorkerRegisterResp {
+	WorkerId        string `json:"worker_id"`
+	HeartbeatEveryS int    `json:"heartbeat_every_s"`
+	LeaseTtlSeconds int64  `json:"lease_ttl_seconds"`
+	Status          string `json:"status"`
+}
+
+type WorkerHeartbeatReq {
+	WorkerId       string   `json:"worker_id"`
+	RunningTasks   []string `json:"running_tasks,optional"`
+	RunningCount   int      `json:"running_count"`
+	AvailableSlots int      `json:"available_slots,optional"`
+}
+
+type WorkerHeartbeatResp {
+	WorkerId string `json:"worker_id"`
+	Status   string `json:"status"`
+}
+
+type WorkerClaimTasksReq {
+	WorkerId           string   `json:"worker_id"`
+	Capabilities       []string `json:"capabilities,optional"`
+	SupportedLanguages []string `json:"supported_languages,optional"`
+	AvailableSlots     int      `json:"available_slots"`
+}
+
+type WorkerArtifactRef {
+	Url         string `json:"url"`
+	Sha256      string `json:"sha256"`
+	SizeBytes   int64  `json:"size_bytes"`
+	ContentType string `json:"content_type"`
+}
+
+type WorkerTaskLease {
+	TaskId         string            `json:"task_id"`
+	SubmissionId   int64             `json:"submission_id"`
+	ProblemId      int64             `json:"problem_id"`
+	Language       string            `json:"language"`
+	Attempt        int               `json:"attempt"`
+	LeaseVersion   int               `json:"lease_version"`
+	LeaseExpiresAt string            `json:"lease_expires_at"`
+	Source         WorkerArtifactRef `json:"source"`
+	ProblemPackage WorkerArtifactRef `json:"problem_package"`
+}
+
+type WorkerClaimTasksResp {
+	Tasks []WorkerTaskLease `json:"tasks"`
+}
+
+type WorkerTaskHeartbeatReq {
+	TaskId       string `path:"task_id"`
+	WorkerId     string `json:"worker_id"`
+	LeaseVersion int    `json:"lease_version"`
+}
+
+type WorkerTaskHeartbeatResp {
+	TaskId         string `json:"task_id"`
+	LeaseVersion   int    `json:"lease_version"`
+	LeaseExpiresAt string `json:"lease_expires_at"`
+}
+
+type WorkerResultCase {
+	CaseNo     int    `json:"case_no"`
+	Status     string `json:"status"`
+	Score      int    `json:"score"`
+	TimeMs     int    `json:"time_ms"`
+	MemoryKb   int    `json:"memory_kb"`
+	Message    string `json:"message,optional"`
+	Stdout     string `json:"stdout,optional"`
+	Stderr     string `json:"stderr,optional"`
+	CheckerLog string `json:"checker_log,optional"`
+}
+
+type WorkerSubmitResultReq {
+	TaskId       string             `path:"task_id"`
+	WorkerId     string             `json:"worker_id"`
+	LeaseVersion int                `json:"lease_version"`
+	Status       string             `json:"status"`
+	Score        int                `json:"score"`
+	TimeMs       int                `json:"time_ms"`
+	MemoryKb     int                `json:"memory_kb"`
+	Message      string             `json:"message,optional"`
+	Cases        []WorkerResultCase `json:"cases,optional"`
+}
+
+type WorkerSubmitResultResp {
+	Accepted bool   `json:"accepted"`
+	Status   string `json:"status"`
+}
+
+type WorkerFailTaskReq {
+	TaskId       string `path:"task_id"`
+	WorkerId     string `json:"worker_id"`
+	LeaseVersion int    `json:"lease_version"`
+	ErrorType    string `json:"error_type"`
+	Message      string `json:"message"`
+	Retryable    bool   `json:"retryable"`
+}
+
+type WorkerFailTaskResp {
+	Accepted bool   `json:"accepted"`
+	Status   string `json:"status"`
+}
+
+type WorkerArtifactSourceReq {
+	Id           int64  `path:"id"`
+	TaskId       string `form:"task_id"`
+	WorkerId     string `form:"worker_id"`
+	LeaseVersion int    `form:"lease_version"`
+}
+
+type WorkerArtifactProblemPackageReq {
+	Id           int64  `path:"id"`
+	TaskId       string `form:"task_id"`
+	WorkerId     string `form:"worker_id"`
+	LeaseVersion int    `form:"lease_version"`
+}
+
+type AdminQueueResp {
+	StreamLength      int64  `json:"stream_length"`
+	PendingCount      int64  `json:"pending_count"`
+	ConsumerGroup     string `json:"consumer_group"`
+	LastId            string `json:"last_id"`
+	TrimStrategy      string `json:"trim_strategy"`
+	PendingOldestIdle int64  `json:"pending_oldest_idle_ms"`
+	Scheduled         int64  `json:"scheduled"`
+	Pending           int64  `json:"pending"`
+	Judging           int64  `json:"judging"`
+}
+
+type AdminWorkerItem {
+	WorkerId           string   `json:"worker_id"`
+	WorkerName         string   `json:"worker_name"`
+	Hostname           string   `json:"hostname"`
+	Version            string   `json:"version"`
+	Capabilities       []string `json:"capabilities"`
+	SupportedLanguages []string `json:"supported_languages"`
+	MaxConcurrency     int      `json:"max_concurrency"`
+	RunningCount       int      `json:"running_count"`
+	LastSeen           string   `json:"last_seen"`
+	Status             string   `json:"status"`
+}
+
+type AdminWorkersResp {
+	Workers []AdminWorkerItem `json:"workers"`
+}
+
+type AdminTaskItem {
+	TaskId         string `json:"task_id"`
+	SubmissionId   int64  `json:"submission_id"`
+	WorkerId       string `json:"worker_id,optional"`
+	Status         string `json:"status"`
+	LeaseExpiresAt string `json:"lease_expires_at,optional"`
+	Attempt        int    `json:"attempt"`
+	HeartbeatAt    string `json:"heartbeat_at,optional"`
+}
+
+type AdminTasksResp {
+	Tasks []AdminTaskItem `json:"tasks"`
+}
+
+type AdminWorkerActionReq {
+	Id string `path:"id"`
+}
+
+type AdminSubmissionActionReq {
+	Id int64 `path:"id"`
+}
+
+type AdminActionResp {
+	Ok bool `json:"ok"`
 }
 
 type CancelSubmissionReq {
@@ -86,14 +324,38 @@ type RejudgeProblemResp {
 	middleware: UserContextMiddleware
 )
 service judgeapi {
+	@handler listLanguages
+	get /languages returns (ListLanguagesResp)
+
+	@handler adminQueue
+	get /admin/queue returns (AdminQueueResp)
+
+	@handler adminWorkers
+	get /admin/workers returns (AdminWorkersResp)
+
+	@handler adminTasks
+	get /admin/tasks returns (AdminTasksResp)
+
+	@handler adminDrainWorker
+	post /admin/workers/:id/drain (AdminWorkerActionReq) returns (AdminActionResp)
+
+	@handler adminRequeueSubmission
+	post /admin/submissions/:id/requeue (AdminSubmissionActionReq) returns (AdminActionResp)
+
 	@handler createSubmission
 	post /submissions (CreateSubmissionReq) returns (CreateSubmissionResp)
 
-	@handler getSubmission
-	get /submissions/:id (GetSubmissionReq) returns (GetSubmissionResp)
+	@handler listSubmissions
+	get /submissions (ListSubmissionsReq) returns (ListSubmissionsResp)
 
 	@handler getSubmissionCases
 	get /submissions/:id/cases (GetSubmissionCasesReq) returns (GetSubmissionCasesResp)
+
+	@handler getSubmissionDebugLogs
+	get /submissions/:id/debug-logs (GetSubmissionDebugLogsReq) returns (SubmissionDebugLogsResp)
+
+	@handler getSubmission
+	get /submissions/:id (GetSubmissionReq) returns (GetSubmissionResp)
 
 	@handler cancelSubmission
 	post /submissions/:id/cancel (CancelSubmissionReq) returns (CancelSubmissionResp)
@@ -102,3 +364,31 @@ service judgeapi {
 	post /problems/:id/rejudge (RejudgeProblemReq) returns (RejudgeProblemResp)
 }
 
+@server (
+	prefix: /judge
+)
+service judgeapi {
+	@handler workerRegister
+	post /worker/register (WorkerRegisterReq) returns (WorkerRegisterResp)
+
+	@handler workerHeartbeat
+	post /worker/heartbeat (WorkerHeartbeatReq) returns (WorkerHeartbeatResp)
+
+	@handler workerClaimTasks
+	post /worker/tasks/claim (WorkerClaimTasksReq) returns (WorkerClaimTasksResp)
+
+	@handler workerTaskHeartbeat
+	post /worker/tasks/:task_id/heartbeat (WorkerTaskHeartbeatReq) returns (WorkerTaskHeartbeatResp)
+
+	@handler workerSubmitResult
+	post /worker/tasks/:task_id/result (WorkerSubmitResultReq) returns (WorkerSubmitResultResp)
+
+	@handler workerFailTask
+	post /worker/tasks/:task_id/fail (WorkerFailTaskReq) returns (WorkerFailTaskResp)
+
+	@handler workerArtifactSubmissionSource
+	get /worker/artifacts/submissions/:id/source (WorkerArtifactSourceReq)
+
+	@handler workerArtifactProblemPackage
+	get /worker/artifacts/problems/:id/package (WorkerArtifactProblemPackageReq)
+}

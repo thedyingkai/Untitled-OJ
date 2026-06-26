@@ -6,6 +6,8 @@ package svc
 import (
 	"context"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"ojos-problem-api/internal/config"
@@ -40,6 +42,7 @@ type ServiceContext struct {
 
 func NewServiceContext(c config.Config) *ServiceContext {
 	ctx := context.Background()
+	applyEnvOverrides(&c)
 
 	zlog, err := sharedlogger.New(c.Name)
 	if err != nil {
@@ -103,6 +106,30 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		).Handle,
 		UserContextMiddleware: middleware.NewUserContextMiddleware().Handle,
 	}
+}
+
+func applyEnvOverrides(c *config.Config) {
+	if value := firstEnv("DATABASE_URL", "POSTGRES_DSN"); value != "" {
+		c.Database.Url = value
+	}
+	if value := strings.TrimSpace(os.Getenv("REDIS_URL")); value != "" {
+		c.Redis.Url = value
+	}
+	if value := strings.TrimSpace(os.Getenv("JAEGER_ENDPOINT")); value != "" {
+		c.Jaeger.Endpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEMS_ROOT")); value != "" {
+		c.Storage.ProblemsRoot = value
+	}
+}
+
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *ServiceContext) Close(ctx context.Context) {

@@ -76,8 +76,6 @@ func (l *UpdateTestCaseLogic) UpdateTestCase(req *types.UpdateTestCaseReq) (resp
 	}
 
 	return &types.UpdateTestCaseResp{
-		CaseNo:     result.CaseNo,
-		InputPath:  result.InputPath,
-		AnswerPath: result.AnswerPath,
+		CaseNo: result.CaseNo,
 	}, nil
 }

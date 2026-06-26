@@ -6,9 +6,7 @@ package logic
 import (
 	"context"
 	"errors"
-	"strconv"
 	"strings"
-	"time"
 
 	"ojos-judge-api/internal/submissionfs"
 	"ojos-judge-api/internal/svc"
@@ -16,7 +14,6 @@ import (
 	"ojos-shared/security/authctx"
 	sharedperm "ojos-shared/security/permission"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/zeromicro/go-zero/core/logx"
 )
 
@@ -58,9 +55,13 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		return nil, errors.New("empty code")
 	}
 
-	language := strings.TrimSpace(req.Language)
-	if language == "" {
-		language = "cpp17"
+	if int64(len([]byte(req.Code))) > maxCodeBytes(l.svcCtx) {
+		return nil, errors.New("code is too large")
+	}
+
+	language, err := validateEnabledLanguage(l.svcCtx, req.Language)
+	if err != nil {
+		return nil, err
 	}
 
 	problem, err := l.svcCtx.Repo.GetProblemMeta(l.ctx, req.ProblemId)
@@ -68,8 +69,24 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		return nil, err
 	}
 
+	if problem.Status == "archived" {
+		return nil, errors.New("problem is archived")
+	}
+
+	if problem.Visibility != "public" && problem.CreatedBy != user.UserID {
+		if err := sharedperm.RequireUserPermission(
+			l.ctx,
+			l.svcCtx.DB,
+			user.UserID,
+			"problem.view",
+			sharedperm.Scope{Type: "problem", ID: req.ProblemId},
+		); err != nil {
+			return nil, err
+		}
+	}
+
 	if problem.PackageDir == "" {
-		return nil, errors.New("problem package dir is empty")
+		return nil, errors.New("problem package is not ready")
 	}
 
 	submissionID, err := l.svcCtx.Repo.CreateSubmission(
@@ -104,6 +121,11 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		return nil, err
 	}
 
+	if err := l.svcCtx.Repo.EnsureTaskForSubmission(l.ctx, submissionID); err != nil {
+		_ = l.svcCtx.Repo.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
+		return nil, err
+	}
+
 	if err := l.publishSubmissionCreated(submissionID); err != nil {
 		_ = l.svcCtx.Repo.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
 		return nil, err
@@ -118,16 +140,5 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 const judgeSubmissionStream = "ojos:judge:submissions"
 
 func (l *CreateSubmissionLogic) publishSubmissionCreated(submissionID int64) error {
-	return l.svcCtx.Redis.XAdd(
-		l.ctx,
-		&redis.XAddArgs{
-			Stream: judgeSubmissionStream,
-			Values: map[string]any{
-				"type":          "submission.created",
-				"producer":      "judge-api-service",
-				"submission_id": strconv.FormatInt(submissionID, 10),
-				"created_at":    time.Now().UTC().Format(time.RFC3339Nano),
-			},
-		},
-	).Err()
+	return publishJudgeSignal(l.ctx, l.svcCtx, "submission.created", "judge-api-service", submissionID)
 }

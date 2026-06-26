@@ -1,13 +1,10 @@
 services:
   postgres:
     image: postgres:17
-    container_name: ojos-postgres
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: ojos
-    ports:
-      - "5433:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ojos}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -18,13 +15,10 @@ services:
 
   redis:
     image: redis:8
-    container_name: ojos-redis
-    ports:
-      - "6379:6379"
+    command: [ "redis-server", "--appendonly", "yes" ]
 
   jaeger:
     image: jaegertracing/all-in-one:latest
-    container_name: ojos-jaeger
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
@@ -37,22 +31,28 @@ services:
     build:
       context: ../../services
       dockerfile: gateway/Dockerfile
-    container_name: ojos-gateway
     depends_on:
       postgres:
         condition: service_healthy
       problem-api:
         condition: service_started
     environment:
-      DATABASE_URL: "postgres://postgres:password@postgres:5432/ojos?sslmode=disable"
+      DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
+      OJOS_PROBLEMS_ROOT: /data/ojos/problems
+      OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
     ports:
       - "8080:8080"
+    volumes:
+      - ../../storage/problems:/data/ojos/problems:ro
+      - ../../storage/submissions:/data/ojos/submissions:ro
 
   auth:
     build:
       context: ../../services
       dockerfile: auth/Dockerfile
-    container_name: ojos-auth
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,12 +62,15 @@ services:
         condition: service_started
     expose:
       - "8081"
+    environment:
+      DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
 
   judge-api:
     build:
       context: ../../services
       dockerfile: judge-api/Dockerfile
-    container_name: ojos-judge-api
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,23 +78,34 @@ services:
         condition: service_started
     expose:
       - "8082"
+    environment:
+      DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
+      OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
+      OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:?OJOS_WORKER_TOKEN is required}
     volumes:
       - ../../storage/submissions:/data/ojos/submissions
+      - ../../storage/problems:/data/ojos/problems:ro
 
   judge-worker:
     build:
       context: ../../services
       dockerfile: judge-worker/Dockerfile
-    container_name: ojos-judge-worker
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
+      gateway:
         condition: service_started
     environment:
-      DATABASE_URL: postgres://postgres:password@postgres:5432/ojos?sslmode=disable
-      REDIS_URL: redis://ojos-redis:6379/0
       LANGUAGES_CONFIG: config/languages.yaml
+      OJOS_CONTROL_PLANE_URL: http://gateway:8080/api
+      OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:?OJOS_WORKER_TOKEN is required}
+      OJOS_MAX_CONCURRENCY: 1
+      OJOS_WORK_DIR: /var/lib/ojos-worker/work
+      OJOS_ARTIFACT_CACHE_DIR: /var/lib/ojos-worker/cache
+      OJOS_SUPPORTED_LANGUAGES: cpp17,c11,python3,java17
+      OJOS_HEARTBEAT_INTERVAL: 10
+      OJOS_TASK_LEASE_TTL: 60
+      OJOS_CGROUP_V2_ROOT: /sys/fs/cgroup
       RUST_LOG: info
     cap_add:
       - SYS_ADMIN
@@ -99,19 +113,14 @@ services:
       - SETUID
       - SETGID
       - NET_ADMIN
-    security_opt:
-      - seccomp=unconfined
-      - apparmor=unconfined
     volumes:
-      - ../../storage/problems:/data/ojos/problems:ro
-      - ../../storage/submissions:/data/ojos/submissions
+      - worker-data:/var/lib/ojos-worker
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
 
   problem-api:
     build:
       context: ../../services
       dockerfile: problem-api/Dockerfile
-    container_name: ojos-problem-api
     depends_on:
       postgres:
         condition: service_healthy
@@ -121,8 +130,14 @@ services:
         condition: service_started
     expose:
       - "8083"
+    environment:
+      DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
+      OJOS_PROBLEMS_ROOT: /data/ojos/problems
     volumes:
       - ../../storage/problems:/data/ojos/problems
 
 volumes:
   postgres-data:
+  worker-data:

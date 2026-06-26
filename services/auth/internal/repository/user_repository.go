@@ -158,3 +158,101 @@ func (r *UserRepository) GetRolesByUserID(ctx context.Context, userID int64) ([]
 
 	return roles, nil
 }
+
+func (r *UserRepository) GetPermissionCodesByUserID(ctx context.Context, userID int64) ([]string, error) {
+	rows, err := r.db.Query(
+		ctx,
+		`
+WITH is_super_admin AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM user_roles ur
+        JOIN roles r ON r.id = ur.role_id
+        WHERE ur.user_id = $1
+          AND r.name = 'super_admin'
+
+        UNION ALL
+
+        SELECT 1
+        FROM role_bindings rb
+        JOIN roles r ON r.id = rb.role_id
+        WHERE rb.principal_type = 'user'
+          AND rb.principal_id = $1
+          AND rb.scope_type = 'system'
+          AND rb.scope_id = 0
+          AND r.name = 'super_admin'
+          AND (rb.expires_at IS NULL OR rb.expires_at > NOW())
+    ) AS ok
+),
+role_permissions_for_user AS (
+    SELECT rp.permission_code
+    FROM user_roles ur
+    JOIN role_permissions rp ON rp.role_id = ur.role_id
+    WHERE ur.user_id = $1
+
+    UNION
+
+    SELECT rp.permission_code
+    FROM role_bindings rb
+    JOIN role_permissions rp ON rp.role_id = rb.role_id
+    WHERE rb.principal_type = 'user'
+      AND rb.principal_id = $1
+      AND (rb.expires_at IS NULL OR rb.expires_at > NOW())
+),
+direct_allow AS (
+    SELECT permission_code
+    FROM permission_assignments
+    WHERE principal_type = 'user'
+      AND principal_id = $1
+      AND effect = 'allow'
+      AND (expires_at IS NULL OR expires_at > NOW())
+),
+direct_deny AS (
+    SELECT permission_code
+    FROM permission_assignments
+    WHERE principal_type = 'user'
+      AND principal_id = $1
+      AND effect = 'deny'
+      AND (expires_at IS NULL OR expires_at > NOW())
+),
+effective AS (
+    SELECT p.code AS permission_code
+    FROM permissions p
+    CROSS JOIN is_super_admin s
+    WHERE s.ok
+
+    UNION
+
+    SELECT permission_code FROM role_permissions_for_user
+
+    UNION
+
+    SELECT permission_code FROM direct_allow
+)
+SELECT permission_code
+FROM effective
+WHERE permission_code NOT IN (SELECT permission_code FROM direct_deny)
+ORDER BY permission_code
+`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	permissions := make([]string, 0)
+	for rows.Next() {
+		var permission string
+		if err := rows.Scan(&permission); err != nil {
+			return nil, err
+		}
+		permissions = append(permissions, permission)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return permissions, nil
+}
