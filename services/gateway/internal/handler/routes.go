@@ -25,9 +25,19 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Handler: adminHealthHandler(serverCtx),
 			},
 			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/health",
+				Handler: preflightHandler(),
+			},
+			{
 				Method:  http.MethodGet,
 				Path:    "/api/admin/modules",
 				Handler: adminModulesHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules",
+				Handler: preflightHandler(),
 			},
 			{
 				Method:  http.MethodGet,
@@ -35,14 +45,29 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Handler: adminModuleSetsHandler(serverCtx),
 			},
 			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/sets",
+				Handler: preflightHandler(),
+			},
+			{
 				Method:  http.MethodGet,
 				Path:    "/api/admin/modules/topology",
 				Handler: adminModuleTopologyHandler(serverCtx),
 			},
 			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/topology",
+				Handler: preflightHandler(),
+			},
+			{
 				Method:  http.MethodGet,
 				Path:    "/api/admin/modules/:id",
 				Handler: adminModuleDetailHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/:id",
+				Handler: preflightHandler(),
 			},
 		},
 	)

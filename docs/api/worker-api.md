@@ -95,3 +95,8 @@ Content-Type: application/json
 
 - [Worker Link 协议](../architecture/worker-link-protocol.md)
 - [Worker Token](../security/worker-token.md)
+## 2026-06-26 Worker Link API 运行时验收补充
+
+Worker Link API 必须通过 Gateway 验证，不允许 worker 直接使用 PostgreSQL/Redis 凭据。`scripts\e2e-api.ps1` 覆盖无 token/错误 token 拒绝、正确 token register、heartbeat、claim、artifact 下载、错误 lease result 拒绝和 fail cleanup。claim 验收使用真实 pending submission 和真实返回的 `task_id`、`worker_id`、`lease_version`。
+
+返回给 worker 的 artifact `url` 是相对 `OJOS_CONTROL_PLANE_URL` 的 Gateway 路径，例如 `/judge/worker/artifacts/...`；当 `OJOS_CONTROL_PLANE_URL=http://gateway:8080/api` 时，worker 实际访问 `/api/judge/worker/artifacts/...`。

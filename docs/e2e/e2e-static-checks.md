@@ -62,3 +62,13 @@ powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild
 - [工程验收总入口](e2e-engineering-acceptance.md)
 - [静态验证](../development/static-verification.md)
 - [临时文件隔离规则](../development/temp-file-policy.md)
+## 2026-06-26 验收边界补充
+
+`scripts\verify-static.ps1 -SkipDockerBuild` 只属于静态验证入口，不能证明 Docker Control Plane 已启动、数据库迁移已执行、Gateway 转发正常或 API 权限拒绝正确。需要 API 运行时验收时，必须先真实启动 compose：
+
+```powershell
+docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build
+powershell -NoProfile -File scripts\e2e-api.ps1 -BaseUrl http://localhost:8080/api -AdminUsername admin1 -AdminPassword admin123 -UserUsername user1 -UserPassword user123 -WorkerToken $env:OJOS_WORKER_TOKEN
+```
+
+Linux nsjail/cgroup 资源限制仍由 `scripts/e2e-linux.sh` 单独验收；多机 worker 仍需要 Linux/Docker/多机环境。

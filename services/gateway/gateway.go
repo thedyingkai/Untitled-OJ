@@ -10,6 +10,7 @@ import (
 
 	"ojos-gateway/internal/config"
 	"ojos-gateway/internal/handler"
+	gatewaymw "ojos-gateway/internal/middleware"
 	"ojos-gateway/internal/proxy"
 	"ojos-gateway/internal/svc"
 
@@ -26,6 +27,7 @@ func main() {
 
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
+	sharedmw.InstallHTTPErrorHandler()
 
 	svcCtx := svc.NewServiceContext(c)
 	defer svcCtx.Close(context.Background())
@@ -35,6 +37,7 @@ func main() {
 
 	server.Use(sharedmw.RecoveryMiddleware(svcCtx.Logger))
 	server.Use(sharedmw.LoggingMiddleware(svcCtx.Logger, svcCtx.Tracer))
+	server.Use(gatewaymw.CORSMiddleware())
 
 	handler.RegisterHandlers(server, svcCtx)
 

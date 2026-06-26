@@ -4,6 +4,12 @@
 > 适用范围：E2E 验收 / 发布前检查 / 运维
 > 最后更新：2026-06-26
 
+## 2026-06-27 Admin Health 验收补充
+
+Docker API 验收必须确认 `GET /api/admin/health` 在 Control Plane 正常启动时整体状态为 `ok`，且 `judge` 子项为 `ok`。`judge` 子项的健康检查路径是 compose 内部 `judge-api` 服务的 `GET /health`，不是 Gateway public `/api/judge/*` 路由。
+
+如果 Admin Health 返回 `degraded`，必须区分真实子项异常和探测路径错误。`judge-api` 正常运行但 health 子项返回 404 属于实现或配置缺陷，不能作为外部环境阻塞处理；修复后需重新运行 `scripts\e2e-api.ps1` 并确认摘要包含 `admin_health_status=ok`、`admin_health_judge_status=ok`、`failed=0`、`path_leaks=0`。
+
 ## 1. 文档目的
 
 本文档定义 OJOS 从静态构建到运行验收的完整检查入口。它强调一个原则：只有真实执行命令并得到预期结果，才可以记录为通过；Docker daemon、Linux cgroup v2、nsjail 或多机环境缺失时，只能记录为外部阻塞。
@@ -109,3 +115,13 @@ Redis Streams 只作为 signal history，不是任务所有权来源。验收时
 - [E2E 静态检查](e2e-static-checks.md)
 - [Judge E2E 用例](../judge/judge-e2e-cases.md)
 - [Worker Link 协议](../architecture/worker-link-protocol.md)
+## 2026-06-26 Docker API 运行时验收补充
+
+本仓库现在区分四类验收入口：
+
+- 静态验证：`powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild`，只覆盖格式、构建、单元测试、文档扫描、compose config 和前端 build 等静态事项。
+- Docker API 验证：先真实执行 `docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build`，再执行 `powershell -NoProfile -File scripts\e2e-api.ps1 -BaseUrl http://localhost:8080/api -AdminUsername admin1 -AdminPassword admin123 -UserUsername user1 -UserPassword user123 -WorkerToken $env:OJOS_WORKER_TOKEN`。
+- Linux 资源限制验收：`scripts/e2e-linux.sh`，用于 nsjail、cgroup v2、TLE/MLE/OLE 等 Linux worker runtime 行为。
+- 多机 worker 验收：需要 Linux/Docker/多机网络环境，验证远程 worker、并发、lease 恢复和故障切换。
+
+静态验证结果不得替代 API 验收；Docker daemon 不可用时必须记录为“无法执行 Docker API 验收”。

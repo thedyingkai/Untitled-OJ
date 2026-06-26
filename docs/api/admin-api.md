@@ -4,6 +4,14 @@
 > 适用范围：管理后台 / 运维 / 安全
 > 最后更新：2026-06-26
 
+## 2026-06-27 Admin Health judge-api 修复说明
+
+`GET /api/admin/health` 是 Gateway 聚合健康检查入口，管理员 token 访问返回 200，普通用户返回 403，无 token 返回 401。响应会检查 `gateway`、`auth`、`problem`、`judge`、`postgres`、`redis`、`artifact storage`、`internal auth key`、`workers` 和 `queue` 等子项。
+
+其中 `judge` 子项通过 compose 内部地址探测 `judge-api` 的真实 `GET /health`，当前目标为 `http://judge-api:8082/health`。该检查不应走 public `/api/judge/*` 路由，也不应被业务路由、用户鉴权、worker token 或 internal HMAC middleware 吞掉。`judge-api` 正常时不应返回 404；若 Admin Health 因 judge 404 变为 `degraded`，应优先检查 `judge-api` 是否注册了无前缀 `/health`。
+
+`degraded` 表示真实子项异常，不应由错误探测路径造成。health 响应不得泄露 DSN、secret、worker token、HMAC key 或内部绝对路径。
+
 ## 1. 文档目的
 
 本文档说明管理员 API 的范围、权限要求和安全边界。管理员 API 影响系统健康、评测队列、worker、用户角色和资源授权。
@@ -119,3 +127,8 @@ Module Registry v0 的 topology 响应不应为空。完成 `000009_module_regis
 
 - [健康检查](../operations/health-checks.md)
 - [权限管理安全](../security/permission-admin.md)
+## 2026-06-26 Admin API 运行时验收补充
+
+Admin API 必须通过 Gateway 验证 admin 成功、普通用户 403、无 token 401。`scripts\e2e-api.ps1` 已覆盖 `/api/admin/health`、`/api/admin/modules`、`/api/admin/modules/sets`、`/api/admin/modules/topology`、`/api/admin/modules/:id`、`/api/judge/admin/*` 和 `/api/auth/admin/*` 的核心路径。
+
+Module Registry topology 验收必须返回非空真实数据，至少包含 `ojos.judge-core`、kernel 内置模块、judge-core 到 kernel 的依赖，以及 problem-api、judge-api、judge-worker、frontend routes、gateway routes、permissions 等组件。不得再把空数组响应写成通过。

@@ -7,6 +7,10 @@ info (
 	version: "v1"
 )
 
+type HealthResp {
+	Status string `json:"status"`
+}
+
 type CreateSubmissionReq {
 	ProblemId int64  `json:"problem_id"`
 	Language  string `json:"language"`
@@ -317,6 +321,11 @@ type RejudgeProblemReq {
 type RejudgeProblemResp {
 	ProblemId int64 `json:"problem_id"`
 	Enqueued  int   `json:"enqueued"`
+}
+
+service judgeapi {
+	@handler health
+	get /health returns (HealthResp)
 }
 
 @server (

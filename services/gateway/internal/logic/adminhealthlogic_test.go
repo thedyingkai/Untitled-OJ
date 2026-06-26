@@ -2,11 +2,16 @@ package logic
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"ojos-gateway/internal/config"
+	"ojos-gateway/internal/svc"
 )
 
 func TestComponentMapsErrorToHealthStatus(t *testing.T) {
@@ -62,5 +67,56 @@ func TestStatusFromBool(t *testing.T) {
 	}
 	if got := statusFromBool(false); got != "error" {
 		t.Fatalf("expected error, got %q", got)
+	}
+}
+
+func TestCheckHTTPUsesInternalHealthEndpoint(t *testing.T) {
+	var requestedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.Path
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	logic := NewAdminHealthLogic(t.Context(), &svc.ServiceContext{})
+	got := logic.checkHTTP(config.ProxyRouteConfig{
+		Prefix:      "/api/judge",
+		Target:      server.URL,
+		StripPrefix: "/api",
+	})
+
+	if requestedPath != "/health" {
+		t.Fatalf("expected gateway to probe internal /health, got %q", requestedPath)
+	}
+	if got.Name != "judge" {
+		t.Fatalf("expected component name judge, got %q", got.Name)
+	}
+	if got.Status != "ok" {
+		t.Fatalf("expected judge health ok, got status=%q message=%q", got.Status, got.Message)
+	}
+}
+
+func TestCheckHTTPMarksJudgeHealth404AsError(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	logic := NewAdminHealthLogic(t.Context(), &svc.ServiceContext{})
+	got := logic.checkHTTP(config.ProxyRouteConfig{
+		Prefix: "/api/judge",
+		Target: server.URL,
+	})
+
+	if got.Name != "judge" {
+		t.Fatalf("expected component name judge, got %q", got.Name)
+	}
+	if got.Status != "error" {
+		t.Fatalf("expected judge health 404 to be error, got %q", got.Status)
+	}
+	if !strings.Contains(got.Message, "404") {
+		t.Fatalf("expected 404 message, got %q", got.Message)
 	}
 }

@@ -67,3 +67,13 @@ User API 使用 JWT；Worker API 使用 `X-OJOS-Worker-Token`；Admin API 使用
 
 - [安全边界](../security/security-boundary.md)
 - [路径泄露防护](../security/path-leak-prevention.md)
+## 2026-06-26 API 运行时验收补充
+
+API 文档中的接口验收必须通过 Gateway 真实请求完成。推荐命令：
+
+```powershell
+docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build
+powershell -NoProfile -File scripts\e2e-api.ps1 -BaseUrl http://localhost:8080/api -AdminUsername admin1 -AdminPassword admin123 -UserUsername user1 -UserPassword user123 -WorkerToken $env:OJOS_WORKER_TOKEN
+```
+
+该脚本覆盖 auth、problem、judge submissions、admin health、admin judge、module registry、worker register/heartbeat/claim、权限拒绝和内部路径泄露扫描。静态验证和前端 build 不能写成 API 验收通过。

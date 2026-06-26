@@ -52,3 +52,6 @@ OJOS_WORKER_TOKEN=<token> bash scripts/e2e-linux.sh
 
 - [资源限制](../judge/judge-resource-limits.md)
 - [Worker Node 部署](../deploy/deploy-worker-node.md)
+## 2026-06-26 验收边界补充
+
+本文件只描述 Linux worker runtime 验收。Docker Control Plane API 验收请使用 `scripts\e2e-api.ps1`，静态验证请使用 `scripts\verify-static.ps1 -SkipDockerBuild`。不要把 Docker API 验收和 Linux nsjail/cgroup 验收混在一起：前者确认 Gateway、数据库、Redis、storage、HMAC、权限和 API 响应；后者确认真实 Linux sandbox、cgroup v2、资源限制和 worker runtime 行为。

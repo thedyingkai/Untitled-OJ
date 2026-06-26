@@ -79,7 +79,7 @@ func taskLeaseToResp(
 	source, err := artifactRefForFile(
 		submission.CodePath,
 		fmt.Sprintf(
-			"/artifacts/submissions/%d/source?task_id=%s&worker_id=%s&lease_version=%d",
+			"/judge/worker/artifacts/submissions/%d/source?task_id=%s&worker_id=%s&lease_version=%d",
 			r.SubmissionID,
 			r.TaskID,
 			r.WorkerID,
@@ -99,7 +99,7 @@ func taskLeaseToResp(
 	problemPackage, err := artifactRefForFile(
 		packageZip,
 		fmt.Sprintf(
-			"/artifacts/problems/%d/package?task_id=%s&worker_id=%s&lease_version=%d",
+			"/judge/worker/artifacts/problems/%d/package?task_id=%s&worker_id=%s&lease_version=%d",
 			r.ProblemID,
 			r.TaskID,
 			r.WorkerID,

@@ -3,6 +3,10 @@
 
 package types
 
+type HealthResp struct {
+	Status string `json:"status"`
+}
+
 type CancelSubmissionReq struct {
 	Id     int64  `path:"id"`
 	Reason string `json:"reason,optional"`

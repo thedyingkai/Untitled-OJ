@@ -25,6 +25,7 @@ func main() {
 
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
+	sharedmw.InstallHTTPErrorHandler()
 
 	svcCtx := svc.NewServiceContext(c)
 	defer svcCtx.Close(context.Background())

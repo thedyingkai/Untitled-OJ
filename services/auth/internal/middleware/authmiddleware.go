@@ -65,7 +65,7 @@ func ClaimsFromContext(ctx context.Context) (*token.Claims, bool) {
 
 func writeAuthError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusUnauthorized)
 
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"code": code,

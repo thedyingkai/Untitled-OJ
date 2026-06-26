@@ -4,6 +4,14 @@
 > 适用范围：运维 / 管理后台 / 部署验收
 > 最后更新：2026-06-26
 
+## 2026-06-27 Admin Health judge-api 探测语义
+
+`GET /api/admin/health` 由 Gateway 聚合 Control Plane 健康状态，当前检查项包括 `gateway`、`auth`、`problem`、`judge`、`postgres`、`redis`、`artifact storage`、`internal auth key`、`workers` 和 `queue`。
+
+Gateway 检查 `judge` 子项时必须直连 compose 内部服务 `judge-api` 的真实 `GET /health` endpoint，即 `http://judge-api:8082/health`，不得通过 public `/api/judge/*` 转发路径探测。`judge-api` 正常运行时该 endpoint 返回 `{"status":"ok"}`，Admin Health 中 `judge` 子项应为 `ok`，整体状态不应因为错误探测路径导致 `degraded`。
+
+`degraded` 只表示真实子项异常，例如下游服务不可达、Redis/Postgres/storage 不可用、worker/queue 查询失败或内部 HMAC key 不可验证。health 响应不得返回 DSN、secret、worker token、HMAC key 或内部绝对路径。
+
 ## 1. 文档目的
 
 本文档说明 OJOS 健康检查的检查项、展示方式和排障用途。健康检查不是简单 `ok`，而是用于判断 Control Plane、队列、worker 和 artifact storage 是否可用。
