@@ -12,17 +12,12 @@ mod imp {
 
     #[derive(Debug)]
     pub struct CgroupRun {
-        path: PathBuf,
+        path: Option<PathBuf>,
     }
 
     impl CgroupRun {
         pub fn create(memory_mb: u64, pids_max: u64) -> Result<Self> {
-            let root = std::env::var("OJOS_CGROUP_V2_ROOT")
-                .unwrap_or_else(|_| "/sys/fs/cgroup".to_string());
-            let root = PathBuf::from(root);
-            if !root.join("cgroup.controllers").exists() {
-                return Err(anyhow!("cgroup v2 is required: {}", root.display()));
-            }
+            let root = detect_cgroup_v2_root()?;
 
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -36,38 +31,44 @@ mod imp {
                 id
             ));
 
-            std::fs::create_dir_all(&path)
-                .with_context(|| format!("create cgroup failed: {}", path.display()))?;
+            if let Err(err) = create_limited_cgroup(&path, memory_mb, pids_max) {
+                if allow_cgroup_fallback() {
+                    let _ = std::fs::remove_dir(&path);
+                    return Ok(Self { path: None });
+                }
+                return Err(err);
+            }
 
-            std::fs::write(
-                path.join("memory.max"),
-                (memory_mb * 1024 * 1024).to_string(),
-            )
-            .with_context(|| format!("write memory.max failed: {}", path.display()))?;
-            std::fs::write(path.join("pids.max"), pids_max.to_string())
-                .with_context(|| format!("write pids.max failed: {}", path.display()))?;
-
-            Ok(Self { path })
+            Ok(Self { path: Some(path) })
         }
 
         pub fn attach(&self, pid: u32) -> Result<()> {
-            std::fs::write(self.path.join("cgroup.procs"), pid.to_string())
-                .with_context(|| format!("attach pid to cgroup failed: {}", self.path.display()))
+            let Some(path) = &self.path else {
+                return Ok(());
+            };
+            std::fs::write(path.join("cgroup.procs"), pid.to_string())
+                .with_context(|| format!("attach pid to cgroup failed: {}", path.display()))
         }
 
         pub fn memory_peak_kb(&self) -> Result<i32> {
-            let path = self.path.join("memory.peak");
+            let Some(cgroup_path) = &self.path else {
+                return Ok(0);
+            };
+            let path = cgroup_path.join("memory.peak");
             let value = if path.exists() {
                 read_u64(&path)?
             } else {
-                read_u64(&self.path.join("memory.current"))?
+                read_u64(&cgroup_path.join("memory.current"))?
             };
             Ok((value / 1024).min(i32::MAX as u64) as i32)
         }
 
         pub fn oom_killed(&self) -> Result<bool> {
-            let events = std::fs::read_to_string(self.path.join("memory.events"))
-                .with_context(|| format!("read memory.events failed: {}", self.path.display()))?;
+            let Some(path) = &self.path else {
+                return Ok(false);
+            };
+            let events = std::fs::read_to_string(path.join("memory.events"))
+                .with_context(|| format!("read memory.events failed: {}", path.display()))?;
             for line in events.lines() {
                 let mut parts = line.split_whitespace();
                 let key = parts.next().unwrap_or_default();
@@ -85,8 +86,36 @@ mod imp {
 
     impl Drop for CgroupRun {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir(&self.path);
+            if let Some(path) = &self.path {
+                let _ = std::fs::remove_dir(path);
+            }
         }
+    }
+
+    fn create_limited_cgroup(path: &Path, memory_mb: u64, pids_max: u64) -> Result<()> {
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("create cgroup failed: {}", path.display()))?;
+
+        std::fs::write(
+            path.join("memory.max"),
+            (memory_mb * 1024 * 1024).to_string(),
+        )
+        .with_context(|| format!("write memory.max failed: {}", path.display()))?;
+        std::fs::write(path.join("pids.max"), pids_max.to_string())
+            .with_context(|| format!("write pids.max failed: {}", path.display()))?;
+
+        Ok(())
+    }
+
+    fn allow_cgroup_fallback() -> bool {
+        std::env::var("OJOS_ALLOW_CGROUP_FALLBACK")
+            .map(|value| {
+                let value = value.trim();
+                value == "1"
+                    || value.eq_ignore_ascii_case("true")
+                    || value.eq_ignore_ascii_case("yes")
+            })
+            .unwrap_or(false)
     }
 
     fn read_u64(path: &Path) -> Result<u64> {
@@ -95,6 +124,27 @@ mod imp {
         text.trim()
             .parse::<u64>()
             .with_context(|| format!("parse cgroup value failed: {}", path.display()))
+    }
+
+    fn detect_cgroup_v2_root() -> Result<PathBuf> {
+        let mut candidates = Vec::new();
+        if let Ok(raw) = std::env::var("OJOS_CGROUP_V2_ROOT") {
+            if !raw.trim().is_empty() {
+                candidates.push(PathBuf::from(raw));
+            }
+        }
+        candidates.push(PathBuf::from("/sys/fs/cgroup"));
+        candidates.push(PathBuf::from("/sys/fs/cgroup/unified"));
+
+        for root in candidates {
+            if root.join("cgroup.controllers").exists() {
+                return Ok(root);
+            }
+        }
+
+        Err(anyhow!(
+            "cgroup v2 is required: checked OJOS_CGROUP_V2_ROOT, /sys/fs/cgroup, /sys/fs/cgroup/unified"
+        ))
     }
 }
 

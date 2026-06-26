@@ -199,7 +199,7 @@ async fn execute_task(
     match result {
         Ok(result) => submit_result(&client, &config, &task, &result).await?,
         Err(err) => {
-            fail_task(&client, &config, &task, true, "SYSTEM", &err.to_string()).await?;
+            fail_task(&client, &config, &task, false, "SYSTEM", &err.to_string()).await?;
             return Err(err);
         }
     }

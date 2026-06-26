@@ -319,9 +319,13 @@ async fn run_nsjail_shell(
 
     let mut cmd = Command::new("nsjail");
 
-    cmd.arg("--mode")
-        .arg("o")
-        .arg("--user")
+    cmd.arg("--mode").arg("o");
+
+    if env_bool("OJOS_NSJAIL_NO_PIVOTROOT") {
+        cmd.arg("--no_pivotroot");
+    }
+
+    cmd.arg("--user")
         .arg("10001")
         .arg("--group")
         .arg("10001")
@@ -509,6 +513,15 @@ async fn run_nsjail_shell(
         stderr,
         message,
     })
+}
+
+fn env_bool(key: &str) -> bool {
+    std::env::var(key)
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
 }
 
 async fn attach_case_output(
