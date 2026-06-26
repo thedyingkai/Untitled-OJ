@@ -5,10 +5,14 @@ import { NButton, NResult } from 'naive-ui'
 
 <template>
   <main class="error-page">
-    <NResult status="403" title="403" description="当前账号没有访问权限">
+    <NResult
+      status="403"
+      title="Access denied"
+      description="Your account does not have permission to open this page."
+    >
       <template #footer>
         <RouterLink to="/dashboard">
-          <NButton type="primary">返回工作台</NButton>
+          <NButton type="primary">Back to dashboard</NButton>
         </RouterLink>
       </template>
     </NResult>

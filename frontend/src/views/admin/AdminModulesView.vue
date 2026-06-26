@@ -1,22 +1,17 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
-import {
-  NButton,
-  NDataTable,
-  NInput,
-  NSelect,
-  NSpace,
-  NTag,
-  type DataTableColumns,
-} from 'naive-ui'
+import { NButton, NDataTable, NInput, NSelect, NSpace, type DataTableColumns } from 'naive-ui'
 
-import { listModules, listModuleSets } from '../../api/modules'
+import { listModuleSets, listModules } from '../../api/modules'
 import { toApiClientError, type ApiClientError } from '../../api/client'
 import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
 import EmptyView from '../../components/common/EmptyView.vue'
 import LoadingView from '../../components/common/LoadingView.vue'
-import PageCard from '../../components/common/PageCard.vue'
+import OjosModuleStatusTag from '../../components/oj/OjosModuleStatusTag.vue'
+import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
+import OjosSection from '../../components/oj/OjosSection.vue'
+import OjosStatCard from '../../components/oj/OjosStatCard.vue'
 import type { ModuleNodeItem, ModuleSetItem } from '../../types/module'
 
 const modules = ref<ModuleNodeItem[]>([])
@@ -29,13 +24,13 @@ const setFilter = ref<string | null>(null)
 const statusFilter = ref<string | null>(null)
 
 const setOptions = computed(() => [
-  { label: '全部集合', value: '' },
+  { label: 'All sets', value: '' },
   ...sets.value.map((item) => ({ label: `${item.name} (${item.set_id})`, value: item.set_id })),
 ])
 
 const statusOptions = computed(() => {
   const values = Array.from(new Set(modules.value.map((item) => item.status))).sort()
-  return [{ label: '全部状态', value: '' }, ...values.map((value) => ({ label: value, value }))]
+  return [{ label: 'All statuses', value: '' }, ...values.map((value) => ({ label: value, value }))]
 })
 
 const filteredModules = computed(() => {
@@ -54,21 +49,25 @@ const filteredModules = computed(() => {
 
 const columns = computed<DataTableColumns<ModuleNodeItem>>(() => [
   {
-    title: 'module_id',
+    title: 'Module',
     key: 'module_id',
+    width: 260,
     render: (row) =>
       h(
         RouterLink,
-        { to: `/admin/modules/${encodeURIComponent(row.module_id)}` },
+        {
+          to: `/admin/modules/${encodeURIComponent(row.module_id)}`,
+          class: 'table-link',
+        },
         { default: () => row.module_id },
       ),
   },
-  { title: 'name', key: 'name' },
-  { title: 'set_id', key: 'set_id' },
-  { title: 'version', key: 'version', width: 100 },
-  { title: 'status', key: 'status', width: 120, render: (row) => hStatus(row.status) },
-  { title: 'kind', key: 'kind', width: 120 },
-  { title: 'description', key: 'description' },
+  { title: 'Name', key: 'name', width: 180 },
+  { title: 'Set', key: 'set_id', width: 160 },
+  { title: 'Version', key: 'version', width: 110 },
+  { title: 'Status', key: 'status', width: 120, render: (row) => h(OjosModuleStatusTag, { status: row.status }) },
+  { title: 'Kind', key: 'kind', width: 120 },
+  { title: 'Description', key: 'description' },
 ])
 
 async function load(silent = false): Promise<void> {
@@ -90,53 +89,92 @@ async function load(silent = false): Promise<void> {
   }
 }
 
-function hStatus(status: string) {
-  const type = status === 'ENABLED' ? 'success' : status.includes('FAILED') ? 'error' : 'default'
-  return h(NTag, { type, size: 'small', round: true }, { default: () => status })
-}
-
 onMounted(() => void load())
 </script>
 
 <template>
-  <PageCard title="模块注册表">
-    <template #headerExtra>
-      <NSpace>
-        <RouterLink to="/admin/modules/topology">拓扑视图</RouterLink>
-        <NButton size="small" secondary :loading="refreshing" @click="load(true)">刷新</NButton>
-      </NSpace>
-    </template>
+  <div class="modules-page">
+    <OjosPageHeader
+      title="Module Registry"
+      description="Installed and built-in modules with status, set membership, versions, and components."
+      eyebrow="Admin"
+    >
+      <template #actions>
+        <RouterLink to="/admin/modules/topology">
+          <NButton secondary>Topology</NButton>
+        </RouterLink>
+        <NButton secondary :loading="refreshing" @click="load(true)">Refresh</NButton>
+      </template>
+    </OjosPageHeader>
 
     <LoadingView v-if="loading" />
     <template v-else>
       <ApiErrorAlert v-if="error" :error="error" @retry="load()" />
-      <NSpace v-else vertical size="large">
-        <NSpace>
-          <NInput v-model:value="keyword" clearable placeholder="搜索 module_id / name / description" />
-          <NSelect
-            v-model:value="setFilter"
-            :options="setOptions"
-            clearable
-            placeholder="按集合筛选"
-            style="width: 240px"
-          />
-          <NSelect
-            v-model:value="statusFilter"
-            :options="statusOptions"
-            clearable
-            placeholder="按状态筛选"
-            style="width: 180px"
-          />
-        </NSpace>
+      <template v-else>
+        <div class="module-summary">
+          <OjosStatCard label="Modules" :value="modules.length" tone="primary" />
+          <OjosStatCard label="Sets" :value="sets.length" />
+          <OjosStatCard label="Visible" :value="filteredModules.length" />
+        </div>
 
-        <EmptyView v-if="filteredModules.length === 0" description="没有匹配的模块" />
-        <NDataTable
-          v-else
-          :columns="columns"
-          :data="filteredModules"
-          :pagination="{ pageSize: 12 }"
-        />
-      </NSpace>
+        <OjosSection title="Registry">
+          <NSpace class="module-filters">
+            <NInput
+              v-model:value="keyword"
+              clearable
+              placeholder="Search module id, name, or description"
+              style="min-width: 280px"
+            />
+            <NSelect
+              v-model:value="setFilter"
+              :options="setOptions"
+              clearable
+              placeholder="Filter by set"
+              style="width: 240px"
+            />
+            <NSelect
+              v-model:value="statusFilter"
+              :options="statusOptions"
+              clearable
+              placeholder="Filter by status"
+              style="width: 180px"
+            />
+          </NSpace>
+
+          <EmptyView v-if="filteredModules.length === 0" description="No matching modules" />
+          <NDataTable
+            v-else
+            :columns="columns"
+            :data="filteredModules"
+            :pagination="{ pageSize: 12 }"
+            :bordered="false"
+          />
+        </OjosSection>
+      </template>
     </template>
-  </PageCard>
+  </div>
 </template>
+
+<style scoped>
+.modules-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.module-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.module-filters {
+  width: 100%;
+}
+
+@media (max-width: 900px) {
+  .module-summary {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

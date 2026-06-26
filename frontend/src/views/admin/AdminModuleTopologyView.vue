@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
-import { NButton, NDataTable, NSpace, NTag, NTabs, NTabPane, type DataTableColumns } from 'naive-ui'
+import { NButton, NDataTable, NSpace, NTag, NTabPane, NTabs, type DataTableColumns } from 'naive-ui'
 
 import { getModuleTopology } from '../../api/modules'
 import { toApiClientError, type ApiClientError } from '../../api/client'
@@ -24,43 +24,47 @@ const refreshing = ref(false)
 const error = ref<ApiClientError | null>(null)
 
 const setColumns: DataTableColumns<ModuleSetItem> = [
-  { title: 'set_id', key: 'set_id' },
-  { title: 'name', key: 'name' },
-  { title: 'description', key: 'description' },
-  { title: 'sort_order', key: 'sort_order', width: 120 },
+  { title: 'Set ID', key: 'set_id', width: 180 },
+  { title: 'Name', key: 'name', width: 180 },
+  { title: 'Description', key: 'description' },
+  { title: 'Order', key: 'sort_order', width: 100 },
 ]
 
 const nodeColumns = computed<DataTableColumns<ModuleNodeItem>>(() => [
   {
-    title: 'module_id',
+    title: 'Module',
     key: 'module_id',
+    width: 260,
     render: (row) =>
       h(
         RouterLink,
-        { to: `/admin/modules/${encodeURIComponent(row.module_id)}` },
+        {
+          to: `/admin/modules/${encodeURIComponent(row.module_id)}`,
+          class: 'table-link',
+        },
         { default: () => row.module_id },
       ),
   },
-  { title: 'set_id', key: 'set_id' },
-  { title: 'version', key: 'version', width: 100 },
-  { title: 'status', key: 'status', width: 120, render: (row) => hStatus(row.status) },
-  { title: 'kind', key: 'kind', width: 120 },
+  { title: 'Set', key: 'set_id', width: 160 },
+  { title: 'Version', key: 'version', width: 100 },
+  { title: 'Status', key: 'status', width: 120, render: (row) => hStatus(row.status) },
+  { title: 'Kind', key: 'kind', width: 120 },
 ])
 
 const edgeColumns: DataTableColumns<ModuleEdgeItem> = [
-  { title: 'from_module_id', key: 'from_module_id' },
-  { title: 'to_module_id', key: 'to_module_id' },
-  { title: 'edge_type', key: 'edge_type', width: 120 },
-  { title: 'version_constraint', key: 'version_constraint', width: 160 },
-  { title: 'required', key: 'required', width: 100, render: (row) => (row.required ? 'yes' : 'no') },
+  { title: 'From', key: 'from_module_id' },
+  { title: 'To', key: 'to_module_id' },
+  { title: 'Type', key: 'edge_type', width: 120 },
+  { title: 'Constraint', key: 'version_constraint', width: 160 },
+  { title: 'Required', key: 'required', width: 100, render: (row) => (row.required ? 'yes' : 'no') },
 ]
 
 const componentColumns: DataTableColumns<ModuleComponentItem> = [
-  { title: 'module_id', key: 'module_id' },
-  { title: 'component_id', key: 'component_id' },
-  { title: 'component_type', key: 'component_type' },
-  { title: 'status', key: 'status', width: 120, render: (row) => hStatus(row.status) },
-  { title: 'config', key: 'config', render: (row) => h(JsonViewer, { value: row.config }) },
+  { title: 'Module', key: 'module_id', width: 240 },
+  { title: 'Component', key: 'component_id', width: 220 },
+  { title: 'Type', key: 'component_type', width: 160 },
+  { title: 'Status', key: 'status', width: 120, render: (row) => hStatus(row.status) },
+  { title: 'Config', key: 'config', render: (row) => h(JsonViewer, { value: row.config }) },
 ]
 
 async function load(silent = false): Promise<void> {
@@ -82,44 +86,63 @@ async function load(silent = false): Promise<void> {
 
 function hStatus(status: string) {
   const type = status === 'ENABLED' ? 'success' : status.includes('FAILED') ? 'error' : 'default'
-  return h(NTag, { type, size: 'small', round: true }, { default: () => status })
+  return h(NTag, { type, size: 'small' }, { default: () => status })
 }
 
 onMounted(() => void load())
 </script>
 
 <template>
-  <PageCard title="模块拓扑">
+  <PageCard title="Module Topology">
     <template #headerExtra>
       <NSpace>
-        <RouterLink to="/admin/modules">模块列表</RouterLink>
-        <NButton size="small" secondary :loading="refreshing" @click="load(true)">刷新</NButton>
+        <RouterLink to="/admin/modules" class="header-link">Registry</RouterLink>
+        <NButton size="small" secondary :loading="refreshing" @click="load(true)">Refresh</NButton>
       </NSpace>
     </template>
 
     <LoadingView v-if="loading" />
     <template v-else>
       <ApiErrorAlert v-if="error" :error="error" @retry="load()" />
-      <NTabs v-else type="line">
-        <NTabPane name="sets" tab="集合">
-          <EmptyView v-if="!topology?.sets.length" description="没有模块集合" />
-          <NDataTable v-else :columns="setColumns" :data="topology.sets" :pagination="{ pageSize: 10 }" />
+      <NTabs v-else type="line" animated>
+        <NTabPane name="sets" tab="Sets">
+          <EmptyView v-if="!topology?.sets.length" description="No module sets" />
+          <NDataTable
+            v-else
+            :columns="setColumns"
+            :data="topology.sets"
+            :pagination="{ pageSize: 10 }"
+            :bordered="false"
+          />
         </NTabPane>
-        <NTabPane name="nodes" tab="模块节点">
-          <EmptyView v-if="!topology?.nodes.length" description="没有模块节点" />
-          <NDataTable v-else :columns="nodeColumns" :data="topology.nodes" :pagination="{ pageSize: 10 }" />
+        <NTabPane name="nodes" tab="Nodes">
+          <EmptyView v-if="!topology?.nodes.length" description="No module nodes" />
+          <NDataTable
+            v-else
+            :columns="nodeColumns"
+            :data="topology.nodes"
+            :pagination="{ pageSize: 10 }"
+            :bordered="false"
+          />
         </NTabPane>
-        <NTabPane name="edges" tab="依赖边">
-          <EmptyView v-if="!topology?.edges.length" description="没有依赖边" />
-          <NDataTable v-else :columns="edgeColumns" :data="topology.edges" :pagination="{ pageSize: 10 }" />
+        <NTabPane name="edges" tab="Edges">
+          <EmptyView v-if="!topology?.edges.length" description="No dependency edges" />
+          <NDataTable
+            v-else
+            :columns="edgeColumns"
+            :data="topology.edges"
+            :pagination="{ pageSize: 10 }"
+            :bordered="false"
+          />
         </NTabPane>
-        <NTabPane name="components" tab="组件">
-          <EmptyView v-if="!topology?.components.length" description="没有组件" />
+        <NTabPane name="components" tab="Components">
+          <EmptyView v-if="!topology?.components.length" description="No components" />
           <NDataTable
             v-else
             :columns="componentColumns"
             :data="topology.components"
             :pagination="{ pageSize: 8 }"
+            :bordered="false"
           />
         </NTabPane>
       </NTabs>

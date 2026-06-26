@@ -19,10 +19,14 @@ import { listProblems } from '../../api/problem'
 import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
 import EmptyView from '../../components/common/EmptyView.vue'
 import LoadingView from '../../components/common/LoadingView.vue'
-import PageCard from '../../components/common/PageCard.vue'
-import TimeText from '../../components/common/TimeText.vue'
+import OjosDifficultyTag from '../../components/oj/OjosDifficultyTag.vue'
+import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
+import OjosStatusTag from '../../components/oj/OjosStatusTag.vue'
+import OjosToolbar from '../../components/oj/OjosToolbar.vue'
+import OjosVisibilityTag from '../../components/oj/OjosVisibilityTag.vue'
 import { useAuthStore } from '../../stores/auth'
 import type { ProblemItem, ProblemVisibility } from '../../types/problem'
+import { formatDateTime, formatDuration, formatMemoryLimit, splitCsv } from '../../utils/format'
 
 const auth = useAuthStore()
 const loading = ref(false)
@@ -48,63 +52,65 @@ const canCreate = computed(
 
 const columns: DataTableColumns<ProblemItem> = [
   {
-    title: 'Title',
+    title: 'Problem',
     key: 'title',
+    minWidth: 280,
     render: (row) =>
-      h(
-        RouterLink,
-        { to: `/problems/${row.id}`, class: 'table-link' },
-        { default: () => row.title },
-      ),
+      h('div', { class: 'problem-title-cell' }, [
+        h(
+          RouterLink,
+          { to: `/problems/${row.id}`, class: 'table-link problem-title-link' },
+          { default: () => row.title },
+        ),
+        h('span', { class: 'problem-slug' }, `${row.id} · ${row.slug}`),
+      ]),
+  },
+  {
+    title: 'Difficulty',
+    key: 'difficulty',
+    width: 120,
+    render: (row) => h(OjosDifficultyTag, { difficulty: row.difficulty }),
+  },
+  {
+    title: 'State',
+    key: 'status',
+    width: 120,
+    render: (row) => h(OjosStatusTag, { status: row.status, domain: 'problem' }),
   },
   {
     title: 'Visibility',
     key: 'visibility',
     width: 120,
-    render: (row) =>
-      h(
-        NTag,
-        { size: 'small', type: row.visibility === 'public' ? 'success' : 'warning', round: true },
-        { default: () => visibilityLabel(row.visibility) },
-      ),
-  },
-  {
-    title: 'Difficulty',
-    key: 'difficulty',
-    width: 110,
-    render: (row) =>
-      h(
-        NTag,
-        { size: 'small', type: difficultyType(row.difficulty), round: true },
-        { default: () => difficultyLabel(row.difficulty) },
-      ),
+    render: (row) => h(OjosVisibilityTag, { visibility: row.visibility }),
   },
   {
     title: 'Tags',
     key: 'tags',
+    minWidth: 180,
     render: (row) =>
       h(
         NSpace,
         { size: 6 },
         {
-          default: () =>
-            splitTags(row.tags).map((tag) =>
-              h(NTag, { key: tag, size: 'small' }, { default: () => tag }),
-            ),
+          default: () => {
+            const tags = splitCsv(row.tags)
+            if (!tags.length) return '-'
+            return tags.map((tag) => h(NTag, { key: tag, size: 'small' }, { default: () => tag }))
+          },
         },
       ),
   },
   {
     title: 'Limits',
     key: 'limits',
-    width: 160,
-    render: (row) => `${row.time_limit_ms} ms / ${row.memory_limit_mb} MB`,
+    width: 150,
+    render: (row) => `${formatDuration(row.time_limit_ms)} / ${formatMemoryLimit(row.memory_limit_mb)}`,
   },
   {
     title: 'Updated',
     key: 'updated_at',
-    width: 190,
-    render: (row) => h(TimeText, { value: row.updated_at }),
+    width: 180,
+    render: (row) => formatDateTime(row.updated_at),
   },
 ]
 
@@ -135,46 +141,28 @@ function search(): void {
   void load()
 }
 
-function visibilityLabel(value: string): string {
-  if (value === 'public') return 'Public'
-  if (value === 'contest_only') return 'Contest'
-  return 'Private'
-}
-
-function difficultyLabel(value: string): string {
-  if (value === 'easy') return 'Easy'
-  if (value === 'hard') return 'Hard'
-  return 'Medium'
-}
-
-function difficultyType(value: string): 'success' | 'warning' | 'error' {
-  if (value === 'easy') return 'success'
-  if (value === 'hard') return 'error'
-  return 'warning'
-}
-
-function splitTags(value: string): string[] {
-  return value
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean)
-}
-
 onMounted(() => {
   void load()
 })
 </script>
 
 <template>
-  <PageCard title="Problems">
-    <template #headerExtra>
-      <RouterLink v-if="canCreate" to="/problems/new">
-        <NButton type="primary">New problem</NButton>
-      </RouterLink>
-    </template>
+  <div class="problem-list-page">
+    <OjosPageHeader
+      title="Problems"
+      description="Browse available problems, filter by difficulty or tags, and jump directly into submissions."
+      eyebrow="Online Judge"
+    >
+      <template #actions>
+        <RouterLink v-if="canCreate" to="/problems/new">
+          <NButton type="primary">New problem</NButton>
+        </RouterLink>
+        <NButton secondary :loading="loading" @click="load">Refresh</NButton>
+      </template>
+    </OjosPageHeader>
 
-    <NSpace vertical size="large">
-      <NForm :model="filters" label-placement="top">
+    <OjosToolbar>
+      <NForm :model="filters" label-placement="top" class="problem-filter-form">
         <NGrid :cols="4" :x-gap="12" :y-gap="8" responsive="screen">
           <NFormItemGi label="Keyword">
             <NInput
@@ -215,29 +203,71 @@ onMounted(() => {
             />
           </NFormItemGi>
         </NGrid>
-        <NSpace justify="end">
-          <NButton @click="search">Search</NButton>
-          <NButton secondary @click="load">Refresh</NButton>
-        </NSpace>
       </NForm>
-
-      <ApiErrorAlert :error="error" />
-      <LoadingView v-if="loading && problems.length === 0" />
-      <EmptyView v-else-if="!loading && !error && problems.length === 0" description="No problems" />
-      <template v-else>
-        <NDataTable :columns="columns" :data="problems" :loading="loading" :bordered="false" />
-        <NSpace justify="end">
-          <NPagination
-            v-model:page="filters.page"
-            v-model:page-size="filters.pageSize"
-            :item-count="total"
-            show-size-picker
-            :page-sizes="[10, 20, 50, 100]"
-            @update:page="load"
-            @update:page-size="search"
-          />
-        </NSpace>
+      <template #actions>
+        <NButton type="primary" @click="search">Search</NButton>
       </template>
-    </NSpace>
-  </PageCard>
+    </OjosToolbar>
+
+    <ApiErrorAlert :error="error" />
+    <LoadingView v-if="loading && problems.length === 0" />
+    <EmptyView v-else-if="!loading && !error && problems.length === 0" description="No problems" />
+
+    <template v-else>
+      <NDataTable
+        :columns="columns"
+        :data="problems"
+        :loading="loading"
+        :bordered="false"
+        class="ojos-data-table"
+      />
+      <NSpace justify="end" class="list-pagination">
+        <NPagination
+          v-model:page="filters.page"
+          v-model:page-size="filters.pageSize"
+          :item-count="total"
+          show-size-picker
+          :page-sizes="[10, 20, 50, 100]"
+          @update:page="load"
+          @update:page-size="search"
+        />
+      </NSpace>
+    </template>
+  </div>
 </template>
+
+<style scoped>
+.problem-list-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.problem-filter-form {
+  width: 100%;
+}
+
+.problem-title-cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.problem-title-link {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.problem-slug {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.list-pagination {
+  padding-top: 4px;
+}
+</style>

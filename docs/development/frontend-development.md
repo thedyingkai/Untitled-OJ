@@ -60,3 +60,13 @@ npm run build
 - [API 文档总览](../api/README.md)
 - [编码规范](coding-standards.md)
 - [静态验证](static-verification.md)
+
+## 11. OJOS UI 体系
+
+当前前端 UI 以 OJOS 组件体系为准，新增页面优先使用 `frontend/src/components/oj/` 下的页面头、区块、工具栏、状态标签、数据表格、代码块、JSON 查看器、空状态、错误状态和加载状态组件。
+
+状态颜色、难度颜色、worker 状态、module 状态和 health 状态统一由 `frontend/src/utils/status.ts` 提供。时间、内存、字节、百分比和列表展示统一由 `frontend/src/utils/format.ts` 提供。
+
+前端页面必须继续接真实 Gateway API，不写演示数据，不写本地固定 ID，不绕过统一 API client。Docker Control Plane 可用时，UI 修改后应同时执行 `scripts/e2e-api.ps1`，确认 auth、problem、judge、worker、admin health、admin judge、module registry、permission 和路径泄露扫描不被破坏。
+
+详细设计规则见 [UI 风格指南](ui-style-guide.md)。

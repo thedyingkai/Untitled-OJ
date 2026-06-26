@@ -2,12 +2,10 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import {
   NButton,
-  NDataTable,
   NForm,
   NFormItem,
   NInputNumber,
   NSelect,
-  NSpace,
   NTabs,
   NTabPane,
   useMessage,
@@ -22,11 +20,17 @@ import {
   removeProblemRole,
 } from '../../api/authAdmin'
 import { toApiClientError, type ApiClientError } from '../../api/client'
-import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
-import EmptyView from '../../components/common/EmptyView.vue'
 import LoadingView from '../../components/common/LoadingView.vue'
-import PageCard from '../../components/common/PageCard.vue'
 import TimeText from '../../components/common/TimeText.vue'
+import OjosDataTable from '../../components/oj/OjosDataTable.vue'
+import OjosEmptyState from '../../components/oj/OjosEmptyState.vue'
+import OjosErrorState from '../../components/oj/OjosErrorState.vue'
+import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
+import OjosPermissionTag from '../../components/oj/OjosPermissionTag.vue'
+import OjosRoleTag from '../../components/oj/OjosRoleTag.vue'
+import OjosSection from '../../components/oj/OjosSection.vue'
+import OjosStatCard from '../../components/oj/OjosStatCard.vue'
+import OjosToolbar from '../../components/oj/OjosToolbar.vue'
 import type { AuditLogItem, PermissionItem, RoleItem } from '../../types/permission'
 
 const message = useMessage()
@@ -48,14 +52,17 @@ const roleOptions = computed(() =>
     .map((role) => ({ label: role.name, value: role.name })),
 )
 
+const systemRoleCount = computed(() => roles.value.filter((role) => role.is_system).length)
+const problemRoleCount = computed(() => roles.value.filter((role) => role.name.startsWith('problem_')).length)
+
 const roleColumns: DataTableColumns<RoleItem> = [
-  { title: 'Role', key: 'name' },
+  { title: 'Role', key: 'name', render: (row) => h(OjosRoleTag, { role: row.name }) },
   { title: 'Module', key: 'module_code' },
   { title: 'Description', key: 'description' },
 ]
 
 const permissionColumns: DataTableColumns<PermissionItem> = [
-  { title: 'Permission', key: 'code' },
+  { title: 'Permission', key: 'code', render: (row) => h(OjosPermissionTag, { permission: row.code }) },
   { title: 'Module', key: 'module_code' },
   { title: 'Name', key: 'name' },
   { title: 'Description', key: 'description' },
@@ -121,55 +128,101 @@ onMounted(() => void load())
 </script>
 
 <template>
-  <PageCard title="Permissions">
+  <div class="admin-permissions-page">
+    <OjosPageHeader
+      title="Permissions"
+      description="Review role definitions, permission points, problem-scoped grants, and audit history."
+      eyebrow="Admin"
+    >
+      <template #actions>
+        <NButton secondary :loading="loading || saving" @click="load()">Refresh</NButton>
+      </template>
+    </OjosPageHeader>
+
     <LoadingView v-if="loading" />
     <template v-else>
-      <ApiErrorAlert v-if="error" :error="error" @retry="load()" />
-      <NSpace v-else vertical size="large">
-        <NForm inline :model="grantForm">
-          <NFormItem label="User ID">
-            <NInputNumber v-model:value="grantForm.user_id" :min="1" />
-          </NFormItem>
-          <NFormItem label="Problem ID">
-            <NInputNumber v-model:value="grantForm.problem_id" :min="1" />
-          </NFormItem>
-          <NFormItem label="Role">
-            <NSelect v-model:value="grantForm.role" :options="roleOptions" style="width: 180px" />
-          </NFormItem>
-          <NFormItem>
-            <NSpace>
+      <OjosErrorState v-if="error" :error="error" @retry="load()" />
+      <template v-else>
+        <div class="admin-summary-grid">
+          <OjosStatCard label="Roles" :value="roles.length" tone="primary" />
+          <OjosStatCard label="Problem Roles" :value="problemRoleCount" tone="warning" />
+          <OjosStatCard label="Permissions" :value="permissions.length" />
+          <OjosStatCard label="Audit Logs" :value="auditLogs.length" />
+        </div>
+
+        <OjosSection
+          title="Problem-scoped Role"
+          description="Grant or remove roles bound to one problem. This uses the same Gateway admin API as runtime validation."
+        >
+          <OjosToolbar>
+            <NForm inline :model="grantForm" class="permission-grant-form">
+              <NFormItem label="User ID">
+                <NInputNumber v-model:value="grantForm.user_id" :min="1" />
+              </NFormItem>
+              <NFormItem label="Problem ID">
+                <NInputNumber v-model:value="grantForm.problem_id" :min="1" />
+              </NFormItem>
+              <NFormItem label="Role">
+                <NSelect v-model:value="grantForm.role" :options="roleOptions" style="width: 190px" />
+              </NFormItem>
+            </NForm>
+            <template #actions>
               <NButton type="primary" :loading="saving" @click="submitGrant(true)">Grant</NButton>
               <NButton secondary :loading="saving" @click="submitGrant(false)">Remove</NButton>
-              <NButton secondary @click="load()">Refresh</NButton>
-            </NSpace>
-          </NFormItem>
-        </NForm>
+            </template>
+          </OjosToolbar>
+        </OjosSection>
 
-        <NTabs type="line">
-          <NTabPane name="roles" tab="Roles">
-            <EmptyView v-if="roles.length === 0" description="No roles" />
-            <NDataTable v-else :columns="roleColumns" :data="roles" :pagination="{ pageSize: 12 }" />
-          </NTabPane>
-          <NTabPane name="permissions" tab="Permissions">
-            <EmptyView v-if="permissions.length === 0" description="No permissions" />
-            <NDataTable
-              v-else
-              :columns="permissionColumns"
-              :data="permissions"
-              :pagination="{ pageSize: 12 }"
-            />
-          </NTabPane>
-          <NTabPane name="audit" tab="Audit">
-            <EmptyView v-if="auditLogs.length === 0" description="No audit logs" />
-            <NDataTable
-              v-else
-              :columns="auditColumns"
-              :data="auditLogs"
-              :pagination="{ pageSize: 10 }"
-            />
-          </NTabPane>
-        </NTabs>
-      </NSpace>
+        <OjosSection
+          title="Authorization Registry"
+          :description="`${systemRoleCount} system roles, ${problemRoleCount} problem roles, and ${permissions.length} permission points.`"
+        >
+          <NTabs type="line" animated>
+            <NTabPane name="roles" tab="Roles">
+              <OjosEmptyState v-if="roles.length === 0" description="No roles" />
+              <OjosDataTable v-else :columns="roleColumns" :data="roles" :page-size="12" />
+            </NTabPane>
+            <NTabPane name="permissions" tab="Permissions">
+              <OjosEmptyState v-if="permissions.length === 0" description="No permissions" />
+              <OjosDataTable v-else :columns="permissionColumns" :data="permissions" :page-size="12" />
+            </NTabPane>
+            <NTabPane name="audit" tab="Audit Logs">
+              <OjosEmptyState v-if="auditLogs.length === 0" description="No audit logs" />
+              <OjosDataTable v-else :columns="auditColumns" :data="auditLogs" :page-size="10" />
+            </NTabPane>
+          </NTabs>
+        </OjosSection>
+      </template>
     </template>
-  </PageCard>
+  </div>
 </template>
+
+<style scoped>
+.admin-permissions-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.admin-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.permission-grant-form {
+  width: 100%;
+}
+
+@media (max-width: 1000px) {
+  .admin-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .admin-summary-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

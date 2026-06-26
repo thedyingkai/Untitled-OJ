@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 import {
   NButton,
   NDataTable,
-  NGrid,
-  NGridItem,
   NSpace,
   NSwitch,
+  NTag,
   NText,
   useMessage,
   type DataTableColumns,
@@ -23,10 +23,14 @@ import { toApiClientError, type ApiClientError } from '../../api/client'
 import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
 import EmptyView from '../../components/common/EmptyView.vue'
 import LoadingView from '../../components/common/LoadingView.vue'
-import PageCard from '../../components/common/PageCard.vue'
-import StatusTag from '../../components/common/StatusTag.vue'
-import TimeText from '../../components/common/TimeText.vue'
+import OjosLanguageTag from '../../components/oj/OjosLanguageTag.vue'
+import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
+import OjosSection from '../../components/oj/OjosSection.vue'
+import OjosStatCard from '../../components/oj/OjosStatCard.vue'
+import OjosStatusTag from '../../components/oj/OjosStatusTag.vue'
+import OjosWorkerStatusTag from '../../components/oj/OjosWorkerStatusTag.vue'
 import type { JudgeTaskItem, QueueStatus, WorkerItem } from '../../types/worker'
+import { formatDateTime, formatDuration, formatList } from '../../utils/format'
 
 const message = useMessage()
 const queue = ref<QueueStatus | null>(null)
@@ -38,39 +42,93 @@ const error = ref<ApiClientError | null>(null)
 const autoRefresh = ref(true)
 let timer: number | undefined
 
+const runningTasks = computed(() => tasks.value.filter((task) => task.status === 'RUNNING').length)
+const staleHint = computed(() =>
+  tasks.value.filter((task) => task.status === 'RUNNING' && task.lease_expires_at).length,
+)
+
 const workerColumns = computed<DataTableColumns<WorkerItem>>(() => [
-  { title: 'Worker', key: 'worker_name', render: (row) => row.worker_name || row.worker_id },
-  { title: 'Host', key: 'hostname' },
-  { title: 'Version', key: 'version' },
-  { title: 'Status', key: 'status', render: (row) => hStatus(row.status) },
-  { title: 'Slots', key: 'slots', render: (row) => `${row.running_count}/${row.max_concurrency}` },
+  {
+    title: 'Worker',
+    key: 'worker_name',
+    minWidth: 220,
+    render: (row) =>
+      h('div', { class: 'worker-cell' }, [
+        h('strong', row.worker_name || row.worker_id),
+        h('span', row.worker_id),
+      ]),
+  },
+  { title: 'Host', key: 'hostname', minWidth: 150 },
+  { title: 'Version', key: 'version', width: 110 },
+  {
+    title: 'Status',
+    key: 'status',
+    width: 120,
+    render: (row) => h(OjosWorkerStatusTag, { status: row.status }),
+  },
+  { title: 'Slots', key: 'slots', width: 100, render: (row) => `${row.running_count}/${row.max_concurrency}` },
   {
     title: 'Languages',
     key: 'supported_languages',
-    render: (row) => row.supported_languages.join(', '),
+    minWidth: 220,
+    render: (row) =>
+      h(
+        NSpace,
+        { size: 6 },
+        {
+          default: () =>
+            row.supported_languages.length
+              ? row.supported_languages.map((language) =>
+                  h(OjosLanguageTag, { key: language, language }),
+                )
+              : formatList(row.supported_languages),
+        },
+      ),
   },
-  { title: 'Last Seen', key: 'last_seen', render: (row) => hTime(row.last_seen) },
+  { title: 'Last Seen', key: 'last_seen', width: 180, render: (row) => formatDateTime(row.last_seen) },
   {
     title: 'Action',
     key: 'action',
+    width: 110,
     render: (row) =>
       row.status === 'DRAINING'
-        ? 'Draining'
+        ? h(NTag, { size: 'small', type: 'warning' }, { default: () => 'Draining' })
         : hButton('Drain', () => handleDrain(row.worker_id)),
   },
 ])
 
 const taskColumns = computed<DataTableColumns<JudgeTaskItem>>(() => [
-  { title: 'Task', key: 'task_id' },
-  { title: 'Submission', key: 'submission_id' },
-  { title: 'Worker', key: 'worker_id' },
-  { title: 'Status', key: 'status', render: (row) => hStatus(row.status) },
-  { title: 'Attempt', key: 'attempt' },
-  { title: 'Heartbeat', key: 'heartbeat_at', render: (row) => hTime(row.heartbeat_at) },
-  { title: 'Lease Expires', key: 'lease_expires_at', render: (row) => hTime(row.lease_expires_at) },
+  { title: 'Task', key: 'task_id', minWidth: 140 },
+  {
+    title: 'Submission',
+    key: 'submission_id',
+    width: 120,
+    render: (row) =>
+      h(
+        RouterLink,
+        { to: `/submissions/${row.submission_id}`, class: 'table-link' },
+        { default: () => row.submission_id },
+      ),
+  },
+  { title: 'Worker', key: 'worker_id', minWidth: 160, render: (row) => row.worker_id || '-' },
+  {
+    title: 'Status',
+    key: 'status',
+    width: 120,
+    render: (row) => h(OjosStatusTag, { status: row.status, domain: 'task' }),
+  },
+  { title: 'Attempt', key: 'attempt', width: 90 },
+  { title: 'Heartbeat', key: 'heartbeat_at', width: 180, render: (row) => formatDateTime(row.heartbeat_at) },
+  {
+    title: 'Lease Expires',
+    key: 'lease_expires_at',
+    width: 180,
+    render: (row) => formatDateTime(row.lease_expires_at),
+  },
   {
     title: 'Action',
     key: 'action',
+    width: 110,
     render: (row) => hButton('Requeue', () => handleRequeue(row.submission_id)),
   },
 ])
@@ -135,14 +193,6 @@ function stopTimer(): void {
   }
 }
 
-function hStatus(status: string) {
-  return h(StatusTag, { status })
-}
-
-function hTime(value?: string) {
-  return value ? h(TimeText, { value }) : '-'
-}
-
 function hButton(label: string, onClick: () => void) {
   return h(NButton, { size: 'small', secondary: true, onClick }, { default: () => label })
 }
@@ -156,91 +206,130 @@ onBeforeUnmount(stopTimer)
 </script>
 
 <template>
-  <PageCard title="Judge Cluster">
-    <LoadingView v-if="loading" />
-    <template v-else>
-      <ApiErrorAlert v-if="error" :error="error" @retry="load()" />
-
-      <NSpace vertical size="large">
-        <NSpace justify="end" align="center">
+  <div class="admin-judge-page">
+    <OjosPageHeader
+      title="Judge Cluster"
+      description="Operational view of queue signals, PostgreSQL task leases, workers, and requeue controls."
+      eyebrow="Admin"
+    >
+      <template #actions>
+        <NSpace align="center">
           <NText depth="3">Auto refresh</NText>
           <NSwitch v-model:value="autoRefresh" />
           <NButton :loading="refreshing" secondary @click="load(true)">Refresh</NButton>
         </NSpace>
+      </template>
+    </OjosPageHeader>
 
-        <NGrid class="metric-grid" :cols="4" :x-gap="12" :y-gap="12" responsive="screen">
-          <NGridItem class="metric">
-            <strong>{{ queue?.stream_length ?? 0 }}</strong>
-            <span>Stream Length</span>
-          </NGridItem>
-          <NGridItem class="metric">
-            <strong>{{ queue?.pending_count ?? 0 }}</strong>
-            <span>Redis Signal Pending</span>
-          </NGridItem>
-          <NGridItem class="metric">
-            <strong>{{ queue?.scheduled ?? 0 }}</strong>
-            <span>Scheduled</span>
-          </NGridItem>
-          <NGridItem class="metric">
-            <strong>{{ queue?.judging ?? 0 }}</strong>
-            <span>Judging</span>
-          </NGridItem>
-        </NGrid>
-        <NText depth="3">
-          Task ownership is tracked in PostgreSQL leases; Redis Streams are trimmed signal history.
-        </NText>
+    <LoadingView v-if="loading" />
+    <template v-else>
+      <ApiErrorAlert v-if="error" :error="error" @retry="load()" />
 
-        <section>
-          <h2>Workers</h2>
+      <template v-else>
+        <div class="judge-summary-grid">
+          <OjosStatCard label="Stream Length" :value="queue?.stream_length ?? 0" tone="primary" />
+          <OjosStatCard label="Redis Pending" :value="queue?.pending_count ?? 0" />
+          <OjosStatCard label="Scheduled" :value="queue?.scheduled ?? 0" />
+          <OjosStatCard label="Judging" :value="queue?.judging ?? 0" tone="success" />
+          <OjosStatCard label="Running Tasks" :value="runningTasks" />
+          <OjosStatCard label="Lease Rows" :value="staleHint" />
+        </div>
+
+        <OjosSection
+          title="Queue"
+          description="Redis Streams are signal history; PostgreSQL judge_tasks is the task ownership source."
+        >
+          <div class="queue-detail-grid">
+            <span>Consumer group</span>
+            <strong>{{ queue?.consumer_group || '-' }}</strong>
+            <span>Last stream id</span>
+            <strong>{{ queue?.last_id || '-' }}</strong>
+            <span>Trim strategy</span>
+            <strong>{{ queue?.trim_strategy || '-' }}</strong>
+            <span>Oldest pending idle</span>
+            <strong>{{ queue?.pending_oldest_idle_ms ? formatDuration(queue.pending_oldest_idle_ms) : '-' }}</strong>
+          </div>
+        </OjosSection>
+
+        <OjosSection title="Workers" description="Registered workers, heartbeats, languages, and concurrency slots.">
           <EmptyView v-if="workers.length === 0" description="No workers registered" />
           <NDataTable
             v-else
             :columns="workerColumns"
             :data="workers"
             :pagination="{ pageSize: 8 }"
+            :bordered="false"
           />
-        </section>
+        </OjosSection>
 
-        <section>
-          <h2>Tasks</h2>
+        <OjosSection title="Tasks" description="Current task rows with worker leases and requeue controls.">
           <EmptyView v-if="tasks.length === 0" description="No judge tasks" />
           <NDataTable
             v-else
             :columns="taskColumns"
             :data="tasks"
             :pagination="{ pageSize: 10 }"
+            :bordered="false"
           />
-        </section>
-      </NSpace>
+        </OjosSection>
+      </template>
     </template>
-  </PageCard>
+  </div>
 </template>
 
 <style scoped>
-.metric-grid {
-  margin-bottom: 4px;
+.admin-judge-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
-.metric {
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  padding: 14px;
-  background: #fff;
+.judge-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
 }
 
-.metric strong {
-  display: block;
-  font-size: 24px;
-  line-height: 1.2;
+.queue-detail-grid {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 8px 14px;
 }
 
-.metric span {
-  color: #667085;
-  font-size: 13px;
+.queue-detail-grid span {
+  color: var(--muted);
 }
 
-section h2 {
-  margin: 0 0 12px;
-  font-size: 16px;
+.queue-detail-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:deep(.worker-cell) {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+:deep(.worker-cell strong) {
+  color: var(--text-strong);
+}
+
+:deep(.worker-cell span) {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 1200px) {
+  .judge-summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .judge-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

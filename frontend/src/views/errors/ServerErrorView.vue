@@ -5,10 +5,14 @@ import { NButton, NResult } from 'naive-ui'
 
 <template>
   <main class="error-page">
-    <NResult status="500" title="500" description="服务暂时不可用">
+    <NResult
+      status="500"
+      title="Service unavailable"
+      description="The application could not complete the request."
+    >
       <template #footer>
         <RouterLink to="/dashboard">
-          <NButton type="primary">返回工作台</NButton>
+          <NButton type="primary">Back to dashboard</NButton>
         </RouterLink>
       </template>
     </NResult>

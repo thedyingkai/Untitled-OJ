@@ -5,10 +5,10 @@ import { NButton, NResult } from 'naive-ui'
 
 <template>
   <main class="error-page">
-    <NResult status="404" title="404" description="页面不存在">
+    <NResult status="404" title="Page not found" description="The requested route does not exist.">
       <template #footer>
         <RouterLink to="/dashboard">
-          <NButton type="primary">返回工作台</NButton>
+          <NButton type="primary">Back to dashboard</NButton>
         </RouterLink>
       </template>
     </NResult>

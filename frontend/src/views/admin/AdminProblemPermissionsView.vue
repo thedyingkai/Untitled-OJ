@@ -5,7 +5,10 @@ import { NButton, NForm, NFormItem, NInputNumber, NSelect, NSpace, useMessage } 
 
 import { addProblemRole, removeProblemRole } from '../../api/authAdmin'
 import { toApiClientError } from '../../api/client'
-import PageCard from '../../components/common/PageCard.vue'
+import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
+import OjosRoleTag from '../../components/oj/OjosRoleTag.vue'
+import OjosSection from '../../components/oj/OjosSection.vue'
+import OjosToolbar from '../../components/oj/OjosToolbar.vue'
 
 const route = useRoute()
 const message = useMessage()
@@ -50,8 +53,18 @@ async function submit(add: boolean): Promise<void> {
 </script>
 
 <template>
-  <PageCard title="Problem Permissions">
-    <NForm :model="form" label-placement="left" label-width="120">
+  <div class="problem-permissions-page">
+    <OjosPageHeader
+      title="Problem Permissions"
+      :description="`Grant or remove scoped roles for problem #${problemId}.`"
+      eyebrow="Admin"
+    />
+
+    <OjosSection
+      title="Scoped Role Binding"
+      description="Problem roles are applied through Auth admin APIs and are not stored in the frontend."
+    >
+      <NForm :model="form" label-placement="left" label-width="120" class="problem-permission-form">
       <NFormItem label="Problem ID">
         <NInputNumber :value="problemId" disabled />
       </NFormItem>
@@ -61,12 +74,35 @@ async function submit(add: boolean): Promise<void> {
       <NFormItem label="Role" required>
         <NSelect v-model:value="form.role" :options="roleOptions" style="width: 220px" />
       </NFormItem>
-      <NFormItem>
-        <NSpace>
+    </NForm>
+
+      <OjosToolbar>
+        <NSpace align="center">
+          <span class="muted-text">Selected role</span>
+          <OjosRoleTag :role="form.role" />
+        </NSpace>
+        <template #actions>
           <NButton type="primary" :loading="saving" @click="submit(true)">Grant</NButton>
           <NButton secondary :loading="saving" @click="submit(false)">Remove</NButton>
-        </NSpace>
-      </NFormItem>
-    </NForm>
-  </PageCard>
+        </template>
+      </OjosToolbar>
+    </OjosSection>
+  </div>
 </template>
+
+<style scoped>
+.problem-permissions-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.problem-permission-form {
+  max-width: 720px;
+}
+
+.muted-text {
+  color: var(--muted);
+  font-size: 12px;
+}
+</style>

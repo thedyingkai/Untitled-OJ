@@ -2,9 +2,9 @@
 
 > 文档状态：当前实现
 > 适用范围：开发 / 部署 / 运维 / 架构设计 / 安全 / E2E 验收
-> 最后更新：2026-06-26
+> 最后更新：2026-06-27
 
-本文档记录每篇正式文档的状态。状态只描述文档和对应能力的成熟度，不代表尚未执行的运行验收已经通过。
+本文记录正式文档的状态。状态描述文档与能力成熟度，不代表尚未执行的运行时验收已经通过。
 
 | 文档 | 状态 |
 | --- | --- |
@@ -58,28 +58,19 @@
 | development/static-verification.md | 当前实现 |
 | development/coding-standards.md | 当前实现 |
 | development/frontend-development.md | 当前实现 |
+| development/ui-style-guide.md | 当前实现 |
 | development/backend-development.md | 当前实现 |
 | development/temp-file-policy.md | 当前实现 |
-| archive/legacy-docs/DOCS_MIGRATION.md | 已归档 |
 | archive/legacy-docs/* | 已归档 |
 
 ## 状态解释
 
-- 当前实现：文档描述当前仓库中已经实现并可静态验证的能力。
+- 当前实现：描述当前仓库中已实现并可静态验证的能力。
 - 部分实现：主体链路存在，但仍有目标能力或运行验收未完成。
-- 目标架构：设计方向，不应当理解为当前已上线能力。
+- 目标架构：设计方向，不应理解为当前已上线能力。
 - 需要运行验收：代码、配置或脚本存在，但必须在 Docker/Linux/多机环境中实际执行。
-- 已归档：历史文档，仅供追溯，不可作为当前部署依据。
+- 已归档：历史文档，仅供追溯。
 
 ## 验收方式
 
-维护者更新状态后，应同步更新 [文档索引](DOCS_INDEX.md)，并执行静态验证。
-
-## 相关文档
-
-- [文档首页](README.md)
-- [工程验收总入口](e2e/e2e-engineering-acceptance.md)
-
-## 剩余风险或外部环境要求
-
-状态为“需要运行验收”的文档必须在具备 Docker daemon、Linux cgroup v2、nsjail 或多机 worker 条件时补充实际结果。
+维护文档状态后，应同步更新 [文档索引](DOCS_INDEX.md)，并执行静态验证。

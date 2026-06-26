@@ -19,10 +19,12 @@ import { listJudgeLanguages, listSubmissions } from '../../api/judge'
 import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
 import EmptyView from '../../components/common/EmptyView.vue'
 import LoadingView from '../../components/common/LoadingView.vue'
-import PageCard from '../../components/common/PageCard.vue'
-import StatusTag from '../../components/common/StatusTag.vue'
-import TimeText from '../../components/common/TimeText.vue'
+import OjosLanguageTag from '../../components/oj/OjosLanguageTag.vue'
+import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
+import OjosStatusTag from '../../components/oj/OjosStatusTag.vue'
+import OjosToolbar from '../../components/oj/OjosToolbar.vue'
 import type { JudgeLanguage, JudgeStatus, SubmissionItem } from '../../types/judge'
+import { formatDateTime, formatDuration, formatMemory } from '../../utils/format'
 
 const loading = ref(false)
 const error = ref<unknown>()
@@ -60,7 +62,7 @@ const columns: DataTableColumns<SubmissionItem> = [
   {
     title: 'ID',
     key: 'id',
-    width: 90,
+    width: 88,
     render: (row) =>
       h(RouterLink, { to: `/submissions/${row.id}`, class: 'table-link' }, { default: () => row.id }),
   },
@@ -68,7 +70,7 @@ const columns: DataTableColumns<SubmissionItem> = [
     title: 'Status',
     key: 'status',
     width: 160,
-    render: (row) => h(StatusTag, { status: row.status }),
+    render: (row) => h(OjosStatusTag, { status: row.status }),
   },
   {
     title: 'Problem',
@@ -81,22 +83,27 @@ const columns: DataTableColumns<SubmissionItem> = [
         { default: () => row.problem_id },
       ),
   },
-  { title: 'User', key: 'user_id', width: 100 },
-  { title: 'Language', key: 'language', width: 120 },
-  { title: 'Score', key: 'score', width: 90 },
-  { title: 'Time', key: 'time_ms', width: 100, render: (row) => `${row.time_ms} ms` },
-  { title: 'Memory', key: 'memory_kb', width: 120, render: (row) => `${row.memory_kb} KB` },
+  { title: 'User', key: 'user_id', width: 90 },
   {
-    title: 'Created',
+    title: 'Language',
+    key: 'language',
+    width: 130,
+    render: (row) => h(OjosLanguageTag, { language: row.language }),
+  },
+  { title: 'Score', key: 'score', width: 82 },
+  { title: 'Time', key: 'time_ms', width: 100, render: (row) => formatDuration(row.time_ms) },
+  { title: 'Memory', key: 'memory_kb', width: 110, render: (row) => formatMemory(row.memory_kb) },
+  {
+    title: 'Submitted',
     key: 'created_at',
-    width: 190,
-    render: (row) => h(TimeText, { value: row.created_at }),
+    width: 180,
+    render: (row) => formatDateTime(row.created_at),
   },
   {
     title: 'Judged',
     key: 'judged_at',
-    width: 190,
-    render: (row) => h(TimeText, { value: row.judged_at }),
+    width: 180,
+    render: (row) => formatDateTime(row.judged_at),
   },
 ]
 
@@ -145,10 +152,20 @@ onMounted(() => {
 </script>
 
 <template>
-  <PageCard title="Submissions">
-    <NSpace vertical size="large">
-      <NForm :model="filters" label-placement="top">
-        <NGrid :cols="4" :x-gap="12" :y-gap="8" responsive="screen">
+  <div class="submissions-page">
+    <OjosPageHeader
+      title="Submissions"
+      description="High-density judging history with verdicts, resource usage, and timestamps."
+      eyebrow="Judge"
+    >
+      <template #actions>
+        <NButton secondary :loading="loading" @click="load">Refresh</NButton>
+      </template>
+    </OjosPageHeader>
+
+    <OjosToolbar>
+      <NForm :model="filters" label-placement="top" class="submission-filter-form">
+        <NGrid :cols="6" :x-gap="12" :y-gap="8" responsive="screen">
           <NFormItemGi label="Status">
             <NSelect v-model:value="filters.status" clearable :options="statusOptions" />
           </NFormItemGi>
@@ -163,55 +180,72 @@ onMounted(() => {
               }))"
             />
           </NFormItemGi>
-          <NFormItemGi label="Problem ID">
+          <NFormItemGi label="Problem">
             <NInputNumber v-model:value="filters.problemId" clearable :min="1" style="width: 100%" />
           </NFormItemGi>
-          <NFormItemGi label="User ID">
+          <NFormItemGi label="User">
             <NInputNumber v-model:value="filters.userId" clearable :min="1" style="width: 100%" />
           </NFormItemGi>
-          <NFormItemGi label="Created from">
+          <NFormItemGi label="From">
             <NInput
               v-model:value="filters.createdFrom"
               clearable
-              placeholder="YYYY-MM-DD or RFC3339"
+              placeholder="YYYY-MM-DD"
               @keydown.enter.prevent="search"
             />
           </NFormItemGi>
-          <NFormItemGi label="Created to">
+          <NFormItemGi label="To">
             <NInput
               v-model:value="filters.createdTo"
               clearable
-              placeholder="YYYY-MM-DD or RFC3339"
+              placeholder="YYYY-MM-DD"
               @keydown.enter.prevent="search"
             />
           </NFormItemGi>
         </NGrid>
-        <NSpace justify="end">
-          <NButton @click="search">Search</NButton>
-          <NButton secondary @click="load">Refresh</NButton>
-        </NSpace>
       </NForm>
-
-      <ApiErrorAlert :error="error" />
-      <LoadingView v-if="loading && submissions.length === 0" />
-      <EmptyView
-        v-else-if="!loading && !error && submissions.length === 0"
-        description="No submissions"
-      />
-      <template v-else>
-        <NDataTable :columns="columns" :data="submissions" :loading="loading" :bordered="false" />
-        <NSpace justify="end">
-          <NPagination
-            v-model:page="filters.page"
-            v-model:page-size="filters.pageSize"
-            :item-count="total"
-            show-size-picker
-            :page-sizes="[10, 20, 50, 100]"
-            @update:page="load"
-            @update:page-size="search"
-          />
-        </NSpace>
+      <template #actions>
+        <NButton type="primary" @click="search">Filter</NButton>
       </template>
-    </NSpace>
-  </PageCard>
+    </OjosToolbar>
+
+    <ApiErrorAlert :error="error" />
+    <LoadingView v-if="loading && submissions.length === 0" />
+    <EmptyView
+      v-else-if="!loading && !error && submissions.length === 0"
+      description="No submissions"
+    />
+    <template v-else>
+      <NDataTable
+        :columns="columns"
+        :data="submissions"
+        :loading="loading"
+        :bordered="false"
+        class="ojos-data-table"
+      />
+      <NSpace justify="end">
+        <NPagination
+          v-model:page="filters.page"
+          v-model:page-size="filters.pageSize"
+          :item-count="total"
+          show-size-picker
+          :page-sizes="[10, 20, 50, 100]"
+          @update:page="load"
+          @update:page-size="search"
+        />
+      </NSpace>
+    </template>
+  </div>
 </template>
+
+<style scoped>
+.submissions-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.submission-filter-form {
+  width: 100%;
+}
+</style>

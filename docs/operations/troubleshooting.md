@@ -1,81 +1,99 @@
 # 故障排查
 
 > 文档状态：当前实现
-> 适用范围：运维 / 开发 / 验收
-> 最后更新：2026-06-26
+> 适用范围：运行时 / 开发 / 验收
+> 最后更新：2026-06-27
 
-## 2026-06-27 Admin Health degraded 排查补充
+## 1. 排查原则
 
-`/api/admin/health` 会聚合 `gateway`、`auth`、`problem-api`、`judge-api`、`postgres`、`redis`、`storage`、`worker` 和 `queue` 等子项。正常 Docker Control Plane 中，`judge-api` 必须提供无前缀 `GET /health`，Gateway 的 Admin Health 通过内部服务地址探测它。
+先确认失败发生在哪一层：前端、Gateway、内部 API、数据库、Redis、worker、sandbox、权限系统或文档/验收脚本。不要把静态构建成功写成运行时 API 成功。
 
-如果整体状态为 `degraded` 且 `judge` 子项消息为 `404 Not Found`，先在容器内验证：
+临时日志、截图、响应和报告只能写入 `.tmp/agent/`。
+
+## 2. 前端页面问题
+
+常用检查：
+
+```powershell
+cd frontend
+npm run build
+cd ..
+```
+
+如果页面空白，先检查：
+
+- Vite dev server 是否正常。
+- Route lazy import 是否构建失败。
+- 浏览器是否跳转到 `/login`。
+- API client 是否返回 401/403/5xx。
+- 页面是否绕过统一 API client。
+
+UI 问题应参考 [UI 风格指南](../development/ui-style-guide.md)。状态颜色不一致时，检查是否使用了 `OjosStatusTag` 和 `frontend/src/utils/status.ts`。
+
+## 3. Admin Health degraded
+
+`/api/admin/health` 会检查 gateway、auth、problem-api、judge-api、postgres、redis、storage、worker、queue 等子项。
+
+正常 Docker Control Plane 中，`judge-api` 必须提供无前缀 `GET /health`，Gateway Admin Health 通过内部服务地址探测该 endpoint，不应通过 public `/api/judge/*` 路由探测。
+
+排查命令：
 
 ```powershell
 docker compose --env-file .env -f deploy\compose\docker-compose.yml exec judge-api wget -qO- http://localhost:8082/health
 docker compose --env-file .env -f deploy\compose\docker-compose.yml exec gateway wget -qO- http://judge-api:8082/health
 ```
 
-两条命令都应返回 `{"status":"ok"}`。如果返回 404，说明 `judge-api` 的 `/health` 未注册或注册在错误路由组；如果直连正常但 Admin Health 异常，再检查 Gateway proxy route 的 `Target`、compose 服务名和端口。`degraded` 应代表真实子项异常，不应由错误探测路径造成。
+两条命令都应返回 `{"status":"ok"}`。如果直接访问正常但 Admin Health degraded，检查 Gateway health probe 的内部服务名、端口和路径。
 
-## 1. 文档目的
+## 4. Docker API 验收失败
 
-本文档提供 OJOS 常见故障的排查入口。它不替代日志系统和监控系统，但能帮助维护者按服务边界快速定位问题。
+查看：
 
-## 2. 适用范围
+- `.tmp/agent/reports/api-runtime/failures.txt`
+- `.tmp/agent/reports/api-runtime/runtime-results.json`
+- `.tmp/agent/logs/api-runtime/compose-logs.txt`
 
-适用于本地开发、静态验证、Control Plane 部署、worker 部署和 E2E 验收失败后的初步排查。
+常见分界：
 
-## 3. 当前实现
+- 401/403 异常：检查 JWT、角色、权限中间件和测试用户授权。
+- Worker claim 异常：检查 `OJOS_WORKER_TOKEN`、Gateway worker route 和 task lease。
+- Artifact 下载异常：检查 claim 返回的 `url`、`sha256`、`size_bytes` 和 lease。
+- 内部路径泄露：检查 API response sanitizer，不允许返回内部绝对路径字段。
 
-当前可排查的核心链路包括 Gateway、Auth、Problem API、Judge API、PostgreSQL、Redis、artifact storage、Worker Link 和前端页面。
+## 5. OJ 提交长期 PENDING
 
-## 4. 目标设计
+先看 Admin Judge：
 
-后续应结合结构化日志、request_id、submission_id、worker_id 和审计日志，形成更完整的运维 playbook。
+- queue pending/scheduled/judging
+- workers 是否 ONLINE
+- tasks 是否有 lease
+- worker 日志是否反复 claim 同一 task
 
-## 5. 关键流程
+本地 Docker Desktop/WSL 中，nsjail 可能需要 `OJOS_NSJAIL_NO_PIVOTROOT=true`，cgroup 可能需要本地兼容开关 `OJOS_ALLOW_CGROUP_FALLBACK=true`。这些只用于本地演示，不代表 Linux cgroup/nsjail 资源限制验收通过。
 
-先确认失败发生在哪一层：前端构建、Gateway 代理、内部服务、数据库、Redis、worker、sandbox 或权限系统。不要直接修改最终状态，应先保留失败命令和日志。
-
-## 6. 配置说明
-
-常见配置包括 `.env`、`services/*/etc/*.yaml`、`deploy/compose/docker-compose.yml`、`deploy/worker/docker-compose.yml` 和 worker `.env`。
-
-## 7. 安全边界
-
-排查日志时不能把 secret、token、用户源码和私有题目包写入正式文档或提交到 Git。临时日志放入 `.tmp/agent/logs/`。
-
-## 8. 验收方式
-
-排查后重新执行失败命令。例如：
+## 6. 必跑验证
 
 ```powershell
 powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild
 ```
 
-或在对应服务目录执行更小范围命令。
+Docker 可用时：
 
-## 9. 常见问题
+```powershell
+powershell -NoProfile -File scripts\e2e-api.ps1 `
+  -BaseUrl http://localhost:8080/api `
+  -AdminUsername admin1 `
+  -AdminPassword admin123 `
+  -UserUsername user1 `
+  -UserPassword user123 `
+  -WorkerToken $env:OJOS_WORKER_TOKEN
+```
 
-- 静态验证失败：进入对应服务目录单独执行失败命令。
-- Docker build 失败：执行 `docker version`，确认 daemon 可用。
-- worker offline：检查 token、`OJOS_CONTROL_PLANE_URL`、heartbeat 和 worker 日志。
-- submission 长时间 `JUDGING`：检查 `lease_expires_at`、task heartbeat、admin queue 和 worker 状态。
-- 普通用户能访问 admin：检查后端权限中间件。
+Linux nsjail/cgroup、多 worker、worker crash recovery 仍属于 Linux Judge Runtime 验收，不应写成 Windows/Docker Desktop 已通过。
 
-## 10. 相关文档
+## 7. 相关文档
 
-- [工程验收总入口](../e2e/e2e-engineering-acceptance.md)
-- [Judge Worker 集群](../judge/judge-worker-cluster.md)
+- [前端开发指南](../development/frontend-development.md)
+- [UI 风格指南](../development/ui-style-guide.md)
 - [健康检查](health-checks.md)
-## 2026-06-26 Docker API 验收排查补充
-
-如果 `scripts\e2e-api.ps1` 失败，先查看 `.tmp/agent/reports/api-runtime/failures.txt`、`runtime-results.json` 和 `.tmp/agent/logs/api-runtime/compose-logs.txt`。常见分界：
-
-- 401/403 状态异常：检查 Gateway JWT、Auth 角色、后端权限中间件和 HTTP status 是否真实返回。
-- Worker claim 失败：先停掉 compose 自带 worker 后创建新的 pending submission，避免任务被真实 worker 抢走。
-- Artifact 下载失败：检查 claim 返回的 artifact `url`、`sha256`、`size_bytes` 和 task lease。
-- 前端 Network Error：检查 Gateway CORS/OPTIONS，尤其是 `/api/admin/*` 这类 Gateway 自有路由。
-- 内部暴露失败：以 `docker compose ps --format json` 的 published port 为准，不要把宿主机同端口的其他进程误判为 compose 暴露。
-
-静态验证失败请回到 `scripts\verify-static.ps1 -SkipDockerBuild`；Linux nsjail/cgroup 或多机 worker 问题请回到 `scripts/e2e-linux.sh` 和 worker 节点日志。
+- [工程验收总入口](../e2e/e2e-engineering-acceptance.md)

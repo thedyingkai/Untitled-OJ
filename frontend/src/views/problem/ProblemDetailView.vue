@@ -5,11 +5,17 @@ import { NButton, NDescriptions, NDescriptionsItem, NSpace, NTag, NText } from '
 
 import { getProblem } from '../../api/problem'
 import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
+import EmptyView from '../../components/common/EmptyView.vue'
 import LoadingView from '../../components/common/LoadingView.vue'
-import PageCard from '../../components/common/PageCard.vue'
-import TimeText from '../../components/common/TimeText.vue'
+import OjosCodeBlock from '../../components/oj/OjosCodeBlock.vue'
+import OjosDifficultyTag from '../../components/oj/OjosDifficultyTag.vue'
+import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
+import OjosSection from '../../components/oj/OjosSection.vue'
+import OjosStatusTag from '../../components/oj/OjosStatusTag.vue'
+import OjosVisibilityTag from '../../components/oj/OjosVisibilityTag.vue'
 import { useAuthStore } from '../../stores/auth'
 import type { ProblemItem } from '../../types/problem'
+import { formatDateTime, formatDuration, formatMemoryLimit, splitCsv } from '../../utils/format'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -49,84 +55,138 @@ async function load(): Promise<void> {
   }
 }
 
-function splitTags(value: string): string[] {
-  return value
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean)
-}
-
 onMounted(() => {
   void load()
 })
 </script>
 
 <template>
-  <NSpace vertical size="large">
+  <div class="problem-detail-page">
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && !problem" />
+    <EmptyView v-else-if="!loading && !error && !problem" description="Problem not found" />
 
     <template v-if="problem">
-      <PageCard :title="problem.title">
-        <template #headerExtra>
-          <NSpace>
-            <RouterLink :to="`/problems/${problem.id}/submit`">
-              <NButton type="primary">Submit</NButton>
-            </RouterLink>
-            <RouterLink v-if="canManage" :to="`/problems/${problem.id}/edit`">
-              <NButton secondary>Edit</NButton>
-            </RouterLink>
-            <RouterLink v-if="canManage" :to="`/problems/${problem.id}/package`">
-              <NButton secondary>Package</NButton>
-            </RouterLink>
-          </NSpace>
+      <OjosPageHeader
+        :title="problem.title"
+        :description="`${problem.id} · ${problem.slug}`"
+        eyebrow="Problem"
+      >
+        <template #actions>
+          <RouterLink :to="`/problems/${problem.id}/submit`">
+            <NButton type="primary">Submit</NButton>
+          </RouterLink>
+          <RouterLink v-if="canManage" :to="`/problems/${problem.id}/edit`">
+            <NButton secondary>Edit</NButton>
+          </RouterLink>
+          <RouterLink v-if="canManage" :to="`/problems/${problem.id}/package`">
+            <NButton secondary>Package</NButton>
+          </RouterLink>
         </template>
+      </OjosPageHeader>
 
-        <NDescriptions bordered :column="2" label-placement="left">
-          <NDescriptionsItem label="ID">{{ problem.id }}</NDescriptionsItem>
-          <NDescriptionsItem label="Slug">{{ problem.slug }}</NDescriptionsItem>
-          <NDescriptionsItem label="Visibility">
-            <NTag size="small" :type="problem.visibility === 'public' ? 'success' : 'warning'">
-              {{ problem.visibility }}
-            </NTag>
-          </NDescriptionsItem>
-          <NDescriptionsItem label="Status">{{ problem.status }}</NDescriptionsItem>
-          <NDescriptionsItem label="Time limit">{{ problem.time_limit_ms }} ms</NDescriptionsItem>
-          <NDescriptionsItem label="Memory limit">{{ problem.memory_limit_mb }} MB</NDescriptionsItem>
-          <NDescriptionsItem label="Difficulty">{{ problem.difficulty }}</NDescriptionsItem>
-          <NDescriptionsItem label="Updated">
-            <TimeText :value="problem.updated_at" />
-          </NDescriptionsItem>
-          <NDescriptionsItem label="Tags" :span="2">
-            <NSpace v-if="splitTags(problem.tags).length">
-              <NTag v-for="tag in splitTags(problem.tags)" :key="tag" size="small">{{ tag }}</NTag>
+      <div class="problem-reading-layout">
+        <main class="problem-main">
+          <OjosSection title="Statement">
+            <article class="statement-view">
+              {{ problem.statement || 'No statement yet.' }}
+            </article>
+          </OjosSection>
+
+          <OjosSection v-if="problem.samples?.length" title="Samples">
+            <NSpace vertical size="medium">
+              <div v-for="sample in problem.samples" :key="sample.case_no" class="sample-block">
+                <NText strong>Sample {{ sample.case_no }}</NText>
+                <div class="sample-grid">
+                  <OjosCodeBlock label="Input" :code="sample.input" />
+                  <OjosCodeBlock label="Output" :code="sample.output" />
+                </div>
+              </div>
             </NSpace>
-            <NText v-else depth="3">-</NText>
-          </NDescriptionsItem>
-        </NDescriptions>
-      </PageCard>
+          </OjosSection>
+        </main>
 
-      <PageCard title="Statement">
-        <pre class="statement-view">{{ problem.statement || 'No statement yet' }}</pre>
-      </PageCard>
+        <aside class="problem-aside">
+          <OjosSection title="Summary">
+            <NDescriptions :column="1" label-placement="left">
+              <NDescriptionsItem label="Difficulty">
+                <OjosDifficultyTag :difficulty="problem.difficulty" />
+              </NDescriptionsItem>
+              <NDescriptionsItem label="Visibility">
+                <OjosVisibilityTag :visibility="problem.visibility" />
+              </NDescriptionsItem>
+              <NDescriptionsItem label="Status">
+                <OjosStatusTag :status="problem.status" domain="problem" />
+              </NDescriptionsItem>
+              <NDescriptionsItem label="Time">
+                {{ formatDuration(problem.time_limit_ms) }}
+              </NDescriptionsItem>
+              <NDescriptionsItem label="Memory">
+                {{ formatMemoryLimit(problem.memory_limit_mb) }}
+              </NDescriptionsItem>
+              <NDescriptionsItem label="Updated">
+                {{ formatDateTime(problem.updated_at) }}
+              </NDescriptionsItem>
+            </NDescriptions>
+          </OjosSection>
 
-      <PageCard v-if="problem.samples?.length" title="Samples">
-        <NSpace vertical size="medium">
-          <div v-for="sample in problem.samples" :key="sample.case_no" class="sample-block">
-            <NText strong>Sample {{ sample.case_no }}</NText>
-            <div class="sample-grid">
-              <div>
-                <NText depth="3">Input</NText>
-                <pre>{{ sample.input }}</pre>
-              </div>
-              <div>
-                <NText depth="3">Output</NText>
-                <pre>{{ sample.output }}</pre>
-              </div>
-            </div>
-          </div>
-        </NSpace>
-      </PageCard>
+          <OjosSection title="Tags">
+            <NSpace v-if="splitCsv(problem.tags).length">
+              <NTag v-for="tag in splitCsv(problem.tags)" :key="tag" size="small">{{ tag }}</NTag>
+            </NSpace>
+            <NText v-else depth="3">No tags</NText>
+          </OjosSection>
+        </aside>
+      </div>
     </template>
-  </NSpace>
+  </div>
 </template>
+
+<style scoped>
+.problem-detail-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.problem-reading-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 18px;
+  align-items: start;
+}
+
+.problem-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.problem-aside {
+  position: sticky;
+  top: 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.statement-view {
+  max-width: 860px;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 1100px) {
+  .problem-reading-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .problem-aside {
+    position: static;
+  }
+}
+</style>

@@ -2,8 +2,9 @@
 import { useRouter } from 'vue-router'
 import { NButton, NDescriptions, NDescriptionsItem, NSpace, NTag } from 'naive-ui'
 
-import JsonViewer from '../../components/common/JsonViewer.vue'
-import PageCard from '../../components/common/PageCard.vue'
+import OjosJsonViewer from '../../components/oj/OjosJsonViewer.vue'
+import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
+import OjosSection from '../../components/oj/OjosSection.vue'
 import { useAuthStore } from '../../stores/auth'
 
 const router = useRouter()
@@ -16,17 +17,29 @@ function logout(): void {
 </script>
 
 <template>
-  <NSpace vertical size="large">
-    <PageCard title="个人信息">
+  <div class="profile-page">
+    <OjosPageHeader
+      title="Profile"
+      description="Current account identity, roles, and effective permission snapshot."
+      eyebrow="Account"
+    >
+      <template #actions>
+        <NButton secondary @click="auth.refreshCurrentUser()">Refresh</NButton>
+        <NButton tertiary @click="logout">Logout</NButton>
+      </template>
+    </OjosPageHeader>
+
+    <OjosSection title="Identity">
       <NDescriptions bordered :column="1" label-placement="left">
-        <NDescriptionsItem label="用户 ID">{{ auth.user?.user_id }}</NDescriptionsItem>
-        <NDescriptionsItem label="用户名">{{ auth.user?.username }}</NDescriptionsItem>
-        <NDescriptionsItem label="角色">
-          <NSpace>
+        <NDescriptionsItem label="User ID">{{ auth.user?.user_id }}</NDescriptionsItem>
+        <NDescriptionsItem label="Username">{{ auth.user?.username }}</NDescriptionsItem>
+        <NDescriptionsItem label="Roles">
+          <NSpace v-if="auth.roles.length">
             <NTag v-for="role in auth.roles" :key="role" size="small">{{ role }}</NTag>
           </NSpace>
+          <span v-else>-</span>
         </NDescriptionsItem>
-        <NDescriptionsItem label="权限">
+        <NDescriptionsItem label="Permissions">
           <NSpace v-if="auth.permissions.length">
             <NTag v-for="permission in auth.permissions" :key="permission" size="small">
               {{ permission }}
@@ -34,19 +47,22 @@ function logout(): void {
           </NSpace>
           <span v-else>-</span>
         </NDescriptionsItem>
-        <NDescriptionsItem label="Token 状态">
-          {{ auth.token ? '有效' : '未登录' }}
+        <NDescriptionsItem label="Token">
+          {{ auth.token ? 'Available' : 'Not signed in' }}
         </NDescriptionsItem>
       </NDescriptions>
-    </PageCard>
+    </OjosSection>
 
-    <PageCard title="权限调试">
-      <JsonViewer :value="{ roles: auth.roles, permissions: auth.permissions }" />
-    </PageCard>
-
-    <NSpace>
-      <NButton type="primary" ghost @click="auth.refreshCurrentUser()">刷新当前用户</NButton>
-      <NButton secondary @click="logout">退出登录</NButton>
-    </NSpace>
-  </NSpace>
+    <OjosSection title="Permission Snapshot">
+      <OjosJsonViewer :value="{ roles: auth.roles, permissions: auth.permissions }" />
+    </OjosSection>
+  </div>
 </template>
+
+<style scoped>
+.profile-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+</style>

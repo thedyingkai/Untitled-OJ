@@ -13,18 +13,16 @@ import {
   type DataTableColumns,
 } from 'naive-ui'
 
-import {
-  getSubmission,
-  getSubmissionCases,
-  getSubmissionDebugLogs,
-} from '../../api/judge'
+import { getSubmission, getSubmissionCases, getSubmissionDebugLogs } from '../../api/judge'
 import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
 import EmptyView from '../../components/common/EmptyView.vue'
-import JsonViewer from '../../components/common/JsonViewer.vue'
 import LoadingView from '../../components/common/LoadingView.vue'
-import PageCard from '../../components/common/PageCard.vue'
-import StatusTag from '../../components/common/StatusTag.vue'
-import TimeText from '../../components/common/TimeText.vue'
+import OjosCodeBlock from '../../components/oj/OjosCodeBlock.vue'
+import OjosLanguageTag from '../../components/oj/OjosLanguageTag.vue'
+import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
+import OjosSection from '../../components/oj/OjosSection.vue'
+import OjosStatCard from '../../components/oj/OjosStatCard.vue'
+import OjosStatusTag from '../../components/oj/OjosStatusTag.vue'
 import { useAuthStore } from '../../stores/auth'
 import type {
   JudgeStatus,
@@ -32,6 +30,7 @@ import type {
   SubmissionDebugLogsResponse,
   SubmissionItem,
 } from '../../types/judge'
+import { formatDateTime, formatDuration, formatMemory } from '../../utils/format'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -56,17 +55,17 @@ const canDebug = computed(
 )
 
 const columns: DataTableColumns<SubmissionCaseItem> = [
-  { title: 'Case', key: 'case_no', width: 90 },
+  { title: 'Case', key: 'case_no', width: 82 },
   {
     title: 'Status',
     key: 'status',
-    width: 170,
-    render: (row) => h(StatusTag, { status: row.status }),
+    width: 160,
+    render: (row) => h(OjosStatusTag, { status: row.status }),
   },
-  { title: 'Score', key: 'score', width: 90 },
-  { title: 'Time', key: 'time_ms', width: 110, render: (row) => `${row.time_ms} ms` },
-  { title: 'Memory', key: 'memory_kb', width: 130, render: (row) => `${row.memory_kb} KB` },
-  { title: 'Message', key: 'message' },
+  { title: 'Score', key: 'score', width: 82 },
+  { title: 'Time', key: 'time_ms', width: 105, render: (row) => formatDuration(row.time_ms) },
+  { title: 'Memory', key: 'memory_kb', width: 120, render: (row) => formatMemory(row.memory_kb) },
+  { title: 'Message', key: 'message', render: (row) => row.message || '-' },
 ]
 
 async function load(showLoading = true): Promise<void> {
@@ -148,57 +147,63 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <NSpace vertical size="large">
+  <div class="submission-detail-page">
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && !submission" />
     <EmptyView v-else-if="!loading && !error && !submission" description="Submission not found" />
 
     <template v-if="submission">
-      <PageCard :title="`Submission #${submission.id}`">
-        <template #headerExtra>
-          <NSpace>
-            <RouterLink to="/submissions">
-              <NButton secondary>Back</NButton>
-            </RouterLink>
-            <NButton secondary :loading="loading" @click="() => load()">Refresh</NButton>
-          </NSpace>
+      <OjosPageHeader
+        :title="`Submission #${submission.id}`"
+        :description="isTerminal ? 'Final judge result is available.' : 'This submission is still being processed.'"
+        eyebrow="Judge Result"
+      >
+        <template #actions>
+          <RouterLink to="/submissions">
+            <NButton secondary>Back</NButton>
+          </RouterLink>
+          <NButton secondary :loading="loading" @click="() => load()">Refresh</NButton>
         </template>
+      </OjosPageHeader>
 
-        <NDescriptions bordered :column="2" label-placement="left">
+      <div class="submission-summary-grid">
+        <OjosStatCard label="Score" :value="submission.score" tone="primary" />
+        <OjosStatCard label="Time" :value="formatDuration(submission.time_ms)" />
+        <OjosStatCard label="Memory" :value="formatMemory(submission.memory_kb)" />
+        <OjosStatCard label="Cases" :value="cases.length" />
+      </div>
+
+      <OjosSection title="Overview">
+        <NDescriptions :column="2" label-placement="left" bordered>
           <NDescriptionsItem label="Status">
-            <StatusTag :status="submission.status" />
+            <OjosStatusTag :status="submission.status" />
           </NDescriptionsItem>
-          <NDescriptionsItem label="Language">{{ submission.language }}</NDescriptionsItem>
+          <NDescriptionsItem label="Language">
+            <OjosLanguageTag :language="submission.language" />
+          </NDescriptionsItem>
           <NDescriptionsItem label="Problem">
             <RouterLink :to="`/problems/${submission.problem_id}`" class="table-link">
               {{ submission.problem_id }}
             </RouterLink>
           </NDescriptionsItem>
           <NDescriptionsItem label="User">{{ submission.user_id }}</NDescriptionsItem>
-          <NDescriptionsItem label="Score">{{ submission.score }}</NDescriptionsItem>
-          <NDescriptionsItem label="Time">{{ submission.time_ms }} ms</NDescriptionsItem>
-          <NDescriptionsItem label="Memory">{{ submission.memory_kb }} KB</NDescriptionsItem>
           <NDescriptionsItem label="Code sha256">{{ submission.code_sha256 || '-' }}</NDescriptionsItem>
-          <NDescriptionsItem label="Created">
-            <TimeText :value="submission.created_at" />
-          </NDescriptionsItem>
-          <NDescriptionsItem label="Judged">
-            <TimeText :value="submission.judged_at" />
-          </NDescriptionsItem>
+          <NDescriptionsItem label="Created">{{ formatDateTime(submission.created_at) }}</NDescriptionsItem>
+          <NDescriptionsItem label="Judged">{{ formatDateTime(submission.judged_at) }}</NDescriptionsItem>
           <NDescriptionsItem label="Message" :span="2">
             <NText>{{ submission.message || '-' }}</NText>
           </NDescriptionsItem>
         </NDescriptions>
-      </PageCard>
+      </OjosSection>
 
-      <PageCard title="Cases">
+      <OjosSection title="Case Results">
         <NDataTable :columns="columns" :data="cases" :loading="loading" :bordered="false" />
-      </PageCard>
+      </OjosSection>
 
-      <PageCard v-if="canDebug" title="Debug Logs">
+      <OjosSection v-if="canDebug" title="Debug Logs">
         <NSpace vertical size="medium">
           <NAlert type="warning" :show-icon="true">
-            Logs are truncated by API and paths are never exposed.
+            Logs are returned by the API with truncation. Internal paths must not be exposed.
           </NAlert>
           <NSpace align="center">
             <NText>Case</NText>
@@ -206,9 +211,39 @@ onUnmounted(() => {
             <NButton :loading="debugLoading" @click="loadDebugLogs">Load logs</NButton>
           </NSpace>
           <ApiErrorAlert :error="debugError" />
-          <JsonViewer v-if="debugLogs" :value="debugLogs" />
+          <div v-if="debugLogs" class="debug-log-grid">
+            <OjosCodeBlock label="stdout" :code="debugLogs.stdout" />
+            <OjosCodeBlock label="stderr" :code="debugLogs.stderr" />
+            <OjosCodeBlock label="checker log" :code="debugLogs.checker_log" />
+          </div>
         </NSpace>
-      </PageCard>
+      </OjosSection>
     </template>
-  </NSpace>
+  </div>
 </template>
+
+<style scoped>
+.submission-detail-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.submission-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.debug-log-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .submission-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+</style>

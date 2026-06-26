@@ -10,7 +10,6 @@ import {
   NLayoutHeader,
   NLayoutSider,
   NMenu,
-  NSpace,
   NTag,
   NText,
   type MenuOption,
@@ -29,7 +28,7 @@ const canUseAdmin = computed(
 
 const menuOptions = computed<MenuOption[]>(() => {
   const options: MenuOption[] = [
-    menuLink('/dashboard', 'Dashboard'),
+    menuLink('/dashboard', 'Overview'),
     menuLink('/problems', 'Problems'),
     menuLink('/submissions', 'Submissions'),
     menuLink('/me', 'Profile'),
@@ -38,12 +37,12 @@ const menuOptions = computed<MenuOption[]>(() => {
   if (canUseAdmin.value) {
     options.push({
       key: 'admin',
-      label: 'Admin',
+      label: 'Administration',
       children: [
-        menuLink('/admin/health', 'Service Health'),
+        menuLink('/admin/health', 'Health'),
         menuLink('/admin/judge', 'Judge Cluster'),
         menuLink('/admin/modules', 'Modules'),
-        menuLink('/admin/modules/topology', 'Module Topology'),
+        menuLink('/admin/modules/topology', 'Topology'),
         menuLink('/admin/users', 'Users'),
         menuLink('/admin/permissions', 'Permissions'),
         menuLink('/admin/permission-check', 'Permission Check'),
@@ -54,7 +53,15 @@ const menuOptions = computed<MenuOption[]>(() => {
   return options
 })
 
-const selectedKeys = computed(() => [route.path])
+const selectedKey = computed(() => {
+  if (route.path.startsWith('/admin/modules/topology')) return '/admin/modules/topology'
+  if (route.path.startsWith('/admin/modules/')) return '/admin/modules'
+  if (route.path.startsWith('/problems')) return '/problems'
+  if (route.path.startsWith('/submissions')) return '/submissions'
+  return route.path
+})
+
+const expandedKeys = computed(() => (route.path.startsWith('/admin') ? ['admin'] : []))
 const breadcrumbs = computed(() =>
   route.matched.filter((item) => item.meta.title).map((item) => String(item.meta.title)),
 )
@@ -85,25 +92,29 @@ function logout(): void {
       bordered
       collapse-mode="width"
       :collapsed-width="0"
-      :width="232"
+      :width="248"
       :collapsed="collapsed"
       class="app-sider"
     >
       <div class="brand">
-        <strong>OJOS</strong>
-        <span>Distributed Judge</span>
+        <div class="brand-mark">OJ</div>
+        <div class="brand-copy">
+          <strong>OJOS</strong>
+          <span>Control Plane</span>
+        </div>
       </div>
-      <NMenu :options="menuOptions" :value="selectedKeys[0]" />
+      <NMenu :options="menuOptions" :value="selectedKey" :default-expanded-keys="expandedKeys" />
+      <div class="sider-footer">Gateway routed through /api</div>
     </NLayoutSider>
 
     <NLayout class="app-main">
-      <NLayoutHeader bordered class="app-header">
-        <NSpace align="center" justify="space-between" :wrap="false">
-          <NSpace align="center" :wrap="false">
-            <NButton size="small" quaternary @click="collapsed = !collapsed">
-              {{ collapsed ? 'Menu' : 'Collapse' }}
+      <NLayoutHeader class="app-header">
+        <div class="header-inner">
+          <div class="header-left">
+            <NButton size="small" secondary @click="collapsed = !collapsed">
+              {{ collapsed ? 'Menu' : 'Hide' }}
             </NButton>
-            <div>
+            <div class="header-title">
               <h1>{{ route.meta.title || 'OJOS' }}</h1>
               <NBreadcrumb v-if="breadcrumbs.length > 1">
                 <NBreadcrumbItem v-for="item in breadcrumbs" :key="item">
@@ -111,21 +122,21 @@ function logout(): void {
                 </NBreadcrumbItem>
               </NBreadcrumb>
             </div>
-          </NSpace>
+          </div>
 
-          <NSpace align="center" :wrap="false">
+          <div class="header-actions">
             <RouterLink v-if="canUseAdmin" to="/admin/health" class="header-link">
               Health
             </RouterLink>
-            <NTag size="small" type="success" round>
-              {{ auth.user?.username }}
+            <NTag size="small" type="success">
+              {{ auth.user?.username || 'user' }}
             </NTag>
-            <NText depth="3" class="role-text">
+            <NText class="role-text">
               {{ auth.roles.join(', ') || 'user' }}
             </NText>
-            <NButton size="small" secondary @click="logout">Logout</NButton>
-          </NSpace>
-        </NSpace>
+            <NButton size="small" tertiary @click="logout">Logout</NButton>
+          </div>
+        </div>
       </NLayoutHeader>
 
       <NLayoutContent class="app-content">

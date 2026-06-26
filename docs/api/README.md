@@ -1,79 +1,63 @@
 # API 文档总览
 
 > 文档状态：当前实现
-> 适用范围：开发 / API 对接 / 安全
-> 最后更新：2026-06-26
+> 适用范围：前端对接 / 后端开发 / E2E 验收 / 安全审计
+> 最后更新：2026-06-27
 
-## 1. 文档目的
+## 1. 入口原则
 
-本文档是 OJOS API 文档入口，说明 API 分组、鉴权方式、错误处理和安全边界。
+浏览器、worker 和验收脚本访问 OJOS API 时均应通过 Gateway 的 `/api` 前缀。内部服务端口不是公开 API，前端也不得写死内部服务地址。
 
-## 2. 适用范围
+当前主要 API 分组：
 
-适用于前端接入、后端开发、E2E 验收和安全审计。
-
-## 3. 当前实现
-
-所有浏览器和 worker 可访问 API 都通过 Gateway 的 `/api` 前缀。内部服务端口不作为公开 API。
-
-当前 API 分三类：
-
-| 类型 | 示例 | 认证 | 是否公开到浏览器 |
+| 分组 | 示例 | 认证方式 | 浏览器可用 |
 | --- | --- | --- | --- |
-| 用户 API | `/api/auth/me`、`/api/problem/problems`、`/api/judge/submissions` | JWT 或匿名 public | 是 |
-| 管理 API | `/api/admin/health`、`/api/judge/admin/workers`、`/api/auth/admin/users` | JWT + 后端权限 | 仅管理员 |
-| Worker API | `/api/judge/worker/register`、`/api/judge/worker/tasks/claim` | worker token + lease | 仅 worker |
+| Auth API | `/api/auth/login`, `/api/auth/profile` | JWT | 是 |
+| Problem API | `/api/problem/problems` | JWT / 公开读策略 | 是 |
+| Judge API | `/api/judge/submissions` | JWT | 是 |
+| Admin API | `/api/admin/health`, `/api/judge/admin/tasks` | JWT + 后端权限 | 仅管理员 |
+| Worker API | `/api/judge/worker/tasks/claim` | `X-OJOS-Worker-Token` | 否 |
 
-所有三类 API 都通过 Gateway 进入系统。`problem-api`、`judge-api` 和 `auth` 的内部端口不作为浏览器入口，也不应写进前端配置。
+## 2. 前端接入
 
-## 4. 目标设计
+前端统一通过 `frontend/src/api/client.ts` 调用 API。UI 页面必须使用真实 API 响应，不允许 fake/mock/random 数据。
 
-API 文档应随 public schema 同步更新。新增接口必须说明 base path、认证方式、权限要求、请求示例、响应示例和错误情况。
+前端应处理：
 
-## 5. API 分组
+- 401：清理登录态并跳转 `/login`。
+- 403：显示权限不足或跳转 `/403`。
+- 404：显示资源不存在。
+- 409：显示状态冲突或 lease 冲突。
+- 5xx：显示可重试错误提示。
 
-- [Auth API](auth-api.md)：登录、注册、当前用户。
-- [Problem API](problem-api.md)：题目、题目包校验。
-- [Judge API](judge-api.md)：提交、结果、语言。
-- [Worker API](worker-api.md)：worker-only 协议。
-- [Admin API](admin-api.md)：健康、队列、权限。
+## 3. 安全边界
 
-## 6. 配置说明
+- User/Admin API 使用 JWT。
+- Worker API 使用 worker token 和 task lease。
+- 后端权限校验是安全边界，前端隐藏按钮只是体验优化。
+- API 响应不得泄露 `code_path`、`result_path`、`package_dir`、`stdout_path`、`stderr_path`、`checker_log_path` 或宿主机绝对路径。
 
-前端通过 `VITE_API_BASE_URL` 指向 Gateway。worker 通过 `OJOS_CONTROL_PLANE_URL` 指向 Gateway。
+## 4. 文档索引
 
-API client 必须统一处理 400、401、403、404、409、429、500 等错误。后端响应中如果包含 request id，前端应在错误提示或调试信息中保留，便于跨服务排查。
+- [Auth API](auth-api.md)
+- [Problem API](problem-api.md)
+- [Judge API](judge-api.md)
+- [Worker API](worker-api.md)
+- [Admin API](admin-api.md)
 
-请求体和响应体默认使用 JSON。文件或 artifact 传输必须由对应 API 明确声明权限、大小限制、digest 和错误行为，不能退回到传本地路径。
+## 5. 验收方式
 
-## 7. 安全边界
-
-User API 使用 JWT；Worker API 使用 `X-OJOS-Worker-Token`；Admin API 使用后端权限校验；Public API 不返回内部路径。
-
-## 8. 验收方式
-
-前端页面必须通过真实 API 工作；E2E 脚本必须覆盖 login、problem、submission、worker 和 admin API。
-
-静态验收检查前端是否绕过统一 API client、public schema 是否包含内部路径、部署文件是否暴露内部服务。运行验收应至少覆盖：注册、登录、刷新 `/api/auth/me`、题目列表、题目详情、提交、提交轮询、管理员健康页、worker 注册和 claim。
-
-## 9. 常见问题
-
-- 401：token 缺失或过期。
-- 403：权限不足。
-- 404：资源不存在或不可见。
-- 409：状态冲突或旧 lease。
-
-## 10. 相关文档
-
-- [安全边界](../security/security-boundary.md)
-- [路径泄露防护](../security/path-leak-prevention.md)
-## 2026-06-26 API 运行时验收补充
-
-API 文档中的接口验收必须通过 Gateway 真实请求完成。推荐命令：
+静态 build 不能替代运行时 API 验收。Docker Control Plane 可用时执行：
 
 ```powershell
 docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build
-powershell -NoProfile -File scripts\e2e-api.ps1 -BaseUrl http://localhost:8080/api -AdminUsername admin1 -AdminPassword admin123 -UserUsername user1 -UserPassword user123 -WorkerToken $env:OJOS_WORKER_TOKEN
+powershell -NoProfile -File scripts\e2e-api.ps1 `
+  -BaseUrl http://localhost:8080/api `
+  -AdminUsername admin1 `
+  -AdminPassword admin123 `
+  -UserUsername user1 `
+  -UserPassword user123 `
+  -WorkerToken $env:OJOS_WORKER_TOKEN
 ```
 
-该脚本覆盖 auth、problem、judge submissions、admin health、admin judge、module registry、worker register/heartbeat/claim、权限拒绝和内部路径泄露扫描。静态验证和前端 build 不能写成 API 验收通过。
+该脚本覆盖 auth、problem、judge submissions、admin health、admin judge、module registry、worker register/heartbeat/claim、权限拒绝和内部路径泄露扫描。
