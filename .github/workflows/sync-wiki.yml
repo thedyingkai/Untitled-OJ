@@ -1,0 +1,115 @@
+name: Sync Docs To Wiki
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "README.md"
+      - ".github/workflows/sync-wiki.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-docs-to-wiki
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync docs directory to GitHub Wiki
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare wiki mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf .wiki-src
+          mkdir -p .wiki-src
+          cp -R docs/. .wiki-src/
+
+          # GitHub Wiki uses Home.md as the landing page.
+          cp docs/README.md .wiki-src/Home.md
+
+          cat > .wiki-src/_Sidebar.md <<'EOF'
+          # OJOS Wiki
+
+          - [Home](Home)
+          - [Documentation Index](DOCS_INDEX)
+          - [Documentation Status](DOCS_STATUS)
+
+          ## Architecture
+          - [Overview](architecture/overview)
+          - [Module Topology](architecture/module-topology)
+          - [Service Topology](architecture/service-topology)
+          - [Worker Link Protocol](architecture/worker-link-protocol)
+
+          ## Modules
+          - [Module System](modules/README)
+          - [Judge Core](modules/judge-core)
+
+          ## Judge
+          - [Resource Limits](judge/judge-resource-limits)
+          - [Status Model](judge/judge-status-model)
+          - [Worker Cluster](judge/judge-worker-cluster)
+
+          ## Deployment
+          - [Control Plane](deploy/deploy-control-plane)
+          - [Worker Node](deploy/deploy-worker-node)
+          - [Docker Compose](deploy/docker-compose)
+
+          ## API
+          - [API Index](api/README)
+          - [Admin API](api/admin-api)
+          - [Worker API](api/worker-api)
+
+          ## Security
+          - [Security Boundary](security/security-boundary)
+          - [Worker Token](security/worker-token)
+          - [Internal HMAC](security/internal-hmac)
+
+          ## E2E
+          - [Engineering Acceptance](e2e/e2e-engineering-acceptance)
+          - [Linux Runtime](e2e/e2e-linux-runtime)
+          - [Static Checks](e2e/e2e-static-checks)
+          EOF
+
+      - name: Push mirror to wiki
+        shell: bash
+        env:
+          WIKI_TOKEN: ${{ secrets.WIKI_PUSH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          wiki_url="https://x-access-token:${WIKI_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+
+          rm -rf .wiki-repo
+          if ! git clone "$wiki_url" .wiki-repo; then
+            echo "GitHub Wiki 仓库不可访问。请先在仓库 Settings 中启用 Wiki，并创建一次 Wiki 首页。"
+            echo "如果 GITHUB_TOKEN 没有 Wiki 写权限，请创建 repo scope 的 WIKI_PUSH_TOKEN secret。"
+            exit 1
+          fi
+
+          find .wiki-repo -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R .wiki-src/. .wiki-repo/
+
+          cd .wiki-repo
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Wiki 已经是最新内容，无需推送。"
+            exit 0
+          fi
+
+          git commit -m "docs: sync repository docs to wiki"
+          git push

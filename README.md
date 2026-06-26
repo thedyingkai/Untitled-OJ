@@ -108,7 +108,9 @@ Docker 运行验收需要先启动 Docker daemon，并准备 `.env.example` 中�
 - Wiki 首页可以同步 `docs/README.md`，分类页可以同步 `docs/architecture`、`docs/deploy`、`docs/api`、`docs/judge`、`docs/security` 和 `docs/e2e`。
 - 运行验收状态必须写清楚，不能在 Wiki 中把 Docker/nsjail/cgroup/多机 worker 未执行项标为已通过。
 
-如果需要自动同步，可以后续增加脚本，将 `docs/` 中的 Markdown 转换为 Wiki 仓库需要的文件名和相对链接。
+当前已经提供 GitHub Actions 自动同步流程：`.github/workflows/sync-wiki.yml` 会在 `main` 分支的 `docs/**`、根目录 `README.md` 或 workflow 自身变更后，把 `docs/` 镜像到 `Untitled-OJ.wiki.git`。也可以在 GitHub Actions 页面手动触发 `Sync Docs To Wiki`。
+
+默认同步使用 `GITHUB_TOKEN`。如果仓库权限策略导致 Wiki 推送失败，可以在仓库 Secrets 中配置具备仓库写权限的 `WIKI_PUSH_TOKEN`，workflow 会优先使用它。
 
 ## 代码与文档约束
 
