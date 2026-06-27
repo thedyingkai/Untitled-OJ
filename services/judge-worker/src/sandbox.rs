@@ -1,4 +1,6 @@
 use anyhow::{Context, Result, anyhow};
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -9,7 +11,7 @@ use tokio::time::timeout;
 
 use crate::cgroup::CgroupRun;
 use crate::checker::truncate_message;
-use crate::config::{LanguageConfig, render_arg};
+use crate::config::{LanguageConfig, render_arg, render_run_arg};
 use crate::problem_package::LimitConfig;
 
 const COMPILE_OUTPUT_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
@@ -208,7 +210,15 @@ pub async fn run_case_in_sandbox(
             .run
             .args
             .iter()
-            .map(|arg| render_arg(arg, &inside_source, Path::new(""), Path::new("/work")))
+            .map(|arg| {
+                render_run_arg(
+                    arg,
+                    &inside_source,
+                    Path::new(""),
+                    Path::new("/work"),
+                    limit.memory_mb,
+                )
+            })
             .collect();
 
         let run_command = render_arg(
@@ -261,7 +271,15 @@ pub async fn run_case_in_sandbox(
         .run
         .args
         .iter()
-        .map(|arg| render_arg(arg, Path::new(""), &inside_exe, Path::new("/work")))
+        .map(|arg| {
+            render_run_arg(
+                arg,
+                Path::new(""),
+                &inside_exe,
+                Path::new("/work"),
+                limit.memory_mb,
+            )
+        })
         .collect();
 
     let run_command = render_arg(
@@ -333,7 +351,7 @@ async fn run_nsjail_shell(
         .arg("--time_limit")
         .arg(time_limit_sec.to_string())
         .arg("--rlimit_as")
-        .arg(memory_mb.to_string())
+        .arg("inf")
         .arg("--rlimit_fsize")
         .arg(file_size_limit_mb.to_string())
         .arg("--rlimit_nofile")
@@ -360,7 +378,15 @@ async fn run_nsjail_shell(
         .arg("/dev/zero:/dev/zero")
         .arg("--bindmount_ro")
         .arg("/dev/urandom:/dev/urandom")
-        .arg("--bindmount")
+        .arg("--bindmount_ro")
+        .arg("/dev/random:/dev/random");
+
+    if Path::new("/etc/java-17-openjdk").exists() {
+        cmd.arg("--bindmount_ro")
+            .arg("/etc/java-17-openjdk:/etc/java-17-openjdk");
+    }
+
+    cmd.arg("--bindmount")
         .arg(format!("{}:/work", work_dir.display()))
         .arg("--tmpfsmount")
         .arg("/tmp")
@@ -402,12 +428,21 @@ async fn run_nsjail_shell(
     let cgroup =
         CgroupRun::create(memory_mb, 64).context("create cgroup v2 sandbox context failed")?;
 
-    let mut child = cmd.spawn().context("spawn nsjail failed")?;
-    if let Some(pid) = child.id() {
-        cgroup
-            .attach(pid)
-            .context("attach nsjail to cgroup failed")?;
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(cgroup_path) = cgroup.path() {
+            let cgroup_procs = cgroup_path.join("cgroup.procs");
+            unsafe {
+                cmd.pre_exec(move || {
+                    let pid = libc::getpid();
+                    std::fs::write(&cgroup_procs, pid.to_string())?;
+                    Ok(())
+                });
+            }
+        }
     }
+
+    let mut child = cmd.spawn().context("spawn nsjail failed")?;
 
     let exit_status = match timeout(wall_timeout, child.wait()).await {
         Ok(result) => result.context("wait nsjail failed")?,
@@ -415,6 +450,16 @@ async fn run_nsjail_shell(
             let _ = child.start_kill();
             let _ = child.wait().await;
             let memory_kb = cgroup.memory_peak_kb().unwrap_or(0);
+            if cgroup.oom_killed().unwrap_or(false) {
+                return Ok(SandboxOutput {
+                    status: SandboxStatus::MemoryLimitExceeded,
+                    time_ms: time_limit_ms as i32,
+                    memory_kb,
+                    stdout: vec![],
+                    stderr: vec![],
+                    message: "memory limit exceeded".to_string(),
+                });
+            }
             return Ok(SandboxOutput {
                 status: SandboxStatus::TimeLimitExceeded,
                 time_ms: time_limit_ms as i32,
@@ -499,7 +544,10 @@ async fn run_nsjail_shell(
 
     let status = if lower.contains("time limit") || lower.contains("timed out") {
         SandboxStatus::TimeLimitExceeded
-    } else if lower.contains("memory") || lower.contains("oom") {
+    } else if lower.contains("memory")
+        || lower.contains("oom")
+        || lower.contains("outofmemoryerror")
+    {
         SandboxStatus::MemoryLimitExceeded
     } else {
         SandboxStatus::RuntimeError
@@ -544,7 +592,13 @@ async fn attach_case_output(
     }
 
     match read_file_limited(stderr_path, RUN_OUTPUT_LIMIT_BYTES, "stderr").await {
-        Ok(data) => output.stderr = data,
+        Ok(data) => {
+            if output.status == SandboxStatus::RuntimeError && looks_like_memory_error(&data) {
+                output.status = SandboxStatus::MemoryLimitExceeded;
+                output.message = "memory limit exceeded".to_string();
+            }
+            output.stderr = data;
+        }
         Err(err) => {
             return Ok(SandboxOutput {
                 status: SandboxStatus::OutputLimitExceeded,
@@ -558,6 +612,14 @@ async fn attach_case_output(
     }
 
     Ok(output)
+}
+
+fn looks_like_memory_error(stderr: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stderr).to_lowercase();
+    text.contains("outofmemoryerror")
+        || text.contains("memoryerror")
+        || text.contains("java heap space")
+        || text.contains("cannot allocate memory")
 }
 
 async fn read_file_limited(path: &Path, limit_bytes: u64, name: &str) -> Result<Vec<u8>> {

@@ -42,6 +42,13 @@ func CreateSubmissionFiles(arg CreateSubmissionFilesArgs) (*CreateSubmissionFile
 	sourceDir := filepath.Join(submissionDir, "source")
 	buildDir := filepath.Join(submissionDir, "build")
 	casesDir := filepath.Join(submissionDir, "cases")
+	resultPath := filepath.Join(submissionDir, "result.json")
+
+	for _, path := range []string{sourceDir, buildDir, casesDir, resultPath} {
+		if err := os.RemoveAll(path); err != nil {
+			return nil, err
+		}
+	}
 
 	for _, dir := range []string{sourceDir, buildDir, casesDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -64,12 +71,7 @@ func CreateSubmissionFiles(arg CreateSubmissionFilesArgs) (*CreateSubmissionFile
 		return nil, err
 	}
 
-	resultPath := filepath.Join(submissionDir, "result.json")
-	if _, err := os.Stat(resultPath); os.IsNotExist(err) {
-		if err := os.WriteFile(resultPath, []byte(`{"cases":[]}`+"\n"), 0644); err != nil {
-			return nil, err
-		}
-	} else if err != nil {
+	if err := os.WriteFile(resultPath, []byte(`{"cases":[]}`+"\n"), 0644); err != nil {
 		return nil, err
 	}
 

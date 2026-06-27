@@ -127,7 +127,8 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
             tokio::spawn(async move {
                 let _permit = permit;
                 if let Err(err) = execute_task(client, config, languages, task).await {
-                    error!(error = %err, "worker task failed");
+                    let error_chain = format_error_chain(&err);
+                    error!(error = %error_chain, "worker task failed");
                 }
             });
         }
@@ -481,6 +482,13 @@ where
     F: FnOnce() -> String,
 {
     std::env::var(key).unwrap_or_else(|_| fallback())
+}
+
+fn format_error_chain(err: &anyhow::Error) -> String {
+    err.chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 fn required_env(key: &str) -> Result<String> {

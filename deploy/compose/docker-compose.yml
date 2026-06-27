@@ -17,6 +17,23 @@ services:
     image: redis:8
     command: [ "redis-server", "--appendonly", "yes" ]
 
+  migrations:
+    image: postgres:17
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ojos}
+      MIGRATIONS_DIR: /migrations
+    volumes:
+      - ../migrations:/migrations:ro
+      - ./apply-migrations.sh:/apply-migrations.sh:ro
+    entrypoint: [ "/bin/sh", "/apply-migrations.sh" ]
+
   jaeger:
     image: jaegertracing/all-in-one:latest
     environment:
@@ -31,9 +48,17 @@ services:
     build:
       context: ../../services
       dockerfile: gateway/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${HTTP_PROXY:-}
+        https_proxy: ${HTTPS_PROXY:-}
+        no_proxy: ${NO_PROXY:-}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
       problem-api:
         condition: service_started
     environment:
@@ -53,9 +78,17 @@ services:
     build:
       context: ../../services
       dockerfile: auth/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${HTTP_PROXY:-}
+        https_proxy: ${HTTPS_PROXY:-}
+        no_proxy: ${NO_PROXY:-}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
       redis:
         condition: service_started
       jaeger:
@@ -71,9 +104,17 @@ services:
     build:
       context: ../../services
       dockerfile: judge-api/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${HTTP_PROXY:-}
+        https_proxy: ${HTTPS_PROXY:-}
+        no_proxy: ${NO_PROXY:-}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
       redis:
         condition: service_started
     expose:
@@ -92,6 +133,13 @@ services:
     build:
       context: ../../services
       dockerfile: judge-worker/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${HTTP_PROXY:-}
+        https_proxy: ${HTTPS_PROXY:-}
+        no_proxy: ${NO_PROXY:-}
     depends_on:
       gateway:
         condition: service_started
@@ -115,6 +163,7 @@ services:
       - SETUID
       - SETGID
       - NET_ADMIN
+    cgroup: host
     volumes:
       - worker-data:/var/lib/ojos-worker
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
@@ -123,9 +172,17 @@ services:
     build:
       context: ../../services
       dockerfile: problem-api/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${HTTP_PROXY:-}
+        https_proxy: ${HTTPS_PROXY:-}
+        no_proxy: ${NO_PROXY:-}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
       redis:
         condition: service_started
       jaeger:

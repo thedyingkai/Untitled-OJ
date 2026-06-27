@@ -63,10 +63,13 @@ languages:
     source_file: main.py
     exe_file: ""
     compile:
-      enabled: false
-      command: ""
-      args: []
-      timeout_ms: 0
+      enabled: true
+      command: python3
+      args:
+        - "-m"
+        - "py_compile"
+        - "{source}"
+      timeout_ms: 5000
       memory_mb: 512
     run:
       command: python3
@@ -75,7 +78,7 @@ languages:
 
   java17:
     source_file: Main.java
-    exe_file: ""
+    exe_file: Main.class
     compile:
       enabled: true
       command: javac
@@ -86,6 +89,10 @@ languages:
     run:
       command: java
       args:
+        - "-Xmx{java_heap_mb}m"
+        - "-XX:ActiveProcessorCount=1"
+        - "-XX:ParallelGCThreads=1"
+        - "-XX:ConcGCThreads=1"
         - "-cp"
         - "{workdir}"
         - "Main"

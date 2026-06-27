@@ -1,8 +1,8 @@
 # Worker Node 部署
 
-> 文档状态：需要运行验收
+> 文档状态：需要真实多机验收
 > 适用范围：Judge Worker 部署与运行验收
-> 最后更新：2026-06-26
+> 最后更新：2026-06-27
 
 ## 1. 文档目的
 
@@ -85,6 +85,14 @@ Docker daemon 不可用时，只能执行 compose config 或静态扫描，不�
 
 在同一台 Linux 主机可复制两份 `.env`，设置不同 `OJOS_WORKER_ID`、`OJOS_WORK_DIR` 和 `OJOS_ARTIFACT_CACHE_DIR`。每个 worker 设置 `OJOS_MAX_CONCURRENCY=1`，提交多份任务后应看到两个 worker 都参与评测。
 
+Control Plane compose 也可以用于本机双 worker 验收：
+
+```bash
+docker compose --env-file .env -f deploy/compose/docker-compose.yml up -d --scale judge-worker=2 judge-worker
+```
+
+2026-06-27 已在 `Ubuntu-24.04-OJOS` WSL2 Linux 环境完成本机双 worker 模拟验收，两个 worker 均 ONLINE，worker_id 不冲突，四语言矩阵任务分布到两个 worker，未发现重复 claim。
+
 ## 10. 下线与升级
 
 滚动升级流程：
@@ -100,6 +108,8 @@ Docker daemon 不可用时，只能执行 compose config 或静态扫描，不�
 
 worker 失联后，`judge_tasks.lease_expires_at` 过期，Control Plane 恢复任务。新 worker claim 后旧 worker 上传 result 必须因 lease_version 过期而失败。
 
+2026-06-27 验收中，worker A claim 长运行任务后被停止；lease 过期后 worker B 重新 claim，`lease_version` 从 1 增至 2；旧 lease result 上传返回 HTTP 400，最终 submission 未被旧结果覆盖。
+
 ## 12. 安全边界
 
 worker token 必须通过环境变量注入，不写入镜像。worker node 不保存数据库凭据，不暴露 Redis，不接收内部路径，只处理带 digest 的 artifact。
@@ -111,6 +121,10 @@ worker token 必须通过环境变量注入，不写入镜像。worker node 不�
 - 连续提交任务分布到两个 worker。
 - 停掉 worker A 后任务由 worker B 恢复。
 - `/admin/judge` 能看到 worker 状态变化。
+- stale lease result 被拒绝。
+- Redis Stream 仅作为 signal history，PostgreSQL `judge_tasks` 是任务所有权事实源。
+
+本次验收未覆盖第二台真实机器。真实多机部署还需要在独立 Linux worker node 上重复执行注册、claim、crash recovery、跨主机网络抖动、断网恢复和时钟漂移检查。
 
 ## 14. 常见问题
 

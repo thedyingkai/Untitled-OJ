@@ -19,22 +19,22 @@
 | architecture/permission-model.md | 当前实现 |
 | architecture/internal-auth.md | 当前实现 |
 | deploy/deploy-control-plane.md | 当前实现 |
-| deploy/deploy-worker-node.md | 需要运行验收 |
+| deploy/deploy-worker-node.md | 需要真实多机验收 |
 | deploy/docker-compose.md | 当前实现 |
 | deploy/env-reference.md | 当前实现 |
 | deploy/production-hardening.md | 当前实现 |
-| judge/judge-resource-limits.md | 需要运行验收 |
+| judge/judge-resource-limits.md | 当前实现，WSL2 Linux 已验收 |
 | judge/judge-status-model.md | 当前实现 |
-| judge/judge-worker-cluster.md | 需要运行验收 |
+| judge/judge-worker-cluster.md | 部分实现，本机双 worker 已验收，真实多机待验收 |
 | judge/judge-language-runtime.md | 需要运行验收 |
-| judge/judge-e2e-cases.md | 需要运行验收 |
+| judge/judge-e2e-cases.md | 当前实现，WSL2 Linux 已验收 |
 | security/security-boundary.md | 当前实现 |
 | security/internal-hmac.md | 当前实现 |
 | security/worker-token.md | 当前实现 |
 | security/path-leak-prevention.md | 当前实现 |
 | security/permission-admin.md | 当前实现 |
 | e2e/e2e-engineering-acceptance.md | 当前实现 |
-| e2e/e2e-linux-runtime.md | 需要运行验收 |
+| e2e/e2e-linux-runtime.md | 当前实现，WSL2 Linux 已验收，真实多机待补充 |
 | e2e/e2e-static-checks.md | 当前实现 |
 | api/README.md | 当前实现 |
 | api/auth-api.md | 当前实现 |
@@ -69,7 +69,12 @@
 - 部分实现：主体链路存在，但仍有目标能力或运行验收未完成。
 - 目标架构：设计方向，不应理解为当前已上线能力。
 - 需要运行验收：代码、配置或脚本存在，但必须在 Docker/Linux/多机环境中实际执行。
+- 需要真实多机验收：本机或单机模拟不足以证明独立 worker node、跨主机网络和故障恢复能力。
+- WSL2 Linux 环境已验收：已在 WSL2 Linux + Docker + cgroup v2 + nsjail 环境执行通过，但不等同于真实多机生产验收。
+- WSL2 本机双 worker 已验收：已在同一台 WSL2 Linux 主机用两个 worker 实例完成并发、lease 和恢复验收，但不等同于第二台真实 worker node 验收。
 - 已归档：历史文档，仅供追溯。
+
+当前 A/Judge Core 已通过 WSL2 Linux 本机运行验收，但真实第二台 worker node、跨主机网络抖动、断网恢复、时钟漂移和长时间 soak test 仍未执行，因此不得标记为 GA。
 
 ## 验收方式
 

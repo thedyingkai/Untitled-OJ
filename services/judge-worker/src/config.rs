@@ -53,3 +53,19 @@ pub fn render_arg(arg: &str, source: &Path, exe: &Path, workdir: &Path) -> Strin
         .replace("{exe}", &exe.to_string_lossy())
         .replace("{workdir}", &workdir.to_string_lossy())
 }
+
+pub fn render_run_arg(
+    arg: &str,
+    source: &Path,
+    exe: &Path,
+    workdir: &Path,
+    memory_mb: u64,
+) -> String {
+    render_arg(arg, source, exe, workdir)
+        .replace("{memory_mb}", &memory_mb.to_string())
+        .replace("{java_heap_mb}", &java_heap_mb(memory_mb).to_string())
+}
+
+fn java_heap_mb(memory_mb: u64) -> u64 {
+    ((memory_mb * 3) / 5).clamp(16, memory_mb.max(16))
+}

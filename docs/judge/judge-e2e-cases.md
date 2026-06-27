@@ -1,8 +1,8 @@
 # Judge E2E 用例
 
-> 文档状态：需要运行验收
+> 文档状态：WSL2 Linux 环境已验收
 > 适用范围：Judge Worker / E2E 验收 / 质量保证
-> 最后更新：2026-06-26
+> 最后更新：2026-06-27
 
 ## 1. 文档目的
 
@@ -50,13 +50,26 @@ OJOS_WORKER_TOKEN=<token> bash scripts/e2e-linux.sh
 
 脚本退出 0 才能记录通过。
 
-## 9. 常见问题
+## 9. 2026-06-27 验收结果
+
+已在 `Ubuntu-24.04-OJOS` WSL2 Linux 环境执行状态矩阵：
+
+| 语言 | AC | WA | CE | RE | TLE | MLE | OLE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `cpp17` | 通过 | 通过 | 通过 | 通过 | 通过 | 通过 | 通过 |
+| `c11` | 通过 | 通过 | 通过 | 通过 | 通过 | 通过 | 通过 |
+| `python3` | 通过 | 通过 | 通过 | 通过 | 通过 | 通过 | 通过 |
+| `java17` | 通过 | 通过 | 通过 | 通过 | 通过 | 通过 | 通过 |
+
+总计 28 个状态用例，失败数 0。`memory_kb` 非 0 记录 24 条，不存在长期恒为 0 的问题。fork bomb 防护、TLE 后进程清理、路径泄露扫描和权限复扫均通过。
+
+## 10. 常见问题
 
 - MLE 不稳定：检查 cgroup memory controller。
 - OLE 不触发：检查输出文件限制。
 - Java/Python 差异：检查语言独立配置。
 
-## 10. 相关文档
+## 11. 相关文档
 
 - [资源限制](judge-resource-limits.md)
 - [语言运行时](judge-language-runtime.md)

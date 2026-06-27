@@ -1,8 +1,8 @@
 # Judge 资源限制
 
-> 文档状态：需要运行验收
+> 文档状态：WSL2 Linux 环境已验收
 > 适用范围：Judge Worker 部署与运行验收
-> 最后更新：2026-06-26
+> 最后更新：2026-06-27
 
 ## 1. 文档目的
 
@@ -61,7 +61,7 @@ cat /sys/fs/cgroup/cgroup.controllers
 
 ## 7. Docker worker 权限边界
 
-worker 容器需要 nsjail 和 cgroup 所需的最小能力。生产部署不允许使用危险的全权限容器作为默认方案。若某个环境确实需要额外 capability 或 cgroup mount，必须在部署文档中说明原因、最小权限和风险。
+worker 容器需要 nsjail 和 cgroup 所需的最小能力。当前 compose 运行验收使用 host cgroup namespace，并将 `/sys/fs/cgroup` 以读写方式挂载给 worker，使 case 级 cgroup v2 可以创建、设置 `memory.max`/`pids.max` 并读取 `memory.peak`、`memory.events`。生产部署不允许无说明地扩大为全权限容器；若某个环境确实需要额外 capability 或 cgroup mount，必须在部署文档中说明原因、最小权限和风险。
 
 ## 8. 状态一致性要求
 
@@ -84,14 +84,37 @@ OJOS_WORKER_TOKEN=<token> bash scripts/e2e-linux.sh
 
 必须验证：AC、WA、CE、RE、TLE、MLE、OLE、非法文件读取、fork bomb 和大 stderr。Windows 静态验证不能替代这些运行检查。
 
-## 11. 常见问题
+## 11. 2026-06-27 验收结果
+
+已在 `Ubuntu-24.04-OJOS` WSL2 Linux 环境执行 `bash scripts/e2e-linux.sh`，结果如下：
+
+| 检查 | 结果 |
+| --- | --- |
+| cgroup v2 | 通过，controllers 包含 `memory` 和 `pids` |
+| nsjail | 通过，worker 容器内可用 |
+| 四语言矩阵 | 28/28 通过 |
+| `cpp17` | AC/WA/CE/RE/TLE/MLE/OLE 通过 |
+| `c11` | AC/WA/CE/RE/TLE/MLE/OLE 通过 |
+| `python3` | AC/WA/CE/RE/TLE/MLE/OLE 通过 |
+| `java17` | AC/WA/CE/RE/TLE/MLE/OLE 通过 |
+| `memory_kb` | 非 0 记录 24 条，不恒为 0 |
+| MLE | 正确判定为 `MEMORY_LIMIT_EXCEEDED` |
+| OLE | 正确判定为 `OUTPUT_LIMIT_EXCEEDED` |
+| TLE | 正确判定为 `TIME_LIMIT_EXCEEDED` |
+| fork bomb | 被 `pids.max`/rlimit 限制，未拖垮 host |
+| TLE 残留 | 未发现残留 `nsjail` 或 `/work/main` |
+
+本次验收发现并修复过一个关键问题：Linux `pre_exec` 不能使用父进程 PID 将子进程加入 cgroup，必须在子进程侧使用当前 PID 加入 case cgroup。否则 C/C++ MLE 会因为未进入 memory cgroup 而被误判为 TLE。
+
+## 12. 常见问题
 
 - `memory_kb` 为 0：检查 `memory.peak` 是否可读、cgroup 路径是否正确。
 - MLE 变成 RE：检查 `memory.events` 和 OOM 判断。
+- MLE 变成 TLE：检查被 nsjail 启动的子进程是否确实加入 case cgroup。
 - OLE 不触发：检查 stdout/stderr 限制和文件大小限制。
 - worker 被 fork bomb 拖垮：检查 `pids.max` 和 `rlimit_nproc`。
 
-## 12. 相关文档
+## 13. 相关文档
 
 - [Judge 状态模型](judge-status-model.md)
 - [Linux 运行验收](../e2e/e2e-linux-runtime.md)

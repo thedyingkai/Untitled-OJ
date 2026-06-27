@@ -280,6 +280,7 @@ type AdminTaskItem struct {
 	SubmissionId   int64  `json:"submission_id"`
 	WorkerId       string `json:"worker_id,optional"`
 	Status         string `json:"status"`
+	LeaseVersion   int    `json:"lease_version"`
 	LeaseExpiresAt string `json:"lease_expires_at,optional"`
 	Attempt        int    `json:"attempt"`
 	HeartbeatAt    string `json:"heartbeat_at,optional"`

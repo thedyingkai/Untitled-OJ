@@ -1,5 +1,12 @@
 FROM rust:1.89-bookworm
 
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \

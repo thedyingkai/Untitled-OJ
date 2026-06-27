@@ -41,6 +41,7 @@ func (l *AdminTasksLogic) AdminTasks() (resp *types.AdminTasksResp, err error) {
 			SubmissionId:   task.SubmissionID,
 			WorkerId:       task.WorkerID,
 			Status:         task.Status,
+			LeaseVersion:   task.LeaseVersion,
 			LeaseExpiresAt: task.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
 			Attempt:        task.Attempt,
 			HeartbeatAt:    task.HeartbeatAt.UTC().Format(time.RFC3339Nano),

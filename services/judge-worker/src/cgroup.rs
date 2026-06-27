@@ -42,12 +42,8 @@ mod imp {
             Ok(Self { path: Some(path) })
         }
 
-        pub fn attach(&self, pid: u32) -> Result<()> {
-            let Some(path) = &self.path else {
-                return Ok(());
-            };
-            std::fs::write(path.join("cgroup.procs"), pid.to_string())
-                .with_context(|| format!("attach pid to cgroup failed: {}", path.display()))
+        pub fn path(&self) -> Option<&Path> {
+            self.path.as_deref()
         }
 
         pub fn memory_peak_kb(&self) -> Result<i32> {
@@ -93,6 +89,8 @@ mod imp {
     }
 
     fn create_limited_cgroup(path: &Path, memory_mb: u64, pids_max: u64) -> Result<()> {
+        prepare_parent_controllers(path)?;
+
         std::fs::create_dir_all(path)
             .with_context(|| format!("create cgroup failed: {}", path.display()))?;
 
@@ -105,6 +103,56 @@ mod imp {
             .with_context(|| format!("write pids.max failed: {}", path.display()))?;
 
         Ok(())
+    }
+
+    fn prepare_parent_controllers(path: &Path) -> Result<()> {
+        let Some(root) = detect_cgroup_v2_root().ok() else {
+            return Ok(());
+        };
+        let parent = path.parent().unwrap_or(&root);
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create cgroup parent failed: {}", parent.display()))?;
+
+        let relative = parent.strip_prefix(&root).unwrap_or(parent);
+        let mut current = root.clone();
+        enable_controllers(&current)?;
+
+        for component in relative.components() {
+            current.push(component.as_os_str());
+            if current.exists() {
+                enable_controllers(&current)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn enable_controllers(path: &Path) -> Result<()> {
+        let controllers = path.join("cgroup.controllers");
+        let subtree = path.join("cgroup.subtree_control");
+        if !controllers.exists() || !subtree.exists() {
+            return Ok(());
+        }
+
+        let available = std::fs::read_to_string(&controllers)
+            .with_context(|| format!("read cgroup.controllers failed: {}", path.display()))?;
+        let mut requested = Vec::new();
+        for controller in ["memory", "pids"] {
+            if available.split_whitespace().any(|item| item == controller) {
+                requested.push(format!("+{}", controller));
+            }
+        }
+        if requested.is_empty() {
+            return Ok(());
+        }
+
+        match std::fs::write(&subtree, requested.join(" ")) {
+            Ok(()) => Ok(()),
+            Err(err) if err.raw_os_error() == Some(16) => Ok(()),
+            Err(err) => Err(err).with_context(|| {
+                format!("write cgroup.subtree_control failed: {}", path.display())
+            }),
+        }
     }
 
     fn allow_cgroup_fallback() -> bool {
@@ -160,8 +208,9 @@ mod imp {
             Err(anyhow!("cgroup v2 memory enforcement requires Linux"))
         }
 
-        pub fn attach(&self, _pid: u32) -> Result<()> {
-            Ok(())
+        #[allow(dead_code)]
+        pub fn path(&self) -> Option<&std::path::Path> {
+            None
         }
 
         pub fn memory_peak_kb(&self) -> Result<i32> {

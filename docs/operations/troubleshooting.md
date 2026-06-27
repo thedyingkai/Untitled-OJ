@@ -69,7 +69,16 @@ docker compose --env-file .env -f deploy\compose\docker-compose.yml exec gateway
 - tasks 是否有 lease
 - worker 日志是否反复 claim 同一 task
 
-本地 Docker Desktop/WSL 中，nsjail 可能需要 `OJOS_NSJAIL_NO_PIVOTROOT=true`，cgroup 可能需要本地兼容开关 `OJOS_ALLOW_CGROUP_FALLBACK=true`。这些只用于本地演示，不代表 Linux cgroup/nsjail 资源限制验收通过。
+本地 Docker Desktop/WSL 中，nsjail 可能需要 `OJOS_NSJAIL_NO_PIVOTROOT=true`。Linux Runtime 验收不应依赖无内存限制的兼容降级；必须确认 `/sys/fs/cgroup/cgroup.controllers` 存在，并包含 `memory` 和 `pids`。
+
+2026-06-27 的 WSL2 Linux 验收环境使用 `Ubuntu-24.04-OJOS`，Docker worker 容器通过 host cgroup namespace 和 `/sys/fs/cgroup` mount 执行 case 级 cgroup v2 限制。该环境已通过四语言 AC/WA/CE/RE/TLE/MLE/OLE 矩阵、fork bomb、TLE 残留进程清理、双 worker 模拟、crash recovery 和 stale lease 拒绝。
+
+如果 MLE 被误判为 TLE 或 RE，重点检查：
+
+- worker 是否能创建 case cgroup。
+- 被 nsjail 启动的子进程是否加入了 case cgroup。
+- `memory.max`、`memory.peak`、`memory.events` 是否可读写。
+- worker 容器是否缺少必要 capability 或 cgroup mount。
 
 ## 6. 必跑验证
 
@@ -89,7 +98,15 @@ powershell -NoProfile -File scripts\e2e-api.ps1 `
   -WorkerToken $env:OJOS_WORKER_TOKEN
 ```
 
-Linux nsjail/cgroup、多 worker、worker crash recovery 仍属于 Linux Judge Runtime 验收，不应写成 Windows/Docker Desktop 已通过。
+Linux nsjail/cgroup、多 worker、worker crash recovery 属于 Linux Judge Runtime 验收。WSL2 Linux 本机双 worker 可以作为本地运行验收，但不能替代第二台真实机器的多机 worker 验收。
+
+Linux 环境可用时：
+
+```bash
+bash scripts/e2e-linux.sh
+```
+
+该脚本应保持 `matrix_failed=0`、`path_leaks=0`、`permission_failures=0`，并确认 `memory_kb` 不恒为 0。
 
 ## 7. 相关文档
 
