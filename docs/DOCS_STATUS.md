@@ -4,7 +4,13 @@ Date: 2026-06-27
 
 ## Baseline Status
 
-Kernel Baseline Freeze is implemented in this working tree and pending final verification. The baseline includes Installer Core, Module Registry, Runtime Snapshot v1, Dynamic Gateway route table/proxy, Web Shell contribution registry, Permission registry, Health aggregation, Service Runtime Driver foundation, controlled `ojosctl` apply, Module SDK and Sample Hello compatibility.
+Kernel Baseline Freeze is implemented on `main`. The baseline includes Installer Core, Module Registry, Runtime Snapshot v1, Dynamic Gateway route table/proxy, Web Shell contribution registry, Permission registry, Health aggregation, Service Runtime Driver foundation, controlled `ojosctl` apply, Module SDK and Sample Hello compatibility.
+
+## Feature Planning Gate Status
+
+Feature Module Planning Gate v1 is documented as a design-only gate. It compares Contest, Training, Group/Team, Discussion, Clarification, Print, Balloon, Remote OJ and Rating/Ranking candidates. The recommendation is Contest Core Skeleton as the first real business module, after acceptance checks pass.
+
+No Contest API, Contest frontend, Contest migration or `modules/contest-core/` implementation is created by this planning gate. Contest Core is not implemented.
 
 ## Current Hotplug Status
 
@@ -57,6 +63,7 @@ Judge Core is the first core feature module and appears through Runtime Snapshot
 - B Contest implementation.
 - Contest API.
 - Contest frontend.
+- Contest migration.
 - Remote module market.
 - Hook execution.
 - Dynamic untrusted frontend JavaScript.

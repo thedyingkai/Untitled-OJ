@@ -10,6 +10,19 @@ This index points to the current canonical docs. Historical docs remain under `d
 - [Regression Matrix](release/regression-matrix.md)
 - [Versioning And Contract Freeze](release/versioning.md)
 
+## Feature Planning
+
+- [Feature Module Roadmap](features/feature-module-roadmap.md)
+- [First Feature Module Decision](features/first-feature-module-decision.md)
+- [Contest Core Module Plan](features/contest-core-module-plan.md)
+- [Contest Core Data Model Draft](features/contest-core-data-model.md)
+- [Contest Core API Draft](features/contest-core-api.md)
+- [Contest Core Frontend Draft](features/contest-core-frontend.md)
+- [Contest Core Runtime And Topology Draft](features/contest-core-runtime.md)
+- [Contest Core Acceptance Matrix](features/contest-core-acceptance.md)
+- [Contest Core Risk Review](features/contest-core-risk-review.md)
+- [Contest Core Pre-Implementation Gate](features/contest-core-pre-implementation-gate.md)
+
 ## Kernel
 
 - [Kernel Overview](kernel/kernel-overview.md)
