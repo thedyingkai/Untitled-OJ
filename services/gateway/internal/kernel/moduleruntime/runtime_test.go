@@ -3,6 +3,8 @@ package moduleruntime
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"ojos-gateway/internal/moduleregistry"
@@ -100,6 +102,73 @@ func TestBuildSnapshotContainsKernelPlatformAndJudgeCore(t *testing.T) {
 	}
 	if !hasTopologyNode(snapshot.Topology.Nodes, "ojos.judge-core:manifest:judge-api") {
 		t.Fatalf("manifest topology node should enter runtime topology")
+	}
+	if !hasTopologyNode(snapshot.Topology.Nodes, "ojos.judge-core:service:judge-api") {
+		t.Fatalf("runtime service node should enter topology")
+	}
+	if !hasTopologyNode(snapshot.Topology.Nodes, "ojos.judge-core:worker:judge-worker") {
+		t.Fatalf("runtime worker node should enter topology")
+	}
+}
+
+func TestBuildSnapshotParsesManifestServicesAndWorkers(t *testing.T) {
+	reader := fakeReader{
+		modules: []moduleregistry.Module{{
+			ModuleID: "ojos.judge-core",
+			Status:   "ENABLED",
+			Kind:     "feature",
+			Name:     "Judge Core",
+			Manifest: rawManifest(map[string]any{
+				"provides": map[string]any{
+					"services": []map[string]any{{
+						"id":              "problem-api",
+						"name":            "Problem API",
+						"kind":            "http",
+						"lifecycle":       "managed",
+						"trusted_runtime": "compose",
+						"compose_service": "problem-api",
+						"health_check_id": "problem-api-health",
+						"routes":          []string{"/api/problem"},
+						"required":        true,
+					}},
+					"workers": []map[string]any{{
+						"id":              "judge-worker",
+						"name":            "Judge Worker",
+						"kind":            "worker",
+						"lifecycle":       "managed",
+						"trusted_runtime": "compose",
+						"compose_service": "judge-worker",
+						"health_check_id": "worker-cluster-health",
+						"required":        false,
+					}},
+				},
+			}),
+		}},
+		gatewayRoutes: []moduleregistry.GatewayRoute{{
+			ModuleID:      "ojos.judge-core",
+			Prefix:        "/api/problem",
+			TargetService: "problem-api",
+			AuthMode:      "user",
+			Enabled:       true,
+		}},
+	}
+
+	snapshot, err := BuildSnapshot(context.Background(), reader)
+	if err != nil {
+		t.Fatalf("BuildSnapshot failed: %v", err)
+	}
+	if len(snapshot.Services) != 1 {
+		t.Fatalf("expected one manifest service, got %#v", snapshot.Services)
+	}
+	service := snapshot.Services[0]
+	if service.ServiceID != "problem-api" || service.Lifecycle != LifecycleManaged || service.Runtime != "compose" {
+		t.Fatalf("unexpected service contract: %#v", service)
+	}
+	if !contains(service.Routes, "/api/problem") || service.HealthCheckID != "problem-api-health" || !service.Required {
+		t.Fatalf("service routes/health/required not populated: %#v", service)
+	}
+	if len(snapshot.Workers) != 1 || snapshot.Workers[0].ServiceID != "judge-worker" {
+		t.Fatalf("expected judge-worker manifest worker, got %#v", snapshot.Workers)
 	}
 }
 
@@ -219,6 +288,128 @@ func TestBuildRouteTableBlocksDuplicatePrefix(t *testing.T) {
 	}
 }
 
+func TestBuildRouteTableBindsServiceHealth(t *testing.T) {
+	table := BuildRouteTableWithOptions(Snapshot{
+		Version: "1",
+		GatewayRoutes: []moduleregistry.GatewayRoute{{
+			ModuleID:      "ojos.judge-core",
+			Prefix:        "/api/problem",
+			TargetService: "problem-api",
+			AuthMode:      "user",
+			Enabled:       true,
+		}},
+	}, RouteTableOptions{
+		TrustedServices: map[string]TrustedService{
+			"problem-api": {ServiceID: "problem-api", UpstreamBase: "http://problem-api:8080"},
+		},
+		ServiceStates: map[string]RuntimeService{
+			"problem-api": {
+				ServiceID: "problem-api",
+				State:     ServiceStateStopped,
+				Health:    "error",
+			},
+		},
+	})
+	if len(table.Routes) != 1 {
+		t.Fatalf("expected one route, got %d", len(table.Routes))
+	}
+	route := table.Routes[0]
+	if route.ProxyEnabled || route.Status != "unavailable" {
+		t.Fatalf("stopped service route should be unavailable and not proxied: %#v", route)
+	}
+	if route.ServiceState != ServiceStateStopped || route.ServiceHealth != "error" {
+		t.Fatalf("route should expose service state and health: %#v", route)
+	}
+	if !contains(route.BlockedBy, "service not running") {
+		t.Fatalf("route should be blocked by service state: %#v", route)
+	}
+}
+
+func TestComposeDriverPlansOnlyAllowedManagedServices(t *testing.T) {
+	healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer healthServer.Close()
+
+	snapshot := Snapshot{
+		Services: []RuntimeService{
+			{
+				ServiceID:      "problem-api",
+				ModuleID:       "ojos.judge-core",
+				Kind:           "http",
+				Lifecycle:      LifecycleManaged,
+				Runtime:        "compose",
+				ComposeService: "problem-api",
+				Required:       true,
+			},
+			{
+				ServiceID: "demo-metadata-service",
+				ModuleID:  "ojos.demo-module",
+				Kind:      "metadata",
+				Lifecycle: LifecycleMetadata,
+				Runtime:   "metadata",
+			},
+			{
+				ServiceID:      "unsafe-service",
+				ModuleID:       "ojos.demo-module",
+				Kind:           "http",
+				Lifecycle:      LifecycleManaged,
+				Runtime:        "compose",
+				ComposeService: "not-allowed",
+			},
+		},
+		Workers: []RuntimeService{{
+			ServiceID:      "judge-worker",
+			ModuleID:       "ojos.judge-core",
+			Kind:           "worker",
+			Lifecycle:      LifecycleManaged,
+			Runtime:        "compose",
+			ComposeService: "judge-worker",
+		}},
+	}
+	driver := NewComposeDriver(map[string]TrustedService{
+		"problem-api": {ServiceID: "problem-api", UpstreamBase: healthServer.URL},
+	}, "problem-api", "judge-worker")
+
+	services, err := driver.ListServices(context.Background(), snapshot)
+	if err != nil {
+		t.Fatalf("ListServices failed: %v", err)
+	}
+	if serviceState(services, "problem-api") != ServiceStateRunning {
+		t.Fatalf("problem-api should be running when health returns 204: %#v", services)
+	}
+	if serviceState(services, "judge-worker") != ServiceStateUnknown {
+		t.Fatalf("judge-worker should be unknown without HTTP health endpoint: %#v", services)
+	}
+
+	plan, err := driver.PlanRestart(context.Background(), snapshot, "problem-api")
+	if err != nil {
+		t.Fatalf("PlanRestart failed: %v", err)
+	}
+	if plan.CanApply || len(plan.BlockedBy) != 0 {
+		t.Fatalf("plan should be valid but apply-disabled: %#v", plan)
+	}
+	if len(plan.Commands) != 1 || plan.Commands[0].Tool != "compose" || !contains(plan.Commands[0].Args, "problem-api") {
+		t.Fatalf("plan command should be structured compose args: %#v", plan.Commands)
+	}
+
+	metadataPlan, err := driver.PlanStart(context.Background(), snapshot, "demo-metadata-service")
+	if err != nil {
+		t.Fatalf("PlanStart metadata failed: %v", err)
+	}
+	if !contains(metadataPlan.BlockedBy, "metadata lifecycle cannot start") {
+		t.Fatalf("metadata lifecycle must block start: %#v", metadataPlan)
+	}
+
+	unsafePlan, err := driver.PlanStart(context.Background(), snapshot, "unsafe-service")
+	if err != nil {
+		t.Fatalf("PlanStart unsafe failed: %v", err)
+	}
+	if !contains(unsafePlan.BlockedBy, "service is not in trusted compose allowlist") {
+		t.Fatalf("unknown compose service should be blocked: %#v", unsafePlan)
+	}
+}
+
 func assertHasModule(t *testing.T, modules []moduleregistry.Module, id string) {
 	t.Helper()
 	for _, module := range modules {
@@ -272,6 +463,15 @@ func contains(items []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func serviceState(items []RuntimeService, serviceID string) string {
+	for _, item := range items {
+		if item.ServiceID == serviceID {
+			return item.State
+		}
+	}
+	return ""
 }
 
 func rawManifest(value map[string]any) json.RawMessage {

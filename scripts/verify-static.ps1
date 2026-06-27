@@ -198,6 +198,9 @@ Step "Rust fmt/check module-installer workspace" {
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "package", "modules/demo-module", "-o", ".tmp/agent/scratch/verify-static-demo.ojosmod")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "verify", ".tmp/agent/scratch/verify-static-demo.ojosmod")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "inspect", ".tmp/agent/scratch/verify-static-demo.ojosmod")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "services")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "service", "problem-api")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "plan-restart", "problem-api")
     }
 }
 

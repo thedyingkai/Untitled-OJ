@@ -83,3 +83,16 @@ Boundaries retained:
 Kernel Runtime now provides dynamic gateway route activation for enabled module routes. Gateway remains the edge adapter and resolves module `service_id` values through a trusted service map. Web Shell remains the frontend shell and renders unknown module components through safe contribution metadata pages.
 
 L2 service/worker runtime driver, L3 dynamic frontend bundles and L4 full module hotplug are not implemented.
+## Hotplug L2 Foundation
+
+Kernel Runtime now owns the service and worker lifecycle model for modules. Gateway remains an adapter: it can read runtime services, generate plans and make routing decisions from service health, but it does not control the host or Docker socket.
+
+New Kernel runtime responsibilities in this foundation phase:
+
+- Parse service and worker declarations from module manifests.
+- Track service state and health in Runtime Snapshot.
+- Generate plan-only start/stop/restart/reload/health responses.
+- Bind gateway route status to service health.
+- Add runtime service and worker nodes to topology.
+
+Still out of scope: arbitrary service image deployment, remote module marketplace, hook execution, Docker socket control, Web-triggered apply, L3 dynamic frontend bundles and L4 full hotplug automation.

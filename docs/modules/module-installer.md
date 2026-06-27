@@ -177,3 +177,8 @@ Gateway route declarations are validated as metadata in v1. The route table API 
 Gateway route declarations use `service_id` in the manifest contract. The installer continues to persist the compatibility DB column `target_service`, but it must be treated as a service identifier, not a URL. Direct `target_url` is forbidden.
 
 Enable/disable affects dynamic proxy eligibility through Runtime Snapshot and route table reload. Disabled modules may appear in include-disabled admin inspection, but disabled routes are not proxy-enabled.
+## Hotplug L2 Boundary
+
+Module Installer validates service and worker manifest fields, including lifecycle, trusted runtime, compose service identity and route paths. It rejects dangerous runtime fields such as `command`, `script`, `image`, `host_path`, `mount`, `privileged` and `cap_add`.
+
+Installer does not start, stop or restart module services in L2 foundation. Runtime state and plan generation are Kernel Runtime responsibilities, and actual apply remains reserved for a future controlled operator/ojosctl path.

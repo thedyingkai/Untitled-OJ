@@ -86,3 +86,28 @@ Mitigations:
 - Dynamic proxy strips hop-by-hop headers and does not forward raw `Authorization` by default.
 - Gateway forwards sanitized actor headers plus internal HMAC headers to trusted services.
 - Admin route table hides `upstream_base` by default; ordinary users cannot access route table APIs.
+## Hotplug L2 Runtime Driver Threats
+
+New attack surface:
+
+- Manifest-declared services and workers.
+- `compose_service` identities.
+- Runtime plan generation APIs.
+- Service health affecting gateway route availability.
+
+Threats:
+
+- Host control if Gateway, Web Shell or installer could access Docker socket.
+- Arbitrary code execution if manifests could define `command`, `script`, `image`, `host_path`, `mount`, `privileged` or `cap_add` and have them applied automatically.
+- SSRF or internal probing if service health accepted arbitrary URLs.
+- Permission bypass if unavailable dynamic routes returned before auth checks.
+
+Mitigations:
+
+- No Docker socket is mounted into Gateway, Web Shell or module-installer.
+- L2 foundation is plan/status/health only; Gateway apply-plan is disabled.
+- Compose driver uses trusted Gateway service configuration and an allowlist.
+- Manifest dangerous runtime fields are rejected by installer core validation.
+- Runtime plans use structured command arrays and never shell strings.
+- Dynamic proxy enforces auth mode before returning service unavailable for matched runtime routes.
+- Admin APIs redact host paths, raw env, DSNs, tokens and internal service URLs.

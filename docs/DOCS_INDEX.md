@@ -113,3 +113,11 @@
 - `docs/modules/module-contract.md` documents `gateway_routes.service_id` and safe Web Shell contribution fallback.
 - `docs/api/admin-api.md` documents runtime route table fields and dynamic proxy security boundaries.
 - `docs/security/module-installer-threat-model.md` includes L1 dynamic proxy threats and mitigations.
+## Hotplug L2 Foundation Documents
+
+- `docs/kernel/module-runtime.md` documents runtime driver abstraction, service states, plan-only compose driver and route-health linkage.
+- `docs/modules/module-contract.md` documents `provides.services` / `provides.workers` L2 fields and forbidden runtime fields.
+- `docs/modules/module-lifecycle.md` documents service lifecycle plans and metadata-only blocking.
+- `docs/api/admin-api.md` documents `/api/admin/runtime/services` and plan endpoints.
+- `docs/development/backend-development.md` and `docs/development/frontend-development.md` document L2 safety boundaries.
+- `docs/security/module-installer-threat-model.md` documents runtime driver threats and mitigations.

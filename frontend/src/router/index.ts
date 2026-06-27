@@ -178,6 +178,28 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
+        path: 'admin/runtime/services',
+        name: 'admin-runtime-services',
+        component: () => import('../views/admin/AdminRuntimeServicesView.vue'),
+        meta: {
+          title: 'Runtime Services',
+          requiresAuth: true,
+          roles: adminRoles,
+          permissions: adminPermissions,
+        },
+      },
+      {
+        path: 'admin/runtime/services/:serviceId',
+        name: 'admin-runtime-service-detail',
+        component: () => import('../views/admin/AdminRuntimeServicesView.vue'),
+        meta: {
+          title: 'Runtime Service',
+          requiresAuth: true,
+          roles: adminRoles,
+          permissions: adminPermissions,
+        },
+      },
+      {
         path: 'admin/modules/:id',
         name: 'admin-module-detail',
         component: () => import('../views/admin/AdminModuleDetailView.vue'),

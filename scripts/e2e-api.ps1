@@ -486,6 +486,13 @@ try {
   $runtimeReload = Invoke-Api "modules.runtime.reload.admin" POST "/admin/modules/runtime/reload" @{} -Token $script:AdminToken -Expected @(200)
   Invoke-Api "modules.runtime.reload.user" POST "/admin/modules/runtime/reload" @{} -Token $script:UserToken -Expected @(403) | Out-Null
   Invoke-Api "modules.runtime.reload.none" POST "/admin/modules/runtime/reload" @{} -Expected @(401) | Out-Null
+  $runtimeServices = Invoke-Api "runtime.services.admin" GET "/admin/runtime/services" -Token $script:AdminToken -Expected @(200)
+  Invoke-Api "runtime.services.user" GET "/admin/runtime/services" -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "runtime.services.none" GET "/admin/runtime/services" -Expected @(401) | Out-Null
+  $runtimeProblemService = Invoke-Api "runtime.service.problem-api.admin" GET "/admin/runtime/services/problem-api" -Token $script:AdminToken -Expected @(200)
+  $runtimePlanRestart = Invoke-Api "runtime.service.problem-api.plan-restart" POST "/admin/runtime/services/problem-api/plan-restart" @{} -Token $script:AdminToken -Expected @(200)
+  Invoke-Api "runtime.service.problem-api.plan-restart.user" POST "/admin/runtime/services/problem-api/plan-restart" @{} -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "runtime.service.problem-api.plan-restart.none" POST "/admin/runtime/services/problem-api/plan-restart" @{} -Expected @(401) | Out-Null
   if ($runtimeSnapshot.Json) {
     $snapshotModules = Get-JsonArray $runtimeSnapshot.Json "modules"
     if ($snapshotModules.Count -le 0) {
@@ -493,6 +500,24 @@ try {
     }
     if (-not $runtimeSnapshot.Json.topology -or -not $runtimeSnapshot.Json.topology.nodes -or $runtimeSnapshot.Json.topology.nodes.Count -le 0) {
       $failures.Add("runtime snapshot topology nodes expected non-empty") | Out-Null
+    }
+    $snapshotServices = Get-JsonArray $runtimeSnapshot.Json "services"
+    $snapshotWorkers = Get-JsonArray $runtimeSnapshot.Json "workers"
+    if (-not (Has-JsonItem $snapshotServices "service_id" "problem-api")) {
+      $failures.Add("runtime snapshot services missing problem-api") | Out-Null
+    }
+    if (-not (Has-JsonItem $snapshotServices "service_id" "judge-api")) {
+      $failures.Add("runtime snapshot services missing judge-api") | Out-Null
+    }
+    if (-not (Has-JsonItem $snapshotWorkers "service_id" "judge-worker")) {
+      $failures.Add("runtime snapshot workers missing judge-worker") | Out-Null
+    }
+    $snapshotTopologyNodes = Get-JsonArray $runtimeSnapshot.Json.topology "nodes"
+    if (-not (Has-JsonItem $snapshotTopologyNodes "id" "ojos.judge-core:service:problem-api")) {
+      $failures.Add("runtime topology missing service node problem-api") | Out-Null
+    }
+    if (-not (Has-JsonItem $snapshotTopologyNodes "id" "ojos.judge-core:worker:judge-worker")) {
+      $failures.Add("runtime topology missing worker node judge-worker") | Out-Null
     }
     $snapshotModuleIds = @($snapshotModules | Select-Object -ExpandProperty module_id)
     foreach ($expectedModule in @("ojos.kernel.installer", "ojos.kernel.module-runtime", "ojos.platform.gateway", "ojos.platform.web-shell", "ojos.judge-core")) {
@@ -525,6 +550,12 @@ try {
       if ([string]$problemRoute.auth_mode -ne "user") {
         $failures.Add("runtime route /api/problem expected auth_mode=user got $($problemRoute.auth_mode)") | Out-Null
       }
+      if ([string]$problemRoute.service_state -ne "RUNNING") {
+        $failures.Add("runtime route /api/problem expected service_state RUNNING got $($problemRoute.service_state)") | Out-Null
+      }
+      if ([string]$problemRoute.service_health -ne "ok") {
+        $failures.Add("runtime route /api/problem expected service_health ok got $($problemRoute.service_health)") | Out-Null
+      }
       if ($problemRoute.PSObject.Properties["upstream_base"] -and -not [string]::IsNullOrWhiteSpace([string]$problemRoute.upstream_base)) {
         $failures.Add("runtime route table should not expose upstream_base by default") | Out-Null
       }
@@ -543,6 +574,51 @@ try {
     }
   } else {
     $failures.Add("runtime route table response is not JSON") | Out-Null
+  }
+  if ($runtimeServices.Json) {
+    $runtimeServiceItems = Get-JsonArray $runtimeServices.Json "services"
+    $runtimeWorkerItems = Get-JsonArray $runtimeServices.Json "workers"
+    if (-not (Has-JsonItem $runtimeServiceItems "service_id" "problem-api")) {
+      $failures.Add("runtime services API missing problem-api") | Out-Null
+    }
+    if (-not (Has-JsonItem $runtimeWorkerItems "service_id" "judge-worker")) {
+      $failures.Add("runtime services API missing judge-worker") | Out-Null
+    }
+  } else {
+    $failures.Add("runtime services response is not JSON") | Out-Null
+  }
+  if ($runtimeProblemService.Json) {
+    if ([string]$runtimeProblemService.Json.service.service_id -ne "problem-api") {
+      $failures.Add("runtime service detail expected problem-api got $($runtimeProblemService.Json.service.service_id)") | Out-Null
+    }
+    if ([string]$runtimeProblemService.Json.service.state -ne "RUNNING") {
+      $failures.Add("runtime service problem-api expected RUNNING got $($runtimeProblemService.Json.service.state)") | Out-Null
+    }
+  } else {
+    $failures.Add("runtime service problem-api response is not JSON") | Out-Null
+  }
+  if ($runtimePlanRestart.Json) {
+    $plan = $runtimePlanRestart.Json.plan
+    if ([string]$plan.service_id -ne "problem-api") {
+      $failures.Add("runtime plan restart expected problem-api got $($plan.service_id)") | Out-Null
+    }
+    if ($plan.can_apply -ne $false) {
+      $failures.Add("runtime plan restart should be plan-only can_apply=false") | Out-Null
+    }
+    $commands = @($plan.commands)
+    if ($commands.Count -ne 1 -or [string]$commands[0].tool -ne "compose") {
+      $failures.Add("runtime plan restart expected one compose command") | Out-Null
+    } else {
+      $args = @($commands[0].args)
+      if ($args -notcontains "restart" -or $args -notcontains "problem-api") {
+        $failures.Add("runtime plan restart command should contain restart problem-api got $($args -join ',')") | Out-Null
+      }
+      if (($args -join " ") -match "[;&|]") {
+        $failures.Add("runtime plan restart command args must not contain shell metacharacters") | Out-Null
+      }
+    }
+  } else {
+    $failures.Add("runtime plan restart response is not JSON") | Out-Null
   }
   if ($runtimeReload.Json) {
     if ($runtimeReload.Json.reloaded -ne $true) {
@@ -578,6 +654,18 @@ try {
     }
   } else {
     $failures.Add("demo enabled runtime snapshot response is not JSON") | Out-Null
+  }
+  $demoMetadataPlan = Invoke-Api "runtime.service.demo-metadata.plan-start.blocked" POST "/admin/runtime/services/demo-metadata-service/plan-start" @{} -Token $script:AdminToken -Expected @(200)
+  if ($demoMetadataPlan.Json) {
+    $blockedBy = @($demoMetadataPlan.Json.plan.blocked_by)
+    if ($blockedBy -notcontains "metadata lifecycle cannot start") {
+      $failures.Add("demo metadata service plan-start expected metadata lifecycle block got $($blockedBy -join ',')") | Out-Null
+    }
+    if ($demoMetadataPlan.Json.plan.can_apply -ne $false) {
+      $failures.Add("demo metadata service plan-start should not be applyable") | Out-Null
+    }
+  } else {
+    $failures.Add("demo metadata plan-start response is not JSON") | Out-Null
   }
   $demoRoutesAll = Invoke-Api "modules.runtime.routes.demo-enabled.include-disabled" GET "/admin/modules/runtime/routes?include_disabled=true" -Token $script:AdminToken -Expected @(200)
   if ($demoRoutesAll.Json) {

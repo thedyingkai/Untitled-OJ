@@ -125,6 +125,76 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Handler: adminModuleRuntimeReloadHandler(serverCtx),
 			},
 			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/runtime/services",
+				Handler: adminRuntimeServicesHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/runtime/services",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/runtime/services/:id/plan-start",
+				Handler: adminRuntimeServicePlanHandler(serverCtx, "start"),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/runtime/services/:id/plan-start",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/runtime/services/:id/plan-stop",
+				Handler: adminRuntimeServicePlanHandler(serverCtx, "stop"),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/runtime/services/:id/plan-stop",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/runtime/services/:id/plan-restart",
+				Handler: adminRuntimeServicePlanHandler(serverCtx, "restart"),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/runtime/services/:id/plan-restart",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/runtime/services/:id/plan-reload",
+				Handler: adminRuntimeServicePlanHandler(serverCtx, "reload"),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/runtime/services/:id/plan-reload",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/runtime/services/:id",
+				Handler: adminRuntimeServiceDetailHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/runtime/services/:id",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/runtime/reload",
+				Handler: adminRuntimeReloadHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/runtime/reload",
+				Handler: preflightHandler(),
+			},
+			{
 				Method:  http.MethodOptions,
 				Path:    "/api/admin/modules/runtime/reload",
 				Handler: preflightHandler(),

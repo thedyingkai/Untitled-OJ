@@ -91,16 +91,41 @@ provides:
 
   services:
     - id: problem-api
+      name: Problem API
+      kind: http
+      lifecycle: managed
+      trusted_runtime: compose
+      compose_service: problem-api
+      health_check_id: problem-api-health
+      routes:
+        - /api/problem
+      required: true
       path: services/problem-api
       health: /health
       exposure: internal
     - id: judge-api
+      name: Judge API
+      kind: http
+      lifecycle: managed
+      trusted_runtime: compose
+      compose_service: judge-api
+      health_check_id: judge-api-health
+      routes:
+        - /api/judge
+      required: true
       path: services/judge-api
       health: /health
       exposure: internal
 
   workers:
     - id: judge-worker
+      name: Judge Worker
+      kind: worker
+      lifecycle: managed
+      trusted_runtime: compose
+      compose_service: judge-worker
+      health_check_id: worker-cluster-health
+      required: false
       path: services/judge-worker
       mode: external-node
 

@@ -337,9 +337,9 @@ func installationForModules(modules []Module, judgeManifest json.RawMessage) []I
 
 func judgeCoreComponents() []Component {
 	return []Component{
-		component("problem-api", "backend_service", map[string]any{"path": "services/problem-api", "future_path": "modules/judge-core/services/problem-api", "health": "/health", "exposure": "internal"}),
-		component("judge-api", "backend_service", map[string]any{"path": "services/judge-api", "future_path": "modules/judge-core/services/judge-api", "health": "/health", "exposure": "internal"}),
-		component("judge-worker", "worker_service", map[string]any{"path": "services/judge-worker", "future_path": "modules/judge-core/workers/judge-worker", "mode": "external-node"}),
+		component("problem-api", "backend_service", map[string]any{"path": "services/problem-api", "future_path": "modules/judge-core/services/problem-api", "health": "/health", "exposure": "internal", "lifecycle": "managed", "trusted_runtime": "compose", "compose_service": "problem-api", "health_check_id": "problem-api-health", "routes": []string{"/api/problem"}, "required": true}),
+		component("judge-api", "backend_service", map[string]any{"path": "services/judge-api", "future_path": "modules/judge-core/services/judge-api", "health": "/health", "exposure": "internal", "lifecycle": "managed", "trusted_runtime": "compose", "compose_service": "judge-api", "health_check_id": "judge-api-health", "routes": []string{"/api/judge", "/api/judge/worker"}, "required": true}),
+		component("judge-worker", "worker_service", map[string]any{"path": "services/judge-worker", "future_path": "modules/judge-core/workers/judge-worker", "mode": "external-node", "lifecycle": "managed", "trusted_runtime": "compose", "compose_service": "judge-worker", "health_check_id": "worker-cluster-health", "required": false}),
 		component("problems-storage", "storage_bucket", map[string]any{"bucket": "problems"}),
 		component("submissions-storage", "storage_bucket", map[string]any{"bucket": "submissions"}),
 		component("judge-artifacts-storage", "storage_bucket", map[string]any{"bucket": "judge-artifacts"}),
@@ -493,11 +493,16 @@ func judgeCoreManifest() map[string]any {
 			},
 		},
 		"provides": map[string]any{
-			"permissions":     manifestPermissions(judgeCorePermissions()),
-			"roles":           []map[string]any{},
-			"components":      manifestComponents(judgeCoreComponents()),
-			"services":        []map[string]any{{"id": "problem-api", "path": "services/problem-api", "health": "/health", "exposure": "internal"}, {"id": "judge-api", "path": "services/judge-api", "health": "/health", "exposure": "internal"}},
-			"workers":         []map[string]any{{"id": "judge-worker", "path": "services/judge-worker", "mode": "external-node"}},
+			"permissions": manifestPermissions(judgeCorePermissions()),
+			"roles":       []map[string]any{},
+			"components":  manifestComponents(judgeCoreComponents()),
+			"services": []map[string]any{
+				{"id": "problem-api", "name": "Problem API", "kind": "http", "lifecycle": "managed", "trusted_runtime": "compose", "compose_service": "problem-api", "health_check_id": "problem-api-health", "routes": []string{"/api/problem"}, "required": true, "path": "services/problem-api", "health": "/health", "exposure": "internal"},
+				{"id": "judge-api", "name": "Judge API", "kind": "http", "lifecycle": "managed", "trusted_runtime": "compose", "compose_service": "judge-api", "health_check_id": "judge-api-health", "routes": []string{"/api/judge", "/api/judge/worker"}, "required": true, "path": "services/judge-api", "health": "/health", "exposure": "internal"},
+			},
+			"workers": []map[string]any{
+				{"id": "judge-worker", "name": "Judge Worker", "kind": "worker", "lifecycle": "managed", "trusted_runtime": "compose", "compose_service": "judge-worker", "health_check_id": "worker-cluster-health", "required": false, "path": "services/judge-worker", "mode": "external-node"},
+			},
 			"frontend_routes": manifestFrontendRoutes(judgeCoreFrontendRoutes()),
 			"menus":           manifestMenus(judgeCoreMenus()),
 			"gateway_routes":  manifestGatewayRoutes(judgeCoreGatewayRoutes()),

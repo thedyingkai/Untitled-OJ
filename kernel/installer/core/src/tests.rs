@@ -175,6 +175,107 @@ fn duplicate_permission_and_gateway_prefix() {
 }
 
 #[test]
+fn service_and_worker_runtime_contract_validates() {
+    let mut manifest = valid_manifest();
+    manifest.provides.services = vec![ServiceDecl {
+        id: "problem-api".to_string(),
+        name: "Problem API".to_string(),
+        kind: "http".to_string(),
+        lifecycle: "managed".to_string(),
+        trusted_runtime: "compose".to_string(),
+        compose_service: "problem-api".to_string(),
+        health_check_id: "problem-api-health".to_string(),
+        routes: vec!["/api/problem".to_string()],
+        required: true,
+        path: "services/problem-api".to_string(),
+        health: "/health".to_string(),
+        exposure: "internal".to_string(),
+    }];
+    manifest.provides.workers = vec![WorkerDecl {
+        id: "judge-worker".to_string(),
+        name: "Judge Worker".to_string(),
+        kind: "worker".to_string(),
+        lifecycle: "managed".to_string(),
+        trusted_runtime: "compose".to_string(),
+        compose_service: "judge-worker".to_string(),
+        health_check_id: "worker-cluster-health".to_string(),
+        required: false,
+        path: "services/judge-worker".to_string(),
+        mode: "external-node".to_string(),
+    }];
+
+    validate_manifest(&manifest).expect("runtime service/worker contract should validate");
+}
+
+#[test]
+fn duplicate_service_id_is_rejected() {
+    let mut manifest = valid_manifest();
+    manifest.provides.services = vec![
+        ServiceDecl {
+            id: "problem-api".to_string(),
+            name: String::new(),
+            kind: "http".to_string(),
+            lifecycle: "managed".to_string(),
+            trusted_runtime: "compose".to_string(),
+            compose_service: "problem-api".to_string(),
+            health_check_id: String::new(),
+            routes: vec![],
+            required: true,
+            path: String::new(),
+            health: String::new(),
+            exposure: String::new(),
+        },
+        ServiceDecl {
+            id: "problem-api".to_string(),
+            name: String::new(),
+            kind: "http".to_string(),
+            lifecycle: "managed".to_string(),
+            trusted_runtime: "compose".to_string(),
+            compose_service: "problem-api-copy".to_string(),
+            health_check_id: String::new(),
+            routes: vec![],
+            required: false,
+            path: String::new(),
+            health: String::new(),
+            exposure: String::new(),
+        },
+    ];
+
+    assert!(validate_manifest(&manifest).is_err());
+}
+
+#[test]
+fn dangerous_runtime_fields_are_rejected() {
+    for field in ["image", "host_path", "privileged", "cap_add", "command"] {
+        let text = format!(
+            r#"
+schema_version: 1
+id: ojos.demo
+name: Demo
+version: 0.1.0
+set: demo
+kind: feature
+status: demo
+provides:
+  services:
+    - id: demo-api
+      lifecycle: managed
+      trusted_runtime: compose
+      compose_service: demo-api
+      {field}: dangerous
+"#
+        );
+        let parsed: Result<Manifest> = serde_yaml::from_str(&text).map_err(InstallerError::from);
+        if let Ok(manifest) = parsed {
+            assert!(
+                validate_manifest(&manifest).is_err(),
+                "dangerous field {field} should fail validation"
+            );
+        }
+    }
+}
+
+#[test]
 fn gateway_route_hotplug_auth_modes_are_valid() {
     for auth_mode in ["public", "user", "admin", "worker", "internal"] {
         let mut manifest = valid_manifest();

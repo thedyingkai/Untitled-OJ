@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"ojos-gateway/internal/config"
@@ -201,6 +202,53 @@ func TestRuntimeProxyRejectsUnknownServiceAndPrefersStaticRoute(t *testing.T) {
 	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/bad/ping", nil))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("unknown service route should not proxy, got %d", rr.Code)
+	}
+}
+
+func TestRuntimeProxyUnavailableRuntimeRouteReturnsStableError(t *testing.T) {
+	staticUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("static"))
+	}))
+	defer staticUpstream.Close()
+
+	rp, err := NewRuntimeProxy([]config.ProxyRouteConfig{{
+		Prefix:      "/api/problem",
+		Target:      staticUpstream.URL,
+		StripPrefix: "/api",
+		AuthMode:    "required",
+	}}, []config.ProxyTrustedServiceConfig{{
+		ServiceID:   "problem-api",
+		Target:      staticUpstream.URL,
+		StripPrefix: "/api",
+	}}, testSecret, nil, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp.SetRouteTable(moduleruntime.RouteTable{
+		Routes: []moduleruntime.RuntimeRoute{{
+			RouteID:      "ojos.judge-core:/api/problem",
+			Prefix:       "/api/problem",
+			ServiceID:    "problem-api",
+			AuthMode:     "user",
+			Enabled:      true,
+			ProxyEnabled: false,
+			Status:       "unavailable",
+			ServiceState: moduleruntime.ServiceStateStopped,
+			BlockedBy:    []string{"service not running"},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/problem", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken(t, []string{"user"}))
+	rr := httptest.NewRecorder()
+
+	rp.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "runtime service unavailable") {
+		t.Fatalf("expected stable runtime unavailable error, got %s", rr.Body.String())
 	}
 }
 

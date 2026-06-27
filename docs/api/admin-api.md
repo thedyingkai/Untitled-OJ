@@ -199,3 +199,37 @@ Module manifests may reference only `service_id`; they must not declare arbitrar
 Reserved prefixes cannot be claimed by module routes: `/api/auth`, `/api/admin/modules`, `/api/admin/health`, `/api/health`, `/api/internal`, `/api/judge/worker`.
 
 Auth modes are explicit: `public` requires no JWT; `user` requires a valid JWT; `admin` requires an admin role or `system.admin`; `worker` and `internal` are not public dynamic proxy surfaces.
+## Hotplug L2 Runtime Services APIs
+
+Runtime service APIs are admin-only. Ordinary users receive 403 and missing tokens receive 401.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/admin/runtime/services` | Lists runtime services and workers from enabled module declarations. |
+| `GET` | `/api/admin/runtime/services/:id` | Returns one service/worker state, health, lifecycle and route metadata. |
+| `POST` | `/api/admin/runtime/services/:id/plan-start` | Generates a start plan. |
+| `POST` | `/api/admin/runtime/services/:id/plan-stop` | Generates a stop plan. |
+| `POST` | `/api/admin/runtime/services/:id/plan-restart` | Generates a restart plan. |
+| `POST` | `/api/admin/runtime/services/:id/plan-reload` | Generates a reload plan. |
+| `POST` | `/api/admin/runtime/reload` | Rebuilds runtime route table and returns route status. |
+
+Service items include `service_id`, `module_id`, `kind`, `lifecycle`, `runtime`, `state`, `health`, `required`, `routes`, `health_check_id`, `blocked_by` and `warnings`. Admin responses do not expose Docker socket paths, host absolute paths, raw compose env, DSNs, tokens or internal secrets.
+
+Plans are structured and plan-only:
+
+```json
+{
+  "plan": {
+    "action": "restart",
+    "service_id": "problem-api",
+    "driver": "compose",
+    "can_apply": false,
+    "commands": [
+      { "tool": "compose", "args": ["restart", "problem-api"] }
+    ],
+    "blocked_by": []
+  }
+}
+```
+
+Gateway does not apply these plans in L2 foundation.

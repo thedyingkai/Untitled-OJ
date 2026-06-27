@@ -33,6 +33,7 @@ import type {
   ModuleRuntimeManifestItem,
   ModuleRuntimeRouteItem,
   ModuleRuntimeRoutesResponse,
+  ModuleRuntimeService,
   ModuleRuntimeSnapshotResponse,
   ModuleRuntimeTopologyEdge,
   ModuleRuntimeTopologyNode,
@@ -53,6 +54,8 @@ const visibleMenus = computed(() => filterByModule(snapshot.value?.menus ?? []))
 const visibleFrontendRoutes = computed(() => filterByModule(snapshot.value?.frontend_routes ?? []))
 const visibleGatewayRoutes = computed(() => filterByModule(snapshot.value?.gateway_routes ?? []))
 const visibleRuntimeRoutes = computed(() => filterByModule(routes.value?.routes ?? []))
+const visibleServices = computed(() => filterByModule(snapshot.value?.services ?? []))
+const visibleWorkers = computed(() => filterByModule(snapshot.value?.workers ?? []))
 const visibleHealthChecks = computed(() => filterByModule(snapshot.value?.health_checks ?? []))
 const visibleStorageBuckets = computed(() => filterByModule(snapshot.value?.storage_buckets ?? []))
 const visibleOperations = computed(() => filterByModule(snapshot.value?.operations ?? []))
@@ -103,6 +106,23 @@ const runtimeRouteColumns: DataTableColumns<ModuleRuntimeRouteItem> = [
     key: 'blocked_by',
     minWidth: 260,
     render: (row) => [...row.blocked_by, ...row.conflicts, ...row.warnings].join('; ') || 'none',
+  },
+]
+
+const runtimeServiceColumns: DataTableColumns<ModuleRuntimeService> = [
+  { title: 'Service', key: 'service_id', minWidth: 200 },
+  { title: 'Module', key: 'module_id', minWidth: 220 },
+  { title: 'Kind', key: 'kind', width: 120 },
+  { title: 'Runtime', key: 'runtime', width: 120 },
+  { title: 'Lifecycle', key: 'lifecycle', width: 130 },
+  { title: 'State', key: 'state', width: 130 },
+  { title: 'Health', key: 'health', width: 120 },
+  { title: 'Routes', key: 'routes', minWidth: 220, render: (row) => row.routes.join(', ') || 'none' },
+  {
+    title: 'Warnings',
+    key: 'warnings',
+    minWidth: 260,
+    render: (row) => [...row.blocked_by, ...row.warnings].join('; ') || 'none',
   },
 ]
 
@@ -219,6 +239,7 @@ onMounted(() => void load())
           <OjosStatCard label="Modules" :value="snapshot.modules.length" tone="primary" />
           <OjosStatCard label="Permissions" :value="visiblePermissions.length" />
           <OjosStatCard label="Menus" :value="visibleMenus.length" />
+          <OjosStatCard label="Services" :value="visibleServices.length + visibleWorkers.length" />
           <OjosStatCard label="Runtime Routes" :value="visibleRuntimeRoutes.length" />
           <OjosStatCard label="Warnings" :value="warningCount" tone="warning" />
         </div>
@@ -244,6 +265,14 @@ onMounted(() => void load())
             <NTabPane name="runtime-routes" tab="Route Table">
               <EmptyView v-if="visibleRuntimeRoutes.length === 0" description="No runtime routes" />
               <NDataTable v-else :columns="runtimeRouteColumns" :data="visibleRuntimeRoutes" :pagination="{ pageSize: 12 }" :bordered="false" />
+            </NTabPane>
+            <NTabPane name="services" tab="Services">
+              <EmptyView v-if="visibleServices.length === 0" description="No runtime services" />
+              <NDataTable v-else :columns="runtimeServiceColumns" :data="visibleServices" :pagination="{ pageSize: 12 }" :bordered="false" />
+            </NTabPane>
+            <NTabPane name="workers" tab="Workers">
+              <EmptyView v-if="visibleWorkers.length === 0" description="No runtime workers" />
+              <NDataTable v-else :columns="runtimeServiceColumns" :data="visibleWorkers" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="health" tab="Health">
               <EmptyView v-if="visibleHealthChecks.length === 0" description="No health checks" />

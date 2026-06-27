@@ -128,8 +128,8 @@ type ModuleRuntimeSnapshotResp struct {
 	FrontendRoutes []ModuleFrontendRouteItem   `json:"frontend_routes"`
 	GatewayRoutes  []ModuleGatewayRouteItem    `json:"gateway_routes"`
 	Components     []ModuleRuntimeComponent    `json:"components"`
-	Services       []ModuleRuntimeComponent    `json:"services"`
-	Workers        []ModuleRuntimeComponent    `json:"workers"`
+	Services       []ModuleRuntimeService      `json:"services"`
+	Workers        []ModuleRuntimeService      `json:"workers"`
 	StorageBuckets []ModuleRuntimeManifestItem `json:"storage_buckets"`
 	HealthChecks   []ModuleRuntimeComponent    `json:"health_checks"`
 	Operations     []ModuleRuntimeManifestItem `json:"operations"`
@@ -143,6 +143,24 @@ type ModuleRuntimeComponent struct {
 	Type        string `json:"type"`
 	Status      string `json:"status"`
 	Config      any    `json:"config"`
+}
+
+type ModuleRuntimeService struct {
+	ServiceId      string   `json:"service_id"`
+	ModuleId       string   `json:"module_id"`
+	Name           string   `json:"name"`
+	Kind           string   `json:"kind"`
+	Lifecycle      string   `json:"lifecycle"`
+	Runtime        string   `json:"runtime"`
+	ComposeService string   `json:"compose_service,omitempty"`
+	State          string   `json:"state"`
+	Health         string   `json:"health"`
+	Required       bool     `json:"required"`
+	Routes         []string `json:"routes"`
+	HealthCheckId  string   `json:"health_check_id,omitempty"`
+	Status         string   `json:"status"`
+	BlockedBy      []string `json:"blocked_by"`
+	Warnings       []string `json:"warnings"`
 }
 
 type ModuleRuntimeManifestItem struct {
@@ -198,6 +216,8 @@ type ModuleRuntimeRouteItem struct {
 	HealthCheckId string   `json:"health_check_id,omitempty"`
 	CreatedFrom   string   `json:"created_from"`
 	Status        string   `json:"status"`
+	ServiceState  string   `json:"service_state,omitempty"`
+	ServiceHealth string   `json:"service_health,omitempty"`
 	Conflicts     []string `json:"conflicts"`
 	Warnings      []string `json:"warnings"`
 	BlockedBy     []string `json:"blocked_by"`
@@ -210,6 +230,39 @@ type ModuleRuntimeRoutesResp struct {
 	Warnings    []string                 `json:"warnings"`
 	CanProxy    bool                     `json:"can_proxy"`
 	Reloaded    bool                     `json:"reloaded,omitempty"`
+}
+
+type RuntimeServicesResp struct {
+	Services []ModuleRuntimeService `json:"services"`
+	Workers  []ModuleRuntimeService `json:"workers"`
+}
+
+type RuntimeServiceResp struct {
+	Service ModuleRuntimeService `json:"service"`
+}
+
+type RuntimeServicePlanResp struct {
+	Plan RuntimePlanItem `json:"plan"`
+}
+
+type RuntimePlanItem struct {
+	PlanId       string               `json:"plan_id"`
+	Action       string               `json:"action"`
+	ServiceId    string               `json:"service_id"`
+	ModuleId     string               `json:"module_id"`
+	Driver       string               `json:"driver"`
+	CanApply     bool                 `json:"can_apply"`
+	ApplyEnabled bool                 `json:"apply_enabled"`
+	Commands     []RuntimePlanCommand `json:"commands"`
+	Affected     []string             `json:"affected"`
+	BlockedBy    []string             `json:"blocked_by"`
+	Warnings     []string             `json:"warnings"`
+	CreatedAt    string               `json:"created_at"`
+}
+
+type RuntimePlanCommand struct {
+	Tool string   `json:"tool"`
+	Args []string `json:"args"`
 }
 
 type ModuleDetailResp struct {

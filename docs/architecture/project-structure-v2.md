@@ -101,3 +101,15 @@ Adding a metadata-only module should require only manifest/package installation 
 Project Structure v2 now treats Gateway dynamic proxy and Web Shell contribution registry as Kernel Runtime consumers. Future ordinary modules should be able to add enabled permissions, menus, frontend metadata, topology, health metadata and trusted gateway routes through manifest/package/installer/runtime snapshot without editing Kernel code.
 
 This does not implement L2 service runtime driver, L3 dynamic frontend bundle loading or L4 full module automation.
+## Hotplug L2 Foundation Addendum
+
+Project Structure v2 now includes a service runtime foundation under the Kernel Runtime boundary. The compatibility implementation still lives in Gateway's `services/gateway/internal/kernel/moduleruntime`, but the interface is Kernel-shaped and avoids business-specific runtime control.
+
+Implemented boundaries:
+
+- Module manifests declare services/workers and trusted runtime metadata.
+- Kernel Runtime generates service state, health, topology and lifecycle plans.
+- Gateway and Web Shell consume runtime plans/status but do not control Docker or hosts.
+- `ojosctl runtime ...` provides local plan/status inspection.
+
+Future repo splitting should keep runtime driver contracts separate from Gateway edge code once Runtime APIs stabilize.

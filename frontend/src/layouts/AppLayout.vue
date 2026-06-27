@@ -49,6 +49,7 @@ const menuOptions = computed<MenuOption[]>(() => {
         menuLink('/admin/health', 'Health'),
         ...moduleMenuOptions(runtimeMenus.value.filter((item) => item.route_path.startsWith('/admin'))),
         menuLink('/admin/modules', 'Modules'),
+        menuLink('/admin/runtime/services', 'Runtime Services'),
         menuLink('/admin/modules/installer', 'Installer'),
         menuLink('/admin/modules/contributions', 'Contributions'),
         menuLink('/admin/modules/topology', 'Topology'),
@@ -66,6 +67,7 @@ const selectedKey = computed(() => {
   if (route.path.startsWith('/admin/modules/topology')) return '/admin/modules/topology'
   if (route.path.startsWith('/admin/modules/contributions')) return '/admin/modules/contributions'
   if (route.path.startsWith('/admin/modules/installer')) return '/admin/modules/installer'
+  if (route.path.startsWith('/admin/runtime/services')) return '/admin/runtime/services'
   if (route.path.startsWith('/admin/modules/')) return '/admin/modules'
   if (route.path.startsWith('/problems')) return '/problems'
   if (route.path.startsWith('/submissions')) return '/submissions'

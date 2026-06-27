@@ -91,3 +91,36 @@ gateway_routes:
 Gateway resolves `service_id` through its trusted service map. Runtime Route Table blocks unknown services, duplicate prefixes and reserved prefix claims. Reserved prefixes include `/api/auth`, `/api/admin/modules`, `/api/admin/health`, `/api/health`, `/api/internal` and `/api/judge/worker`.
 
 Web Shell contribution hotplug stays safe: known compiled routes render their existing components; unknown `component_key` values are shown through the Module Contributions registry page. Web Shell does not dynamically import remote JavaScript, does not execute module bundles and does not load untrusted frontend code.
+
+## Hotplug L2 Service / Worker Contract
+
+`schema_version: 1` supports structured service and worker declarations for L2 foundation.
+
+```yaml
+provides:
+  services:
+    - id: problem-api
+      name: Problem API
+      kind: http
+      lifecycle: managed
+      trusted_runtime: compose
+      compose_service: problem-api
+      health_check_id: problem-api-health
+      routes:
+        - /api/problem
+      required: true
+
+  workers:
+    - id: judge-worker
+      name: Judge Worker
+      kind: worker
+      lifecycle: managed
+      trusted_runtime: compose
+      compose_service: judge-worker
+      health_check_id: worker-cluster-health
+      required: false
+```
+
+Allowed lifecycle values are `managed`, `metadata`, `external` and `manual`. L2 foundation only generates compose plans for trusted allowlisted `managed` services. `metadata` services enter snapshot/topology but cannot start, stop or restart.
+
+Manifests may not specify executable runtime control fields such as `command`, `script`, `image`, `mount`, `host_path`, `privileged` or `cap_add`. A module may declare the trusted compose service identity, but it cannot declare arbitrary images, URLs, host mounts or shell commands.

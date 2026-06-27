@@ -56,6 +56,16 @@ Proxy:
       StripPrefix: /api
       AuthMode: required
 
+Runtime:
+  ComposeServices:
+    - auth
+    - gateway
+    - module-installer
+    - problem-api
+    - judge-api
+    - judge-worker
+  ApplyEnabled: false
+
 InternalAuth:
   Enabled: true
   RotationIntervalSeconds: 21600

@@ -115,3 +115,15 @@ Current backend contract:
 Gateway dynamic proxy now reads the Kernel Runtime route table for enabled module routes. Manifests declare `service_id`, while Gateway configuration owns trusted upstream URLs. Do not add future module routes as hardcoded Gateway routes unless they are core compatibility or reserved platform routes.
 
 Core static routes keep priority for `/api/auth` and `/api/judge/worker`. Dynamic proxy strips hop-by-hop headers, does not forward raw Authorization by default, forwards sanitized actor headers and signs internal requests. Reserved prefixes and unknown services are blocked by the route table.
+## Hotplug L2 Backend Guidance
+
+Runtime service lifecycle code belongs to Kernel Runtime boundaries. The current compatibility implementation lives in `services/gateway/internal/kernel/moduleruntime`, but it should remain independent from business modules.
+
+Rules for backend changes:
+
+- Use the `RuntimeDriver` interface for service list/state/plan operations.
+- Do not execute arbitrary shell strings.
+- Do not mount or access Docker socket from Gateway or module-installer.
+- Compose driver input must be an allowlisted service identity, never arbitrary manifest image, URL, mount or command.
+- Gateway admin APIs may generate plans and expose sanitized state. They must not apply dangerous host actions.
+- Dynamic proxy must check runtime route health/status and enforce auth before returning unavailable service errors.

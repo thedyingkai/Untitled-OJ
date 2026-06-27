@@ -34,7 +34,15 @@ provides:
       config:
         purpose: installer-acceptance
 
-  services: []
+  services:
+    - id: demo-metadata-service
+      name: Demo Metadata Service
+      kind: metadata
+      lifecycle: metadata
+      trusted_runtime: metadata
+      health_check_id: demo-health
+      routes: []
+      required: false
 
   workers: []
 

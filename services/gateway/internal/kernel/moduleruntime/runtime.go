@@ -30,8 +30,8 @@ type Snapshot struct {
 	FrontendRoutes []moduleregistry.FrontendRoute `json:"frontend_routes"`
 	GatewayRoutes  []moduleregistry.GatewayRoute  `json:"gateway_routes"`
 	Components     []RuntimeComponent             `json:"components"`
-	Services       []RuntimeComponent             `json:"services"`
-	Workers        []RuntimeComponent             `json:"workers"`
+	Services       []RuntimeService               `json:"services"`
+	Workers        []RuntimeService               `json:"workers"`
 	StorageBuckets []RuntimeManifestItem          `json:"storage_buckets"`
 	HealthChecks   []RuntimeComponent             `json:"health_checks"`
 	Operations     []RuntimeManifestItem          `json:"operations"`
@@ -112,6 +112,8 @@ type RuntimeRoute struct {
 	HealthCheckID string   `json:"health_check_id,omitempty"`
 	CreatedFrom   string   `json:"created_from"`
 	Status        string   `json:"status"`
+	ServiceState  string   `json:"service_state,omitempty"`
+	ServiceHealth string   `json:"service_health,omitempty"`
 	Conflicts     []string `json:"conflicts"`
 	Warnings      []string `json:"warnings"`
 	BlockedBy     []string `json:"blocked_by"`
@@ -119,6 +121,7 @@ type RuntimeRoute struct {
 
 type RouteTableOptions struct {
 	TrustedServices       map[string]TrustedService
+	ServiceStates         map[string]RuntimeService
 	ReservedPrefixes      []string
 	IncludeDisabledRoutes bool
 }
@@ -193,10 +196,6 @@ func BuildSnapshotWithOptions(ctx context.Context, reader RegistryReader, opts B
 		}
 		snapshot.Components = append(snapshot.Components, item)
 		switch component.ComponentType {
-		case "backend_service":
-			snapshot.Services = append(snapshot.Services, item)
-		case "worker_service":
-			snapshot.Workers = append(snapshot.Workers, item)
 		case "health_check":
 			snapshot.HealthChecks = append(snapshot.HealthChecks, item)
 		}
@@ -204,7 +203,8 @@ func BuildSnapshotWithOptions(ctx context.Context, reader RegistryReader, opts B
 	snapshot.Roles = manifestItemsFromModules(snapshot.Modules, "roles")
 	snapshot.StorageBuckets = storageBucketItems(snapshot.Modules, snapshot.Components)
 	snapshot.Operations = manifestItemsFromModules(snapshot.Modules, "operations")
-	snapshot.Topology.Nodes, snapshot.Topology.Edges = buildTopology(snapshot.Modules, moduleByID, snapshot.Components, snapshot.GatewayRoutes, snapshot.Menus, snapshot.FrontendRoutes, snapshot.HealthChecks, snapshot.Topology.DependencyEdges)
+	snapshot.Services, snapshot.Workers = collectRuntimeServiceDeclarations(snapshot)
+	snapshot.Topology.Nodes, snapshot.Topology.Edges = buildTopology(snapshot.Modules, moduleByID, snapshot.Components, snapshot.Services, snapshot.Workers, snapshot.GatewayRoutes, snapshot.Menus, snapshot.FrontendRoutes, snapshot.HealthChecks, snapshot.Topology.DependencyEdges)
 	snapshot.Warnings = append(snapshot.Warnings, topologyWarnings(snapshot.Topology)...)
 	sortSnapshot(&snapshot)
 	return snapshot, nil
@@ -228,6 +228,7 @@ func BuildRouteTableWithOptions(snapshot Snapshot, opts RouteTableOptions) Route
 		}
 		serviceID := strings.TrimSpace(route.TargetService)
 		trustedService, serviceTrusted := trusted[serviceID]
+		serviceState, hasServiceState := opts.ServiceStates[serviceID]
 		item := RuntimeRoute{
 			RouteID:       routeID(route.ModuleID, route.Prefix),
 			ModuleID:      route.ModuleID,
@@ -262,10 +263,31 @@ func BuildRouteTableWithOptions(snapshot Snapshot, opts RouteTableOptions) Route
 		if reservedPrefixMatches(item.Prefix, reserved) {
 			item.BlockedBy = append(item.BlockedBy, "reserved prefix")
 		}
+		structuralBlocked := len(item.BlockedBy) > 0
+		if hasServiceState {
+			item.ServiceState = serviceState.State
+			item.ServiceHealth = serviceState.Health
+			item.HealthCheckID = firstNonEmpty(item.HealthCheckID, serviceState.HealthCheckID)
+			switch serviceState.State {
+			case ServiceStateRunning:
+			case ServiceStateDegraded:
+				item.Status = "degraded"
+				item.BlockedBy = append(item.BlockedBy, "service degraded")
+				item.Warnings = append(item.Warnings, "service health is "+serviceState.Health)
+			case ServiceStateDeclared, ServiceStateInstalled, ServiceStateEnabled, ServiceStateStarting:
+				item.Status = "degraded"
+				item.BlockedBy = append(item.BlockedBy, "service not running")
+				item.Warnings = append(item.Warnings, "service state is "+serviceState.State)
+			default:
+				item.Status = "unavailable"
+				item.BlockedBy = append(item.BlockedBy, "service not running")
+				item.Warnings = append(item.Warnings, "service state is "+serviceState.State)
+			}
+		}
 		if !item.Enabled {
 			item.Status = "disabled"
 		}
-		if len(item.BlockedBy) > 0 {
+		if structuralBlocked {
 			item.Status = "blocked"
 		}
 		table.Routes = append(table.Routes, item)
@@ -410,6 +432,8 @@ type manifestEnvelope struct {
 
 type manifestProvides struct {
 	Roles          []manifestNamedItem   `json:"roles"`
+	Services       []manifestServiceItem `json:"services"`
+	Workers        []manifestServiceItem `json:"workers"`
 	StorageBuckets []manifestNamedItem   `json:"storage_buckets"`
 	Events         manifestEvents        `json:"events"`
 	ScheduledJobs  []manifestEnabledItem `json:"scheduled_jobs"`
@@ -427,6 +451,22 @@ type manifestEnabledItem struct {
 	ID          string `json:"id"`
 	Description string `json:"description"`
 	Enabled     bool   `json:"enabled"`
+}
+
+type manifestServiceItem struct {
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Kind           string   `json:"kind"`
+	Lifecycle      string   `json:"lifecycle"`
+	TrustedRuntime string   `json:"trusted_runtime"`
+	ComposeService string   `json:"compose_service"`
+	HealthCheckID  string   `json:"health_check_id"`
+	Routes         []string `json:"routes"`
+	Required       bool     `json:"required"`
+	Path           string   `json:"path"`
+	Health         string   `json:"health"`
+	Exposure       string   `json:"exposure"`
+	Mode           string   `json:"mode"`
 }
 
 type manifestAdminPanel struct {
@@ -525,10 +565,178 @@ func storageBucketItems(modules []moduleregistry.Module, components []RuntimeCom
 	return items
 }
 
+func collectRuntimeServiceDeclarations(snapshot Snapshot) ([]RuntimeService, []RuntimeService) {
+	services := make([]RuntimeService, 0)
+	workers := make([]RuntimeService, 0)
+	seenServices := map[string]bool{}
+	seenWorkers := map[string]bool{}
+	routeMap := routesByService(snapshot.GatewayRoutes)
+
+	addService := func(item RuntimeService, isWorker bool) {
+		if item.ServiceID == "" {
+			return
+		}
+		item.Routes = appendMissingStrings(item.Routes, routeMap[item.ServiceID]...)
+		if isWorker {
+			if seenWorkers[item.ServiceID] {
+				return
+			}
+			seenWorkers[item.ServiceID] = true
+			workers = append(workers, item)
+			return
+		}
+		if seenServices[item.ServiceID] {
+			return
+		}
+		seenServices[item.ServiceID] = true
+		services = append(services, item)
+	}
+
+	for _, module := range snapshot.Modules {
+		manifest, ok := decodeManifest(module.Manifest)
+		if !ok {
+			continue
+		}
+		for _, item := range manifest.Provides.Services {
+			addService(runtimeServiceFromManifest(module.ModuleID, item, false), false)
+		}
+		for _, item := range manifest.Provides.Workers {
+			addService(runtimeServiceFromManifest(module.ModuleID, item, true), true)
+		}
+	}
+	for _, component := range snapshot.Components {
+		switch component.Type {
+		case "backend_service":
+			addService(runtimeServiceFromComponent(component, routeMap[component.ComponentID], false), false)
+		case "worker_service":
+			addService(runtimeServiceFromComponent(component, nil, true), true)
+		}
+	}
+	sortRuntimeServices(services)
+	sortRuntimeServices(workers)
+	return services, workers
+}
+
+func RebuildRuntimeTopology(snapshot Snapshot) ([]RuntimeTopologyNode, []RuntimeTopologyEdge) {
+	return buildTopology(
+		snapshot.Modules,
+		mapModules(snapshot.Modules),
+		snapshot.Components,
+		snapshot.Services,
+		snapshot.Workers,
+		snapshot.GatewayRoutes,
+		snapshot.Menus,
+		snapshot.FrontendRoutes,
+		snapshot.HealthChecks,
+		snapshot.Topology.DependencyEdges,
+	)
+}
+
+func runtimeServiceFromManifest(moduleID string, item manifestServiceItem, isWorker bool) RuntimeService {
+	kind := strings.TrimSpace(item.Kind)
+	if kind == "" {
+		if isWorker {
+			kind = "worker"
+		} else {
+			kind = "http"
+		}
+	}
+	lifecycle := strings.ToLower(strings.TrimSpace(item.Lifecycle))
+	if lifecycle == "" {
+		lifecycle = LifecycleManaged
+	}
+	runtime := strings.ToLower(strings.TrimSpace(item.TrustedRuntime))
+	if runtime == "" {
+		if lifecycle == LifecycleMetadata {
+			runtime = "metadata"
+		} else {
+			runtime = "compose"
+		}
+	}
+	serviceID := strings.TrimSpace(item.ID)
+	return RuntimeService{
+		ServiceID:      serviceID,
+		ModuleID:       moduleID,
+		Name:           firstNonEmpty(item.Name, serviceID),
+		Kind:           kind,
+		Lifecycle:      lifecycle,
+		Runtime:        runtime,
+		ComposeService: strings.TrimSpace(item.ComposeService),
+		State:          ServiceStateDeclared,
+		Health:         "unknown",
+		Required:       item.Required,
+		Routes:         cleanStringList(item.Routes),
+		HealthCheckID:  strings.TrimSpace(item.HealthCheckID),
+		Status:         ServiceStateDeclared,
+	}
+}
+
+func runtimeServiceFromComponent(component RuntimeComponent, routes []string, isWorker bool) RuntimeService {
+	var cfg struct {
+		Service        string   `json:"service"`
+		Health         string   `json:"health"`
+		Exposure       string   `json:"exposure"`
+		Mode           string   `json:"mode"`
+		Lifecycle      string   `json:"lifecycle"`
+		TrustedRuntime string   `json:"trusted_runtime"`
+		ComposeService string   `json:"compose_service"`
+		HealthCheckID  string   `json:"health_check_id"`
+		Routes         []string `json:"routes"`
+		Required       bool     `json:"required"`
+	}
+	_ = json.Unmarshal(component.Config, &cfg)
+	serviceID := firstNonEmpty(cfg.Service, component.ComponentID)
+	kind := "http"
+	if isWorker {
+		kind = "worker"
+	}
+	lifecycle := strings.ToLower(strings.TrimSpace(cfg.Lifecycle))
+	if lifecycle == "" {
+		lifecycle = LifecycleManaged
+	}
+	runtime := strings.ToLower(strings.TrimSpace(cfg.TrustedRuntime))
+	if runtime == "" {
+		if lifecycle == LifecycleMetadata {
+			runtime = "metadata"
+		} else {
+			runtime = "compose"
+		}
+	}
+	return RuntimeService{
+		ServiceID:      serviceID,
+		ModuleID:       component.ModuleID,
+		Name:           serviceID,
+		Kind:           kind,
+		Lifecycle:      lifecycle,
+		Runtime:        runtime,
+		ComposeService: firstNonEmpty(cfg.ComposeService, serviceID),
+		State:          ServiceStateDeclared,
+		Health:         "unknown",
+		Required:       cfg.Required,
+		Routes:         appendMissingStrings(cleanStringList(cfg.Routes), routes...),
+		HealthCheckID:  strings.TrimSpace(cfg.HealthCheckID),
+		Status:         component.Status,
+	}
+}
+
+func routesByService(routes []moduleregistry.GatewayRoute) map[string][]string {
+	out := map[string][]string{}
+	for _, route := range routes {
+		serviceID := strings.TrimSpace(route.TargetService)
+		if serviceID == "" {
+			continue
+		}
+		out[serviceID] = appendMissingStrings(out[serviceID], cleanPrefix(route.Prefix))
+	}
+	return out
+}
+
 func buildTopology(
 	modules []moduleregistry.Module,
 	moduleByID map[string]moduleregistry.Module,
 	components []RuntimeComponent,
+	services []RuntimeService,
+	workers []RuntimeService,
 	gatewayRoutes []moduleregistry.GatewayRoute,
 	menus []moduleregistry.Menu,
 	frontendRoutes []moduleregistry.FrontendRoute,
@@ -587,6 +795,70 @@ func buildTopology(
 			Required: false,
 			Source:   "registry",
 		})
+	}
+	for _, service := range services {
+		id := topologyID(service.ModuleID, "service", service.ServiceID)
+		addNode(RuntimeTopologyNode{
+			ID:       id,
+			ModuleID: service.ModuleID,
+			Label:    firstNonEmpty(service.Name, service.ServiceID),
+			Type:     "service",
+			Status:   service.State,
+			Source:   "runtime",
+			Config:   mustRaw(map[string]any{"service_id": service.ServiceID, "runtime": service.Runtime, "lifecycle": service.Lifecycle, "health": service.Health, "routes": service.Routes}),
+		})
+		edges = append(edges, RuntimeTopologyEdge{
+			ID:       service.ModuleID + "->" + id + ":runtime-service",
+			ModuleID: service.ModuleID,
+			From:     service.ModuleID,
+			To:       id,
+			Type:     "runtime_service",
+			Required: service.Required,
+			Source:   "runtime",
+		})
+		if service.HealthCheckID != "" {
+			edges = append(edges, RuntimeTopologyEdge{
+				ID:       id + "->" + topologyID(service.ModuleID, "health", service.HealthCheckID),
+				ModuleID: service.ModuleID,
+				From:     id,
+				To:       topologyID(service.ModuleID, "health", service.HealthCheckID),
+				Type:     "health",
+				Required: service.Required,
+				Source:   "runtime",
+			})
+		}
+	}
+	for _, worker := range workers {
+		id := topologyID(worker.ModuleID, "worker", worker.ServiceID)
+		addNode(RuntimeTopologyNode{
+			ID:       id,
+			ModuleID: worker.ModuleID,
+			Label:    firstNonEmpty(worker.Name, worker.ServiceID),
+			Type:     "worker",
+			Status:   worker.State,
+			Source:   "runtime",
+			Config:   mustRaw(map[string]any{"service_id": worker.ServiceID, "runtime": worker.Runtime, "lifecycle": worker.Lifecycle, "health": worker.Health}),
+		})
+		edges = append(edges, RuntimeTopologyEdge{
+			ID:       worker.ModuleID + "->" + id + ":runtime-worker",
+			ModuleID: worker.ModuleID,
+			From:     worker.ModuleID,
+			To:       id,
+			Type:     "runtime_worker",
+			Required: worker.Required,
+			Source:   "runtime",
+		})
+		if worker.HealthCheckID != "" {
+			edges = append(edges, RuntimeTopologyEdge{
+				ID:       id + "->" + topologyID(worker.ModuleID, "health", worker.HealthCheckID),
+				ModuleID: worker.ModuleID,
+				From:     id,
+				To:       topologyID(worker.ModuleID, "health", worker.HealthCheckID),
+				Type:     "health",
+				Required: worker.Required,
+				Source:   "runtime",
+			})
+		}
 	}
 	for _, route := range gatewayRoutes {
 		id := topologyID(route.ModuleID, "gateway_route", route.Prefix)
@@ -763,6 +1035,36 @@ func boolStatus(enabled bool) string {
 	return "DISABLED"
 }
 
+func cleanStringList(items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		out = appendMissingStrings(out, value)
+	}
+	return out
+}
+
+func appendMissingStrings(items []string, values ...string) []string {
+	seen := map[string]bool{}
+	for _, item := range items {
+		if item != "" {
+			seen[item] = true
+		}
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		items = append(items, value)
+	}
+	return items
+}
+
 func topologyID(moduleID string, kind string, value string) string {
 	cleaned := strings.NewReplacer("/", "_", ":", "_", " ", "_").Replace(strings.TrimSpace(value))
 	return moduleID + ":" + kind + ":" + cleaned
@@ -913,8 +1215,8 @@ func sortSnapshot(snapshot *Snapshot) {
 		}
 		return snapshot.Components[i].ModuleID < snapshot.Components[j].ModuleID
 	})
-	sort.Slice(snapshot.Services, func(i, j int) bool { return snapshot.Services[i].ComponentID < snapshot.Services[j].ComponentID })
-	sort.Slice(snapshot.Workers, func(i, j int) bool { return snapshot.Workers[i].ComponentID < snapshot.Workers[j].ComponentID })
+	sortRuntimeServices(snapshot.Services)
+	sortRuntimeServices(snapshot.Workers)
 	sort.Slice(snapshot.HealthChecks, func(i, j int) bool {
 		return snapshot.HealthChecks[i].ComponentID < snapshot.HealthChecks[j].ComponentID
 	})

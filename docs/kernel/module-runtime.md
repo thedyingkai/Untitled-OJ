@@ -100,3 +100,37 @@ Current hotplug conclusion:
 - L2 Service hotplug: runtime driver contract remains future work.
 - L3 Frontend contribution hotplug: metadata display only. OJOS still does not execute untrusted JS or dynamic frontend bundles.
 - L4 Full module hotplug: future work.
+
+## Hotplug L2 Foundation
+
+Hotplug L2 is a foundation, not full automatic service hotplug. Kernel Runtime now models service and worker lifecycle metadata, service state, service health, runtime plans and topology nodes from module manifests and registry data.
+
+Implemented L2 foundation behavior:
+
+- `provides.services` and `provides.workers` enter Runtime Snapshot as structured runtime services.
+- The Gateway Kernel Runtime has a `RuntimeDriver` interface with list, state, plan-start, plan-stop, plan-restart, plan-reload, plan-health and apply-plan methods.
+- The current compose driver reads trusted Gateway service configuration plus an allowlist. It checks HTTP health for trusted HTTP services and marks non-HTTP workers as `UNKNOWN` when no safe probe exists.
+- Runtime plans are structured data. Commands are arrays such as `compose restart problem-api`; no shell strings are generated.
+- `ApplyPlan` is disabled in Gateway for L2 foundation.
+- Route table entries include `service_state` and `service_health`; unavailable services are not proxied and return a stable 503 after auth checks.
+- Topology includes service and worker runtime nodes plus route and health edges.
+
+State model:
+
+```text
+DECLARED INSTALLED ENABLED STARTING RUNNING DEGRADED STOPPING STOPPED FAILED DISABLED UNKNOWN
+```
+
+Security boundary:
+
+- Gateway, Web Shell and module-installer do not mount or call the Docker socket.
+- Manifests must not declare `image`, `command`, `script`, `host_path`, `mount`, `privileged` or `cap_add` as executable runtime instructions.
+- Compose service names must come from trusted config / allowlist, not arbitrary manifest input.
+- Admin UI generates plans only; it does not apply start/stop/restart.
+
+Current hotplug conclusion:
+
+- L0 metadata hotplug: implemented.
+- L1 gateway route/menu contribution hotplug: implemented for trusted enabled routes and safe Web Shell metadata.
+- L2 foundation: implemented for service/worker declaration, health/state view, plan generation and route-health linkage.
+- L2 service runtime apply, L3 dynamic frontend bundles and L4 full module automation are not implemented.

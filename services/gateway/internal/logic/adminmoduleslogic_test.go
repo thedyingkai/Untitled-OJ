@@ -3,6 +3,7 @@ package logic
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -16,6 +17,69 @@ import (
 
 type fakeModuleRegistry struct {
 	data moduleregistry.BootstrapData
+}
+
+type fakeRuntimeDriver struct {
+	services []moduleruntime.RuntimeService
+}
+
+func (f fakeRuntimeDriver) ListServices(context.Context, moduleruntime.Snapshot) ([]moduleruntime.RuntimeService, error) {
+	return f.services, nil
+}
+
+func (f fakeRuntimeDriver) GetServiceState(_ context.Context, _ moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimeService, error) {
+	for _, service := range f.services {
+		if service.ServiceID == serviceID {
+			return service, nil
+		}
+	}
+	return moduleruntime.RuntimeService{}, errors.New("not found: runtime service")
+}
+
+func (f fakeRuntimeDriver) PlanStart(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimePlan, error) {
+	return f.plan(ctx, snapshot, serviceID, "start")
+}
+
+func (f fakeRuntimeDriver) PlanStop(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimePlan, error) {
+	return f.plan(ctx, snapshot, serviceID, "stop")
+}
+
+func (f fakeRuntimeDriver) PlanRestart(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimePlan, error) {
+	return f.plan(ctx, snapshot, serviceID, "restart")
+}
+
+func (f fakeRuntimeDriver) PlanReload(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimePlan, error) {
+	return f.plan(ctx, snapshot, serviceID, "reload")
+}
+
+func (f fakeRuntimeDriver) PlanHealth(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimePlan, error) {
+	return f.plan(ctx, snapshot, serviceID, "health")
+}
+
+func (f fakeRuntimeDriver) ApplyPlan(context.Context, moduleruntime.RuntimePlan) (moduleruntime.RuntimePlanResult, error) {
+	return moduleruntime.RuntimePlanResult{}, errors.New("not implemented")
+}
+
+func (f fakeRuntimeDriver) plan(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string, action string) (moduleruntime.RuntimePlan, error) {
+	service, _ := f.GetServiceState(ctx, snapshot, serviceID)
+	plan := moduleruntime.RuntimePlan{
+		PlanID:       fmt.Sprintf("test-%s-%s", action, serviceID),
+		Action:       action,
+		ServiceID:    serviceID,
+		ModuleID:     service.ModuleID,
+		Driver:       "compose",
+		CanApply:     false,
+		ApplyEnabled: false,
+		Affected:     []string{serviceID},
+		Warnings:     []string{"plan only"},
+		CreatedAt:    "2026-01-01T00:00:00Z",
+	}
+	if service.Lifecycle == moduleruntime.LifecycleMetadata {
+		plan.BlockedBy = append(plan.BlockedBy, "metadata lifecycle cannot "+action)
+		return plan, nil
+	}
+	plan.Commands = []moduleruntime.RuntimePlanCommand{{Tool: "compose", Args: []string{action, service.ComposeService}}}
+	return plan, nil
 }
 
 func (f fakeModuleRegistry) ListModules(context.Context) ([]moduleregistry.Module, error) {
@@ -356,6 +420,109 @@ func TestRuntimeRoutesReturnsRegistryRouteTable(t *testing.T) {
 	}
 }
 
+func TestRuntimeServicesAdminAPIUsesRuntimeDriver(t *testing.T) {
+	ctx := context.Background()
+	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logic := &AdminRuntimeLogic{
+		ctx: ctx,
+		svcCtx: &svc.ServiceContext{
+			Config: config.Config{Jwt: config.JwtConfig{Secret: "test-secret"}},
+			RuntimeDriver: fakeRuntimeDriver{services: []moduleruntime.RuntimeService{
+				{
+					ServiceID:      "problem-api",
+					ModuleID:       "ojos.judge-core",
+					Kind:           "http",
+					Lifecycle:      moduleruntime.LifecycleManaged,
+					Runtime:        "compose",
+					ComposeService: "problem-api",
+					State:          moduleruntime.ServiceStateRunning,
+					Health:         "ok",
+					Routes:         []string{"/api/problem"},
+					Required:       true,
+				},
+				{
+					ServiceID: "demo-metadata-service",
+					ModuleID:  "ojos.demo-module",
+					Kind:      "metadata",
+					Lifecycle: moduleruntime.LifecycleMetadata,
+					Runtime:   "metadata",
+					State:     moduleruntime.ServiceStateDeclared,
+					Health:    "metadata",
+				},
+				{
+					ServiceID: "judge-worker",
+					ModuleID:  "ojos.judge-core",
+					Kind:      "worker",
+					Lifecycle: moduleruntime.LifecycleManaged,
+					Runtime:   "compose",
+					State:     moduleruntime.ServiceStateUnknown,
+					Health:    "unknown",
+				},
+			}},
+		},
+		repo: fakeModuleRegistry{data: moduleregistry.BuiltinData()},
+	}
+
+	resp, err := logic.ListServices("Bearer " + token)
+	if err != nil {
+		t.Fatalf("runtime services failed: %v", err)
+	}
+	if len(resp.Services) != 2 || len(resp.Workers) != 1 {
+		t.Fatalf("unexpected runtime service grouping: %#v", resp)
+	}
+	detail, err := logic.ServiceDetail("Bearer "+token, "problem-api")
+	if err != nil {
+		t.Fatalf("runtime service detail failed: %v", err)
+	}
+	if detail.Service.ServiceId != "problem-api" || detail.Service.State != moduleruntime.ServiceStateRunning {
+		t.Fatalf("unexpected service detail: %#v", detail)
+	}
+	plan, err := logic.PlanRestart("Bearer "+token, "problem-api")
+	if err != nil {
+		t.Fatalf("plan restart failed: %v", err)
+	}
+	if plan.Plan.CanApply || len(plan.Plan.Commands) != 1 || plan.Plan.Commands[0].Tool != "compose" {
+		t.Fatalf("plan should be compose plan-only: %#v", plan)
+	}
+	metadataPlan, err := logic.PlanStart("Bearer "+token, "demo-metadata-service")
+	if err != nil {
+		t.Fatalf("metadata plan start failed: %v", err)
+	}
+	if !containsString(metadataPlan.Plan.BlockedBy, "metadata lifecycle cannot start") {
+		t.Fatalf("metadata service should block start: %#v", metadataPlan)
+	}
+}
+
+func TestRuntimeServicesRejectOrdinaryUser(t *testing.T) {
+	oldChecker := hasSystemAdminPermission
+	hasSystemAdminPermission = func(context.Context, *svc.ServiceContext, int64) (bool, error) {
+		return false, nil
+	}
+	defer func() {
+		hasSystemAdminPermission = oldChecker
+	}()
+
+	token, err := sharedjwt.Generate("test-secret", 1001, "alice", []string{"user"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logic := &AdminRuntimeLogic{
+		ctx: context.Background(),
+		svcCtx: &svc.ServiceContext{
+			Config: config.Config{Jwt: config.JwtConfig{Secret: "test-secret"}},
+		},
+		repo: fakeModuleRegistry{data: moduleregistry.BuiltinData()},
+	}
+
+	_, err = logic.ListServices("Bearer " + token)
+	if err == nil || !strings.Contains(err.Error(), "forbidden") {
+		t.Fatalf("expected forbidden error, got %v", err)
+	}
+}
+
 func TestIsAdminRole(t *testing.T) {
 	if !isAdminRole([]string{"user", "admin"}) {
 		t.Fatalf("admin role should be accepted")
@@ -407,6 +574,15 @@ func hasRuntimeRoute(items []types.ModuleRuntimeRouteItem, prefix string) bool {
 func hasRuntimeRouteUpstream(items []types.ModuleRuntimeRouteItem, prefix string) bool {
 	for _, item := range items {
 		if item.Prefix == prefix && item.UpstreamBase != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
 			return true
 		}
 	}

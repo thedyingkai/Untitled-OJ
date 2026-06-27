@@ -104,3 +104,10 @@ Status: implemented in this working tree, pending final verification.
 Gateway dynamic proxy now uses the Kernel Runtime route table for enabled module routes. Gateway uses trusted `service_id` configuration rather than manifest-provided URLs, protects reserved prefixes, hides upstream addresses by default, strips raw Authorization on dynamic proxy routes, and supports route table reload. Web Shell contribution registry routes unknown component keys to safe registry metadata views instead of executing dynamic JavaScript.
 
 Still out of scope: service runtime driver, Docker socket control, remote module marketplace, hook execution, dynamic untrusted frontend bundles, L2/L3/L4 hotplug and Judge Core GA.
+## 2026-06-27 Hotplug L2 Foundation Status
+
+Status: implemented in this working tree, pending final runtime verification.
+
+Runtime service/worker declarations now enter Runtime Snapshot, route table health linkage and topology. Gateway admin APIs expose runtime services and plan-only start/stop/restart/reload operations. Web Shell has a Runtime Services admin page. `ojosctl runtime` provides local service listing and plan generation.
+
+Still out of scope: applying plans from Gateway/Web, Docker socket control, arbitrary image deployment, hooks, remote module marketplace, dynamic untrusted frontend bundles, L3/L4 hotplug and Judge Core GA.

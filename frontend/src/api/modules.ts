@@ -13,6 +13,9 @@ import type {
   ModuleRuntimeSnapshotResponse,
   ModuleTopologyResponse,
   ModuleValidateData,
+  RuntimeServicePlanResponse,
+  RuntimeServiceResponse,
+  RuntimeServicesResponse,
 } from '../types/module'
 
 export function listModules(): Promise<ListModulesResponse> {
@@ -46,6 +49,34 @@ export function reloadModuleRuntime(options?: {
 }): Promise<ModuleRuntimeRoutesResponse> {
   const query = options?.includeDisabled ? '?include_disabled=true' : ''
   return apiClient.post(`/admin/modules/runtime/reload${query}`, {})
+}
+
+export function getRuntimeServices(): Promise<RuntimeServicesResponse> {
+  return apiClient.get('/admin/runtime/services')
+}
+
+export function getRuntimeService(serviceId: string): Promise<RuntimeServiceResponse> {
+  return apiClient.get(`/admin/runtime/services/${encodeURIComponent(serviceId)}`)
+}
+
+export function planRuntimeServiceStart(serviceId: string): Promise<RuntimeServicePlanResponse> {
+  return apiClient.post(`/admin/runtime/services/${encodeURIComponent(serviceId)}/plan-start`, {})
+}
+
+export function planRuntimeServiceStop(serviceId: string): Promise<RuntimeServicePlanResponse> {
+  return apiClient.post(`/admin/runtime/services/${encodeURIComponent(serviceId)}/plan-stop`, {})
+}
+
+export function planRuntimeServiceRestart(serviceId: string): Promise<RuntimeServicePlanResponse> {
+  return apiClient.post(`/admin/runtime/services/${encodeURIComponent(serviceId)}/plan-restart`, {})
+}
+
+export function planRuntimeServiceReload(serviceId: string): Promise<RuntimeServicePlanResponse> {
+  return apiClient.post(`/admin/runtime/services/${encodeURIComponent(serviceId)}/plan-reload`, {})
+}
+
+export function reloadRuntimeServices(): Promise<ModuleRuntimeRoutesResponse> {
+  return apiClient.post('/admin/runtime/reload', {})
 }
 
 export function getModuleDetail(moduleId: string): Promise<ModuleDetailResponse> {

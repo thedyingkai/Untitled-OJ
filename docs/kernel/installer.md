@@ -36,3 +36,14 @@ Kernel Installer writes module registry data, and Kernel Module Runtime reads re
 ## Hotplug L1 Route Contract
 
 Installer Core accepts `gateway_routes.service_id` as the forward contract and keeps `target_service` as a compatibility alias. It rejects direct `target_url` through deny-unknown-fields and dangerous field checks. The installer never resolves upstream URLs; Gateway owns trusted service resolution.
+## Hotplug L2 Runtime Commands
+
+`ojosctl` now includes local runtime inspection commands:
+
+```powershell
+cargo run -p ojosctl -- runtime services
+cargo run -p ojosctl -- runtime service problem-api
+cargo run -p ojosctl -- runtime plan-restart problem-api
+```
+
+These commands read local module manifests and generate JSON output. They are plan-only in L2 foundation. `runtime apply-plan` intentionally returns non-zero / not implemented until a controlled operator path exists.

@@ -110,6 +110,24 @@ export interface ModuleRuntimeComponent {
   config: unknown
 }
 
+export interface ModuleRuntimeService {
+  service_id: string
+  module_id: string
+  name: string
+  kind: string
+  lifecycle: string
+  runtime: string
+  compose_service?: string
+  state: string
+  health: string
+  required: boolean
+  routes: string[]
+  health_check_id?: string
+  status: string
+  blocked_by: string[]
+  warnings: string[]
+}
+
 export interface ModuleRuntimeTopology {
   nodes: ModuleRuntimeTopologyNode[]
   edges: ModuleRuntimeTopologyEdge[]
@@ -156,8 +174,8 @@ export interface ModuleRuntimeSnapshotResponse {
   frontend_routes: ModuleFrontendRouteItem[]
   gateway_routes: ModuleGatewayRouteItem[]
   components: ModuleRuntimeComponent[]
-  services: ModuleRuntimeComponent[]
-  workers: ModuleRuntimeComponent[]
+  services: ModuleRuntimeService[]
+  workers: ModuleRuntimeService[]
   storage_buckets: ModuleRuntimeManifestItem[]
   health_checks: ModuleRuntimeComponent[]
   operations: ModuleRuntimeManifestItem[]
@@ -182,6 +200,8 @@ export interface ModuleRuntimeRouteItem {
   health_check_id?: string
   created_from: string
   status: string
+  service_state?: string
+  service_health?: string
   conflicts: string[]
   warnings: string[]
   blocked_by: string[]
@@ -194,6 +214,39 @@ export interface ModuleRuntimeRoutesResponse {
   warnings: string[]
   can_proxy: boolean
   reloaded?: boolean
+}
+
+export interface RuntimeServicesResponse {
+  services: ModuleRuntimeService[]
+  workers: ModuleRuntimeService[]
+}
+
+export interface RuntimeServiceResponse {
+  service: ModuleRuntimeService
+}
+
+export interface RuntimePlanCommand {
+  tool: string
+  args: string[]
+}
+
+export interface RuntimePlanItem {
+  plan_id: string
+  action: string
+  service_id: string
+  module_id: string
+  driver: string
+  can_apply: boolean
+  apply_enabled: boolean
+  commands: RuntimePlanCommand[]
+  affected: string[]
+  blocked_by: string[]
+  warnings: string[]
+  created_at: string
+}
+
+export interface RuntimeServicePlanResponse {
+  plan: RuntimePlanItem
 }
 
 export interface ModuleDetailResponse {

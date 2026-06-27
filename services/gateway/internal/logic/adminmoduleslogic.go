@@ -71,6 +71,7 @@ func (l *AdminModulesLogic) Topology(authHeader string) (*types.ModuleTopologyRe
 	if err != nil {
 		return nil, err
 	}
+	l.enrichRuntimeSnapshot(&snapshot)
 	components := runtimeAsComponentItems(snapshot.Components)
 	return &types.ModuleTopologyResp{
 		Sets:            setItems(sets),
@@ -92,6 +93,7 @@ func (l *AdminModulesLogic) RuntimeSnapshot(authHeader string, includeDisabled b
 	if err != nil {
 		return nil, err
 	}
+	l.enrichRuntimeSnapshot(&snapshot)
 	return runtimeSnapshotResp(snapshot), nil
 }
 
@@ -100,7 +102,10 @@ func (l *AdminModulesLogic) RuntimeRouteTable(ctx context.Context) (moduleruntim
 	if err != nil {
 		return moduleruntime.RouteTable{}, err
 	}
-	return moduleruntime.BuildRouteTableWithOptions(snapshot, l.svcCtx.RouteTableOptions), nil
+	l.enrichRuntimeSnapshot(&snapshot)
+	options := l.svcCtx.RouteTableOptions
+	options.ServiceStates = moduleruntime.RuntimeServiceStates(snapshot.Services)
+	return moduleruntime.BuildRouteTableWithOptions(snapshot, options), nil
 }
 
 func (l *AdminModulesLogic) RuntimeRoutes(authHeader string, includeDisabled bool, reloaded bool, includeUpstream bool) (*types.ModuleRuntimeRoutesResp, error) {
@@ -120,12 +125,41 @@ func (l *AdminModulesLogic) RuntimeRoutes(authHeader string, includeDisabled boo
 	if err != nil {
 		return nil, err
 	}
+	l.enrichRuntimeSnapshot(&snapshot)
 	tableOptions := l.svcCtx.RouteTableOptions
 	tableOptions.IncludeDisabledRoutes = includeDisabled
+	tableOptions.ServiceStates = moduleruntime.RuntimeServiceStates(snapshot.Services)
 	table := moduleruntime.BuildRouteTableWithOptions(snapshot, tableOptions)
 	resp := runtimeRoutesResp(table, includeUpstream)
 	resp.Reloaded = reloaded
 	return resp, nil
+}
+
+func (l *AdminModulesLogic) enrichRuntimeSnapshot(snapshot *moduleruntime.Snapshot) {
+	if l == nil || l.svcCtx == nil || snapshot == nil {
+		return
+	}
+	driver := l.svcCtx.RuntimeDriver
+	if driver == nil {
+		return
+	}
+	services, err := driver.ListServices(l.ctx, *snapshot)
+	if err != nil {
+		snapshot.Warnings = append(snapshot.Warnings, "runtime services unavailable")
+		return
+	}
+	workers := make([]moduleruntime.RuntimeService, 0, len(services))
+	realServices := make([]moduleruntime.RuntimeService, 0, len(services))
+	for _, service := range services {
+		if service.Kind == "worker" {
+			workers = append(workers, service)
+		} else {
+			realServices = append(realServices, service)
+		}
+	}
+	snapshot.Services = realServices
+	snapshot.Workers = workers
+	snapshot.Topology.Nodes, snapshot.Topology.Edges = moduleruntime.RebuildRuntimeTopology(*snapshot)
 }
 
 func (l *AdminModulesLogic) Detail(authHeader string, moduleID string) (*types.ModuleDetailResp, error) {
@@ -229,6 +263,34 @@ func runtimeComponentItems(items []moduleruntime.RuntimeComponent) []types.Modul
 	return result
 }
 
+func runtimeServiceItems(items []moduleruntime.RuntimeService) []types.ModuleRuntimeService {
+	result := make([]types.ModuleRuntimeService, 0, len(items))
+	for _, item := range items {
+		result = append(result, runtimeServiceItem(item))
+	}
+	return result
+}
+
+func runtimeServiceItem(item moduleruntime.RuntimeService) types.ModuleRuntimeService {
+	return types.ModuleRuntimeService{
+		ServiceId:      item.ServiceID,
+		ModuleId:       item.ModuleID,
+		Name:           item.Name,
+		Kind:           item.Kind,
+		Lifecycle:      item.Lifecycle,
+		Runtime:        item.Runtime,
+		ComposeService: item.ComposeService,
+		State:          item.State,
+		Health:         item.Health,
+		Required:       item.Required,
+		Routes:         item.Routes,
+		HealthCheckId:  item.HealthCheckID,
+		Status:         item.Status,
+		BlockedBy:      item.BlockedBy,
+		Warnings:       item.Warnings,
+	}
+}
+
 func runtimeManifestItems(items []moduleruntime.RuntimeManifestItem) []types.ModuleRuntimeManifestItem {
 	result := make([]types.ModuleRuntimeManifestItem, 0, len(items))
 	for _, item := range items {
@@ -301,8 +363,8 @@ func runtimeSnapshotResp(snapshot moduleruntime.Snapshot) *types.ModuleRuntimeSn
 		FrontendRoutes: frontendRouteItems(snapshot.FrontendRoutes),
 		GatewayRoutes:  gatewayRouteItems(snapshot.GatewayRoutes),
 		Components:     runtimeComponentItems(snapshot.Components),
-		Services:       runtimeComponentItems(snapshot.Services),
-		Workers:        runtimeComponentItems(snapshot.Workers),
+		Services:       runtimeServiceItems(snapshot.Services),
+		Workers:        runtimeServiceItems(snapshot.Workers),
 		StorageBuckets: runtimeManifestItems(snapshot.StorageBuckets),
 		HealthChecks:   runtimeComponentItems(snapshot.HealthChecks),
 		Operations:     runtimeManifestItems(snapshot.Operations),
@@ -340,6 +402,8 @@ func runtimeRoutesResp(table moduleruntime.RouteTable, includeUpstream bool) *ty
 			HealthCheckId: route.HealthCheckID,
 			CreatedFrom:   route.CreatedFrom,
 			Status:        route.Status,
+			ServiceState:  route.ServiceState,
+			ServiceHealth: route.ServiceHealth,
 			Conflicts:     route.Conflicts,
 			Warnings:      route.Warnings,
 			BlockedBy:     route.BlockedBy,

@@ -14,6 +14,7 @@ type Config struct {
 	Jwt          JwtConfig
 	Storage      StorageConfig
 	Proxy        ProxyConfig
+	Runtime      RuntimeConfig
 	InternalAuth InternalAuthConfig
 	Installer    InstallerConfig
 }
@@ -57,6 +58,11 @@ type ProxyTrustedServiceConfig struct {
 	StripPrefix   string `json:",optional"`
 	RewritePrefix string `json:",optional"`
 	HealthCheckID string `json:",optional"`
+}
+
+type RuntimeConfig struct {
+	ComposeServices []string `json:",optional"`
+	ApplyEnabled    bool     `json:",optional"`
 }
 
 type InternalAuthConfig struct {

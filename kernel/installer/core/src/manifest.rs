@@ -130,6 +130,22 @@ pub struct ComponentDecl {
 pub struct ServiceDecl {
     pub id: String,
     #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub lifecycle: String,
+    #[serde(default)]
+    pub trusted_runtime: String,
+    #[serde(default)]
+    pub compose_service: String,
+    #[serde(default)]
+    pub health_check_id: String,
+    #[serde(default)]
+    pub routes: Vec<String>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
     pub path: String,
     #[serde(default)]
     pub health: String,
@@ -141,6 +157,20 @@ pub struct ServiceDecl {
 #[serde(deny_unknown_fields)]
 pub struct WorkerDecl {
     pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub lifecycle: String,
+    #[serde(default)]
+    pub trusted_runtime: String,
+    #[serde(default)]
+    pub compose_service: String,
+    #[serde(default)]
+    pub health_check_id: String,
+    #[serde(default)]
+    pub required: bool,
     #[serde(default)]
     pub path: String,
     #[serde(default)]
@@ -351,6 +381,17 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
     )?;
     for item in &manifest.provides.services {
         ensure(key_re.is_match(&item.id), "service id is invalid")?;
+        validate_lifecycle(&item.lifecycle)?;
+        validate_trusted_runtime(&item.trusted_runtime)?;
+        if !item.compose_service.trim().is_empty() {
+            ensure(
+                key_re.is_match(&item.compose_service),
+                "service compose_service is invalid",
+            )?;
+        }
+        for route in &item.routes {
+            ensure(path_re.is_match(route), "service route is invalid")?;
+        }
         validate_optional_contract_path(&item.path, "service path")?;
         if !item.health.trim().is_empty() {
             ensure(
@@ -366,6 +407,14 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
     )?;
     for item in &manifest.provides.workers {
         ensure(key_re.is_match(&item.id), "worker id is invalid")?;
+        validate_lifecycle(&item.lifecycle)?;
+        validate_trusted_runtime(&item.trusted_runtime)?;
+        if !item.compose_service.trim().is_empty() {
+            ensure(
+                key_re.is_match(&item.compose_service),
+                "worker compose_service is invalid",
+            )?;
+        }
         validate_optional_contract_path(&item.path, "worker path")?;
     }
 
@@ -648,6 +697,28 @@ fn validate_optional_contract_path(path: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_lifecycle(value: &str) -> Result<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(());
+    }
+    ensure(
+        matches!(value, "managed" | "metadata" | "external" | "manual"),
+        "service lifecycle is invalid",
+    )
+}
+
+fn validate_trusted_runtime(value: &str) -> Result<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(());
+    }
+    ensure(
+        matches!(value, "compose" | "metadata" | "external"),
+        "service trusted_runtime is invalid",
+    )
+}
+
 fn reject_path_components(path: &Path) -> Result<()> {
     let banned = [".tmp", ".env", "node_modules", "dist", "target", ".git"];
     for component in path.components() {
@@ -706,6 +777,11 @@ fn reject_dangerous_keys(value: &Value) -> Result<()> {
         "command",
         "script",
         "hook",
+        "image",
+        "mount",
+        "host_path",
+        "privileged",
+        "cap_add",
         "postinstall",
         "preinstall",
         "remote_url",

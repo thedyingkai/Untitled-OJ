@@ -182,6 +182,13 @@ func (p *RuntimeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.serveRoute(w, r, route)
 		return
 	}
+	if blocked, ok := p.matchBlockedRuntimeRoute(r.URL.Path); ok {
+		if _, ok := p.authenticateRequest(w, r, blocked.authMode); !ok {
+			return
+		}
+		writeJSONError(w, http.StatusServiceUnavailable, 50301, "runtime service unavailable: "+blocked.serviceID)
+		return
+	}
 
 	for _, route := range p.staticRoutes {
 		if !isCoreStaticProxyPrefix(route.prefix) && matchPrefix(r.URL.Path, route.prefix) {
@@ -191,6 +198,20 @@ func (p *RuntimeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.NotFound(w, r)
+}
+
+func (p *RuntimeProxy) matchBlockedRuntimeRoute(path string) (routeProxy, bool) {
+	value := p.table.Load()
+	table, _ := value.(moduleruntime.RouteTable)
+	for _, route := range table.Routes {
+		if route.ProxyEnabled || !route.Enabled || !matchPrefix(path, route.Prefix) {
+			continue
+		}
+		if route.Status == "unavailable" || containsString(route.BlockedBy, "service not running") || containsString(route.BlockedBy, "service degraded") {
+			return routeProxy{prefix: route.Prefix, serviceID: route.ServiceID, authMode: route.AuthMode}, true
+		}
+	}
+	return routeProxy{}, false
 }
 
 func (p *RuntimeProxy) matchRuntimeRoute(path string) (routeProxy, bool) {
@@ -223,6 +244,15 @@ func (p *RuntimeProxy) matchRuntimeRoute(path string) (routeProxy, bool) {
 		}, true
 	}
 	return routeProxy{}, false
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *RuntimeProxy) serveRoute(w http.ResponseWriter, r *http.Request, route routeProxy) {

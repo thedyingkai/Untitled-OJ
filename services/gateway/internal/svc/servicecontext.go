@@ -39,6 +39,7 @@ type ServiceContext struct {
 
 	Proxy             http.HandlerFunc
 	RuntimeProxy      *proxy.RuntimeProxy
+	RuntimeDriver     moduleruntime.RuntimeDriver
 	RouteTableOptions moduleruntime.RouteTableOptions
 	InternalSigner    *internalauth.Signer
 }
@@ -99,7 +100,16 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		return sharedperm.HasUserPermission(ctx, db, userID, "system.admin", sharedperm.SystemScope())
 	})
 	routeTableOptions := routeTableOptionsFromConfig(c.Proxy)
+	runtimeDriver := moduleruntime.NewComposeDriver(routeTableOptions.TrustedServices, c.Runtime.ComposeServices...)
+	if c.Runtime.ApplyEnabled {
+		zlog.Warn("runtime apply is configured but remains disabled in L2 foundation")
+	}
 	if snapshot, err := moduleruntime.BuildSnapshot(ctx, repo); err == nil {
+		if services, serviceErr := runtimeDriver.ListServices(ctx, snapshot); serviceErr == nil {
+			snapshot.Services = filterRuntimeServicesByKind(services, false)
+			snapshot.Workers = filterRuntimeServicesByKind(services, true)
+			routeTableOptions.ServiceStates = moduleruntime.RuntimeServiceStates(snapshot.Services)
+		}
 		runtimeProxy.SetRouteTable(moduleruntime.BuildRouteTableWithOptions(snapshot, routeTableOptions))
 	} else {
 		zlog.Warn("initial runtime route table build failed", zap.Error(err))
@@ -113,6 +123,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		Tracer:            tp,
 		Proxy:             runtimeProxy.ServeHTTP,
 		RuntimeProxy:      runtimeProxy,
+		RuntimeDriver:     runtimeDriver,
 		RouteTableOptions: routeTableOptions,
 		InternalSigner:    internalSigner,
 	}
@@ -150,6 +161,16 @@ func routeTableOptionsFromConfig(cfg config.ProxyConfig) moduleruntime.RouteTabl
 	return moduleruntime.RouteTableOptions{
 		TrustedServices: trusted,
 	}
+}
+
+func filterRuntimeServicesByKind(items []moduleruntime.RuntimeService, workers bool) []moduleruntime.RuntimeService {
+	out := make([]moduleruntime.RuntimeService, 0, len(items))
+	for _, item := range items {
+		if (item.Kind == "worker") == workers {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func applyEnvOverrides(c *config.Config) {

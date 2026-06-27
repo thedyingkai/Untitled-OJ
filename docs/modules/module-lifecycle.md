@@ -108,3 +108,21 @@ Enable now affects both metadata and dynamic gateway proxy eligibility. An enabl
 `POST /api/admin/modules/runtime/reload` rebuilds the active route table and atomically replaces Gateway's in-memory dynamic proxy table. Dry-run or include-disabled views can show disabled route metadata, but disabled routes must not receive traffic.
 
 L1 does not start or stop module services. Service availability still comes from compose/operator-managed deployment. L2 will define the controlled runtime driver.
+
+## Hotplug L2 Lifecycle Semantics
+
+Module lifecycle and service lifecycle are separate. Installing/enabling a module activates metadata contributions. L2 foundation additionally exposes declared services/workers, their observed state/health and plan-only lifecycle actions.
+
+Service plan actions:
+
+```text
+plan-start
+plan-stop
+plan-restart
+plan-reload
+plan-health
+```
+
+The Gateway admin API returns plans only. Apply is disabled in Gateway. Metadata-only services are blocked from start/stop/restart and remain useful only for snapshot/topology validation.
+
+A service health failure can make a dynamic gateway route `degraded` or `unavailable`. Unavailable routes are not proxied; Gateway still enforces auth mode before returning a stable 503.
