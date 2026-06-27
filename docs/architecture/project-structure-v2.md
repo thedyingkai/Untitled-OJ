@@ -95,3 +95,9 @@ Implemented in this phase:
 - Permission admin page reads active module permission registry from Runtime Snapshot.
 
 Adding a metadata-only module should require only manifest/package installation and enablement. Service proxy cutover, runtime service driver and frontend bundle loading remain future phases.
+
+## Hotplug L1 Completion Addendum
+
+Project Structure v2 now treats Gateway dynamic proxy and Web Shell contribution registry as Kernel Runtime consumers. Future ordinary modules should be able to add enabled permissions, menus, frontend metadata, topology, health metadata and trusted gateway routes through manifest/package/installer/runtime snapshot without editing Kernel code.
+
+This does not implement L2 service runtime driver, L3 dynamic frontend bundle loading or L4 full module automation.

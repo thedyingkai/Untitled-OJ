@@ -40,7 +40,8 @@ type StorageConfig struct {
 }
 
 type ProxyConfig struct {
-	Routes []ProxyRouteConfig
+	Routes          []ProxyRouteConfig
+	TrustedServices []ProxyTrustedServiceConfig `json:",optional"`
 }
 
 type ProxyRouteConfig struct {
@@ -48,6 +49,14 @@ type ProxyRouteConfig struct {
 	Target      string
 	StripPrefix string `json:",optional"`
 	AuthMode    string `json:",optional"`
+}
+
+type ProxyTrustedServiceConfig struct {
+	ServiceID     string
+	Target        string
+	StripPrefix   string `json:",optional"`
+	RewritePrefix string `json:",optional"`
+	HealthCheckID string `json:",optional"`
 }
 
 type InternalAuthConfig struct {

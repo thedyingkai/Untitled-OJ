@@ -96,13 +96,39 @@ type RouteTable struct {
 }
 
 type RuntimeRoute struct {
+	RouteID       string   `json:"route_id"`
 	ModuleID      string   `json:"module_id"`
 	Prefix        string   `json:"prefix"`
+	ServiceID     string   `json:"service_id"`
 	TargetService string   `json:"target_service"`
+	UpstreamBase  string   `json:"upstream_base,omitempty"`
 	AuthMode      string   `json:"auth_mode"`
+	Methods       []string `json:"methods"`
 	Enabled       bool     `json:"enabled"`
+	ProxyEnabled  bool     `json:"proxy_enabled"`
+	Priority      int      `json:"priority"`
+	StripPrefix   string   `json:"strip_prefix,omitempty"`
+	RewritePrefix string   `json:"rewrite_prefix,omitempty"`
+	HealthCheckID string   `json:"health_check_id,omitempty"`
+	CreatedFrom   string   `json:"created_from"`
+	Status        string   `json:"status"`
 	Conflicts     []string `json:"conflicts"`
 	Warnings      []string `json:"warnings"`
+	BlockedBy     []string `json:"blocked_by"`
+}
+
+type RouteTableOptions struct {
+	TrustedServices       map[string]TrustedService
+	ReservedPrefixes      []string
+	IncludeDisabledRoutes bool
+}
+
+type TrustedService struct {
+	ServiceID     string
+	UpstreamBase  string
+	StripPrefix   string
+	RewritePrefix string
+	HealthCheckID string
 }
 
 func BuildSnapshot(ctx context.Context, reader RegistryReader) (Snapshot, error) {
@@ -185,27 +211,62 @@ func BuildSnapshotWithOptions(ctx context.Context, reader RegistryReader, opts B
 }
 
 func BuildRouteTable(snapshot Snapshot) RouteTable {
+	return BuildRouteTableWithOptions(snapshot, RouteTableOptions{})
+}
+
+func BuildRouteTableWithOptions(snapshot Snapshot, opts RouteTableOptions) RouteTable {
 	table := RouteTable{
 		Version:     snapshot.Version,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		CanProxy:    false,
 	}
+	trusted := normalizeTrustedServices(opts.TrustedServices)
+	reserved := normalizeReservedPrefixes(opts.ReservedPrefixes)
 	for _, route := range snapshot.GatewayRoutes {
+		if !route.Enabled && !opts.IncludeDisabledRoutes {
+			continue
+		}
+		serviceID := strings.TrimSpace(route.TargetService)
+		trustedService, serviceTrusted := trusted[serviceID]
 		item := RuntimeRoute{
+			RouteID:       routeID(route.ModuleID, route.Prefix),
 			ModuleID:      route.ModuleID,
 			Prefix:        cleanPrefix(route.Prefix),
-			TargetService: strings.TrimSpace(route.TargetService),
+			ServiceID:     serviceID,
+			TargetService: serviceID,
 			AuthMode:      normalizeRouteAuthMode(route.AuthMode),
+			Methods:       defaultRouteMethods(),
 			Enabled:       route.Enabled,
+			Priority:      len(cleanPrefix(route.Prefix)),
+			CreatedFrom:   "registry",
+			Status:        "active",
+		}
+		if serviceTrusted {
+			item.UpstreamBase = trustedService.UpstreamBase
+			item.StripPrefix = cleanPrefix(trustedService.StripPrefix)
+			item.RewritePrefix = cleanPrefix(trustedService.RewritePrefix)
+			item.HealthCheckID = trustedService.HealthCheckID
 		}
 		if item.Prefix == "" {
-			item.Warnings = append(item.Warnings, "empty prefix")
+			item.BlockedBy = append(item.BlockedBy, "empty prefix")
 		}
-		if item.TargetService == "" {
-			item.Warnings = append(item.Warnings, "empty target service")
+		if item.ServiceID == "" {
+			item.BlockedBy = append(item.BlockedBy, "empty service_id")
 		}
 		if !isSupportedRouteAuthMode(item.AuthMode) {
-			item.Warnings = append(item.Warnings, "unsupported auth mode")
+			item.BlockedBy = append(item.BlockedBy, "unsupported auth mode")
+		}
+		if !serviceTrusted {
+			item.BlockedBy = append(item.BlockedBy, "unknown trusted service")
+		}
+		if reservedPrefixMatches(item.Prefix, reserved) {
+			item.BlockedBy = append(item.BlockedBy, "reserved prefix")
+		}
+		if !item.Enabled {
+			item.Status = "disabled"
+		}
+		if len(item.BlockedBy) > 0 {
+			item.Status = "blocked"
 		}
 		table.Routes = append(table.Routes, item)
 	}
@@ -231,6 +292,32 @@ func BuildRouteTable(snapshot Snapshot) RouteTable {
 	}
 
 	for _, route := range table.Routes {
+		if len(route.Conflicts) > 0 {
+			for i := range table.Routes {
+				if table.Routes[i].RouteID == route.RouteID {
+					table.Routes[i].Warnings = append(table.Routes[i].Warnings, route.Conflicts...)
+				}
+			}
+		}
+	}
+
+	for i := range table.Routes {
+		if hasDuplicateConflict(table.Routes[i].Conflicts) {
+			table.Routes[i].BlockedBy = append(table.Routes[i].BlockedBy, "duplicate prefix")
+			table.Routes[i].Status = "blocked"
+		}
+		table.Routes[i].ProxyEnabled = table.Routes[i].Enabled &&
+			table.Routes[i].Status == "active" &&
+			len(table.Routes[i].BlockedBy) == 0
+		if table.Routes[i].ProxyEnabled {
+			table.CanProxy = true
+		}
+	}
+
+	for _, route := range table.Routes {
+		if len(route.BlockedBy) > 0 {
+			table.Warnings = append(table.Warnings, route.ModuleID+" "+route.Prefix+": blocked by "+strings.Join(route.BlockedBy, "; "))
+		}
 		if len(route.Conflicts) > 0 {
 			table.Warnings = append(table.Warnings, route.ModuleID+" "+route.Prefix+": "+strings.Join(route.Conflicts, "; "))
 		}
@@ -725,6 +812,82 @@ func routePrefixOverlaps(left string, right string) bool {
 	return strings.HasPrefix(left, right+"/") || strings.HasPrefix(right, left+"/")
 }
 
+func defaultRouteMethods() []string {
+	return []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
+}
+
+func routeID(moduleID string, prefix string) string {
+	return moduleID + ":" + cleanPrefix(prefix)
+}
+
+func normalizeTrustedServices(items map[string]TrustedService) map[string]TrustedService {
+	out := make(map[string]TrustedService, len(items))
+	for key, item := range items {
+		serviceID := strings.TrimSpace(firstNonEmpty(item.ServiceID, key))
+		if serviceID == "" {
+			continue
+		}
+		item.ServiceID = serviceID
+		item.UpstreamBase = strings.TrimRight(strings.TrimSpace(item.UpstreamBase), "/")
+		item.StripPrefix = cleanPrefix(item.StripPrefix)
+		item.RewritePrefix = cleanPrefix(item.RewritePrefix)
+		out[serviceID] = item
+	}
+	return out
+}
+
+func normalizeReservedPrefixes(items []string) []string {
+	if len(items) == 0 {
+		items = DefaultReservedPrefixes()
+	}
+	out := make([]string, 0, len(items))
+	seen := map[string]bool{}
+	for _, item := range items {
+		prefix := cleanPrefix(item)
+		if prefix == "" || seen[prefix] {
+			continue
+		}
+		seen[prefix] = true
+		out = append(out, prefix)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if len(out[i]) == len(out[j]) {
+			return out[i] < out[j]
+		}
+		return len(out[i]) > len(out[j])
+	})
+	return out
+}
+
+func DefaultReservedPrefixes() []string {
+	return []string{
+		"/api/auth",
+		"/api/admin/modules",
+		"/api/admin/health",
+		"/api/health",
+		"/api/internal",
+		"/api/judge/worker",
+	}
+}
+
+func reservedPrefixMatches(prefix string, reserved []string) bool {
+	for _, item := range reserved {
+		if prefix == item || strings.HasPrefix(prefix, item+"/") || strings.HasPrefix(item, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDuplicateConflict(items []string) bool {
+	for _, item := range items {
+		if strings.Contains(item, "duplicate prefix") {
+			return true
+		}
+	}
+	return false
+}
+
 func sortSnapshot(snapshot *Snapshot) {
 	sort.Slice(snapshot.Modules, func(i, j int) bool { return snapshot.Modules[i].ModuleID < snapshot.Modules[j].ModuleID })
 	sort.Slice(snapshot.Permissions, func(i, j int) bool {
@@ -780,14 +943,15 @@ func manifestLess(left RuntimeManifestItem, right RuntimeManifestItem) bool {
 
 func sortRouteTable(table *RouteTable) {
 	sort.Slice(table.Routes, func(i, j int) bool {
-		if len(table.Routes[i].Prefix) == len(table.Routes[j].Prefix) {
+		if table.Routes[i].Priority == table.Routes[j].Priority {
 			return table.Routes[i].Prefix < table.Routes[j].Prefix
 		}
-		return len(table.Routes[i].Prefix) > len(table.Routes[j].Prefix)
+		return table.Routes[i].Priority > table.Routes[j].Priority
 	})
 	for i := range table.Routes {
 		sort.Strings(table.Routes[i].Conflicts)
 		sort.Strings(table.Routes[i].Warnings)
+		sort.Strings(table.Routes[i].BlockedBy)
 	}
 	sort.Strings(table.Warnings)
 }

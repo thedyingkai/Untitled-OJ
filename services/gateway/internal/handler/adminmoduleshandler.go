@@ -61,7 +61,8 @@ func adminModuleRuntimeRoutesHandler(svcCtx *svc.ServiceContext) http.HandlerFun
 	return func(w http.ResponseWriter, r *http.Request) {
 		l := logic.NewAdminModulesLogic(r.Context(), svcCtx)
 		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
-		resp, err := l.RuntimeRoutes(r.Header.Get("Authorization"), includeDisabled, false)
+		includeUpstream := r.URL.Query().Get("debug_upstream") == "true"
+		resp, err := l.RuntimeRoutes(r.Header.Get("Authorization"), includeDisabled, false, includeUpstream)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 		} else {
@@ -74,7 +75,8 @@ func adminModuleRuntimeReloadHandler(svcCtx *svc.ServiceContext) http.HandlerFun
 	return func(w http.ResponseWriter, r *http.Request) {
 		l := logic.NewAdminModulesLogic(r.Context(), svcCtx)
 		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
-		resp, err := l.RuntimeRoutes(r.Header.Get("Authorization"), includeDisabled, true)
+		includeUpstream := r.URL.Query().Get("debug_upstream") == "true"
+		resp, err := l.RuntimeRoutes(r.Header.Get("Authorization"), includeDisabled, true, includeUpstream)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 		} else {

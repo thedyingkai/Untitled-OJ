@@ -96,3 +96,11 @@ Installer source is now canonical under kernel/installer/core, kernel/installer/
 Status: implemented and pending final verification in this working tree.
 
 Runtime Snapshot is now the active module runtime source for permissions, menus, frontend route metadata, gateway route metadata, components, health checks and topology. Gateway exposes runtime route table/reload admin APIs. Web Shell has a Module Contributions view and admin menu contribution rendering. Dynamic proxy cutover, service runtime driver and dynamic untrusted frontend bundles remain explicitly not implemented.
+
+## 2026-06-27 Hotplug L1 Completion Status
+
+Status: implemented in this working tree, pending final verification.
+
+Gateway dynamic proxy now uses the Kernel Runtime route table for enabled module routes. Gateway uses trusted `service_id` configuration rather than manifest-provided URLs, protects reserved prefixes, hides upstream addresses by default, strips raw Authorization on dynamic proxy routes, and supports route table reload. Web Shell contribution registry routes unknown component keys to safe registry metadata views instead of executing dynamic JavaScript.
+
+Still out of scope: service runtime driver, Docker socket control, remote module marketplace, hook execution, dynamic untrusted frontend bundles, L2/L3/L4 hotplug and Judge Core GA.

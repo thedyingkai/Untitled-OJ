@@ -98,3 +98,9 @@ Rules:
 - Use `/admin/modules/contributions` for generic metadata display.
 - Use `required_permission` from snapshot menus to decide visibility where user permission data is available.
 - Ordinary user navigation keeps static compatibility entries because Runtime Snapshot admin API is not exposed to ordinary users.
+
+## Hotplug L1 Frontend Guidance
+
+Web Shell uses Runtime Snapshot menus and contribution metadata for module surfaces. Unknown `component_key` values must route to `/admin/modules/contributions/:moduleId` and render metadata only. Web Shell must not dynamically import remote module JavaScript, must not load untrusted bundles and must not create fake business pages for metadata-only modules.
+
+Static Vue routes remain compatibility entries for current Kernel/Platform/Judge Core pages. Future ordinary modules should contribute menus and frontend route metadata through manifest/package installation.

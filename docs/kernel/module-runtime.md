@@ -80,14 +80,23 @@ Runtime aggregation rules:
 - Manifest-only metadata such as roles, storage buckets, events, admin panels, scheduled jobs and topology contributions is derived from the stored manifest when no dedicated registry table exists yet.
 - Snapshot responses must not include secrets, tokens, DB connection strings, local absolute paths, Docker socket paths, or package internals.
 
-Gateway route hotplug v1 is partial L1: Gateway exposes `GET /api/admin/modules/runtime/routes` and `POST /api/admin/modules/runtime/reload` to rebuild and validate the runtime route table from registry data. The existing compatibility proxy routes remain in place for Judge Core. The runtime table validates duplicate and overlapping prefixes and normalizes auth modes to `public`, `user`, `admin`, `worker`, or `internal`. It is not yet the sole proxy source.
+Gateway route hotplug L1 is implemented for enabled module routes. Gateway exposes `GET /api/admin/modules/runtime/routes` and `POST /api/admin/modules/runtime/reload` to rebuild and validate the runtime route table from registry data. Dynamic proxy matching uses the route table after core static routes and before compatibility fallback routes. The runtime table validates reserved prefixes, duplicate prefixes, overlapping prefixes, unknown services and auth modes. Manifest route declarations may reference only a `service_id`; upstream URLs come from Gateway trusted service configuration, not from module manifests.
+
+Dynamic proxy security rules:
+
+- Core static routes keep priority for `/api/auth` and `/api/judge/worker`.
+- Reserved prefixes cannot be claimed by modules: `/api/auth`, `/api/admin/modules`, `/api/admin/health`, `/api/health`, `/api/internal`, `/api/judge/worker`.
+- `service_id` must exist in Gateway trusted service configuration.
+- Admin route table responses hide `upstream_base` by default.
+- Raw `Authorization` is not forwarded through dynamic routes. Gateway forwards sanitized actor headers and internal HMAC headers.
+- `public`, `user`, `admin`, `worker` and `internal` auth modes are explicit. `worker` and `internal` are not public dynamic proxy surfaces.
 
 Topology is generated from Runtime Snapshot. It contains module nodes, dependency edges, service/worker/component nodes, gateway route nodes, frontend menu/route nodes, health nodes, and manifest-declared topology nodes/edges. Admin UI only renders the snapshot; it should not invent topology for future modules.
 
 Current hotplug conclusion:
 
 - L0 Metadata hotplug: implemented for registry/snapshot/menu/permission/topology/health contribution display.
-- L1 Gateway route hotplug: route table and conflict validation implemented; full dynamic proxy cutover remains future work.
+- L1 Gateway route hotplug: runtime route table, reload, trusted service map, reserved prefix protection and dynamic proxy for enabled routes are implemented. Service start/stop remains out of scope.
 - L2 Service hotplug: runtime driver contract remains future work.
 - L3 Frontend contribution hotplug: metadata display only. OJOS still does not execute untrusted JS or dynamic frontend bundles.
 - L4 Full module hotplug: future work.

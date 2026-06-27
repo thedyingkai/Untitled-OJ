@@ -106,3 +106,10 @@
 - `docs/modules/module-contract.md` describes manifest extension points consumed by Runtime Snapshot.
 - `docs/development/frontend-development.md` documents Web Shell contribution rendering boundaries.
 - `docs/development/backend-development.md` documents Gateway/runtime aggregation boundaries.
+
+## Hotplug L1 Completion Documents
+
+- `docs/kernel/module-runtime.md` now documents dynamic Gateway proxy, trusted service map, reserved prefixes, auth modes and route table reload semantics.
+- `docs/modules/module-contract.md` documents `gateway_routes.service_id` and safe Web Shell contribution fallback.
+- `docs/api/admin-api.md` documents runtime route table fields and dynamic proxy security boundaries.
+- `docs/security/module-installer-threat-model.md` includes L1 dynamic proxy threats and mitigations.

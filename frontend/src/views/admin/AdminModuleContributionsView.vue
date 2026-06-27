@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   NButton,
   NDataTable,
@@ -43,6 +44,20 @@ const loading = ref(true)
 const refreshing = ref(false)
 const error = ref<ApiClientError | null>(null)
 const includeDisabled = ref(false)
+const route = useRoute()
+const selectedModuleId = computed(() => String(route.params.moduleId ?? ''))
+const pageTitle = computed(() => selectedModuleId.value ? 'Module Contribution' : 'Module Contributions')
+
+const visiblePermissions = computed(() => filterByModule(snapshot.value?.permissions ?? []))
+const visibleMenus = computed(() => filterByModule(snapshot.value?.menus ?? []))
+const visibleFrontendRoutes = computed(() => filterByModule(snapshot.value?.frontend_routes ?? []))
+const visibleGatewayRoutes = computed(() => filterByModule(snapshot.value?.gateway_routes ?? []))
+const visibleRuntimeRoutes = computed(() => filterByModule(routes.value?.routes ?? []))
+const visibleHealthChecks = computed(() => filterByModule(snapshot.value?.health_checks ?? []))
+const visibleStorageBuckets = computed(() => filterByModule(snapshot.value?.storage_buckets ?? []))
+const visibleOperations = computed(() => filterByModule(snapshot.value?.operations ?? []))
+const visibleTopologyNodes = computed(() => filterByModule(snapshot.value?.topology.nodes ?? []))
+const visibleTopologyEdges = computed(() => filterByModule(snapshot.value?.topology.edges ?? []))
 
 const permissionColumns: DataTableColumns<ModulePermissionItem> = [
   { title: 'Permission', key: 'permission_key', minWidth: 240 },
@@ -79,14 +94,15 @@ const gatewayRouteColumns: DataTableColumns<ModuleGatewayRouteItem> = [
 const runtimeRouteColumns: DataTableColumns<ModuleRuntimeRouteItem> = [
   { title: 'Prefix', key: 'prefix', minWidth: 220 },
   { title: 'Module', key: 'module_id', minWidth: 220 },
-  { title: 'Target', key: 'target_service', minWidth: 160 },
+  { title: 'Service', key: 'service_id', minWidth: 160 },
   { title: 'Auth', key: 'auth_mode', width: 110 },
-  { title: 'Enabled', key: 'enabled', width: 100, render: (row) => enabledTag(row.enabled) },
+  { title: 'Status', key: 'status', width: 120, render: (row) => routeStatusTag(row) },
+  { title: 'Proxy', key: 'proxy_enabled', width: 100, render: (row) => enabledTag(row.proxy_enabled) },
   {
-    title: 'Conflicts',
-    key: 'conflicts',
+    title: 'Blocked / Warnings',
+    key: 'blocked_by',
     minWidth: 260,
-    render: (row) => row.conflicts.join('; ') || 'none',
+    render: (row) => [...row.blocked_by, ...row.conflicts, ...row.warnings].join('; ') || 'none',
   },
 ]
 
@@ -164,14 +180,24 @@ function enabledTag(enabled: boolean) {
   return h(NTag, { type: enabled ? 'success' : 'default', size: 'small' }, { default: () => (enabled ? 'yes' : 'no') })
 }
 
+function routeStatusTag(row: ModuleRuntimeRouteItem) {
+  const type = row.status === 'active' ? 'success' : row.status === 'blocked' ? 'error' : 'default'
+  return h(NTag, { type, size: 'small' }, { default: () => row.status || 'unknown' })
+}
+
+function filterByModule<T extends { module_id: string }>(items: T[]): T[] {
+  if (!selectedModuleId.value) return items
+  return items.filter((item) => item.module_id === selectedModuleId.value)
+}
+
 onMounted(() => void load())
 </script>
 
 <template>
   <div class="module-contributions-page">
     <OjosPageHeader
-      title="Module Contributions"
-      description="Runtime snapshot viewer for registry-provided permissions, menus, routes, health checks, and topology."
+      :title="pageTitle"
+      :description="selectedModuleId ? `Safe registry view for ${selectedModuleId}. Unknown component keys are shown as metadata only.` : 'Runtime snapshot viewer for registry-provided permissions, menus, routes, health checks, and topology.'"
       eyebrow="Kernel Runtime"
     >
       <template #actions>
@@ -191,53 +217,53 @@ onMounted(() => void load())
       <template v-else-if="snapshot && routes">
         <div class="contribution-summary">
           <OjosStatCard label="Modules" :value="snapshot.modules.length" tone="primary" />
-          <OjosStatCard label="Permissions" :value="snapshot.permissions.length" />
-          <OjosStatCard label="Menus" :value="snapshot.menus.length" />
-          <OjosStatCard label="Runtime Routes" :value="routes.routes.length" />
+          <OjosStatCard label="Permissions" :value="visiblePermissions.length" />
+          <OjosStatCard label="Menus" :value="visibleMenus.length" />
+          <OjosStatCard label="Runtime Routes" :value="visibleRuntimeRoutes.length" />
           <OjosStatCard label="Warnings" :value="warningCount" tone="warning" />
         </div>
 
         <OjosSection title="Runtime Contributions">
           <NTabs type="line" animated>
             <NTabPane name="permissions" tab="Permissions">
-              <EmptyView v-if="snapshot.permissions.length === 0" description="No runtime permissions" />
-              <NDataTable v-else :columns="permissionColumns" :data="snapshot.permissions" :pagination="{ pageSize: 12 }" :bordered="false" />
+              <EmptyView v-if="visiblePermissions.length === 0" description="No runtime permissions" />
+              <NDataTable v-else :columns="permissionColumns" :data="visiblePermissions" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="menus" tab="Menus">
-              <EmptyView v-if="snapshot.menus.length === 0" description="No runtime menus" />
-              <NDataTable v-else :columns="menuColumns" :data="snapshot.menus" :pagination="{ pageSize: 12 }" :bordered="false" />
+              <EmptyView v-if="visibleMenus.length === 0" description="No runtime menus" />
+              <NDataTable v-else :columns="menuColumns" :data="visibleMenus" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="frontend" tab="Frontend Routes">
-              <EmptyView v-if="snapshot.frontend_routes.length === 0" description="No frontend routes" />
-              <NDataTable v-else :columns="frontendRouteColumns" :data="snapshot.frontend_routes" :pagination="{ pageSize: 12 }" :bordered="false" />
+              <EmptyView v-if="visibleFrontendRoutes.length === 0" description="No frontend routes" />
+              <NDataTable v-else :columns="frontendRouteColumns" :data="visibleFrontendRoutes" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="gateway" tab="Gateway Routes">
-              <EmptyView v-if="snapshot.gateway_routes.length === 0" description="No gateway routes" />
-              <NDataTable v-else :columns="gatewayRouteColumns" :data="snapshot.gateway_routes" :pagination="{ pageSize: 12 }" :bordered="false" />
+              <EmptyView v-if="visibleGatewayRoutes.length === 0" description="No gateway routes" />
+              <NDataTable v-else :columns="gatewayRouteColumns" :data="visibleGatewayRoutes" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="runtime-routes" tab="Route Table">
-              <EmptyView v-if="routes.routes.length === 0" description="No runtime routes" />
-              <NDataTable v-else :columns="runtimeRouteColumns" :data="routes.routes" :pagination="{ pageSize: 12 }" :bordered="false" />
+              <EmptyView v-if="visibleRuntimeRoutes.length === 0" description="No runtime routes" />
+              <NDataTable v-else :columns="runtimeRouteColumns" :data="visibleRuntimeRoutes" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="health" tab="Health">
-              <EmptyView v-if="snapshot.health_checks.length === 0" description="No health checks" />
-              <NDataTable v-else :columns="componentColumns" :data="snapshot.health_checks" :pagination="{ pageSize: 12 }" :bordered="false" />
+              <EmptyView v-if="visibleHealthChecks.length === 0" description="No health checks" />
+              <NDataTable v-else :columns="componentColumns" :data="visibleHealthChecks" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="storage" tab="Storage">
-              <EmptyView v-if="snapshot.storage_buckets.length === 0" description="No storage buckets" />
-              <NDataTable v-else :columns="manifestItemColumns" :data="snapshot.storage_buckets" :pagination="{ pageSize: 12 }" :bordered="false" />
+              <EmptyView v-if="visibleStorageBuckets.length === 0" description="No storage buckets" />
+              <NDataTable v-else :columns="manifestItemColumns" :data="visibleStorageBuckets" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="operations" tab="Manifest Ops">
-              <EmptyView v-if="snapshot.operations.length === 0" description="No manifest-level operations" />
-              <NDataTable v-else :columns="manifestItemColumns" :data="snapshot.operations" :pagination="{ pageSize: 12 }" :bordered="false" />
+              <EmptyView v-if="visibleOperations.length === 0" description="No manifest-level operations" />
+              <NDataTable v-else :columns="manifestItemColumns" :data="visibleOperations" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="topology-nodes" tab="Topology Nodes">
-              <EmptyView v-if="snapshot.topology.nodes.length === 0" description="No topology nodes" />
-              <NDataTable v-else :columns="topologyNodeColumns" :data="snapshot.topology.nodes" :pagination="{ pageSize: 12 }" :bordered="false" />
+              <EmptyView v-if="visibleTopologyNodes.length === 0" description="No topology nodes" />
+              <NDataTable v-else :columns="topologyNodeColumns" :data="visibleTopologyNodes" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="topology-edges" tab="Topology Edges">
-              <EmptyView v-if="snapshot.topology.edges.length === 0" description="No topology edges" />
-              <NDataTable v-else :columns="topologyEdgeColumns" :data="snapshot.topology.edges" :pagination="{ pageSize: 12 }" :bordered="false" />
+              <EmptyView v-if="visibleTopologyEdges.length === 0" description="No topology edges" />
+              <NDataTable v-else :columns="topologyEdgeColumns" :data="visibleTopologyEdges" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
           </NTabs>
         </OjosSection>

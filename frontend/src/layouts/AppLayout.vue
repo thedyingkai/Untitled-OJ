@@ -100,7 +100,9 @@ function moduleMenuOptions(items: ModuleMenuItem[]): MenuOption[] {
     .flatMap((item) => {
       if (seen.has(item.route_path)) return []
       seen.add(item.route_path)
-      const routePath = routeExists(item.route_path) ? item.route_path : '/admin/modules/contributions'
+      const routePath = routeExists(item.route_path)
+        ? item.route_path
+        : `/admin/modules/contributions/${encodeURIComponent(item.module_id)}`
       return [menuLink(routePath, item.title)]
     })
 }

@@ -132,12 +132,18 @@ func TestBuildSnapshotIncludeDisabledReturnsDisabledContributions(t *testing.T) 
 }
 
 func TestBuildRouteTableDetectsPrefixConflicts(t *testing.T) {
-	table := BuildRouteTable(Snapshot{
+	table := BuildRouteTableWithOptions(Snapshot{
 		Version: "1",
 		GatewayRoutes: []moduleregistry.GatewayRoute{
 			{ModuleID: "a", Prefix: "/api/admin/modules", TargetService: "a", AuthMode: "admin", Enabled: true},
 			{ModuleID: "b", Prefix: "/api/admin/modules/topology", TargetService: "b", AuthMode: "admin", Enabled: true},
 			{ModuleID: "c", Prefix: "/api/problem", TargetService: "c", AuthMode: "required", Enabled: true},
+		},
+	}, RouteTableOptions{
+		TrustedServices: map[string]TrustedService{
+			"a": {ServiceID: "a", UpstreamBase: "http://a:8080"},
+			"b": {ServiceID: "b", UpstreamBase: "http://b:8080"},
+			"c": {ServiceID: "c", UpstreamBase: "http://c:8080"},
 		},
 	})
 	if len(table.Routes) != 3 {
@@ -148,6 +154,68 @@ func TestBuildRouteTableDetectsPrefixConflicts(t *testing.T) {
 	}
 	if table.Routes[2].AuthMode != "user" {
 		t.Fatalf("required auth mode should normalize to user, got %q", table.Routes[2].AuthMode)
+	}
+}
+
+func TestBuildRouteTableBlocksReservedPrefixAndUnknownService(t *testing.T) {
+	table := BuildRouteTableWithOptions(Snapshot{
+		Version: "1",
+		GatewayRoutes: []moduleregistry.GatewayRoute{
+			{ModuleID: "a", Prefix: "/api/auth/shadow", TargetService: "known", AuthMode: "public", Enabled: true},
+			{ModuleID: "b", Prefix: "/api/demo", TargetService: "missing", AuthMode: "user", Enabled: true},
+			{ModuleID: "c", Prefix: "/api/ok", TargetService: "known", AuthMode: "user", Enabled: true},
+			{ModuleID: "d", Prefix: "/api/disabled", TargetService: "known", AuthMode: "user", Enabled: false},
+			{ModuleID: "e", Prefix: "/api/judge", TargetService: "known", AuthMode: "user", Enabled: true},
+		},
+	}, RouteTableOptions{
+		TrustedServices: map[string]TrustedService{
+			"known": {ServiceID: "known", UpstreamBase: "http://known:8080", StripPrefix: "/api"},
+		},
+	})
+
+	routeByPrefix := map[string]RuntimeRoute{}
+	for _, route := range table.Routes {
+		routeByPrefix[route.Prefix] = route
+	}
+	if routeByPrefix["/api/auth/shadow"].ProxyEnabled {
+		t.Fatalf("reserved prefix route must not be proxy-enabled")
+	}
+	if !contains(routeByPrefix["/api/auth/shadow"].BlockedBy, "reserved prefix") {
+		t.Fatalf("reserved prefix should be recorded in blocked_by: %#v", routeByPrefix["/api/auth/shadow"])
+	}
+	if routeByPrefix["/api/judge"].ProxyEnabled || !contains(routeByPrefix["/api/judge"].BlockedBy, "reserved prefix") {
+		t.Fatalf("parent prefix must not cover reserved worker route: %#v", routeByPrefix["/api/judge"])
+	}
+	if routeByPrefix["/api/demo"].ProxyEnabled || !contains(routeByPrefix["/api/demo"].BlockedBy, "unknown trusted service") {
+		t.Fatalf("unknown service should be blocked: %#v", routeByPrefix["/api/demo"])
+	}
+	if !routeByPrefix["/api/ok"].ProxyEnabled || routeByPrefix["/api/ok"].UpstreamBase == "" {
+		t.Fatalf("trusted active route should be proxy-enabled with upstream: %#v", routeByPrefix["/api/ok"])
+	}
+	if routeByPrefix["/api/disabled"].ProxyEnabled {
+		t.Fatalf("disabled route must not be proxy-enabled")
+	}
+}
+
+func TestBuildRouteTableBlocksDuplicatePrefix(t *testing.T) {
+	table := BuildRouteTableWithOptions(Snapshot{
+		Version: "1",
+		GatewayRoutes: []moduleregistry.GatewayRoute{
+			{ModuleID: "a", Prefix: "/api/demo", TargetService: "svc", AuthMode: "user", Enabled: true},
+			{ModuleID: "b", Prefix: "/api/demo", TargetService: "svc", AuthMode: "user", Enabled: true},
+		},
+	}, RouteTableOptions{
+		TrustedServices: map[string]TrustedService{
+			"svc": {ServiceID: "svc", UpstreamBase: "http://svc:8080"},
+		},
+	})
+	for _, route := range table.Routes {
+		if route.ProxyEnabled {
+			t.Fatalf("duplicate route must not be proxy-enabled: %#v", route)
+		}
+		if !contains(route.BlockedBy, "duplicate prefix") {
+			t.Fatalf("duplicate prefix should be blocked: %#v", route)
+		}
 	}
 }
 
@@ -191,6 +259,15 @@ func hasMenu(items []moduleregistry.Menu, key string) bool {
 func hasTopologyNode(items []RuntimeTopologyNode, id string) bool {
 	for _, item := range items {
 		if item.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func contains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
 			return true
 		}
 	}

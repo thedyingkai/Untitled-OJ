@@ -19,6 +19,22 @@ Storage:
   SubmissionsRoot: /data/ojos/submissions
 
 Proxy:
+  TrustedServices:
+    - ServiceID: auth
+      Target: http://auth:8081
+      StripPrefix: /api
+      HealthCheckID: auth-health
+
+    - ServiceID: problem-api
+      Target: http://problem-api:8083
+      StripPrefix: /api
+      HealthCheckID: problem-api-health
+
+    - ServiceID: judge-api
+      Target: http://judge-api:8082
+      StripPrefix: /api
+      HealthCheckID: judge-api-health
+
   Routes:
     - Prefix: /api/auth
       Target: http://auth:8081

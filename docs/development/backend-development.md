@@ -109,3 +109,9 @@ Current backend contract:
 - Runtime route table validates duplicate and overlapping prefixes.
 - Admin Health aggregates module health_check metadata from Runtime Snapshot and marks metadata checks as registered, not as fake service probes.
 - Compatibility proxy routes stay configured until full dynamic proxy cutover.
+
+## Hotplug L1 Backend Guidance
+
+Gateway dynamic proxy now reads the Kernel Runtime route table for enabled module routes. Manifests declare `service_id`, while Gateway configuration owns trusted upstream URLs. Do not add future module routes as hardcoded Gateway routes unless they are core compatibility or reserved platform routes.
+
+Core static routes keep priority for `/api/auth` and `/api/judge/worker`. Dynamic proxy strips hop-by-hop headers, does not forward raw Authorization by default, forwards sanitized actor headers and signs internal requests. Reserved prefixes and unknown services are blocked by the route table.

@@ -77,3 +77,9 @@ Boundaries retained:
 - No hook execution is allowed.
 - No dynamic untrusted frontend bundle is loaded.
 - A/Judge Core remains protected and is not marked GA.
+
+## Hotplug L1 Completion
+
+Kernel Runtime now provides dynamic gateway route activation for enabled module routes. Gateway remains the edge adapter and resolves module `service_id` values through a trusted service map. Web Shell remains the frontend shell and renders unknown module components through safe contribution metadata pages.
+
+L2 service/worker runtime driver, L3 dynamic frontend bundles and L4 full module hotplug are not implemented.

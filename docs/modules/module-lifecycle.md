@@ -100,3 +100,11 @@ Demo module lifecycle acceptance now verifies:
 - demo topology metadata appears after enable;
 - disabled demo module is excluded from active Runtime Snapshot;
 - disabled demo module remains visible through include-disabled admin inspection.
+
+## Hotplug L1 Lifecycle Semantics
+
+Enable now affects both metadata and dynamic gateway proxy eligibility. An enabled module can contribute active permissions, menus, frontend route metadata, topology, health metadata and gateway routes. A disabled module is excluded from the active Runtime Snapshot and its gateway routes are not proxy-enabled.
+
+`POST /api/admin/modules/runtime/reload` rebuilds the active route table and atomically replaces Gateway's in-memory dynamic proxy table. Dry-run or include-disabled views can show disabled route metadata, but disabled routes must not receive traffic.
+
+L1 does not start or stop module services. Service availability still comes from compose/operator-managed deployment. L2 will define the controlled runtime driver.

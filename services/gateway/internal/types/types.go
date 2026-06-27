@@ -182,13 +182,25 @@ type ModuleRuntimeTopologyEdge struct {
 }
 
 type ModuleRuntimeRouteItem struct {
+	RouteId       string   `json:"route_id"`
 	ModuleId      string   `json:"module_id"`
 	Prefix        string   `json:"prefix"`
+	ServiceId     string   `json:"service_id"`
 	TargetService string   `json:"target_service"`
+	UpstreamBase  string   `json:"upstream_base,omitempty"`
 	AuthMode      string   `json:"auth_mode"`
+	Methods       []string `json:"methods"`
 	Enabled       bool     `json:"enabled"`
+	ProxyEnabled  bool     `json:"proxy_enabled"`
+	Priority      int      `json:"priority"`
+	StripPrefix   string   `json:"strip_prefix,omitempty"`
+	RewritePrefix string   `json:"rewrite_prefix,omitempty"`
+	HealthCheckId string   `json:"health_check_id,omitempty"`
+	CreatedFrom   string   `json:"created_from"`
+	Status        string   `json:"status"`
 	Conflicts     []string `json:"conflicts"`
 	Warnings      []string `json:"warnings"`
+	BlockedBy     []string `json:"blocked_by"`
 }
 
 type ModuleRuntimeRoutesResp struct {

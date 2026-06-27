@@ -73,3 +73,21 @@ Future modules should be added through `module.yaml`, `.ojosmod` package metadat
 Active Runtime Snapshot only includes ENABLED modules. Disabled modules remain visible through registry detail and `include_disabled=true` admin inspection. Disabled metadata must not create clickable fake business entries or live gateway proxy routes.
 
 Frontend contribution hotplug remains metadata-only. Dynamic JS, remote bundles, hooks and remote marketplace installation are still out of scope.
+
+## Hotplug L1 Gateway Route Contract
+
+`gateway_routes` uses `service_id` to reference a Gateway-trusted service. Manifests must not provide `target_url`, public URLs, localhost targets, Docker socket paths, raw ports, credentials or proxy commands.
+
+Example:
+
+```yaml
+gateway_routes:
+  - prefix: /api/problem
+    service_id: problem-api
+    auth_mode: user
+    enabled: true
+```
+
+Gateway resolves `service_id` through its trusted service map. Runtime Route Table blocks unknown services, duplicate prefixes and reserved prefix claims. Reserved prefixes include `/api/auth`, `/api/admin/modules`, `/api/admin/health`, `/api/health`, `/api/internal` and `/api/judge/worker`.
+
+Web Shell contribution hotplug stays safe: known compiled routes render their existing components; unknown `component_key` values are shown through the Module Contributions registry page. Web Shell does not dynamically import remote JavaScript, does not execute module bundles and does not load untrusted frontend code.

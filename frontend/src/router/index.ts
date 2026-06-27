@@ -167,6 +167,17 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
+        path: 'admin/modules/contributions/:moduleId',
+        name: 'admin-module-contribution-detail',
+        component: () => import('../views/admin/AdminModuleContributionsView.vue'),
+        meta: {
+          title: 'Module Contribution',
+          requiresAuth: true,
+          roles: adminRoles,
+          permissions: adminPermissions,
+        },
+      },
+      {
         path: 'admin/modules/:id',
         name: 'admin-module-detail',
         component: () => import('../views/admin/AdminModuleDetailView.vue'),

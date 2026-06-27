@@ -593,10 +593,10 @@ func manifestGatewayRoutes(items []GatewayRoute) []map[string]any {
 	out := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		out = append(out, map[string]any{
-			"prefix":         item.Prefix,
-			"target_service": item.TargetService,
-			"auth_mode":      item.AuthMode,
-			"enabled":        item.Enabled,
+			"prefix":     item.Prefix,
+			"service_id": item.TargetService,
+			"auth_mode":  item.AuthMode,
+			"enabled":    item.Enabled,
 		})
 	}
 	return out

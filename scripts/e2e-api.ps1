@@ -288,6 +288,16 @@ function Has-JsonItem($Items, [string]$Property, [string]$Expected) {
   return $false
 }
 
+function Get-JsonItem($Items, [string]$Property, [string]$Expected) {
+  foreach ($item in @($Items)) {
+    $prop = $item.PSObject.Properties[$Property]
+    if ($null -ne $prop -and [string]$prop.Value -eq $Expected) {
+      return $item
+    }
+  }
+  return $null
+}
+
 function Ensure-AdminRole {
   param([int64]$UserId)
   $sql = "insert into user_roles(user_id, role_id) select $UserId, id from roles where name='super_admin' on conflict do nothing;"
@@ -502,6 +512,35 @@ try {
     if (-not (Has-JsonItem $routeItems "prefix" "/api/problem")) {
       $failures.Add("runtime route table missing /api/problem") | Out-Null
     }
+    $problemRoute = Get-JsonItem $routeItems "prefix" "/api/problem"
+    if ($null -eq $problemRoute) {
+      $failures.Add("runtime route table missing judge-core /api/problem route") | Out-Null
+    } else {
+      if ([string]$problemRoute.service_id -ne "problem-api") {
+        $failures.Add("runtime route /api/problem expected service_id problem-api got $($problemRoute.service_id)") | Out-Null
+      }
+      if ($problemRoute.proxy_enabled -ne $true) {
+        $failures.Add("runtime route /api/problem expected proxy_enabled=true") | Out-Null
+      }
+      if ([string]$problemRoute.auth_mode -ne "user") {
+        $failures.Add("runtime route /api/problem expected auth_mode=user got $($problemRoute.auth_mode)") | Out-Null
+      }
+      if ($problemRoute.PSObject.Properties["upstream_base"] -and -not [string]::IsNullOrWhiteSpace([string]$problemRoute.upstream_base)) {
+        $failures.Add("runtime route table should not expose upstream_base by default") | Out-Null
+      }
+    }
+    $judgeRoute = Get-JsonItem $routeItems "prefix" "/api/judge"
+    if ($null -eq $judgeRoute) {
+      $failures.Add("runtime route table missing judge-core /api/judge route") | Out-Null
+    } else {
+      if ($judgeRoute.proxy_enabled -eq $true) {
+        $failures.Add("runtime route /api/judge should not proxy because it would cover reserved /api/judge/worker") | Out-Null
+      }
+      $judgeBlockedBy = @($judgeRoute.blocked_by)
+      if ($judgeBlockedBy -notcontains "reserved prefix") {
+        $failures.Add("runtime route /api/judge expected blocked_by reserved prefix got $($judgeBlockedBy -join ',')") | Out-Null
+      }
+    }
   } else {
     $failures.Add("runtime route table response is not JSON") | Out-Null
   }
@@ -512,6 +551,7 @@ try {
   } else {
     $failures.Add("runtime reload response is not JSON") | Out-Null
   }
+  Invoke-Api "dynamic.proxy.problem.list.user" GET "/problem/problems?page=1&page_size=1" -Token $script:UserToken -Expected @(200) | Out-Null
   Invoke-Api "modules.detail.judge-core" GET "/admin/modules/ojos.judge-core" -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.installer.discover.admin" GET "/admin/modules/discover" -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.installer.discover.user" GET "/admin/modules/discover" -Token $script:UserToken -Expected @(403) | Out-Null
@@ -545,6 +585,10 @@ try {
     if (-not (Has-JsonItem $demoRouteItems "prefix" "/api/demo-module")) {
       $failures.Add("demo metadata gateway route missing from runtime route table include_disabled") | Out-Null
     }
+    $demoRoute = Get-JsonItem $demoRouteItems "prefix" "/api/demo-module"
+    if ($null -ne $demoRoute -and [string]$demoRoute.service_id -ne "demo-api") {
+      $failures.Add("demo gateway route expected service_id demo-api got $($demoRoute.service_id)") | Out-Null
+    }
   }
   Invoke-Api "modules.installer.disable.demo" POST "/admin/modules/ojos.demo-module/disable" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
   $demoDisabledActiveSnapshot = Invoke-Api "modules.runtime-snapshot.demo-disabled.active" GET "/admin/modules/runtime-snapshot" -Token $script:AdminToken -Expected @(200)
@@ -569,6 +613,8 @@ try {
       $failures.Add("include_disabled runtime snapshot should include disabled demo permission") | Out-Null
     }
   }
+  Invoke-Api "modules.runtime.reload.after-demo-disabled" POST "/admin/modules/runtime/reload" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "dynamic.proxy.demo.disabled.not-proxied" GET "/demo-module/ping" -Token $script:AdminToken -Expected @(404) | Out-Null
   Invoke-Api "modules.installer.upgrade-plan.demo" POST "/admin/modules/ojos.demo-module/upgrade-plan" $demoManifest -Token $script:AdminToken -Expected @(200, 400) | Out-Null
   Invoke-Api "modules.installer.rollback-plan.demo" POST "/admin/modules/ojos.demo-module/rollback-plan" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.installer.uninstall-dry-run.demo" POST "/admin/modules/ojos.demo-module/uninstall-dry-run" @{} -Token $script:AdminToken -Expected @(200) | Out-Null

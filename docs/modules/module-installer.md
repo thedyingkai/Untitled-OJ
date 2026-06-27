@@ -171,3 +171,9 @@ Installer v0 writes metadata used by Kernel Module Runtime. Module enable/disabl
 The demo module intentionally declares disabled menu, frontend route and gateway route metadata. This validates the registry/runtime contribution path without pretending a real business API or frontend bundle exists.
 
 Gateway route declarations are validated as metadata in v1. The route table API can aggregate and detect conflicts, but full dynamic proxy cutover is future work.
+
+## Hotplug L1 Installer Notes
+
+Gateway route declarations use `service_id` in the manifest contract. The installer continues to persist the compatibility DB column `target_service`, but it must be treated as a service identifier, not a URL. Direct `target_url` is forbidden.
+
+Enable/disable affects dynamic proxy eligibility through Runtime Snapshot and route table reload. Disabled modules may appear in include-disabled admin inspection, but disabled routes are not proxy-enabled.

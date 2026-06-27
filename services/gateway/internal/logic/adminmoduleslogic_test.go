@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"ojos-gateway/internal/config"
+	"ojos-gateway/internal/kernel/moduleruntime"
 	"ojos-gateway/internal/moduleregistry"
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
@@ -319,18 +320,19 @@ func TestRuntimeRoutesReturnsRegistryRouteTable(t *testing.T) {
 			Config: config.Config{
 				Jwt: config.JwtConfig{Secret: "test-secret"},
 			},
+			RouteTableOptions: testRouteTableOptions(),
 		},
 		repo: fakeModuleRegistry{data: data},
 	}
 
-	active, err := logic.RuntimeRoutes("Bearer "+token, false, false)
+	active, err := logic.RuntimeRoutes("Bearer "+token, false, false, false)
 	if err != nil {
 		t.Fatalf("runtime routes failed: %v", err)
 	}
 	if hasRuntimeRoute(active.Routes, "/api/demo") {
 		t.Fatalf("disabled demo route should not appear in active runtime route table")
 	}
-	all, err := logic.RuntimeRoutes("Bearer "+token, true, true)
+	all, err := logic.RuntimeRoutes("Bearer "+token, true, true, false)
 	if err != nil {
 		t.Fatalf("include-disabled runtime routes failed: %v", err)
 	}
@@ -339,6 +341,18 @@ func TestRuntimeRoutesReturnsRegistryRouteTable(t *testing.T) {
 	}
 	if !hasRuntimeRoute(all.Routes, "/api/demo") {
 		t.Fatalf("include-disabled route table should expose demo metadata route")
+	}
+	for _, route := range all.Routes {
+		if route.UpstreamBase != "" {
+			t.Fatalf("admin route table should not expose upstream_base by default: %#v", route)
+		}
+	}
+	debug, err := logic.RuntimeRoutes("Bearer "+token, true, false, true)
+	if err != nil {
+		t.Fatalf("debug runtime routes failed: %v", err)
+	}
+	if !hasRuntimeRouteUpstream(debug.Routes, "/api/demo") {
+		t.Fatalf("debug runtime routes should expose upstream for trusted route")
 	}
 }
 
@@ -390,6 +404,15 @@ func hasRuntimeRoute(items []types.ModuleRuntimeRouteItem, prefix string) bool {
 	return false
 }
 
+func hasRuntimeRouteUpstream(items []types.ModuleRuntimeRouteItem, prefix string) bool {
+	for _, item := range items {
+		if item.Prefix == prefix && item.UpstreamBase != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func hasEdge(items []types.ModuleEdgeItem, from string, to string) bool {
 	for _, item := range items {
 		if item.FromModuleId == from && item.ToModuleId == to {
@@ -406,4 +429,14 @@ func hasComponent(items []types.ModuleComponentItem, moduleID string, componentI
 		}
 	}
 	return false
+}
+
+func testRouteTableOptions() moduleruntime.RouteTableOptions {
+	return moduleruntime.RouteTableOptions{
+		TrustedServices: map[string]moduleruntime.TrustedService{
+			"demo-api":    {ServiceID: "demo-api", UpstreamBase: "http://demo-api:8080"},
+			"problem-api": {ServiceID: "problem-api", UpstreamBase: "http://problem-api:8083"},
+			"judge-api":   {ServiceID: "judge-api", UpstreamBase: "http://judge-api:8082"},
+		},
+	}
 }

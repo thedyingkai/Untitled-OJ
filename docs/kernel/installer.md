@@ -32,3 +32,7 @@ v0 不支持远程市场，不执行 hook，不加载 dynamic frontend bundle。
 Kernel Installer writes module registry data, and Kernel Module Runtime reads registry tables plus stored manifest metadata to build Runtime Snapshot. The installer does not need Gateway or Web Shell dependencies. Gateway only exposes admin adapter APIs and forwards installer operations to the internal Rust service.
 
 `gateway_routes.auth_mode` supports `public`, `user`, `admin`, `worker`, and `internal` as the forward-facing route contract. Compatibility aliases `none`, `optional`, and `required` are still accepted for existing Judge Core routes and normalize to public/user semantics in the runtime route table.
+
+## Hotplug L1 Route Contract
+
+Installer Core accepts `gateway_routes.service_id` as the forward contract and keeps `target_service` as a compatibility alias. It rejects direct `target_url` through deny-unknown-fields and dangerous field checks. The installer never resolves upstream URLs; Gateway owns trusted service resolution.

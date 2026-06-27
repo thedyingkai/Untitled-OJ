@@ -95,9 +95,24 @@ func (l *AdminModulesLogic) RuntimeSnapshot(authHeader string, includeDisabled b
 	return runtimeSnapshotResp(snapshot), nil
 }
 
-func (l *AdminModulesLogic) RuntimeRoutes(authHeader string, includeDisabled bool, reloaded bool) (*types.ModuleRuntimeRoutesResp, error) {
+func (l *AdminModulesLogic) RuntimeRouteTable(ctx context.Context) (moduleruntime.RouteTable, error) {
+	snapshot, err := moduleruntime.BuildSnapshot(ctx, l.repo)
+	if err != nil {
+		return moduleruntime.RouteTable{}, err
+	}
+	return moduleruntime.BuildRouteTableWithOptions(snapshot, l.svcCtx.RouteTableOptions), nil
+}
+
+func (l *AdminModulesLogic) RuntimeRoutes(authHeader string, includeDisabled bool, reloaded bool, includeUpstream bool) (*types.ModuleRuntimeRoutesResp, error) {
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
+	}
+	if reloaded && l.svcCtx.RuntimeProxy != nil {
+		activeTable, err := l.RuntimeRouteTable(l.ctx)
+		if err != nil {
+			return nil, err
+		}
+		l.svcCtx.RuntimeProxy.SetRouteTable(activeTable)
 	}
 	snapshot, err := moduleruntime.BuildSnapshotWithOptions(l.ctx, l.repo, moduleruntime.BuildOptions{
 		IncludeDisabled: includeDisabled,
@@ -105,8 +120,10 @@ func (l *AdminModulesLogic) RuntimeRoutes(authHeader string, includeDisabled boo
 	if err != nil {
 		return nil, err
 	}
-	table := moduleruntime.BuildRouteTable(snapshot)
-	resp := runtimeRoutesResp(table)
+	tableOptions := l.svcCtx.RouteTableOptions
+	tableOptions.IncludeDisabledRoutes = includeDisabled
+	table := moduleruntime.BuildRouteTableWithOptions(snapshot, tableOptions)
+	resp := runtimeRoutesResp(table, includeUpstream)
 	resp.Reloaded = reloaded
 	return resp, nil
 }
@@ -299,17 +316,33 @@ func runtimeSnapshotResp(snapshot moduleruntime.Snapshot) *types.ModuleRuntimeSn
 	}
 }
 
-func runtimeRoutesResp(table moduleruntime.RouteTable) *types.ModuleRuntimeRoutesResp {
+func runtimeRoutesResp(table moduleruntime.RouteTable, includeUpstream bool) *types.ModuleRuntimeRoutesResp {
 	routes := make([]types.ModuleRuntimeRouteItem, 0, len(table.Routes))
 	for _, route := range table.Routes {
+		upstream := ""
+		if includeUpstream {
+			upstream = route.UpstreamBase
+		}
 		routes = append(routes, types.ModuleRuntimeRouteItem{
+			RouteId:       route.RouteID,
 			ModuleId:      route.ModuleID,
 			Prefix:        route.Prefix,
+			ServiceId:     route.ServiceID,
 			TargetService: route.TargetService,
+			UpstreamBase:  upstream,
 			AuthMode:      route.AuthMode,
+			Methods:       route.Methods,
 			Enabled:       route.Enabled,
+			ProxyEnabled:  route.ProxyEnabled,
+			Priority:      route.Priority,
+			StripPrefix:   route.StripPrefix,
+			RewritePrefix: route.RewritePrefix,
+			HealthCheckId: route.HealthCheckID,
+			CreatedFrom:   route.CreatedFrom,
+			Status:        route.Status,
 			Conflicts:     route.Conflicts,
 			Warnings:      route.Warnings,
+			BlockedBy:     route.BlockedBy,
 		})
 	}
 	return &types.ModuleRuntimeRoutesResp{

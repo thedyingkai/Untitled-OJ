@@ -181,3 +181,21 @@ Runtime Snapshot and route table endpoints are admin-only. Ordinary users must r
 `/api/admin/modules/topology` is generated from Runtime Snapshot and returns runtime `nodes`/`edges` plus compatibility `module_nodes`/`dependency_edges` fields.
 
 The route table may show `target_service` to admins. It must not be available to ordinary users, and the Gateway must not expose internal service URLs or tokens in errors.
+
+## Hotplug L1 Dynamic Gateway Proxy APIs
+
+Runtime route table endpoints are admin-only. Ordinary users receive 403, and requests without a token receive 401.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/admin/modules/runtime/routes` | Registry-driven route table for enabled module gateway routes. |
+| `GET` | `/api/admin/modules/runtime/routes?include_disabled=true` | Admin inspection view that includes disabled route metadata. |
+| `POST` | `/api/admin/modules/runtime/reload` | Rebuild, validate and atomically replace the live runtime route table. |
+
+Route table items include `route_id`, `module_id`, `prefix`, `service_id`, `auth_mode`, `methods`, `enabled`, `proxy_enabled`, `priority`, `status`, `conflicts`, `warnings` and `blocked_by`. `upstream_base` is hidden by default. It is only for tightly controlled debug/admin-internal inspection and must not be visible to ordinary users.
+
+Module manifests may reference only `service_id`; they must not declare arbitrary `target_url` values. Gateway resolves `service_id` through its trusted service map. This prevents manifest-driven SSRF to public hosts, localhost, Docker socket or undeclared internal ports.
+
+Reserved prefixes cannot be claimed by module routes: `/api/auth`, `/api/admin/modules`, `/api/admin/health`, `/api/health`, `/api/internal`, `/api/judge/worker`.
+
+Auth modes are explicit: `public` requires no JWT; `user` requires a valid JWT; `admin` requires an admin role or `system.admin`; `worker` and `internal` are not public dynamic proxy surfaces.

@@ -181,6 +181,7 @@ pub struct MenuDecl {
 #[serde(deny_unknown_fields)]
 pub struct GatewayRouteDecl {
     pub prefix: String,
+    #[serde(alias = "service_id")]
     pub target_service: String,
     pub auth_mode: String,
     #[serde(default)]
@@ -709,6 +710,7 @@ fn reject_dangerous_keys(value: &Value) -> Result<()> {
         "preinstall",
         "remote_url",
         "download_url",
+        "target_url",
     ];
     match value {
         Value::Object(map) => {

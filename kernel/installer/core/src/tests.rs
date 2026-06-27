@@ -191,6 +191,52 @@ fn gateway_route_hotplug_auth_modes_are_valid() {
 }
 
 #[test]
+fn gateway_route_service_id_alias_is_valid() {
+    let yaml = r#"
+schema_version: 1
+id: ojos.demo
+name: Demo
+version: 0.1.0
+set: demo
+kind: feature
+status: demo
+provides:
+  gateway_routes:
+    - prefix: /api/demo
+      service_id: demo-api
+      auth_mode: user
+      enabled: true
+"#;
+    let manifest: Manifest = serde_yaml::from_str(yaml).expect("manifest parses");
+    assert_eq!(
+        manifest.provides.gateway_routes[0].target_service,
+        "demo-api"
+    );
+    validate_manifest(&manifest).expect("service_id alias should validate");
+}
+
+#[test]
+fn gateway_route_direct_target_url_is_rejected() {
+    let yaml = r#"
+schema_version: 1
+id: ojos.demo
+name: Demo
+version: 0.1.0
+set: demo
+kind: feature
+status: demo
+provides:
+  gateway_routes:
+    - prefix: /api/demo
+      target_url: http://127.0.0.1:2375
+      auth_mode: user
+      enabled: true
+"#;
+    let err = serde_yaml::from_str::<Manifest>(yaml).expect_err("unknown target_url should fail");
+    assert!(err.to_string().contains("target_url"));
+}
+
+#[test]
 fn dangerous_fields_are_rejected() {
     let text = r#"
 schema_version: 1

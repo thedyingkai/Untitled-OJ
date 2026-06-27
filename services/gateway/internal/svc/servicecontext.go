@@ -7,14 +7,17 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"ojos-gateway/internal/config"
+	"ojos-gateway/internal/kernel/moduleruntime"
 	"ojos-gateway/internal/moduleregistry"
 	"ojos-gateway/internal/proxy"
 	"ojos-shared/security/internalauth"
+	sharedperm "ojos-shared/security/permission"
 
 	"ojos-shared/database"
 	sharedlogger "ojos-shared/logger"
@@ -34,8 +37,10 @@ type ServiceContext struct {
 	Redis  *redis.Client
 	Tracer *sdktrace.TracerProvider
 
-	Proxy          http.HandlerFunc
-	InternalSigner *internalauth.Signer
+	Proxy             http.HandlerFunc
+	RuntimeProxy      *proxy.RuntimeProxy
+	RouteTableOptions moduleruntime.RouteTableOptions
+	InternalSigner    *internalauth.Signer
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
@@ -81,23 +86,69 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		internalSigner = internalauth.NewSigner(internalKeyManager)
 	}
 
-	if err := moduleregistry.BootstrapBuiltin(ctx, moduleregistry.NewRepository(db)); err != nil {
+	repo := moduleregistry.NewRepository(db)
+	if err := moduleregistry.BootstrapBuiltin(ctx, repo); err != nil {
 		log.Fatalf("bootstrap module registry failed: %v", err)
 	}
 
-	proxyHandler, err := proxy.NewConfigProxy(c.Proxy.Routes, c.Jwt.Secret, internalSigner, zlog)
+	runtimeProxy, err := proxy.NewRuntimeProxy(c.Proxy.Routes, c.Proxy.TrustedServices, c.Jwt.Secret, internalSigner, zlog)
 	if err != nil {
 		log.Fatalf("init proxy failed: %v", err)
 	}
+	runtimeProxy.SetAdminChecker(func(ctx context.Context, userID int64) (bool, error) {
+		return sharedperm.HasUserPermission(ctx, db, userID, "system.admin", sharedperm.SystemScope())
+	})
+	routeTableOptions := routeTableOptionsFromConfig(c.Proxy)
+	if snapshot, err := moduleruntime.BuildSnapshot(ctx, repo); err == nil {
+		runtimeProxy.SetRouteTable(moduleruntime.BuildRouteTableWithOptions(snapshot, routeTableOptions))
+	} else {
+		zlog.Warn("initial runtime route table build failed", zap.Error(err))
+	}
 
 	return &ServiceContext{
-		Config:         c,
-		Logger:         zlog,
-		DB:             db,
-		Redis:          redisClient,
-		Tracer:         tp,
-		Proxy:          proxyHandler,
-		InternalSigner: internalSigner,
+		Config:            c,
+		Logger:            zlog,
+		DB:                db,
+		Redis:             redisClient,
+		Tracer:            tp,
+		Proxy:             runtimeProxy.ServeHTTP,
+		RuntimeProxy:      runtimeProxy,
+		RouteTableOptions: routeTableOptions,
+		InternalSigner:    internalSigner,
+	}
+}
+
+func routeTableOptionsFromConfig(cfg config.ProxyConfig) moduleruntime.RouteTableOptions {
+	trusted := make(map[string]moduleruntime.TrustedService)
+	for _, item := range cfg.TrustedServices {
+		if strings.TrimSpace(item.ServiceID) == "" {
+			continue
+		}
+		trusted[item.ServiceID] = moduleruntime.TrustedService{
+			ServiceID:     item.ServiceID,
+			UpstreamBase:  item.Target,
+			StripPrefix:   item.StripPrefix,
+			RewritePrefix: item.RewritePrefix,
+			HealthCheckID: item.HealthCheckID,
+		}
+	}
+	for _, route := range cfg.Routes {
+		serviceID := inferServiceID(route.Target)
+		if serviceID == "" {
+			continue
+		}
+		if _, ok := trusted[serviceID]; ok {
+			continue
+		}
+		trusted[serviceID] = moduleruntime.TrustedService{
+			ServiceID:     serviceID,
+			UpstreamBase:  route.Target,
+			StripPrefix:   route.StripPrefix,
+			HealthCheckID: serviceID + "-health",
+		}
+	}
+	return moduleruntime.RouteTableOptions{
+		TrustedServices: trusted,
 	}
 }
 
@@ -135,6 +186,14 @@ func firstEnv(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func inferServiceID(target string) string {
+	targetURL, err := url.Parse(strings.TrimSpace(target))
+	if err != nil {
+		return ""
+	}
+	return targetURL.Hostname()
 }
 
 func (s *ServiceContext) Close(ctx context.Context) {

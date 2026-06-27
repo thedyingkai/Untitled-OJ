@@ -58,3 +58,31 @@ Module Installer 保护以下资产：
 - v0 checksum 只能证明包未被 checksum 列表之外的变更破坏，不能证明发布者可信。
 - rollback apply 和 uninstall apply 默认不是通用生产能力；v0 只保留 plan 边界和 demo module metadata 场景。
 - distroless runtime image 是后续目标；当前 runtime 已从 Rust builder 镜像收敛到 `debian:bookworm-slim`。
+
+## Hotplug L1 Gateway Dynamic Proxy Threats
+
+New attack surface:
+
+- Manifest-declared `gateway_routes.prefix` values.
+- Manifest-declared `service_id` values.
+- Runtime route table reload and cache replacement.
+- Dynamic proxy request path rewriting.
+- Actor propagation from Gateway to trusted internal services.
+
+Main threats:
+
+- SSRF if a manifest could declare arbitrary `target_url` values.
+- Reserved API takeover, for example claiming `/api/auth`, `/api/admin/modules`, `/api/admin/health`, `/api/health`, `/api/internal` or `/api/judge/worker`.
+- Permission bypass through weak `auth_mode` mapping.
+- Leakage of raw `Authorization`, internal URLs or upstream errors to module services or users.
+- Route conflict ambiguity through duplicate or overlapping prefixes.
+
+Mitigations:
+
+- Manifests may reference only `service_id`; Gateway resolves it through trusted configuration.
+- Direct `target_url`, remote URLs, commands, scripts and hooks remain forbidden.
+- Runtime Route Table blocks reserved prefixes, duplicate prefixes, unknown services and unsupported auth modes.
+- Core static routes keep priority for `/api/auth` and `/api/judge/worker`.
+- Dynamic proxy strips hop-by-hop headers and does not forward raw `Authorization` by default.
+- Gateway forwards sanitized actor headers plus internal HMAC headers to trusted services.
+- Admin route table hides `upstream_base` by default; ordinary users cannot access route table APIs.

@@ -166,13 +166,25 @@ export interface ModuleRuntimeSnapshotResponse {
 }
 
 export interface ModuleRuntimeRouteItem {
+  route_id: string
   module_id: string
   prefix: string
+  service_id: string
   target_service: string
+  upstream_base?: string
   auth_mode: string
+  methods: string[]
   enabled: boolean
+  proxy_enabled: boolean
+  priority: number
+  strip_prefix?: string
+  rewrite_prefix?: string
+  health_check_id?: string
+  created_from: string
+  status: string
   conflicts: string[]
   warnings: string[]
+  blocked_by: string[]
 }
 
 export interface ModuleRuntimeRoutesResponse {

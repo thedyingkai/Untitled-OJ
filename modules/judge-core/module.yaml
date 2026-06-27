@@ -171,12 +171,12 @@ provides:
 
   gateway_routes:
     - prefix: /api/problem
-      target_service: problem-api
-      auth_mode: required
+      service_id: problem-api
+      auth_mode: user
       enabled: true
     - prefix: /api/judge
-      target_service: judge-api
-      auth_mode: required
+      service_id: judge-api
+      auth_mode: user
       enabled: true
 
   storage:

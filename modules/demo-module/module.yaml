@@ -55,8 +55,8 @@ provides:
 
   gateway_routes:
     - prefix: /api/demo-module
-      target_service: demo-api
-      auth_mode: required
+      service_id: demo-api
+      auth_mode: user
       enabled: false
 
   storage:
