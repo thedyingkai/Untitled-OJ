@@ -48,6 +48,9 @@ func (l *AdminHealthLogic) AdminHealth(authHeader string) (*types.AdminHealthRes
 			components = append(components, l.checkHTTP(route))
 		}
 	}
+	if strings.TrimSpace(l.svcCtx.Config.Installer.Endpoint) != "" {
+		components = append(components, l.checkInstaller())
+	}
 
 	workerOnline := l.workerOnlineCount()
 	queuePending := l.queuePendingCount()
@@ -129,6 +132,19 @@ func (l *AdminHealthLogic) checkHTTP(route config.ProxyRouteConfig) types.Health
 		}
 	}
 	return component(name, start, err)
+}
+
+func (l *AdminHealthLogic) checkInstaller() types.HealthComponent {
+	start := time.Now()
+	client := http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(strings.TrimRight(l.svcCtx.Config.Installer.Endpoint, "/") + "/health")
+	if err == nil && resp != nil {
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			err = errors.New(resp.Status)
+		}
+	}
+	return component("module-installer", start, err)
 }
 
 func (l *AdminHealthLogic) workerOnlineCount() int64 {

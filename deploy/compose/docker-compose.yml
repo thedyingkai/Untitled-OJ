@@ -59,12 +59,16 @@ services:
     depends_on:
       migrations:
         condition: service_completed_successfully
+      module-installer:
+        condition: service_started
       problem-api:
         condition: service_started
     environment:
       DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      MODULE_INSTALLER_ENDPOINT: ${MODULE_INSTALLER_ENDPOINT:-http://module-installer:8090}
+      MODULE_INSTALLER_INTERNAL_TOKEN: ${MODULE_INSTALLER_INTERNAL_TOKEN:?MODULE_INSTALLER_INTERNAL_TOKEN is required}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
@@ -73,6 +77,37 @@ services:
     volumes:
       - ../../storage/problems:/data/ojos/problems:ro
       - ../../storage/submissions:/data/ojos/submissions:ro
+
+  module-installer:
+    build:
+      context: ../..
+      dockerfile: services/module-installer/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${HTTP_PROXY:-}
+        https_proxy: ${HTTPS_PROXY:-}
+        no_proxy: ${NO_PROXY:-}
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    expose:
+      - "8090"
+    environment:
+      DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      MODULE_INSTALLER_INTERNAL_TOKEN: ${MODULE_INSTALLER_INTERNAL_TOKEN:?MODULE_INSTALLER_INTERNAL_TOKEN is required}
+      MODULE_INSTALLER_HOST: 0.0.0.0
+      MODULE_INSTALLER_PORT: 8090
+      OJOS_REPO_ROOT: /workspace
+      RUST_LOG: info
+    volumes:
+      - ../../modules:/workspace/modules:ro
+    healthcheck:
+      test: [ "CMD", "curl", "-fsS", "http://localhost:8090/health" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   auth:
     build:

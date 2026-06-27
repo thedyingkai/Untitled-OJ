@@ -14,6 +14,8 @@ func TestAdminModuleTopologyRoutePrecedesDetailRoute(t *testing.T) {
 	source := string(data)
 
 	topology := strings.Index(source, `"/api/admin/modules/topology"`)
+	installer := strings.Index(source, `"/api/admin/modules/discover"`)
+	enable := strings.Index(source, `"/api/admin/modules/:id/enable"`)
 	detail := strings.Index(source, `"/api/admin/modules/:id"`)
 	if topology < 0 {
 		t.Fatalf("topology route not found")
@@ -21,7 +23,16 @@ func TestAdminModuleTopologyRoutePrecedesDetailRoute(t *testing.T) {
 	if detail < 0 {
 		t.Fatalf("module detail route not found")
 	}
+	if installer < 0 || enable < 0 {
+		t.Fatalf("installer routes not found")
+	}
 	if topology > detail {
 		t.Fatalf("topology route must be registered before module detail route")
+	}
+	if installer > detail {
+		t.Fatalf("installer static routes must be registered before module detail route")
+	}
+	if enable > detail {
+		t.Fatalf("installer action routes must be registered before module detail route")
 	}
 }

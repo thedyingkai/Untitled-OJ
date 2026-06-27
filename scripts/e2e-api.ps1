@@ -442,12 +442,31 @@ try {
   Invoke-Api "modules.sets.admin" GET "/admin/modules/sets" -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.topology.admin" GET "/admin/modules/topology" -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.detail.judge-core" GET "/admin/modules/ojos.judge-core" -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.discover.admin" GET "/admin/modules/discover" -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.discover.user" GET "/admin/modules/discover" -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "modules.installer.discover.none" GET "/admin/modules/discover" -Expected @(401) | Out-Null
+  $demoManifest = @{ manifest_path = "modules/demo-module/module.yaml"; dry_run = $true }
+  Invoke-Api "modules.installer.validate.demo" POST "/admin/modules/validate" $demoManifest -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.plan.demo" POST "/admin/modules/plan" $demoManifest -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.install.dry-run.demo" POST "/admin/modules/install" $demoManifest -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.install.apply.demo" POST "/admin/modules/install" @{ manifest_path = "modules/demo-module/module.yaml"; dry_run = $false } -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.enable.demo" POST "/admin/modules/ojos.demo-module/enable" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.disable.demo" POST "/admin/modules/ojos.demo-module/disable" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.upgrade-plan.demo" POST "/admin/modules/ojos.demo-module/upgrade-plan" $demoManifest -Token $script:AdminToken -Expected @(200, 400) | Out-Null
+  Invoke-Api "modules.installer.rollback-plan.demo" POST "/admin/modules/ojos.demo-module/rollback-plan" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.uninstall-dry-run.demo" POST "/admin/modules/ojos.demo-module/uninstall-dry-run" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.health.demo" GET "/admin/modules/ojos.demo-module/health" -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.operations.demo" GET "/admin/modules/ojos.demo-module/operations" -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.disable.judge-core.refused" POST "/admin/modules/ojos.judge-core/disable" @{} -Token $script:AdminToken -Expected @(403) | Out-Null
+  Invoke-Api "modules.installer.uninstall.judge-core.refused" POST "/admin/modules/ojos.judge-core/uninstall-dry-run" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "modules.installer.install.user.denied" POST "/admin/modules/install" $demoManifest -Token $script:UserToken -Expected @(403) | Out-Null
 
   $composeRows = @(docker compose --env-file .env -f $ComposeFile ps --format json | ForEach-Object { $_ | ConvertFrom-Json })
   $internalServices = @(
     [pscustomobject]@{ Service = "auth"; Port = 8081 },
     [pscustomobject]@{ Service = "judge-api"; Port = 8082 },
     [pscustomobject]@{ Service = "problem-api"; Port = 8083 },
+    [pscustomobject]@{ Service = "module-installer"; Port = 8090 },
     [pscustomobject]@{ Service = "postgres"; Port = 5432 },
     [pscustomobject]@{ Service = "redis"; Port = 6379 }
   )

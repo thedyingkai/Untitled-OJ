@@ -15,6 +15,7 @@ type Config struct {
 	Storage      StorageConfig
 	Proxy        ProxyConfig
 	InternalAuth InternalAuthConfig
+	Installer    InstallerConfig
 }
 
 type DatabaseConfig struct {
@@ -56,4 +57,9 @@ type InternalAuthConfig struct {
 	RotateBeforeSeconds     int64 `json:",optional"`
 	TimestampSkewSeconds    int64 `json:",optional"`
 	NonceTTLSeconds         int64 `json:",optional"`
+}
+
+type InstallerConfig struct {
+	Endpoint      string
+	InternalToken string
 }

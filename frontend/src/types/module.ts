@@ -112,3 +112,89 @@ export interface ModuleDetailResponse {
   installations: ModuleInstallationItem[]
   health_checks: ModuleComponentItem[]
 }
+
+export interface ModulePlanAction {
+  action: string
+  target: string
+  detail?: string
+}
+
+export interface ModulePlanWarning {
+  code: string
+  message: string
+}
+
+export interface ModulePlan {
+  kind: string
+  module_id: string
+  version: string
+  dry_run: boolean
+  can_apply: boolean
+  actions: ModulePlanAction[]
+  affected_tables: string[]
+  affected_modules: string[]
+  dependencies: string[]
+  blocked_by: string[]
+  warnings: ModulePlanWarning[]
+}
+
+export interface ModuleInstallerEnvelope<T = unknown> {
+  code: number
+  msg: string
+  data: T
+}
+
+export interface ModuleInstallerRequest {
+  manifest_path?: string
+  manifest?: unknown
+  dry_run?: boolean
+}
+
+export interface ModuleDiscoverItem {
+  manifest_path: string
+  module_id?: string
+  name?: string
+  version?: string
+  status?: string
+  valid?: boolean
+  error?: string
+}
+
+export interface ModuleDiscoverData {
+  modules: ModuleDiscoverItem[]
+}
+
+export interface ModuleValidateData {
+  valid: boolean
+  manifest: unknown
+}
+
+export interface ModuleInstallData {
+  plan: ModulePlan
+  result?: unknown
+}
+
+export interface ModuleHealthData {
+  module_id: string
+  status: string
+  module_status: string
+}
+
+export interface ModuleOperationItem {
+  operation_id: string
+  module_id: string
+  action: string
+  status: string
+  actor_user_id?: number
+  actor_username: string
+  request: unknown
+  plan: unknown
+  result: unknown
+  error_message: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ModuleOperationsData {
+  operations: ModuleOperationItem[]
+}

@@ -114,6 +114,12 @@ func applyEnvOverrides(c *config.Config) {
 	if value := strings.TrimSpace(os.Getenv("JWT_SECRET")); value != "" {
 		c.Jwt.Secret = value
 	}
+	if value := strings.TrimSpace(os.Getenv("MODULE_INSTALLER_ENDPOINT")); value != "" {
+		c.Installer.Endpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MODULE_INSTALLER_INTERNAL_TOKEN")); value != "" {
+		c.Installer.InternalToken = value
+	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEMS_ROOT")); value != "" {
 		c.Storage.ProblemsRoot = value
 	}

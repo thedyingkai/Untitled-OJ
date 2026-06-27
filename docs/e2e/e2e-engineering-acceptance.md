@@ -125,3 +125,23 @@ Redis Streams 只作为 signal history，不是任务所有权来源。验收时
 - 多机 worker 验收：需要 Linux/Docker/多机网络环境，验证远程 worker、并发、lease 恢复和故障切换。
 
 静态验证结果不得替代 API 验收；Docker daemon 不可用时必须记录为“无法执行 Docker API 验收”。
+# 2026-06-27 Module Installer E2E 覆盖
+
+`scripts/e2e-api.ps1` 已扩展 Module Installer runtime smoke：
+
+- `/api/admin/modules/discover`
+- `/api/admin/modules/validate`
+- `/api/admin/modules/plan`
+- `/api/admin/modules/install` dry-run / apply demo module
+- `/api/admin/modules/:id/enable`
+- `/api/admin/modules/:id/disable`
+- `/api/admin/modules/:id/upgrade-plan`
+- `/api/admin/modules/:id/rollback-plan`
+- `/api/admin/modules/:id/uninstall-dry-run`
+- `/api/admin/modules/:id/health`
+- `/api/admin/modules/:id/operations`
+- 普通用户 403、无 token 401
+- `ojos.judge-core` disable 被拒绝
+- internal service 不通过 compose host port 暴露
+
+验收必须保持 `failed=0`、`path_leaks=0`、`admin_health_status=ok`、`admin_health_judge_status=ok`。

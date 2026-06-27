@@ -92,3 +92,5 @@
 
 - [历史文档目录](archive/legacy-docs/)
 - [文档迁移记录](archive/legacy-docs/DOCS_MIGRATION.md)
+- [Module Installer 仓库边界 ADR](architecture/adr/ADR-module-installer-repository-boundary.md)
+- [模块包格式](modules/module-package-format.md)

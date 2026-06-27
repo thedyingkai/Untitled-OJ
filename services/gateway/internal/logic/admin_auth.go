@@ -11,21 +11,32 @@ import (
 )
 
 func requireAdmin(ctx context.Context, svcCtx *svc.ServiceContext, authHeader string) error {
+	_, err := requireAdminClaims(ctx, svcCtx, authHeader)
+	return err
+}
+
+type adminClaims struct {
+	UserID   int64
+	Username string
+	Roles    []string
+}
+
+func requireAdminClaims(ctx context.Context, svcCtx *svc.ServiceContext, authHeader string) (adminClaims, error) {
 	claims, err := parseBearerClaims(svcCtx, authHeader)
 	if err != nil {
-		return err
+		return adminClaims{}, err
 	}
 	if isAdminRole(claims.Roles) {
-		return nil
+		return adminClaims{UserID: claims.UserID, Username: claims.Username, Roles: claims.Roles}, nil
 	}
 	ok, err := hasSystemAdminPermission(ctx, svcCtx, claims.UserID)
 	if err != nil {
-		return err
+		return adminClaims{}, err
 	}
 	if !ok {
-		return errors.New("forbidden")
+		return adminClaims{}, errors.New("forbidden")
 	}
-	return nil
+	return adminClaims{UserID: claims.UserID, Username: claims.Username, Roles: claims.Roles}, nil
 }
 
 var hasSystemAdminPermission = func(ctx context.Context, svcCtx *svc.ServiceContext, userID int64) (bool, error) {

@@ -59,3 +59,24 @@ go test ./...
 - [服务拓扑](../architecture/service-topology.md)
 - [内部 HMAC](../architecture/internal-auth.md)
 - [Worker Link 协议](../architecture/worker-link-protocol.md)
+# 2026-06-27 Module Installer 后端开发补充
+
+Module Installer 使用独立 Rust workspace：
+
+```text
+crates/module-installer-core/
+services/module-installer/
+tools/ojosctl/
+```
+
+`module-installer-core` 只包含 manifest/package/plan/依赖解析等纯逻辑，不依赖 Go 服务或 frontend。`services/module-installer` 是内部 HTTP service，通过 PostgreSQL 写 module registry、operation lock、operation history 和 audit log。`tools/ojosctl` 提供本地 validate / plan / package / verify。
+
+新增 Rust 验证命令：
+
+```powershell
+cargo fmt --check
+cargo check
+cargo test
+```
+
+Gateway 仍是唯一 public API 入口。新增 Admin API 必须先在 Gateway 做 JWT 和 `system.admin` 权限校验，再调用 internal installer service。

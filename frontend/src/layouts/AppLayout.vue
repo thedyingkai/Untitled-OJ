@@ -42,6 +42,7 @@ const menuOptions = computed<MenuOption[]>(() => {
         menuLink('/admin/health', 'Health'),
         menuLink('/admin/judge', 'Judge Cluster'),
         menuLink('/admin/modules', 'Modules'),
+        menuLink('/admin/modules/installer', 'Installer'),
         menuLink('/admin/modules/topology', 'Topology'),
         menuLink('/admin/users', 'Users'),
         menuLink('/admin/permissions', 'Permissions'),
@@ -55,6 +56,7 @@ const menuOptions = computed<MenuOption[]>(() => {
 
 const selectedKey = computed(() => {
   if (route.path.startsWith('/admin/modules/topology')) return '/admin/modules/topology'
+  if (route.path.startsWith('/admin/modules/installer')) return '/admin/modules/installer'
   if (route.path.startsWith('/admin/modules/')) return '/admin/modules'
   if (route.path.startsWith('/problems')) return '/problems'
   if (route.path.startsWith('/submissions')) return '/submissions'

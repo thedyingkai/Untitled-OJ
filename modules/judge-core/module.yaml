@@ -1,84 +1,155 @@
+schema_version: 1
 id: ojos.judge-core
 name: Judge Core
 version: 0.1.0
 set: core-capability
 kind: feature
 status: builtin
-description: 题目、题目包、提交、评测、Worker Link、结果查询与评测集群管理模块。
+description: Problem catalog, package validation, submissions, judging, Worker Link, result storage, and judge cluster administration.
+
+compatibility:
+  platform: ">=0.1.0"
+  installer: ">=0.1.0"
 
 requires:
-  platform: ">=0.1.0"
   modules:
-    - ojos.kernel.edge-ui-shell >= 0.1.0
-    - ojos.kernel.identity-access >= 0.1.0
-    - ojos.kernel.config-secret >= 0.1.0
-    - ojos.kernel.audit-policy >= 0.1.0
+    - id: ojos.kernel.edge-ui-shell
+      version: ">=0.1.0"
+    - id: ojos.kernel.identity-access
+      version: ">=0.1.0"
+    - id: ojos.kernel.config-secret
+      version: ">=0.1.0"
+    - id: ojos.kernel.audit-policy
+      version: ">=0.1.0"
 
 provides:
   permissions:
-    - problem.view
-    - problem.view.private
-    - problem.create
-    - problem.edit
-    - problem.delete
-    - problem.manage.data
-    - problem.manage.asset
-    - judge.submit
-    - submission.view.own
-    - submission.view.all
+    - key: problem.view
+      description: View public problems.
+    - key: problem.view.private
+      description: View private problems.
+    - key: problem.create
+      description: Create problems.
+    - key: problem.edit
+      description: Edit problems.
+    - key: problem.delete
+      description: Delete problems.
+    - key: problem.manage.data
+      description: Manage problem test data.
+    - key: problem.manage.asset
+      description: Manage problem assets.
+    - key: judge.submit
+      description: Submit code to judge.
+    - key: submission.view.own
+      description: View own submissions.
+    - key: submission.view.all
+      description: View all submissions.
 
-  backend_services:
+  components:
     - id: problem-api
-      path: services/problem-api
-      health: /health
-      exposure: internal
-
+      type: backend_service
+      status: ENABLED
+      config:
+        service: problem-api
+        health: /health
+        exposure: internal
     - id: judge-api
-      path: services/judge-api
-      health: /health
-      exposure: internal
-
-  worker_services:
+      type: backend_service
+      status: ENABLED
+      config:
+        service: judge-api
+        health: /health
+        exposure: internal
     - id: judge-worker
-      path: services/judge-worker
-      mode: external-node
+      type: worker_service
+      status: ENABLED
+      config:
+        mode: external-node
+    - id: problems-storage
+      type: storage_bucket
+      status: ENABLED
+      config:
+        bucket: problems
+    - id: submissions-storage
+      type: storage_bucket
+      status: ENABLED
+      config:
+        bucket: submissions
 
-  frontend:
-    routes:
-      - /problems
-      - /problems/new
-      - /problems/:id
-      - /problems/:id/edit
-      - /problems/:id/package
-      - /problems/:id/submit
-      - /submissions
-      - /submissions/:id
-      - /admin/judge
+  frontend_routes:
+    - path: /problems
+      name: problems
+      component_key: ProblemListView
+      required_permission: problem.view
+      enabled: true
+    - path: /problems/new
+      name: problem-create
+      component_key: ProblemCreateView
+      required_permission: problem.create
+      enabled: true
+    - path: /problems/:id
+      name: problem-detail
+      component_key: ProblemDetailView
+      required_permission: problem.view
+      enabled: true
+    - path: /problems/:id/edit
+      name: problem-edit
+      component_key: ProblemEditView
+      required_permission: problem.edit
+      enabled: true
+    - path: /problems/:id/package
+      name: problem-package
+      component_key: ProblemPackageView
+      required_permission: problem.manage.data
+      enabled: true
+    - path: /problems/:id/submit
+      name: problem-submit
+      component_key: ProblemSubmitView
+      required_permission: judge.submit
+      enabled: true
+    - path: /submissions
+      name: submissions
+      component_key: SubmissionsListView
+      required_permission: submission.view.own
+      enabled: true
+    - path: /submissions/:id
+      name: submission-detail
+      component_key: SubmissionDetailView
+      required_permission: submission.view.own
+      enabled: true
+    - path: /admin/judge
+      name: admin-judge
+      component_key: AdminJudgeView
+      required_permission: system.admin
+      enabled: true
 
-    menus:
-      - key: problems
-        title: 题目
-        route: /problems
-      - key: submissions
-        title: 提交
-        route: /submissions
-      - key: admin-judge
-        title: 评测集群
-        route: /admin/judge
-        permission: system.admin
+  menus:
+    - key: problems
+      title: Problems
+      route_path: /problems
+      sort_order: 10
+      enabled: true
+    - key: submissions
+      title: Submissions
+      route_path: /submissions
+      sort_order: 20
+      enabled: true
+    - key: admin-judge
+      title: Judge Cluster
+      route_path: /admin/judge
+      sort_order: 100
+      required_permission: system.admin
+      enabled: true
 
   gateway_routes:
     - prefix: /api/problem
-      service: problem-api
-      auth: user
-
+      target_service: problem-api
+      auth_mode: required
+      enabled: true
     - prefix: /api/judge
-      service: judge-api
-      auth: user
-
-    - prefix: /api/judge/worker
-      service: judge-api
-      auth: worker
+      target_service: judge-api
+      auth_mode: required
+      enabled: true
 
   storage:
     buckets:
@@ -87,15 +158,30 @@ provides:
       - judge-artifacts
 
   health_checks:
-    - problem-api
-    - judge-api
-    - worker-cluster
-    - queue
-    - artifact-storage
+    - id: problem-api-health
+      type: http
+      optional: false
+    - id: judge-api-health
+      type: http
+      optional: false
+    - id: worker-cluster-health
+      type: metadata
+      optional: false
+    - id: queue-health
+      type: metadata
+      optional: false
+    - id: artifact-storage-health
+      type: metadata
+      optional: false
 
   migrations:
-    - deploy/migrations/000002_judge_schema.up.sql
-    - deploy/migrations/000004_problem_package_core.up.sql
-    - deploy/migrations/000005_judge_sandbox_storage_cleanup.up.sql
-    - deploy/migrations/000007_problem_catalog_fields.up.sql
-    - deploy/migrations/000008_worker_link.up.sql
+    - up: deploy/migrations/000002_judge_schema.up.sql
+      down: deploy/migrations/000002_judge_schema.down.sql
+    - up: deploy/migrations/000004_problem_package_core.up.sql
+      down: deploy/migrations/000004_problem_package_core.down.sql
+    - up: deploy/migrations/000005_judge_sandbox_storage_cleanup.up.sql
+      down: deploy/migrations/000005_judge_sandbox_storage_cleanup.down.sql
+    - up: deploy/migrations/000007_problem_catalog_fields.up.sql
+      down: deploy/migrations/000007_problem_catalog_fields.down.sql
+    - up: deploy/migrations/000008_worker_link.up.sql
+      down: deploy/migrations/000008_worker_link.down.sql

@@ -1,70 +1,128 @@
-# 模块安装器
+# Module Installer
 
-> 文档状态：目标架构
-> 适用范围：架构设计 / 模块开发规划 / 运维
-> 最后更新：2026-06-26
+> 文档状态：当前实现，v0 本地 manifest / 本地 package 验收中
+> 适用范围：模块开发 / 后端开发 / 运维 / 安全审计
+> 最后更新：2026-06-27
 
-## 1. 文档目的
+## 设计目标
 
-本文档描述目标架构中的 module installer。安装器是把模块从“文件和 manifest”变成“可运行能力”的执行器。
+Module Installer 是 OJOS 的模块生命周期基座。它不是一个简单的管理按钮，而是负责把模块声明从 `module.yaml` 和 `.ojosmod` 包转换为可审计、可回滚规划、可权限控制的系统状态变更。
 
-## 2. 适用范围
+当前实现采用 Rust：
 
-适用于后续实现 module registry、模块安装 CLI、管理后台模块页面和 Contest 热插拔验证。
-
-## 3. 当前实现
-
-当前仓库没有完整安装器。现有部署通过 compose、迁移文件和手写路由完成。本文档是目标架构约束，不能理解为当前已上线能力。
-
-## 4. 目标设计
-
-安装器 v0 应本地、确定性、可审计。它读取 `module.yaml`，校验 manifest，解析依赖，检测冲突，执行迁移，注册权限、菜单、Gateway route 和健康检查，然后运行 smoke test。
-
-## 5. 关键流程
-
-```mermaid
-flowchart TD
-    Read[Read module.yaml] --> Validate[Validate schema]
-    Validate --> Deps[Resolve dependencies]
-    Deps --> Conflicts[Check conflicts]
-    Conflicts --> Migrate[Apply migrations]
-    Migrate --> Register[Register routes permissions menus]
-    Register --> Smoke[Run smoke tests]
-    Smoke --> Enabled[Mark enabled]
+```text
+crates/module-installer-core/  纯逻辑核心
+services/module-installer/     内部 HTTP service
+tools/ojosctl/                 本地 CLI
 ```
 
-## 6. 配置说明
+仓库边界见 [ADR: Module Installer Repository Boundary](../architecture/adr/ADR-module-installer-repository-boundary.md)。当前不立即拆仓，但按独立 Rust workspace 和可拆仓 contract 实现。
 
-安装器需要平台版本、模块目录、迁移目录、数据库连接和审计写入权限。生产 secret 不应出现在模块包中。
+## 当前 v0 能力
 
-安装器执行位置应属于 Control Plane 管理域，不能放在 worker node。它需要访问数据库和服务注册表，因此必须运行在可信网络内。安装器可以读取模块包中的 manifest 和迁移文件，但不能执行任意未审计脚本。需要外部二进制或构建步骤的模块，应先在 CI 中构建为可审计 artifact。
+v0 已实现：
 
-安装器日志应记录 module id、版本、操作者、开始时间、结束时间、状态、失败步骤和 request_id。日志不能记录生产 secret。
+- 本地 `modules/*/module.yaml` discover / validate / plan。
+- 本地 `.ojosmod` package / verify。
+- manifest schema version 1 校验。
+- 路径安全校验、危险字段校验、重复声明校验。
+- 依赖解析与 install / enable / disable / upgrade / rollback / uninstall plan。
+- demo module 的 install apply / enable / disable。
+- operation lock、operation history 和 audit log。
+- Gateway Admin API 接入。
+- 前端 `/admin/modules/installer` 管理页。
 
-## 7. 安全边界
+v0 明确不支持：
 
-安装器必须由管理员触发，执行前做权限校验。失败时不能留下半注册路由或半注册权限。
+- 远程模块市场。
+- 远程不可信模块自动安装。
+- 动态 frontend bundle 执行。
+- install hook / postinstall / preinstall 脚本执行。
+- judge-core / kernel 的 disable 或 uninstall apply。
+- 真实跨仓库独立发布。
 
-## 8. 验收方式
+## 内部服务
 
-用 Judge Core 和 Contest 模块验证安装、禁用、启用、升级失败和回滚。所有动作应有审计记录。
+`module-installer` 只在 compose internal network 中暴露：
 
-installer v0 的最小验收包括：
+```text
+GET  /health
+GET  /internal/modules/discover
+POST /internal/modules/validate
+POST /internal/modules/plan
+POST /internal/modules/install
+POST /internal/modules/:id/enable
+POST /internal/modules/:id/disable
+POST /internal/modules/:id/upgrade-plan
+POST /internal/modules/:id/rollback-plan
+POST /internal/modules/:id/uninstall-dry-run
+GET  /internal/modules/:id/health
+GET  /internal/modules/:id/operations
+```
 
-1. 安装合法模块成功，并能在管理页面看到状态。
-2. 安装缺依赖模块失败，且没有写入半成品 route。
-3. 安装迁移失败模块进入 `FAILED_INSTALL`。
-4. 禁用模块后前端菜单消失，后端 route 返回不可用或 404。
-5. 重新启用后 route 和菜单恢复。
-6. 所有动作可以在审计记录中追溯。
+内部调用必须携带 `X-OJOS-Installer-Token`。该 token 由 Gateway 注入，不能暴露给前端或用户。
 
-## 9. 常见问题
+## Gateway API
 
-- 迁移失败：停止安装并标记 `FAILED_INSTALL`。
-- 权限冲突：安装前拒绝。
-- 禁用后菜单仍显示：检查前端菜单注册状态。
+外部只通过 Gateway：
 
-## 10. 相关文档
+```text
+GET  /api/admin/modules/discover
+POST /api/admin/modules/validate
+POST /api/admin/modules/plan
+POST /api/admin/modules/install
+POST /api/admin/modules/:id/enable
+POST /api/admin/modules/:id/disable
+POST /api/admin/modules/:id/upgrade-plan
+POST /api/admin/modules/:id/rollback-plan
+POST /api/admin/modules/:id/uninstall-dry-run
+GET  /api/admin/modules/:id/health
+GET  /api/admin/modules/:id/operations
+```
 
-- [模块契约](module-contract.md)
-- [模块生命周期](module-lifecycle.md)
+Gateway 负责 JWT 鉴权、`admin` / `super_admin` / `system.admin` 权限检查、actor 信息透传和错误映射。前端不直接访问 installer service。
+
+## Operation Lock
+
+写操作使用 `module_operation_locks` 全局锁，TTL 为 5 分钟。install / enable / disable / upgrade / rollback / uninstall apply 都必须持锁。
+
+dry-run 默认不写业务表。apply 操作会写入 `module_operations`，并在 `permission_audit_logs` 里记录 `module.<action>`。
+
+## 保护规则
+
+- kernel 模块不可 disable。
+- `ojos.judge-core` 默认不可 disable。
+- kernel / builtin / judge-core 不可 uninstall apply。
+- 有 enabled dependent 时，不允许 disable / uninstall。
+- uninstall apply v0 仅为 demo module 预留；涉及业务数据的模块默认只能 dry-run。
+
+## 验收方式
+
+本地 CLI：
+
+```powershell
+cargo run -p ojosctl -- module validate modules/demo-module/module.yaml --repo-root .
+cargo run -p ojosctl -- module plan modules/demo-module/module.yaml --repo-root .
+cargo run -p ojosctl -- module package modules/demo-module -o .tmp/agent/scratch/demo.ojosmod
+cargo run -p ojosctl -- module verify .tmp/agent/scratch/demo.ojosmod
+```
+
+运行时 API：
+
+```powershell
+powershell -NoProfile -File scripts\e2e-api.ps1 `
+  -BaseUrl http://localhost:8080/api `
+  -AdminUsername admin1 `
+  -AdminPassword admin123 `
+  -UserUsername user1 `
+  -UserPassword user123 `
+  -WorkerToken $env:OJOS_WORKER_TOKEN
+```
+# Runtime Image Boundary
+
+`services/module-installer` currently builds and runs from `rust:1.89-bookworm`
+for v0 acceptance. This keeps the Rust service build reproducible in the local
+compose validation environment, but it is not the final production runtime
+image. A later hardening pass must slim the runtime image, run the service with
+least privilege, reduce writable filesystem surface, and review image
+vulnerabilities before production use.

@@ -70,3 +70,19 @@ npm run build
 前端页面必须继续接真实 Gateway API，不写演示数据，不写本地固定 ID，不绕过统一 API client。Docker Control Plane 可用时，UI 修改后应同时执行 `scripts/e2e-api.ps1`，确认 auth、problem、judge、worker、admin health、admin judge、module registry、permission 和路径泄露扫描不被破坏。
 
 详细设计规则见 [UI 风格指南](ui-style-guide.md)。
+# 2026-06-27 Module Installer 前端开发补充
+
+前端新增 `/admin/modules/installer` 页面，用于调用真实 Gateway API：
+
+- discover
+- validate
+- install dry-run
+- install apply
+- enable / disable
+- upgrade plan
+- rollback plan
+- uninstall dry-run
+- module health
+- operation history
+
+页面不访问本地文件系统，不连接 internal service，不使用 mock/fake 数据。危险操作必须展示影响范围并二次确认。kernel 和 `ojos.judge-core` 需要展示保护提示，不能提供可执行的禁用/卸载 apply 按钮。

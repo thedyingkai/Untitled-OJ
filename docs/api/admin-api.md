@@ -132,3 +132,33 @@ Module Registry v0 的 topology 响应不应为空。完成 `000009_module_regis
 Admin API 必须通过 Gateway 验证 admin 成功、普通用户 403、无 token 401。`scripts\e2e-api.ps1` 已覆盖 `/api/admin/health`、`/api/admin/modules`、`/api/admin/modules/sets`、`/api/admin/modules/topology`、`/api/admin/modules/:id`、`/api/judge/admin/*` 和 `/api/auth/admin/*` 的核心路径。
 
 Module Registry topology 验收必须返回非空真实数据，至少包含 `ojos.judge-core`、kernel 内置模块、judge-core 到 kernel 的依赖，以及 problem-api、judge-api、judge-worker、frontend routes、gateway routes、permissions 等组件。不得再把空数组响应写成通过。
+# 2026-06-27 Module Installer Admin API
+
+Module Installer 对外只通过 Gateway 暴露，所有端点都要求管理员角色或 `system.admin` 权限。普通用户必须返回 403，无 token 必须返回 401。Gateway 会向内部 Rust `module-installer` service 透传 actor 信息，但不会泄露 internal service URL 或 internal token。
+
+新增端点：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/admin/modules/discover` | 发现本地 `modules/*/module.yaml` |
+| `POST` | `/api/admin/modules/validate` | 校验本地 manifest 或 manifest JSON |
+| `POST` | `/api/admin/modules/plan` | 生成 install dry-run plan |
+| `POST` | `/api/admin/modules/install` | dry-run 或 apply metadata install |
+| `POST` | `/api/admin/modules/:id/enable` | 启用模块 |
+| `POST` | `/api/admin/modules/:id/disable` | 禁用模块，kernel/judge-core 受保护 |
+| `POST` | `/api/admin/modules/:id/upgrade-plan` | 生成 upgrade plan |
+| `POST` | `/api/admin/modules/:id/rollback-plan` | 生成 rollback plan |
+| `POST` | `/api/admin/modules/:id/uninstall-dry-run` | 生成 uninstall dry-run plan |
+| `GET` | `/api/admin/modules/:id/health` | 查询 installer 视角的模块健康 |
+| `GET` | `/api/admin/modules/:id/operations` | 查询 module operation history |
+
+请求示例：
+
+```json
+{
+  "manifest_path": "modules/demo-module/module.yaml",
+  "dry_run": true
+}
+```
+
+plan 响应包含 `actions`、`affected_tables`、`affected_modules`、`dependencies`、`blocked_by`、`warnings`、`dry_run` 和 `can_apply`。如果 `blocked_by` 非空，apply 操作会被拒绝。v0 不支持远程市场、不执行 hook、不加载动态 bundle。`.ojosmod` 包只做 checksum integrity，signature / trust policy 留到 v1。

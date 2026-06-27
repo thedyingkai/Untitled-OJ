@@ -124,3 +124,31 @@ powershell -NoProfile -File scripts\e2e-api.ps1 -BaseUrl http://localhost:8080/a
 ```
 
 验收会检查 Gateway 是唯一公开 API 入口，内部 `auth`、`problem-api`、`judge-api`、PostgreSQL、Redis 不通过 compose 发布到宿主机；Jaeger 仅绑定本机 loopback 作为开发/预生产观测入口，生产环境如需访问必须放在受控反向代理、鉴权和网络 ACL 之后。前端开发环境跨端口调用 Gateway 时，需要 Gateway CORS preflight 正常返回 204。
+# 2026-06-27 Module Installer 部署补充
+
+Control Plane compose 新增 `module-installer` 内部服务。该服务使用 Rust 编写，只通过 compose network `expose: 8090` 提供内部 API，不把端口发布到宿主机。
+
+安全边界：
+
+- 只读挂载 `modules/` 到 `/workspace/modules`。
+- 不挂载 `.env`。
+- 不挂载 Docker socket。
+- 不具备执行任意模块脚本的能力。
+- 不支持远程模块市场。
+
+Gateway 通过以下环境变量访问它：
+
+```text
+MODULE_INSTALLER_ENDPOINT=http://module-installer:8090
+MODULE_INSTALLER_INTERNAL_TOKEN=<strong random token>
+```
+
+生产或预生产部署必须生成强随机 `MODULE_INSTALLER_INTERNAL_TOKEN`。该 token 不能写入 Git、文档、前端代码或运行报告。
+# 2026-06-27 Module Installer Runtime Image Boundary
+
+`services/module-installer` currently uses `rust:1.89-bookworm` as the v0
+acceptance runtime image. This is allowed for the controlled v0 validation
+stage, but it is not the final production-hardened runtime image. Before a
+production deployment, the module-installer image should be slimmed and
+hardened separately, including a smaller runtime base, least-privilege runtime
+user, minimal filesystem permissions, and image vulnerability review.

@@ -136,6 +136,9 @@ onMounted(() => void load())
         <RouterLink to="/admin/modules/topology">
           <NButton secondary>Topology</NButton>
         </RouterLink>
+        <RouterLink to="/admin/modules/installer">
+          <NButton secondary>Installer</NButton>
+        </RouterLink>
         <NButton secondary :loading="refreshing" @click="load(true)">Refresh</NButton>
       </template>
     </OjosPageHeader>

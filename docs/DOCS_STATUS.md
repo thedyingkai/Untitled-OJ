@@ -79,3 +79,20 @@
 ## 验收方式
 
 维护文档状态后，应同步更新 [文档索引](DOCS_INDEX.md)，并执行静态验证。
+## 2026-06-27 Module Installer 文档状态
+
+| 文档 | 状态 |
+| --- | --- |
+| architecture/adr/ADR-module-installer-repository-boundary.md | 当前实现，采用 monorepo 内独立 Rust workspace |
+| modules/module-installer.md | 当前实现，v0 本地 manifest / package / metadata lifecycle |
+| modules/module-manifest.md | 当前实现，schema_version 1 |
+| modules/module-lifecycle.md | 当前实现，v0 metadata lifecycle |
+| modules/module-contract.md | 当前实现 |
+| modules/module-package-format.md | 当前实现，checksum integrity；signature v1 |
+
+边界：Installer v0 不支持远程市场、不执行不可信脚本、不加载动态 bundle、不宣称独立仓库发布完成。
+# Module Installer Runtime Image Boundary
+
+`services/module-installer` uses `rust:1.89-bookworm` as a v0 acceptance runtime
+image. It is not the final production-hardened image. Runtime image slimming
+and hardening remain follow-up work before production use.

@@ -47,3 +47,7 @@ InternalAuth:
   RotateBeforeSeconds: 120
   TimestampSkewSeconds: 60
   NonceTTLSeconds: 120
+
+Installer:
+  Endpoint: http://module-installer:8090
+  InternalToken: ""

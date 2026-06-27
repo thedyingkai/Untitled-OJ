@@ -128,3 +128,15 @@ type ModuleDetailResp struct {
 	Installations  []ModuleInstallationItem  `json:"installations"`
 	HealthChecks   []ModuleComponentItem     `json:"health_checks"`
 }
+
+type ModuleInstallerReq struct {
+	ManifestPath string `json:"manifest_path,optional"`
+	Manifest     any    `json:"manifest,optional"`
+	DryRun       bool   `json:"dry_run,optional"`
+}
+
+type ModuleInstallerResp struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data any    `json:"data"`
+}

@@ -145,6 +145,17 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
+        path: 'admin/modules/installer',
+        name: 'admin-module-installer',
+        component: () => import('../views/admin/AdminModuleInstallerView.vue'),
+        meta: {
+          title: 'Module Installer',
+          requiresAuth: true,
+          roles: adminRoles,
+          permissions: adminPermissions,
+        },
+      },
+      {
         path: 'admin/modules/:id',
         name: 'admin-module-detail',
         component: () => import('../views/admin/AdminModuleDetailView.vue'),

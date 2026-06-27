@@ -41,6 +41,46 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 			},
 			{
 				Method:  http.MethodGet,
+				Path:    "/api/admin/modules/discover",
+				Handler: adminModuleInstallerDiscoverHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/discover",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/modules/validate",
+				Handler: adminModuleInstallerValidateHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/validate",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/modules/plan",
+				Handler: adminModuleInstallerPlanHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/plan",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/modules/install",
+				Handler: adminModuleInstallerInstallHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/install",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodGet,
 				Path:    "/api/admin/modules/sets",
 				Handler: adminModuleSetsHandler(serverCtx),
 			},
@@ -57,6 +97,76 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 			{
 				Method:  http.MethodOptions,
 				Path:    "/api/admin/modules/topology",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/modules/:id/enable",
+				Handler: adminModuleInstallerEnableHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/:id/enable",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/modules/:id/disable",
+				Handler: adminModuleInstallerDisableHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/:id/disable",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/modules/:id/upgrade-plan",
+				Handler: adminModuleInstallerUpgradePlanHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/:id/upgrade-plan",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/modules/:id/rollback-plan",
+				Handler: adminModuleInstallerRollbackPlanHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/:id/rollback-plan",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/modules/:id/uninstall-dry-run",
+				Handler: adminModuleInstallerUninstallDryRunHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/:id/uninstall-dry-run",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/modules/:id/health",
+				Handler: adminModuleInstallerHealthHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/:id/health",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/modules/:id/operations",
+				Handler: adminModuleInstallerOperationsHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/:id/operations",
 				Handler: preflightHandler(),
 			},
 			{

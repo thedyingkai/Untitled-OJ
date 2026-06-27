@@ -187,6 +187,14 @@ foreach ($service in @("auth", "gateway", "problem-api", "judge-api")) {
     }
 }
 
+Step "Rust fmt/check module-installer workspace" {
+    InDir $root {
+        Run "cargo" @("fmt", "--check")
+        Run "cargo" @("check")
+        Run "cargo" @("test")
+    }
+}
+
 Step "Rust fmt/check judge-worker" {
     InDir (Join-Path $root "services/judge-worker") {
         Run "cargo" @("fmt", "--check")
