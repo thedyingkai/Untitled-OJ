@@ -131,3 +131,13 @@
 - `docs/api/admin-api.md` documents runtime operations APIs and Gateway apply returning 501.
 - `docs/development/backend-development.md` and `docs/development/frontend-development.md` document that Gateway/Web remain plan/status-only.
 - `docs/security/module-installer-threat-model.md` documents controlled apply threats and mitigations.
+
+## Module SDK Compatibility Documents
+
+- `docs/modules/module-contract-v1.md` freezes schema v1 semantics.
+- `docs/modules/module-schema-v1.yaml` lists schema v1 fields and compatibility policy.
+- `docs/modules/module-sdk.md` describes SDK commands and lifecycle.
+- `docs/modules/module-authoring-guide.md` describes authoring extension points.
+- `docs/modules/module-testing-guide.md` describes local and e2e module compatibility checks.
+- `docs/modules/no-kernel-change-extension-proof.md` records the no-core-change proof for Sample Hello.
+- `scripts/e2e-module-compat.ps1` is the compatibility harness.

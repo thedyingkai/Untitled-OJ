@@ -119,3 +119,11 @@ Status: implemented in this working tree, pending final runtime verification.
 Controlled apply is available through `ojosctl runtime apply-plan` for trusted local compose services. Gateway and Web Shell remain plan/status-only and Gateway apply returns 501. Plans use argv-only commands, fixed compose configuration, TTL, confirmation, dry-run, service locks, timeouts, and operation history/audit redaction.
 
 Still out of scope: Web/Gateway apply, Docker socket control in Apps, arbitrary image deployment, manifest command/script execution, hooks, remote module marketplace, dynamic untrusted frontend bundles, full hotplug automation, and Judge Core GA.
+
+## 2026-06-27 Module SDK Compatibility Status
+
+Status: implemented in this working tree, pending final verification.
+
+Module Contract v1 is documented as the stable compatibility start. Sample Hello is a metadata-only SDK sample module. `ojosctl module init` scaffolds safe metadata modules. The compatibility harness proves ordinary modules can enter installer registry, Runtime Snapshot, route table viewer, menu/permission/topology contribution surfaces and runtime services without sample-specific Kernel/Gateway/Web Shell core changes.
+
+Still out of scope: Contest implementation, remote module market, hooks, dynamic untrusted frontend bundles, Web/Gateway runtime apply, full hotplug automation and Judge Core GA.

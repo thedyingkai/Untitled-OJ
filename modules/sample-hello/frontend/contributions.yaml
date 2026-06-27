@@ -1,0 +1,6 @@
+# Metadata-only frontend contribution.
+# Web Shell must render unknown component_key values through safe contribution views.
+routes:
+  - path: /admin/modules/sample-hello
+    component_key: sample-hello-placeholder
+    dynamic_js: false

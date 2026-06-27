@@ -247,3 +247,9 @@ Runtime apply remains disabled in Gateway. Gateway/Web can generate plans and vi
 Plan responses use stable argv-only command data. `can_apply=true` means an external trusted operator may apply the plan after revalidation. `apply_enabled=false` means Gateway/Web apply is intentionally unavailable.
 
 Ordinary users still receive 403 and unauthenticated requests receive 401. Responses must not expose Docker socket paths, raw compose env, DSNs, tokens, secrets, or host absolute paths.
+
+## Module SDK Compatibility APIs
+
+The module SDK compatibility flow uses existing admin APIs: installer validate, install dry-run, install apply, enable, disable, Runtime Snapshot, route table, runtime services, service plan generation and uninstall dry-run. No sample-specific Gateway API is added.
+
+`scripts/e2e-module-compat.ps1` verifies that Sample Hello appears in Module Center, Runtime Snapshot, contribution metadata, topology, permission registry, runtime route viewer and runtime services after enable, then disappears from the active snapshot after disable while remaining visible through `include_disabled=true`.

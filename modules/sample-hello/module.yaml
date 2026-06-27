@@ -1,0 +1,116 @@
+schema_version: 1
+id: ojos.sample-hello
+name: Sample Hello
+version: 0.1.0
+set: sdk-sample
+kind: feature
+status: demo
+description: Metadata-only SDK sample module used to prove manifest/package/runtime compatibility without Kernel, Gateway, or Web Shell core changes.
+
+compatibility:
+  platform: ">=0.1.0"
+  installer: ">=0.1.0"
+
+requires:
+  modules:
+    - id: ojos.platform.web-shell
+      version: ">=0.1.0"
+    - id: ojos.platform.identity-access
+      version: ">=0.1.0"
+    - id: ojos.kernel.module-runtime
+      version: ">=0.1.0"
+
+provides:
+  permissions:
+    - key: sample.hello.view
+      description: View Sample Hello metadata.
+
+  roles: []
+
+  components:
+    - id: sample-hello-component
+      type: metadata
+      status: DISABLED
+      config:
+        purpose: module-sdk-compatibility
+
+  services:
+    - id: sample-hello-metadata-service
+      name: Sample Hello Metadata Service
+      kind: metadata
+      lifecycle: metadata
+      trusted_runtime: metadata
+      health_check_id: sample-hello-health
+      routes: []
+      required: false
+
+  workers:
+    - id: sample-hello-metadata-worker
+      name: Sample Hello Metadata Worker
+      kind: worker
+      lifecycle: metadata
+      trusted_runtime: metadata
+      health_check_id: sample-hello-health
+      required: false
+
+  frontend_routes:
+    - path: /admin/modules/sample-hello
+      name: sample-hello
+      component_key: sample-hello-placeholder
+      required_permission: sample.hello.view
+      enabled: false
+
+  menus:
+    - key: sample-hello
+      title: Sample Hello
+      route_path: /admin/modules/sample-hello
+      sort_order: 950
+      required_permission: sample.hello.view
+      enabled: false
+
+  gateway_routes:
+    - prefix: /api/sample-hello
+      service_id: sample-hello-api
+      auth_mode: user
+      enabled: false
+
+  storage:
+    buckets:
+      - sample-hello-metadata
+
+  storage_buckets:
+    - id: sample-hello-metadata
+      description: Metadata-only storage declaration for SDK compatibility tests.
+
+  health_checks:
+    - id: sample-hello-health
+      type: metadata
+      optional: true
+
+  migrations: []
+
+  events:
+    publishes:
+      - sample.hello.enabled
+    subscribes:
+      - kernel.runtime.snapshot.generated
+
+  scheduled_jobs: []
+
+  admin_panels:
+    - id: sample-hello
+      route_path: /admin/modules/sample-hello
+      required_permission: sample.hello.view
+
+  topology:
+    nodes:
+      - id: sample-hello-component
+        type: metadata
+        label: Sample Hello Component
+      - id: sample-hello-health
+        type: health
+        label: Sample Hello Metadata Health
+    edges:
+      - from: sample-hello-component
+        to: sample-hello-health
+        type: observes

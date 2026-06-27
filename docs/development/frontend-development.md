@@ -135,3 +135,7 @@ Forbidden UI behavior:
 - No dynamic JavaScript execution from module manifests.
 
 L2 Controlled Apply keeps apply authority outside the browser.
+
+## Module SDK Frontend Guidance
+
+Web Shell must not hardcode ordinary SDK sample modules. It should render module menus, frontend route metadata, contribution detail and topology from Runtime Snapshot/registry APIs. Unknown `component_key` values continue to use safe metadata fallback and must not dynamically import JavaScript.

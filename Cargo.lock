@@ -1262,8 +1262,10 @@ dependencies = [
  "chrono",
  "clap",
  "module-installer-core",
+ "regex",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "uuid",
 ]

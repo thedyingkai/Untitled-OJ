@@ -156,3 +156,18 @@ Installer hardening 后，静态验收还必须覆盖：
 - `ojosctl module verify` 和 `ojosctl module inspect`。
 - compose config 包含 `module-installer` internal service、`read_only: true`、`no-new-privileges:true`、`cap_drop: ALL`、只读 `modules/` 挂载和 lock TTL 配置。
 - module-installer Dockerfile 使用 builder/runtime 多阶段，最终 runtime image 不得是 `rust:*`。
+
+## Module SDK Compatibility Harness
+
+Run:
+
+```powershell
+powershell -NoProfile -File scripts\e2e-module-compat.ps1 `
+  -BaseUrl http://localhost:8080/api `
+  -AdminUsername admin1 `
+  -AdminPassword admin123 `
+  -UserUsername user1 `
+  -UserPassword user123
+```
+
+The harness validates scaffold, package, install, enable, Runtime Snapshot, route/menu/topology/permission/service contribution, metadata service plan blocking, disable, include-disabled inspection, uninstall dry-run, auth rejection and path leak checks.

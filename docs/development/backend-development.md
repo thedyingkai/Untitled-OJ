@@ -141,3 +141,7 @@ Backend rules:
 - Any compose apply implementation must validate service allowlist, action allowlist, fixed compose path, TTL, and lock before execution.
 
 Local controlled apply currently belongs to `kernel/installer/cli` (`ojosctl runtime apply-plan`) and future operator code, not to Gateway handlers.
+
+## Module SDK Backend Guidance
+
+For ordinary modules, do not add hardcoded Gateway routes or module-specific runtime aggregation code. New modules should enter through `module.yaml`, installer registry writes and Runtime Snapshot. Add Kernel/Gateway code only when introducing a new extension point type, a new runtime driver, or a reviewed platform capability.

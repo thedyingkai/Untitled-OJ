@@ -158,3 +158,9 @@ Plan safety rules:
 - Apply has a service lock, timeout, output length limit, and redaction.
 
 Gateway still exposes `POST /api/admin/runtime/plans/:id/apply` only as an explicit disabled boundary. It returns `501 not implemented` for admins. Ordinary users receive 403 and missing tokens receive 401.
+
+## Module SDK Compatibility Harness v1
+
+Runtime Snapshot is the compatibility surface for ordinary modules. `modules/sample-hello/module.yaml` proves that permissions, menus, frontend route metadata, disabled gateway routes, metadata services/workers, health checks and topology can appear through manifest install/enable without editing Gateway route code, Web Shell hardcoded menus, topology page code or permission page code.
+
+Schema v1 modules can use L0 metadata, L1 route table contribution and L2 controlled service plan metadata. L3 dynamic frontend bundles, hooks, remote module market and full hotplug remain out of scope.

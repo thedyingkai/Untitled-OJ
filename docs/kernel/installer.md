@@ -71,3 +71,13 @@ Apply is intentionally not automatic:
 - operation history is written locally and, when the local control-plane database is reachable, mirrored to runtime operation/audit tables.
 
 Gateway/Web remain plan-only and do not apply runtime plans.
+
+## Module SDK Commands
+
+`ojosctl module init` scaffolds a metadata-only module:
+
+```powershell
+cargo run -p ojosctl -- module init ojos.sample-hello --name "Sample Hello" --kind feature --out modules/sample-hello --with-topology
+```
+
+The scaffold refuses to overwrite existing directories unless `--force` is passed. It does not generate hooks, scripts, dynamic frontend bundles, arbitrary target URLs, images, mounts or privileged runtime options. Generated manifests are validated before the command exits.

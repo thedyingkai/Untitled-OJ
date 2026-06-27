@@ -1,7 +1,16 @@
 use crate::*;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("repo root")
+        .to_path_buf()
+}
 
 fn valid_manifest() -> Manifest {
     Manifest {
@@ -135,6 +144,52 @@ fn invalid_schema_version() {
     let mut manifest = valid_manifest();
     manifest.schema_version = 2;
     assert!(validate_manifest(&manifest).is_err());
+}
+
+#[test]
+fn schema_version_missing_is_rejected() {
+    let yaml = r#"
+id: ojos.demo
+name: Demo
+version: 0.1.0
+set: demo
+kind: feature
+status: demo
+provides: {}
+"#;
+    assert!(serde_yaml::from_str::<Manifest>(yaml).is_err());
+}
+
+#[test]
+fn unknown_top_level_field_is_rejected() {
+    let yaml = r#"
+schema_version: 1
+id: ojos.demo
+name: Demo
+version: 0.1.0
+set: demo
+kind: feature
+status: demo
+unknown_field: ignored
+provides: {}
+"#;
+    assert!(serde_yaml::from_str::<Manifest>(yaml).is_err());
+}
+
+#[test]
+fn unknown_provides_extension_is_rejected_in_v1() {
+    let yaml = r#"
+schema_version: 1
+id: ojos.demo
+name: Demo
+version: 0.1.0
+set: demo
+kind: feature
+status: demo
+provides:
+  harmless_future_extension: []
+"#;
+    assert!(serde_yaml::from_str::<Manifest>(yaml).is_err());
 }
 
 #[test]
@@ -358,6 +413,20 @@ provides:
 }
 
 #[test]
+fn checked_in_manifests_are_schema_v1_compatible() {
+    let root = repo_root();
+    for path in [
+        "modules/judge-core/module.yaml",
+        "modules/demo-module/module.yaml",
+        "modules/sample-hello/module.yaml",
+    ] {
+        let manifest = validate_manifest_file(&root, Path::new(path))
+            .unwrap_or_else(|err| panic!("{path} should validate: {err}"));
+        assert_eq!(manifest.schema_version, 1);
+    }
+}
+
+#[test]
 fn manifest_path_rejects_traversal_absolute_and_tmp() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("modules/demo")).unwrap();
@@ -535,6 +604,87 @@ fn package_checksum_verify_and_path_rejection() {
 
     fs::write(module_dir.join(".env"), "SECRET=value").unwrap();
     assert!(package_module(&module_dir, &dir.path().join("bad.ojosmod")).is_err());
+}
+
+#[test]
+fn package_entry_path_rejects_traversal_absolute_and_symlink() {
+    assert!(manifest::validate_package_entry_path("../module.yaml").is_err());
+    assert!(manifest::validate_package_entry_path("/module.yaml").is_err());
+
+    let dir = tempdir().unwrap();
+    let package = dir.path().join("symlink-entry.ojosmod");
+    {
+        let file = fs::File::create(&package).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default().unix_permissions(0o120777);
+        use std::io::Write;
+        zip.start_file("link", options).unwrap();
+        zip.write_all(b"module.yaml").unwrap();
+        zip.finish().unwrap();
+    }
+    assert!(verify_package(&package).is_err());
+}
+
+#[test]
+fn sample_module_package_verifies() {
+    let dir = tempdir().unwrap();
+    let package = dir.path().join("sample-hello.ojosmod");
+    let module_dir = repo_root().join("modules/sample-hello");
+    let result = package_module(&module_dir, &package).unwrap();
+    assert!(result.valid);
+    assert_eq!(result.module_id, "ojos.sample-hello");
+    let verified = verify_package(&package).unwrap();
+    assert!(verified.valid);
+    assert!(verified.files_checked >= 5);
+    assert_eq!(verified.package.unwrap().signature, None);
+    assert!(verified.warnings.iter().any(|item| item.contains("v1")));
+}
+
+#[test]
+fn package_rejects_banned_entries_and_checksum_mismatch() {
+    for rel in [
+        ".env",
+        ".tmp/file",
+        "node_modules/pkg/index.js",
+        "frontend/dist/app.js",
+    ] {
+        let dir = tempdir().unwrap();
+        let module_dir = dir.path().join("demo");
+        fs::create_dir_all(module_dir.join(rel).parent().unwrap()).unwrap();
+        fs::write(
+            module_dir.join("module.yaml"),
+            serde_yaml::to_string(&valid_manifest()).unwrap(),
+        )
+        .unwrap();
+        fs::write(module_dir.join("README.md"), "demo").unwrap();
+        fs::write(module_dir.join(rel), "bad").unwrap();
+        assert!(
+            package_module(&module_dir, &dir.path().join("bad.ojosmod")).is_err(),
+            "{rel} should be rejected"
+        );
+    }
+
+    let dir = tempdir().unwrap();
+    let package = dir.path().join("checksum-mismatch.ojosmod");
+    {
+        let file = fs::File::create(&package).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
+        use std::io::Write;
+        let manifest_text = serde_yaml::to_string(&valid_manifest()).unwrap();
+        zip.start_file("module.yaml", options).unwrap();
+        zip.write_all(manifest_text.as_bytes()).unwrap();
+        zip.start_file("checksums.sha256", options).unwrap();
+        zip.write_all(
+            b"0000000000000000000000000000000000000000000000000000000000000000  module.yaml\n",
+        )
+        .unwrap();
+        let metadata = "package:\n  format: ojosmod\n  version: 1\n  created_by: test\n";
+        zip.start_file("package.yaml", options).unwrap();
+        zip.write_all(metadata.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+    assert!(verify_package(&package).is_err());
 }
 
 #[test]

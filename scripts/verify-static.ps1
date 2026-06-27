@@ -194,10 +194,17 @@ Step "Rust fmt/check module-installer workspace" {
         Run "cargo" @("test")
         Run "cargo" @("run", "-p", "ojosctl", "--", "--version")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "doctor")
+        if (Test-Path ".tmp/agent/scratch/verify-static-sample-init") {
+            Remove-Item -Recurse -Force ".tmp/agent/scratch/verify-static-sample-init"
+        }
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "init", "ojos.verify-static-sample", "--name", "Verify Static Sample", "--kind", "feature", "--out", ".tmp/agent/scratch/verify-static-sample-init", "--with-topology")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "validate", "modules/demo-module/module.yaml", "--repo-root", ".")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "validate", "modules/sample-hello/module.yaml", "--repo-root", ".")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "package", "modules/demo-module", "-o", ".tmp/agent/scratch/verify-static-demo.ojosmod")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "verify", ".tmp/agent/scratch/verify-static-demo.ojosmod")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "inspect", ".tmp/agent/scratch/verify-static-demo.ojosmod")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "package", "modules/sample-hello", "-o", ".tmp/agent/scratch/verify-static-sample-hello.ojosmod")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "verify", ".tmp/agent/scratch/verify-static-sample-hello.ojosmod")
         Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "services")
         Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "service", "problem-api")
         Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "plan-restart", "problem-api", "--out", ".tmp/agent/scratch/problem-api-restart.json")
