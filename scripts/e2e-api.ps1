@@ -441,6 +441,25 @@ try {
   Invoke-Api "modules.list.none" GET "/admin/modules" -Expected @(401) | Out-Null
   Invoke-Api "modules.sets.admin" GET "/admin/modules/sets" -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.topology.admin" GET "/admin/modules/topology" -Token $script:AdminToken -Expected @(200) | Out-Null
+  $runtimeSnapshot = Invoke-Api "modules.runtime-snapshot.admin" GET "/admin/modules/runtime-snapshot" -Token $script:AdminToken -Expected @(200)
+  Invoke-Api "modules.runtime-snapshot.user" GET "/admin/modules/runtime-snapshot" -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "modules.runtime-snapshot.none" GET "/admin/modules/runtime-snapshot" -Expected @(401) | Out-Null
+  if ($runtimeSnapshot.Json) {
+    if (-not $runtimeSnapshot.Json.modules -or $runtimeSnapshot.Json.modules.Count -le 0) {
+      $failures.Add("runtime snapshot modules expected non-empty") | Out-Null
+    }
+    if (-not $runtimeSnapshot.Json.topology -or -not $runtimeSnapshot.Json.topology.nodes -or $runtimeSnapshot.Json.topology.nodes.Count -le 0) {
+      $failures.Add("runtime snapshot topology nodes expected non-empty") | Out-Null
+    }
+    $snapshotModuleIds = @($runtimeSnapshot.Json.modules | Select-Object -ExpandProperty module_id)
+    foreach ($expectedModule in @("ojos.kernel.installer", "ojos.kernel.module-runtime", "ojos.platform.gateway", "ojos.platform.web-shell", "ojos.judge-core")) {
+      if ($snapshotModuleIds -notcontains $expectedModule) {
+        $failures.Add("runtime snapshot missing $expectedModule") | Out-Null
+      }
+    }
+  } else {
+    $failures.Add("runtime snapshot response is not JSON") | Out-Null
+  }
   Invoke-Api "modules.detail.judge-core" GET "/admin/modules/ojos.judge-core" -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.installer.discover.admin" GET "/admin/modules/discover" -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.installer.discover.user" GET "/admin/modules/discover" -Token $script:UserToken -Expected @(403) | Out-Null

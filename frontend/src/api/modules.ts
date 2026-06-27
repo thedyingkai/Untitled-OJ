@@ -9,6 +9,7 @@ import type {
   ModuleInstallerRequest,
   ModuleOperationsData,
   ModulePlan,
+  ModuleRuntimeSnapshotResponse,
   ModuleTopologyResponse,
   ModuleValidateData,
 } from '../types/module'
@@ -23,6 +24,10 @@ export function listModuleSets(): Promise<ListModuleSetsResponse> {
 
 export function getModuleTopology(): Promise<ModuleTopologyResponse> {
   return apiClient.get('/admin/modules/topology')
+}
+
+export function getModuleRuntimeSnapshot(): Promise<ModuleRuntimeSnapshotResponse> {
+  return apiClient.get('/admin/modules/runtime-snapshot')
 }
 
 export function getModuleDetail(moduleId: string): Promise<ModuleDetailResponse> {

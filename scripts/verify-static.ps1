@@ -218,10 +218,10 @@ Step "Docker compose config" {
     InDir $root {
         RunQuiet "docker" @("compose", "--env-file", ".env.example", "-f", "deploy/compose/docker-compose.yml", "config")
         RunQuiet "docker" @("compose", "--env-file", "deploy/worker/.env.example", "-f", "deploy/worker/docker-compose.yml", "config")
-        if (-not (Test-Path (Join-Path $root "services/module-installer/Dockerfile"))) {
+        if (-not (Test-Path (Join-Path $root "kernel/installer/service/Dockerfile"))) {
             throw "module-installer Dockerfile is missing"
         }
-        $installerDockerfile = Get-Content (Join-Path $root "services/module-installer/Dockerfile") -Raw
+        $installerDockerfile = Get-Content (Join-Path $root "kernel/installer/service/Dockerfile") -Raw
         $installerFrom = @($installerDockerfile -split "`n" | Where-Object { $_ -match "^\s*FROM\s+" })
         if ($installerFrom.Count -lt 2) {
             throw "module-installer Dockerfile must use a builder and runtime stage"

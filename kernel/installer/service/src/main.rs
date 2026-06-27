@@ -595,11 +595,13 @@ async fn apply_install(
     manifest: &Manifest,
 ) -> Result<(), sqlx::Error> {
     let manifest_json = serde_json::to_value(manifest).unwrap_or_else(|_| json!({}));
-    let install_status = if manifest.kind == "kernel" || manifest.status == "builtin" {
-        "ENABLED"
-    } else {
-        "DISABLED"
-    };
+    let install_status =
+        if manifest.kind == "kernel" || manifest.kind == "platform" || manifest.status == "builtin"
+        {
+            "ENABLED"
+        } else {
+            "DISABLED"
+        };
     sqlx::query(
         r#"
 INSERT INTO module_sets(set_id, name, description, sort_order)
@@ -684,6 +686,46 @@ ON CONFLICT(from_module_id, to_module_id, edge_type) DO UPDATE SET
             &component.component_type,
             &component.status,
             &component.config,
+        )
+        .await?;
+    }
+    for service in &manifest.provides.services {
+        upsert_component(
+            tx,
+            &manifest.id,
+            &service.id,
+            "backend_service",
+            install_status,
+            &json!({
+                "path": service.path,
+                "health": service.health,
+                "exposure": service.exposure
+            }),
+        )
+        .await?;
+    }
+    for worker in &manifest.provides.workers {
+        upsert_component(
+            tx,
+            &manifest.id,
+            &worker.id,
+            "worker_service",
+            install_status,
+            &json!({
+                "path": worker.path,
+                "mode": worker.mode
+            }),
+        )
+        .await?;
+    }
+    for bucket in &manifest.provides.storage_buckets {
+        upsert_component(
+            tx,
+            &manifest.id,
+            &bucket.id,
+            "storage_bucket",
+            install_status,
+            &json!({ "description": bucket.description }),
         )
         .await?;
     }

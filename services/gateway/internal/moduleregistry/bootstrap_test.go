@@ -105,6 +105,31 @@ func TestBuiltinDataContainsJudgeCoreTopology(t *testing.T) {
 	if !foundJudgeCore {
 		t.Fatalf("judge-core module not found")
 	}
+	for _, moduleID := range []string{
+		"ojos.kernel.installer",
+		"ojos.kernel.module-runtime",
+		"ojos.kernel.module-registry",
+		"ojos.kernel.topology",
+		"ojos.kernel.policy",
+		"ojos.kernel.audit",
+		"ojos.kernel.config",
+		"ojos.kernel.health",
+		"ojos.platform.gateway",
+		"ojos.platform.web-shell",
+		"ojos.platform.identity-access",
+		"ojos.platform.storage",
+		"ojos.platform.observability",
+	} {
+		if !bootstrapHasModule(data.Modules, moduleID) {
+			t.Fatalf("builtin module %s not found", moduleID)
+		}
+	}
+	if !bootstrapHasEdge(data.Edges, "ojos.judge-core", "ojos.kernel.module-runtime") {
+		t.Fatalf("judge-core should depend on kernel module-runtime")
+	}
+	if !bootstrapHasEdge(data.Edges, "ojos.judge-core", "ojos.platform.web-shell") {
+		t.Fatalf("judge-core should depend on platform web-shell")
+	}
 }
 
 func TestBootstrapBuiltinIsRepeatable(t *testing.T) {
@@ -132,4 +157,22 @@ func TestBootstrapBuiltinIsRepeatable(t *testing.T) {
 	if writer.permissions["system.admin"] != 2 {
 		t.Fatalf("system.admin permission should be bootstrapped twice")
 	}
+}
+
+func bootstrapHasModule(items []Module, moduleID string) bool {
+	for _, item := range items {
+		if item.ModuleID == moduleID {
+			return true
+		}
+	}
+	return false
+}
+
+func bootstrapHasEdge(items []Edge, from string, to string) bool {
+	for _, item := range items {
+		if item.FromModuleID == from && item.ToModuleID == to {
+			return true
+		}
+	}
+	return false
 }

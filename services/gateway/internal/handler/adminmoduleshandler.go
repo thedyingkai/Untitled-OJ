@@ -44,6 +44,18 @@ func adminModuleTopologyHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
+func adminModuleRuntimeSnapshotHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		l := logic.NewAdminModulesLogic(r.Context(), svcCtx)
+		resp, err := l.RuntimeSnapshot(r.Header.Get("Authorization"))
+		if err != nil {
+			httpx.ErrorCtx(r.Context(), w, err)
+		} else {
+			httpx.OkJsonCtx(r.Context(), w, resp)
+		}
+	}
+}
+
 func adminModuleDetailHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

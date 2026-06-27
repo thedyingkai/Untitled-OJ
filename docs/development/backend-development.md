@@ -64,12 +64,12 @@ go test ./...
 Module Installer 使用独立 Rust workspace：
 
 ```text
-crates/module-installer-core/
-services/module-installer/
-tools/ojosctl/
+kernel/installer/core/
+kernel/installer/service/
+kernel/installer/cli/
 ```
 
-`module-installer-core` 只包含 manifest/package/plan/依赖解析等纯逻辑，不依赖 Go 服务或 frontend。`services/module-installer` 是内部 HTTP service，通过 PostgreSQL 写 module registry、operation lock、operation history 和 audit log。`tools/ojosctl` 提供本地 discover / validate / plan / package / verify / inspect / doctor。
+`module-installer-core` 只包含 manifest/package/plan/依赖解析等纯逻辑，不依赖 Go 服务或 frontend。`kernel/installer/service` 是内部 HTTP service，通过 PostgreSQL 写 module registry、operation lock、operation history 和 audit log。`kernel/installer/cli` 提供本地 discover / validate / plan / package / verify / inspect / doctor。
 
 Rust installer internal API 使用稳定错误结构：
 

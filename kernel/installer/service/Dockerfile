@@ -10,9 +10,9 @@ ARG no_proxy
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
-COPY crates/module-installer-core ./crates/module-installer-core
-COPY services/module-installer ./services/module-installer
-COPY tools/ojosctl ./tools/ojosctl
+COPY kernel/installer/core ./kernel/installer/core
+COPY kernel/installer/service ./kernel/installer/service
+COPY kernel/installer/cli ./kernel/installer/cli
 
 RUN cargo build --release -p module-installer
 

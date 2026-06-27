@@ -3,7 +3,7 @@ import { computed, h, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { NButton, NDataTable, NSpace, NTag, NTabPane, NTabs, type DataTableColumns } from 'naive-ui'
 
-import { getModuleTopology } from '../../api/modules'
+import { getModuleRuntimeSnapshot, listModuleSets } from '../../api/modules'
 import { toApiClientError, type ApiClientError } from '../../api/client'
 import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
 import EmptyView from '../../components/common/EmptyView.vue'
@@ -14,6 +14,8 @@ import type {
   ModuleComponentItem,
   ModuleEdgeItem,
   ModuleNodeItem,
+  ModuleRuntimeComponent,
+  ModuleRuntimeSnapshotResponse,
   ModuleSetItem,
   ModuleTopologyResponse,
 } from '../../types/module'
@@ -67,6 +69,28 @@ const componentColumns: DataTableColumns<ModuleComponentItem> = [
   { title: 'Config', key: 'config', render: (row) => h(JsonViewer, { value: row.config }) },
 ]
 
+function runtimeComponentToComponent(item: ModuleRuntimeComponent): ModuleComponentItem {
+  return {
+    module_id: item.module_id,
+    component_id: item.component_id,
+    component_type: item.type,
+    status: item.status,
+    config: item.config,
+  }
+}
+
+function topologyFromSnapshot(
+  sets: ModuleSetItem[],
+  snapshot: ModuleRuntimeSnapshotResponse,
+): ModuleTopologyResponse {
+  return {
+    sets,
+    nodes: snapshot.topology.nodes,
+    edges: snapshot.topology.edges,
+    components: snapshot.components.map(runtimeComponentToComponent),
+  }
+}
+
 async function load(silent = false): Promise<void> {
   if (silent) {
     refreshing.value = true
@@ -75,7 +99,8 @@ async function load(silent = false): Promise<void> {
   }
   error.value = null
   try {
-    topology.value = await getModuleTopology()
+    const [sets, snapshot] = await Promise.all([listModuleSets(), getModuleRuntimeSnapshot()])
+    topology.value = topologyFromSnapshot(sets.sets, snapshot)
   } catch (err) {
     error.value = toApiClientError(err)
   } finally {

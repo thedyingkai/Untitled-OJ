@@ -1,18 +1,18 @@
 # 文档索引
 
 > 文档状态：当前实现
-> 适用范围：开发 / 部署 / 运维 / 架构设计 / 安全 / E2E 验收
+> 适用范围：开�?/ 部署 / 运维 / 架构设计 / 安全 / E2E 验收
 > 最后更新：2026-06-27
 
-本索引按主题列出 OJOS 当前正式文档。历史文档仅供追溯，不作为当前部署依据。
-
+本索引按主题列出 OJOS 当前正式文档。历史文档仅供追溯，不作为当前部署依据�?
 ## 架构
 
 - [架构总览](architecture/overview.md)
+- [Project Structure v2](architecture/project-structure-v2.md)
 - [模块拓扑设计](architecture/module-topology.md)
 - [服务拓扑](architecture/service-topology.md)
 - [Worker Link 协议](architecture/worker-link-protocol.md)
-- [Storage 与 artifact 模型](architecture/storage-artifact-model.md)
+- [Storage �?artifact 模型](architecture/storage-artifact-model.md)
 - [权限模型](architecture/permission-model.md)
 - [内部 HMAC](architecture/internal-auth.md)
 
@@ -32,6 +32,9 @@
 
 ## 模块系统
 
+- [Kernel Overview](kernel/kernel-overview.md)
+- [Kernel Installer](kernel/installer.md)
+- [Kernel Module Runtime](kernel/module-runtime.md)
 - [模块系统首页](modules/README.md)
 - [模块契约](modules/module-contract.md)
 - [模块清单](modules/module-manifest.md)
@@ -78,8 +81,7 @@
 - [权限管理安全](security/permission-admin.md)
 - [Module Installer Threat Model](security/module-installer-threat-model.md)
 
-## 开发
-
+## 开�?
 - [当前状态](development/current-state.md)
 - [本地开发](development/local-development.md)
 - [静态验证](development/static-verification.md)
@@ -94,4 +96,5 @@
 - [历史文档目录](archive/legacy-docs/)
 - [文档迁移记录](archive/legacy-docs/DOCS_MIGRATION.md)
 - [Module Installer 仓库边界 ADR](architecture/adr/ADR-module-installer-repository-boundary.md)
+- [Project Structure v2 ADR](architecture/adr/ADR-project-structure-v2-kernel-modules.md)
 - [模块包格式](modules/module-package-format.md)

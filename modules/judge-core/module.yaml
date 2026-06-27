@@ -13,13 +13,19 @@ compatibility:
 
 requires:
   modules:
-    - id: ojos.kernel.edge-ui-shell
+    - id: ojos.platform.web-shell
       version: ">=0.1.0"
-    - id: ojos.kernel.identity-access
+    - id: ojos.platform.identity-access
       version: ">=0.1.0"
-    - id: ojos.kernel.config-secret
+    - id: ojos.platform.storage
       version: ">=0.1.0"
-    - id: ojos.kernel.audit-policy
+    - id: ojos.platform.gateway
+      version: ">=0.1.0"
+    - id: ojos.kernel.module-runtime
+      version: ">=0.1.0"
+    - id: ojos.kernel.audit
+      version: ">=0.1.0"
+    - id: ojos.kernel.health
       version: ">=0.1.0"
 
 provides:
@@ -44,6 +50,8 @@ provides:
       description: View own submissions.
     - key: submission.view.all
       description: View all submissions.
+
+  roles: []
 
   components:
     - id: problem-api
@@ -75,6 +83,26 @@ provides:
       status: ENABLED
       config:
         bucket: submissions
+    - id: judge-artifacts-storage
+      type: storage_bucket
+      status: ENABLED
+      config:
+        bucket: judge-artifacts
+
+  services:
+    - id: problem-api
+      path: services/problem-api
+      health: /health
+      exposure: internal
+    - id: judge-api
+      path: services/judge-api
+      health: /health
+      exposure: internal
+
+  workers:
+    - id: judge-worker
+      path: services/judge-worker
+      mode: external-node
 
   frontend_routes:
     - path: /problems
@@ -157,6 +185,14 @@ provides:
       - submissions
       - judge-artifacts
 
+  storage_buckets:
+    - id: problems
+      description: Problem statements, package metadata, and problem assets.
+    - id: submissions
+      description: Submission source and result records.
+    - id: judge-artifacts
+      description: Judge runtime artifacts retained by controlled policy.
+
   health_checks:
     - id: problem-api-health
       type: http
@@ -185,3 +221,38 @@ provides:
       down: deploy/migrations/000007_problem_catalog_fields.down.sql
     - up: deploy/migrations/000008_worker_link.up.sql
       down: deploy/migrations/000008_worker_link.down.sql
+
+  events:
+    publishes:
+      - judge.submission.created
+      - judge.submission.finished
+    subscribes: []
+
+  scheduled_jobs: []
+
+  admin_panels:
+    - id: judge-cluster
+      route_path: /admin/judge
+      required_permission: system.admin
+
+  topology:
+    nodes:
+      - id: problem-api
+        type: service
+        label: Problem API
+      - id: judge-api
+        type: service
+        label: Judge API
+      - id: judge-worker
+        type: worker
+        label: Judge Worker
+    edges:
+      - from: gateway
+        to: problem-api
+        type: routes
+      - from: gateway
+        to: judge-api
+        type: routes
+      - from: judge-api
+        to: judge-worker
+        type: worker-link

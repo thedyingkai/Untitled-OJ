@@ -13,9 +13,11 @@ compatibility:
 
 requires:
   modules:
-    - id: ojos.kernel.edge-ui-shell
+    - id: ojos.platform.web-shell
       version: ">=0.1.0"
-    - id: ojos.kernel.identity-access
+    - id: ojos.platform.identity-access
+      version: ">=0.1.0"
+    - id: ojos.kernel.module-runtime
       version: ">=0.1.0"
 
 provides:
@@ -23,12 +25,18 @@ provides:
     - key: demo.view
       description: View demo module metadata.
 
+  roles: []
+
   components:
     - id: demo-component
       type: metadata
       status: DISABLED
       config:
         purpose: installer-acceptance
+
+  services: []
+
+  workers: []
 
   frontend_routes:
     - path: /admin/modules/demo
@@ -50,9 +58,29 @@ provides:
   storage:
     buckets: []
 
+  storage_buckets: []
+
   health_checks:
     - id: demo-health
       type: metadata
       optional: true
 
   migrations: []
+
+  events:
+    publishes: []
+    subscribes: []
+
+  scheduled_jobs: []
+
+  admin_panels:
+    - id: demo-module
+      route_path: /admin/modules/demo
+      required_permission: demo.view
+
+  topology:
+    nodes:
+      - id: demo-component
+        type: metadata
+        label: Demo Component
+    edges: []

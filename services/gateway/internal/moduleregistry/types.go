@@ -5,8 +5,9 @@ import "encoding/json"
 const (
 	StatusEnabled = "ENABLED"
 
-	KindKernel  = "kernel"
-	KindFeature = "feature"
+	KindKernel   = "kernel"
+	KindPlatform = "platform"
+	KindFeature  = "feature"
 )
 
 type Set struct {

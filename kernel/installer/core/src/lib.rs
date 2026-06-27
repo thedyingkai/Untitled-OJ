@@ -3,9 +3,10 @@ mod package;
 mod plan;
 
 pub use manifest::{
-    Compatibility, ComponentDecl, FrontendRouteDecl, GatewayRouteDecl, HealthCheckDecl, Manifest,
-    MenuDecl, MigrationDecl, ModuleDependency, PermissionDecl, Provides, StorageDecl,
-    validate_manifest, validate_manifest_file,
+    AdminPanelDecl, Compatibility, ComponentDecl, EventsDecl, FrontendRouteDecl, GatewayRouteDecl,
+    HealthCheckDecl, Manifest, MenuDecl, MigrationDecl, ModuleDependency, PermissionDecl, Provides,
+    RoleDecl, ScheduledJobDecl, ServiceDecl, StorageBucketDecl, StorageDecl, TopologyDecl,
+    TopologyEdgeDecl, TopologyNodeDecl, WorkerDecl, validate_manifest, validate_manifest_file,
 };
 pub use package::{PackageMetadata, PackageVerification, package_module, verify_package};
 pub use plan::{

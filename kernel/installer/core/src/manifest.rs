@@ -66,7 +66,13 @@ pub struct Provides {
     #[serde(default)]
     pub permissions: Vec<PermissionDecl>,
     #[serde(default)]
+    pub roles: Vec<RoleDecl>,
+    #[serde(default)]
     pub components: Vec<ComponentDecl>,
+    #[serde(default)]
+    pub services: Vec<ServiceDecl>,
+    #[serde(default)]
+    pub workers: Vec<WorkerDecl>,
     #[serde(default)]
     pub frontend_routes: Vec<FrontendRouteDecl>,
     #[serde(default)]
@@ -76,14 +82,32 @@ pub struct Provides {
     #[serde(default)]
     pub storage: StorageDecl,
     #[serde(default)]
+    pub storage_buckets: Vec<StorageBucketDecl>,
+    #[serde(default)]
     pub health_checks: Vec<HealthCheckDecl>,
     #[serde(default)]
     pub migrations: Vec<MigrationDecl>,
+    #[serde(default)]
+    pub events: EventsDecl,
+    #[serde(default)]
+    pub scheduled_jobs: Vec<ScheduledJobDecl>,
+    #[serde(default)]
+    pub admin_panels: Vec<AdminPanelDecl>,
+    #[serde(default)]
+    pub topology: TopologyDecl,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionDecl {
+    pub key: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RoleDecl {
     pub key: String,
     #[serde(default)]
     pub description: String,
@@ -99,6 +123,28 @@ pub struct ComponentDecl {
     pub status: String,
     #[serde(default)]
     pub config: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceDecl {
+    pub id: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub health: String,
+    #[serde(default)]
+    pub exposure: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerDecl {
+    pub id: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -150,6 +196,14 @@ pub struct StorageDecl {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct StorageBucketDecl {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCheckDecl {
     pub id: String,
     #[serde(rename = "type")]
@@ -163,6 +217,62 @@ pub struct HealthCheckDecl {
 pub struct MigrationDecl {
     pub up: String,
     pub down: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EventsDecl {
+    #[serde(default)]
+    pub publishes: Vec<String>,
+    #[serde(default)]
+    pub subscribes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledJobDecl {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AdminPanelDecl {
+    pub id: String,
+    pub route_path: String,
+    #[serde(default)]
+    pub required_permission: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TopologyDecl {
+    #[serde(default)]
+    pub nodes: Vec<TopologyNodeDecl>,
+    #[serde(default)]
+    pub edges: Vec<TopologyEdgeDecl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TopologyNodeDecl {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub node_type: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TopologyEdgeDecl {
+    pub from: String,
+    pub to: String,
+    #[serde(rename = "type")]
+    pub edge_type: String,
 }
 
 pub fn validate_manifest_file(repo_root: &Path, manifest_path: &Path) -> Result<Manifest> {
@@ -190,7 +300,7 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
     ensure(
         matches!(
             manifest.kind.as_str(),
-            "kernel" | "feature" | "integration" | "metadata"
+            "kernel" | "platform" | "feature" | "integration" | "metadata"
         ),
         "kind is invalid",
     )?;
@@ -215,6 +325,14 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
     }
 
     unique_by(
+        manifest.provides.roles.iter().map(|r| r.key.as_str()),
+        "duplicate role",
+    )?;
+    for item in &manifest.provides.roles {
+        ensure(key_re.is_match(&item.key), "role key is invalid")?;
+    }
+
+    unique_by(
         manifest.provides.components.iter().map(|c| c.id.as_str()),
         "duplicate component",
     )?;
@@ -224,6 +342,30 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
             !item.component_type.trim().is_empty(),
             "component type is required",
         )?;
+    }
+
+    unique_by(
+        manifest.provides.services.iter().map(|s| s.id.as_str()),
+        "duplicate service",
+    )?;
+    for item in &manifest.provides.services {
+        ensure(key_re.is_match(&item.id), "service id is invalid")?;
+        validate_optional_contract_path(&item.path, "service path")?;
+        if !item.health.trim().is_empty() {
+            ensure(
+                path_re.is_match(&item.health),
+                "service health path is invalid",
+            )?;
+        }
+    }
+
+    unique_by(
+        manifest.provides.workers.iter().map(|w| w.id.as_str()),
+        "duplicate worker",
+    )?;
+    for item in &manifest.provides.workers {
+        ensure(key_re.is_match(&item.id), "worker id is invalid")?;
+        validate_optional_contract_path(&item.path, "worker path")?;
     }
 
     unique_by(
@@ -295,6 +437,18 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
     unique_by(
         manifest
             .provides
+            .storage_buckets
+            .iter()
+            .map(|b| b.id.as_str()),
+        "duplicate storage bucket",
+    )?;
+    for item in &manifest.provides.storage_buckets {
+        ensure(key_re.is_match(&item.id), "storage bucket is invalid")?;
+    }
+
+    unique_by(
+        manifest
+            .provides
             .health_checks
             .iter()
             .map(|h| h.id.as_str()),
@@ -302,6 +456,100 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
     )?;
     for item in &manifest.provides.health_checks {
         ensure(key_re.is_match(&item.id), "health check id is invalid")?;
+    }
+
+    unique_by(
+        manifest
+            .provides
+            .events
+            .publishes
+            .iter()
+            .map(|e| e.as_str()),
+        "duplicate published event",
+    )?;
+    for item in &manifest.provides.events.publishes {
+        ensure(key_re.is_match(item), "published event is invalid")?;
+    }
+    unique_by(
+        manifest
+            .provides
+            .events
+            .subscribes
+            .iter()
+            .map(|e| e.as_str()),
+        "duplicate subscribed event",
+    )?;
+    for item in &manifest.provides.events.subscribes {
+        ensure(key_re.is_match(item), "subscribed event is invalid")?;
+    }
+
+    unique_by(
+        manifest
+            .provides
+            .scheduled_jobs
+            .iter()
+            .map(|j| j.id.as_str()),
+        "duplicate scheduled job",
+    )?;
+    for item in &manifest.provides.scheduled_jobs {
+        ensure(key_re.is_match(&item.id), "scheduled job id is invalid")?;
+    }
+
+    unique_by(
+        manifest.provides.admin_panels.iter().map(|p| p.id.as_str()),
+        "duplicate admin panel",
+    )?;
+    unique_by(
+        manifest
+            .provides
+            .admin_panels
+            .iter()
+            .map(|p| p.route_path.as_str()),
+        "duplicate admin panel route",
+    )?;
+    for item in &manifest.provides.admin_panels {
+        ensure(key_re.is_match(&item.id), "admin panel id is invalid")?;
+        ensure(
+            path_re.is_match(&item.route_path),
+            "admin panel route_path is invalid",
+        )?;
+    }
+
+    unique_by(
+        manifest
+            .provides
+            .topology
+            .nodes
+            .iter()
+            .map(|n| n.id.as_str()),
+        "duplicate topology node",
+    )?;
+    for item in &manifest.provides.topology.nodes {
+        ensure(key_re.is_match(&item.id), "topology node id is invalid")?;
+        ensure(
+            key_re.is_match(&item.node_type),
+            "topology node type is invalid",
+        )?;
+    }
+    unique_by(
+        manifest
+            .provides
+            .topology
+            .edges
+            .iter()
+            .map(topology_edge_key)
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|v| v.as_str()),
+        "duplicate topology edge",
+    )?;
+    for item in &manifest.provides.topology.edges {
+        ensure(key_re.is_match(&item.from), "topology edge from is invalid")?;
+        ensure(key_re.is_match(&item.to), "topology edge to is invalid")?;
+        ensure(
+            key_re.is_match(&item.edge_type),
+            "topology edge type is invalid",
+        )?;
     }
 
     unique_by(
@@ -378,6 +626,17 @@ fn validate_migration_path(path: &str) -> Result<()> {
         "migration path must be under deploy/migrations",
     )?;
     ensure(path.ends_with(".sql"), "migration path must be .sql")?;
+    Ok(())
+}
+
+fn validate_optional_contract_path(path: &str, label: &str) -> Result<()> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(());
+    }
+    let p = Path::new(path);
+    ensure(!p.is_absolute(), label)?;
+    reject_path_components(p)?;
     Ok(())
 }
 
@@ -477,6 +736,10 @@ fn unique_by<'a>(items: impl Iterator<Item = &'a str>, msg: &str) -> Result<()> 
         }
     }
     Ok(())
+}
+
+fn topology_edge_key(item: &TopologyEdgeDecl) -> String {
+    format!("{}|{}|{}", item.from, item.to, item.edge_type)
 }
 
 fn ensure(ok: bool, msg: &str) -> Result<()> {

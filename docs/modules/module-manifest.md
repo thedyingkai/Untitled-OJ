@@ -1,14 +1,15 @@
 # Module Manifest
 
-> 文档状态：当前实现，schema_version 1
-> 最后更新：2026-06-27
+> Status: current implementation, `schema_version: 1`
+> Last updated: 2026-06-27
 
-## 基本结构
+OJOS modules are declared through `modules/<module>/module.yaml`. The manifest is a contract between a module package and the Kernel. It must describe capabilities; it must not contain secrets or executable hooks.
 
-模块 manifest 必须使用 `schema_version: 1`：
+## Base Shape
 
 ```yaml
 schema_version: 1
+
 id: ojos.demo-module
 name: Demo Module
 version: 0.1.0
@@ -23,43 +24,55 @@ compatibility:
 
 requires:
   modules:
-    - id: ojos.kernel.edge-ui-shell
+    - id: ojos.platform.web-shell
+      version: ">=0.1.0"
+    - id: ojos.platform.identity-access
+      version: ">=0.1.0"
+    - id: ojos.kernel.module-runtime
       version: ">=0.1.0"
 
 provides:
   permissions:
     - key: demo.view
       description: View demo module metadata.
-  components:
-    - id: demo-component
-      type: metadata
-      status: DISABLED
-      config: {}
+  roles: []
+  components: []
+  services: []
+  workers: []
   frontend_routes: []
   menus: []
   gateway_routes: []
   storage:
     buckets: []
+  storage_buckets: []
   health_checks: []
   migrations: []
+  events:
+    publishes: []
+    subscribes: []
+  scheduled_jobs: []
+  admin_panels: []
+  topology:
+    nodes: []
+    edges: []
 ```
 
-## 校验规则
+## Validation
 
-Rust installer core 会校验：
+Rust installer core validates:
 
-- `id` 只能匹配 `[a-z0-9][a-z0-9.-]*`。
-- `version` 必须是 semver。
-- `schema_version` 必须是支持版本。
-- `kind` 必须是 `kernel`、`feature`、`integration` 或 `metadata`。
-- `status` 必须是 `builtin`、`external` 或 `demo`。
-- permission key、component id、route path、menu key、gateway prefix、bucket、health check id 不得重复。
-- dependency 不得重复，不得 self dependency。
-- migration 只能声明 `deploy/migrations/*.sql`，且 up/down 成对。
+- `id` matches `[a-z0-9][a-z0-9.-]*`.
+- `version` is semver.
+- `schema_version` is supported.
+- `kind` is `kernel`, `platform`, `feature`, `integration`, or `metadata`.
+- `status` is `builtin`, `external`, or `demo`.
+- permissions, roles, components, services, workers, routes, menus, gateway prefixes, buckets, health checks, jobs, admin panels, topology nodes, and dependencies are not duplicated.
+- dependencies are not self references.
+- migrations are relative `deploy/migrations/*.sql` paths and `up/down` pairs match.
 
-## 危险字段
+## Forbidden Fields
 
-manifest 不允许包含以下字段名：
+Manifest content must not contain fields named:
 
 ```text
 secret
@@ -76,21 +89,21 @@ remote_url
 download_url
 ```
 
-v0 不执行任何脚本，也不支持远程下载模块。
+v0 does not execute hooks, does not download remote modules, and does not load dynamic frontend bundles.
 
-## 路径安全
+## Path Safety
 
-`validate_manifest_file` 要求 manifest 路径：
+`validate_manifest_file` requires:
 
-- 是相对路径。
-- 位于 repo root 的 `modules/` 下。
-- canonicalize 后仍在 `modules/` 下。
-- 文件名必须是 `module.yaml`。
-- 不允许 `..`、绝对路径、symlink escape、`.tmp`、`.env`、`node_modules`、`frontend/dist`、`target`、`.git`。
+- manifest path is relative
+- manifest is under repo root `modules/`
+- canonical path remains under `modules/`
+- file name is `module.yaml`
+- no `..`, absolute path, symlink escape, `.tmp`, `.env`, `node_modules`, `frontend/dist`, `target`, or `.git`
 
-## 签名字段
+## Signature Fields
 
-保留字段：
+Reserved fields:
 
 ```yaml
 signature:
@@ -98,4 +111,4 @@ signing_key_id:
 trusted_publisher:
 ```
 
-v0 只做 checksum integrity。signature / trust policy 留到 v1，因此 v0 不应安装远程不可信模块。
+v0 only verifies checksum integrity for local packages. Signature and publisher trust policy are v1 work, so v0 must not install remote untrusted modules automatically.

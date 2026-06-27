@@ -38,11 +38,21 @@ Gateway 启动时会幂等登记 Kernel 内置模块和 `ojos.judge-core`。这�
 
 已登记的 Kernel 模块包括：
 
-- `ojos.kernel.edge-ui-shell`
-- `ojos.kernel.identity-access`
 - `ojos.kernel.module-runtime`
-- `ojos.kernel.config-secret`
-- `ojos.kernel.audit-policy`
+- `ojos.kernel.installer`
+- `ojos.kernel.module-registry`
+- `ojos.kernel.topology`
+- `ojos.kernel.policy`
+- `ojos.kernel.audit`
+- `ojos.kernel.config`
+- `ojos.kernel.health`
+
+Platform built-ins registered by Project Structure v2:
+- `ojos.platform.gateway`
+- `ojos.platform.web-shell`
+- `ojos.platform.identity-access`
+- `ojos.platform.storage`
+- `ojos.platform.observability`
 
 已登记的 Core 模块：
 

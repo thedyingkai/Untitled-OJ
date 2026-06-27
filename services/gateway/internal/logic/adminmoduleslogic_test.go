@@ -34,6 +34,30 @@ func (f fakeModuleRegistry) Topology(context.Context) (moduleregistry.Topology, 
 	}, nil
 }
 
+func (f fakeModuleRegistry) ListPermissions(context.Context) ([]moduleregistry.Permission, error) {
+	return f.data.Permissions, nil
+}
+
+func (f fakeModuleRegistry) ListMenus(context.Context) ([]moduleregistry.Menu, error) {
+	return f.data.Menus, nil
+}
+
+func (f fakeModuleRegistry) ListFrontendRoutes(context.Context) ([]moduleregistry.FrontendRoute, error) {
+	return f.data.FrontendRoutes, nil
+}
+
+func (f fakeModuleRegistry) ListGatewayRoutes(context.Context) ([]moduleregistry.GatewayRoute, error) {
+	return f.data.GatewayRoutes, nil
+}
+
+func (f fakeModuleRegistry) ListComponents(context.Context) ([]moduleregistry.Component, error) {
+	return f.data.Components, nil
+}
+
+func (f fakeModuleRegistry) ListEdges(context.Context) ([]moduleregistry.Edge, error) {
+	return f.data.Edges, nil
+}
+
 func (f fakeModuleRegistry) Detail(_ context.Context, moduleID string) (moduleregistry.Detail, error) {
 	var detail moduleregistry.Detail
 	for _, module := range f.data.Modules {
@@ -154,9 +178,9 @@ func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
 		t.Fatalf("topology should include ojos.judge-core node")
 	}
 	for _, edge := range [][2]string{
-		{"ojos.judge-core", "ojos.kernel.edge-ui-shell"},
-		{"ojos.judge-core", "ojos.kernel.identity-access"},
-		{"ojos.judge-core", "ojos.kernel.config-secret"},
+		{"ojos.judge-core", "ojos.platform.web-shell"},
+		{"ojos.judge-core", "ojos.platform.identity-access"},
+		{"ojos.judge-core", "ojos.kernel.module-runtime"},
 	} {
 		if !hasEdge(resp.Edges, edge[0], edge[1]) {
 			t.Fatalf("topology should include edge %s -> %s", edge[0], edge[1])
@@ -166,6 +190,43 @@ func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
 		if !hasComponent(resp.Components, "ojos.judge-core", componentID) {
 			t.Fatalf("topology should include component %s", componentID)
 		}
+	}
+}
+
+func TestRuntimeSnapshotReturnsKernelPlatformAndJudgeCore(t *testing.T) {
+	ctx := context.Background()
+	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logic := &AdminModulesLogic{
+		ctx: ctx,
+		svcCtx: &svc.ServiceContext{
+			Config: config.Config{
+				Jwt: config.JwtConfig{Secret: "test-secret"},
+			},
+		},
+		repo: fakeModuleRegistry{data: moduleregistry.BuiltinData()},
+	}
+
+	resp, err := logic.RuntimeSnapshot("Bearer " + token)
+	if err != nil {
+		t.Fatalf("runtime snapshot failed: %v", err)
+	}
+	for _, moduleID := range []string{"ojos.kernel.installer", "ojos.kernel.module-runtime", "ojos.platform.gateway", "ojos.platform.web-shell", "ojos.judge-core"} {
+		if !hasNode(resp.Modules, moduleID) {
+			t.Fatalf("runtime snapshot should include %s", moduleID)
+		}
+	}
+	if len(resp.Topology.Nodes) == 0 || len(resp.Topology.Edges) == 0 {
+		t.Fatalf("runtime snapshot topology should be non-empty")
+	}
+	if len(resp.Services) == 0 || len(resp.Workers) == 0 || len(resp.HealthChecks) == 0 {
+		t.Fatalf("runtime snapshot should include services/workers/health checks")
+	}
+	if len(resp.Components) == 0 {
+		t.Fatalf("runtime snapshot should include full component list")
 	}
 }
 

@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "crates/module-installer-core",
-    "services/module-installer",
-    "tools/ojosctl",
+    "kernel/installer/core",
+    "kernel/installer/service",
+    "kernel/installer/cli",
 ]
 exclude = [
     "services/judge-worker",
@@ -20,7 +20,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 hmac = "0.12"
-module-installer-core = { path = "crates/module-installer-core" }
+module-installer-core = { path = "kernel/installer/core" }
 regex = "1"
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

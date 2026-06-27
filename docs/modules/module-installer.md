@@ -11,12 +11,12 @@ Module Installer 是 OJOS 的模块生命周期基座。它不是一个简单的
 当前实现采用 Rust：
 
 ```text
-crates/module-installer-core/  纯逻辑核心
-services/module-installer/     内部 HTTP service
-tools/ojosctl/                 本地 CLI
+kernel/installer/core/     纯逻辑核心
+kernel/installer/service/  内部 HTTP service
+kernel/installer/cli/      本地 CLI
 ```
 
-仓库边界见 [ADR: Module Installer Repository Boundary](../architecture/adr/ADR-module-installer-repository-boundary.md)。当前不立即拆仓，但按独立 Rust workspace 和可拆仓 contract 实现。
+仓库边界见 [Project Structure v2 ADR](../architecture/adr/ADR-project-structure-v2-kernel-modules.md) 和 [ADR: Module Installer Repository Boundary](../architecture/adr/ADR-module-installer-repository-boundary.md)。当前不立即拆仓，但 Installer 已从普通 service 提升为 Kernel 能力。
 
 ## 当前 v0 能力
 
@@ -84,7 +84,7 @@ Gateway 负责 JWT 鉴权、`admin` / `super_admin` / `system.admin` 权限检�
 
 ## Runtime Image Hardening
 
-`services/module-installer` 使用多阶段 Dockerfile：
+`kernel/installer/service` 使用多阶段 Dockerfile：
 
 ```text
 builder: rust:1.89-bookworm

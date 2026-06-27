@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"ojos-gateway/internal/kernel/moduleruntime"
 	"ojos-gateway/internal/moduleregistry"
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
@@ -24,6 +25,7 @@ type moduleRegistryReader interface {
 	ListSets(context.Context) ([]moduleregistry.Set, error)
 	Topology(context.Context) (moduleregistry.Topology, error)
 	Detail(context.Context, string) (moduleregistry.Detail, error)
+	moduleruntime.RegistryReader
 }
 
 func NewAdminModulesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *AdminModulesLogic {
@@ -61,15 +63,45 @@ func (l *AdminModulesLogic) Topology(authHeader string) (*types.ModuleTopologyRe
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
 	}
-	topology, err := l.repo.Topology(l.ctx)
+	sets, err := l.repo.ListSets(l.ctx)
 	if err != nil {
 		return nil, err
 	}
+	snapshot, err := moduleruntime.BuildSnapshot(l.ctx, l.repo)
+	if err != nil {
+		return nil, err
+	}
+	components := runtimeAsComponentItems(snapshot.Components)
 	return &types.ModuleTopologyResp{
-		Sets:       setItems(topology.Sets),
-		Nodes:      moduleItems(topology.Nodes, false),
-		Edges:      edgeItems(topology.Edges),
-		Components: componentItems(topology.Components),
+		Sets:       setItems(sets),
+		Nodes:      moduleItems(snapshot.Topology.Nodes, false),
+		Edges:      edgeItems(snapshot.Topology.Edges),
+		Components: components,
+	}, nil
+}
+
+func (l *AdminModulesLogic) RuntimeSnapshot(authHeader string) (*types.ModuleRuntimeSnapshotResp, error) {
+	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
+		return nil, err
+	}
+	snapshot, err := moduleruntime.BuildSnapshot(l.ctx, l.repo)
+	if err != nil {
+		return nil, err
+	}
+	return &types.ModuleRuntimeSnapshotResp{
+		Modules:        moduleItems(snapshot.Modules, false),
+		Permissions:    permissionItems(snapshot.Permissions),
+		Menus:          menuItems(snapshot.Menus),
+		FrontendRoutes: frontendRouteItems(snapshot.FrontendRoutes),
+		GatewayRoutes:  gatewayRouteItems(snapshot.GatewayRoutes),
+		Components:     runtimeComponentItems(snapshot.Components),
+		Services:       runtimeComponentItems(snapshot.Services),
+		Workers:        runtimeComponentItems(snapshot.Workers),
+		HealthChecks:   runtimeComponentItems(snapshot.HealthChecks),
+		Topology: types.ModuleRuntimeTopology{
+			Nodes: moduleItems(snapshot.Topology.Nodes, false),
+			Edges: edgeItems(snapshot.Topology.Edges),
+		},
 	}, nil
 }
 
@@ -153,6 +185,34 @@ func componentItems(items []moduleregistry.Component) []types.ModuleComponentIte
 			ModuleId:      item.ModuleID,
 			ComponentId:   item.ComponentID,
 			ComponentType: item.ComponentType,
+			Status:        item.Status,
+			Config:        rawJSON(item.Config),
+		})
+	}
+	return result
+}
+
+func runtimeComponentItems(items []moduleruntime.RuntimeComponent) []types.ModuleRuntimeComponent {
+	result := make([]types.ModuleRuntimeComponent, 0, len(items))
+	for _, item := range items {
+		result = append(result, types.ModuleRuntimeComponent{
+			ModuleId:    item.ModuleID,
+			ComponentId: item.ComponentID,
+			Type:        item.Type,
+			Status:      item.Status,
+			Config:      rawJSON(item.Config),
+		})
+	}
+	return result
+}
+
+func runtimeAsComponentItems(items []moduleruntime.RuntimeComponent) []types.ModuleComponentItem {
+	result := make([]types.ModuleComponentItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, types.ModuleComponentItem{
+			ModuleId:      item.ModuleID,
+			ComponentId:   item.ComponentID,
+			ComponentType: item.Type,
 			Status:        item.Status,
 			Config:        rawJSON(item.Config),
 		})

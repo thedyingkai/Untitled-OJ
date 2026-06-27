@@ -100,6 +100,32 @@ export interface ModuleTopologyResponse {
   components: ModuleComponentItem[]
 }
 
+export interface ModuleRuntimeComponent {
+  module_id: string
+  component_id: string
+  type: string
+  status: string
+  config: unknown
+}
+
+export interface ModuleRuntimeTopology {
+  nodes: ModuleNodeItem[]
+  edges: ModuleEdgeItem[]
+}
+
+export interface ModuleRuntimeSnapshotResponse {
+  modules: ModuleNodeItem[]
+  permissions: ModulePermissionItem[]
+  menus: ModuleMenuItem[]
+  frontend_routes: ModuleFrontendRouteItem[]
+  gateway_routes: ModuleGatewayRouteItem[]
+  components: ModuleRuntimeComponent[]
+  services: ModuleRuntimeComponent[]
+  workers: ModuleRuntimeComponent[]
+  health_checks: ModuleRuntimeComponent[]
+  topology: ModuleRuntimeTopology
+}
+
 export interface ModuleDetailResponse {
   module: ModuleNodeItem
   dependencies: ModuleEdgeItem[]

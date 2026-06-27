@@ -47,3 +47,11 @@ Installer core 不依赖 Go 代码，不依赖 frontend 代码。Gateway 也不�
 ```text
 docs/architecture/adr/ADR-module-installer-repository-boundary.md
 ```
+
+## Project Structure v2 Contract Addendum
+
+Installer, Module Runtime, Module Registry and Topology are Kernel capabilities. Gateway is an App / edge adapter, and Web Shell is an App / frontend shell. Judge Core is a Feature Module that wraps the current problem-api, judge-api and judge-worker compatibility paths.
+
+`schema_version: 1` now accepts the future-facing extension surface: permissions, roles, components, services, workers, frontend_routes, menus, gateway_routes, storage_buckets, health_checks, migrations, events, scheduled_jobs, admin_panels and topology nodes/edges.
+
+Future modules should be added through `module.yaml`, `.ojosmod` package metadata and extension points. They must not require Kernel code changes, Gateway hardcoded navigation changes, Web Shell hardcoded menu changes, topology hardcoding, or changes to existing modules.

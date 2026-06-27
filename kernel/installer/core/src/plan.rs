@@ -255,7 +255,7 @@ pub fn rollback_plan(module_id: &str, snapshot: &RegistrySnapshot, dry_run: bool
     let modules = snapshot.by_id();
     if let Some(module) = modules.get(module_id) {
         plan.version = module.version.clone();
-        if module.kind == "kernel" || module_id == "ojos.judge-core" {
+        if module.kind == "kernel" || module.kind == "platform" || module_id == "ojos.judge-core" {
             plan.blocked_by
                 .push("protected module rollback is dry-run only in v0".to_string());
         }
@@ -280,7 +280,7 @@ pub fn uninstall_plan(module_id: &str, snapshot: &RegistrySnapshot, dry_run: boo
         return finalize_plan(plan);
     };
     plan.version = module.version.clone();
-    if module.kind == "kernel" || module_id == "ojos.judge-core" {
+    if module.kind == "kernel" || module.kind == "platform" || module_id == "ojos.judge-core" {
         plan.blocked_by
             .push("protected builtin module cannot be uninstalled".to_string());
     }
@@ -334,6 +334,32 @@ pub fn diff_manifests(old: &Manifest, new: &Manifest) -> Vec<Action> {
     );
     diff_set(
         &mut actions,
+        "roles",
+        old.provides.roles.iter().map(|p| p.key.as_str()).collect(),
+        new.provides.roles.iter().map(|p| p.key.as_str()).collect(),
+    );
+    diff_set(
+        &mut actions,
+        "services",
+        old.provides
+            .services
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect(),
+        new.provides
+            .services
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect(),
+    );
+    diff_set(
+        &mut actions,
+        "workers",
+        old.provides.workers.iter().map(|p| p.id.as_str()).collect(),
+        new.provides.workers.iter().map(|p| p.id.as_str()).collect(),
+    );
+    diff_set(
+        &mut actions,
         "frontend_routes",
         old.provides
             .frontend_routes
@@ -364,6 +390,48 @@ pub fn diff_manifests(old: &Manifest, new: &Manifest) -> Vec<Action> {
             .gateway_routes
             .iter()
             .map(|p| p.prefix.as_str())
+            .collect(),
+    );
+    diff_set(
+        &mut actions,
+        "storage_buckets",
+        old.provides
+            .storage_buckets
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect(),
+        new.provides
+            .storage_buckets
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect(),
+    );
+    diff_set(
+        &mut actions,
+        "health_checks",
+        old.provides
+            .health_checks
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect(),
+        new.provides
+            .health_checks
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect(),
+    );
+    diff_set(
+        &mut actions,
+        "admin_panels",
+        old.provides
+            .admin_panels
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect(),
+        new.provides
+            .admin_panels
+            .iter()
+            .map(|p| p.id.as_str())
             .collect(),
     );
     if actions.is_empty() {
@@ -458,6 +526,10 @@ fn protect_disable(module_id: &str, module: &InstalledModule, plan: &mut Plan) {
     if module.kind == "kernel" {
         plan.blocked_by
             .push("kernel module cannot be disabled".to_string());
+    }
+    if module.kind == "platform" {
+        plan.blocked_by
+            .push("platform module is protected by default".to_string());
     }
     if module_id == "ojos.judge-core" {
         plan.blocked_by

@@ -116,6 +116,32 @@ type ModuleTopologyResp struct {
 	Components []ModuleComponentItem `json:"components"`
 }
 
+type ModuleRuntimeSnapshotResp struct {
+	Modules        []ModuleNodeItem          `json:"modules"`
+	Permissions    []ModulePermissionItem    `json:"permissions"`
+	Menus          []ModuleMenuItem          `json:"menus"`
+	FrontendRoutes []ModuleFrontendRouteItem `json:"frontend_routes"`
+	GatewayRoutes  []ModuleGatewayRouteItem  `json:"gateway_routes"`
+	Components     []ModuleRuntimeComponent  `json:"components"`
+	Services       []ModuleRuntimeComponent  `json:"services"`
+	Workers        []ModuleRuntimeComponent  `json:"workers"`
+	HealthChecks   []ModuleRuntimeComponent  `json:"health_checks"`
+	Topology       ModuleRuntimeTopology     `json:"topology"`
+}
+
+type ModuleRuntimeComponent struct {
+	ModuleId    string `json:"module_id"`
+	ComponentId string `json:"component_id"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	Config      any    `json:"config"`
+}
+
+type ModuleRuntimeTopology struct {
+	Nodes []ModuleNodeItem `json:"nodes"`
+	Edges []ModuleEdgeItem `json:"edges"`
+}
+
 type ModuleDetailResp struct {
 	Module         ModuleNodeItem            `json:"module"`
 	Dependencies   []ModuleEdgeItem          `json:"dependencies"`

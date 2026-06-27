@@ -75,35 +75,27 @@ func BootstrapBuiltin(ctx context.Context, writer BootstrapWriter) error {
 }
 
 func BuiltinData() BootstrapData {
-	kernelManifest := func(description string) json.RawMessage {
+	builtinManifest := func(kind string, description string) json.RawMessage {
 		return mustJSON(map[string]any{
-			"status":      "builtin",
-			"description": description,
-			"note":        "Kernel builtin module registered by Module Registry v0.",
+			"schema_version": 1,
+			"kind":           kind,
+			"status":         "builtin",
+			"description":    description,
+			"note":           "Builtin module registered by Kernel Module Registry.",
 		})
 	}
 
 	judgeManifest := mustJSON(judgeCoreManifest())
 	kernelModules := []Module{
 		{
-			ModuleID:    "ojos.kernel.edge-ui-shell",
+			ModuleID:    "ojos.kernel.installer",
 			SetID:       "kernel",
-			Name:        "Edge UI Shell",
+			Name:        "Kernel Installer",
 			Version:     "0.1.0",
 			Status:      StatusEnabled,
 			Kind:        KindKernel,
-			Description: "前端 shell、基础布局、路由守卫和统一 API client。",
-			Manifest:    kernelManifest("frontend shell, layout, router guard and API client"),
-		},
-		{
-			ModuleID:    "ojos.kernel.identity-access",
-			SetID:       "kernel",
-			Name:        "Identity Access",
-			Version:     "0.1.0",
-			Status:      StatusEnabled,
-			Kind:        KindKernel,
-			Description: "认证、用户、角色、权限和资源级授权能力。",
-			Manifest:    kernelManifest("auth, users, roles, permissions and resource bindings"),
+			Description: "Module package validation, planning, install operations, lifecycle operations, and operation locks.",
+			Manifest:    builtinManifest(KindKernel, "module package validation, planning, install operations, lifecycle operations, and operation locks"),
 		},
 		{
 			ModuleID:    "ojos.kernel.module-runtime",
@@ -112,72 +104,195 @@ func BuiltinData() BootstrapData {
 			Version:     "0.1.0",
 			Status:      StatusEnabled,
 			Kind:        KindKernel,
-			Description: "Module Registry v0，只读模块拓扑和后续 installer 的基础。",
-			Manifest:    kernelManifest("read-only module registry v0"),
+			Description: "Runtime snapshot, dynamic module surface aggregation, lifecycle state, and hotplug contracts.",
+			Manifest:    builtinManifest(KindKernel, "runtime snapshot, dynamic module surface aggregation, lifecycle state, and hotplug contracts"),
 		},
 		{
-			ModuleID:    "ojos.kernel.config-secret",
+			ModuleID:    "ojos.kernel.module-registry",
 			SetID:       "kernel",
-			Name:        "Config Secret",
+			Name:        "Module Registry",
 			Version:     "0.1.0",
 			Status:      StatusEnabled,
 			Kind:        KindKernel,
-			Description: "环境配置、secret 注入边界和内部 HMAC 配置。",
-			Manifest:    kernelManifest("configuration, secret boundary and internal HMAC"),
+			Description: "Registry tables for modules, dependencies, permissions, menus, routes, components, and installation state.",
+			Manifest:    builtinManifest(KindKernel, "registry tables for modules, dependencies, permissions, menus, routes, components, and installation state"),
 		},
 		{
-			ModuleID:    "ojos.kernel.audit-policy",
+			ModuleID:    "ojos.kernel.topology",
 			SetID:       "kernel",
-			Name:        "Audit Policy",
+			Name:        "Module Topology",
 			Version:     "0.1.0",
 			Status:      StatusEnabled,
 			Kind:        KindKernel,
-			Description: "权限变更和管理操作审计策略。",
-			Manifest:    kernelManifest("permission and admin audit policy"),
+			Description: "Kernel-owned module, service, dependency, runtime, and deployment topology aggregation.",
+			Manifest:    builtinManifest(KindKernel, "kernel-owned module, service, dependency, runtime, and deployment topology aggregation"),
+		},
+		{
+			ModuleID:    "ojos.kernel.policy",
+			SetID:       "kernel",
+			Name:        "Kernel Policy",
+			Version:     "0.1.0",
+			Status:      StatusEnabled,
+			Kind:        KindKernel,
+			Description: "Kernel safety policy for protected modules, admin permissions, and lifecycle boundaries.",
+			Manifest:    builtinManifest(KindKernel, "kernel safety policy for protected modules, admin permissions, and lifecycle boundaries"),
+		},
+		{
+			ModuleID:    "ojos.kernel.audit",
+			SetID:       "kernel",
+			Name:        "Kernel Audit",
+			Version:     "0.1.0",
+			Status:      StatusEnabled,
+			Kind:        KindKernel,
+			Description: "Audit log contract for module operations and administrative security events.",
+			Manifest:    builtinManifest(KindKernel, "audit log contract for module operations and administrative security events"),
+		},
+		{
+			ModuleID:    "ojos.kernel.config",
+			SetID:       "kernel",
+			Name:        "Kernel Config",
+			Version:     "0.1.0",
+			Status:      StatusEnabled,
+			Kind:        KindKernel,
+			Description: "Configuration and secret boundary contract; secrets stay outside module manifests and packages.",
+			Manifest:    builtinManifest(KindKernel, "configuration and secret boundary contract"),
+		},
+		{
+			ModuleID:    "ojos.kernel.health",
+			SetID:       "kernel",
+			Name:        "Kernel Health",
+			Version:     "0.1.0",
+			Status:      StatusEnabled,
+			Kind:        KindKernel,
+			Description: "Health check aggregation contract for modules, services, workers, and runtime state.",
+			Manifest:    builtinManifest(KindKernel, "health check aggregation contract for modules, services, workers, and runtime state"),
 		},
 	}
 
-	modules := append(kernelModules, Module{
+	platformModules := []Module{
+		{
+			ModuleID:    "ojos.platform.gateway",
+			SetID:       "platform",
+			Name:        "Gateway",
+			Version:     "0.1.0",
+			Status:      StatusEnabled,
+			Kind:        KindPlatform,
+			Description: "Public edge adapter for JWT, admin authorization, internal auth, route proxying, and error mapping.",
+			Manifest:    builtinManifest(KindPlatform, "public edge adapter for JWT, admin authorization, internal auth, route proxying, and error mapping"),
+		},
+		{
+			ModuleID:    "ojos.platform.web-shell",
+			SetID:       "platform",
+			Name:        "Web Shell",
+			Version:     "0.1.0",
+			Status:      StatusEnabled,
+			Kind:        KindPlatform,
+			Description: "Frontend shell for login state, layout, module menus, module entry points, and generic admin views.",
+			Manifest:    builtinManifest(KindPlatform, "frontend shell for login state, layout, module menus, module entry points, and generic admin views"),
+		},
+		{
+			ModuleID:    "ojos.platform.identity-access",
+			SetID:       "platform",
+			Name:        "Identity Access",
+			Version:     "0.1.0",
+			Status:      StatusEnabled,
+			Kind:        KindPlatform,
+			Description: "Authentication, users, roles, permissions, scoped bindings, and permission audit surfaces.",
+			Manifest:    builtinManifest(KindPlatform, "authentication, users, roles, permissions, scoped bindings, and permission audit surfaces"),
+		},
+		{
+			ModuleID:    "ojos.platform.storage",
+			SetID:       "platform",
+			Name:        "Platform Storage",
+			Version:     "0.1.0",
+			Status:      StatusEnabled,
+			Kind:        KindPlatform,
+			Description: "Storage buckets and persistence boundary used by feature modules.",
+			Manifest:    builtinManifest(KindPlatform, "storage buckets and persistence boundary used by feature modules"),
+		},
+		{
+			ModuleID:    "ojos.platform.observability",
+			SetID:       "platform",
+			Name:        "Platform Observability",
+			Version:     "0.1.0",
+			Status:      StatusEnabled,
+			Kind:        KindPlatform,
+			Description: "Operational health, metrics-ready state, and diagnostics surfaces.",
+			Manifest:    builtinManifest(KindPlatform, "operational health, metrics-ready state, and diagnostics surfaces"),
+		},
+	}
+
+	modules := append([]Module{}, kernelModules...)
+	modules = append(modules, platformModules...)
+	modules = append(modules, Module{
 		ModuleID:    "ojos.judge-core",
 		SetID:       "core-capability",
 		Name:        "Judge Core",
 		Version:     "0.1.0",
 		Status:      StatusEnabled,
 		Kind:        KindFeature,
-		Description: "题目、题目包、提交、评测、Worker Link、结果查询与评测集群管理模块。",
+		Description: "Problem catalog, packages, submissions, judging, Worker Link, result storage, and judge cluster administration.",
 		Manifest:    judgeManifest,
 	})
 
 	data := BootstrapData{
 		Sets: []Set{
-			{SetID: "kernel", Name: "Kernel Set", Description: "OJOS 平台内核集合。", SortOrder: 0},
-			{SetID: "core-capability", Name: "Core Capability Set", Description: "题目、提交、评测和基础业务能力集合。", SortOrder: 10},
-			{SetID: "competition", Name: "Competition Set", Description: "竞赛能力集合，当前仅为目标架构。", SortOrder: 20},
-			{SetID: "education", Name: "Education Set", Description: "教学训练能力集合，当前仅为目标架构。", SortOrder: 30},
-			{SetID: "collaboration", Name: "Collaboration Set", Description: "协作社区能力集合，当前仅为目标架构。", SortOrder: 40},
-			{SetID: "integration", Name: "Integration Set", Description: "第三方集成能力集合，当前仅为目标架构。", SortOrder: 50},
-			{SetID: "operations", Name: "Operations Set", Description: "运维和可观测能力集合。", SortOrder: 60},
+			{SetID: "kernel", Name: "Kernel Set", Description: "OJOS kernel capabilities: installer, runtime, registry, topology, policy, audit, config, and health.", SortOrder: 0},
+			{SetID: "platform", Name: "Platform Set", Description: "Platform application adapters and base services: gateway, web shell, identity, storage, and observability.", SortOrder: 5},
+			{SetID: "core-capability", Name: "Core Capability Set", Description: "Problem, submission, judging, and foundational online judge capability modules.", SortOrder: 10},
+			{SetID: "competition", Name: "Competition Set", Description: "Future contest capabilities; not implemented in this phase.", SortOrder: 20},
+			{SetID: "education", Name: "Education Set", Description: "Future training and education capabilities; not implemented in this phase.", SortOrder: 30},
+			{SetID: "collaboration", Name: "Collaboration Set", Description: "Future group, discussion, clarification, print, and balloon capabilities; not implemented in this phase.", SortOrder: 40},
+			{SetID: "integration", Name: "Integration Set", Description: "Future external integration capabilities; not implemented in this phase.", SortOrder: 50},
+			{SetID: "operations", Name: "Operations Set", Description: "Operations and observability capabilities.", SortOrder: 60},
 		},
 		Modules: modules,
 		Edges: []Edge{
-			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.kernel.edge-ui-shell", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
-			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.kernel.identity-access", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
-			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.kernel.config-secret", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
-			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.kernel.audit-policy", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
-			{FromModuleID: "ojos.kernel.module-runtime", ToModuleID: "ojos.kernel.identity-access", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
-			{FromModuleID: "ojos.kernel.module-runtime", ToModuleID: "ojos.kernel.audit-policy", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.kernel.installer", ToModuleID: "ojos.kernel.module-registry", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.kernel.installer", ToModuleID: "ojos.kernel.policy", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.kernel.installer", ToModuleID: "ojos.kernel.audit", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.kernel.module-runtime", ToModuleID: "ojos.kernel.module-registry", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.kernel.topology", ToModuleID: "ojos.kernel.module-runtime", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.platform.gateway", ToModuleID: "ojos.kernel.module-runtime", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.platform.gateway", ToModuleID: "ojos.kernel.policy", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.platform.gateway", ToModuleID: "ojos.kernel.config", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.platform.web-shell", ToModuleID: "ojos.platform.gateway", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.platform.web-shell", ToModuleID: "ojos.kernel.module-runtime", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.platform.identity-access", ToModuleID: "ojos.kernel.policy", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.platform.identity-access", ToModuleID: "ojos.kernel.audit", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.platform.storage", ToModuleID: "ojos.kernel.config", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.platform.observability", ToModuleID: "ojos.kernel.health", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.platform.web-shell", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.platform.identity-access", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.platform.storage", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.platform.gateway", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.kernel.module-runtime", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.kernel.audit", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
+			{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.kernel.health", EdgeType: "requires", VersionConstraint: ">=0.1.0", Required: true},
 		},
 	}
 
 	data.Components = append(data.Components,
-		kernelComponent("ojos.kernel.edge-ui-shell", "frontend-shell", "frontend_shell", map[string]any{"path": "frontend/src"}),
-		kernelComponent("ojos.kernel.edge-ui-shell", "router-guard", "router_guard", map[string]any{"path": "frontend/src/router"}),
-		kernelComponent("ojos.kernel.identity-access", "auth-service", "backend_service", map[string]any{"path": "services/auth", "exposure": "internal"}),
-		kernelComponent("ojos.kernel.identity-access", "permission-admin-pages", "frontend_route_group", map[string]any{"routes": []string{"/admin/users", "/admin/permissions", "/admin/permission-check"}}),
-		kernelComponent("ojos.kernel.module-runtime", "module-registry-db", "database_schema", map[string]any{"migration": "deploy/migrations/000009_module_registry.up.sql"}),
-		kernelComponent("ojos.kernel.module-runtime", "module-admin-api", "admin_api", map[string]any{"prefix": "/api/admin/modules"}),
-		kernelComponent("ojos.kernel.config-secret", "internal-hmac", "security_component", map[string]any{"path": "services/shared/security/internalauth"}),
-		kernelComponent("ojos.kernel.audit-policy", "permission-audit-log", "database_schema", map[string]any{"table": "permission_audit_logs"}),
+		kernelComponent("ojos.kernel.installer", "installer-core", "rust_crate", map[string]any{"path": "kernel/installer/core"}),
+		kernelComponent("ojos.kernel.installer", "installer-service", "backend_service", map[string]any{"path": "kernel/installer/service", "health": "/health", "exposure": "internal"}),
+		kernelComponent("ojos.kernel.installer", "installer-cli", "tool", map[string]any{"path": "kernel/installer/cli", "tool_name": "ojosctl"}),
+		kernelComponent("ojos.kernel.module-runtime", "runtime-snapshot", "kernel_api", map[string]any{"path": "/api/admin/modules/runtime-snapshot"}),
+		kernelComponent("ojos.kernel.module-runtime", "runtime-reader", "go_package", map[string]any{"path": "services/gateway/internal/kernel/moduleruntime"}),
+		kernelComponent("ojos.kernel.module-registry", "module-registry-db", "database_schema", map[string]any{"migration": "deploy/migrations/000009_module_registry.up.sql"}),
+		kernelComponent("ojos.kernel.module-registry", "module-admin-api", "admin_api", map[string]any{"prefix": "/api/admin/modules"}),
+		kernelComponent("ojos.kernel.topology", "topology-snapshot", "kernel_api", map[string]any{"path": "/api/admin/modules/topology"}),
+		kernelComponent("ojos.kernel.policy", "protected-module-policy", "policy", map[string]any{"kernel": "no_disable_no_uninstall", "platform": "protected_by_default", "judge_core": "protected"}),
+		kernelComponent("ojos.kernel.audit", "permission-audit-log", "database_schema", map[string]any{"table": "permission_audit_logs"}),
+		kernelComponent("ojos.kernel.audit", "module-operation-history", "database_schema", map[string]any{"table": "module_operations"}),
+		kernelComponent("ojos.kernel.config", "internal-hmac", "security_component", map[string]any{"path": "services/shared/security/internalauth"}),
+		kernelComponent("ojos.kernel.health", "health-aggregator", "kernel_api", map[string]any{"path": "/api/admin/health"}),
+		kernelComponent("ojos.platform.gateway", "gateway-app", "backend_service", map[string]any{"path": "services/gateway", "exposure": "public"}),
+		kernelComponent("ojos.platform.web-shell", "web-shell-app", "frontend_shell", map[string]any{"path": "frontend/src", "future_path": "apps/web-shell"}),
+		kernelComponent("ojos.platform.web-shell", "router-guard", "router_guard", map[string]any{"path": "frontend/src/router"}),
+		kernelComponent("ojos.platform.identity-access", "auth-service", "backend_service", map[string]any{"path": "services/auth", "exposure": "internal"}),
+		kernelComponent("ojos.platform.identity-access", "permission-admin-pages", "frontend_route_group", map[string]any{"routes": []string{"/admin/users", "/admin/permissions", "/admin/permission-check"}}),
+		kernelComponent("ojos.platform.storage", "storage-buckets", "storage_contract", map[string]any{"buckets": []string{"problems", "submissions", "judge-artifacts"}}),
+		kernelComponent("ojos.platform.observability", "admin-health", "health_check", map[string]any{"path": "/api/admin/health"}),
 	)
 
 	data.Components = append(data.Components, judgeCoreComponents()...)
@@ -222,9 +337,9 @@ func installationForModules(modules []Module, judgeManifest json.RawMessage) []I
 
 func judgeCoreComponents() []Component {
 	return []Component{
-		component("problem-api", "backend_service", map[string]any{"path": "services/problem-api", "health": "/health", "exposure": "internal"}),
-		component("judge-api", "backend_service", map[string]any{"path": "services/judge-api", "health": "/health", "exposure": "internal"}),
-		component("judge-worker", "worker_service", map[string]any{"path": "services/judge-worker", "mode": "external-node"}),
+		component("problem-api", "backend_service", map[string]any{"path": "services/problem-api", "future_path": "modules/judge-core/services/problem-api", "health": "/health", "exposure": "internal"}),
+		component("judge-api", "backend_service", map[string]any{"path": "services/judge-api", "future_path": "modules/judge-core/services/judge-api", "health": "/health", "exposure": "internal"}),
+		component("judge-worker", "worker_service", map[string]any{"path": "services/judge-worker", "future_path": "modules/judge-core/workers/judge-worker", "mode": "external-node"}),
 		component("problems-storage", "storage_bucket", map[string]any{"bucket": "problems"}),
 		component("submissions-storage", "storage_bucket", map[string]any{"bucket": "submissions"}),
 		component("judge-artifacts-storage", "storage_bucket", map[string]any{"bucket": "judge-artifacts"}),
@@ -251,14 +366,14 @@ func component(componentID, componentType string, config map[string]any) Compone
 }
 
 func kernelPermissions() []Permission {
-	items := []Permission{
-		{ModuleID: "ojos.kernel.identity-access", PermissionKey: "system.admin", Description: "Kernel permission: system.admin"},
-		{ModuleID: "ojos.kernel.module-runtime", PermissionKey: "module.install", Description: "Kernel module runtime permission: module.install"},
-		{ModuleID: "ojos.kernel.module-runtime", PermissionKey: "module.enable", Description: "Kernel module runtime permission: module.enable"},
-		{ModuleID: "ojos.kernel.module-runtime", PermissionKey: "module.disable", Description: "Kernel module runtime permission: module.disable"},
-		{ModuleID: "ojos.kernel.module-runtime", PermissionKey: "module.configure", Description: "Kernel module runtime permission: module.configure"},
+	return []Permission{
+		{ModuleID: "ojos.platform.identity-access", PermissionKey: "system.admin", Description: "Platform permission: system.admin"},
+		{ModuleID: "ojos.kernel.installer", PermissionKey: "module.install", Description: "Kernel installer permission: module.install"},
+		{ModuleID: "ojos.kernel.installer", PermissionKey: "module.enable", Description: "Kernel installer permission: module.enable"},
+		{ModuleID: "ojos.kernel.installer", PermissionKey: "module.disable", Description: "Kernel installer permission: module.disable"},
+		{ModuleID: "ojos.kernel.installer", PermissionKey: "module.configure", Description: "Kernel installer permission: module.configure"},
+		{ModuleID: "ojos.kernel.module-runtime", PermissionKey: "module.runtime.read", Description: "Kernel module runtime permission: module.runtime.read"},
 	}
-	return items
 }
 
 func judgeCorePermissions() []Permission {
@@ -287,9 +402,9 @@ func judgeCorePermissions() []Permission {
 
 func judgeCoreMenus() []Menu {
 	return []Menu{
-		{ModuleID: "ojos.judge-core", MenuKey: "problems", Title: "题目", RoutePath: "/problems", SortOrder: 10, Enabled: true},
-		{ModuleID: "ojos.judge-core", MenuKey: "submissions", Title: "提交", RoutePath: "/submissions", SortOrder: 20, Enabled: true},
-		{ModuleID: "ojos.judge-core", MenuKey: "admin-judge", Title: "评测集群", RoutePath: "/admin/judge", SortOrder: 100, RequiredPermission: "system.admin", Enabled: true},
+		{ModuleID: "ojos.judge-core", MenuKey: "problems", Title: "Problems", RoutePath: "/problems", SortOrder: 10, Enabled: true},
+		{ModuleID: "ojos.judge-core", MenuKey: "submissions", Title: "Submissions", RoutePath: "/submissions", SortOrder: 20, Enabled: true},
+		{ModuleID: "ojos.judge-core", MenuKey: "admin-judge", Title: "Judge Cluster", RoutePath: "/admin/judge", SortOrder: 100, RequiredPermission: "system.admin", Enabled: true},
 	}
 }
 
@@ -354,34 +469,69 @@ func judgeCoreMigrations() []Migration {
 
 func judgeCoreManifest() map[string]any {
 	return map[string]any{
-		"id":          "ojos.judge-core",
-		"name":        "Judge Core",
-		"version":     "0.1.0",
-		"set":         "core-capability",
-		"kind":        "feature",
-		"status":      "builtin",
-		"description": "题目、题目包、提交、评测、Worker Link、结果查询与评测集群管理模块。",
+		"schema_version": 1,
+		"id":             "ojos.judge-core",
+		"name":           "Judge Core",
+		"version":        "0.1.0",
+		"set":            "core-capability",
+		"kind":           "feature",
+		"status":         "builtin",
+		"description":    "Problem catalog, packages, submissions, judging, Worker Link, result storage, and judge cluster administration.",
+		"compatibility": map[string]any{
+			"platform":  ">=0.1.0",
+			"installer": ">=0.1.0",
+		},
 		"requires": map[string]any{
-			"platform": ">=0.1.0",
-			"modules": []string{
-				"ojos.kernel.edge-ui-shell >= 0.1.0",
-				"ojos.kernel.identity-access >= 0.1.0",
-				"ojos.kernel.config-secret >= 0.1.0",
-				"ojos.kernel.audit-policy >= 0.1.0",
+			"modules": []map[string]any{
+				{"id": "ojos.platform.web-shell", "version": ">=0.1.0"},
+				{"id": "ojos.platform.identity-access", "version": ">=0.1.0"},
+				{"id": "ojos.platform.storage", "version": ">=0.1.0"},
+				{"id": "ojos.platform.gateway", "version": ">=0.1.0"},
+				{"id": "ojos.kernel.module-runtime", "version": ">=0.1.0"},
+				{"id": "ojos.kernel.audit", "version": ">=0.1.0"},
+				{"id": "ojos.kernel.health", "version": ">=0.1.0"},
 			},
 		},
 		"provides": map[string]any{
-			"permissions":      permissionKeys(judgeCorePermissions()),
-			"backend_services": []map[string]any{{"id": "problem-api", "path": "services/problem-api", "health": "/health", "exposure": "internal"}, {"id": "judge-api", "path": "services/judge-api", "health": "/health", "exposure": "internal"}},
-			"worker_services":  []map[string]any{{"id": "judge-worker", "path": "services/judge-worker", "mode": "external-node"}},
-			"frontend": map[string]any{
-				"routes": []string{"/problems", "/problems/new", "/problems/:id", "/problems/:id/edit", "/problems/:id/package", "/problems/:id/submit", "/submissions", "/submissions/:id", "/admin/judge"},
-				"menus":  []map[string]any{{"key": "problems", "title": "题目", "route": "/problems"}, {"key": "submissions", "title": "提交", "route": "/submissions"}, {"key": "admin-judge", "title": "评测集群", "route": "/admin/judge", "permission": "system.admin"}},
+			"permissions":     manifestPermissions(judgeCorePermissions()),
+			"roles":           []map[string]any{},
+			"components":      manifestComponents(judgeCoreComponents()),
+			"services":        []map[string]any{{"id": "problem-api", "path": "services/problem-api", "health": "/health", "exposure": "internal"}, {"id": "judge-api", "path": "services/judge-api", "health": "/health", "exposure": "internal"}},
+			"workers":         []map[string]any{{"id": "judge-worker", "path": "services/judge-worker", "mode": "external-node"}},
+			"frontend_routes": manifestFrontendRoutes(judgeCoreFrontendRoutes()),
+			"menus":           manifestMenus(judgeCoreMenus()),
+			"gateway_routes":  manifestGatewayRoutes(judgeCoreGatewayRoutes()),
+			"storage":         map[string]any{"buckets": []string{"problems", "submissions", "judge-artifacts"}},
+			"storage_buckets": []map[string]any{{"id": "problems"}, {"id": "submissions"}, {"id": "judge-artifacts"}},
+			"health_checks": []map[string]any{
+				{"id": "problem-api-health", "type": "http", "optional": false},
+				{"id": "judge-api-health", "type": "http", "optional": false},
+				{"id": "worker-cluster-health", "type": "metadata", "optional": false},
+				{"id": "queue-health", "type": "metadata", "optional": false},
+				{"id": "artifact-storage-health", "type": "metadata", "optional": false},
 			},
-			"gateway_routes": []map[string]any{{"prefix": "/api/problem", "service": "problem-api", "auth": "user"}, {"prefix": "/api/judge", "service": "judge-api", "auth": "user"}, {"prefix": "/api/judge/worker", "service": "judge-api", "auth": "worker"}},
-			"storage":        map[string]any{"buckets": []string{"problems", "submissions", "judge-artifacts"}},
-			"health_checks":  []string{"problem-api", "judge-api", "worker-cluster", "queue", "artifact-storage"},
-			"migrations":     []string{"deploy/migrations/000002_judge_schema.up.sql", "deploy/migrations/000004_problem_package_core.up.sql", "deploy/migrations/000005_judge_sandbox_storage_cleanup.up.sql", "deploy/migrations/000007_problem_catalog_fields.up.sql", "deploy/migrations/000008_worker_link.up.sql"},
+			"migrations": []map[string]any{
+				{"up": "deploy/migrations/000002_judge_schema.up.sql", "down": "deploy/migrations/000002_judge_schema.down.sql"},
+				{"up": "deploy/migrations/000004_problem_package_core.up.sql", "down": "deploy/migrations/000004_problem_package_core.down.sql"},
+				{"up": "deploy/migrations/000005_judge_sandbox_storage_cleanup.up.sql", "down": "deploy/migrations/000005_judge_sandbox_storage_cleanup.down.sql"},
+				{"up": "deploy/migrations/000007_problem_catalog_fields.up.sql", "down": "deploy/migrations/000007_problem_catalog_fields.down.sql"},
+				{"up": "deploy/migrations/000008_worker_link.up.sql", "down": "deploy/migrations/000008_worker_link.down.sql"},
+			},
+			"events":         map[string]any{"publishes": []string{"judge.submission.created", "judge.submission.finished"}, "subscribes": []string{}},
+			"scheduled_jobs": []map[string]any{},
+			"admin_panels":   []map[string]any{{"id": "judge-cluster", "route_path": "/admin/judge", "required_permission": "system.admin"}},
+			"topology": map[string]any{
+				"nodes": []map[string]any{
+					{"id": "problem-api", "type": "service"},
+					{"id": "judge-api", "type": "service"},
+					{"id": "judge-worker", "type": "worker"},
+				},
+				"edges": []map[string]any{
+					{"from": "gateway", "to": "problem-api", "type": "routes"},
+					{"from": "gateway", "to": "judge-api", "type": "routes"},
+					{"from": "judge-api", "to": "judge-worker", "type": "worker-link"},
+				},
+			},
 		},
 	}
 }
@@ -392,6 +542,72 @@ func permissionKeys(items []Permission) []string {
 		keys = append(keys, item.PermissionKey)
 	}
 	return keys
+}
+
+func manifestPermissions(items []Permission) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, map[string]any{"key": item.PermissionKey, "description": item.Description})
+	}
+	return out
+}
+
+func manifestComponents(items []Component) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, map[string]any{"id": item.ComponentID, "type": item.ComponentType, "status": item.Status, "config": rawJSONMap(item.Config)})
+	}
+	return out
+}
+
+func manifestFrontendRoutes(items []FrontendRoute) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, map[string]any{
+			"path":                item.RoutePath,
+			"name":                item.RouteName,
+			"component_key":       item.ComponentKey,
+			"required_permission": item.RequiredPermission,
+			"enabled":             item.Enabled,
+		})
+	}
+	return out
+}
+
+func manifestMenus(items []Menu) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, map[string]any{
+			"key":                 item.MenuKey,
+			"title":               item.Title,
+			"route_path":          item.RoutePath,
+			"sort_order":          item.SortOrder,
+			"required_permission": item.RequiredPermission,
+			"enabled":             item.Enabled,
+		})
+	}
+	return out
+}
+
+func manifestGatewayRoutes(items []GatewayRoute) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, map[string]any{
+			"prefix":         item.Prefix,
+			"target_service": item.TargetService,
+			"auth_mode":      item.AuthMode,
+			"enabled":        item.Enabled,
+		})
+	}
+	return out
+}
+
+func rawJSONMap(data json.RawMessage) map[string]any {
+	var value map[string]any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return map[string]any{}
+	}
+	return value
 }
 
 func mustJSON(value any) json.RawMessage {

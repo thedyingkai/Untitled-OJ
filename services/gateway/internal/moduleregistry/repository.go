@@ -327,6 +327,66 @@ ORDER BY module_id, component_type, component_id
 	return scanComponents(rows)
 }
 
+func (r *Repository) ListPermissions(ctx context.Context) ([]Permission, error) {
+	rows, err := r.db.Query(ctx, `
+SELECT module_id, permission_key, description
+FROM module_permissions
+ORDER BY module_id, permission_key
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]Permission, 0)
+	for rows.Next() {
+		var item Permission
+		if err := rows.Scan(&item.ModuleID, &item.PermissionKey, &item.Description); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) ListMenus(ctx context.Context) ([]Menu, error) {
+	rows, err := r.db.Query(ctx, `
+SELECT module_id, menu_key, title, route_path, icon, parent_key, sort_order, required_permission, enabled
+FROM module_menus
+ORDER BY sort_order, menu_key
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMenus(rows)
+}
+
+func (r *Repository) ListFrontendRoutes(ctx context.Context) ([]FrontendRoute, error) {
+	rows, err := r.db.Query(ctx, `
+SELECT module_id, route_path, route_name, component_key, required_permission, enabled
+FROM module_frontend_routes
+ORDER BY route_path
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanFrontendRoutes(rows)
+}
+
+func (r *Repository) ListGatewayRoutes(ctx context.Context) ([]GatewayRoute, error) {
+	rows, err := r.db.Query(ctx, `
+SELECT module_id, prefix, target_service, auth_mode, enabled
+FROM module_gateway_routes
+ORDER BY prefix
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanGatewayRoutes(rows)
+}
+
 func (r *Repository) ListComponentsByModule(ctx context.Context, moduleID string) ([]Component, error) {
 	rows, err := r.db.Query(ctx, `
 SELECT module_id, component_id, component_type, status, config
@@ -374,15 +434,7 @@ ORDER BY sort_order, menu_key
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]Menu, 0)
-	for rows.Next() {
-		var item Menu
-		if err := rows.Scan(&item.ModuleID, &item.MenuKey, &item.Title, &item.RoutePath, &item.Icon, &item.ParentKey, &item.SortOrder, &item.RequiredPermission, &item.Enabled); err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
+	return scanMenus(rows)
 }
 
 func (r *Repository) ListFrontendRoutesByModule(ctx context.Context, moduleID string) ([]FrontendRoute, error) {
@@ -396,15 +448,7 @@ ORDER BY route_path
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]FrontendRoute, 0)
-	for rows.Next() {
-		var item FrontendRoute
-		if err := rows.Scan(&item.ModuleID, &item.RoutePath, &item.RouteName, &item.ComponentKey, &item.RequiredPermission, &item.Enabled); err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
+	return scanFrontendRoutes(rows)
 }
 
 func (r *Repository) ListGatewayRoutesByModule(ctx context.Context, moduleID string) ([]GatewayRoute, error) {
@@ -418,15 +462,7 @@ ORDER BY prefix
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]GatewayRoute, 0)
-	for rows.Next() {
-		var item GatewayRoute
-		if err := rows.Scan(&item.ModuleID, &item.Prefix, &item.TargetService, &item.AuthMode, &item.Enabled); err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
+	return scanGatewayRoutes(rows)
 }
 
 func (r *Repository) ListInstallationsByModule(ctx context.Context, moduleID string) ([]Installation, error) {
@@ -524,6 +560,42 @@ func scanComponents(rows pgx.Rows) ([]Component, error) {
 			return nil, err
 		}
 		item.Config = rawOrObject(config)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func scanMenus(rows pgx.Rows) ([]Menu, error) {
+	items := make([]Menu, 0)
+	for rows.Next() {
+		var item Menu
+		if err := rows.Scan(&item.ModuleID, &item.MenuKey, &item.Title, &item.RoutePath, &item.Icon, &item.ParentKey, &item.SortOrder, &item.RequiredPermission, &item.Enabled); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func scanFrontendRoutes(rows pgx.Rows) ([]FrontendRoute, error) {
+	items := make([]FrontendRoute, 0)
+	for rows.Next() {
+		var item FrontendRoute
+		if err := rows.Scan(&item.ModuleID, &item.RoutePath, &item.RouteName, &item.ComponentKey, &item.RequiredPermission, &item.Enabled); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func scanGatewayRoutes(rows pgx.Rows) ([]GatewayRoute, error) {
+	items := make([]GatewayRoute, 0)
+	for rows.Next() {
+		var item GatewayRoute
+		if err := rows.Scan(&item.ModuleID, &item.Prefix, &item.TargetService, &item.AuthMode, &item.Enabled); err != nil {
+			return nil, err
+		}
 		items = append(items, item)
 	}
 	return items, rows.Err()

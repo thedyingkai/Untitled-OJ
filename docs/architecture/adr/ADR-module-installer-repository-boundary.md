@@ -1,5 +1,7 @@
 # ADR: Module Installer Repository Boundary
 
+> Superseded in path ownership by [ADR: Project Structure v2, Kernel and Modules](ADR-project-structure-v2-kernel-modules.md). The repository split decision remains valid; canonical source paths are now `kernel/installer/core`, `kernel/installer/service`, and `kernel/installer/cli`.
+
 Status: Accepted
 
 Date: 2026-06-27
@@ -12,12 +14,12 @@ The boundary must support fast v0 iteration without making the installer impossi
 
 ## Decision
 
-OJOS will not split the Module Installer into a separate repository immediately. The installer will be implemented inside the OJOS monorepo as an independent Rust workspace:
+OJOS will not split the Module Installer into a separate repository immediately. Project Structure v2 supersedes the original path sketch; the installer is implemented inside the OJOS monorepo as Kernel-owned Rust source:
 
 ```text
-crates/module-installer-core/
-services/module-installer/
-tools/ojosctl/
+kernel/installer/core/
+kernel/installer/service/
+kernel/installer/cli/
 ```
 
 This is option C: monorepo placement with independent-repository boundaries.
@@ -37,9 +39,9 @@ The installer code must not depend on Go service internals or frontend code. Its
 Paths:
 
 ```text
-services/module-installer/
-crates/module-installer-core/
-tools/ojosctl/
+kernel/installer/core/
+kernel/installer/service/
+kernel/installer/cli/
 ```
 
 Pros:

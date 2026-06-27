@@ -151,7 +151,7 @@ MODULE_INSTALLER_LOCK_TTL_SECONDS=300
 
 # 2026-06-27 Module Installer Runtime Image Hardening
 
-`services/module-installer` 已改为多阶段构建：
+`kernel/installer/service` 使用多阶段构建：
 
 ```text
 builder: rust:1.89-bookworm

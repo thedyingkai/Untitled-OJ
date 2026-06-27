@@ -19,7 +19,7 @@ fn valid_manifest() -> Manifest {
         },
         requires: manifest::Requires {
             modules: vec![ModuleDependency {
-                id: "ojos.kernel.identity-access".to_string(),
+                id: "ojos.platform.identity-access".to_string(),
                 version: ">=0.1.0".to_string(),
             }],
         },
@@ -28,12 +28,18 @@ fn valid_manifest() -> Manifest {
                 key: "demo.view".to_string(),
                 description: "View demo.".to_string(),
             }],
+            roles: vec![RoleDecl {
+                key: "demo.viewer".to_string(),
+                description: "Demo viewer.".to_string(),
+            }],
             components: vec![ComponentDecl {
                 id: "demo-component".to_string(),
                 component_type: "metadata".to_string(),
                 status: "DISABLED".to_string(),
                 config: serde_json::json!({}),
             }],
+            services: vec![],
+            workers: vec![],
             frontend_routes: vec![FrontendRouteDecl {
                 path: "/admin/modules/demo".to_string(),
                 name: "demo-module".to_string(),
@@ -53,12 +59,34 @@ fn valid_manifest() -> Manifest {
             }],
             gateway_routes: vec![],
             storage: StorageDecl { buckets: vec![] },
+            storage_buckets: vec![StorageBucketDecl {
+                id: "demo-metadata".to_string(),
+                description: "Demo metadata bucket declaration.".to_string(),
+            }],
             health_checks: vec![HealthCheckDecl {
                 id: "demo-health".to_string(),
                 check_type: "metadata".to_string(),
                 optional: true,
             }],
             migrations: vec![],
+            events: EventsDecl {
+                publishes: vec!["demo.installed".to_string()],
+                subscribes: vec![],
+            },
+            scheduled_jobs: vec![],
+            admin_panels: vec![AdminPanelDecl {
+                id: "demo-panel".to_string(),
+                route_path: "/admin/modules/demo".to_string(),
+                required_permission: "demo.view".to_string(),
+            }],
+            topology: TopologyDecl {
+                nodes: vec![TopologyNodeDecl {
+                    id: "demo-component".to_string(),
+                    node_type: "metadata".to_string(),
+                    label: "Demo Component".to_string(),
+                }],
+                edges: vec![],
+            },
         },
         signature: None,
         signing_key_id: None,
@@ -70,11 +98,11 @@ fn snapshot() -> RegistrySnapshot {
     RegistrySnapshot {
         modules: vec![
             InstalledModule {
-                module_id: "ojos.kernel.identity-access".to_string(),
+                module_id: "ojos.platform.identity-access".to_string(),
                 name: "Identity Access".to_string(),
                 version: "0.1.0".to_string(),
                 status: ModuleState::Enabled,
-                kind: "kernel".to_string(),
+                kind: "platform".to_string(),
                 manifest: None,
             },
             InstalledModule {
@@ -301,6 +329,10 @@ fn disable_and_uninstall_protection() {
     let plan = uninstall_plan("ojos.judge-core", &snapshot(), true).unwrap();
     assert!(!plan.can_apply);
     assert!(plan.blocked_by.iter().any(|v| v.contains("protected")));
+
+    let plan = disable_plan("ojos.platform.identity-access", &snapshot(), true).unwrap();
+    assert!(!plan.can_apply);
+    assert!(plan.blocked_by.iter().any(|v| v.contains("platform")));
 }
 
 #[test]

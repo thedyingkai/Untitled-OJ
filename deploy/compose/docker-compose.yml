@@ -81,7 +81,7 @@ services:
   module-installer:
     build:
       context: ../..
-      dockerfile: services/module-installer/Dockerfile
+      dockerfile: kernel/installer/service/Dockerfile
       args:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
