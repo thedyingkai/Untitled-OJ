@@ -171,3 +171,27 @@ powershell -NoProfile -File scripts\e2e-module-compat.ps1 `
 ```
 
 The harness validates scaffold, package, install, enable, Runtime Snapshot, route/menu/topology/permission/service contribution, metadata service plan blocking, disable, include-disabled inspection, uninstall dry-run, auth rejection and path leak checks.
+
+## Kernel Baseline Acceptance
+
+Run:
+
+```powershell
+powershell -NoProfile -File scripts\acceptance-kernel.ps1 -SkipDockerBuild
+```
+
+The unified kernel acceptance entry calls static verification, API e2e, module compatibility and `ojosctl` smoke checks. It writes a summary with:
+
+```text
+static_failed
+api_failed
+compat_failed
+path_leaks
+admin_health_status
+admin_health_judge_status
+module_compat
+controlled_apply
+overall_status
+```
+
+Controlled apply is skipped by default. It only runs when `-RunControlledApply` is passed.

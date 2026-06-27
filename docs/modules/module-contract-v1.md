@@ -62,3 +62,11 @@ Package v1 verifies checksum integrity only. Signature trust policy is reserved 
 ## Hotplug Level
 
 Schema v1 supports L0 metadata hotplug, L1 Gateway route table contribution, and L2 controlled service plan metadata. It does not implement dynamic frontend bundles, hooks, remote module market or full hotplug automation.
+
+## Version Freeze
+
+`schema_version: 1` is frozen as the current compatibility starting point. Future breaking changes must use `schema_version: 2`; additive fields in v1 must be backward compatible and must not make old manifests unsafe or semantically different.
+
+## Version Freeze
+
+`schema_version: 1` is frozen as the current compatibility starting point. Future breaking changes must use `schema_version: 2`; additive fields in v1 must be backward compatible and must not make old manifests unsafe or semantically different.

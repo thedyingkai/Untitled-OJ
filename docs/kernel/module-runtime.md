@@ -164,3 +164,27 @@ Gateway still exposes `POST /api/admin/runtime/plans/:id/apply` only as an expli
 Runtime Snapshot is the compatibility surface for ordinary modules. `modules/sample-hello/module.yaml` proves that permissions, menus, frontend route metadata, disabled gateway routes, metadata services/workers, health checks and topology can appear through manifest install/enable without editing Gateway route code, Web Shell hardcoded menus, topology page code or permission page code.
 
 Schema v1 modules can use L0 metadata, L1 route table contribution and L2 controlled service plan metadata. L3 dynamic frontend bundles, hooks, remote module market and full hotplug remain out of scope.
+
+## Baseline Version Freeze
+
+Runtime Snapshot version is currently `1`. Breaking response-shape changes must introduce snapshot version `2` and keep a compatibility story for Web Shell and admin clients.
+
+Current frozen hotplug status:
+
+- L0 Metadata Hotplug: complete.
+- L1 Route/Menu/Topology/Permission Hotplug: basically complete for trusted metadata and route proxying.
+- L2 Service Runtime Foundation + Controlled Apply: foundation complete; apply is only through `ojosctl` / operator.
+- L3 Dynamic Frontend Extension: not complete.
+- L4 Full Module Hotplug: not complete.
+
+## Baseline Version Freeze
+
+Runtime Snapshot version is currently `1`. Breaking response-shape changes must introduce snapshot version `2` and keep a compatibility story for Web Shell and admin clients.
+
+Current frozen hotplug status:
+
+- L0 Metadata Hotplug: complete.
+- L1 Route/Menu/Topology/Permission Hotplug: basically complete for trusted metadata and route proxying.
+- L2 Service Runtime Foundation + Controlled Apply: foundation complete; apply is only through `ojosctl` / operator.
+- L3 Dynamic Frontend Extension: not complete.
+- L4 Full Module Hotplug: not complete.

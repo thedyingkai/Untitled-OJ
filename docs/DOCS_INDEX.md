@@ -1,143 +1,111 @@
-# 文档索引
+# OJOS Documentation Index
 
-> 文档状态：当前实现
-> 适用范围：开�?/ 部署 / 运维 / 架构设计 / 安全 / E2E 验收
-> 最后更新：2026-06-27
+This index points to the current canonical docs. Historical docs remain under `docs/archive/`.
 
-本索引按主题列出 OJOS 当前正式文档。历史文档仅供追溯，不作为当前部署依据�?
-## 架构
+## Release And Gates
 
-- [架构总览](architecture/overview.md)
-- [Project Structure v2](architecture/project-structure-v2.md)
-- [模块拓扑设计](architecture/module-topology.md)
-- [服务拓扑](architecture/service-topology.md)
-- [Worker Link 协议](architecture/worker-link-protocol.md)
-- [Storage �?artifact 模型](architecture/storage-artifact-model.md)
-- [权限模型](architecture/permission-model.md)
-- [内部 HMAC](architecture/internal-auth.md)
+- [Kernel Baseline Freeze](release/kernel-baseline-freeze.md)
+- [Pre-Feature Gate](release/pre-feature-gate.md)
+- [Acceptance Matrix](release/acceptance-matrix.md)
+- [Regression Matrix](release/regression-matrix.md)
+- [Versioning And Contract Freeze](release/versioning.md)
 
-## API
-
-- [API 总览](api/README.md)
-- [Auth API](api/auth-api.md)
-- [Problem API](api/problem-api.md)
-- [Judge API](api/judge-api.md)
-- [Worker API](api/worker-api.md)
-- [Admin API](api/admin-api.md)
-
-## 前端
-
-- [前端开发指南](development/frontend-development.md)
-- [UI 风格指南](development/ui-style-guide.md)
-
-## 模块系统
+## Kernel
 
 - [Kernel Overview](kernel/kernel-overview.md)
 - [Kernel Installer](kernel/installer.md)
 - [Kernel Module Runtime](kernel/module-runtime.md)
-- [模块系统首页](modules/README.md)
-- [模块契约](modules/module-contract.md)
-- [模块清单](modules/module-manifest.md)
-- [模块生命周期](modules/module-lifecycle.md)
-- [模块安装器](modules/module-installer.md)
-- [Judge Core 模块](modules/judge-core.md)
-- [Contest 模块规划](modules/contest-planning.md)
 
-## Judge
+## Modules
 
-- [资源限制](judge/judge-resource-limits.md)
-- [状态模型](judge/judge-status-model.md)
-- [Worker 集群](judge/judge-worker-cluster.md)
-- [语言运行时](judge/judge-language-runtime.md)
-- [评测 E2E 用例](judge/judge-e2e-cases.md)
+- [Module System](modules/README.md)
+- [Module Contract](modules/module-contract.md)
+- [Module Contract v1](modules/module-contract-v1.md)
+- [Module Schema v1](modules/module-schema-v1.yaml)
+- [Module SDK](modules/module-sdk.md)
+- [Module Authoring Guide](modules/module-authoring-guide.md)
+- [Module Testing Guide](modules/module-testing-guide.md)
+- [No Kernel Change Extension Proof](modules/no-kernel-change-extension-proof.md)
+- [Module Lifecycle](modules/module-lifecycle.md)
+- [Module Installer](modules/module-installer.md)
+- [Module Package Format](modules/module-package-format.md)
+- [Judge Core](modules/judge-core.md)
+- [Judge Core Readiness](modules/judge-core-readiness.md)
+- [Contest Planning](modules/contest-planning.md)
 
-## 部署
+## Architecture
 
-- [Control Plane 部署](deploy/deploy-control-plane.md)
-- [Worker Node 部署](deploy/deploy-worker-node.md)
-- [Docker Compose 说明](deploy/docker-compose.md)
-- [环境变量参考](deploy/env-reference.md)
-- [生产加固](deploy/production-hardening.md)
+- [Architecture Overview](architecture/overview.md)
+- [Project Structure v2](architecture/project-structure-v2.md)
+- [Module Topology](architecture/module-topology.md)
+- [Service Topology](architecture/service-topology.md)
+- [Permission Model](architecture/permission-model.md)
+- [Internal Auth](architecture/internal-auth.md)
+- [Storage Artifact Model](architecture/storage-artifact-model.md)
+- [Worker Link Protocol](architecture/worker-link-protocol.md)
 
-## 运维
+## API
 
-- [健康检查](operations/health-checks.md)
-- [管理员操作](operations/admin-operations.md)
-- [备份与保留](operations/backup-retention.md)
-- [故障排查](operations/troubleshooting.md)
+- [API Index](api/README.md)
+- [Admin API](api/admin-api.md)
+- [Auth API](api/auth-api.md)
+- [Problem API](api/problem-api.md)
+- [Judge API](api/judge-api.md)
+- [Worker API](api/worker-api.md)
+
+## Security
+
+- [Security Boundary](security/security-boundary.md)
+- [Kernel Security Review](security/kernel-security-review.md)
+- [Module Installer Threat Model](security/module-installer-threat-model.md)
+- [Internal HMAC](security/internal-hmac.md)
+- [Path Leak Prevention](security/path-leak-prevention.md)
+- [Permission Admin](security/permission-admin.md)
+- [Worker Token](security/worker-token.md)
+
+## Development
+
+- [Current State](development/current-state.md)
+- [Local Development](development/local-development.md)
+- [Backend Development](development/backend-development.md)
+- [Frontend Development](development/frontend-development.md)
+- [Static Verification](development/static-verification.md)
+- [Coding Standards](development/coding-standards.md)
+- [Temporary File Policy](development/temp-file-policy.md)
+- [UI Style Guide](development/ui-style-guide.md)
 
 ## E2E
 
-- [工程验收总入口](e2e/e2e-engineering-acceptance.md)
-- [Linux 运行验收](e2e/e2e-linux-runtime.md)
-- [静态检查](e2e/e2e-static-checks.md)
+- [Engineering Acceptance](e2e/e2e-engineering-acceptance.md)
+- [Linux Runtime](e2e/e2e-linux-runtime.md)
+- [Static Checks](e2e/e2e-static-checks.md)
 
-## 安全
+## Judge
 
-- [安全边界](security/security-boundary.md)
-- [内部 HMAC](security/internal-hmac.md)
-- [Worker Token](security/worker-token.md)
-- [路径泄露防护](security/path-leak-prevention.md)
-- [权限管理安全](security/permission-admin.md)
-- [Module Installer Threat Model](security/module-installer-threat-model.md)
+- [Judge E2E Cases](judge/judge-e2e-cases.md)
+- [Judge Language Runtime](judge/judge-language-runtime.md)
+- [Judge Resource Limits](judge/judge-resource-limits.md)
+- [Judge Status Model](judge/judge-status-model.md)
+- [Judge Worker Cluster](judge/judge-worker-cluster.md)
 
-## 开�?
-- [当前状态](development/current-state.md)
-- [本地开发](development/local-development.md)
-- [静态验证](development/static-verification.md)
-- [编码规范](development/coding-standards.md)
-- [前端开发指南](development/frontend-development.md)
-- [UI 风格指南](development/ui-style-guide.md)
-- [后端开发指南](development/backend-development.md)
-- [临时文件隔离规则](development/temp-file-policy.md)
+## Deployment
 
-## 归档
+- [Control Plane Deployment](deploy/deploy-control-plane.md)
+- [Worker Node Deployment](deploy/deploy-worker-node.md)
+- [Docker Compose](deploy/docker-compose.md)
+- [Environment Reference](deploy/env-reference.md)
+- [Production Hardening](deploy/production-hardening.md)
 
-- [历史文档目录](archive/legacy-docs/)
-- [文档迁移记录](archive/legacy-docs/DOCS_MIGRATION.md)
-- [Module Installer 仓库边界 ADR](architecture/adr/ADR-module-installer-repository-boundary.md)
-- [Project Structure v2 ADR](architecture/adr/ADR-project-structure-v2-kernel-modules.md)
-- [模块包格式](modules/module-package-format.md)
+## Operations
 
-## Kernel Runtime Wiring v1 Documents
+- [Admin Operations](operations/admin-operations.md)
+- [Backup Retention](operations/backup-retention.md)
+- [Health Checks](operations/health-checks.md)
+- [Troubleshooting](operations/troubleshooting.md)
 
-- `docs/kernel/module-runtime.md` describes Runtime Snapshot v1, include-disabled behavior, topology generation and L0/L1 hotplug status.
-- `docs/api/admin-api.md` lists runtime snapshot, runtime routes and runtime reload admin APIs.
-- `docs/modules/module-contract.md` describes manifest extension points consumed by Runtime Snapshot.
-- `docs/development/frontend-development.md` documents Web Shell contribution rendering boundaries.
-- `docs/development/backend-development.md` documents Gateway/runtime aggregation boundaries.
+## Scripts
 
-## Hotplug L1 Completion Documents
-
-- `docs/kernel/module-runtime.md` now documents dynamic Gateway proxy, trusted service map, reserved prefixes, auth modes and route table reload semantics.
-- `docs/modules/module-contract.md` documents `gateway_routes.service_id` and safe Web Shell contribution fallback.
-- `docs/api/admin-api.md` documents runtime route table fields and dynamic proxy security boundaries.
-- `docs/security/module-installer-threat-model.md` includes L1 dynamic proxy threats and mitigations.
-## Hotplug L2 Foundation Documents
-
-- `docs/kernel/module-runtime.md` documents runtime driver abstraction, service states, plan-only compose driver and route-health linkage.
-- `docs/modules/module-contract.md` documents `provides.services` / `provides.workers` L2 fields and forbidden runtime fields.
-- `docs/modules/module-lifecycle.md` documents service lifecycle plans and metadata-only blocking.
-- `docs/api/admin-api.md` documents `/api/admin/runtime/services` and plan endpoints.
-- `docs/development/backend-development.md` and `docs/development/frontend-development.md` document L2 safety boundaries.
-- `docs/security/module-installer-threat-model.md` documents runtime driver threats and mitigations.
-
-## Hotplug L2 Controlled Apply Documents
-
-- `docs/kernel/module-runtime.md` documents controlled apply architecture, stable plan JSON, argv-only commands, TTL, confirm, dry-run, locks, and Gateway apply disablement.
-- `docs/kernel/installer.md` documents `ojosctl runtime apply-plan`, operations, and operation lookup commands.
-- `docs/modules/module-lifecycle.md` documents operator lifecycle states and the allowed apply flow.
-- `docs/modules/module-contract.md` documents that manifests describe service metadata only and cannot grant executable runtime control.
-- `docs/api/admin-api.md` documents runtime operations APIs and Gateway apply returning 501.
-- `docs/development/backend-development.md` and `docs/development/frontend-development.md` document that Gateway/Web remain plan/status-only.
-- `docs/security/module-installer-threat-model.md` documents controlled apply threats and mitigations.
-
-## Module SDK Compatibility Documents
-
-- `docs/modules/module-contract-v1.md` freezes schema v1 semantics.
-- `docs/modules/module-schema-v1.yaml` lists schema v1 fields and compatibility policy.
-- `docs/modules/module-sdk.md` describes SDK commands and lifecycle.
-- `docs/modules/module-authoring-guide.md` describes authoring extension points.
-- `docs/modules/module-testing-guide.md` describes local and e2e module compatibility checks.
-- `docs/modules/no-kernel-change-extension-proof.md` records the no-core-change proof for Sample Hello.
-- `scripts/e2e-module-compat.ps1` is the compatibility harness.
+- `scripts/acceptance-kernel.ps1`: unified local kernel baseline acceptance.
+- `scripts/verify-static.ps1`: static build/test/security verification.
+- `scripts/e2e-api.ps1`: Docker control-plane API e2e.
+- `scripts/e2e-module-compat.ps1`: Module SDK compatibility harness.

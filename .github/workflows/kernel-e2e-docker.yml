@@ -1,0 +1,32 @@
+name: Kernel Docker E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_controlled_apply:
+        description: "Run controlled apply smoke"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+jobs:
+  docker-e2e:
+    name: Docker e2e draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Explain manual boundary
+        run: |
+          echo "Docker e2e is workflow_dispatch only."
+          echo "This workflow does not upload .env, .tmp, .ojosmod packages, tokens or logs."
+          echo "Local full acceptance remains scripts/acceptance-kernel.ps1."
+      - name: Static acceptance without Docker build
+        shell: pwsh
+        run: |
+          ./scripts/verify-static.ps1 -SkipDockerBuild

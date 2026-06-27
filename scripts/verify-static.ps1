@@ -1,5 +1,8 @@
 param(
-    [switch]$SkipDockerBuild
+    [switch]$SkipDockerBuild,
+    [switch]$SkipFrontend,
+    [switch]$SkipRust,
+    [switch]$SkipGo
 )
 
 # 用途：执行 OJOS 静态验证，包括 Go、Rust、前端构建、compose config 和安全扫描。
@@ -159,6 +162,7 @@ function Search-Text {
     })
 }
 
+if (-not $SkipGo) {
 Step "Go fmt check" {
     $files = Get-ChildItem -Path (Join-Path $root "services") -Recurse -Filter *.go |
         ForEach-Object { $_.FullName }
@@ -186,7 +190,9 @@ foreach ($service in @("auth", "gateway", "problem-api", "judge-api")) {
         }
     }
 }
+}
 
+if (-not $SkipRust) {
 Step "Rust fmt/check module-installer workspace" {
     InDir $root {
         Run "cargo" @("fmt", "--check")
@@ -219,11 +225,14 @@ Step "Rust fmt/check judge-worker" {
         Run "cargo" @("check")
     }
 }
+}
 
+if (-not $SkipFrontend) {
 Step "Frontend build" {
     InDir (Join-Path $root "frontend") {
         Run "npm" @("run", "build")
     }
+}
 }
 
 Step "Docker compose config" {

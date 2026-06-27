@@ -1,0 +1,79 @@
+name: Kernel CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-test:
+    name: Go tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+      - name: Test Go modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in services/shared services/auth services/gateway services/problem-api services/judge-api; do
+            (cd "$dir" && go test ./...)
+          done
+
+  rust-test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test installer workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo check
+          cargo test
+      - name: Test judge worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd services/judge-worker
+          cargo fmt --check
+          cargo check
+          cargo test
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+  schema-package-compat:
+    name: Schema and package compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run compatibility tests
+        run: |
+          cargo test -p module-installer-core checked_in_manifests_are_schema_v1_compatible
+          cargo test -p module-installer-core sample_module_package_verifies
+          cargo test -p module-installer-core package_rejects_banned_entries_and_checksum_mismatch
+          cargo test -p ojosctl module_init
