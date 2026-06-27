@@ -39,6 +39,10 @@ func classifyHTTPError(err error) (int, int, string) {
 		return http.StatusForbidden, 40300, "forbidden"
 	case errors.Is(err, pgx.ErrNoRows), errorMessageContains(err, "not found"):
 		return http.StatusNotFound, 40400, sanitizeErrorMessage(err)
+	case errorMessageContains(err, "conflict"):
+		return http.StatusConflict, 40900, sanitizeErrorMessage(err)
+	case errorMessageContains(err, "service unavailable"):
+		return http.StatusServiceUnavailable, 50300, "service unavailable"
 	default:
 		return http.StatusBadRequest, 40000, sanitizeErrorMessage(err)
 	}

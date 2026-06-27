@@ -69,7 +69,22 @@ services/module-installer/
 tools/ojosctl/
 ```
 
-`module-installer-core` 只包含 manifest/package/plan/依赖解析等纯逻辑，不依赖 Go 服务或 frontend。`services/module-installer` 是内部 HTTP service，通过 PostgreSQL 写 module registry、operation lock、operation history 和 audit log。`tools/ojosctl` 提供本地 validate / plan / package / verify。
+`module-installer-core` 只包含 manifest/package/plan/依赖解析等纯逻辑，不依赖 Go 服务或 frontend。`services/module-installer` 是内部 HTTP service，通过 PostgreSQL 写 module registry、operation lock、operation history 和 audit log。`tools/ojosctl` 提供本地 discover / validate / plan / package / verify / inspect / doctor。
+
+Rust installer internal API 使用稳定错误结构：
+
+```json
+{
+  "error": {
+    "code": "MANIFEST_INVALID",
+    "message": "manifest validation failed",
+    "severity": "error",
+    "details": {}
+  }
+}
+```
+
+Gateway 调用 installer 时必须做错误映射，不能把 internal URL、SQL 错误、panic、token 或绝对路径透传给用户。operation request/result 入库前必须 redaction。
 
 新增 Rust 验证命令：
 
@@ -77,6 +92,8 @@ tools/ojosctl/
 cargo fmt --check
 cargo check
 cargo test
+cargo run -p ojosctl -- --version
+cargo run -p ojosctl -- module doctor
 ```
 
 Gateway 仍是唯一 public API 入口。新增 Admin API 必须先在 Gateway 做 JWT 和 `system.admin` 权限校验，再调用 internal installer service。

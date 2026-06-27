@@ -94,17 +94,25 @@ services:
         condition: service_completed_successfully
     expose:
       - "8090"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
     environment:
       DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
       MODULE_INSTALLER_INTERNAL_TOKEN: ${MODULE_INSTALLER_INTERNAL_TOKEN:?MODULE_INSTALLER_INTERNAL_TOKEN is required}
       MODULE_INSTALLER_HOST: 0.0.0.0
       MODULE_INSTALLER_PORT: 8090
+      MODULE_INSTALLER_LOCK_TTL_SECONDS: ${MODULE_INSTALLER_LOCK_TTL_SECONDS:-300}
       OJOS_REPO_ROOT: /workspace
       RUST_LOG: info
     volumes:
       - ../../modules:/workspace/modules:ro
     healthcheck:
-      test: [ "CMD", "curl", "-fsS", "http://localhost:8090/health" ]
+      test: [ "CMD", "module-installer", "--healthcheck" ]
       interval: 30s
       timeout: 5s
       retries: 3

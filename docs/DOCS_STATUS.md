@@ -33,6 +33,7 @@
 | security/worker-token.md | 当前实现 |
 | security/path-leak-prevention.md | 当前实现 |
 | security/permission-admin.md | 当前实现 |
+| security/module-installer-threat-model.md | 当前实现，Installer hardening 威胁模型 |
 | e2e/e2e-engineering-acceptance.md | 当前实现 |
 | e2e/e2e-linux-runtime.md | 当前实现，WSL2 Linux 已验收，真实多机待补充 |
 | e2e/e2e-static-checks.md | 当前实现 |
@@ -91,8 +92,9 @@
 | modules/module-package-format.md | 当前实现，checksum integrity；signature v1 |
 
 边界：Installer v0 不支持远程市场、不执行不可信脚本、不加载动态 bundle、不宣称独立仓库发布完成。
-# Module Installer Runtime Image Boundary
 
-`services/module-installer` uses `rust:1.89-bookworm` as a v0 acceptance runtime
-image. It is not the final production-hardened image. Runtime image slimming
-and hardening remain follow-up work before production use.
+# Module Installer Hardening Status
+
+`services/module-installer` 已改为多阶段构建：builder 使用 `rust:1.89-bookworm`，最终 runtime 使用 `debian:bookworm-slim`，并以非 root 用户运行。Compose 对 `module-installer` 启用 `read_only: true`、`no-new-privileges:true`、`cap_drop: ALL`、`/tmp` tmpfs 和只读 `modules/` 挂载，不发布宿主机端口。
+
+包格式新增 `package.yaml` metadata；v0 仍只做 checksum integrity，不提供 publisher trust。signature / trust policy、distroless runtime、完整通用 rollback/uninstall apply 留到 v1 或后续 hardening。

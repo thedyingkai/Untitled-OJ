@@ -90,6 +90,45 @@ func TestInstallerInternalErrorMapping(t *testing.T) {
 	}
 }
 
+func TestInstallerStructuredErrorMapping(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":     "OPERATION_LOCK_HELD",
+				"message":  "module operation lock is held",
+				"severity": "error",
+				"details":  map[string]any{},
+			},
+		})
+	}))
+	defer server.Close()
+
+	token, err := sharedjwt.Generate("test-secret", 7, "root", []string{"admin"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logic := NewAdminModuleInstallerLogic(context.Background(), testInstallerSvc(server.URL))
+	_, err = logic.Discover("Bearer " + token)
+	if err == nil || !strings.Contains(err.Error(), "conflict: module operation lock is held") {
+		t.Fatalf("expected conflict installer error, got %v", err)
+	}
+}
+
+func TestInstallerUnavailableMapping(t *testing.T) {
+	token, err := sharedjwt.Generate("test-secret", 7, "root", []string{"admin"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logic := NewAdminModuleInstallerLogic(context.Background(), testInstallerSvc("http://127.0.0.1:1"))
+	_, err = logic.Discover("Bearer " + token)
+	if err == nil || !strings.Contains(err.Error(), "service unavailable") {
+		t.Fatalf("expected service unavailable, got %v", err)
+	}
+}
+
 func testInstallerSvc(endpoint string) *svc.ServiceContext {
 	return &svc.ServiceContext{
 		Config: config.Config{

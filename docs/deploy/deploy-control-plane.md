@@ -132,7 +132,10 @@ Control Plane compose 新增 `module-installer` 内部服务。该服务使用 R
 
 - 只读挂载 `modules/` 到 `/workspace/modules`。
 - 不挂载 `.env`。
+- 不挂载 `.tmp`。
 - 不挂载 Docker socket。
+- 不使用 host network、host PID 或 privileged 容器模式。
+- `read_only: true`、`no-new-privileges:true`、`cap_drop: ALL`，并用 `/tmp` tmpfs 提供临时目录。
 - 不具备执行任意模块脚本的能力。
 - 不支持远程模块市场。
 
@@ -141,14 +144,18 @@ Gateway 通过以下环境变量访问它：
 ```text
 MODULE_INSTALLER_ENDPOINT=http://module-installer:8090
 MODULE_INSTALLER_INTERNAL_TOKEN=<strong random token>
+MODULE_INSTALLER_LOCK_TTL_SECONDS=300
 ```
 
 生产或预生产部署必须生成强随机 `MODULE_INSTALLER_INTERNAL_TOKEN`。该 token 不能写入 Git、文档、前端代码或运行报告。
-# 2026-06-27 Module Installer Runtime Image Boundary
 
-`services/module-installer` currently uses `rust:1.89-bookworm` as the v0
-acceptance runtime image. This is allowed for the controlled v0 validation
-stage, but it is not the final production-hardened runtime image. Before a
-production deployment, the module-installer image should be slimmed and
-hardened separately, including a smaller runtime base, least-privilege runtime
-user, minimal filesystem permissions, and image vulnerability review.
+# 2026-06-27 Module Installer Runtime Image Hardening
+
+`services/module-installer` 已改为多阶段构建：
+
+```text
+builder: rust:1.89-bookworm
+runtime: debian:bookworm-slim
+```
+
+最终 runtime image 不包含 cargo、rustc 或源码，只复制 `module-installer` binary 和 CA bundle，并使用非 root 用户 `65532:65532` 运行。`debian:bookworm-slim` 是当前 hardening 选择；后续可评估 `gcr.io/distroless/cc-debian12`，但需要确认 CA、动态链接和排障方式。

@@ -16,10 +16,12 @@ COPY tools/ojosctl ./tools/ojosctl
 
 RUN cargo build --release -p module-installer
 
-FROM rust:1.89-bookworm
+FROM debian:bookworm-slim
 
 WORKDIR /app
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /app/target/release/module-installer /usr/local/bin/module-installer
 
+USER 65532:65532
 EXPOSE 8090
 CMD ["module-installer"]

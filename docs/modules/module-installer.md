@@ -23,12 +23,12 @@ tools/ojosctl/                 本地 CLI
 v0 已实现：
 
 - 本地 `modules/*/module.yaml` discover / validate / plan。
-- 本地 `.ojosmod` package / verify。
+- 本地 `.ojosmod` package / verify / inspect。
 - manifest schema version 1 校验。
 - 路径安全校验、危险字段校验、重复声明校验。
 - 依赖解析与 install / enable / disable / upgrade / rollback / uninstall plan。
 - demo module 的 install apply / enable / disable。
-- operation lock、operation history 和 audit log。
+- operation lock、operation history、request/result redaction 和 audit log。
 - Gateway Admin API 接入。
 - 前端 `/admin/modules/installer` 管理页。
 
@@ -82,11 +82,51 @@ GET  /api/admin/modules/:id/operations
 
 Gateway 负责 JWT 鉴权、`admin` / `super_admin` / `system.admin` 权限检查、actor 信息透传和错误映射。前端不直接访问 installer service。
 
+## Runtime Image Hardening
+
+`services/module-installer` 使用多阶段 Dockerfile：
+
+```text
+builder: rust:1.89-bookworm
+runtime: debian:bookworm-slim
+```
+
+最终 runtime image 只复制 `module-installer` binary 和 CA bundle，不包含 cargo、rustc 或源码。Compose 中 `module-installer` 只通过 internal network `expose: 8090` 暴露，不发布宿主机端口，不挂载 Docker socket，不挂载 `.env`，只读挂载 `modules/`。
+
+当前 compose hardening：
+
+```text
+read_only: true
+security_opt: no-new-privileges:true
+cap_drop: ALL
+tmpfs: /tmp
+USER 65532:65532
+```
+
+后续目标是评估 `gcr.io/distroless/cc-debian12` 等 distroless runtime；v0 hardening 先使用 `debian:bookworm-slim` 以保留证书和动态链接调试余地。
+
+## Error Model
+
+Rust internal API 错误统一返回：
+
+```json
+{
+  "error": {
+    "code": "MANIFEST_PATH_ESCAPE",
+    "message": "manifest path escapes modules directory",
+    "severity": "error",
+    "details": {}
+  }
+}
+```
+
+Gateway 会把 manifest/path/validation error 映射为 400，未登录映射为 401，权限不足映射为 403，模块不存在映射为 404，operation lock 或 dependency conflict 映射为 409，installer 不可达映射为 503。错误响应不得泄露 internal service URL、DB 连接串、Rust panic、SQL 错误或绝对路径。
+
 ## Operation Lock
 
-写操作使用 `module_operation_locks` 全局锁，TTL 为 5 分钟。install / enable / disable / upgrade / rollback / uninstall apply 都必须持锁。
+写操作使用 `module_operation_locks` 全局锁，TTL 默认 300 秒，可通过 `MODULE_INSTALLER_LOCK_TTL_SECONDS` 配置，允许范围为 30 到 3600 秒。install / enable / disable / upgrade / rollback / uninstall apply 都必须持锁。
 
-dry-run 默认不写业务表。apply 操作会写入 `module_operations`，并在 `permission_audit_logs` 里记录 `module.<action>`。
+dry-run 默认不写业务表。apply 操作会写入 `module_operations`，并在 `permission_audit_logs` 里记录 `module.<action>`。operation request/result 写入前会 redaction，`token`、`secret`、`password`、`authorization` 字段不会原样保存。
 
 ## 保护规则
 
@@ -105,6 +145,8 @@ cargo run -p ojosctl -- module validate modules/demo-module/module.yaml --repo-r
 cargo run -p ojosctl -- module plan modules/demo-module/module.yaml --repo-root .
 cargo run -p ojosctl -- module package modules/demo-module -o .tmp/agent/scratch/demo.ojosmod
 cargo run -p ojosctl -- module verify .tmp/agent/scratch/demo.ojosmod
+cargo run -p ojosctl -- module inspect .tmp/agent/scratch/demo.ojosmod
+cargo run -p ojosctl -- module doctor
 ```
 
 运行时 API：
@@ -118,11 +160,6 @@ powershell -NoProfile -File scripts\e2e-api.ps1 `
   -UserPassword user123 `
   -WorkerToken $env:OJOS_WORKER_TOKEN
 ```
-# Runtime Image Boundary
+## 安全参考
 
-`services/module-installer` currently builds and runs from `rust:1.89-bookworm`
-for v0 acceptance. This keeps the Rust service build reproducible in the local
-compose validation environment, but it is not the final production runtime
-image. A later hardening pass must slim the runtime image, run the service with
-least privilege, reduce writable filesystem surface, and review image
-vulnerabilities before production use.
+更多攻击面、缓解措施和剩余边界见 [Module Installer Threat Model](../security/module-installer-threat-model.md)。

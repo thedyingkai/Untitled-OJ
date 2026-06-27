@@ -334,8 +334,34 @@ fn package_checksum_verify_and_path_rejection() {
     let package = dir.path().join("demo.ojosmod");
     let result = package_module(&module_dir, &package).unwrap();
     assert!(result.valid);
-    assert!(verify_package(&package).unwrap().files_checked >= 2);
+    let verified = verify_package(&package).unwrap();
+    assert!(verified.files_checked >= 3);
+    assert_eq!(verified.package.unwrap().format, "ojosmod");
 
     fs::write(module_dir.join(".env"), "SECRET=value").unwrap();
     assert!(package_module(&module_dir, &dir.path().join("bad.ojosmod")).is_err());
+}
+
+#[test]
+fn package_requires_metadata() {
+    let dir = tempdir().unwrap();
+    let package = dir.path().join("missing-metadata.ojosmod");
+    {
+        let file = fs::File::create(&package).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
+        let manifest_text = serde_yaml::to_string(&valid_manifest()).unwrap();
+        zip.start_file("module.yaml", options).unwrap();
+        use std::io::Write;
+        zip.write_all(manifest_text.as_bytes()).unwrap();
+        let hash = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(manifest_text.as_bytes()))
+        };
+        zip.start_file("checksums.sha256", options).unwrap();
+        zip.write_all(format!("{}  module.yaml\n", hash).as_bytes())
+            .unwrap();
+        zip.finish().unwrap();
+    }
+    assert!(verify_package(&package).is_err());
 }

@@ -108,7 +108,7 @@ func (l *AdminModuleInstallerLogic) callInstaller(method string, path string, bo
 
 	resp, err := l.client.Do(httpReq)
 	if err != nil {
-		return nil, errors.New("module installer unavailable")
+		return nil, errors.New("service unavailable: module installer unavailable")
 	}
 	defer resp.Body.Close()
 
@@ -121,11 +121,18 @@ func (l *AdminModuleInstallerLogic) callInstaller(method string, path string, bo
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, errors.New("module installer returned invalid response")
 	}
+	installerMsg := payload.Msg
+	if payload.Error != nil {
+		installerMsg = strings.TrimSpace(payload.Error.Message)
+		if installerMsg == "" {
+			installerMsg = strings.TrimSpace(payload.Error.Code)
+		}
+	}
 	if payload.Code != 0 {
-		return nil, installerStatusError(resp.StatusCode, payload.Msg)
+		return nil, installerStatusError(resp.StatusCode, installerMsg)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, installerStatusError(resp.StatusCode, payload.Msg)
+		return nil, installerStatusError(resp.StatusCode, installerMsg)
 	}
 	return &payload, nil
 }
@@ -142,6 +149,10 @@ func installerStatusError(status int, msg string) error {
 		return errors.New("forbidden: " + msg)
 	case http.StatusNotFound:
 		return errors.New("not found: " + msg)
+	case http.StatusConflict:
+		return errors.New("conflict: " + msg)
+	case http.StatusBadGateway, http.StatusServiceUnavailable:
+		return errors.New("service unavailable: " + msg)
 	default:
 		return errors.New(msg)
 	}

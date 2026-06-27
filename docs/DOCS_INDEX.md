@@ -76,6 +76,7 @@
 - [Worker Token](security/worker-token.md)
 - [路径泄露防护](security/path-leak-prevention.md)
 - [权限管理安全](security/permission-admin.md)
+- [Module Installer Threat Model](security/module-installer-threat-model.md)
 
 ## 开发
 

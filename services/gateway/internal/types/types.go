@@ -136,7 +136,15 @@ type ModuleInstallerReq struct {
 }
 
 type ModuleInstallerResp struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-	Data any    `json:"data"`
+	Code  int                   `json:"code"`
+	Msg   string                `json:"msg"`
+	Data  any                   `json:"data"`
+	Error *ModuleInstallerError `json:"error,omitempty"`
+}
+
+type ModuleInstallerError struct {
+	Code     string         `json:"code"`
+	Message  string         `json:"message"`
+	Severity string         `json:"severity"`
+	Details  map[string]any `json:"details,omitempty"`
 }

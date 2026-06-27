@@ -192,6 +192,12 @@ Step "Rust fmt/check module-installer workspace" {
         Run "cargo" @("fmt", "--check")
         Run "cargo" @("check")
         Run "cargo" @("test")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "--version")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "doctor")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "validate", "modules/demo-module/module.yaml", "--repo-root", ".")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "package", "modules/demo-module", "-o", ".tmp/agent/scratch/verify-static-demo.ojosmod")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "verify", ".tmp/agent/scratch/verify-static-demo.ojosmod")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "inspect", ".tmp/agent/scratch/verify-static-demo.ojosmod")
     }
 }
 
@@ -212,12 +218,30 @@ Step "Docker compose config" {
     InDir $root {
         RunQuiet "docker" @("compose", "--env-file", ".env.example", "-f", "deploy/compose/docker-compose.yml", "config")
         RunQuiet "docker" @("compose", "--env-file", "deploy/worker/.env.example", "-f", "deploy/worker/docker-compose.yml", "config")
+        if (-not (Test-Path (Join-Path $root "services/module-installer/Dockerfile"))) {
+            throw "module-installer Dockerfile is missing"
+        }
+        $installerDockerfile = Get-Content (Join-Path $root "services/module-installer/Dockerfile") -Raw
+        $installerFrom = @($installerDockerfile -split "`n" | Where-Object { $_ -match "^\s*FROM\s+" })
+        if ($installerFrom.Count -lt 2) {
+            throw "module-installer Dockerfile must use a builder and runtime stage"
+        }
+        if ($installerFrom[-1] -match "rust:") {
+            throw "module-installer final runtime image must not be rust:*"
+        }
+        $compose = Get-Content (Join-Path $root "deploy/compose/docker-compose.yml") -Raw
+        foreach ($required in @("module-installer:", "read_only: true", "no-new-privileges:true", "cap_drop:", "expose:", "../../modules:/workspace/modules:ro", "MODULE_INSTALLER_LOCK_TTL_SECONDS")) {
+            if ($compose -notlike "*$required*") {
+                throw "compose module-installer hardening check failed: missing $required"
+            }
+        }
     }
 }
 
 if (-not $SkipDockerBuild) {
     Step "Docker compose build" {
         InDir $root {
+            Run "docker" @("compose", "--env-file", ".env.example", "-f", "deploy/compose/docker-compose.yml", "build", "module-installer")
             Run "docker" @("compose", "--env-file", ".env.example", "-f", "deploy/compose/docker-compose.yml", "build")
         }
     }

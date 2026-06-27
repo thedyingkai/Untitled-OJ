@@ -7,7 +7,7 @@ pub use manifest::{
     MenuDecl, MigrationDecl, ModuleDependency, PermissionDecl, Provides, StorageDecl,
     validate_manifest, validate_manifest_file,
 };
-pub use package::{PackageVerification, package_module, verify_package};
+pub use package::{PackageMetadata, PackageVerification, package_module, verify_package};
 pub use plan::{
     Action, InstalledModule, ModuleState, Plan, PlanKind, PlanRequest, PlanWarning,
     RegistrySnapshot, diff_manifests, disable_plan, enable_plan, install_plan, rollback_plan,

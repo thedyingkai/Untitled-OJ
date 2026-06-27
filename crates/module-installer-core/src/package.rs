@@ -17,7 +17,27 @@ pub struct PackageVerification {
     pub version: String,
     pub files_checked: usize,
     #[serde(default)]
+    pub package: Option<PackageMetadata>,
+    #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageMetadata {
+    pub format: String,
+    pub version: u32,
+    pub created_by: String,
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub signing_key_id: Option<String>,
+    #[serde(default)]
+    pub trusted_publisher: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PackageMetadataFile {
+    pub package: PackageMetadata,
 }
 
 pub fn package_module(module_dir: &Path, output: &Path) -> Result<PackageVerification> {
@@ -44,7 +64,7 @@ pub fn package_module(module_dir: &Path, output: &Path) -> Result<PackageVerific
             .to_string_lossy()
             .replace('\\', "/");
         validate_package_entry_name(&rel)?;
-        if rel == "checksums.sha256" {
+        if rel == "checksums.sha256" || rel == "package.yaml" {
             continue;
         }
         entries.push((rel, entry.path().to_path_buf()));
@@ -56,6 +76,22 @@ pub fn package_module(module_dir: &Path, output: &Path) -> Result<PackageVerific
         let hash = sha256_file(path)?;
         checksums.push_str(&format!("{}  {}\n", hash, rel));
     }
+    let metadata = PackageMetadata {
+        format: "ojosmod".to_string(),
+        version: 1,
+        created_by: "ojosctl".to_string(),
+        signature: None,
+        signing_key_id: None,
+        trusted_publisher: None,
+    };
+    let metadata_file = PackageMetadataFile {
+        package: metadata.clone(),
+    };
+    let metadata_text = serde_yaml::to_string(&metadata_file)?;
+    checksums.push_str(&format!(
+        "{}  package.yaml\n",
+        sha256_bytes(metadata_text.as_bytes())
+    ));
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
@@ -70,6 +106,8 @@ pub fn package_module(module_dir: &Path, output: &Path) -> Result<PackageVerific
     }
     zip.start_file("checksums.sha256", options)?;
     zip.write_all(checksums.as_bytes())?;
+    zip.start_file("package.yaml", options)?;
+    zip.write_all(metadata_text.as_bytes())?;
     zip.finish()?;
 
     verify_package(output)
@@ -81,12 +119,22 @@ pub fn verify_package(package_path: &Path) -> Result<PackageVerification> {
     let mut names = HashSet::new();
     let mut manifest_text = None;
     let mut checksum_text = None;
+    let mut metadata_text = None;
     let mut actual = HashMap::new();
 
     for idx in 0..archive.len() {
         let mut file = archive.by_index(idx)?;
         let name = file.name().replace('\\', "/");
         validate_package_entry_name(&name)?;
+        if file
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            return Err(InstallerError::Package(format!(
+                "symlink package entry is not allowed: {}",
+                name
+            )));
+        }
         if !names.insert(name.clone()) {
             return Err(InstallerError::Package(
                 "duplicate package entry".to_string(),
@@ -108,6 +156,11 @@ pub fn verify_package(package_path: &Path) -> Result<PackageVerification> {
             checksum_text = Some(String::from_utf8(data).map_err(|_| {
                 InstallerError::Package("checksums.sha256 must be utf-8".to_string())
             })?);
+        } else if name == "package.yaml" {
+            metadata_text =
+                Some(String::from_utf8(data).map_err(|_| {
+                    InstallerError::Package("package.yaml must be utf-8".to_string())
+                })?);
         }
     }
 
@@ -115,8 +168,13 @@ pub fn verify_package(package_path: &Path) -> Result<PackageVerification> {
         .ok_or_else(|| InstallerError::Package("module.yaml is missing".to_string()))?;
     let checksum_text = checksum_text
         .ok_or_else(|| InstallerError::Package("checksums.sha256 is missing".to_string()))?;
+    let metadata_text = metadata_text
+        .ok_or_else(|| InstallerError::Package("package.yaml is missing".to_string()))?;
     let manifest: Manifest = serde_yaml::from_str(&manifest_text)?;
     validate_manifest(&manifest)?;
+    let metadata_file: PackageMetadataFile = serde_yaml::from_str(&metadata_text)?;
+    let metadata = metadata_file.package;
+    validate_package_metadata(&metadata)?;
 
     let expected = parse_checksums(&checksum_text)?;
     if expected.is_empty() {
@@ -155,11 +213,31 @@ pub fn verify_package(package_path: &Path) -> Result<PackageVerification> {
         module_id: manifest.id,
         version: manifest.version,
         files_checked: expected.len(),
+        package: Some(metadata),
         warnings: vec![
             "v0 verifies checksum integrity only; signature trust policy is reserved for v1"
                 .to_string(),
         ],
     })
+}
+
+fn validate_package_metadata(metadata: &PackageMetadata) -> Result<()> {
+    if metadata.format != "ojosmod" {
+        return Err(InstallerError::Package(
+            "package format must be ojosmod".to_string(),
+        ));
+    }
+    if metadata.version != 1 {
+        return Err(InstallerError::Package(
+            "package metadata version is unsupported".to_string(),
+        ));
+    }
+    if metadata.created_by.trim().is_empty() {
+        return Err(InstallerError::Package(
+            "package created_by is required".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_package_entry_name(name: &str) -> Result<()> {

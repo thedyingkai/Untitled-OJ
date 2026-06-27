@@ -25,7 +25,7 @@ operation lock
 operation history
 ```
 
-v0 apply 能力聚焦 metadata lifecycle。upgrade apply、rollback apply、uninstall apply 仅保留 API / 状态机边界，不伪装成完整热升级系统。
+v0 apply 能力聚焦 metadata lifecycle。upgrade apply 默认只允许 demo module metadata-only 场景，rollback apply 默认关闭，uninstall apply 默认关闭或仅限 demo module 且无 dependent。v0 不伪装成完整热升级系统。
 
 ## 状态
 
@@ -77,4 +77,12 @@ module_operations
 permission_audit_logs
 ```
 
-失败会保留 operation history，不应只写入容器日志。
+失败会保留 operation history，不应只写入容器日志。`operation_id` 全局唯一，lock key 当前为 `module-installer-global`，TTL 默认 300 秒并可配置。过期锁可被新操作接管；成功操作记录 `SUCCEEDED`，失败操作记录 `FAILED`。operation request/result 不保存完整 Authorization、token、secret 或 password。
+
+## v0 / v1 边界
+
+- 已实现：discover、validate、plan、install dry-run、demo module install apply、enable、disable、upgrade plan、rollback plan、uninstall dry-run、health、doctor、operation lock、operation history。
+- plan-only：judge-core upgrade、rollback、uninstall。
+- 默认关闭：通用 rollback apply、通用 uninstall apply。
+- 保护拒绝：kernel disable/uninstall、builtin uninstall、`ojos.judge-core` disable/uninstall。
+- v1 目标：签名信任策略、远程发布者信任、完整 upgrade apply、可审计 rollback apply、更细粒度 operation lock。

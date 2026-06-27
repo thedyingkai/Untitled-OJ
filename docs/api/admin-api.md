@@ -162,3 +162,29 @@ Module Installer 对外只通过 Gateway 暴露，所有端点都要求管理员
 ```
 
 plan 响应包含 `actions`、`affected_tables`、`affected_modules`、`dependencies`、`blocked_by`、`warnings`、`dry_run` 和 `can_apply`。如果 `blocked_by` 非空，apply 操作会被拒绝。v0 不支持远程市场、不执行 hook、不加载动态 bundle。`.ojosmod` 包只做 checksum integrity，signature / trust policy 留到 v1。
+
+Installer internal API 错误结构稳定为：
+
+```json
+{
+  "error": {
+    "code": "OPERATION_LOCK_HELD",
+    "message": "module operation lock is held",
+    "severity": "error",
+    "details": {}
+  }
+}
+```
+
+Gateway 对外错误映射必须保持：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 400 | manifest/path/validation/package error |
+| 401 | 无 token |
+| 403 | 普通用户或权限不足 |
+| 404 | 模块不存在 |
+| 409 | operation lock 或 dependency conflict |
+| 503 | installer internal service 不可达 |
+
+错误响应不得泄露 Rust panic、SQL 错误、internal installer URL、DB 连接串、token 或本机绝对路径。

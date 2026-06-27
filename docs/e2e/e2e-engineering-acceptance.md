@@ -145,3 +145,14 @@ Redis Streams 只作为 signal history，不是任务所有权来源。验收时
 - internal service 不通过 compose host port 暴露
 
 验收必须保持 `failed=0`、`path_leaks=0`、`admin_health_status=ok`、`admin_health_judge_status=ok`。
+
+Installer hardening 后，静态验收还必须覆盖：
+
+- root Rust workspace `cargo fmt --check`、`cargo check`、`cargo test`。
+- `ojosctl --version`。
+- `ojosctl module doctor`。
+- `ojosctl module validate modules/demo-module/module.yaml`。
+- `ojosctl module package modules/demo-module -o .tmp/agent/scratch/verify-static-demo.ojosmod`。
+- `ojosctl module verify` 和 `ojosctl module inspect`。
+- compose config 包含 `module-installer` internal service、`read_only: true`、`no-new-privileges:true`、`cap_drop: ALL`、只读 `modules/` 挂载和 lock TTL 配置。
+- module-installer Dockerfile 使用 builder/runtime 多阶段，最终 runtime image 不得是 `rust:*`。

@@ -10,79 +10,114 @@ use module_installer_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 const INSTALLER_TOKEN_HEADER: &str = "x-ojos-installer-token";
+const DEFAULT_LOCK_TTL_SECONDS: u64 = 300;
 
 #[derive(Clone)]
 struct AppState {
     db: PgPool,
     repo_root: PathBuf,
     internal_token: String,
+    lock_ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ErrorBody {
-    code: i32,
-    msg: String,
+    error: ErrorInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ErrorInfo {
+    code: String,
+    message: String,
+    severity: String,
+    details: Value,
 }
 
 #[derive(Debug)]
 struct AppError {
     status: StatusCode,
+    code: &'static str,
     msg: String,
+    details: Value,
 }
 
 impl AppError {
     fn bad_request(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            code: "BAD_REQUEST",
             msg: msg.into(),
+            details: json!({}),
         }
     }
 
     fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
+            code: "INSTALLER_INTERNAL_UNAUTHORIZED",
             msg: "missing or invalid installer internal token".to_string(),
+            details: json!({}),
         }
     }
 
     fn forbidden(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
+            code: "FORBIDDEN",
             msg: msg.into(),
+            details: json!({}),
         }
     }
 
     fn internal(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "INTERNAL_ERROR",
             msg: msg.into(),
+            details: json!({}),
+        }
+    }
+
+    fn not_found(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "MODULE_NOT_FOUND",
+            msg: msg.into(),
+            details: json!({}),
+        }
+    }
+
+    fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "OPERATION_LOCK_HELD",
+            msg: msg.into(),
+            details: json!({}),
         }
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let code = match self.status {
-            StatusCode::UNAUTHORIZED => 40110,
-            StatusCode::FORBIDDEN => 40310,
-            StatusCode::NOT_FOUND => 40410,
-            StatusCode::CONFLICT => 40910,
-            StatusCode::INTERNAL_SERVER_ERROR => 50010,
-            _ => 40010,
-        };
         (
             self.status,
             Json(ErrorBody {
-                code,
-                msg: self.msg,
+                error: ErrorInfo {
+                    code: self.code.to_string(),
+                    message: self.msg,
+                    severity: "error".to_string(),
+                    details: self.details,
+                },
             }),
         )
             .into_response()
@@ -91,7 +126,13 @@ impl IntoResponse for AppError {
 
 impl From<module_installer_core::InstallerError> for AppError {
     fn from(value: module_installer_core::InstallerError) -> Self {
-        AppError::bad_request(value.to_string())
+        let code = installer_error_code(&value);
+        AppError {
+            status: StatusCode::BAD_REQUEST,
+            code,
+            msg: value.to_string(),
+            details: json!({}),
+        }
     }
 }
 
@@ -144,6 +185,10 @@ struct Actor {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|arg| arg == "--healthcheck") {
+        return healthcheck_command();
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .json()
@@ -156,6 +201,11 @@ async fn main() -> anyhow::Result<()> {
     let port: u16 = std::env::var("MODULE_INSTALLER_PORT")
         .unwrap_or_else(|_| "8090".to_string())
         .parse()?;
+    let lock_ttl_seconds = std::env::var("MODULE_INSTALLER_LOCK_TTL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| (30..=3600).contains(value))
+        .unwrap_or(DEFAULT_LOCK_TTL_SECONDS);
 
     let db = PgPoolOptions::new()
         .max_connections(8)
@@ -166,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         repo_root: PathBuf::from(repo_root),
         internal_token,
+        lock_ttl_seconds,
     });
 
     let app = router(state).layer(TraceLayer::new_for_http());
@@ -174,6 +225,28 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("module-installer listening on {}", addr);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn healthcheck_command() -> anyhow::Result<()> {
+    let host = std::env::var("MODULE_INSTALLER_HOST")
+        .ok()
+        .filter(|value| value != "0.0.0.0")
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let port: u16 = std::env::var("MODULE_INSTALLER_PORT")
+        .unwrap_or_else(|_| "8090".to_string())
+        .parse()?;
+    let addr = format!("{}:{}", host, port);
+    let mut stream = std::net::TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    stream.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    if response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200") {
+        Ok(())
+    } else {
+        anyhow::bail!("module-installer healthcheck failed");
+    }
 }
 
 fn router(state: Arc<AppState>) -> Router {
@@ -410,10 +483,7 @@ async fn module_health(
         Some(status) => Ok(ok(
             json!({ "module_id": id, "status": "ok", "module_status": status }),
         )),
-        None => Err(AppError {
-            status: StatusCode::NOT_FOUND,
-            msg: "module not found".to_string(),
-        }),
+        None => Err(AppError::not_found("module not found")),
     }
 }
 
@@ -503,10 +573,7 @@ async fn get_installed_manifest(db: &PgPool, module_id: &str) -> AppResult<Manif
         .bind(module_id)
         .fetch_optional(db)
         .await?
-        .ok_or_else(|| AppError {
-            status: StatusCode::NOT_FOUND,
-            msg: "module not found".to_string(),
-        })?;
+        .ok_or_else(|| AppError::not_found("module not found"))?;
     let value: Value = row.get("manifest");
     serde_json::from_value(value)
         .map_err(|_| AppError::bad_request("installed manifest is not schema_version 1"))
@@ -792,10 +859,16 @@ where
 {
     let operation_id = Uuid::new_v4().to_string();
     let owner = format!("module-installer:{}", operation_id);
-    acquire_lock(&state.db, "module-installer-global", &owner).await?;
+    acquire_lock(
+        &state.db,
+        "module-installer-global",
+        &owner,
+        state.lock_ttl_seconds,
+    )
+    .await?;
     let mut tx = state.db.begin().await?;
     let plan_json = serde_json::to_value(&plan).unwrap_or_else(|_| json!({}));
-    let request_json = request.clone();
+    let request_json = redact_json(request.clone());
     let initial_result = json!({});
     sqlx::query(
         r#"
@@ -824,7 +897,7 @@ WHERE operation_id = $1
 "#,
             )
             .bind(&operation_id)
-            .bind(&result)
+            .bind(redact_json(result.clone()))
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
@@ -862,11 +935,11 @@ ON CONFLICT(operation_id) DO UPDATE SET
     }
 }
 
-async fn acquire_lock(db: &PgPool, key: &str, owner: &str) -> AppResult<()> {
+async fn acquire_lock(db: &PgPool, key: &str, owner: &str, ttl_seconds: u64) -> AppResult<()> {
     let row = sqlx::query(
         r#"
 INSERT INTO module_operation_locks(lock_key, owner, expires_at)
-VALUES($1,$2,NOW() + interval '5 minutes')
+VALUES($1,$2,NOW() + ($3::text || ' seconds')::interval)
 ON CONFLICT(lock_key) DO UPDATE SET
     owner = EXCLUDED.owner,
     acquired_at = NOW(),
@@ -877,13 +950,11 @@ RETURNING owner
     )
     .bind(key)
     .bind(owner)
+    .bind(ttl_seconds as i64)
     .fetch_optional(db)
     .await?;
     if row.is_none() {
-        return Err(AppError {
-            status: StatusCode::CONFLICT,
-            msg: "module operation lock is held".to_string(),
-        });
+        return Err(AppError::conflict("module operation lock is held"));
     }
     Ok(())
 }
@@ -949,6 +1020,43 @@ fn ok<T: Serialize>(data: T) -> Json<Envelope<T>> {
     })
 }
 
+fn installer_error_code(err: &module_installer_core::InstallerError) -> &'static str {
+    match err {
+        module_installer_core::InstallerError::UnsafePath(_) => "MANIFEST_PATH_ESCAPE",
+        module_installer_core::InstallerError::InvalidManifest(_) => "MANIFEST_INVALID",
+        module_installer_core::InstallerError::Dependency(_) => "DEPENDENCY_CONFLICT",
+        module_installer_core::InstallerError::Blocked(_) => "OPERATION_BLOCKED",
+        module_installer_core::InstallerError::Package(_) => "PACKAGE_INVALID",
+        module_installer_core::InstallerError::Io(_) => "IO_ERROR",
+        module_installer_core::InstallerError::Yaml(_) => "MANIFEST_PARSE_ERROR",
+        module_installer_core::InstallerError::Json(_) => "JSON_ERROR",
+        module_installer_core::InstallerError::Zip(_) => "PACKAGE_INVALID",
+    }
+}
+
+fn redact_json(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| {
+                    let lower = key.to_ascii_lowercase();
+                    let redacted = lower.contains("token")
+                        || lower.contains("secret")
+                        || lower.contains("password")
+                        || lower == "authorization";
+                    if redacted {
+                        (key, Value::String("<redacted>".to_string()))
+                    } else {
+                        (key, redact_json(value))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.into_iter().map(redact_json).collect()),
+        other => other,
+    }
+}
+
 fn required_env(name: &str) -> anyhow::Result<String> {
     let value = std::env::var(name)?;
     if value.trim().is_empty() {
@@ -969,6 +1077,7 @@ mod tests {
                 .unwrap(),
             repo_root: PathBuf::from("."),
             internal_token: "secret".to_string(),
+            lock_ttl_seconds: DEFAULT_LOCK_TTL_SECONDS,
         };
         let headers = HeaderMap::new();
         assert!(require_internal(&state, &headers).is_err());
@@ -977,5 +1086,18 @@ mod tests {
     #[test]
     fn state_parse_accepts_enabled() {
         assert!(parse_state("ENABLED".to_string()).is_enabled());
+    }
+
+    #[test]
+    fn redact_json_removes_sensitive_fields() {
+        let value = redact_json(json!({
+            "token": "abc",
+            "nested": { "password": "pw", "ok": true },
+            "authorization": "Bearer abc"
+        }));
+        assert_eq!(value["token"], "<redacted>");
+        assert_eq!(value["nested"]["password"], "<redacted>");
+        assert_eq!(value["nested"]["ok"], true);
+        assert_eq!(value["authorization"], "<redacted>");
     }
 }
