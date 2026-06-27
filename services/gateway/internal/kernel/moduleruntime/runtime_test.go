@@ -386,11 +386,11 @@ func TestComposeDriverPlansOnlyAllowedManagedServices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanRestart failed: %v", err)
 	}
-	if plan.CanApply || len(plan.BlockedBy) != 0 {
-		t.Fatalf("plan should be valid but apply-disabled: %#v", plan)
+	if !plan.CanApply || plan.ApplyEnabled || len(plan.BlockedBy) != 0 || plan.OperationID == "" || plan.ExpiresAt == "" {
+		t.Fatalf("plan should be valid for operator apply while Gateway apply remains disabled: %#v", plan)
 	}
-	if len(plan.Commands) != 1 || plan.Commands[0].Tool != "compose" || !contains(plan.Commands[0].Args, "problem-api") {
-		t.Fatalf("plan command should be structured compose args: %#v", plan.Commands)
+	if len(plan.Commands) != 1 || plan.Commands[0].Kind != "compose" || !contains(plan.Commands[0].Argv, "problem-api") {
+		t.Fatalf("plan command should be structured compose argv: %#v", plan.Commands)
 	}
 
 	metadataPlan, err := driver.PlanStart(context.Background(), snapshot, "demo-metadata-service")

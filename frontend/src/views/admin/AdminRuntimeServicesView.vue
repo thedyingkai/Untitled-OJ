@@ -10,13 +10,16 @@ import {
   NTabPane,
   NTabs,
   NTag,
+  useMessage,
   type DataTableColumns,
 } from 'naive-ui'
 
 import {
+  getRuntimeOperations,
   getRuntimeService,
   getRuntimeServices,
   planRuntimeServiceRestart,
+  planRuntimeServiceReload,
   planRuntimeServiceStart,
   planRuntimeServiceStop,
   reloadRuntimeServices,
@@ -31,11 +34,13 @@ import OjosSection from '../../components/oj/OjosSection.vue'
 import OjosStatCard from '../../components/oj/OjosStatCard.vue'
 import type {
   ModuleRuntimeService,
+  RuntimeOperationItem,
   RuntimePlanItem,
   RuntimeServicesResponse,
 } from '../../types/module'
 
 const route = useRoute()
+const message = useMessage()
 const loading = ref(true)
 const refreshing = ref(false)
 const planning = ref('')
@@ -43,6 +48,7 @@ const error = ref<ApiClientError | null>(null)
 const services = ref<RuntimeServicesResponse | null>(null)
 const selectedService = ref<ModuleRuntimeService | null>(null)
 const plan = ref<RuntimePlanItem | null>(null)
+const operations = ref<RuntimeOperationItem[]>([])
 
 const selectedServiceId = computed(() => String(route.params.serviceId ?? ''))
 const allServices = computed(() => [
@@ -52,6 +58,19 @@ const allServices = computed(() => [
 const pageTitle = computed(() => selectedServiceId.value ? 'Runtime Service' : 'Runtime Services')
 const runningCount = computed(() => allServices.value.filter((item) => item.state === 'RUNNING').length)
 const blockedCount = computed(() => allServices.value.filter((item) => item.blocked_by.length > 0).length)
+const planJson = computed(() => plan.value ? JSON.stringify(plan.value, null, 2) : '')
+const visibleOperations = computed(() => {
+  if (!selectedService.value) return operations.value
+  return operations.value.filter((item) => item.service_id === selectedService.value?.service_id)
+})
+const ojosctlDryRun = computed(() => plan.value
+  ? `ojosctl runtime apply-plan ${plan.value.plan_id}.json --dry-run`
+  : '',
+)
+const ojosctlConfirm = computed(() => plan.value
+  ? `ojosctl runtime apply-plan ${plan.value.plan_id}.json --confirm`
+  : '',
+)
 
 const serviceColumns: DataTableColumns<ModuleRuntimeService> = [
   {
@@ -85,6 +104,15 @@ const serviceColumns: DataTableColumns<ModuleRuntimeService> = [
   },
 ]
 
+const operationColumns: DataTableColumns<RuntimeOperationItem> = [
+  { title: 'Operation', key: 'operation_id', minWidth: 260 },
+  { title: 'Action', key: 'action', width: 140 },
+  { title: 'Status', key: 'status', width: 120, render: (row) => stateTag(row.status) },
+  { title: 'Actor', key: 'actor_username', width: 140 },
+  { title: 'Updated', key: 'updated_at', minWidth: 180 },
+  { title: 'Error', key: 'error_message', minWidth: 220 },
+]
+
 async function load(silent = false): Promise<void> {
   if (silent) {
     refreshing.value = true
@@ -94,6 +122,7 @@ async function load(silent = false): Promise<void> {
   error.value = null
   try {
     services.value = await getRuntimeServices()
+    operations.value = (await getRuntimeOperations()).operations
     if (selectedServiceId.value) {
       selectedService.value = (await getRuntimeService(selectedServiceId.value)).service
     } else {
@@ -120,7 +149,7 @@ async function reloadRuntime(): Promise<void> {
   }
 }
 
-async function generatePlan(action: 'start' | 'stop' | 'restart'): Promise<void> {
+async function generatePlan(action: 'start' | 'stop' | 'restart' | 'reload'): Promise<void> {
   if (!selectedService.value) return
   planning.value = action
   error.value = null
@@ -130,14 +159,33 @@ async function generatePlan(action: 'start' | 'stop' | 'restart'): Promise<void>
       plan.value = (await planRuntimeServiceStart(serviceId)).plan
     } else if (action === 'stop') {
       plan.value = (await planRuntimeServiceStop(serviceId)).plan
-    } else {
+    } else if (action === 'restart') {
       plan.value = (await planRuntimeServiceRestart(serviceId)).plan
+    } else {
+      plan.value = (await planRuntimeServiceReload(serviceId)).plan
     }
   } catch (err) {
     error.value = toApiClientError(err)
   } finally {
     planning.value = ''
   }
+}
+
+async function copyPlan(): Promise<void> {
+  if (!planJson.value) return
+  await navigator.clipboard.writeText(planJson.value)
+  message.success('Plan JSON copied')
+}
+
+function downloadPlan(): void {
+  if (!plan.value) return
+  const blob = new Blob([planJson.value], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `${plan.value.plan_id}.json`
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 
 function stateTag(state: string) {
@@ -230,9 +278,26 @@ onMounted(() => void load())
             <NButton secondary :loading="planning === 'start'" @click="generatePlan('start')">Plan Start</NButton>
             <NButton secondary :loading="planning === 'stop'" @click="generatePlan('stop')">Plan Stop</NButton>
             <NButton secondary :loading="planning === 'restart'" @click="generatePlan('restart')">Plan Restart</NButton>
+            <NButton secondary :loading="planning === 'reload'" @click="generatePlan('reload')">Plan Reload</NButton>
           </NSpace>
           <OjosSection v-if="plan" title="Runtime Plan">
+            <NSpace class="plan-actions">
+              <NButton secondary @click="copyPlan()">Copy JSON</NButton>
+              <NButton secondary @click="downloadPlan()">Download JSON</NButton>
+            </NSpace>
+            <NDescriptions :column="2" bordered label-placement="left" class="plan-meta">
+              <NDescriptionsItem label="Operation">{{ plan.operation_id }}</NDescriptionsItem>
+              <NDescriptionsItem label="Expires">{{ plan.expires_at }}</NDescriptionsItem>
+              <NDescriptionsItem label="Operator Apply">{{ plan.can_apply ? 'allowed' : 'blocked' }}</NDescriptionsItem>
+              <NDescriptionsItem label="Gateway Apply">{{ plan.apply_enabled ? 'enabled' : 'disabled' }}</NDescriptionsItem>
+              <NDescriptionsItem label="Dry Run">{{ ojosctlDryRun }}</NDescriptionsItem>
+              <NDescriptionsItem label="Confirm">{{ ojosctlConfirm }}</NDescriptionsItem>
+            </NDescriptions>
             <OjosJsonViewer :value="plan" />
+          </OjosSection>
+          <OjosSection title="Operation History">
+            <EmptyView v-if="visibleOperations.length === 0" description="No runtime operations" />
+            <NDataTable v-else :columns="operationColumns" :data="visibleOperations" :pagination="{ pageSize: 8 }" :bordered="false" />
           </OjosSection>
         </OjosSection>
 
@@ -268,6 +333,10 @@ onMounted(() => void load())
 
 .plan-actions {
   margin-top: 14px;
+}
+
+.plan-meta {
+  margin: 12px 0;
 }
 
 @media (max-width: 960px) {

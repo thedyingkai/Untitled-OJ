@@ -115,3 +115,23 @@ Frontend boundaries:
 - Do not execute dynamic JavaScript from module manifests.
 - Metadata-only services should be shown as metadata and blocked from start/stop/restart.
 - Unknown module frontend `component_key` values continue to render through safe contribution metadata pages.
+
+## Hotplug L2 Controlled Apply Frontend Guidance
+
+Web Shell may show generated runtime plans, warnings, blocked reasons, and operation history. It must not execute runtime plans.
+
+Allowed UI behavior:
+
+- Generate plan-start, plan-stop, plan-restart, and plan-reload through Gateway admin APIs.
+- Display plan JSON for operator review.
+- Copy or download plan JSON.
+- Show an `ojosctl runtime apply-plan ... --dry-run` / `--confirm` command example.
+- Show runtime operation history.
+
+Forbidden UI behavior:
+
+- No direct apply button that calls Docker, compose, Gateway apply, or module-installer internals.
+- No Docker socket, local file, or host path access.
+- No dynamic JavaScript execution from module manifests.
+
+L2 Controlled Apply keeps apply authority outside the browser.

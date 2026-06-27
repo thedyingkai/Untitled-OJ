@@ -493,6 +493,12 @@ try {
   $runtimePlanRestart = Invoke-Api "runtime.service.problem-api.plan-restart" POST "/admin/runtime/services/problem-api/plan-restart" @{} -Token $script:AdminToken -Expected @(200)
   Invoke-Api "runtime.service.problem-api.plan-restart.user" POST "/admin/runtime/services/problem-api/plan-restart" @{} -Token $script:UserToken -Expected @(403) | Out-Null
   Invoke-Api "runtime.service.problem-api.plan-restart.none" POST "/admin/runtime/services/problem-api/plan-restart" @{} -Expected @(401) | Out-Null
+  Invoke-Api "runtime.apply.gateway.disabled.admin" POST "/admin/runtime/plans/runtime-restart-problem-api/apply" @{} -Token $script:AdminToken -Expected @(501) | Out-Null
+  Invoke-Api "runtime.apply.gateway.disabled.user" POST "/admin/runtime/plans/runtime-restart-problem-api/apply" @{} -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "runtime.apply.gateway.disabled.none" POST "/admin/runtime/plans/runtime-restart-problem-api/apply" @{} -Expected @(401) | Out-Null
+  Invoke-Api "runtime.operations.admin" GET "/admin/runtime/operations" -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "runtime.operations.user" GET "/admin/runtime/operations" -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "runtime.operations.none" GET "/admin/runtime/operations" -Expected @(401) | Out-Null
   if ($runtimeSnapshot.Json) {
     $snapshotModules = Get-JsonArray $runtimeSnapshot.Json "modules"
     if ($snapshotModules.Count -le 0) {
@@ -602,19 +608,28 @@ try {
     if ([string]$plan.service_id -ne "problem-api") {
       $failures.Add("runtime plan restart expected problem-api got $($plan.service_id)") | Out-Null
     }
-    if ($plan.can_apply -ne $false) {
-      $failures.Add("runtime plan restart should be plan-only can_apply=false") | Out-Null
+    if ($plan.can_apply -ne $true) {
+      $failures.Add("runtime plan restart should be operator applyable can_apply=true") | Out-Null
+    }
+    if ($plan.apply_enabled -ne $false) {
+      $failures.Add("runtime plan restart should keep Gateway/Web apply_enabled=false") | Out-Null
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$plan.operation_id)) {
+      $failures.Add("runtime plan restart expected operation_id") | Out-Null
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$plan.expires_at)) {
+      $failures.Add("runtime plan restart expected expires_at") | Out-Null
     }
     $commands = @($plan.commands)
-    if ($commands.Count -ne 1 -or [string]$commands[0].tool -ne "compose") {
+    if ($commands.Count -ne 1 -or [string]$commands[0].kind -ne "compose") {
       $failures.Add("runtime plan restart expected one compose command") | Out-Null
     } else {
-      $args = @($commands[0].args)
-      if ($args -notcontains "restart" -or $args -notcontains "problem-api") {
-        $failures.Add("runtime plan restart command should contain restart problem-api got $($args -join ',')") | Out-Null
+      $argv = @($commands[0].argv)
+      if ($argv -notcontains "docker" -or $argv -notcontains "compose" -or $argv -notcontains "restart" -or $argv -notcontains "problem-api") {
+        $failures.Add("runtime plan restart command should contain docker compose restart problem-api got $($argv -join ',')") | Out-Null
       }
-      if (($args -join " ") -match "[;&|]") {
-        $failures.Add("runtime plan restart command args must not contain shell metacharacters") | Out-Null
+      if (($argv -join " ") -match "[;&|]") {
+        $failures.Add("runtime plan restart command argv must not contain shell metacharacters") | Out-Null
       }
     }
   } else {

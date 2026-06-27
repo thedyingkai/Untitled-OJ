@@ -111,3 +111,31 @@ Mitigations:
 - Runtime plans use structured command arrays and never shell strings.
 - Dynamic proxy enforces auth mode before returning service unavailable for matched runtime routes.
 - Admin APIs redact host paths, raw env, DSNs, tokens and internal service URLs.
+
+## Hotplug L2 Controlled Apply Threats
+
+New attack surface:
+
+- Runtime plan JSON files passed to `ojosctl` or an operator.
+- Local compose apply execution.
+- Operation locks and operation history/audit writes.
+- Plan TTL and confirmation handling.
+
+Threats:
+
+- Arbitrary command execution if plan commands were shell strings.
+- Host control if Gateway/Web/module-installer could execute Docker or access Docker socket.
+- Service escape if a plan could choose arbitrary compose file paths or service names.
+- Replay of old plans after topology or service policy changed.
+- Secret leakage through stdout/stderr, env, audit logs, or operation result.
+- Concurrent apply corrupting runtime state.
+
+Mitigations:
+
+- `ojosctl` validates argv-only commands, driver, action, TTL, service id, target allowlist, and fixed compose path before apply.
+- Real apply requires `--confirm`; `--dry-run` never executes.
+- Gateway/Web apply is intentionally disabled and returns 501 for admin apply attempts.
+- Compose execution uses argument arrays and a trusted service allowlist.
+- Apply uses service locks with TTL and bounded command timeouts.
+- stdout/stderr and operation request/result are length-limited and redacted before history/audit storage.
+- Manifests still cannot declare command/script/image/mount/privileged/capability fields as executable runtime instructions.

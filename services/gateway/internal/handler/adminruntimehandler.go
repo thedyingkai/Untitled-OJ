@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"ojos-gateway/internal/logic"
@@ -14,6 +15,30 @@ func adminRuntimeServicesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		l := logic.NewAdminRuntimeLogic(r.Context(), svcCtx)
 		resp, err := l.ListServices(r.Header.Get("Authorization"))
+		if err != nil {
+			httpx.ErrorCtx(r.Context(), w, err)
+		} else {
+			httpx.OkJsonCtx(r.Context(), w, resp)
+		}
+	}
+}
+
+func adminRuntimeOperationsHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		l := logic.NewAdminRuntimeLogic(r.Context(), svcCtx)
+		resp, err := l.Operations(r.Header.Get("Authorization"))
+		if err != nil {
+			httpx.ErrorCtx(r.Context(), w, err)
+		} else {
+			httpx.OkJsonCtx(r.Context(), w, resp)
+		}
+	}
+}
+
+func adminRuntimeOperationDetailHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		l := logic.NewAdminRuntimeLogic(r.Context(), svcCtx)
+		resp, err := l.OperationDetail(r.Header.Get("Authorization"), pathvar.Vars(r)["id"])
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 		} else {
@@ -72,5 +97,19 @@ func adminRuntimeReloadHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 		} else {
 			httpx.OkJsonCtx(r.Context(), w, resp)
 		}
+	}
+}
+
+func adminRuntimeApplyPlanDisabledHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		l := logic.NewAdminRuntimeLogic(r.Context(), svcCtx)
+		resp, err := l.ApplyDisabled(r.Header.Get("Authorization"))
+		if err != nil {
+			httpx.ErrorCtx(r.Context(), w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }

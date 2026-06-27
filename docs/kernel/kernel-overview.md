@@ -96,3 +96,18 @@ New Kernel runtime responsibilities in this foundation phase:
 - Add runtime service and worker nodes to topology.
 
 Still out of scope: arbitrary service image deployment, remote module marketplace, hook execution, Docker socket control, Web-triggered apply, L3 dynamic frontend bundles and L4 full hotplug automation.
+
+## Hotplug L2 Controlled Apply
+
+Kernel Runtime now has a controlled apply boundary for runtime plans. The Kernel generates structured plans, while `ojosctl` or a future operator is the only component allowed to apply trusted local compose actions.
+
+Boundary summary:
+
+- Gateway and Web Shell remain control-plane viewers and plan generators.
+- Gateway/Web do not mount Docker socket and do not execute Docker or shell commands.
+- Module Installer does not become a host-control process.
+- Manifests still cannot specify `command`, `script`, arbitrary `image`, host `mount`, `privileged`, or `cap_add`.
+- Compose apply is limited to trusted allowlisted services and fixed compose configuration.
+- Apply requires confirm, supports dry-run, uses locks/timeouts, and records operation history/audit.
+
+This phase completes a controlled L2 apply path for known local services. It does not implement L3 dynamic frontend bundles, remote module market, hooks, arbitrary module service deployment, or full hotplug automation.

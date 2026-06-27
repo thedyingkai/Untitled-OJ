@@ -1259,10 +1259,13 @@ name = "ojosctl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "module-installer-core",
  "serde",
  "serde_json",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]

@@ -121,3 +121,13 @@
 - `docs/api/admin-api.md` documents `/api/admin/runtime/services` and plan endpoints.
 - `docs/development/backend-development.md` and `docs/development/frontend-development.md` document L2 safety boundaries.
 - `docs/security/module-installer-threat-model.md` documents runtime driver threats and mitigations.
+
+## Hotplug L2 Controlled Apply Documents
+
+- `docs/kernel/module-runtime.md` documents controlled apply architecture, stable plan JSON, argv-only commands, TTL, confirm, dry-run, locks, and Gateway apply disablement.
+- `docs/kernel/installer.md` documents `ojosctl runtime apply-plan`, operations, and operation lookup commands.
+- `docs/modules/module-lifecycle.md` documents operator lifecycle states and the allowed apply flow.
+- `docs/modules/module-contract.md` documents that manifests describe service metadata only and cannot grant executable runtime control.
+- `docs/api/admin-api.md` documents runtime operations APIs and Gateway apply returning 501.
+- `docs/development/backend-development.md` and `docs/development/frontend-development.md` document that Gateway/Web remain plan/status-only.
+- `docs/security/module-installer-threat-model.md` documents controlled apply threats and mitigations.

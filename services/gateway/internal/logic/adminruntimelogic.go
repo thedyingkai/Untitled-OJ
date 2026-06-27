@@ -9,6 +9,7 @@ import (
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/zeromicro/go-zero/core/logx"
 )
 
@@ -83,6 +84,61 @@ func (l *AdminRuntimeLogic) Reload(authHeader string) (*types.ModuleRuntimeRoute
 	return modulesLogic.RuntimeRoutes(authHeader, false, true, false)
 }
 
+func (l *AdminRuntimeLogic) Operations(authHeader string) (*types.RuntimeOperationsResp, error) {
+	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
+		return nil, err
+	}
+	rows, err := l.svcCtx.DB.Query(l.ctx, `
+SELECT operation_id, module_id, action, status, actor_username,
+       request, plan, result, error_message, created_at::text, updated_at::text
+FROM module_operations
+WHERE action LIKE 'runtime.%'
+ORDER BY created_at DESC
+LIMIT 100
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRuntimeOperations(rows)
+}
+
+func (l *AdminRuntimeLogic) OperationDetail(authHeader string, operationID string) (*types.RuntimeOperationsResp, error) {
+	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
+		return nil, err
+	}
+	rows, err := l.svcCtx.DB.Query(l.ctx, `
+SELECT operation_id, module_id, action, status, actor_username,
+       request, plan, result, error_message, created_at::text, updated_at::text
+FROM module_operations
+WHERE operation_id = $1 AND action LIKE 'runtime.%'
+ORDER BY created_at DESC
+LIMIT 1
+`, strings.TrimSpace(operationID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	resp, err := scanRuntimeOperations(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Operations) == 0 {
+		return nil, pgx.ErrNoRows
+	}
+	return resp, nil
+}
+
+func (l *AdminRuntimeLogic) ApplyDisabled(authHeader string) (*types.RuntimeApplyDisabledResp, error) {
+	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
+		return nil, err
+	}
+	return &types.RuntimeApplyDisabledResp{
+		Code:    50100,
+		Message: "runtime apply is intentionally disabled in Gateway/Web; use ojosctl/operator controlled apply",
+	}, nil
+}
+
 func (l *AdminRuntimeLogic) plan(authHeader string, serviceID string, action string) (*types.RuntimeServicePlanResp, error) {
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
@@ -128,20 +184,54 @@ func (l *AdminRuntimeLogic) driver() moduleruntime.RuntimeDriver {
 func runtimePlanItem(plan moduleruntime.RuntimePlan) types.RuntimePlanItem {
 	commands := make([]types.RuntimePlanCommand, 0, len(plan.Commands))
 	for _, command := range plan.Commands {
-		commands = append(commands, types.RuntimePlanCommand{Tool: command.Tool, Args: command.Args})
+		commands = append(commands, types.RuntimePlanCommand{Kind: command.Kind, Argv: command.Argv})
 	}
 	return types.RuntimePlanItem{
-		PlanId:       plan.PlanID,
-		Action:       plan.Action,
-		ServiceId:    plan.ServiceID,
-		ModuleId:     plan.ModuleID,
-		Driver:       plan.Driver,
-		CanApply:     plan.CanApply,
-		ApplyEnabled: plan.ApplyEnabled,
-		Commands:     commands,
-		Affected:     plan.Affected,
-		BlockedBy:    plan.BlockedBy,
-		Warnings:     plan.Warnings,
-		CreatedAt:    plan.CreatedAt,
+		PlanId:               plan.PlanID,
+		OperationId:          plan.OperationID,
+		Action:               plan.Action,
+		ServiceId:            plan.ServiceID,
+		ModuleId:             plan.ModuleID,
+		Driver:               plan.Driver,
+		CanApply:             plan.CanApply,
+		ApplyEnabled:         plan.ApplyEnabled,
+		RequiresConfirmation: plan.RequiresConfirmation,
+		DryRun:               plan.DryRun,
+		AllowedTargets:       plan.AllowedTargets,
+		Commands:             commands,
+		Affected:             plan.Affected,
+		BlockedBy:            plan.BlockedBy,
+		Warnings:             plan.Warnings,
+		CreatedAt:            plan.CreatedAt,
+		ExpiresAt:            plan.ExpiresAt,
 	}
+}
+
+func scanRuntimeOperations(rows pgx.Rows) (*types.RuntimeOperationsResp, error) {
+	resp := &types.RuntimeOperationsResp{Operations: []types.RuntimeOperationItem{}}
+	for rows.Next() {
+		var item types.RuntimeOperationItem
+		if err := rows.Scan(
+			&item.OperationId,
+			&item.ModuleId,
+			&item.Action,
+			&item.Status,
+			&item.ActorUsername,
+			&item.Request,
+			&item.Plan,
+			&item.Result,
+			&item.ErrorMessage,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if plan, ok := item.Plan.(map[string]any); ok {
+			if serviceID, ok := plan["service_id"].(string); ok {
+				item.ServiceId = serviceID
+			}
+		}
+		resp.Operations = append(resp.Operations, item)
+	}
+	return resp, rows.Err()
 }

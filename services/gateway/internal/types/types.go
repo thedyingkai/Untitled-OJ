@@ -246,23 +246,52 @@ type RuntimeServicePlanResp struct {
 }
 
 type RuntimePlanItem struct {
-	PlanId       string               `json:"plan_id"`
-	Action       string               `json:"action"`
-	ServiceId    string               `json:"service_id"`
-	ModuleId     string               `json:"module_id"`
-	Driver       string               `json:"driver"`
-	CanApply     bool                 `json:"can_apply"`
-	ApplyEnabled bool                 `json:"apply_enabled"`
-	Commands     []RuntimePlanCommand `json:"commands"`
-	Affected     []string             `json:"affected"`
-	BlockedBy    []string             `json:"blocked_by"`
-	Warnings     []string             `json:"warnings"`
-	CreatedAt    string               `json:"created_at"`
+	PlanId               string               `json:"plan_id"`
+	OperationId          string               `json:"operation_id"`
+	Action               string               `json:"action"`
+	ServiceId            string               `json:"service_id"`
+	ModuleId             string               `json:"module_id"`
+	Driver               string               `json:"driver"`
+	CanApply             bool                 `json:"can_apply"`
+	ApplyEnabled         bool                 `json:"apply_enabled"`
+	RequiresConfirmation bool                 `json:"requires_confirmation"`
+	DryRun               bool                 `json:"dry_run"`
+	AllowedTargets       []string             `json:"allowed_targets"`
+	Commands             []RuntimePlanCommand `json:"commands"`
+	Affected             []string             `json:"affected"`
+	BlockedBy            []string             `json:"blocked_by"`
+	Warnings             []string             `json:"warnings"`
+	CreatedAt            string               `json:"created_at"`
+	ExpiresAt            string               `json:"expires_at"`
 }
 
 type RuntimePlanCommand struct {
-	Tool string   `json:"tool"`
-	Args []string `json:"args"`
+	Kind string   `json:"kind"`
+	Argv []string `json:"argv"`
+}
+
+type RuntimeOperationItem struct {
+	OperationId   string `json:"operation_id"`
+	ModuleId      string `json:"module_id"`
+	ServiceId     string `json:"service_id,omitempty"`
+	Action        string `json:"action"`
+	Status        string `json:"status"`
+	ActorUsername string `json:"actor_username"`
+	Request       any    `json:"request"`
+	Plan          any    `json:"plan"`
+	Result        any    `json:"result"`
+	ErrorMessage  string `json:"error_message"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
+}
+
+type RuntimeOperationsResp struct {
+	Operations []RuntimeOperationItem `json:"operations"`
+}
+
+type RuntimeApplyDisabledResp struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }
 
 type ModuleDetailResp struct {

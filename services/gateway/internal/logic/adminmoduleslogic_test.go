@@ -63,22 +63,27 @@ func (f fakeRuntimeDriver) ApplyPlan(context.Context, moduleruntime.RuntimePlan)
 func (f fakeRuntimeDriver) plan(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string, action string) (moduleruntime.RuntimePlan, error) {
 	service, _ := f.GetServiceState(ctx, snapshot, serviceID)
 	plan := moduleruntime.RuntimePlan{
-		PlanID:       fmt.Sprintf("test-%s-%s", action, serviceID),
-		Action:       action,
-		ServiceID:    serviceID,
-		ModuleID:     service.ModuleID,
-		Driver:       "compose",
-		CanApply:     false,
-		ApplyEnabled: false,
-		Affected:     []string{serviceID},
-		Warnings:     []string{"plan only"},
-		CreatedAt:    "2026-01-01T00:00:00Z",
+		PlanID:               fmt.Sprintf("test-%s-%s", action, serviceID),
+		OperationID:          fmt.Sprintf("test-%s-%s-op", action, serviceID),
+		Action:               action,
+		ServiceID:            serviceID,
+		ModuleID:             service.ModuleID,
+		Driver:               "compose",
+		CanApply:             false,
+		ApplyEnabled:         false,
+		RequiresConfirmation: true,
+		AllowedTargets:       []string{service.ComposeService},
+		Affected:             []string{serviceID},
+		Warnings:             []string{"Gateway/Web apply disabled"},
+		CreatedAt:            "2026-01-01T00:00:00Z",
+		ExpiresAt:            "2026-01-01T00:05:00Z",
 	}
 	if service.Lifecycle == moduleruntime.LifecycleMetadata {
 		plan.BlockedBy = append(plan.BlockedBy, "metadata lifecycle cannot "+action)
 		return plan, nil
 	}
-	plan.Commands = []moduleruntime.RuntimePlanCommand{{Tool: "compose", Args: []string{action, service.ComposeService}}}
+	plan.Commands = []moduleruntime.RuntimePlanCommand{{Kind: "compose", Argv: []string{"docker", "compose", action, service.ComposeService}}}
+	plan.CanApply = true
 	return plan, nil
 }
 
@@ -484,8 +489,8 @@ func TestRuntimeServicesAdminAPIUsesRuntimeDriver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plan restart failed: %v", err)
 	}
-	if plan.Plan.CanApply || len(plan.Plan.Commands) != 1 || plan.Plan.Commands[0].Tool != "compose" {
-		t.Fatalf("plan should be compose plan-only: %#v", plan)
+	if !plan.Plan.CanApply || len(plan.Plan.Commands) != 1 || plan.Plan.Commands[0].Kind != "compose" {
+		t.Fatalf("plan should be operator-applyable compose plan while Gateway apply remains disabled: %#v", plan)
 	}
 	metadataPlan, err := logic.PlanStart("Bearer "+token, "demo-metadata-service")
 	if err != nil {

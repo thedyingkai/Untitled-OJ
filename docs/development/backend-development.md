@@ -127,3 +127,17 @@ Rules for backend changes:
 - Compose driver input must be an allowlisted service identity, never arbitrary manifest image, URL, mount or command.
 - Gateway admin APIs may generate plans and expose sanitized state. They must not apply dangerous host actions.
 - Dynamic proxy must check runtime route health/status and enforce auth before returning unavailable service errors.
+
+## Hotplug L2 Controlled Apply Backend Guidance
+
+Gateway remains a plan/status adapter. Do not add code paths that run Docker, call shell, mount Docker socket, or apply runtime plans inside Gateway.
+
+Backend rules:
+
+- Runtime plan commands must be argv arrays, never shell strings.
+- `POST /api/admin/runtime/plans/:id/apply` must remain a 501 boundary unless a separately reviewed operator component owns apply.
+- Plan generation may set `can_apply=true` for externally applicable trusted plans, but Gateway must keep `apply_enabled=false`.
+- Operation history and audit responses must redact secrets, tokens, DSNs, host paths, and raw env.
+- Any compose apply implementation must validate service allowlist, action allowlist, fixed compose path, TTL, and lock before execution.
+
+Local controlled apply currently belongs to `kernel/installer/cli` (`ojosctl runtime apply-plan`) and future operator code, not to Gateway handlers.

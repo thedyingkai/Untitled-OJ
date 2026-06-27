@@ -113,3 +113,23 @@ Implemented boundaries:
 - `ojosctl runtime ...` provides local plan/status inspection.
 
 Future repo splitting should keep runtime driver contracts separate from Gateway edge code once Runtime APIs stabilize.
+
+## Hotplug L2 Controlled Apply Addendum
+
+Project Structure v2 keeps apply authority out of Apps. Gateway and Web Shell are Apps/adapters: they expose plan, status, and operation history, but they do not own host lifecycle execution.
+
+The controlled apply path belongs to Tools / Operator:
+
+```text
+tools or kernel/installer/cli -> ojosctl runtime apply-plan
+future operator -> controlled runtime apply
+```
+
+Current monorepo placement keeps `ojosctl` under `kernel/installer/cli` while the runtime driver compatibility code remains in `services/gateway/internal/kernel/moduleruntime`. The intended split remains:
+
+- Kernel Runtime defines plan/state/driver contracts.
+- Apps consume runtime APIs without host control.
+- Tools/Operator apply trusted local plans.
+- Modules declare services/workers through manifest metadata only.
+
+This phase does not change the repo split decision and does not implement remote module service deployment.

@@ -124,3 +124,22 @@ provides:
 Allowed lifecycle values are `managed`, `metadata`, `external` and `manual`. L2 foundation only generates compose plans for trusted allowlisted `managed` services. `metadata` services enter snapshot/topology but cannot start, stop or restart.
 
 Manifests may not specify executable runtime control fields such as `command`, `script`, `image`, `mount`, `host_path`, `privileged` or `cap_add`. A module may declare the trusted compose service identity, but it cannot declare arbitrary images, URLs, host mounts or shell commands.
+
+## Hotplug L2 Controlled Apply Contract
+
+The manifest describes service intent; it does not grant execution rights. Runtime apply is derived from trusted Kernel/operator policy, not from executable manifest fields.
+
+Valid service declarations may reference `id`, `kind`, `lifecycle`, `trusted_runtime`, `compose_service`, `health_check_id`, `routes`, and `required`.
+
+Invalid executable control remains forbidden:
+
+- arbitrary `image`
+- `command`
+- `script`
+- hook names used as executable lifecycle steps
+- host `mount` or `host_path`
+- `privileged`
+- `cap_add`
+- arbitrary `target_url`
+
+Controlled apply uses a runtime plan with `commands[].argv`, an allowlisted `compose_service`, TTL, `operation_id`, `requires_confirmation`, and `allowed_targets`. A future module cannot make itself executable by adding command-like fields to `module.yaml`.

@@ -126,3 +126,40 @@ plan-health
 The Gateway admin API returns plans only. Apply is disabled in Gateway. Metadata-only services are blocked from start/stop/restart and remain useful only for snapshot/topology validation.
 
 A service health failure can make a dynamic gateway route `degraded` or `unavailable`. Unavailable routes are not proxied; Gateway still enforces auth mode before returning a stable 503.
+
+## Hotplug L2 Controlled Apply Lifecycle
+
+Runtime plan apply is now an operator lifecycle action, separate from module install/enable/disable.
+
+Allowed apply path:
+
+```text
+Admin/Web -> Gateway -> generate runtime plan
+ojosctl/operator -> read plan JSON -> apply trusted compose action
+ojosctl/operator -> write operation history/audit
+Gateway/Web -> view service state and operation result
+```
+
+Gateway/Web apply is intentionally disabled. Admin callers can generate plans, inspect `blocked_by` and `warnings`, and view operation history. They cannot directly start, stop, or restart services through Gateway.
+
+Runtime apply operation states:
+
+```text
+PLANNED
+APPLYING
+SUCCEEDED
+FAILED
+EXPIRED
+BLOCKED
+```
+
+Apply rules:
+
+- `--confirm` is required for real apply.
+- `--dry-run` prints the argv that would run and does not execute it.
+- Expired plans are rejected.
+- Metadata-only services cannot be applied.
+- A service lock prevents concurrent apply for the same service.
+- Operation request/result data is redacted before being stored.
+
+L2 Controlled Apply remains limited to trusted local compose services. It is not a generic module code execution or deployment system.

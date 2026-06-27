@@ -15,6 +15,7 @@ import type {
   ModuleValidateData,
   RuntimeServicePlanResponse,
   RuntimeServiceResponse,
+  RuntimeOperationsResponse,
   RuntimeServicesResponse,
 } from '../types/module'
 
@@ -77,6 +78,10 @@ export function planRuntimeServiceReload(serviceId: string): Promise<RuntimeServ
 
 export function reloadRuntimeServices(): Promise<ModuleRuntimeRoutesResponse> {
   return apiClient.post('/admin/runtime/reload', {})
+}
+
+export function getRuntimeOperations(): Promise<RuntimeOperationsResponse> {
+  return apiClient.get('/admin/runtime/operations')
 }
 
 export function getModuleDetail(moduleId: string): Promise<ModuleDetailResponse> {

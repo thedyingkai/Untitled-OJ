@@ -233,3 +233,17 @@ Plans are structured and plan-only:
 ```
 
 Gateway does not apply these plans in L2 foundation.
+
+## Hotplug L2 Controlled Apply APIs
+
+Runtime apply remains disabled in Gateway. Gateway/Web can generate plans and view operations; `ojosctl` or a future operator applies plan files locally under trusted policy.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/admin/runtime/operations` | Lists runtime operation history. |
+| `GET` | `/api/admin/runtime/operations/:id` | Returns one runtime operation. |
+| `POST` | `/api/admin/runtime/plans/:id/apply` | Intentionally disabled in Gateway; admins receive 501. |
+
+Plan responses use stable argv-only command data. `can_apply=true` means an external trusted operator may apply the plan after revalidation. `apply_enabled=false` means Gateway/Web apply is intentionally unavailable.
+
+Ordinary users still receive 403 and unauthenticated requests receive 401. Responses must not expose Docker socket paths, raw compose env, DSNs, tokens, secrets, or host absolute paths.

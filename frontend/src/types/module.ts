@@ -226,27 +226,51 @@ export interface RuntimeServiceResponse {
 }
 
 export interface RuntimePlanCommand {
-  tool: string
-  args: string[]
+  kind: string
+  argv: string[]
 }
 
 export interface RuntimePlanItem {
   plan_id: string
+  operation_id: string
   action: string
   service_id: string
   module_id: string
   driver: string
   can_apply: boolean
   apply_enabled: boolean
+  requires_confirmation: boolean
+  dry_run: boolean
+  allowed_targets: string[]
   commands: RuntimePlanCommand[]
   affected: string[]
   blocked_by: string[]
   warnings: string[]
   created_at: string
+  expires_at: string
 }
 
 export interface RuntimeServicePlanResponse {
   plan: RuntimePlanItem
+}
+
+export interface RuntimeOperationItem {
+  operation_id: string
+  module_id: string
+  service_id?: string
+  action: string
+  status: string
+  actor_username: string
+  request: unknown
+  plan: unknown
+  result: unknown
+  error_message: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RuntimeOperationsResponse {
+  operations: RuntimeOperationItem[]
 }
 
 export interface ModuleDetailResponse {

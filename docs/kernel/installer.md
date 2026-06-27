@@ -47,3 +47,27 @@ cargo run -p ojosctl -- runtime plan-restart problem-api
 ```
 
 These commands read local module manifests and generate JSON output. They are plan-only in L2 foundation. `runtime apply-plan` intentionally returns non-zero / not implemented until a controlled operator path exists.
+
+## Hotplug L2 Controlled Apply Commands
+
+`ojosctl` now provides the controlled local apply path for trusted runtime plans:
+
+```powershell
+cargo run -p ojosctl -- runtime plan-restart problem-api --out .tmp/agent/scratch/problem-api-restart.json
+cargo run -p ojosctl -- runtime apply-plan .tmp/agent/scratch/problem-api-restart.json --dry-run
+cargo run -p ojosctl -- runtime apply-plan .tmp/agent/scratch/problem-api-restart.json --confirm
+cargo run -p ojosctl -- runtime operations
+cargo run -p ojosctl -- runtime operation <operation_id>
+```
+
+Apply is intentionally not automatic:
+
+- real apply requires `--confirm`;
+- `--dry-run` does not execute;
+- compose commands are executed from argv arrays, not shell strings;
+- only trusted allowlisted compose services can be targeted;
+- the compose file path is fixed by trusted local configuration;
+- operation output is bounded and redacted;
+- operation history is written locally and, when the local control-plane database is reachable, mirrored to runtime operation/audit tables.
+
+Gateway/Web remain plan-only and do not apply runtime plans.

@@ -56,23 +56,28 @@ type RuntimeService struct {
 }
 
 type RuntimePlan struct {
-	PlanID       string               `json:"plan_id"`
-	Action       string               `json:"action"`
-	ServiceID    string               `json:"service_id"`
-	ModuleID     string               `json:"module_id"`
-	Driver       string               `json:"driver"`
-	CanApply     bool                 `json:"can_apply"`
-	ApplyEnabled bool                 `json:"apply_enabled"`
-	Commands     []RuntimePlanCommand `json:"commands"`
-	Affected     []string             `json:"affected"`
-	BlockedBy    []string             `json:"blocked_by"`
-	Warnings     []string             `json:"warnings"`
-	CreatedAt    string               `json:"created_at"`
+	PlanID               string               `json:"plan_id"`
+	OperationID          string               `json:"operation_id"`
+	Action               string               `json:"action"`
+	ServiceID            string               `json:"service_id"`
+	ModuleID             string               `json:"module_id"`
+	Driver               string               `json:"driver"`
+	CanApply             bool                 `json:"can_apply"`
+	ApplyEnabled         bool                 `json:"apply_enabled"`
+	RequiresConfirmation bool                 `json:"requires_confirmation"`
+	DryRun               bool                 `json:"dry_run"`
+	AllowedTargets       []string             `json:"allowed_targets"`
+	Commands             []RuntimePlanCommand `json:"commands"`
+	Affected             []string             `json:"affected"`
+	BlockedBy            []string             `json:"blocked_by"`
+	Warnings             []string             `json:"warnings"`
+	CreatedAt            string               `json:"created_at"`
+	ExpiresAt            string               `json:"expires_at"`
 }
 
 type RuntimePlanCommand struct {
-	Tool string   `json:"tool"`
-	Args []string `json:"args"`
+	Kind string   `json:"kind"`
+	Argv []string `json:"argv"`
 }
 
 type RuntimePlanResult struct {
@@ -86,6 +91,9 @@ type ComposeDriver struct {
 	AllowedComposeServices map[string]bool
 	HTTPClient             *http.Client
 	ApplyEnabled           bool
+	ComposeFile            string
+	EnvFile                string
+	PlanTTL                time.Duration
 }
 
 func NewComposeDriver(trusted map[string]TrustedService, allowedComposeServices ...string) *ComposeDriver {
@@ -104,6 +112,9 @@ func NewComposeDriver(trusted map[string]TrustedService, allowedComposeServices 
 		TrustedServices:        normalized,
 		AllowedComposeServices: allowed,
 		HTTPClient:             &http.Client{Timeout: 2 * time.Second},
+		ComposeFile:            "deploy/compose/docker-compose.yml",
+		EnvFile:                ".env",
+		PlanTTL:                5 * time.Minute,
 	}
 }
 
@@ -156,15 +167,31 @@ func (d *ComposeDriver) ApplyPlan(context.Context, RuntimePlan) (RuntimePlanResu
 
 func (d *ComposeDriver) plan(ctx context.Context, snapshot Snapshot, serviceID string, action string) (RuntimePlan, error) {
 	service, err := d.GetServiceState(ctx, snapshot, serviceID)
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := time.Now().UTC()
+	ttl := d.PlanTTL
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	composeFile := strings.TrimSpace(d.ComposeFile)
+	if composeFile == "" {
+		composeFile = "deploy/compose/docker-compose.yml"
+	}
+	envFile := strings.TrimSpace(d.EnvFile)
+	if envFile == "" {
+		envFile = ".env"
+	}
 	plan := RuntimePlan{
-		PlanID:       "runtime-" + action + "-" + strings.TrimSpace(serviceID),
-		Action:       action,
-		ServiceID:    strings.TrimSpace(serviceID),
-		Driver:       "compose",
-		CanApply:     false,
-		ApplyEnabled: d.ApplyEnabled,
-		CreatedAt:    now,
+		PlanID:               "runtime-" + action + "-" + strings.TrimSpace(serviceID),
+		OperationID:          "runtime-" + action + "-" + strings.TrimSpace(serviceID) + "-" + now.Format("20060102T150405.000000000Z"),
+		Action:               action,
+		ServiceID:            strings.TrimSpace(serviceID),
+		Driver:               "compose",
+		CanApply:             false,
+		ApplyEnabled:         false,
+		RequiresConfirmation: true,
+		DryRun:               false,
+		CreatedAt:            now.Format(time.RFC3339Nano),
+		ExpiresAt:            now.Add(ttl).Format(time.RFC3339Nano),
 	}
 	if err != nil {
 		plan.BlockedBy = append(plan.BlockedBy, err.Error())
@@ -185,13 +212,20 @@ func (d *ComposeDriver) plan(ctx context.Context, snapshot Snapshot, serviceID s
 	if !d.isAllowedService(service) {
 		plan.BlockedBy = append(plan.BlockedBy, "service is not in trusted compose allowlist")
 	}
+	plan.AllowedTargets = []string{service.ComposeService}
+	commandAction := action
 	if action == "health" {
-		plan.Commands = []RuntimePlanCommand{{Tool: "compose", Args: []string{"ps", service.ComposeService}}}
-	} else {
-		plan.Commands = []RuntimePlanCommand{{Tool: "compose", Args: []string{action, service.ComposeService}}}
+		commandAction = "ps"
+	} else if action == "reload" {
+		commandAction = "restart"
+		plan.Warnings = append(plan.Warnings, "compose reload uses restart fallback")
 	}
-	plan.Warnings = append(plan.Warnings, "Gateway generates plan only; apply is disabled in L2 foundation")
-	plan.CanApply = d.ApplyEnabled && len(plan.BlockedBy) == 0
+	if service.ComposeService != "" {
+		argv := []string{"docker", "compose", "--env-file", envFile, "-f", composeFile, commandAction, service.ComposeService}
+		plan.Commands = []RuntimePlanCommand{{Kind: "compose", Argv: argv}}
+	}
+	plan.Warnings = append(plan.Warnings, "Gateway generates operator plan only; Gateway/Web apply is disabled in L2 controlled apply")
+	plan.CanApply = len(plan.BlockedBy) == 0
 	return plan, nil
 }
 

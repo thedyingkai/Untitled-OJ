@@ -111,3 +111,11 @@ Status: implemented in this working tree, pending final runtime verification.
 Runtime service/worker declarations now enter Runtime Snapshot, route table health linkage and topology. Gateway admin APIs expose runtime services and plan-only start/stop/restart/reload operations. Web Shell has a Runtime Services admin page. `ojosctl runtime` provides local service listing and plan generation.
 
 Still out of scope: applying plans from Gateway/Web, Docker socket control, arbitrary image deployment, hooks, remote module marketplace, dynamic untrusted frontend bundles, L3/L4 hotplug and Judge Core GA.
+
+## 2026-06-27 Hotplug L2 Controlled Apply Status
+
+Status: implemented in this working tree, pending final runtime verification.
+
+Controlled apply is available through `ojosctl runtime apply-plan` for trusted local compose services. Gateway and Web Shell remain plan/status-only and Gateway apply returns 501. Plans use argv-only commands, fixed compose configuration, TTL, confirmation, dry-run, service locks, timeouts, and operation history/audit redaction.
+
+Still out of scope: Web/Gateway apply, Docker socket control in Apps, arbitrary image deployment, manifest command/script execution, hooks, remote module marketplace, dynamic untrusted frontend bundles, full hotplug automation, and Judge Core GA.

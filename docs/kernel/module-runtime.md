@@ -134,3 +134,27 @@ Current hotplug conclusion:
 - L1 gateway route/menu contribution hotplug: implemented for trusted enabled routes and safe Web Shell metadata.
 - L2 foundation: implemented for service/worker declaration, health/state view, plan generation and route-health linkage.
 - L2 service runtime apply, L3 dynamic frontend bundles and L4 full module automation are not implemented.
+
+## Hotplug L2 Controlled Apply
+
+L2 Controlled Apply adds a controlled operator path for applying runtime service plans. It is still not full hotplug: OJOS does not pull arbitrary module images, does not run manifest scripts, does not execute hooks, and does not load dynamic frontend bundles.
+
+Apply architecture:
+
+- Gateway and Web Shell generate plans and show status only.
+- Gateway intentionally does not run `docker compose`, mount Docker socket, or apply plans.
+- Web Shell intentionally has no direct apply button.
+- `ojosctl` or a future operator reads a plan file and applies it locally under trusted runtime policy.
+- Apply results are written to operation history and audit surfaces.
+
+Stable plan fields include `plan_id`, `operation_id`, `module_id`, `service_id`, `action`, `driver`, `can_apply`, `apply_enabled`, `requires_confirmation`, `dry_run`, `allowed_targets`, `commands[].kind`, `commands[].argv`, `blocked_by`, `warnings`, and `expires_at`.
+
+Plan safety rules:
+
+- Plans store argv arrays only; shell strings are not valid runtime plan commands.
+- `service_id`, action, driver, compose file, TTL, and target service are revalidated before apply.
+- Compose apply uses a fixed repo-local compose file and a trusted service allowlist.
+- Real apply requires explicit confirmation; dry-run never executes.
+- Apply has a service lock, timeout, output length limit, and redaction.
+
+Gateway still exposes `POST /api/admin/runtime/plans/:id/apply` only as an explicit disabled boundary. It returns `501 not implemented` for admins. Ordinary users receive 403 and missing tokens receive 401.

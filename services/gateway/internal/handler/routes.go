@@ -135,6 +135,36 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Handler: preflightHandler(),
 			},
 			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/runtime/operations",
+				Handler: adminRuntimeOperationsHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/runtime/operations",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/runtime/operations/:id",
+				Handler: adminRuntimeOperationDetailHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/runtime/operations/:id",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/runtime/plans/:id/apply",
+				Handler: adminRuntimeApplyPlanDisabledHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/runtime/plans/:id/apply",
+				Handler: preflightHandler(),
+			},
+			{
 				Method:  http.MethodPost,
 				Path:    "/api/admin/runtime/services/:id/plan-start",
 				Handler: adminRuntimeServicePlanHandler(serverCtx, "start"),
