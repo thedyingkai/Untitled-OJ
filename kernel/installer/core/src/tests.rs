@@ -175,6 +175,22 @@ fn duplicate_permission_and_gateway_prefix() {
 }
 
 #[test]
+fn gateway_route_hotplug_auth_modes_are_valid() {
+    for auth_mode in ["public", "user", "admin", "worker", "internal"] {
+        let mut manifest = valid_manifest();
+        manifest.provides.gateway_routes = vec![GatewayRouteDecl {
+            prefix: format!("/api/demo-{}", auth_mode),
+            target_service: "demo".to_string(),
+            auth_mode: auth_mode.to_string(),
+            enabled: auth_mode != "public",
+        }];
+        validate_manifest(&manifest).unwrap_or_else(|err| {
+            panic!("auth mode {auth_mode} should be valid: {err}");
+        });
+    }
+}
+
+#[test]
 fn dangerous_fields_are_rejected() {
     let text = r#"
 schema_version: 1

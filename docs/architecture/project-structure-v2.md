@@ -81,3 +81,17 @@ installer install/enable
 ```
 
 不得要求修改 Kernel 代码、Gateway 硬编码、Web Shell 主导航硬编码、权限硬编码、topology 硬编码或已有模块代码。
+
+## Kernel Runtime Wiring v1
+
+Project Structure v2 now has an operational wiring layer: Gateway and Web Shell read Runtime Snapshot instead of treating module metadata as page-local hardcoding.
+
+Implemented in this phase:
+
+- Runtime Snapshot v1 includes version, generated_at, active module contributions, route table inputs, manifest-derived metadata and topology.
+- Admin Runtime Routes API exposes registry-driven gateway route table and conflict validation.
+- Web Shell renders module-provided menu entries from Runtime Snapshot when admin access is available, while retaining static compatibility routes for existing Judge Core pages.
+- Admin Topology renders Runtime Snapshot topology nodes/edges and keeps module graph compatibility fields.
+- Permission admin page reads active module permission registry from Runtime Snapshot.
+
+Adding a metadata-only module should require only manifest/package installation and enablement. Service proxy cutover, runtime service driver and frontend bundle loading remain future phases.

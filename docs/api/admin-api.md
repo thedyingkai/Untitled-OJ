@@ -167,3 +167,17 @@ Gateway 对外错误映射必须保持�?
 | 503 | installer internal service 不可�?|
 
 错误响应不得泄露 Rust panic、SQL 错误、internal installer URL、DB 连接串、token 或本机绝对路径�?
+## Kernel Runtime Wiring v1 Admin APIs
+
+Runtime Snapshot and route table endpoints are admin-only. Ordinary users must receive 403, and requests without a token must receive 401.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/admin/modules/runtime-snapshot` | Active Runtime Snapshot for ENABLED modules. |
+| `GET` | `/api/admin/modules/runtime-snapshot?include_disabled=true` | Admin inspection view including disabled registry contributions. |
+| `GET` | `/api/admin/modules/runtime/routes` | Registry-driven gateway route table with conflicts and warnings. |
+| `POST` | `/api/admin/modules/runtime/reload` | Rebuild and validate the runtime route table. V1 does not remove compatibility proxy routes. |
+
+`/api/admin/modules/topology` is generated from Runtime Snapshot and returns runtime `nodes`/`edges` plus compatibility `module_nodes`/`dependency_edges` fields.
+
+The route table may show `target_service` to admins. It must not be available to ordinary users, and the Gateway must not expose internal service URLs or tokens in errors.

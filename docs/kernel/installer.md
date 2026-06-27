@@ -26,3 +26,9 @@ kernel/installer/cli
 ## Safety Boundary
 
 v0 不支持远程市场，不执行 hook，不加载 dynamic frontend bundle。`.ojosmod` v0 只做 checksum integrity，signature/trust policy 留到 v1。
+
+## Runtime Wiring Boundary
+
+Kernel Installer writes module registry data, and Kernel Module Runtime reads registry tables plus stored manifest metadata to build Runtime Snapshot. The installer does not need Gateway or Web Shell dependencies. Gateway only exposes admin adapter APIs and forwards installer operations to the internal Rust service.
+
+`gateway_routes.auth_mode` supports `public`, `user`, `admin`, `worker`, and `internal` as the forward-facing route contract. Compatibility aliases `none`, `optional`, and `required` are still accepted for existing Judge Core routes and normalize to public/user semantics in the runtime route table.

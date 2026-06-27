@@ -97,3 +97,15 @@ cargo run -p ojosctl -- module doctor
 ```
 
 Gateway 仍是唯一 public API 入口。新增 Admin API 必须先在 Gateway 做 JWT 和 `system.admin` 权限校验，再调用 internal installer service。
+
+## Runtime Wiring v1 Backend Guidance
+
+Gateway admin module APIs should use Kernel Module Runtime aggregation for runtime facts. New module contributions should be read from module registry tables or stored manifest metadata instead of page-specific hardcoding.
+
+Current backend contract:
+
+- Runtime Snapshot defaults to ENABLED module contributions.
+- `include_disabled=true` is admin-only inspection.
+- Runtime route table validates duplicate and overlapping prefixes.
+- Admin Health aggregates module health_check metadata from Runtime Snapshot and marks metadata checks as registered, not as fake service probes.
+- Compatibility proxy routes stay configured until full dynamic proxy cutover.

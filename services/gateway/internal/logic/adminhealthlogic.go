@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"ojos-gateway/internal/config"
+	"ojos-gateway/internal/kernel/moduleruntime"
+	"ojos-gateway/internal/moduleregistry"
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
 
@@ -51,6 +54,7 @@ func (l *AdminHealthLogic) AdminHealth(authHeader string) (*types.AdminHealthRes
 	if strings.TrimSpace(l.svcCtx.Config.Installer.Endpoint) != "" {
 		components = append(components, l.checkInstaller())
 	}
+	components = append(components, l.runtimeHealthChecks()...)
 
 	workerOnline := l.workerOnlineCount()
 	queuePending := l.queuePendingCount()
@@ -145,6 +149,48 @@ func (l *AdminHealthLogic) checkInstaller() types.HealthComponent {
 		}
 	}
 	return component("module-installer", start, err)
+}
+
+func (l *AdminHealthLogic) runtimeHealthChecks() []types.HealthComponent {
+	if l.svcCtx == nil || l.svcCtx.DB == nil {
+		return nil
+	}
+	snapshot, err := moduleruntime.BuildSnapshot(l.ctx, moduleregistry.NewRepository(l.svcCtx.DB))
+	if err != nil {
+		c := component("module runtime health registry", time.Now(), nil)
+		c.Status = "warning"
+		c.Message = "runtime health registry unavailable"
+		return []types.HealthComponent{c}
+	}
+	out := make([]types.HealthComponent, 0, len(snapshot.HealthChecks))
+	for _, check := range snapshot.HealthChecks {
+		name := "module:" + check.ModuleID + "/" + check.ComponentID
+		c := component(name, time.Now(), nil)
+		c.Message = runtimeHealthMessage(check)
+		out = append(out, c)
+	}
+	return out
+}
+
+func runtimeHealthMessage(check moduleruntime.RuntimeComponent) string {
+	var config struct {
+		Type     string `json:"type"`
+		Optional bool   `json:"optional"`
+		Target   string `json:"target"`
+	}
+	_ = json.Unmarshal(check.Config, &config)
+	checkType := strings.TrimSpace(config.Type)
+	if checkType == "" {
+		checkType = "metadata"
+	}
+	optional := "required"
+	if config.Optional {
+		optional = "optional"
+	}
+	if config.Target != "" {
+		return checkType + " " + optional + " registered target=" + config.Target
+	}
+	return checkType + " " + optional + " registered"
 }
 
 func (l *AdminHealthLogic) workerOnlineCount() int64 {

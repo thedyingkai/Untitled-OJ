@@ -86,3 +86,17 @@ permission_audit_logs
 - 默认关闭：通用 rollback apply、通用 uninstall apply。
 - 保护拒绝：kernel disable/uninstall、builtin uninstall、`ojos.judge-core` disable/uninstall。
 - v1 目标：签名信任策略、远程发布者信任、完整 upgrade apply、可审计 rollback apply、更细粒度 operation lock。
+
+## Runtime Wiring v1 Lifecycle Semantics
+
+Install/apply writes registry metadata and stored manifest data. Enable changes the module into active Runtime Snapshot scope. Disable keeps registry detail/history, but removes the module's permissions, menus, frontend routes, gateway routes, health checks and topology contributions from the active snapshot.
+
+`include_disabled=true` is the admin inspection escape hatch. It is not a public runtime surface and should not be used by Web Shell to create active clickable entries.
+
+Demo module lifecycle acceptance now verifies:
+
+- enabled demo module appears in Runtime Snapshot;
+- `demo.view` appears in active permission registry after enable;
+- demo topology metadata appears after enable;
+- disabled demo module is excluded from active Runtime Snapshot;
+- disabled demo module remains visible through include-disabled admin inspection.

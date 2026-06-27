@@ -420,7 +420,14 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
         ensure(
             matches!(
                 item.auth_mode.as_str(),
-                "none" | "optional" | "required" | "user" | "worker"
+                "none"
+                    | "optional"
+                    | "required"
+                    | "public"
+                    | "user"
+                    | "admin"
+                    | "worker"
+                    | "internal"
             ),
             "gateway auth_mode is invalid",
         )?;

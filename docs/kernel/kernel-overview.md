@@ -63,3 +63,17 @@ future ojos.remote-oj
 ```
 
 Feature modules 根据 dependency、dependent 和 safety policy 判断 enable、disable、upgrade、rollback 和 uninstall。
+
+## Kernel Runtime Wiring v1
+
+The Kernel now treats Runtime Snapshot as the operational entry point for module-provided permissions, menus, frontend route metadata, gateway route metadata, health checks, topology and component surfaces. Installer, Registry, Runtime and Topology remain Kernel capabilities. Gateway and Web Shell are adapters that read the Kernel runtime surface.
+
+Future modules should appear in Module Center, runtime snapshot, contribution viewer, topology and permission registry through manifest/package installation. They should not require Kernel code changes for metadata-level L0 hotplug.
+
+Boundaries retained:
+
+- No B Contest work is implemented here.
+- No remote module marketplace is implemented.
+- No hook execution is allowed.
+- No dynamic untrusted frontend bundle is loaded.
+- A/Judge Core remains protected and is not marked GA.

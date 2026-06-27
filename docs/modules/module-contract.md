@@ -55,3 +55,21 @@ Installer, Module Runtime, Module Registry and Topology are Kernel capabilities.
 `schema_version: 1` now accepts the future-facing extension surface: permissions, roles, components, services, workers, frontend_routes, menus, gateway_routes, storage_buckets, health_checks, migrations, events, scheduled_jobs, admin_panels and topology nodes/edges.
 
 Future modules should be added through `module.yaml`, `.ojosmod` package metadata and extension points. They must not require Kernel code changes, Gateway hardcoded navigation changes, Web Shell hardcoded menu changes, topology hardcoding, or changes to existing modules.
+
+## Runtime Wiring v1 Addendum
+
+`schema_version: 1` module contracts are now consumed by Runtime Snapshot. The following extension points can surface without page-specific hardcoding:
+
+- `permissions` -> active permission registry
+- `menus` -> Web Shell menu contribution candidates
+- `frontend_routes` -> contribution viewer and future route registry
+- `gateway_routes` -> runtime route table and conflict validation
+- `services` / `workers` / `components` -> runtime components and topology nodes
+- `storage_buckets` -> runtime storage metadata
+- `health_checks` -> admin health metadata and snapshot health checks
+- `events`, `scheduled_jobs`, `admin_panels` -> manifest-derived runtime operation metadata
+- `topology.nodes` / `topology.edges` -> runtime topology graph
+
+Active Runtime Snapshot only includes ENABLED modules. Disabled modules remain visible through registry detail and `include_disabled=true` admin inspection. Disabled metadata must not create clickable fake business entries or live gateway proxy routes.
+
+Frontend contribution hotplug remains metadata-only. Dynamic JS, remote bundles, hooks and remote marketplace installation are still out of scope.

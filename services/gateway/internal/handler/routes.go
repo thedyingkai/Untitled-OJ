@@ -110,6 +110,26 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Handler: preflightHandler(),
 			},
 			{
+				Method:  http.MethodGet,
+				Path:    "/api/admin/modules/runtime/routes",
+				Handler: adminModuleRuntimeRoutesHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/runtime/routes",
+				Handler: preflightHandler(),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/modules/runtime/reload",
+				Handler: adminModuleRuntimeReloadHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodOptions,
+				Path:    "/api/admin/modules/runtime/reload",
+				Handler: preflightHandler(),
+			},
+			{
 				Method:  http.MethodPost,
 				Path:    "/api/admin/modules/:id/enable",
 				Handler: adminModuleInstallerEnableHandler(serverCtx),

@@ -98,3 +98,11 @@
 - [Module Installer 仓库边界 ADR](architecture/adr/ADR-module-installer-repository-boundary.md)
 - [Project Structure v2 ADR](architecture/adr/ADR-project-structure-v2-kernel-modules.md)
 - [模块包格式](modules/module-package-format.md)
+
+## Kernel Runtime Wiring v1 Documents
+
+- `docs/kernel/module-runtime.md` describes Runtime Snapshot v1, include-disabled behavior, topology generation and L0/L1 hotplug status.
+- `docs/api/admin-api.md` lists runtime snapshot, runtime routes and runtime reload admin APIs.
+- `docs/modules/module-contract.md` describes manifest extension points consumed by Runtime Snapshot.
+- `docs/development/frontend-development.md` documents Web Shell contribution rendering boundaries.
+- `docs/development/backend-development.md` documents Gateway/runtime aggregation boundaries.

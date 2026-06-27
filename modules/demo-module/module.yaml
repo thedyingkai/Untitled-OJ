@@ -53,12 +53,19 @@ provides:
       required_permission: demo.view
       enabled: false
 
-  gateway_routes: []
+  gateway_routes:
+    - prefix: /api/demo-module
+      target_service: demo-api
+      auth_mode: required
+      enabled: false
 
   storage:
-    buckets: []
+    buckets:
+      - demo-metadata
 
-  storage_buckets: []
+  storage_buckets:
+    - id: demo-metadata
+      description: Metadata-only bucket declaration for installer/runtime wiring acceptance.
 
   health_checks:
     - id: demo-health
@@ -68,8 +75,10 @@ provides:
   migrations: []
 
   events:
-    publishes: []
-    subscribes: []
+    publishes:
+      - demo.module.enabled
+    subscribes:
+      - kernel.runtime.snapshot.generated
 
   scheduled_jobs: []
 
@@ -83,4 +92,10 @@ provides:
       - id: demo-component
         type: metadata
         label: Demo Component
-    edges: []
+      - id: demo-health
+        type: health
+        label: Demo Metadata Health
+    edges:
+      - from: demo-component
+        to: demo-health
+        type: observes

@@ -90,3 +90,9 @@
 # Project Structure v2 Status
 
 Installer source is now canonical under kernel/installer/core, kernel/installer/service, and kernel/installer/cli. Module Runtime is a Kernel capability with a Phase 1 compatibility implementation in services/gateway/internal/kernel/moduleruntime and API GET /api/admin/modules/runtime-snapshot. Gateway remains an App / edge adapter; frontend remains the Phase 1 Web Shell compatibility path. Judge Core remains a Feature Module and is not GA.
+
+## 2026-06-27 Kernel Runtime Wiring v1
+
+Status: implemented and pending final verification in this working tree.
+
+Runtime Snapshot is now the active module runtime source for permissions, menus, frontend route metadata, gateway route metadata, components, health checks and topology. Gateway exposes runtime route table/reload admin APIs. Web Shell has a Module Contributions view and admin menu contribution rendering. Dynamic proxy cutover, service runtime driver and dynamic untrusted frontend bundles remain explicitly not implemented.

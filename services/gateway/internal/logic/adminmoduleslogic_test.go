@@ -174,7 +174,7 @@ func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
 	if !hasSet(resp.Sets, "kernel") || !hasSet(resp.Sets, "core-capability") {
 		t.Fatalf("topology should include kernel and core-capability sets: %#v", resp.Sets)
 	}
-	if !hasNode(resp.Nodes, "ojos.judge-core") {
+	if !hasNode(resp.ModuleNodes, "ojos.judge-core") {
 		t.Fatalf("topology should include ojos.judge-core node")
 	}
 	for _, edge := range [][2]string{
@@ -182,7 +182,7 @@ func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
 		{"ojos.judge-core", "ojos.platform.identity-access"},
 		{"ojos.judge-core", "ojos.kernel.module-runtime"},
 	} {
-		if !hasEdge(resp.Edges, edge[0], edge[1]) {
+		if !hasEdge(resp.DependencyEdges, edge[0], edge[1]) {
 			t.Fatalf("topology should include edge %s -> %s", edge[0], edge[1])
 		}
 	}
@@ -210,7 +210,7 @@ func TestRuntimeSnapshotReturnsKernelPlatformAndJudgeCore(t *testing.T) {
 		repo: fakeModuleRegistry{data: moduleregistry.BuiltinData()},
 	}
 
-	resp, err := logic.RuntimeSnapshot("Bearer " + token)
+	resp, err := logic.RuntimeSnapshot("Bearer "+token, false)
 	if err != nil {
 		t.Fatalf("runtime snapshot failed: %v", err)
 	}
@@ -222,11 +222,123 @@ func TestRuntimeSnapshotReturnsKernelPlatformAndJudgeCore(t *testing.T) {
 	if len(resp.Topology.Nodes) == 0 || len(resp.Topology.Edges) == 0 {
 		t.Fatalf("runtime snapshot topology should be non-empty")
 	}
+	if len(resp.Topology.ModuleNodes) == 0 || len(resp.Topology.DependencyEdges) == 0 {
+		t.Fatalf("runtime snapshot should expose module graph compatibility fields")
+	}
 	if len(resp.Services) == 0 || len(resp.Workers) == 0 || len(resp.HealthChecks) == 0 {
 		t.Fatalf("runtime snapshot should include services/workers/health checks")
 	}
 	if len(resp.Components) == 0 {
 		t.Fatalf("runtime snapshot should include full component list")
+	}
+}
+
+func TestRuntimeSnapshotIncludeDisabledControlsActiveContributions(t *testing.T) {
+	ctx := context.Background()
+	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data := moduleregistry.BuiltinData()
+	data.Modules = append(data.Modules, moduleregistry.Module{
+		ModuleID: "ojos.demo-module",
+		SetID:    "demo",
+		Name:     "Demo Module",
+		Version:  "0.1.0",
+		Status:   "DISABLED",
+		Kind:     "feature",
+	})
+	data.Permissions = append(data.Permissions, moduleregistry.Permission{
+		ModuleID:      "ojos.demo-module",
+		PermissionKey: "demo.view",
+		Description:   "View demo module metadata.",
+	})
+	data.Menus = append(data.Menus, moduleregistry.Menu{
+		ModuleID:  "ojos.demo-module",
+		MenuKey:   "demo-module",
+		Title:     "Demo Module",
+		RoutePath: "/admin/modules/demo",
+		Enabled:   false,
+	})
+
+	logic := &AdminModulesLogic{
+		ctx: ctx,
+		svcCtx: &svc.ServiceContext{
+			Config: config.Config{
+				Jwt: config.JwtConfig{Secret: "test-secret"},
+			},
+		},
+		repo: fakeModuleRegistry{data: data},
+	}
+
+	active, err := logic.RuntimeSnapshot("Bearer "+token, false)
+	if err != nil {
+		t.Fatalf("active runtime snapshot failed: %v", err)
+	}
+	if hasNode(active.Modules, "ojos.demo-module") || hasPermissionItem(active.Permissions, "demo.view") {
+		t.Fatalf("disabled demo module should not appear in active runtime snapshot")
+	}
+
+	all, err := logic.RuntimeSnapshot("Bearer "+token, true)
+	if err != nil {
+		t.Fatalf("include-disabled runtime snapshot failed: %v", err)
+	}
+	if !hasNode(all.Modules, "ojos.demo-module") || !hasPermissionItem(all.Permissions, "demo.view") {
+		t.Fatalf("include-disabled runtime snapshot should expose disabled demo registry entries")
+	}
+}
+
+func TestRuntimeRoutesReturnsRegistryRouteTable(t *testing.T) {
+	ctx := context.Background()
+	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data := moduleregistry.BuiltinData()
+	data.GatewayRoutes = append(data.GatewayRoutes, moduleregistry.GatewayRoute{
+		ModuleID:      "ojos.demo-module",
+		Prefix:        "/api/demo",
+		TargetService: "demo-api",
+		AuthMode:      "admin",
+		Enabled:       false,
+	})
+	data.Modules = append(data.Modules, moduleregistry.Module{
+		ModuleID: "ojos.demo-module",
+		SetID:    "demo",
+		Name:     "Demo Module",
+		Version:  "0.1.0",
+		Status:   "DISABLED",
+		Kind:     "feature",
+	})
+
+	logic := &AdminModulesLogic{
+		ctx: ctx,
+		svcCtx: &svc.ServiceContext{
+			Config: config.Config{
+				Jwt: config.JwtConfig{Secret: "test-secret"},
+			},
+		},
+		repo: fakeModuleRegistry{data: data},
+	}
+
+	active, err := logic.RuntimeRoutes("Bearer "+token, false, false)
+	if err != nil {
+		t.Fatalf("runtime routes failed: %v", err)
+	}
+	if hasRuntimeRoute(active.Routes, "/api/demo") {
+		t.Fatalf("disabled demo route should not appear in active runtime route table")
+	}
+	all, err := logic.RuntimeRoutes("Bearer "+token, true, true)
+	if err != nil {
+		t.Fatalf("include-disabled runtime routes failed: %v", err)
+	}
+	if !all.Reloaded {
+		t.Fatalf("reload response should be marked reloaded")
+	}
+	if !hasRuntimeRoute(all.Routes, "/api/demo") {
+		t.Fatalf("include-disabled route table should expose demo metadata route")
 	}
 }
 
@@ -254,6 +366,24 @@ func hasSet(items []types.ModuleSetItem, setID string) bool {
 func hasNode(items []types.ModuleNodeItem, moduleID string) bool {
 	for _, item := range items {
 		if item.ModuleId == moduleID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPermissionItem(items []types.ModulePermissionItem, key string) bool {
+	for _, item := range items {
+		if item.PermissionKey == key {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRuntimeRoute(items []types.ModuleRuntimeRouteItem, prefix string) bool {
+	for _, item := range items {
+		if item.Prefix == prefix {
 			return true
 		}
 	}

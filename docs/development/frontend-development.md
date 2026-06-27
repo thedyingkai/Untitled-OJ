@@ -86,3 +86,15 @@ npm run build
 - operation history
 
 页面不访问本地文件系统，不连接 internal service，不使用 mock/fake 数据。危险操作必须展示影响范围并二次确认。kernel 和 `ojos.judge-core` 需要展示保护提示，不能提供可执行的禁用/卸载 apply 按钮。
+
+## Runtime Wiring v1 Frontend Guidance
+
+Web Shell should read Runtime Snapshot for module-provided menus and contribution metadata. Static Vue routes remain for compatibility, but new module metadata should flow into Module Contributions and Module Topology without page-specific hardcoding.
+
+Rules:
+
+- Do not execute dynamic remote bundles.
+- Do not add fake clickable routes for disabled or metadata-only frontend contributions.
+- Use `/admin/modules/contributions` for generic metadata display.
+- Use `required_permission` from snapshot menus to decide visibility where user permission data is available.
+- Ordinary user navigation keeps static compatibility entries because Runtime Snapshot admin API is not exposed to ordinary users.

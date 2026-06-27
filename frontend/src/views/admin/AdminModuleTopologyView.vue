@@ -16,6 +16,8 @@ import type {
   ModuleNodeItem,
   ModuleRuntimeComponent,
   ModuleRuntimeSnapshotResponse,
+  ModuleRuntimeTopologyEdge,
+  ModuleRuntimeTopologyNode,
   ModuleSetItem,
   ModuleTopologyResponse,
 } from '../../types/module'
@@ -32,7 +34,7 @@ const setColumns: DataTableColumns<ModuleSetItem> = [
   { title: 'Order', key: 'sort_order', width: 100 },
 ]
 
-const nodeColumns = computed<DataTableColumns<ModuleNodeItem>>(() => [
+const moduleNodeColumns = computed<DataTableColumns<ModuleNodeItem>>(() => [
   {
     title: 'Module',
     key: 'module_id',
@@ -53,12 +55,29 @@ const nodeColumns = computed<DataTableColumns<ModuleNodeItem>>(() => [
   { title: 'Kind', key: 'kind', width: 120 },
 ])
 
-const edgeColumns: DataTableColumns<ModuleEdgeItem> = [
+const dependencyEdgeColumns: DataTableColumns<ModuleEdgeItem> = [
   { title: 'From', key: 'from_module_id' },
   { title: 'To', key: 'to_module_id' },
   { title: 'Type', key: 'edge_type', width: 120 },
   { title: 'Constraint', key: 'version_constraint', width: 160 },
   { title: 'Required', key: 'required', width: 100, render: (row) => (row.required ? 'yes' : 'no') },
+]
+
+const topologyNodeColumns: DataTableColumns<ModuleRuntimeTopologyNode> = [
+  { title: 'Node', key: 'id', minWidth: 280 },
+  { title: 'Label', key: 'label', minWidth: 180 },
+  { title: 'Type', key: 'type', width: 160 },
+  { title: 'Module', key: 'module_id', minWidth: 220 },
+  { title: 'Status', key: 'status', width: 120, render: (row) => hStatus(row.status) },
+  { title: 'Source', key: 'source', width: 120 },
+]
+
+const topologyEdgeColumns: DataTableColumns<ModuleRuntimeTopologyEdge> = [
+  { title: 'From', key: 'from', minWidth: 280 },
+  { title: 'To', key: 'to', minWidth: 280 },
+  { title: 'Type', key: 'type', width: 140 },
+  { title: 'Module', key: 'module_id', minWidth: 220 },
+  { title: 'Source', key: 'source', width: 120 },
 ]
 
 const componentColumns: DataTableColumns<ModuleComponentItem> = [
@@ -88,6 +107,8 @@ function topologyFromSnapshot(
     nodes: snapshot.topology.nodes,
     edges: snapshot.topology.edges,
     components: snapshot.components.map(runtimeComponentToComponent),
+    module_nodes: snapshot.topology.module_nodes,
+    dependency_edges: snapshot.topology.dependency_edges,
   }
 }
 
@@ -144,18 +165,38 @@ onMounted(() => void load())
           <EmptyView v-if="!topology?.nodes.length" description="No module nodes" />
           <NDataTable
             v-else
-            :columns="nodeColumns"
+            :columns="topologyNodeColumns"
             :data="topology.nodes"
             :pagination="{ pageSize: 10 }"
             :bordered="false"
           />
         </NTabPane>
         <NTabPane name="edges" tab="Edges">
-          <EmptyView v-if="!topology?.edges.length" description="No dependency edges" />
+          <EmptyView v-if="!topology?.edges.length" description="No topology edges" />
           <NDataTable
             v-else
-            :columns="edgeColumns"
+            :columns="topologyEdgeColumns"
             :data="topology.edges"
+            :pagination="{ pageSize: 10 }"
+            :bordered="false"
+          />
+        </NTabPane>
+        <NTabPane name="modules" tab="Module Graph">
+          <EmptyView v-if="!topology?.module_nodes.length" description="No module graph nodes" />
+          <NDataTable
+            v-else
+            :columns="moduleNodeColumns"
+            :data="topology.module_nodes"
+            :pagination="{ pageSize: 10 }"
+            :bordered="false"
+          />
+        </NTabPane>
+        <NTabPane name="dependencies" tab="Dependencies">
+          <EmptyView v-if="!topology?.dependency_edges.length" description="No dependency edges" />
+          <NDataTable
+            v-else
+            :columns="dependencyEdgeColumns"
+            :data="topology.dependency_edges"
             :pagination="{ pageSize: 10 }"
             :bordered="false"
           />

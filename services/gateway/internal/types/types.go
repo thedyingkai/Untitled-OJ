@@ -110,23 +110,31 @@ type ListModuleSetsResp struct {
 }
 
 type ModuleTopologyResp struct {
-	Sets       []ModuleSetItem       `json:"sets"`
-	Nodes      []ModuleNodeItem      `json:"nodes"`
-	Edges      []ModuleEdgeItem      `json:"edges"`
-	Components []ModuleComponentItem `json:"components"`
+	Sets            []ModuleSetItem             `json:"sets"`
+	Nodes           []ModuleRuntimeTopologyNode `json:"nodes"`
+	Edges           []ModuleRuntimeTopologyEdge `json:"edges"`
+	Components      []ModuleComponentItem       `json:"components"`
+	ModuleNodes     []ModuleNodeItem            `json:"module_nodes"`
+	DependencyEdges []ModuleEdgeItem            `json:"dependency_edges"`
 }
 
 type ModuleRuntimeSnapshotResp struct {
-	Modules        []ModuleNodeItem          `json:"modules"`
-	Permissions    []ModulePermissionItem    `json:"permissions"`
-	Menus          []ModuleMenuItem          `json:"menus"`
-	FrontendRoutes []ModuleFrontendRouteItem `json:"frontend_routes"`
-	GatewayRoutes  []ModuleGatewayRouteItem  `json:"gateway_routes"`
-	Components     []ModuleRuntimeComponent  `json:"components"`
-	Services       []ModuleRuntimeComponent  `json:"services"`
-	Workers        []ModuleRuntimeComponent  `json:"workers"`
-	HealthChecks   []ModuleRuntimeComponent  `json:"health_checks"`
-	Topology       ModuleRuntimeTopology     `json:"topology"`
+	Version        string                      `json:"version"`
+	GeneratedAt    string                      `json:"generated_at"`
+	Modules        []ModuleNodeItem            `json:"modules"`
+	Permissions    []ModulePermissionItem      `json:"permissions"`
+	Roles          []ModuleRuntimeManifestItem `json:"roles"`
+	Menus          []ModuleMenuItem            `json:"menus"`
+	FrontendRoutes []ModuleFrontendRouteItem   `json:"frontend_routes"`
+	GatewayRoutes  []ModuleGatewayRouteItem    `json:"gateway_routes"`
+	Components     []ModuleRuntimeComponent    `json:"components"`
+	Services       []ModuleRuntimeComponent    `json:"services"`
+	Workers        []ModuleRuntimeComponent    `json:"workers"`
+	StorageBuckets []ModuleRuntimeManifestItem `json:"storage_buckets"`
+	HealthChecks   []ModuleRuntimeComponent    `json:"health_checks"`
+	Operations     []ModuleRuntimeManifestItem `json:"operations"`
+	Topology       ModuleRuntimeTopology       `json:"topology"`
+	Warnings       []string                    `json:"warnings"`
 }
 
 type ModuleRuntimeComponent struct {
@@ -137,9 +145,59 @@ type ModuleRuntimeComponent struct {
 	Config      any    `json:"config"`
 }
 
+type ModuleRuntimeManifestItem struct {
+	ModuleId string `json:"module_id"`
+	Id       string `json:"id"`
+	Type     string `json:"type"`
+	Status   string `json:"status"`
+	Enabled  bool   `json:"enabled"`
+	Config   any    `json:"config"`
+}
+
 type ModuleRuntimeTopology struct {
-	Nodes []ModuleNodeItem `json:"nodes"`
-	Edges []ModuleEdgeItem `json:"edges"`
+	Nodes           []ModuleRuntimeTopologyNode `json:"nodes"`
+	Edges           []ModuleRuntimeTopologyEdge `json:"edges"`
+	ModuleNodes     []ModuleNodeItem            `json:"module_nodes"`
+	DependencyEdges []ModuleEdgeItem            `json:"dependency_edges"`
+}
+
+type ModuleRuntimeTopologyNode struct {
+	Id       string `json:"id"`
+	ModuleId string `json:"module_id"`
+	Label    string `json:"label"`
+	Type     string `json:"type"`
+	Status   string `json:"status"`
+	Source   string `json:"source"`
+	Config   any    `json:"config"`
+}
+
+type ModuleRuntimeTopologyEdge struct {
+	Id       string `json:"id"`
+	ModuleId string `json:"module_id"`
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Type     string `json:"type"`
+	Required bool   `json:"required"`
+	Source   string `json:"source"`
+}
+
+type ModuleRuntimeRouteItem struct {
+	ModuleId      string   `json:"module_id"`
+	Prefix        string   `json:"prefix"`
+	TargetService string   `json:"target_service"`
+	AuthMode      string   `json:"auth_mode"`
+	Enabled       bool     `json:"enabled"`
+	Conflicts     []string `json:"conflicts"`
+	Warnings      []string `json:"warnings"`
+}
+
+type ModuleRuntimeRoutesResp struct {
+	Version     string                   `json:"version"`
+	GeneratedAt string                   `json:"generated_at"`
+	Routes      []ModuleRuntimeRouteItem `json:"routes"`
+	Warnings    []string                 `json:"warnings"`
+	CanProxy    bool                     `json:"can_proxy"`
+	Reloaded    bool                     `json:"reloaded,omitempty"`
 }
 
 type ModuleDetailResp struct {

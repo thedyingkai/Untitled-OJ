@@ -9,6 +9,7 @@ import type {
   ModuleInstallerRequest,
   ModuleOperationsData,
   ModulePlan,
+  ModuleRuntimeRoutesResponse,
   ModuleRuntimeSnapshotResponse,
   ModuleTopologyResponse,
   ModuleValidateData,
@@ -26,8 +27,25 @@ export function getModuleTopology(): Promise<ModuleTopologyResponse> {
   return apiClient.get('/admin/modules/topology')
 }
 
-export function getModuleRuntimeSnapshot(): Promise<ModuleRuntimeSnapshotResponse> {
-  return apiClient.get('/admin/modules/runtime-snapshot')
+export function getModuleRuntimeSnapshot(options?: {
+  includeDisabled?: boolean
+}): Promise<ModuleRuntimeSnapshotResponse> {
+  const query = options?.includeDisabled ? '?include_disabled=true' : ''
+  return apiClient.get(`/admin/modules/runtime-snapshot${query}`)
+}
+
+export function getModuleRuntimeRoutes(options?: {
+  includeDisabled?: boolean
+}): Promise<ModuleRuntimeRoutesResponse> {
+  const query = options?.includeDisabled ? '?include_disabled=true' : ''
+  return apiClient.get(`/admin/modules/runtime/routes${query}`)
+}
+
+export function reloadModuleRuntime(options?: {
+  includeDisabled?: boolean
+}): Promise<ModuleRuntimeRoutesResponse> {
+  const query = options?.includeDisabled ? '?include_disabled=true' : ''
+  return apiClient.post(`/admin/modules/runtime/reload${query}`, {})
 }
 
 export function getModuleDetail(moduleId: string): Promise<ModuleDetailResponse> {

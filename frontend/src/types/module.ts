@@ -95,9 +95,11 @@ export interface ListModuleSetsResponse {
 
 export interface ModuleTopologyResponse {
   sets: ModuleSetItem[]
-  nodes: ModuleNodeItem[]
-  edges: ModuleEdgeItem[]
+  nodes: ModuleRuntimeTopologyNode[]
+  edges: ModuleRuntimeTopologyEdge[]
   components: ModuleComponentItem[]
+  module_nodes: ModuleNodeItem[]
+  dependency_edges: ModuleEdgeItem[]
 }
 
 export interface ModuleRuntimeComponent {
@@ -109,21 +111,77 @@ export interface ModuleRuntimeComponent {
 }
 
 export interface ModuleRuntimeTopology {
-  nodes: ModuleNodeItem[]
-  edges: ModuleEdgeItem[]
+  nodes: ModuleRuntimeTopologyNode[]
+  edges: ModuleRuntimeTopologyEdge[]
+  module_nodes: ModuleNodeItem[]
+  dependency_edges: ModuleEdgeItem[]
+}
+
+export interface ModuleRuntimeManifestItem {
+  module_id: string
+  id: string
+  type: string
+  status: string
+  enabled: boolean
+  config: unknown
+}
+
+export interface ModuleRuntimeTopologyNode {
+  id: string
+  module_id: string
+  label: string
+  type: string
+  status: string
+  source: string
+  config: unknown
+}
+
+export interface ModuleRuntimeTopologyEdge {
+  id: string
+  module_id: string
+  from: string
+  to: string
+  type: string
+  required: boolean
+  source: string
 }
 
 export interface ModuleRuntimeSnapshotResponse {
+  version: string
+  generated_at: string
   modules: ModuleNodeItem[]
   permissions: ModulePermissionItem[]
+  roles: ModuleRuntimeManifestItem[]
   menus: ModuleMenuItem[]
   frontend_routes: ModuleFrontendRouteItem[]
   gateway_routes: ModuleGatewayRouteItem[]
   components: ModuleRuntimeComponent[]
   services: ModuleRuntimeComponent[]
   workers: ModuleRuntimeComponent[]
+  storage_buckets: ModuleRuntimeManifestItem[]
   health_checks: ModuleRuntimeComponent[]
+  operations: ModuleRuntimeManifestItem[]
   topology: ModuleRuntimeTopology
+  warnings: string[]
+}
+
+export interface ModuleRuntimeRouteItem {
+  module_id: string
+  prefix: string
+  target_service: string
+  auth_mode: string
+  enabled: boolean
+  conflicts: string[]
+  warnings: string[]
+}
+
+export interface ModuleRuntimeRoutesResponse {
+  version: string
+  generated_at: string
+  routes: ModuleRuntimeRouteItem[]
+  warnings: string[]
+  can_proxy: boolean
+  reloaded?: boolean
 }
 
 export interface ModuleDetailResponse {

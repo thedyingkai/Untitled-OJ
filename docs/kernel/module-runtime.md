@@ -39,3 +39,55 @@ Module Runtime 是 OJOS Kernel 能力。它读取 Module Registry，计算当前
 - L2：service/worker hotplug 通过受控 runtime driver 和 operator plan 实现，不暴露 Docker socket。
 - L3：frontend contribution hotplug 必须依赖签名 package、CSP、sandbox iframe 或 web component，不执行不可信动态 JS。
 - L4：完整安装、部署、路由、权限、frontend、health、rollback 自动化。
+
+## Kernel Runtime Wiring v1
+
+Runtime Snapshot is the running-state source of truth for module contributions. `GET /api/admin/modules/runtime-snapshot` returns only ENABLED module contributions by default. `GET /api/admin/modules/runtime-snapshot?include_disabled=true` returns registry-visible disabled module entries for admin inspection.
+
+Snapshot v1 includes:
+
+```json
+{
+  "version": "1",
+  "generated_at": "...",
+  "modules": [],
+  "permissions": [],
+  "roles": [],
+  "menus": [],
+  "frontend_routes": [],
+  "gateway_routes": [],
+  "services": [],
+  "workers": [],
+  "storage_buckets": [],
+  "health_checks": [],
+  "components": [],
+  "operations": [],
+  "topology": {
+    "nodes": [],
+    "edges": [],
+    "module_nodes": [],
+    "dependency_edges": []
+  },
+  "warnings": []
+}
+```
+
+Runtime aggregation rules:
+
+- Active snapshot filters by enabled modules and does not expose disabled module contributions as active runtime surface.
+- `include_disabled=true` is admin-only and is for registry inspection, installer review, and debugging.
+- Every contribution carries `module_id` so operators can trace source ownership.
+- Manifest-only metadata such as roles, storage buckets, events, admin panels, scheduled jobs and topology contributions is derived from the stored manifest when no dedicated registry table exists yet.
+- Snapshot responses must not include secrets, tokens, DB connection strings, local absolute paths, Docker socket paths, or package internals.
+
+Gateway route hotplug v1 is partial L1: Gateway exposes `GET /api/admin/modules/runtime/routes` and `POST /api/admin/modules/runtime/reload` to rebuild and validate the runtime route table from registry data. The existing compatibility proxy routes remain in place for Judge Core. The runtime table validates duplicate and overlapping prefixes and normalizes auth modes to `public`, `user`, `admin`, `worker`, or `internal`. It is not yet the sole proxy source.
+
+Topology is generated from Runtime Snapshot. It contains module nodes, dependency edges, service/worker/component nodes, gateway route nodes, frontend menu/route nodes, health nodes, and manifest-declared topology nodes/edges. Admin UI only renders the snapshot; it should not invent topology for future modules.
+
+Current hotplug conclusion:
+
+- L0 Metadata hotplug: implemented for registry/snapshot/menu/permission/topology/health contribution display.
+- L1 Gateway route hotplug: route table and conflict validation implemented; full dynamic proxy cutover remains future work.
+- L2 Service hotplug: runtime driver contract remains future work.
+- L3 Frontend contribution hotplug: metadata display only. OJOS still does not execute untrusted JS or dynamic frontend bundles.
+- L4 Full module hotplug: future work.

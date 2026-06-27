@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ojos-gateway/internal/config"
+	"ojos-gateway/internal/kernel/moduleruntime"
 	"ojos-gateway/internal/svc"
 )
 
@@ -118,5 +119,18 @@ func TestCheckHTTPMarksJudgeHealth404AsError(t *testing.T) {
 	}
 	if !strings.Contains(got.Message, "404") {
 		t.Fatalf("expected 404 message, got %q", got.Message)
+	}
+}
+
+func TestRuntimeHealthMessageMarksMetadataRegistration(t *testing.T) {
+	got := runtimeHealthMessage(moduleruntime.RuntimeComponent{
+		ModuleID:    "ojos.demo-module",
+		ComponentID: "demo-health",
+		Type:        "health_check",
+		Status:      "DISABLED",
+		Config:      []byte(`{"type":"metadata","optional":true}`),
+	})
+	if !strings.Contains(got, "metadata optional registered") {
+		t.Fatalf("expected metadata registration message, got %q", got)
 	}
 }

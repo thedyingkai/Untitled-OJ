@@ -73,36 +73,42 @@ func (l *AdminModulesLogic) Topology(authHeader string) (*types.ModuleTopologyRe
 	}
 	components := runtimeAsComponentItems(snapshot.Components)
 	return &types.ModuleTopologyResp{
-		Sets:       setItems(sets),
-		Nodes:      moduleItems(snapshot.Topology.Nodes, false),
-		Edges:      edgeItems(snapshot.Topology.Edges),
-		Components: components,
+		Sets:            setItems(sets),
+		Nodes:           runtimeTopologyNodeItems(snapshot.Topology.Nodes),
+		Edges:           runtimeTopologyEdgeItems(snapshot.Topology.Edges),
+		Components:      components,
+		ModuleNodes:     moduleItems(snapshot.Topology.ModuleNodes, false),
+		DependencyEdges: edgeItems(snapshot.Topology.DependencyEdges),
 	}, nil
 }
 
-func (l *AdminModulesLogic) RuntimeSnapshot(authHeader string) (*types.ModuleRuntimeSnapshotResp, error) {
+func (l *AdminModulesLogic) RuntimeSnapshot(authHeader string, includeDisabled bool) (*types.ModuleRuntimeSnapshotResp, error) {
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
 	}
-	snapshot, err := moduleruntime.BuildSnapshot(l.ctx, l.repo)
+	snapshot, err := moduleruntime.BuildSnapshotWithOptions(l.ctx, l.repo, moduleruntime.BuildOptions{
+		IncludeDisabled: includeDisabled,
+	})
 	if err != nil {
 		return nil, err
 	}
-	return &types.ModuleRuntimeSnapshotResp{
-		Modules:        moduleItems(snapshot.Modules, false),
-		Permissions:    permissionItems(snapshot.Permissions),
-		Menus:          menuItems(snapshot.Menus),
-		FrontendRoutes: frontendRouteItems(snapshot.FrontendRoutes),
-		GatewayRoutes:  gatewayRouteItems(snapshot.GatewayRoutes),
-		Components:     runtimeComponentItems(snapshot.Components),
-		Services:       runtimeComponentItems(snapshot.Services),
-		Workers:        runtimeComponentItems(snapshot.Workers),
-		HealthChecks:   runtimeComponentItems(snapshot.HealthChecks),
-		Topology: types.ModuleRuntimeTopology{
-			Nodes: moduleItems(snapshot.Topology.Nodes, false),
-			Edges: edgeItems(snapshot.Topology.Edges),
-		},
-	}, nil
+	return runtimeSnapshotResp(snapshot), nil
+}
+
+func (l *AdminModulesLogic) RuntimeRoutes(authHeader string, includeDisabled bool, reloaded bool) (*types.ModuleRuntimeRoutesResp, error) {
+	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
+		return nil, err
+	}
+	snapshot, err := moduleruntime.BuildSnapshotWithOptions(l.ctx, l.repo, moduleruntime.BuildOptions{
+		IncludeDisabled: includeDisabled,
+	})
+	if err != nil {
+		return nil, err
+	}
+	table := moduleruntime.BuildRouteTable(snapshot)
+	resp := runtimeRoutesResp(table)
+	resp.Reloaded = reloaded
+	return resp, nil
 }
 
 func (l *AdminModulesLogic) Detail(authHeader string, moduleID string) (*types.ModuleDetailResp, error) {
@@ -206,6 +212,53 @@ func runtimeComponentItems(items []moduleruntime.RuntimeComponent) []types.Modul
 	return result
 }
 
+func runtimeManifestItems(items []moduleruntime.RuntimeManifestItem) []types.ModuleRuntimeManifestItem {
+	result := make([]types.ModuleRuntimeManifestItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, types.ModuleRuntimeManifestItem{
+			ModuleId: item.ModuleID,
+			Id:       item.ID,
+			Type:     item.Type,
+			Status:   item.Status,
+			Enabled:  item.Enabled,
+			Config:   rawJSON(item.Config),
+		})
+	}
+	return result
+}
+
+func runtimeTopologyNodeItems(items []moduleruntime.RuntimeTopologyNode) []types.ModuleRuntimeTopologyNode {
+	result := make([]types.ModuleRuntimeTopologyNode, 0, len(items))
+	for _, item := range items {
+		result = append(result, types.ModuleRuntimeTopologyNode{
+			Id:       item.ID,
+			ModuleId: item.ModuleID,
+			Label:    item.Label,
+			Type:     item.Type,
+			Status:   item.Status,
+			Source:   item.Source,
+			Config:   rawJSON(item.Config),
+		})
+	}
+	return result
+}
+
+func runtimeTopologyEdgeItems(items []moduleruntime.RuntimeTopologyEdge) []types.ModuleRuntimeTopologyEdge {
+	result := make([]types.ModuleRuntimeTopologyEdge, 0, len(items))
+	for _, item := range items {
+		result = append(result, types.ModuleRuntimeTopologyEdge{
+			Id:       item.ID,
+			ModuleId: item.ModuleID,
+			From:     item.From,
+			To:       item.To,
+			Type:     item.Type,
+			Required: item.Required,
+			Source:   item.Source,
+		})
+	}
+	return result
+}
+
 func runtimeAsComponentItems(items []moduleruntime.RuntimeComponent) []types.ModuleComponentItem {
 	result := make([]types.ModuleComponentItem, 0, len(items))
 	for _, item := range items {
@@ -218,6 +271,54 @@ func runtimeAsComponentItems(items []moduleruntime.RuntimeComponent) []types.Mod
 		})
 	}
 	return result
+}
+
+func runtimeSnapshotResp(snapshot moduleruntime.Snapshot) *types.ModuleRuntimeSnapshotResp {
+	return &types.ModuleRuntimeSnapshotResp{
+		Version:        snapshot.Version,
+		GeneratedAt:    snapshot.GeneratedAt,
+		Modules:        moduleItems(snapshot.Modules, false),
+		Permissions:    permissionItems(snapshot.Permissions),
+		Roles:          runtimeManifestItems(snapshot.Roles),
+		Menus:          menuItems(snapshot.Menus),
+		FrontendRoutes: frontendRouteItems(snapshot.FrontendRoutes),
+		GatewayRoutes:  gatewayRouteItems(snapshot.GatewayRoutes),
+		Components:     runtimeComponentItems(snapshot.Components),
+		Services:       runtimeComponentItems(snapshot.Services),
+		Workers:        runtimeComponentItems(snapshot.Workers),
+		StorageBuckets: runtimeManifestItems(snapshot.StorageBuckets),
+		HealthChecks:   runtimeComponentItems(snapshot.HealthChecks),
+		Operations:     runtimeManifestItems(snapshot.Operations),
+		Topology: types.ModuleRuntimeTopology{
+			Nodes:           runtimeTopologyNodeItems(snapshot.Topology.Nodes),
+			Edges:           runtimeTopologyEdgeItems(snapshot.Topology.Edges),
+			ModuleNodes:     moduleItems(snapshot.Topology.ModuleNodes, false),
+			DependencyEdges: edgeItems(snapshot.Topology.DependencyEdges),
+		},
+		Warnings: snapshot.Warnings,
+	}
+}
+
+func runtimeRoutesResp(table moduleruntime.RouteTable) *types.ModuleRuntimeRoutesResp {
+	routes := make([]types.ModuleRuntimeRouteItem, 0, len(table.Routes))
+	for _, route := range table.Routes {
+		routes = append(routes, types.ModuleRuntimeRouteItem{
+			ModuleId:      route.ModuleID,
+			Prefix:        route.Prefix,
+			TargetService: route.TargetService,
+			AuthMode:      route.AuthMode,
+			Enabled:       route.Enabled,
+			Conflicts:     route.Conflicts,
+			Warnings:      route.Warnings,
+		})
+	}
+	return &types.ModuleRuntimeRoutesResp{
+		Version:     table.Version,
+		GeneratedAt: table.GeneratedAt,
+		Routes:      routes,
+		Warnings:    table.Warnings,
+		CanProxy:    table.CanProxy,
+	}
 }
 
 func permissionItems(items []moduleregistry.Permission) []types.ModulePermissionItem {

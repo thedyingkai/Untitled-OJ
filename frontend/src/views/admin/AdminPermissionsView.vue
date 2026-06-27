@@ -14,12 +14,12 @@ import {
 
 import {
   addProblemRole,
-  listAdminPermissions,
   listAdminRoles,
   listAuditLogs,
   removeProblemRole,
 } from '../../api/authAdmin'
 import { toApiClientError, type ApiClientError } from '../../api/client'
+import { getModuleRuntimeSnapshot } from '../../api/modules'
 import LoadingView from '../../components/common/LoadingView.vue'
 import TimeText from '../../components/common/TimeText.vue'
 import OjosDataTable from '../../components/oj/OjosDataTable.vue'
@@ -31,11 +31,12 @@ import OjosRoleTag from '../../components/oj/OjosRoleTag.vue'
 import OjosSection from '../../components/oj/OjosSection.vue'
 import OjosStatCard from '../../components/oj/OjosStatCard.vue'
 import OjosToolbar from '../../components/oj/OjosToolbar.vue'
-import type { AuditLogItem, PermissionItem, RoleItem } from '../../types/permission'
+import type { ModulePermissionItem } from '../../types/module'
+import type { AuditLogItem, RoleItem } from '../../types/permission'
 
 const message = useMessage()
 const roles = ref<RoleItem[]>([])
-const permissions = ref<PermissionItem[]>([])
+const permissions = ref<ModulePermissionItem[]>([])
 const auditLogs = ref<AuditLogItem[]>([])
 const loading = ref(true)
 const saving = ref(false)
@@ -61,10 +62,9 @@ const roleColumns: DataTableColumns<RoleItem> = [
   { title: 'Description', key: 'description' },
 ]
 
-const permissionColumns: DataTableColumns<PermissionItem> = [
-  { title: 'Permission', key: 'code', render: (row) => h(OjosPermissionTag, { permission: row.code }) },
-  { title: 'Module', key: 'module_code' },
-  { title: 'Name', key: 'name' },
+const permissionColumns: DataTableColumns<ModulePermissionItem> = [
+  { title: 'Permission', key: 'permission_key', render: (row) => h(OjosPermissionTag, { permission: row.permission_key }) },
+  { title: 'Module', key: 'module_id' },
   { title: 'Description', key: 'description' },
 ]
 
@@ -82,13 +82,13 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [roleResp, permissionResp, auditResp] = await Promise.all([
+    const [roleResp, runtimeResp, auditResp] = await Promise.all([
       listAdminRoles(),
-      listAdminPermissions(),
+      getModuleRuntimeSnapshot(),
       listAuditLogs(),
     ])
     roles.value = roleResp
-    permissions.value = permissionResp
+    permissions.value = runtimeResp.permissions
     auditLogs.value = auditResp
   } catch (err) {
     error.value = toApiClientError(err)
@@ -175,7 +175,7 @@ onMounted(() => void load())
 
         <OjosSection
           title="Authorization Registry"
-          :description="`${systemRoleCount} system roles, ${problemRoleCount} problem roles, and ${permissions.length} permission points.`"
+          :description="`${systemRoleCount} system roles, ${problemRoleCount} problem roles, and ${permissions.length} active module permission points.`"
         >
           <NTabs type="line" animated>
             <NTabPane name="roles" tab="Roles">

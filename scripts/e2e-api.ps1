@@ -271,6 +271,23 @@ function Write-Report($name, [string[]]$patterns) {
   }
 }
 
+function Get-JsonArray($Value, [string]$Property) {
+  if ($null -eq $Value) { return @() }
+  $prop = $Value.PSObject.Properties[$Property]
+  if ($null -eq $prop) { return @() }
+  return @($prop.Value)
+}
+
+function Has-JsonItem($Items, [string]$Property, [string]$Expected) {
+  foreach ($item in @($Items)) {
+    $prop = $item.PSObject.Properties[$Property]
+    if ($null -ne $prop -and [string]$prop.Value -eq $Expected) {
+      return $true
+    }
+  }
+  return $false
+}
+
 function Ensure-AdminRole {
   param([int64]$UserId)
   $sql = "insert into user_roles(user_id, role_id) select $UserId, id from roles where name='super_admin' on conflict do nothing;"
@@ -440,25 +457,60 @@ try {
   Invoke-Api "modules.list.user" GET "/admin/modules" -Token $script:UserToken -Expected @(403) | Out-Null
   Invoke-Api "modules.list.none" GET "/admin/modules" -Expected @(401) | Out-Null
   Invoke-Api "modules.sets.admin" GET "/admin/modules/sets" -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.topology.admin" GET "/admin/modules/topology" -Token $script:AdminToken -Expected @(200) | Out-Null
+  $topologyResp = Invoke-Api "modules.topology.admin" GET "/admin/modules/topology" -Token $script:AdminToken -Expected @(200)
+  if ($topologyResp.Json) {
+    if ((Get-JsonArray $topologyResp.Json "nodes").Count -le 0) {
+      $failures.Add("module topology runtime nodes expected non-empty") | Out-Null
+    }
+    if ((Get-JsonArray $topologyResp.Json "module_nodes").Count -le 0) {
+      $failures.Add("module topology module_nodes expected non-empty") | Out-Null
+    }
+  }
   $runtimeSnapshot = Invoke-Api "modules.runtime-snapshot.admin" GET "/admin/modules/runtime-snapshot" -Token $script:AdminToken -Expected @(200)
+  $runtimeSnapshotAll = Invoke-Api "modules.runtime-snapshot.admin.include-disabled" GET "/admin/modules/runtime-snapshot?include_disabled=true" -Token $script:AdminToken -Expected @(200)
   Invoke-Api "modules.runtime-snapshot.user" GET "/admin/modules/runtime-snapshot" -Token $script:UserToken -Expected @(403) | Out-Null
   Invoke-Api "modules.runtime-snapshot.none" GET "/admin/modules/runtime-snapshot" -Expected @(401) | Out-Null
+  $runtimeRoutes = Invoke-Api "modules.runtime.routes.admin" GET "/admin/modules/runtime/routes" -Token $script:AdminToken -Expected @(200)
+  Invoke-Api "modules.runtime.routes.user" GET "/admin/modules/runtime/routes" -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "modules.runtime.routes.none" GET "/admin/modules/runtime/routes" -Expected @(401) | Out-Null
+  $runtimeReload = Invoke-Api "modules.runtime.reload.admin" POST "/admin/modules/runtime/reload" @{} -Token $script:AdminToken -Expected @(200)
+  Invoke-Api "modules.runtime.reload.user" POST "/admin/modules/runtime/reload" @{} -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "modules.runtime.reload.none" POST "/admin/modules/runtime/reload" @{} -Expected @(401) | Out-Null
   if ($runtimeSnapshot.Json) {
-    if (-not $runtimeSnapshot.Json.modules -or $runtimeSnapshot.Json.modules.Count -le 0) {
+    $snapshotModules = Get-JsonArray $runtimeSnapshot.Json "modules"
+    if ($snapshotModules.Count -le 0) {
       $failures.Add("runtime snapshot modules expected non-empty") | Out-Null
     }
     if (-not $runtimeSnapshot.Json.topology -or -not $runtimeSnapshot.Json.topology.nodes -or $runtimeSnapshot.Json.topology.nodes.Count -le 0) {
       $failures.Add("runtime snapshot topology nodes expected non-empty") | Out-Null
     }
-    $snapshotModuleIds = @($runtimeSnapshot.Json.modules | Select-Object -ExpandProperty module_id)
+    $snapshotModuleIds = @($snapshotModules | Select-Object -ExpandProperty module_id)
     foreach ($expectedModule in @("ojos.kernel.installer", "ojos.kernel.module-runtime", "ojos.platform.gateway", "ojos.platform.web-shell", "ojos.judge-core")) {
       if ($snapshotModuleIds -notcontains $expectedModule) {
         $failures.Add("runtime snapshot missing $expectedModule") | Out-Null
       }
     }
+    $permissionItems = Get-JsonArray $runtimeSnapshot.Json "permissions"
+    if (-not (Has-JsonItem $permissionItems "permission_key" "problem.view")) {
+      $failures.Add("runtime snapshot permission registry missing problem.view") | Out-Null
+    }
   } else {
     $failures.Add("runtime snapshot response is not JSON") | Out-Null
+  }
+  if ($runtimeRoutes.Json) {
+    $routeItems = Get-JsonArray $runtimeRoutes.Json "routes"
+    if (-not (Has-JsonItem $routeItems "prefix" "/api/problem")) {
+      $failures.Add("runtime route table missing /api/problem") | Out-Null
+    }
+  } else {
+    $failures.Add("runtime route table response is not JSON") | Out-Null
+  }
+  if ($runtimeReload.Json) {
+    if ($runtimeReload.Json.reloaded -ne $true) {
+      $failures.Add("runtime reload response expected reloaded=true") | Out-Null
+    }
+  } else {
+    $failures.Add("runtime reload response is not JSON") | Out-Null
   }
   Invoke-Api "modules.detail.judge-core" GET "/admin/modules/ojos.judge-core" -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.installer.discover.admin" GET "/admin/modules/discover" -Token $script:AdminToken -Expected @(200) | Out-Null
@@ -470,7 +522,53 @@ try {
   Invoke-Api "modules.installer.install.dry-run.demo" POST "/admin/modules/install" $demoManifest -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.installer.install.apply.demo" POST "/admin/modules/install" @{ manifest_path = "modules/demo-module/module.yaml"; dry_run = $false } -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.installer.enable.demo" POST "/admin/modules/ojos.demo-module/enable" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
+  $demoActiveSnapshot = Invoke-Api "modules.runtime-snapshot.demo-enabled" GET "/admin/modules/runtime-snapshot" -Token $script:AdminToken -Expected @(200)
+  if ($demoActiveSnapshot.Json) {
+    $demoActiveModules = Get-JsonArray $demoActiveSnapshot.Json "modules"
+    $demoActivePermissions = Get-JsonArray $demoActiveSnapshot.Json "permissions"
+    $demoActiveTopologyNodes = Get-JsonArray $demoActiveSnapshot.Json.topology "nodes"
+    if (-not (Has-JsonItem $demoActiveModules "module_id" "ojos.demo-module")) {
+      $failures.Add("enabled demo module missing from active runtime snapshot") | Out-Null
+    }
+    if (-not (Has-JsonItem $demoActivePermissions "permission_key" "demo.view")) {
+      $failures.Add("enabled demo permission missing from active runtime snapshot") | Out-Null
+    }
+    if (-not (Has-JsonItem $demoActiveTopologyNodes "module_id" "ojos.demo-module")) {
+      $failures.Add("enabled demo topology contribution missing from active runtime snapshot") | Out-Null
+    }
+  } else {
+    $failures.Add("demo enabled runtime snapshot response is not JSON") | Out-Null
+  }
+  $demoRoutesAll = Invoke-Api "modules.runtime.routes.demo-enabled.include-disabled" GET "/admin/modules/runtime/routes?include_disabled=true" -Token $script:AdminToken -Expected @(200)
+  if ($demoRoutesAll.Json) {
+    $demoRouteItems = Get-JsonArray $demoRoutesAll.Json "routes"
+    if (-not (Has-JsonItem $demoRouteItems "prefix" "/api/demo-module")) {
+      $failures.Add("demo metadata gateway route missing from runtime route table include_disabled") | Out-Null
+    }
+  }
   Invoke-Api "modules.installer.disable.demo" POST "/admin/modules/ojos.demo-module/disable" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
+  $demoDisabledActiveSnapshot = Invoke-Api "modules.runtime-snapshot.demo-disabled.active" GET "/admin/modules/runtime-snapshot" -Token $script:AdminToken -Expected @(200)
+  $demoDisabledAllSnapshot = Invoke-Api "modules.runtime-snapshot.demo-disabled.include-disabled" GET "/admin/modules/runtime-snapshot?include_disabled=true" -Token $script:AdminToken -Expected @(200)
+  if ($demoDisabledActiveSnapshot.Json) {
+    $demoDisabledActiveModules = Get-JsonArray $demoDisabledActiveSnapshot.Json "modules"
+    $demoDisabledActivePermissions = Get-JsonArray $demoDisabledActiveSnapshot.Json "permissions"
+    if (Has-JsonItem $demoDisabledActiveModules "module_id" "ojos.demo-module") {
+      $failures.Add("disabled demo module should not appear in active runtime snapshot") | Out-Null
+    }
+    if (Has-JsonItem $demoDisabledActivePermissions "permission_key" "demo.view") {
+      $failures.Add("disabled demo permission should not appear as active runtime contribution") | Out-Null
+    }
+  }
+  if ($demoDisabledAllSnapshot.Json) {
+    $demoDisabledAllModules = Get-JsonArray $demoDisabledAllSnapshot.Json "modules"
+    $demoDisabledAllPermissions = Get-JsonArray $demoDisabledAllSnapshot.Json "permissions"
+    if (-not (Has-JsonItem $demoDisabledAllModules "module_id" "ojos.demo-module")) {
+      $failures.Add("include_disabled runtime snapshot should include disabled demo module") | Out-Null
+    }
+    if (-not (Has-JsonItem $demoDisabledAllPermissions "permission_key" "demo.view")) {
+      $failures.Add("include_disabled runtime snapshot should include disabled demo permission") | Out-Null
+    }
+  }
   Invoke-Api "modules.installer.upgrade-plan.demo" POST "/admin/modules/ojos.demo-module/upgrade-plan" $demoManifest -Token $script:AdminToken -Expected @(200, 400) | Out-Null
   Invoke-Api "modules.installer.rollback-plan.demo" POST "/admin/modules/ojos.demo-module/rollback-plan" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.installer.uninstall-dry-run.demo" POST "/admin/modules/ojos.demo-module/uninstall-dry-run" @{} -Token $script:AdminToken -Expected @(200) | Out-Null

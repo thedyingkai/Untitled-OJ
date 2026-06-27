@@ -163,3 +163,11 @@ powershell -NoProfile -File scripts\e2e-api.ps1 `
 ## 安全参考
 
 更多攻击面、缓解措施和剩余边界见 [Module Installer Threat Model](../security/module-installer-threat-model.md)。
+
+## Runtime Wiring v1 Installer Notes
+
+Installer v0 writes metadata used by Kernel Module Runtime. Module enable/disable directly affects active Runtime Snapshot membership. Disabled module registry records are retained for audit, detail views and include-disabled inspection.
+
+The demo module intentionally declares disabled menu, frontend route and gateway route metadata. This validates the registry/runtime contribution path without pretending a real business API or frontend bundle exists.
+
+Gateway route declarations are validated as metadata in v1. The route table API can aggregate and detect conflicts, but full dynamic proxy cutover is future work.
