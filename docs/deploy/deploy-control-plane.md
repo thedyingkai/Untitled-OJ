@@ -123,4 +123,4 @@ docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --buil
 powershell -NoProfile -File scripts\e2e-api.ps1 -BaseUrl http://localhost:8080/api -AdminUsername admin1 -AdminPassword admin123 -UserUsername user1 -UserPassword user123 -WorkerToken $env:OJOS_WORKER_TOKEN
 ```
 
-验收会检查 Gateway 是唯一公开 API 入口，内部 `auth`、`problem-api`、`judge-api`、PostgreSQL、Redis 不通过 compose 发布到宿主机；Jaeger 作为开发观测端口可按 compose 文档公开。前端开发环境跨端口调用 Gateway 时，需要 Gateway CORS preflight 正常返回 204。
+验收会检查 Gateway 是唯一公开 API 入口，内部 `auth`、`problem-api`、`judge-api`、PostgreSQL、Redis 不通过 compose 发布到宿主机；Jaeger 仅绑定本机 loopback 作为开发/预生产观测入口，生产环境如需访问必须放在受控反向代理、鉴权和网络 ACL 之后。前端开发环境跨端口调用 Gateway 时，需要 Gateway CORS preflight 正常返回 204。
