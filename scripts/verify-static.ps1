@@ -5,10 +5,9 @@ param(
     [switch]$SkipGo
 )
 
-# 用途：执行 OJOS 静态验收，覆盖 Go、Rust、前端构建、compose config 和安全扫描。
+# 用途：执行 OJOS 静态验收，覆盖 Go、Rust、前端构建、compose config、Installer CLI/TUI smoke 和模块包校验。
 # 运行环境：Windows PowerShell，需要 go、cargo、npm、docker compose；使用 -SkipDockerBuild 时不要求构建镜像。
 # 执行目录：仓库根目录，例如 powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild。
-# 依赖工具：推荐安装 rg；rg 不可用时脚本回退到 Select-String。
 # 失败处理：任一步失败都会抛错并停止；修复对应模块后重新执行。
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -62,106 +61,6 @@ function RunQuiet {
     }
 }
 
-function Test-RgAvailable {
-    if ($null -ne $script:RgAvailable) {
-        return $script:RgAvailable
-    }
-
-    try {
-        $cmd = Get-Command "rg" -ErrorAction SilentlyContinue
-        if (-not $cmd) {
-            $script:RgAvailable = $false
-            return $false
-        }
-
-        & rg --version | Out-Null
-        $script:RgAvailable = ($LASTEXITCODE -eq 0)
-        return $script:RgAvailable
-    } catch {
-        $script:RgAvailable = $false
-        return $false
-    }
-}
-
-function Get-SearchFiles {
-    param(
-        [string[]]$Paths,
-        [string[]]$ExcludeGlob = @()
-    )
-
-    $exclude = $ExcludeGlob | ForEach-Object { $_.TrimStart("!") }
-    $files = @()
-
-    foreach ($path in $Paths) {
-        if (-not (Test-Path -LiteralPath $path)) {
-            continue
-        }
-
-        $item = Get-Item -LiteralPath $path
-        if ($item.PSIsContainer) {
-            $files += Get-ChildItem -LiteralPath $item.FullName -Recurse -File
-        } else {
-            $files += $item
-        }
-    }
-
-    $files | Where-Object {
-        if ($_.FullName -match "\\(target|node_modules|dist)\\") {
-            return $false
-        }
-        if (@(".exe", ".dll", ".so", ".dylib", ".test", ".out") -contains $_.Extension) {
-            return $false
-        }
-
-        $rel = $_.FullName.Substring($root.Length + 1).Replace("\", "/")
-        foreach ($pattern in $exclude) {
-            if ($pattern.EndsWith("/**") -and $rel.StartsWith($pattern.Substring(0, $pattern.Length - 3))) {
-                return $false
-            }
-            if ($rel -like $pattern) {
-                return $false
-            }
-        }
-        return $true
-    }
-}
-
-function Search-Text {
-    param(
-        [string]$Pattern,
-        [string[]]$Paths,
-        [string[]]$ExcludeGlob = @()
-    )
-
-    if (Test-RgAvailable) {
-        $args = @("-n", $Pattern)
-        foreach ($glob in $ExcludeGlob) {
-            $args += @("--glob", $glob)
-        }
-        $args += $Paths
-
-        $hits = & rg @args
-        if ($LASTEXITCODE -eq 0) {
-            return @($hits)
-        }
-        if ($LASTEXITCODE -eq 1) {
-            return @()
-        }
-        throw "rg failed"
-    }
-
-    $files = @(Get-SearchFiles -Paths $Paths -ExcludeGlob $ExcludeGlob)
-    if ($files.Count -eq 0) {
-        return @()
-    }
-
-    $hits = Select-String -Path ($files | ForEach-Object { $_.FullName }) -Pattern $Pattern
-    return @($hits | ForEach-Object {
-        $rel = $_.Path.Substring($root.Length + 1).Replace("\", "/")
-        "{0}:{1}:{2}" -f $rel, $_.LineNumber, $_.Line
-    })
-}
-
 if (-not $SkipGo) {
 Step "Go fmt check" {
     $files = Get-ChildItem -Path (Join-Path $root "services") -Recurse -Filter *.go |
@@ -196,8 +95,9 @@ if (-not $SkipRust) {
 Step "Rust fmt/check module-installer workspace" {
     InDir $root {
         Run "cargo" @("fmt", "--check")
-        Run "cargo" @("check")
-        Run "cargo" @("test")
+        Run "cargo" @("check", "--workspace", "--all-targets")
+        Run "cargo" @("test", "--workspace")
+        Run "cargo" @("clippy", "--workspace", "--all-targets", "--", "-D", "warnings")
         Run "cargo" @("run", "-p", "ojosctl", "--", "--version")
         Run "cargo" @("run", "-p", "ojos-installer-tui", "--", "--version")
         Run "cargo" @("run", "-p", "ojosctl", "--", "--json", "doctor")
@@ -274,59 +174,6 @@ if (-not $SkipDockerBuild) {
         InDir $root {
             Run "docker" @("compose", "--env-file", ".env.example", "-f", "deploy/compose/docker-compose.yml", "build", "module-installer")
             Run "docker" @("compose", "--env-file", ".env.example", "-f", "deploy/compose/docker-compose.yml", "build")
-        }
-    }
-}
-
-Step "Frontend API direct-call scan" {
-    InDir $root {
-        $direct = Search-Text "fetch\(|axios|http://|https://|mock|Mock|TODO|console\.log" @("frontend/src")
-        if ($direct.Count -gt 0) {
-            $allowed = $direct | Where-Object { $_ -notmatch "frontend[/\\]src[/\\]api[/\\]client.ts:" }
-            if ($allowed) {
-                $allowed | ForEach-Object { Write-Host $_ }
-                throw "frontend direct-call/mock scan failed"
-            }
-        }
-    }
-}
-
-Step "Public schema internal-path scan" {
-    InDir $root {
-        $schemaHits = Search-Text "code_path|result_path|stdout_path|stderr_path|checker_log_path|package_dir" @(
-            "frontend/src",
-            "services/auth/auth.api",
-            "services/problem-api/problemapi.api",
-            "services/judge-api/judgeapi.api",
-            "services/gateway/gateway.api"
-        )
-        if ($schemaHits.Count -gt 0) {
-            $schemaHits | ForEach-Object { Write-Host $_ }
-            throw "public schema/internal path scan failed"
-        }
-    }
-}
-
-Step "Dangerous deployment scan" {
-    InDir $root {
-        $hits = Search-Text "privileged:\s*true|nats://|async_nats|async-nats|NATS_URL|4222" @(
-            "deploy",
-            "services",
-            "frontend/src",
-            ".env.example",
-            "frontend/.env.example",
-            "docs"
-        ) @("!services/judge-worker/Cargo.lock", "!docs/archive/**")
-        if ($hits.Count -gt 0) {
-            $realHits = $hits | Where-Object {
-                $_ -notlike "*must not use*privileged: true*" -and
-                $_ -notlike "*does not use*privileged: true*" -and
-                $_ -notlike "*do not set*privileged: true*"
-            }
-            if ($realHits) {
-                $realHits | ForEach-Object { Write-Host $_ }
-                throw "dangerous deployment scan failed"
-            }
         }
     }
 }

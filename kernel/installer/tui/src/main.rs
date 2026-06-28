@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -282,7 +282,7 @@ impl App {
             "enable" => make_state_plan(&self.repo_root, &row.module_id, "enable"),
             "disable" => make_state_plan(&self.repo_root, &row.module_id, "disable"),
             "uninstall" => make_state_plan(&self.repo_root, &row.module_id, "uninstall"),
-            _ => unreachable!("unsupported module action"),
+            _ => Err(anyhow::anyhow!("不支持的模块动作: {action}")),
         };
         match result {
             Ok(lines) => self.set_plan(format!("模块 {} 计划: {}", action, row.module_id), lines),
@@ -808,7 +808,7 @@ fn make_state_plan(repo_root: &Path, module_id: &str, action: &str) -> Result<Ve
         "enable" => enable_plan(module_id, &snapshot, true)?,
         "disable" => disable_plan(module_id, &snapshot, true)?,
         "uninstall" => uninstall_plan(module_id, &snapshot, true)?,
-        _ => unreachable!("unsupported module action"),
+        _ => bail!("不支持的模块动作: {action}"),
     };
     Ok(plan_lines(&plan))
 }

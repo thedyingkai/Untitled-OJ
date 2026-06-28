@@ -14,11 +14,12 @@ pub struct InstalledModule {
     pub manifest: Option<Manifest>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ModuleState {
     Enabled,
     Disabled,
+    #[default]
     Installed,
     FailedInstall,
     FailedUpgrade,
@@ -28,12 +29,6 @@ pub enum ModuleState {
 impl ModuleState {
     pub fn is_enabled(&self) -> bool {
         matches!(self, ModuleState::Enabled)
-    }
-}
-
-impl Default for ModuleState {
-    fn default() -> Self {
-        Self::Installed
     }
 }
 

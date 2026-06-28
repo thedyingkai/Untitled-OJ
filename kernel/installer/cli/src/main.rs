@@ -1446,17 +1446,15 @@ fn acquire_runtime_lock(repo_root: &Path, plan: &RuntimePlan) -> Result<RuntimeL
         .collect::<String>();
     let path = lock_dir.join(format!("{}.lock", safe_service));
     if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(value) = serde_json::from_str::<Value>(&content) {
-            if let Some(expires_at) = value.get("expires_at").and_then(Value::as_str) {
-                if let Ok(parsed) = DateTime::parse_from_rfc3339(expires_at) {
-                    if parsed.with_timezone(&Utc) > Utc::now() {
-                        bail!(
-                            "runtime operation lock is held for service {}",
-                            plan.service_id
-                        );
-                    }
-                }
-            }
+        if let Ok(value) = serde_json::from_str::<Value>(&content)
+            && let Some(expires_at) = value.get("expires_at").and_then(Value::as_str)
+            && let Ok(parsed) = DateTime::parse_from_rfc3339(expires_at)
+            && parsed.with_timezone(&Utc) > Utc::now()
+        {
+            bail!(
+                "runtime operation lock is held for service {}",
+                plan.service_id
+            );
         }
         let _ = fs::remove_file(&path);
     }

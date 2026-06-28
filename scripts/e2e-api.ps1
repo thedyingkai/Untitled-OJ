@@ -306,10 +306,32 @@ function Ensure-AdminRole {
 
 function Restart-ComposeWorker([bool]$Start) {
   if ($Start) {
-    docker compose --env-file .env -f $ComposeFile up -d judge-worker | Out-Null
+    docker compose --env-file .env -f $ComposeFile start judge-worker | Out-Null
   } else {
     docker compose --env-file .env -f $ComposeFile stop judge-worker | Out-Null
   }
+}
+
+function Wait-GatewayReady {
+  param([int]$TimeoutSeconds = 30)
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, "$BaseUrl/health")
+      $resp = $script:HttpClient.SendAsync($request).GetAwaiter().GetResult()
+      $status = [int]$resp.StatusCode
+      $request.Dispose()
+      $resp.Dispose()
+      if ($status -lt 500) { return }
+    } catch {
+      Start-Sleep -Milliseconds 500
+      continue
+    }
+    Start-Sleep -Milliseconds 500
+  }
+
+  throw "gateway did not become ready within $TimeoutSeconds seconds"
 }
 
 try {
@@ -431,6 +453,7 @@ try {
     }
   } finally {
     Restart-ComposeWorker $true
+    Wait-GatewayReady
   }
 
   Invoke-Api "admin.judge.queue.admin" GET "/judge/admin/queue" -Token $script:AdminToken -Expected @(200) | Out-Null

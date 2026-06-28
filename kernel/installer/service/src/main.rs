@@ -966,7 +966,7 @@ ON CONFLICT(operation_id) DO UPDATE SET
             .bind(&actor.username)
             .bind(&request_json)
             .bind(&plan_json)
-            .bind(&json!({}))
+            .bind(json!({}))
             .bind(message)
             .execute(&state.db)
             .await;
