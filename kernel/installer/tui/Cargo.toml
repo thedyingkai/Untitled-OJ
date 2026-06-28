@@ -1,0 +1,15 @@
+[package]
+name = "ojos-installer-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+module-installer-core.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true

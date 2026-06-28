@@ -2,8 +2,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use clap::{Parser, Subcommand};
 use module_installer_core::{
-    Manifest, RegistrySnapshot, ServiceDecl, WorkerDecl, install_plan, package_module,
-    validate_manifest, validate_manifest_file, verify_package,
+    Manifest, Plan, RegistrySnapshot, ServiceDecl, WorkerDecl, disable_plan, enable_plan,
+    install_plan, package_module, uninstall_plan, validate_manifest, validate_manifest_file,
+    verify_package,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,15 +26,29 @@ const OUTPUT_LIMIT: usize = 4096;
 
 #[derive(Parser)]
 #[command(name = "ojosctl")]
-#[command(about = "OJOS control-plane utility")]
+#[command(about = "OJOS 原生控制台工具")]
 #[command(version)]
 struct Cli {
+    #[arg(long, global = true, help = "输出 JSON，适合脚本和 CI 使用")]
+    json: bool,
+    #[arg(long, global = true, help = "显示受控路径和执行细节")]
+    verbose: bool,
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    Doctor {
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+    Status {
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+        #[arg(long, default_value = DEFAULT_OPERATION_LOG)]
+        operation_log: PathBuf,
+    },
     Module {
         #[command(subcommand)]
         command: ModuleCommands,
@@ -99,10 +114,46 @@ enum ModuleCommands {
         #[arg(long, default_value = ".")]
         repo_root: PathBuf,
     },
+    Install {
+        manifest: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+        #[arg(long)]
+        confirm: bool,
+    },
+    Enable {
+        module_id: String,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+        #[arg(long)]
+        confirm: bool,
+    },
+    Disable {
+        module_id: String,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+        #[arg(long)]
+        confirm: bool,
+    },
+    UninstallDryRun {
+        module_id: String,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
 enum RuntimeCommands {
+    Snapshot {
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+    Routes {
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
     Services {
         #[arg(long, default_value = ".")]
         repo_root: PathBuf,
@@ -159,13 +210,28 @@ enum RuntimeCommands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let output = OutputMode {
+        json: cli.json,
+        verbose: cli.verbose,
+    };
     match cli.command {
-        Commands::Module { command } => run_module(command),
-        Commands::Runtime { command } => run_runtime(command),
+        Commands::Doctor { repo_root } => run_doctor(&repo_root, &output),
+        Commands::Status {
+            repo_root,
+            operation_log,
+        } => run_status(&repo_root, &operation_log, &output),
+        Commands::Module { command } => run_module(command, &output),
+        Commands::Runtime { command } => run_runtime(command, &output),
     }
 }
 
-fn run_module(command: ModuleCommands) -> Result<()> {
+#[derive(Copy, Clone)]
+struct OutputMode {
+    json: bool,
+    verbose: bool,
+}
+
+fn run_module(command: ModuleCommands, output: &OutputMode) -> Result<()> {
     match command {
         ModuleCommands::Init {
             module_id,
@@ -177,17 +243,20 @@ fn run_module(command: ModuleCommands) -> Result<()> {
             with_gateway_route,
             with_menu,
             with_topology,
-        } => scaffold_module(ModuleScaffoldOptions {
-            module_id,
-            name,
-            kind,
-            out,
-            force,
-            with_service,
-            with_gateway_route,
-            with_menu,
-            with_topology,
-        }),
+        } => scaffold_module(
+            ModuleScaffoldOptions {
+                module_id,
+                name,
+                kind,
+                out,
+                force,
+                with_service,
+                with_gateway_route,
+                with_menu,
+                with_topology,
+            },
+            output,
+        ),
         ModuleCommands::Discover { repo_root } => {
             let modules_dir = repo_root.join("modules");
             let mut items = Vec::new();
@@ -215,7 +284,12 @@ fn run_module(command: ModuleCommands) -> Result<()> {
                     }
                 }
             }
-            print_json(&serde_json::json!({ "modules": items }))
+            print_value(
+                &serde_json::json!({ "modules": items }),
+                output,
+                "模块发现完成",
+                vec![format!("发现 {} 个 module.yaml", items.len())],
+            )
         }
         ModuleCommands::Validate {
             manifest,
@@ -223,7 +297,15 @@ fn run_module(command: ModuleCommands) -> Result<()> {
         } => {
             let manifest = validate_manifest_file(&repo_root, &manifest)?;
             validate_manifest(&manifest)?;
-            print_json(&serde_json::json!({ "valid": true, "manifest": manifest }))
+            print_value(
+                &serde_json::json!({ "valid": true, "manifest": manifest }),
+                output,
+                "Manifest 校验通过",
+                vec![
+                    format!("模块: {}", manifest.id),
+                    format!("版本: {}", manifest.version),
+                ],
+            )
         }
         ModuleCommands::Plan {
             manifest,
@@ -235,36 +317,273 @@ fn run_module(command: ModuleCommands) -> Result<()> {
         } => {
             let manifest = validate_manifest_file(&repo_root, &manifest)?;
             let plan = install_plan(&manifest, &RegistrySnapshot::default(), true)?;
-            print_json(&plan)
+            print_plan(&plan, output)
         }
-        ModuleCommands::Package { module_dir, output } => {
-            let result = package_module(&module_dir, &output)?;
-            print_json(&result)
+        ModuleCommands::Package {
+            module_dir,
+            output: package_output,
+        } => {
+            let result = package_module(&module_dir, &package_output)?;
+            print_value(
+                &result,
+                output,
+                "模块包已生成",
+                vec![
+                    format!("模块: {}", result.module_id),
+                    format!("版本: {}", result.version),
+                    format!("文件数: {}", result.files_checked),
+                ],
+            )
         }
         ModuleCommands::Verify { package } | ModuleCommands::Inspect { package } => {
             let result = verify_package(&package)?;
-            print_json(&result)
+            print_value(
+                &result,
+                output,
+                "模块包验证通过",
+                vec![
+                    format!("模块: {}", result.module_id),
+                    format!("版本: {}", result.version),
+                    format!("文件数: {}", result.files_checked),
+                ],
+            )
         }
-        ModuleCommands::Doctor { repo_root } => {
-            let modules_dir = repo_root.join("modules");
-            print_json(&serde_json::json!({
-                "repo_root": ".",
-                "modules_dir_exists": modules_dir.is_dir(),
-                "manifest_schema_versions": [1],
-                "package": {
-                    "format": "ojosmod",
-                    "version": 1,
-                    "checksum_integrity": true,
-                    "signature_trust_policy": "v1"
-                },
-                "ok": modules_dir.is_dir()
-            }))?;
-            if !modules_dir.is_dir() {
-                bail!("modules directory is missing");
-            }
-            Ok(())
+        ModuleCommands::Doctor { repo_root } => run_doctor(&repo_root, output),
+        ModuleCommands::Install {
+            manifest,
+            dry_run,
+            repo_root,
+            confirm,
+        } => module_install_command(&manifest, &repo_root, dry_run, confirm, output),
+        ModuleCommands::Enable {
+            module_id,
+            repo_root,
+            confirm,
+        } => module_state_plan_command(&repo_root, &module_id, "enable", confirm, output),
+        ModuleCommands::Disable {
+            module_id,
+            repo_root,
+            confirm,
+        } => module_state_plan_command(&repo_root, &module_id, "disable", confirm, output),
+        ModuleCommands::UninstallDryRun {
+            module_id,
+            repo_root,
+        } => {
+            let snapshot = local_registry_snapshot(&repo_root)?;
+            let plan = uninstall_plan(&module_id, &snapshot, true)?;
+            print_plan(&plan, output)
         }
     }
+}
+
+fn run_doctor(repo_root: &Path, output: &OutputMode) -> Result<()> {
+    let modules_dir = repo_root.join("modules");
+    let compose_file = repo_root.join(DEFAULT_COMPOSE_FILE);
+    let sample_manifest = repo_root.join("modules/sample-hello/module.yaml");
+    let value = serde_json::json!({
+        "ok": modules_dir.is_dir() && compose_file.is_file() && sample_manifest.is_file(),
+        "repo_root": if output.verbose { slash_path(repo_root) } else { ".".to_string() },
+        "modules_dir_exists": modules_dir.is_dir(),
+        "compose_file_exists": compose_file.is_file(),
+        "sample_manifest_exists": sample_manifest.is_file(),
+        "manifest_schema_versions": [1],
+        "runtime_snapshot_version": 1,
+        "package": {
+            "format": "ojosmod",
+            "version": 1,
+            "checksum_integrity": true,
+            "signature_trust_policy": "not_complete"
+        },
+        "native_installers": {
+            "cli": "ojosctl",
+            "tui": "ojos-installer-tui"
+        }
+    });
+    print_value(
+        &value,
+        output,
+        "OJOS doctor 完成",
+        vec![
+            format!("modules 目录: {}", ok_text(modules_dir.is_dir())),
+            format!("compose 文件: {}", ok_text(compose_file.is_file())),
+            "官方安装入口: ojosctl / ojos-installer-tui".to_string(),
+        ],
+    )?;
+    if !modules_dir.is_dir() {
+        bail!("modules directory is missing");
+    }
+    if !compose_file.is_file() {
+        bail!("trusted compose file is missing");
+    }
+    Ok(())
+}
+
+fn run_status(repo_root: &Path, operation_log: &Path, output: &OutputMode) -> Result<()> {
+    let services = load_runtime_services(repo_root)?;
+    let operations = read_operation_log(operation_log).unwrap_or_default();
+    let modules = discover_local_modules(repo_root)?;
+    let blocked = services
+        .iter()
+        .filter(|service| !service.blocked_by.is_empty())
+        .count();
+    let value = serde_json::json!({
+        "ok": blocked == 0,
+        "modules": modules.len(),
+        "runtime_services": services.len(),
+        "blocked_runtime_services": blocked,
+        "operations": operations.len(),
+        "gateway_apply": "disabled",
+        "official_installer": ["ojosctl", "ojos-installer-tui"]
+    });
+    print_value(
+        &value,
+        output,
+        "OJOS 状态",
+        vec![
+            format!("模块数量: {}", modules.len()),
+            format!("Runtime 条目: {}", services.len()),
+            format!("受阻条目: {}", blocked),
+            "Gateway/Web apply: disabled".to_string(),
+        ],
+    )
+}
+
+fn discover_local_modules(repo_root: &Path) -> Result<Vec<Manifest>> {
+    let mut out = Vec::new();
+    let modules_dir = repo_root.join("modules");
+    if !modules_dir.exists() {
+        return Ok(out);
+    }
+    for entry in fs::read_dir(&modules_dir).context("read modules directory")? {
+        let entry = entry.context("read module entry")?;
+        let manifest_path = PathBuf::from("modules")
+            .join(entry.file_name())
+            .join("module.yaml");
+        if repo_root.join(&manifest_path).exists() {
+            out.push(validate_manifest_file(repo_root, &manifest_path)?);
+        }
+    }
+    out.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(out)
+}
+
+fn local_registry_snapshot(repo_root: &Path) -> Result<RegistrySnapshot> {
+    let modules = discover_local_modules(repo_root)?
+        .into_iter()
+        .map(|manifest| module_installer_core::InstalledModule {
+            module_id: manifest.id.clone(),
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            status: if manifest.status == "builtin" {
+                module_installer_core::ModuleState::Enabled
+            } else {
+                module_installer_core::ModuleState::Installed
+            },
+            kind: manifest.kind.clone(),
+            manifest: Some(manifest),
+        })
+        .collect();
+    Ok(RegistrySnapshot { modules })
+}
+
+fn module_install_command(
+    manifest_path: &Path,
+    repo_root: &Path,
+    dry_run: bool,
+    confirm: bool,
+    output: &OutputMode,
+) -> Result<()> {
+    let manifest = validate_manifest_file(repo_root, manifest_path)?;
+    let snapshot = local_registry_snapshot(repo_root)?;
+    let plan = install_plan(&manifest, &snapshot, true)?;
+    if dry_run || !confirm {
+        print_plan(&plan, output)?;
+        if !dry_run && !confirm {
+            bail!("module install apply requires --confirm; use --dry-run for plan-only");
+        }
+        return Ok(());
+    }
+    bail!(
+        "module install apply must use the module-installer service or TUI controlled path in v0.1.0"
+    )
+}
+
+fn module_state_plan_command(
+    repo_root: &Path,
+    module_id: &str,
+    action: &str,
+    confirm: bool,
+    output: &OutputMode,
+) -> Result<()> {
+    let snapshot = local_registry_snapshot(repo_root)?;
+    let plan = match action {
+        "enable" => enable_plan(module_id, &snapshot, !confirm)?,
+        "disable" => disable_plan(module_id, &snapshot, !confirm)?,
+        _ => bail!("unsupported module action {}", action),
+    };
+    print_plan(&plan, output)?;
+    if confirm {
+        bail!(
+            "{} apply must use module-installer controlled operation history in v0.1.0",
+            action
+        );
+    }
+    Ok(())
+}
+
+fn runtime_snapshot_value(repo_root: &Path) -> Result<Value> {
+    let manifests = discover_local_modules(repo_root)?;
+    let services = load_runtime_services(repo_root)?;
+    let routes = manifests
+        .iter()
+        .flat_map(|manifest| {
+            manifest
+                .provides
+                .gateway_routes
+                .iter()
+                .map(|route| {
+                    serde_json::json!({
+                        "module_id": manifest.id,
+                        "prefix": route.prefix,
+                        "service_id": route.target_service,
+                        "auth_mode": route.auth_mode,
+                        "enabled": route.enabled
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "version": 1,
+        "modules": manifests.iter().map(|manifest| serde_json::json!({
+            "module_id": manifest.id,
+            "name": manifest.name,
+            "version": manifest.version,
+            "kind": manifest.kind,
+            "status": manifest.status
+        })).collect::<Vec<_>>(),
+        "services": services.iter().filter(|item| item.kind != "worker").collect::<Vec<_>>(),
+        "workers": services.iter().filter(|item| item.kind == "worker").collect::<Vec<_>>(),
+        "routes": routes
+    }))
+}
+
+fn runtime_routes_value(repo_root: &Path) -> Result<Value> {
+    let manifests = discover_local_modules(repo_root)?;
+    let mut routes = Vec::new();
+    for manifest in manifests {
+        for route in manifest.provides.gateway_routes {
+            routes.push(serde_json::json!({
+                "module_id": manifest.id,
+                "prefix": route.prefix,
+                "service_id": route.target_service,
+                "auth_mode": route.auth_mode,
+                "enabled": route.enabled,
+                "status": if route.enabled { "declared" } else { "disabled" }
+            }));
+        }
+    }
+    Ok(serde_json::json!({ "routes": routes }))
 }
 
 struct ModuleScaffoldOptions {
@@ -279,7 +598,7 @@ struct ModuleScaffoldOptions {
     with_topology: bool,
 }
 
-fn scaffold_module(opts: ModuleScaffoldOptions) -> Result<()> {
+fn scaffold_module(opts: ModuleScaffoldOptions, output: &OutputMode) -> Result<()> {
     validate_scaffold_options(&opts)?;
     if opts.out.exists() && !opts.force {
         bail!("output directory already exists; pass --force to replace scaffold files");
@@ -349,14 +668,23 @@ fn scaffold_module(opts: ModuleScaffoldOptions) -> Result<()> {
     )
     .context("parse generated manifest")?;
     validate_manifest(&manifest)?;
-    print_json(&serde_json::json!({
-        "created": true,
-        "module_id": manifest.id,
-        "name": manifest.name,
-        "path": slash_path(&opts.out),
-        "manifest_path": slash_path(&manifest_path),
-        "valid": true
-    }))
+    print_value(
+        &serde_json::json!({
+            "created": true,
+            "module_id": manifest.id,
+            "name": manifest.name,
+            "path": slash_path(&opts.out),
+            "manifest_path": slash_path(&manifest_path),
+            "valid": true
+        }),
+        output,
+        "模块脚手架已生成",
+        vec![
+            format!("模块: {}", manifest.id),
+            format!("目录: {}", slash_path(&opts.out)),
+            "默认 metadata-only，不包含 hook/script/dynamic bundle".to_string(),
+        ],
+    )
 }
 
 fn validate_scaffold_options(opts: &ModuleScaffoldOptions) -> Result<()> {
@@ -570,18 +898,69 @@ provides:
     )
 }
 
-fn run_runtime(command: RuntimeCommands) -> Result<()> {
+fn run_runtime(command: RuntimeCommands, output: &OutputMode) -> Result<()> {
     match command {
+        RuntimeCommands::Snapshot { repo_root } => {
+            let snapshot = runtime_snapshot_value(&repo_root)?;
+            print_value(
+                &snapshot,
+                output,
+                "Runtime Snapshot",
+                vec![
+                    format!(
+                        "模块: {}",
+                        snapshot["modules"].as_array().map(|v| v.len()).unwrap_or(0)
+                    ),
+                    format!(
+                        "路由: {}",
+                        snapshot["routes"].as_array().map(|v| v.len()).unwrap_or(0)
+                    ),
+                    format!(
+                        "服务: {}",
+                        snapshot["services"]
+                            .as_array()
+                            .map(|v| v.len())
+                            .unwrap_or(0)
+                    ),
+                ],
+            )
+        }
+        RuntimeCommands::Routes { repo_root } => {
+            let routes = runtime_routes_value(&repo_root)?;
+            print_value(
+                &routes,
+                output,
+                "Runtime Routes",
+                vec![format!(
+                    "路由数量: {}",
+                    routes["routes"].as_array().map(|v| v.len()).unwrap_or(0)
+                )],
+            )
+        }
         RuntimeCommands::Services { repo_root } => {
             let services = load_runtime_services(&repo_root)?;
-            print_json(&serde_json::json!({ "services": services }))
+            print_value(
+                &serde_json::json!({ "services": services }),
+                output,
+                "Runtime Services",
+                vec![format!("条目数量: {}", services.len())],
+            )
         }
         RuntimeCommands::Service {
             service_id,
             repo_root,
         } => {
             let service = find_runtime_service(&repo_root, &service_id)?;
-            print_json(&service)
+            print_value(
+                &service,
+                output,
+                "Runtime Service",
+                vec![
+                    format!("服务: {}", service.service_id),
+                    format!("模块: {}", service.module_id),
+                    format!("状态: {}", service.state),
+                ],
+            )
         }
         RuntimeCommands::PlanStart {
             service_id,
@@ -590,6 +969,7 @@ fn run_runtime(command: RuntimeCommands) -> Result<()> {
         } => write_or_print_plan(
             &runtime_plan("start", &find_runtime_service(&repo_root, &service_id)?),
             out,
+            output,
         ),
         RuntimeCommands::PlanStop {
             service_id,
@@ -598,6 +978,7 @@ fn run_runtime(command: RuntimeCommands) -> Result<()> {
         } => write_or_print_plan(
             &runtime_plan("stop", &find_runtime_service(&repo_root, &service_id)?),
             out,
+            output,
         ),
         RuntimeCommands::PlanRestart {
             service_id,
@@ -606,6 +987,7 @@ fn run_runtime(command: RuntimeCommands) -> Result<()> {
         } => write_or_print_plan(
             &runtime_plan("restart", &find_runtime_service(&repo_root, &service_id)?),
             out,
+            output,
         ),
         RuntimeCommands::ApplyPlan {
             plan,
@@ -614,9 +996,23 @@ fn run_runtime(command: RuntimeCommands) -> Result<()> {
             repo_root,
             operation_log,
             verbose,
-        } => apply_runtime_plan(&plan, &repo_root, &operation_log, confirm, dry_run, verbose),
+        } => apply_runtime_plan(
+            &plan,
+            &repo_root,
+            &operation_log,
+            confirm,
+            dry_run,
+            verbose || output.verbose,
+            output,
+        ),
         RuntimeCommands::Operations { operation_log } => {
-            print_json(&serde_json::json!({ "operations": read_operation_log(&operation_log)? }))
+            let operations = read_operation_log(&operation_log)?;
+            print_value(
+                &serde_json::json!({ "operations": operations }),
+                output,
+                "Runtime Operations",
+                vec![format!("操作数量: {}", operations.len())],
+            )
         }
         RuntimeCommands::Operation {
             operation_id,
@@ -626,7 +1022,16 @@ fn run_runtime(command: RuntimeCommands) -> Result<()> {
                 .into_iter()
                 .find(|item| item.operation_id == operation_id)
                 .with_context(|| format!("runtime operation not found: {}", operation_id))?;
-            print_json(&operation)
+            print_value(
+                &operation,
+                output,
+                "Runtime Operation",
+                vec![
+                    format!("操作: {}", operation.operation_id),
+                    format!("状态: {}", operation.status),
+                    format!("服务: {}", operation.service_id),
+                ],
+            )
         }
     }
 }
@@ -878,22 +1283,35 @@ fn runtime_plan(action: &str, service: &RuntimeServiceView) -> RuntimePlan {
     }
 }
 
-fn write_or_print_plan(plan: &RuntimePlan, out: Option<PathBuf>) -> Result<()> {
+fn write_or_print_plan(
+    plan: &RuntimePlan,
+    out: Option<PathBuf>,
+    output: &OutputMode,
+) -> Result<()> {
     if let Some(path) = out {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create {}", slash_path(parent)))?;
         }
         fs::write(&path, serde_json::to_string_pretty(plan)?)
             .with_context(|| format!("write {}", slash_path(&path)))?;
-        print_json(&serde_json::json!({
-            "written": true,
-            "path": slash_path(&path),
-            "plan_id": plan.plan_id,
-            "operation_id": plan.operation_id,
-            "can_apply": plan.can_apply
-        }))
+        print_value(
+            &serde_json::json!({
+                "written": true,
+                "path": slash_path(&path),
+                "plan_id": plan.plan_id,
+                "operation_id": plan.operation_id,
+                "can_apply": plan.can_apply
+            }),
+            output,
+            "Runtime plan 已写入",
+            vec![
+                format!("plan_id: {}", plan.plan_id),
+                format!("operation_id: {}", plan.operation_id),
+                format!("can_apply: {}", plan.can_apply),
+            ],
+        )
     } else {
-        print_json(plan)
+        print_runtime_plan(plan, output)
     }
 }
 
@@ -904,6 +1322,7 @@ fn apply_runtime_plan(
     confirm: bool,
     dry_run: bool,
     verbose: bool,
+    output: &OutputMode,
 ) -> Result<()> {
     let plan: RuntimePlan = serde_json::from_slice(
         &fs::read(plan_path).with_context(|| format!("read {}", slash_path(plan_path)))?,
@@ -922,7 +1341,12 @@ fn apply_runtime_plan(
         operation.updated_at = Utc::now().to_rfc3339();
         append_operation_log(operation_log, &operation)?;
         write_db_operation(repo_root, &operation).ok();
-        print_json(&operation)?;
+        print_value(
+            &operation,
+            output,
+            "Runtime apply 被阻断",
+            vec![operation.error_message.clone()],
+        )?;
         bail!("{}", operation.error_message);
     }
 
@@ -938,7 +1362,12 @@ fn apply_runtime_plan(
         operation.updated_at = Utc::now().to_rfc3339();
         append_operation_log(operation_log, &operation)?;
         write_db_operation(repo_root, &operation).ok();
-        print_json(&operation)?;
+        print_value(
+            &operation,
+            output,
+            "Runtime apply dry-run 完成",
+            vec![format!("operation_id: {}", operation.operation_id)],
+        )?;
         return Ok(());
     }
 
@@ -952,7 +1381,12 @@ fn apply_runtime_plan(
             operation.updated_at = Utc::now().to_rfc3339();
             append_operation_log(operation_log, &operation)?;
             write_db_operation(repo_root, &operation).ok();
-            print_json(&operation)?;
+            print_value(
+                &operation,
+                output,
+                "Runtime apply 被锁阻断",
+                vec![operation.error_message.clone()],
+            )?;
             return Err(err);
         }
     };
@@ -966,7 +1400,12 @@ fn apply_runtime_plan(
             operation.updated_at = Utc::now().to_rfc3339();
             append_operation_log(operation_log, &operation)?;
             write_db_operation(repo_root, &operation).ok();
-            print_json(&operation)
+            print_value(
+                &operation,
+                output,
+                "Runtime apply 成功",
+                vec![format!("operation_id: {}", operation.operation_id)],
+            )
         }
         Err(err) => {
             operation.status = "FAILED".to_string();
@@ -975,7 +1414,12 @@ fn apply_runtime_plan(
             operation.updated_at = Utc::now().to_rfc3339();
             append_operation_log(operation_log, &operation)?;
             write_db_operation(repo_root, &operation).ok();
-            print_json(&operation)?;
+            print_value(
+                &operation,
+                output,
+                "Runtime apply 失败",
+                vec![operation.error_message.clone()],
+            )?;
             Err(err)
         }
     }
@@ -1393,6 +1837,66 @@ fn print_json(value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+fn print_value(
+    value: &impl Serialize,
+    output: &OutputMode,
+    title: &str,
+    lines: Vec<String>,
+) -> Result<()> {
+    if output.json {
+        return print_json(value);
+    }
+    println!("{}", title);
+    for line in lines {
+        println!("  - {}", redact_text(&line));
+    }
+    Ok(())
+}
+
+fn print_plan(plan: &Plan, output: &OutputMode) -> Result<()> {
+    print_value(
+        plan,
+        output,
+        "模块计划",
+        vec![
+            format!("类型: {:?}", plan.kind),
+            format!("模块: {}", plan.module_id),
+            format!("版本: {}", plan.version),
+            format!("可执行: {}", plan.can_apply),
+            format!(
+                "阻断: {}",
+                if plan.blocked_by.is_empty() {
+                    "无".to_string()
+                } else {
+                    plan.blocked_by.join("; ")
+                }
+            ),
+            format!("动作数: {}", plan.actions.len()),
+        ],
+    )
+}
+
+fn print_runtime_plan(plan: &RuntimePlan, output: &OutputMode) -> Result<()> {
+    print_value(
+        plan,
+        output,
+        "Runtime 计划",
+        vec![
+            format!("plan_id: {}", plan.plan_id),
+            format!("operation_id: {}", plan.operation_id),
+            format!("服务: {}", plan.service_id),
+            format!("动作: {}", plan.action),
+            format!("可执行: {}", plan.can_apply),
+            format!("确认要求: {}", plan.requires_confirmation),
+            format!("过期时间: {}", plan.expires_at),
+        ],
+    )
+}
+
+fn ok_text(ok: bool) -> &'static str {
+    if ok { "ok" } else { "missing" }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1510,17 +2014,23 @@ mod tests {
     fn module_init_scaffold_generates_valid_metadata_module() {
         let dir = tempdir().expect("tempdir");
         let out = dir.path().join("sample-hello");
-        scaffold_module(ModuleScaffoldOptions {
-            module_id: "ojos.sample-hello".to_string(),
-            name: "Sample Hello".to_string(),
-            kind: "feature".to_string(),
-            out: out.clone(),
-            force: false,
-            with_service: "metadata".to_string(),
-            with_gateway_route: "disabled".to_string(),
-            with_menu: "disabled".to_string(),
-            with_topology: true,
-        })
+        scaffold_module(
+            ModuleScaffoldOptions {
+                module_id: "ojos.sample-hello".to_string(),
+                name: "Sample Hello".to_string(),
+                kind: "feature".to_string(),
+                out: out.clone(),
+                force: false,
+                with_service: "metadata".to_string(),
+                with_gateway_route: "disabled".to_string(),
+                with_menu: "disabled".to_string(),
+                with_topology: true,
+            },
+            &OutputMode {
+                json: true,
+                verbose: false,
+            },
+        )
         .expect("scaffold");
 
         for rel in [
@@ -1550,17 +2060,23 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let out = dir.path().join("sample-hello");
         fs::create_dir_all(&out).expect("out");
-        let err = scaffold_module(ModuleScaffoldOptions {
-            module_id: "ojos.sample-hello".to_string(),
-            name: "Sample Hello".to_string(),
-            kind: "feature".to_string(),
-            out,
-            force: false,
-            with_service: "metadata".to_string(),
-            with_gateway_route: "disabled".to_string(),
-            with_menu: "disabled".to_string(),
-            with_topology: false,
-        })
+        let err = scaffold_module(
+            ModuleScaffoldOptions {
+                module_id: "ojos.sample-hello".to_string(),
+                name: "Sample Hello".to_string(),
+                kind: "feature".to_string(),
+                out,
+                force: false,
+                with_service: "metadata".to_string(),
+                with_gateway_route: "disabled".to_string(),
+                with_menu: "disabled".to_string(),
+                with_topology: false,
+            },
+            &OutputMode {
+                json: true,
+                verbose: false,
+            },
+        )
         .expect_err("existing directory should fail");
         assert!(err.to_string().contains("already exists"));
     }

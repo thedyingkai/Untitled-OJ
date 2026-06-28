@@ -3,6 +3,7 @@ members = [
     "kernel/installer/core",
     "kernel/installer/service",
     "kernel/installer/cli",
+    "kernel/installer/tui",
 ]
 exclude = [
     "services/judge-worker",
@@ -37,3 +38,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
 zip = "5"
+ratatui = "0.29"
+crossterm = "0.29"

@@ -13,6 +13,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY kernel/installer/core ./kernel/installer/core
 COPY kernel/installer/service ./kernel/installer/service
 COPY kernel/installer/cli ./kernel/installer/cli
+COPY kernel/installer/tui ./kernel/installer/tui
 
 RUN cargo build --release -p module-installer
 
