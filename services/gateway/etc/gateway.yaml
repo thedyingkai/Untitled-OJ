@@ -60,7 +60,7 @@ Runtime:
   ComposeServices:
     - auth
     - gateway
-    - module-installer
+    - root-runtime-manager
     - problem-api
     - judge-api
     - judge-worker
@@ -75,5 +75,5 @@ InternalAuth:
   NonceTTLSeconds: 120
 
 Installer:
-  Endpoint: http://module-installer:8090
+  Endpoint: http://root-runtime-manager:8090
   InternalToken: ""

@@ -1,0 +1,34 @@
+schema_version: 1
+id: web-shell
+name: Web Shell
+version: 0.1.0
+kind: root-web-ui
+endpoint:
+  protocol: http
+  default_port: 8088
+  health_path: /health
+runtime:
+  mode: local-process
+  root_allowed: true
+  non_root_allowed: false
+config_schema:
+  ui_registry_ref:
+    type: string
+    default: root-runtime-ui-registry
+requires:
+  links:
+    - id: gateway
+      protocol: http
+provides:
+  capabilities:
+    - web-shell.ui
+    - web-shell.runtime-readonly
+ui:
+  enabled: true
+  menu_scope: root-generated
+permissions:
+  - web-shell.read
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false

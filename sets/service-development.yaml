@@ -1,0 +1,27 @@
+schema_version: 1
+id: service-development
+name: Service 开发
+description: 面向 Service SDK、契约校验和本地集成开发的组合。
+services:
+  - gateway
+  - web-shell
+  - problem-api
+  - judge-api
+  - postgres
+  - storage
+default_links:
+  - from: gateway
+    to: problem-api
+    protocol: http
+  - from: gateway
+    to: judge-api
+    protocol: http
+  - from: problem-api
+    to: postgres
+    protocol: postgres
+  - from: judge-api
+    to: storage
+    protocol: http
+recommended_for:
+  - Service 契约开发
+  - 本地联调

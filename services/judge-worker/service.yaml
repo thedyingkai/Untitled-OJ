@@ -1,0 +1,44 @@
+schema_version: 1
+id: judge-worker
+name: Judge Worker
+version: 0.1.0
+kind: backend-worker
+endpoint:
+  protocol: http
+  default_port: 9101
+  health_path: /health
+runtime:
+  mode: container
+  root_allowed: true
+  non_root_allowed: true
+config_schema:
+  max_parallel_jobs:
+    type: integer
+    default: 16
+  sandbox_slots:
+    type: integer
+    default: 16
+  supported_languages:
+    type: array
+    default:
+      - cpp17
+      - c11
+      - python3
+      - java17
+requires:
+  links:
+    - id: judge-api
+      protocol: http
+    - id: storage
+      protocol: http
+provides:
+  capabilities:
+    - judge.worker
+ui:
+  enabled: false
+permissions:
+  - judge.worker
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false

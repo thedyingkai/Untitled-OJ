@@ -1,0 +1,28 @@
+schema_version: 1
+id: contest-basic
+name: 基础竞赛部署
+description: 仅描述竞赛环境推荐基础服务，不表示 Contest 业务已实现。
+services:
+  - gateway
+  - web-shell
+  - problem-api
+  - judge-api
+  - judge-worker
+  - postgres
+  - storage
+default_links:
+  - from: gateway
+    to: problem-api
+    protocol: http
+  - from: gateway
+    to: judge-api
+    protocol: http
+  - from: judge-api
+    to: postgres
+    protocol: postgres
+  - from: judge-worker
+    to: judge-api
+    protocol: http
+recommended_for:
+  - 未来竞赛能力验证
+  - 基础服务压测

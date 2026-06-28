@@ -241,8 +241,8 @@ func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
 	if len(resp.Components) == 0 {
 		t.Fatalf("topology components should be non-empty")
 	}
-	if !hasSet(resp.Sets, "kernel") || !hasSet(resp.Sets, "core-capability") {
-		t.Fatalf("topology should include kernel and core-capability sets: %#v", resp.Sets)
+	if !hasSet(resp.Sets, "runtime") || !hasSet(resp.Sets, "core-capability") {
+		t.Fatalf("topology should include runtime and core-capability sets: %#v", resp.Sets)
 	}
 	if !hasNode(resp.ModuleNodes, "ojos.judge-core") {
 		t.Fatalf("topology should include ojos.judge-core node")

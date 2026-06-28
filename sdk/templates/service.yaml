@@ -1,0 +1,27 @@
+schema_version: 1
+id: example-service
+name: Example Service
+version: 0.1.0
+kind: backend-http
+endpoint:
+  protocol: http
+  default_port: 9001
+  health_path: /health
+runtime:
+  mode: local-process
+  root_allowed: true
+  non_root_allowed: true
+config_schema: {}
+requires:
+  links: []
+provides:
+  capabilities:
+    - example.service
+ui:
+  enabled: false
+permissions:
+  - example.service
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false

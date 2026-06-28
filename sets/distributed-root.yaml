@@ -1,0 +1,34 @@
+schema_version: 1
+id: distributed-root
+name: 分布式评测 Root
+description: Root 设备部署控制面和核心后端，评测 Worker 可由 Non-root 设备加入。
+services:
+  - gateway
+  - web-shell
+  - problem-api
+  - judge-api
+  - postgres
+  - storage
+default_links:
+  - from: gateway
+    to: web-shell
+    protocol: http
+  - from: gateway
+    to: problem-api
+    protocol: http
+  - from: gateway
+    to: judge-api
+    protocol: http
+  - from: judge-api
+    to: postgres
+    protocol: postgres
+  - from: judge-api
+    to: storage
+    protocol: http
+  - from: problem-api
+    to: postgres
+    protocol: postgres
+recommended_for:
+  - 多评测机
+  - 校内训练
+  - 中大型评测

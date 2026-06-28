@@ -1358,47 +1358,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "module-installer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
- "chrono",
- "hex",
- "hmac",
- "module-installer-core",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "tempfile",
- "thiserror",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "module-installer-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "regex",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tempfile",
- "thiserror",
- "walkdir",
- "zip",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1467,11 +1426,11 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm 0.29.0",
- "module-installer-core",
  "ratatui",
  "serde",
  "serde_json",
  "serde_yaml",
+ "service-installer-core",
 ]
 
 [[package]]
@@ -1481,11 +1440,11 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "module-installer-core",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
+ "service-installer-core",
  "tempfile",
  "uuid",
 ]
@@ -1774,6 +1733,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "root-runtime-manager"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "chrono",
+ "hex",
+ "hmac",
+ "serde",
+ "serde_json",
+ "service-installer-core",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1976,6 +1959,23 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "service-installer-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "regex",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "walkdir",
+ "zip",
 ]
 
 [[package]]

@@ -1,0 +1,30 @@
+schema_version: 1
+id: postgres
+name: PostgreSQL
+version: 17.0.0
+kind: database
+endpoint:
+  protocol: postgres
+  default_port: 5432
+  health_path: ""
+runtime:
+  mode: external
+  root_allowed: true
+  non_root_allowed: false
+config_schema:
+  database:
+    type: string
+    default: ojos
+requires:
+  links: []
+provides:
+  capabilities:
+    - database.postgres
+ui:
+  enabled: false
+permissions:
+  - postgres.connect
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false

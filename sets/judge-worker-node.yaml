@@ -1,0 +1,14 @@
+schema_version: 1
+id: judge-worker-node
+name: 评测节点
+description: Non-root 设备只部署 judge-worker，由 Root 下发 endpoint 和 link 配置。
+services:
+  - judge-worker
+default_links: []
+non_root_only: true
+required_root_links:
+  - judge-api
+  - storage
+recommended_for:
+  - 独立评测机
+  - 横向扩容

@@ -1,0 +1,38 @@
+schema_version: 1
+id: gateway
+name: Gateway
+version: 0.1.0
+kind: edge-http
+endpoint:
+  protocol: http
+  default_port: 8080
+  health_path: /health
+runtime:
+  mode: container
+  root_allowed: true
+  non_root_allowed: false
+config_schema:
+  rate_limit_per_minute:
+    type: integer
+    default: 600
+requires:
+  links:
+    - id: auth
+      protocol: http
+    - id: problem-api
+      protocol: http
+    - id: judge-api
+      protocol: http
+provides:
+  capabilities:
+    - gateway.http
+    - gateway.auth
+    - gateway.audit
+ui:
+  enabled: false
+permissions:
+  - gateway.read
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false

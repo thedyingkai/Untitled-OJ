@@ -148,7 +148,7 @@ func (l *AdminHealthLogic) checkInstaller() types.HealthComponent {
 			err = errors.New(resp.Status)
 		}
 	}
-	return component("module-installer", start, err)
+	return component("root-runtime-manager", start, err)
 }
 
 func (l *AdminHealthLogic) runtimeHealthChecks() []types.HealthComponent {
@@ -157,7 +157,7 @@ func (l *AdminHealthLogic) runtimeHealthChecks() []types.HealthComponent {
 	}
 	snapshot, err := moduleruntime.BuildSnapshot(l.ctx, moduleregistry.NewRepository(l.svcCtx.DB))
 	if err != nil {
-		c := component("module runtime health registry", time.Now(), nil)
+		c := component("service runtime health registry", time.Now(), nil)
 		c.Status = "warning"
 		c.Message = "runtime health registry unavailable"
 		return []types.HealthComponent{c}

@@ -3,12 +3,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use module_installer_core::{
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use service_installer_core::{
     InstalledModule, Manifest, ModuleState, Plan, RegistrySnapshot, enable_plan, install_plan,
     rollback_plan, uninstall_plan, upgrade_plan, validate_manifest, validate_manifest_file,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -124,8 +124,8 @@ impl IntoResponse for AppError {
     }
 }
 
-impl From<module_installer_core::InstallerError> for AppError {
-    fn from(value: module_installer_core::InstallerError) -> Self {
+impl From<service_installer_core::InstallerError> for AppError {
+    fn from(value: service_installer_core::InstallerError) -> Self {
         let code = installer_error_code(&value);
         AppError {
             status: StatusCode::BAD_REQUEST,
@@ -222,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
     let app = router(state).layer(TraceLayer::new_for_http());
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("module-installer listening on {}", addr);
+    tracing::info!("root-runtime-manager listening on {}", addr);
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -245,7 +245,7 @@ fn healthcheck_command() -> anyhow::Result<()> {
     if response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200") {
         Ok(())
     } else {
-        anyhow::bail!("module-installer healthcheck failed");
+        anyhow::bail!("root-runtime-manager healthcheck failed");
     }
 }
 
@@ -408,7 +408,7 @@ async fn disable(
     require_internal(&state, &headers)?;
     let actor = actor_from_headers(&headers);
     let snapshot = load_snapshot(&state.db).await?;
-    let plan = module_installer_core::disable_plan(&id, &snapshot, false)?;
+    let plan = service_installer_core::disable_plan(&id, &snapshot, false)?;
     if !plan.can_apply {
         return Err(AppError::forbidden("disable plan is blocked"));
     }
@@ -900,10 +900,10 @@ where
     F: for<'a> FnOnce(&'a mut sqlx::Transaction<'_, sqlx::Postgres>) -> BoxFutureResult<'a>,
 {
     let operation_id = Uuid::new_v4().to_string();
-    let owner = format!("module-installer:{}", operation_id);
+    let owner = format!("root-runtime-manager:{}", operation_id);
     acquire_lock(
         &state.db,
-        "module-installer-global",
+        "root-runtime-manager-global",
         &owner,
         state.lock_ttl_seconds,
     )
@@ -943,7 +943,7 @@ WHERE operation_id = $1
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
-            release_lock(&state.db, "module-installer-global", &owner).await;
+            release_lock(&state.db, "root-runtime-manager-global", &owner).await;
             Ok(json!({ "operation_id": operation_id, "result": result }))
         }
         Err(err) => {
@@ -970,7 +970,7 @@ ON CONFLICT(operation_id) DO UPDATE SET
             .bind(message)
             .execute(&state.db)
             .await;
-            release_lock(&state.db, "module-installer-global", &owner).await;
+            release_lock(&state.db, "root-runtime-manager-global", &owner).await;
             tracing::error!(error = %err, "module operation failed");
             Err(AppError::internal("operation failed"))
         }
@@ -1062,17 +1062,17 @@ fn ok<T: Serialize>(data: T) -> Json<Envelope<T>> {
     })
 }
 
-fn installer_error_code(err: &module_installer_core::InstallerError) -> &'static str {
+fn installer_error_code(err: &service_installer_core::InstallerError) -> &'static str {
     match err {
-        module_installer_core::InstallerError::UnsafePath(_) => "MANIFEST_PATH_ESCAPE",
-        module_installer_core::InstallerError::InvalidManifest(_) => "MANIFEST_INVALID",
-        module_installer_core::InstallerError::Dependency(_) => "DEPENDENCY_CONFLICT",
-        module_installer_core::InstallerError::Blocked(_) => "OPERATION_BLOCKED",
-        module_installer_core::InstallerError::Package(_) => "PACKAGE_INVALID",
-        module_installer_core::InstallerError::Io(_) => "IO_ERROR",
-        module_installer_core::InstallerError::Yaml(_) => "MANIFEST_PARSE_ERROR",
-        module_installer_core::InstallerError::Json(_) => "JSON_ERROR",
-        module_installer_core::InstallerError::Zip(_) => "PACKAGE_INVALID",
+        service_installer_core::InstallerError::UnsafePath(_) => "MANIFEST_PATH_ESCAPE",
+        service_installer_core::InstallerError::InvalidManifest(_) => "MANIFEST_INVALID",
+        service_installer_core::InstallerError::Dependency(_) => "DEPENDENCY_CONFLICT",
+        service_installer_core::InstallerError::Blocked(_) => "OPERATION_BLOCKED",
+        service_installer_core::InstallerError::Package(_) => "PACKAGE_INVALID",
+        service_installer_core::InstallerError::Io(_) => "IO_ERROR",
+        service_installer_core::InstallerError::Yaml(_) => "MANIFEST_PARSE_ERROR",
+        service_installer_core::InstallerError::Json(_) => "JSON_ERROR",
+        service_installer_core::InstallerError::Zip(_) => "PACKAGE_INVALID",
     }
 }
 

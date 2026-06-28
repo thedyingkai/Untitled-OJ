@@ -1,0 +1,28 @@
+schema_version: 1
+id: course-judge
+name: 课程评测
+description: 面向课程训练的基础部署组合。
+services:
+  - gateway
+  - web-shell
+  - problem-api
+  - judge-api
+  - judge-worker
+  - postgres
+  - storage
+default_links:
+  - from: gateway
+    to: problem-api
+    protocol: http
+  - from: gateway
+    to: judge-api
+    protocol: http
+  - from: judge-api
+    to: postgres
+    protocol: postgres
+  - from: judge-worker
+    to: judge-api
+    protocol: http
+recommended_for:
+  - 课程作业
+  - 班级训练

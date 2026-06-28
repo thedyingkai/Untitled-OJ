@@ -1,0 +1,41 @@
+schema_version: 1
+id: single-node-oj
+name: 单机 OJ
+description: Root 设备同时运行入口、Web Shell、题库、评测 API、Worker、数据库和存储。
+services:
+  - gateway
+  - web-shell
+  - problem-api
+  - judge-api
+  - judge-worker
+  - postgres
+  - storage
+default_links:
+  - from: gateway
+    to: web-shell
+    protocol: http
+  - from: gateway
+    to: problem-api
+    protocol: http
+  - from: gateway
+    to: judge-api
+    protocol: http
+  - from: problem-api
+    to: postgres
+    protocol: postgres
+  - from: judge-api
+    to: postgres
+    protocol: postgres
+  - from: judge-api
+    to: storage
+    protocol: http
+  - from: judge-worker
+    to: judge-api
+    protocol: http
+  - from: judge-worker
+    to: storage
+    protocol: http
+recommended_for:
+  - 本地开发
+  - 小型训练
+  - 单机演示

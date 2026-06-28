@@ -1,0 +1,40 @@
+schema_version: 1
+id: problem-api
+name: Problem API
+version: 0.1.0
+kind: backend-http
+endpoint:
+  protocol: http
+  default_port: 8083
+  health_path: /health
+runtime:
+  mode: container
+  root_allowed: true
+  non_root_allowed: false
+config_schema:
+  package_root:
+    type: string
+    default: storage://problems
+requires:
+  links:
+    - id: postgres
+      protocol: postgres
+    - id: storage
+      protocol: http
+provides:
+  capabilities:
+    - problem.catalog
+    - problem.package
+    - problem.permission
+ui:
+  enabled: false
+permissions:
+  - problem.view
+  - problem.create
+  - problem.edit
+  - problem.delete
+  - problem.manage.data
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false

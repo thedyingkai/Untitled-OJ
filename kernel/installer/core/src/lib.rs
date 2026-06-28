@@ -1,6 +1,7 @@
 mod manifest;
 mod package;
 mod plan;
+mod service;
 
 pub use manifest::{
     AdminPanelDecl, Compatibility, ComponentDecl, EventsDecl, FrontendRouteDecl, GatewayRouteDecl,
@@ -8,11 +9,20 @@ pub use manifest::{
     RoleDecl, ScheduledJobDecl, ServiceDecl, StorageBucketDecl, StorageDecl, TopologyDecl,
     TopologyEdgeDecl, TopologyNodeDecl, WorkerDecl, validate_manifest, validate_manifest_file,
 };
-pub use package::{PackageMetadata, PackageVerification, package_module, verify_package};
+pub use package::{
+    PackageMetadata, PackageVerification, package_module, package_service, verify_package,
+};
 pub use plan::{
     Action, InstalledModule, ModuleState, Plan, PlanKind, PlanRequest, PlanWarning,
     RegistrySnapshot, diff_manifests, disable_plan, enable_plan, install_plan, rollback_plan,
     uninstall_plan, upgrade_plan,
+};
+pub use service::{
+    DeviceKind, EndpointDecl, LinkDecl, LinkEndpointRef, RuntimeMode, ServiceManifest, ServicePlan,
+    ServicePlanAction, ServicePlanKind, ServiceRuntimeDecl, ServiceSecurityDecl, ServiceSet,
+    ServiceSetLink, ServiceState, ServiceUiDecl, SetExpandResult, TopologySnapshot, expand_set,
+    service_install_plan, validate_endpoint_id, validate_service_manifest,
+    validate_service_manifest_file, validate_service_set, validate_service_set_file,
 };
 
 use thiserror::Error;

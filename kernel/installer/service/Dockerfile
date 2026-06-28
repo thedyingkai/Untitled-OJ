@@ -15,14 +15,14 @@ COPY kernel/installer/service ./kernel/installer/service
 COPY kernel/installer/cli ./kernel/installer/cli
 COPY kernel/installer/tui ./kernel/installer/tui
 
-RUN cargo build --release -p module-installer
+RUN cargo build --release -p root-runtime-manager
 
 FROM debian:bookworm-slim
 
 WORKDIR /app
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /app/target/release/module-installer /usr/local/bin/module-installer
+COPY --from=builder /app/target/release/root-runtime-manager /usr/local/bin/root-runtime-manager
 
 USER 65532:65532
 EXPOSE 8090
-CMD ["module-installer"]
+CMD ["root-runtime-manager"]

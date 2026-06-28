@@ -1,0 +1,41 @@
+schema_version: 1
+id: judge-api
+name: Judge API
+version: 0.1.0
+kind: backend-http
+endpoint:
+  protocol: http
+  default_port: 8082
+  health_path: /health
+runtime:
+  mode: container
+  root_allowed: true
+  non_root_allowed: false
+config_schema:
+  queue_visibility_timeout_seconds:
+    type: integer
+    default: 60
+requires:
+  links:
+    - id: postgres
+      protocol: postgres
+    - id: storage
+      protocol: http
+    - id: problem-api
+      protocol: http
+provides:
+  capabilities:
+    - judge.submit
+    - judge.queue
+    - judge.dispatch
+    - judge.result
+ui:
+  enabled: false
+permissions:
+  - judge.submit
+  - submission.view.own
+  - submission.view.all
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false

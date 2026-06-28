@@ -1,5 +1,5 @@
 [package]
-name = "module-installer"
+name = "root-runtime-manager"
 version.workspace = true
 edition.workspace = true
 
@@ -9,7 +9,7 @@ base64.workspace = true
 chrono.workspace = true
 hmac.workspace = true
 hex.workspace = true
-module-installer-core.workspace = true
+service-installer-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

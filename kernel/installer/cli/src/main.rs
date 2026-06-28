@@ -1,13 +1,14 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use clap::{Parser, Subcommand};
-use module_installer_core::{
-    Manifest, Plan, RegistrySnapshot, ServiceDecl, WorkerDecl, disable_plan, enable_plan,
-    install_plan, package_module, uninstall_plan, validate_manifest, validate_manifest_file,
-    verify_package,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use service_installer_core::{
+    Manifest, Plan, RegistrySnapshot, ServiceDecl, WorkerDecl, disable_plan, enable_plan,
+    expand_set, install_plan, package_module, package_service, service_install_plan,
+    uninstall_plan, validate_endpoint_id, validate_manifest, validate_manifest_file,
+    validate_service_manifest_file, validate_service_set_file, verify_package,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -26,12 +27,16 @@ const OUTPUT_LIMIT: usize = 4096;
 
 #[derive(Parser)]
 #[command(name = "ojosctl")]
-#[command(about = "OJOS 原生控制台工具")]
+#[command(about = "OJOS Root Runtime Manager CLI")]
 #[command(version)]
 struct Cli {
-    #[arg(long, global = true, help = "输出 JSON，适合脚本和 CI 使用")]
+    #[arg(long, global = true, help = "Output JSON for scripts and CI")]
     json: bool,
-    #[arg(long, global = true, help = "显示受控路径和执行细节")]
+    #[arg(
+        long,
+        global = true,
+        help = "Show controlled paths and execution details"
+    )]
     verbose: bool,
     #[command(subcommand)]
     command: Commands,
@@ -53,9 +58,110 @@ enum Commands {
         #[command(subcommand)]
         command: ModuleCommands,
     },
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommands,
+    },
+    Set {
+        #[command(subcommand)]
+        command: SetCommands,
+    },
+    Endpoint {
+        #[command(subcommand)]
+        command: EndpointCommands,
+    },
+    Link {
+        #[command(subcommand)]
+        command: LinkCommands,
+    },
+    Topology {
+        #[command(subcommand)]
+        command: TopologyCommands,
+    },
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommands {
+    Discover {
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+    Validate {
+        manifest: PathBuf,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+    InstallPlan {
+        manifest: PathBuf,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+    Package {
+        service_dir: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    Verify {
+        package: PathBuf,
+    },
+    Enable {
+        service_id: String,
+    },
+    Disable {
+        service_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetCommands {
+    List {
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+    Validate {
+        set: PathBuf,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+    Expand {
+        set: PathBuf,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum EndpointCommands {
+    Validate {
+        endpoint: String,
+    },
+    PlanRegister {
+        service_id: String,
+        endpoint: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum LinkCommands {
+    PlanCreate {
+        source: String,
+        target: String,
+        #[arg(long, default_value = "http")]
+        protocol: String,
+        #[arg(long, default_value = "internal")]
+        auth_mode: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TopologyCommands {
+    Snapshot {
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
     },
 }
 
@@ -221,6 +327,11 @@ fn main() -> Result<()> {
             operation_log,
         } => run_status(&repo_root, &operation_log, &output),
         Commands::Module { command } => run_module(command, &output),
+        Commands::Service { command } => run_service(command, &output),
+        Commands::Set { command } => run_set(command, &output),
+        Commands::Endpoint { command } => run_endpoint(command, &output),
+        Commands::Link { command } => run_link(command, &output),
+        Commands::Topology { command } => run_topology(command, &output),
         Commands::Runtime { command } => run_runtime(command, &output),
     }
 }
@@ -231,7 +342,320 @@ struct OutputMode {
     verbose: bool,
 }
 
+fn run_service(command: ServiceCommands, output: &OutputMode) -> Result<()> {
+    match command {
+        ServiceCommands::Discover { repo_root } => {
+            let services = discover_service_manifests(&repo_root)?;
+            let count = services.len();
+            print_value(
+                &serde_json::json!({ "services": services }),
+                output,
+                "Service discovery completed",
+                vec![format!("found {} service.yaml files", count)],
+            )
+        }
+        ServiceCommands::Validate {
+            manifest,
+            repo_root,
+        } => {
+            let manifest = validate_service_manifest_file(&repo_root, &manifest)?;
+            let service_id = manifest.id.clone();
+            let version = manifest.version.clone();
+            let port = manifest.endpoint.default_port;
+            print_value(
+                &serde_json::json!({ "valid": true, "service": manifest }),
+                output,
+                "Service contract valid",
+                vec![
+                    format!("Service: {}", service_id),
+                    format!("version: {}", version),
+                    format!("default_port: {}", port),
+                ],
+            )
+        }
+        ServiceCommands::InstallPlan {
+            manifest,
+            repo_root,
+        } => {
+            let manifest = validate_service_manifest_file(&repo_root, &manifest)?;
+            let plan = service_install_plan(&manifest, &[]);
+            print_value(
+                &plan,
+                output,
+                "Service install plan",
+                vec![
+                    format!("Service: {}", plan.service_id),
+                    format!("version: {}", plan.version),
+                    format!("actions: {}", plan.actions.len()),
+                    format!("can_apply: {}", plan.can_apply),
+                ],
+            )
+        }
+        ServiceCommands::Package {
+            service_dir,
+            output: package_output,
+        } => {
+            let result = package_service(&service_dir, &package_output)?;
+            print_value(
+                &result,
+                output,
+                "Service package created",
+                vec![
+                    format!("Service: {}", result.service_id),
+                    format!("version: {}", result.version),
+                    format!("files: {}", result.files_checked),
+                ],
+            )
+        }
+        ServiceCommands::Verify { package } => {
+            let result = verify_package(&package)?;
+            print_value(
+                &result,
+                output,
+                "Service package verified",
+                vec![
+                    format!("Service: {}", result.service_id),
+                    format!("version: {}", result.version),
+                    format!("files: {}", result.files_checked),
+                ],
+            )
+        }
+        ServiceCommands::Enable { service_id } => print_value(
+            &serde_json::json!({
+                "service_id": &service_id,
+                "action": "enable",
+                "status": "planned",
+                "note": "Root Runtime Manager applies service enable operations"
+            }),
+            output,
+            "Service enable plan",
+            vec![format!("Service: {}", service_id)],
+        ),
+        ServiceCommands::Disable { service_id } => print_value(
+            &serde_json::json!({
+                "service_id": &service_id,
+                "action": "disable",
+                "status": "planned",
+                "note": "Root Runtime Manager applies service disable operations"
+            }),
+            output,
+            "Service disable plan",
+            vec![format!("Service: {}", service_id)],
+        ),
+    }
+}
+
+fn run_set(command: SetCommands, output: &OutputMode) -> Result<()> {
+    match command {
+        SetCommands::List { repo_root } => {
+            let sets = discover_sets(&repo_root)?;
+            let count = sets.len();
+            print_value(
+                &serde_json::json!({ "sets": sets }),
+                output,
+                "Set list",
+                vec![format!("sets: {}", count)],
+            )
+        }
+        SetCommands::Validate { set, repo_root } => {
+            let set = validate_service_set_file(&repo_root, &set)?;
+            let set_id = set.id.clone();
+            let service_count = set.services.len();
+            print_value(
+                &serde_json::json!({ "valid": true, "set": set }),
+                output,
+                "Set valid",
+                vec![
+                    format!("Set: {}", set_id),
+                    format!("services: {}", service_count),
+                ],
+            )
+        }
+        SetCommands::Expand { set, repo_root } => {
+            let set = validate_service_set_file(&repo_root, &set)?;
+            let expanded = expand_set(&set);
+            print_value(
+                &expanded,
+                output,
+                "Set expanded",
+                vec![
+                    format!("Set: {}", expanded.set_id),
+                    format!("services: {}", expanded.services.len()),
+                    format!("default_links: {}", expanded.default_links.len()),
+                ],
+            )
+        }
+    }
+}
+
+fn run_endpoint(command: EndpointCommands, output: &OutputMode) -> Result<()> {
+    match command {
+        EndpointCommands::Validate { endpoint } => {
+            validate_endpoint_id(&endpoint)?;
+            print_value(
+                &serde_json::json!({ "valid": true, "endpoint": &endpoint }),
+                output,
+                "Endpoint valid",
+                vec![format!("Endpoint: {}", endpoint)],
+            )
+        }
+        EndpointCommands::PlanRegister {
+            service_id,
+            endpoint,
+        } => {
+            validate_endpoint_id(&endpoint)?;
+            print_value(
+                &serde_json::json!({
+                    "action": "register_endpoint",
+                    "service_id": &service_id,
+                    "endpoint": &endpoint,
+                    "primary_id": &endpoint
+                }),
+                output,
+                "Endpoint register plan",
+                vec![format!("{} -> {}", service_id, endpoint)],
+            )
+        }
+    }
+}
+
+fn run_link(command: LinkCommands, output: &OutputMode) -> Result<()> {
+    match command {
+        LinkCommands::PlanCreate {
+            source,
+            target,
+            protocol,
+            auth_mode,
+        } => {
+            validate_endpoint_id(&source)?;
+            validate_endpoint_id(&target)?;
+            print_value(
+                &serde_json::json!({
+                    "action": "create_link",
+                    "source": &source,
+                    "target": &target,
+                    "primary_id": format!("{} -> {}", source, target),
+                    "protocol": &protocol,
+                    "auth_mode": &auth_mode
+                }),
+                output,
+                "Link create plan",
+                vec![format!("{} -> {}", source, target)],
+            )
+        }
+    }
+}
+
+fn run_topology(command: TopologyCommands, output: &OutputMode) -> Result<()> {
+    match command {
+        TopologyCommands::Snapshot { repo_root } => {
+            let services = discover_service_manifests(&repo_root)?;
+            let sets = discover_sets(&repo_root)?;
+            let endpoints = services
+                .iter()
+                .filter_map(|item| item.get("default_endpoint").and_then(|v| v.as_str()))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let value = serde_json::json!({
+                "devices": [{ "device_id": "root-local", "kind": "root" }],
+                "services": services,
+                "sets": sets,
+                "endpoints": endpoints,
+                "links": [],
+                "views": ["set", "service", "endpoint", "link", "device", "health"]
+            });
+            print_value(
+                &value,
+                output,
+                "Topology Snapshot",
+                vec![
+                    format!(
+                        "Service count: {}",
+                        value["services"].as_array().map(|v| v.len()).unwrap_or(0)
+                    ),
+                    format!(
+                        "Set count: {}",
+                        value["sets"].as_array().map(|v| v.len()).unwrap_or(0)
+                    ),
+                ],
+            )
+        }
+    }
+}
+
+fn discover_service_manifests(repo_root: &Path) -> Result<Vec<serde_json::Value>> {
+    let services_dir = repo_root.join("services");
+    let mut items = Vec::new();
+    if services_dir.exists() {
+        for entry in fs::read_dir(&services_dir).context("read services directory")? {
+            let entry = entry.context("read service entry")?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let manifest_path = PathBuf::from("services")
+                .join(entry.file_name())
+                .join("service.yaml");
+            if repo_root.join(&manifest_path).exists() {
+                match validate_service_manifest_file(repo_root, &manifest_path) {
+                    Ok(manifest) => items.push(serde_json::json!({
+                        "manifest_path": slash_path(&manifest_path),
+                        "service_id": manifest.id,
+                        "name": manifest.name,
+                        "version": manifest.version,
+                        "kind": manifest.kind,
+                        "default_endpoint": format!("0.0.0.0:{}", manifest.endpoint.default_port),
+                        "valid": true
+                    })),
+                    Err(err) => items.push(serde_json::json!({
+                        "manifest_path": slash_path(&manifest_path),
+                        "valid": false,
+                        "error": err.to_string()
+                    })),
+                }
+            }
+        }
+    }
+    Ok(items)
+}
+
+fn discover_sets(repo_root: &Path) -> Result<Vec<serde_json::Value>> {
+    let sets_dir = repo_root.join("sets");
+    let mut items = Vec::new();
+    if sets_dir.exists() {
+        for entry in fs::read_dir(&sets_dir).context("read sets directory")? {
+            let entry = entry.context("read set entry")?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let set_path = PathBuf::from("sets").join(entry.file_name());
+            if set_path.extension().and_then(|v| v.to_str()) != Some("yaml") {
+                continue;
+            }
+            match validate_service_set_file(repo_root, &set_path) {
+                Ok(set) => items.push(serde_json::json!({
+                    "set_path": slash_path(&set_path),
+                    "set_id": set.id,
+                    "name": set.name,
+                    "services": set.services,
+                    "default_links": set.default_links,
+                    "non_root_only": set.non_root_only,
+                    "valid": true
+                })),
+                Err(err) => items.push(serde_json::json!({
+                    "set_path": slash_path(&set_path),
+                    "valid": false,
+                    "error": err.to_string()
+                })),
+            }
+        }
+    }
+    Ok(items)
+}
+
 fn run_module(command: ModuleCommands, output: &OutputMode) -> Result<()> {
+    eprintln!(
+        "legacy compatibility: `ojosctl module` is only for old module.yaml; prefer `ojosctl service`."
+    );
     match command {
         ModuleCommands::Init {
             module_id,
@@ -287,8 +711,8 @@ fn run_module(command: ModuleCommands, output: &OutputMode) -> Result<()> {
             print_value(
                 &serde_json::json!({ "modules": items }),
                 output,
-                "模块发现完成",
-                vec![format!("发现 {} 个 module.yaml", items.len())],
+                "legacy module discover completed",
+                vec![format!("found {} legacy module.yaml files", items.len())],
             )
         }
         ModuleCommands::Validate {
@@ -300,10 +724,10 @@ fn run_module(command: ModuleCommands, output: &OutputMode) -> Result<()> {
             print_value(
                 &serde_json::json!({ "valid": true, "manifest": manifest }),
                 output,
-                "Manifest 校验通过",
+                "Manifest 鏍￠獙閫氳繃",
                 vec![
-                    format!("模块: {}", manifest.id),
-                    format!("版本: {}", manifest.version),
+                    format!("妯″潡: {}", manifest.id),
+                    format!("鐗堟湰: {}", manifest.version),
                 ],
             )
         }
@@ -327,11 +751,11 @@ fn run_module(command: ModuleCommands, output: &OutputMode) -> Result<()> {
             print_value(
                 &result,
                 output,
-                "模块包已生成",
+                "妯″潡鍖呭凡鐢熸垚",
                 vec![
-                    format!("模块: {}", result.module_id),
-                    format!("版本: {}", result.version),
-                    format!("文件数: {}", result.files_checked),
+                    format!("妯″潡: {}", result.module_id),
+                    format!("鐗堟湰: {}", result.version),
+                    format!("鏂囦欢鏁? {}", result.files_checked),
                 ],
             )
         }
@@ -340,11 +764,11 @@ fn run_module(command: ModuleCommands, output: &OutputMode) -> Result<()> {
             print_value(
                 &result,
                 output,
-                "模块包验证通过",
+                "妯″潡鍖呴獙璇侀€氳繃",
                 vec![
-                    format!("模块: {}", result.module_id),
-                    format!("版本: {}", result.version),
-                    format!("文件数: {}", result.files_checked),
+                    format!("妯″潡: {}", result.module_id),
+                    format!("鐗堟湰: {}", result.version),
+                    format!("鏂囦欢鏁? {}", result.files_checked),
                 ],
             )
         }
@@ -402,11 +826,11 @@ fn run_doctor(repo_root: &Path, output: &OutputMode) -> Result<()> {
     print_value(
         &value,
         output,
-        "OJOS doctor 完成",
+        "OJOS doctor 瀹屾垚",
         vec![
-            format!("modules 目录: {}", ok_text(modules_dir.is_dir())),
-            format!("compose 文件: {}", ok_text(compose_file.is_file())),
-            "官方安装入口: ojosctl / ojos-installer-tui".to_string(),
+            format!("modules 鐩綍: {}", ok_text(modules_dir.is_dir())),
+            format!("compose 鏂囦欢: {}", ok_text(compose_file.is_file())),
+            "瀹樻柟瀹夎鍏ュ彛: ojosctl / ojos-installer-tui".to_string(),
         ],
     )?;
     if !modules_dir.is_dir() {
@@ -438,11 +862,11 @@ fn run_status(repo_root: &Path, operation_log: &Path, output: &OutputMode) -> Re
     print_value(
         &value,
         output,
-        "OJOS 状态",
+        "OJOS status",
         vec![
-            format!("模块数量: {}", modules.len()),
-            format!("Runtime 条目: {}", services.len()),
-            format!("受阻条目: {}", blocked),
+            format!("legacy modules: {}", modules.len()),
+            format!("runtime services: {}", services.len()),
+            format!("blocked runtime services: {}", blocked),
             "Gateway/Web apply: disabled".to_string(),
         ],
     )
@@ -470,14 +894,14 @@ fn discover_local_modules(repo_root: &Path) -> Result<Vec<Manifest>> {
 fn local_registry_snapshot(repo_root: &Path) -> Result<RegistrySnapshot> {
     let modules = discover_local_modules(repo_root)?
         .into_iter()
-        .map(|manifest| module_installer_core::InstalledModule {
+        .map(|manifest| service_installer_core::InstalledModule {
             module_id: manifest.id.clone(),
             name: manifest.name.clone(),
             version: manifest.version.clone(),
             status: if manifest.status == "builtin" {
-                module_installer_core::ModuleState::Enabled
+                service_installer_core::ModuleState::Enabled
             } else {
-                module_installer_core::ModuleState::Installed
+                service_installer_core::ModuleState::Installed
             },
             kind: manifest.kind.clone(),
             manifest: Some(manifest),
@@ -503,9 +927,7 @@ fn module_install_command(
         }
         return Ok(());
     }
-    bail!(
-        "module install apply must use the module-installer service or TUI controlled path in v0.1.0"
-    )
+    bail!("legacy module install apply must use Root Runtime Manager controlled path")
 }
 
 fn module_state_plan_command(
@@ -524,7 +946,7 @@ fn module_state_plan_command(
     print_plan(&plan, output)?;
     if confirm {
         bail!(
-            "{} apply must use module-installer controlled operation history in v0.1.0",
+            "{} apply must use Root Runtime Manager controlled operation history",
             action
         );
     }
@@ -678,11 +1100,11 @@ fn scaffold_module(opts: ModuleScaffoldOptions, output: &OutputMode) -> Result<(
             "valid": true
         }),
         output,
-        "模块脚手架已生成",
+        "legacy module scaffold generated",
         vec![
-            format!("模块: {}", manifest.id),
-            format!("目录: {}", slash_path(&opts.out)),
-            "默认 metadata-only，不包含 hook/script/dynamic bundle".to_string(),
+            format!("legacy module: {}", manifest.id),
+            format!("directory: {}", slash_path(&opts.out)),
+            "metadata-only by default; no hook/script/dynamic bundle".to_string(),
         ],
     )
 }
@@ -908,15 +1330,15 @@ fn run_runtime(command: RuntimeCommands, output: &OutputMode) -> Result<()> {
                 "Runtime Snapshot",
                 vec![
                     format!(
-                        "模块: {}",
+                        "Legacy Module 数量: {}",
                         snapshot["modules"].as_array().map(|v| v.len()).unwrap_or(0)
                     ),
                     format!(
-                        "路由: {}",
+                        "路由数量: {}",
                         snapshot["routes"].as_array().map(|v| v.len()).unwrap_or(0)
                     ),
                     format!(
-                        "服务: {}",
+                        "Service 数量: {}",
                         snapshot["services"]
                             .as_array()
                             .map(|v| v.len())
@@ -943,7 +1365,7 @@ fn run_runtime(command: RuntimeCommands, output: &OutputMode) -> Result<()> {
                 &serde_json::json!({ "services": services }),
                 output,
                 "Runtime Services",
-                vec![format!("条目数量: {}", services.len())],
+                vec![format!("Service 数量: {}", services.len())],
             )
         }
         RuntimeCommands::Service {
@@ -956,8 +1378,8 @@ fn run_runtime(command: RuntimeCommands, output: &OutputMode) -> Result<()> {
                 output,
                 "Runtime Service",
                 vec![
-                    format!("服务: {}", service.service_id),
-                    format!("模块: {}", service.module_id),
+                    format!("Service: {}", service.service_id),
+                    format!("Legacy Module: {}", service.module_id),
                     format!("状态: {}", service.state),
                 ],
             )
@@ -1011,7 +1433,7 @@ fn run_runtime(command: RuntimeCommands, output: &OutputMode) -> Result<()> {
                 &serde_json::json!({ "operations": operations }),
                 output,
                 "Runtime Operations",
-                vec![format!("操作数量: {}", operations.len())],
+                vec![format!("鎿嶄綔鏁伴噺: {}", operations.len())],
             )
         }
         RuntimeCommands::Operation {
@@ -1027,9 +1449,9 @@ fn run_runtime(command: RuntimeCommands, output: &OutputMode) -> Result<()> {
                 output,
                 "Runtime Operation",
                 vec![
-                    format!("操作: {}", operation.operation_id),
-                    format!("状态: {}", operation.status),
-                    format!("服务: {}", operation.service_id),
+                    format!("鎿嶄綔: {}", operation.operation_id),
+                    format!("鐘舵€? {}", operation.status),
+                    format!("鏈嶅姟: {}", operation.service_id),
                 ],
             )
         }
@@ -1303,7 +1725,7 @@ fn write_or_print_plan(
                 "can_apply": plan.can_apply
             }),
             output,
-            "Runtime plan 已写入",
+            "Runtime plan written",
             vec![
                 format!("plan_id: {}", plan.plan_id),
                 format!("operation_id: {}", plan.operation_id),
@@ -1344,7 +1766,7 @@ fn apply_runtime_plan(
         print_value(
             &operation,
             output,
-            "Runtime apply 被阻断",
+            "Runtime apply blocked",
             vec![operation.error_message.clone()],
         )?;
         bail!("{}", operation.error_message);
@@ -1365,7 +1787,7 @@ fn apply_runtime_plan(
         print_value(
             &operation,
             output,
-            "Runtime apply dry-run 完成",
+            "Runtime apply dry-run completed",
             vec![format!("operation_id: {}", operation.operation_id)],
         )?;
         return Ok(());
@@ -1384,7 +1806,7 @@ fn apply_runtime_plan(
             print_value(
                 &operation,
                 output,
-                "Runtime apply 被锁阻断",
+                "Runtime apply blocked by lock",
                 vec![operation.error_message.clone()],
             )?;
             return Err(err);
@@ -1403,7 +1825,7 @@ fn apply_runtime_plan(
             print_value(
                 &operation,
                 output,
-                "Runtime apply 成功",
+                "Runtime apply succeeded",
                 vec![format!("operation_id: {}", operation.operation_id)],
             )
         }
@@ -1417,14 +1839,13 @@ fn apply_runtime_plan(
             print_value(
                 &operation,
                 output,
-                "Runtime apply 失败",
+                "Runtime apply failed",
                 vec![operation.error_message.clone()],
             )?;
             Err(err)
         }
     }
 }
-
 #[derive(Debug)]
 struct RuntimeLock {
     path: PathBuf,
@@ -1742,7 +2163,7 @@ fn trusted_compose_services() -> BTreeSet<&'static str> {
     [
         "auth",
         "gateway",
-        "module-installer",
+        "root-runtime-manager",
         "problem-api",
         "judge-api",
         "judge-worker",
@@ -1855,21 +2276,21 @@ fn print_plan(plan: &Plan, output: &OutputMode) -> Result<()> {
     print_value(
         plan,
         output,
-        "模块计划",
+        "legacy module plan",
         vec![
-            format!("类型: {:?}", plan.kind),
-            format!("模块: {}", plan.module_id),
-            format!("版本: {}", plan.version),
-            format!("可执行: {}", plan.can_apply),
+            format!("kind: {:?}", plan.kind),
+            format!("legacy module: {}", plan.module_id),
+            format!("version: {}", plan.version),
+            format!("can_apply: {}", plan.can_apply),
             format!(
-                "阻断: {}",
+                "blocked_by: {}",
                 if plan.blocked_by.is_empty() {
-                    "无".to_string()
+                    "none".to_string()
                 } else {
                     plan.blocked_by.join("; ")
                 }
             ),
-            format!("动作数: {}", plan.actions.len()),
+            format!("actions: {}", plan.actions.len()),
         ],
     )
 }
@@ -1878,15 +2299,15 @@ fn print_runtime_plan(plan: &RuntimePlan, output: &OutputMode) -> Result<()> {
     print_value(
         plan,
         output,
-        "Runtime 计划",
+        "Runtime plan",
         vec![
             format!("plan_id: {}", plan.plan_id),
             format!("operation_id: {}", plan.operation_id),
-            format!("服务: {}", plan.service_id),
-            format!("动作: {}", plan.action),
-            format!("可执行: {}", plan.can_apply),
-            format!("确认要求: {}", plan.requires_confirmation),
-            format!("过期时间: {}", plan.expires_at),
+            format!("service: {}", plan.service_id),
+            format!("action: {}", plan.action),
+            format!("can_apply: {}", plan.can_apply),
+            format!("requires_confirmation: {}", plan.requires_confirmation),
+            format!("expires_at: {}", plan.expires_at),
         ],
     )
 }

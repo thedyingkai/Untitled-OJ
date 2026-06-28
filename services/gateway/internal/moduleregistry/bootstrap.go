@@ -100,7 +100,7 @@ func BuiltinData() BootstrapData {
 		{
 			ModuleID:    "ojos.kernel.module-runtime",
 			SetID:       "kernel",
-			Name:        "Module Runtime",
+			Name:        "Service Runtime",
 			Version:     "0.1.0",
 			Status:      StatusEnabled,
 			Kind:        KindKernel,
@@ -227,7 +227,7 @@ func BuiltinData() BootstrapData {
 	modules = append(modules, Module{
 		ModuleID:    "ojos.judge-core",
 		SetID:       "core-capability",
-		Name:        "Judge Core",
+		Name:        "Judge Services",
 		Version:     "0.1.0",
 		Status:      StatusEnabled,
 		Kind:        KindFeature,
@@ -237,14 +237,14 @@ func BuiltinData() BootstrapData {
 
 	data := BootstrapData{
 		Sets: []Set{
-			{SetID: "kernel", Name: "Kernel Set", Description: "OJOS Kernel 能力：installer、runtime、registry、topology、policy、audit、config 和 health。", SortOrder: 0},
-			{SetID: "platform", Name: "Platform Set", Description: "平台 adapter 和基础服务：gateway、web shell、identity、storage 和 observability。", SortOrder: 5},
-			{SetID: "core-capability", Name: "Core Capability Set", Description: "题库、提交、评测和在线评测基础能力模块。", SortOrder: 10},
-			{SetID: "competition", Name: "Competition Set", Description: "竞赛能力规划集合；v0.1.0 未实现 Contest。", SortOrder: 20},
-			{SetID: "education", Name: "Education Set", Description: "训练和教学能力规划集合；v0.1.0 未实现 Training。", SortOrder: 30},
-			{SetID: "collaboration", Name: "Collaboration Set", Description: "协作能力规划集合；v0.1.0 未实现 group、discussion、clarification、print 或 balloon。", SortOrder: 40},
-			{SetID: "integration", Name: "Integration Set", Description: "外部集成能力规划集合；v0.1.0 未实现 Remote OJ。", SortOrder: 50},
-			{SetID: "operations", Name: "Operations Set", Description: "运维和可观测能力。", SortOrder: 60},
+			{SetID: "runtime", Name: "Runtime Set", Description: "Root Runtime Manager、Service Registry、Endpoint、Link、Topology、Policy、Audit、Config 和 Health。", SortOrder: 0},
+			{SetID: "platform", Name: "Platform Set", Description: "Gateway、Web Shell、Identity、Storage 和 Observability 等基础 Service。", SortOrder: 5},
+			{SetID: "core-capability", Name: "Core Capability Set", Description: "题库、提交、评测和在线评测基础 Service。", SortOrder: 10},
+			{SetID: "competition", Name: "Competition Set", Description: "基础服务组合预设，不表示竞赛业务已经实现。", SortOrder: 20},
+			{SetID: "education", Name: "Education Set", Description: "训练和教学场景的基础服务组合。", SortOrder: 30},
+			{SetID: "collaboration", Name: "Collaboration Set", Description: "协作场景的基础服务组合说明。", SortOrder: 40},
+			{SetID: "integration", Name: "Integration Set", Description: "外部集成场景的基础服务组合说明。", SortOrder: 50},
+			{SetID: "operations", Name: "Operations Set", Description: "运维和可观测能力组合。", SortOrder: 60},
 		},
 		Modules: modules,
 		Edges: []Edge{
@@ -394,7 +394,7 @@ func judgeCorePermissions() []Permission {
 		items = append(items, Permission{
 			ModuleID:      "ojos.judge-core",
 			PermissionKey: key,
-			Description:   "Judge Core permission: " + key,
+			Description:   "Judge service permission: " + key,
 		})
 	}
 	return items
@@ -471,7 +471,7 @@ func judgeCoreManifest() map[string]any {
 	return map[string]any{
 		"schema_version": 1,
 		"id":             "ojos.judge-core",
-		"name":           "Judge Core",
+		"name":           "Judge Services",
 		"version":        "0.1.0",
 		"set":            "core-capability",
 		"kind":           "feature",
