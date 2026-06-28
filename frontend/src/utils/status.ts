@@ -1,8 +1,8 @@
 import type { HealthState } from '../types/health'
 import type { JudgeStatus } from '../types/judge'
-import type { ModuleStatus } from '../types/module'
-import type { TaskStatus, WorkerStatus } from '../types/worker'
 import type { ProblemDifficulty, ProblemStatus, ProblemVisibility } from '../types/problem'
+import type { ServiceStatus } from '../types/service'
+import type { TaskStatus, WorkerStatus } from '../types/worker'
 
 export type OjosTagType = 'default' | 'success' | 'warning' | 'error' | 'info'
 
@@ -17,303 +17,82 @@ const fallbackMeta: StatusMeta = {
   label: '未知',
   type: 'default',
   className: 'status-unknown',
-  description: '前端暂不认识当前状态。',
+  description: '前端暂不识别当前状态。',
 }
 
-const judgeStatusMeta: Record<JudgeStatus, StatusMeta> = {
-  PENDING: {
-    label: '等待中',
-    type: 'default',
-    className: 'status-pending',
-    description: '已进入队列，等待 Worker 领取。',
-  },
-  JUDGING: {
-    label: '评测中',
-    type: 'info',
-    className: 'status-judging',
-    description: 'Worker 正在执行本次提交。',
-  },
-  ACCEPTED: {
-    label: '通过',
-    type: 'success',
-    className: 'status-accepted',
-    description: '全部必需测试点通过。',
-  },
-  WRONG_ANSWER: {
-    label: '答案错误',
-    type: 'error',
-    className: 'status-wrong-answer',
-    description: '程序输出与标准答案不一致。',
-  },
-  COMPILE_ERROR: {
-    label: '编译错误',
-    type: 'warning',
-    className: 'status-compile-error',
-    description: '源码未能通过编译。',
-  },
-  RUNTIME_ERROR: {
-    label: '运行错误',
-    type: 'error',
-    className: 'status-runtime-error',
-    description: '程序崩溃或返回非零退出码。',
-  },
-  TIME_LIMIT_EXCEEDED: {
-    label: '超时',
-    type: 'warning',
-    className: 'status-time-limit',
-    description: '程序超过时间限制。',
-  },
-  MEMORY_LIMIT_EXCEEDED: {
-    label: '超内存',
-    type: 'warning',
-    className: 'status-memory-limit',
-    description: '程序超过内存限制。',
-  },
-  OUTPUT_LIMIT_EXCEEDED: {
-    label: '输出超限',
-    type: 'warning',
-    className: 'status-output-limit',
-    description: '程序输出超过限制。',
-  },
-  SYSTEM_ERROR: {
-    label: '系统错误',
-    type: 'error',
-    className: 'status-system-error',
-    description: '评测系统处理本次提交时失败。',
-  },
-  CANCELLED: {
-    label: '已取消',
-    type: 'default',
-    className: 'status-cancelled',
-    description: '本次提交已取消。',
-  },
-  UNSUPPORTED_LANGUAGE: {
-    label: '语言不支持',
-    type: 'default',
-    className: 'status-unsupported',
-    description: '当前评测机不支持所选语言。',
-  },
+const judgeStatusMeta: Record<string, StatusMeta> = {
+  PENDING: meta('等待中', 'default', 'status-pending', '提交已进入队列。'),
+  JUDGING: meta('评测中', 'info', 'status-judging', 'Worker 正在执行评测。'),
+  ACCEPTED: meta('通过', 'success', 'status-accepted', '全部测试点通过。'),
+  WRONG_ANSWER: meta('答案错误', 'error', 'status-wrong-answer', '输出与期望结果不一致。'),
+  RUNTIME_ERROR: meta('运行错误', 'error', 'status-runtime-error', '程序运行时异常。'),
+  COMPILE_ERROR: meta('编译错误', 'error', 'status-compile-error', '编译未通过。'),
+  TIME_LIMIT_EXCEEDED: meta('超时', 'warning', 'status-time-limit', '运行时间超过限制。'),
+  MEMORY_LIMIT_EXCEEDED: meta('超内存', 'warning', 'status-memory-limit', '内存使用超过限制。'),
+  SYSTEM_ERROR: meta('系统错误', 'error', 'status-system-error', '评测系统异常。'),
 }
 
-const taskStatusMeta: Record<TaskStatus, StatusMeta> = {
-  PENDING: {
-    label: '等待中',
-    type: 'default',
-    className: 'status-pending',
-    description: '任务正在等待 Worker 租约。',
-  },
-  RUNNING: {
-    label: '运行中',
-    type: 'info',
-    className: 'status-judging',
-    description: '任务已被 Worker 领取。',
-  },
-  SUCCEEDED: {
-    label: '成功',
-    type: 'success',
-    className: 'status-accepted',
-    description: '任务已成功完成。',
-  },
-  FAILED: {
-    label: '失败',
-    type: 'error',
-    className: 'status-system-error',
-    description: '任务失败且不再重试。',
-  },
-  CANCELLED: {
-    label: '已取消',
-    type: 'default',
-    className: 'status-cancelled',
-    description: '任务已取消。',
-  },
+const taskStatusMeta: Record<string, StatusMeta> = {
+  queued: meta('排队中', 'default', 'status-task-queued', '任务等待调度。'),
+  running: meta('运行中', 'info', 'status-task-running', '任务正在执行。'),
+  finished: meta('已完成', 'success', 'status-task-finished', '任务已完成。'),
+  failed: meta('失败', 'error', 'status-task-failed', '任务执行失败。'),
+  cancelled: meta('已取消', 'default', 'status-task-cancelled', '任务已取消。'),
 }
 
 const healthStatusMeta: Record<string, StatusMeta> = {
-  ok: {
-    label: 'OK',
-    type: 'success',
-    className: 'status-health-ok',
-    description: '组件健康。',
-  },
-  degraded: {
-    label: '降级',
-    type: 'warning',
-    className: 'status-health-degraded',
-    description: '组件可达，但报告为降级状态。',
-  },
-  down: {
-    label: '不可用',
-    type: 'error',
-    className: 'status-health-down',
-    description: '组件不可用。',
-  },
-  error: {
-    label: '异常',
-    type: 'error',
-    className: 'status-health-down',
-    description: '组件返回错误。',
-  },
-  unknown: {
-    label: '未知',
-    type: 'default',
-    className: 'status-unknown',
-    description: '暂时无法判断组件健康状态。',
-  },
+  ok: meta('正常', 'success', 'status-health-ok', '服务健康。'),
+  healthy: meta('正常', 'success', 'status-health-ok', '服务健康。'),
+  warning: meta('警告', 'warning', 'status-health-warning', '服务存在警告。'),
+  degraded: meta('降级', 'warning', 'status-health-degraded', '服务降级运行。'),
+  error: meta('异常', 'error', 'status-health-error', '服务异常。'),
+  down: meta('离线', 'error', 'status-health-down', '服务不可达。'),
+  unknown: meta('未知', 'default', 'status-health-unknown', '健康状态未知。'),
 }
 
 const workerStatusMeta: Record<string, StatusMeta> = {
-  ONLINE: {
-    label: '在线',
-    type: 'success',
-    className: 'status-worker-online',
-    description: 'Worker 已连接并持续心跳。',
-  },
-  OFFLINE: {
-    label: '离线',
-    type: 'default',
-    className: 'status-worker-offline',
-    description: 'Worker 近期没有心跳。',
-  },
-  DRAINING: {
-    label: '排空中',
-    type: 'warning',
-    className: 'status-worker-draining',
-    description: 'Worker 将停止领取新任务。',
-  },
-  BUSY: {
-    label: '繁忙',
-    type: 'info',
-    className: 'status-worker-busy',
-    description: 'Worker 没有空闲执行槽位。',
-  },
-  ERROR: {
-    label: '异常',
-    type: 'error',
-    className: 'status-worker-error',
-    description: 'Worker 报告异常状态。',
-  },
+  ONLINE: meta('在线', 'success', 'status-worker-online', 'Worker 在线。'),
+  OFFLINE: meta('离线', 'default', 'status-worker-offline', 'Worker 离线。'),
+  DRAINING: meta('排空中', 'warning', 'status-worker-draining', 'Worker 不再领取新任务。'),
+  BUSY: meta('繁忙', 'info', 'status-worker-busy', 'Worker 正在处理任务。'),
+  ERROR: meta('异常', 'error', 'status-worker-error', 'Worker 报告异常。'),
 }
 
-const moduleStatusMeta: Record<string, StatusMeta> = {
-  ENABLED: {
-    label: '已启用',
-    type: 'success',
-    className: 'status-module-enabled',
-    description: '模块已启用。',
-  },
-  DISABLED: {
-    label: '已禁用',
-    type: 'default',
-    className: 'status-module-disabled',
-    description: '模块已禁用。',
-  },
-  INSTALLING: {
-    label: '安装中',
-    type: 'info',
-    className: 'status-module-installing',
-    description: '模块正在安装。',
-  },
-  UPGRADING: {
-    label: '升级中',
-    type: 'info',
-    className: 'status-module-upgrading',
-    description: '模块正在升级。',
-  },
-  FAILED_INSTALL: {
-    label: '安装失败',
-    type: 'error',
-    className: 'status-module-failed',
-    description: '模块安装失败。',
-  },
-  FAILED_UPGRADE: {
-    label: '升级失败',
-    type: 'error',
-    className: 'status-module-failed',
-    description: '模块升级失败。',
-  },
-  REMOVED: {
-    label: '已移除',
-    type: 'default',
-    className: 'status-module-removed',
-    description: '模块已移除。',
-  },
+const serviceStatusMeta: Record<string, StatusMeta> = {
+  ENABLED: meta('已启用', 'success', 'status-service-enabled', 'Service 已启用。'),
+  DISABLED: meta('已禁用', 'default', 'status-service-disabled', 'Service 已禁用。'),
+  INSTALLING: meta('安装中', 'info', 'status-service-installing', 'Service 正在安装。'),
+  UPGRADING: meta('升级中', 'info', 'status-service-upgrading', 'Service 正在升级。'),
+  FAILED_INSTALL: meta('安装失败', 'error', 'status-service-failed', 'Service 安装失败。'),
+  FAILED_UPGRADE: meta('升级失败', 'error', 'status-service-failed', 'Service 升级失败。'),
+  REMOVED: meta('已移除', 'default', 'status-service-removed', 'Service 已移除。'),
 }
 
-const difficultyMeta: Record<ProblemDifficulty | string, StatusMeta> = {
-  easy: {
-    label: '简单',
-    type: 'success',
-    className: 'difficulty-easy',
-    description: '入门或热身难度。',
-  },
-  medium: {
-    label: '中等',
-    type: 'warning',
-    className: 'difficulty-medium',
-    description: '标准比赛难度。',
-  },
-  hard: {
-    label: '困难',
-    type: 'error',
-    className: 'difficulty-hard',
-    description: '进阶或高要求题目。',
-  },
+const difficultyMeta: Record<string, StatusMeta> = {
+  easy: meta('简单', 'success', 'difficulty-easy', '入门难度。'),
+  medium: meta('中等', 'warning', 'difficulty-medium', '标准难度。'),
+  hard: meta('困难', 'error', 'difficulty-hard', '高难度题目。'),
 }
 
-const visibilityMeta: Record<ProblemVisibility, StatusMeta> = {
-  public: {
-    label: '公开',
-    type: 'success',
-    className: 'visibility-public',
-    description: '所有已登录用户可见。',
-  },
-  private: {
-    label: '私有',
-    type: 'warning',
-    className: 'visibility-private',
-    description: '仅授权用户可见。',
-  },
-  contest_only: {
-    label: '比赛内',
-    type: 'info',
-    className: 'visibility-contest',
-    description: '仅在比赛作用域内可用。',
-  },
+const visibilityMeta: Record<string, StatusMeta> = {
+  public: meta('公开', 'success', 'visibility-public', '所有登录用户可见。'),
+  private: meta('私有', 'warning', 'visibility-private', '仅授权用户可见。'),
+  contest_only: meta('比赛内', 'info', 'visibility-contest', '仅在比赛作用域内可见。'),
 }
 
-const problemStatusMeta: Record<ProblemStatus, StatusMeta> = {
-  draft: {
-    label: '草稿',
-    type: 'default',
-    className: 'problem-draft',
-    description: '题目仍在准备中。',
-  },
-  ready: {
-    label: '待发布',
-    type: 'info',
-    className: 'problem-ready',
-    description: '题目已可审核或发布。',
-  },
-  published: {
-    label: '已发布',
-    type: 'success',
-    className: 'problem-published',
-    description: '题目已发布。',
-  },
-  archived: {
-    label: '已归档',
-    type: 'default',
-    className: 'problem-archived',
-    description: '题目已归档。',
-  },
+const problemStatusMeta: Record<string, StatusMeta> = {
+  draft: meta('草稿', 'default', 'problem-draft', '题目仍在准备中。'),
+  ready: meta('待发布', 'info', 'problem-ready', '题目可以审核或发布。'),
+  published: meta('已发布', 'success', 'problem-published', '题目已发布。'),
+  archived: meta('已归档', 'default', 'problem-archived', '题目已归档。'),
 }
 
 export function getJudgeStatusMeta(status: JudgeStatus | string): StatusMeta {
-  return judgeStatusMeta[status as JudgeStatus] ?? fromUnknown(status)
+  return judgeStatusMeta[String(status).toUpperCase()] ?? fromUnknown(status)
 }
 
 export function getTaskStatusMeta(status: TaskStatus | string): StatusMeta {
-  return taskStatusMeta[status as TaskStatus] ?? fromUnknown(status)
+  return taskStatusMeta[String(status).toLowerCase()] ?? fromUnknown(status)
 }
 
 export function getHealthStatusMeta(status: HealthState | 'down' | string): StatusMeta {
@@ -324,8 +103,8 @@ export function getWorkerStatusMeta(status: WorkerStatus | 'BUSY' | 'ERROR' | st
   return workerStatusMeta[String(status).toUpperCase()] ?? fromUnknown(status)
 }
 
-export function getModuleStatusMeta(status: ModuleStatus | string): StatusMeta {
-  return moduleStatusMeta[String(status).toUpperCase()] ?? fromUnknown(status)
+export function getServiceStatusMeta(status: ServiceStatus | string): StatusMeta {
+  return serviceStatusMeta[String(status).toUpperCase()] ?? fromUnknown(status)
 }
 
 export function getDifficultyMeta(difficulty: ProblemDifficulty | string): StatusMeta {
@@ -333,21 +112,23 @@ export function getDifficultyMeta(difficulty: ProblemDifficulty | string): Statu
 }
 
 export function getProblemVisibilityMeta(visibility: ProblemVisibility | string): StatusMeta {
-  return visibilityMeta[visibility as ProblemVisibility] ?? fromUnknown(visibility)
+  return visibilityMeta[String(visibility).toLowerCase()] ?? fromUnknown(visibility)
 }
 
 export function getProblemStatusMeta(status: ProblemStatus | string): StatusMeta {
-  return problemStatusMeta[status as ProblemStatus] ?? fromUnknown(status)
+  return problemStatusMeta[String(status).toLowerCase()] ?? fromUnknown(status)
+}
+
+function meta(label: string, type: OjosTagType, className: string, description: string): StatusMeta {
+  return { label, type, className, description }
 }
 
 function fromUnknown(value: string): StatusMeta {
-  if (!value) {
-    return fallbackMeta
-  }
+  if (!value) return fallbackMeta
   return {
     label: value,
     type: 'default',
     className: 'status-unknown',
-    description: `未识别状态：${value}`,
+    description: '前端暂不识别当前状态。',
   }
 }

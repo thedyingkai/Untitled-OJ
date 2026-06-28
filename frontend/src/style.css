@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   --ojos-primary: #0b4f8a;
   --ojos-primary-strong: #083b66;
   --ojos-success: #12805c;
@@ -621,7 +621,7 @@ pre {
 .status-accepted,
 .status-health-ok,
 .status-worker-online,
-.status-module-enabled,
+.status-service-enabled,
 .problem-published,
 .difficulty-easy {
   --n-color: #e9f8f1;
@@ -631,8 +631,8 @@ pre {
 
 .status-judging,
 .status-worker-busy,
-.status-module-installing,
-.status-module-upgrading,
+.status-service-installing,
+.status-service-upgrading,
 .problem-ready,
 .visibility-contest,
 .language-tag {
@@ -645,8 +645,8 @@ pre {
 .status-cancelled,
 .status-unsupported,
 .status-worker-offline,
-.status-module-disabled,
-.status-module-removed,
+.status-service-disabled,
+.status-service-removed,
 .problem-draft,
 .problem-archived,
 .status-unknown {
@@ -678,7 +678,7 @@ pre {
 .status-system-error,
 .status-health-down,
 .status-worker-error,
-.status-module-failed,
+.status-service-failed,
 .difficulty-hard {
   --n-color: #fff1f0;
   --n-text-color: var(--danger);

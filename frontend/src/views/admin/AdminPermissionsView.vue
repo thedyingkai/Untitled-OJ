@@ -1,25 +1,10 @@
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref } from 'vue'
-import {
-  NButton,
-  NForm,
-  NFormItem,
-  NInputNumber,
-  NSelect,
-  NTabs,
-  NTabPane,
-  useMessage,
-  type DataTableColumns,
-} from 'naive-ui'
+import { h, onMounted, reactive, ref } from 'vue'
+import { NButton, NForm, NFormItem, NInputNumber, NSelect, NTabPane, NTabs, useMessage, type DataTableColumns } from 'naive-ui'
 
-import {
-  addProblemRole,
-  listAdminRoles,
-  listAuditLogs,
-  removeProblemRole,
-} from '../../api/authAdmin'
+import { addProblemRole, listAdminRoles, listAuditLogs, removeProblemRole } from '../../api/authAdmin'
 import { toApiClientError, type ApiClientError } from '../../api/client'
-import { getModuleRuntimeSnapshot } from '../../api/modules'
+import { getServiceRuntimeSnapshot } from '../../api/services'
 import LoadingView from '../../components/common/LoadingView.vue'
 import TimeText from '../../components/common/TimeText.vue'
 import OjosDataTable from '../../components/oj/OjosDataTable.vue'
@@ -30,13 +15,12 @@ import OjosPermissionTag from '../../components/oj/OjosPermissionTag.vue'
 import OjosRoleTag from '../../components/oj/OjosRoleTag.vue'
 import OjosSection from '../../components/oj/OjosSection.vue'
 import OjosStatCard from '../../components/oj/OjosStatCard.vue'
-import OjosToolbar from '../../components/oj/OjosToolbar.vue'
-import type { ModulePermissionItem } from '../../types/module'
 import type { AuditLogItem, RoleItem } from '../../types/permission'
+import type { ServicePermissionItem } from '../../types/service'
 
 const message = useMessage()
 const roles = ref<RoleItem[]>([])
-const permissions = ref<ModulePermissionItem[]>([])
+const permissions = ref<ServicePermissionItem[]>([])
 const auditLogs = ref<AuditLogItem[]>([])
 const loading = ref(true)
 const saving = ref(false)
@@ -47,24 +31,22 @@ const grantForm = reactive({
   role: 'problem_owner',
 })
 
-const roleOptions = computed(() =>
-  roles.value
-    .filter((role) => role.name.startsWith('problem_'))
-    .map((role) => ({ label: role.name, value: role.name })),
-)
-
-const systemRoleCount = computed(() => roles.value.filter((role) => role.is_system).length)
-const problemRoleCount = computed(() => roles.value.filter((role) => role.name.startsWith('problem_')).length)
+const roleOptions = [
+  { label: 'problem_owner', value: 'problem_owner' },
+  { label: 'problem_setter', value: 'problem_setter' },
+  { label: 'problem_viewer', value: 'problem_viewer' },
+  { label: 'problem_data_manager', value: 'problem_data_manager' },
+]
 
 const roleColumns: DataTableColumns<RoleItem> = [
   { title: '角色', key: 'name', render: (row) => h(OjosRoleTag, { role: row.name }) },
-  { title: '模块', key: 'module_code' },
+  { title: 'Service', key: 'service_code' },
   { title: '说明', key: 'description' },
 ]
 
-const permissionColumns: DataTableColumns<ModulePermissionItem> = [
+const permissionColumns: DataTableColumns<ServicePermissionItem> = [
   { title: '权限', key: 'permission_key', render: (row) => h(OjosPermissionTag, { permission: row.permission_key }) },
-  { title: '模块', key: 'module_id' },
+  { title: 'Service', key: 'service_id' },
   { title: '说明', key: 'description' },
 ]
 
@@ -84,7 +66,7 @@ async function load(): Promise<void> {
   try {
     const [roleResp, runtimeResp, auditResp] = await Promise.all([
       listAdminRoles(),
-      getModuleRuntimeSnapshot(),
+      getServiceRuntimeSnapshot(),
       listAuditLogs(),
     ])
     roles.value = roleResp
@@ -131,7 +113,7 @@ onMounted(() => void load())
   <div class="admin-permissions-page">
     <OjosPageHeader
       title="权限"
-      description="查看角色定义、权限点、题目作用域授权和审计历史。"
+      description="查看角色、Service 权限点、题目作用域授权和审计历史。"
       eyebrow="管理"
     >
       <template #actions>
@@ -140,59 +122,48 @@ onMounted(() => void load())
     </OjosPageHeader>
 
     <LoadingView v-if="loading" />
+    <OjosErrorState v-else-if="error" :error="error" @retry="load()" />
     <template v-else>
-      <OjosErrorState v-if="error" :error="error" @retry="load()" />
-      <template v-else>
-        <div class="admin-summary-grid">
-          <OjosStatCard label="角色" :value="roles.length" tone="primary" />
-          <OjosStatCard label="题目角色" :value="problemRoleCount" tone="warning" />
-          <OjosStatCard label="权限" :value="permissions.length" />
-          <OjosStatCard label="审计日志" :value="auditLogs.length" />
-        </div>
+      <div class="permission-summary">
+        <OjosStatCard label="角色" :value="roles.length" tone="primary" />
+        <OjosStatCard label="权限点" :value="permissions.length" />
+        <OjosStatCard label="审计记录" :value="auditLogs.length" />
+      </div>
 
-        <OjosSection
-          title="题目作用域角色"
-          description="授予或移除绑定到单个题目的角色；使用与 Runtime 校验一致的 Gateway 管理 API。"
-        >
-          <OjosToolbar>
-            <NForm inline :model="grantForm" class="permission-grant-form">
-              <NFormItem label="用户 ID">
-                <NInputNumber v-model:value="grantForm.user_id" :min="1" />
-              </NFormItem>
-              <NFormItem label="题目 ID">
-                <NInputNumber v-model:value="grantForm.problem_id" :min="1" />
-              </NFormItem>
-              <NFormItem label="角色">
-                <NSelect v-model:value="grantForm.role" :options="roleOptions" style="width: 190px" />
-              </NFormItem>
-            </NForm>
-            <template #actions>
-              <NButton type="primary" :loading="saving" @click="submitGrant(true)">授予</NButton>
-              <NButton secondary :loading="saving" @click="submitGrant(false)">移除</NButton>
-            </template>
-          </OjosToolbar>
-        </OjosSection>
+      <OjosSection title="题目角色授权">
+        <NForm class="grant-form" label-placement="left" label-width="90">
+          <NFormItem label="用户 ID">
+            <NInputNumber v-model:value="grantForm.user_id" :min="1" />
+          </NFormItem>
+          <NFormItem label="题目 ID">
+            <NInputNumber v-model:value="grantForm.problem_id" :min="1" />
+          </NFormItem>
+          <NFormItem label="角色">
+            <NSelect v-model:value="grantForm.role" :options="roleOptions" />
+          </NFormItem>
+          <NFormItem>
+            <NButton type="primary" :loading="saving" @click="submitGrant(true)">授予</NButton>
+            <NButton secondary :loading="saving" @click="submitGrant(false)">移除</NButton>
+          </NFormItem>
+        </NForm>
+      </OjosSection>
 
-        <OjosSection
-          title="授权注册表"
-          :description="`${systemRoleCount} 个系统角色，${problemRoleCount} 个题目角色，${permissions.length} 个启用的模块权限点。`"
-        >
-          <NTabs type="line" animated>
-            <NTabPane name="roles" tab="角色">
-              <OjosEmptyState v-if="roles.length === 0" description="暂无角色" />
-              <OjosDataTable v-else :columns="roleColumns" :data="roles" :page-size="12" />
-            </NTabPane>
-            <NTabPane name="permissions" tab="权限">
-              <OjosEmptyState v-if="permissions.length === 0" description="暂无权限" />
-              <OjosDataTable v-else :columns="permissionColumns" :data="permissions" :page-size="12" />
-            </NTabPane>
-            <NTabPane name="audit" tab="审计日志">
-              <OjosEmptyState v-if="auditLogs.length === 0" description="暂无审计日志" />
-              <OjosDataTable v-else :columns="auditColumns" :data="auditLogs" :page-size="10" />
-            </NTabPane>
-          </NTabs>
-        </OjosSection>
-      </template>
+      <OjosSection title="权限注册表">
+        <NTabs type="line" animated>
+          <NTabPane name="roles" tab="角色">
+            <OjosEmptyState v-if="roles.length === 0" description="暂无角色" />
+            <OjosDataTable v-else :columns="roleColumns" :data="roles" :pagination="{ pageSize: 12 }" />
+          </NTabPane>
+          <NTabPane name="permissions" tab="权限点">
+            <OjosEmptyState v-if="permissions.length === 0" description="暂无权限点" />
+            <OjosDataTable v-else :columns="permissionColumns" :data="permissions" :pagination="{ pageSize: 12 }" />
+          </NTabPane>
+          <NTabPane name="audit" tab="审计">
+            <OjosEmptyState v-if="auditLogs.length === 0" description="暂无审计记录" />
+            <OjosDataTable v-else :columns="auditColumns" :data="auditLogs" :pagination="{ pageSize: 12 }" />
+          </NTabPane>
+        </NTabs>
+      </OjosSection>
     </template>
   </div>
 </template>
@@ -204,24 +175,18 @@ onMounted(() => void load())
   gap: 16px;
 }
 
-.admin-summary-grid {
+.permission-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 
-.permission-grant-form {
-  width: 100%;
+.grant-form {
+  max-width: 520px;
 }
 
-@media (max-width: 1000px) {
-  .admin-summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 680px) {
-  .admin-summary-grid {
+@media (max-width: 900px) {
+  .permission-summary {
     grid-template-columns: 1fr;
   }
 }

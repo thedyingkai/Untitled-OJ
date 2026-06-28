@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import OjosStatusTag from './OjosStatusTag.vue'
 
 defineProps<{
@@ -7,5 +7,5 @@ defineProps<{
 </script>
 
 <template>
-  <OjosStatusTag :status="status" domain="module" />
+  <OjosStatusTag :status="status" domain="service" />
 </template>

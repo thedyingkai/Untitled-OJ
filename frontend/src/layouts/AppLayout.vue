@@ -15,15 +15,15 @@ import {
   type MenuOption,
 } from 'naive-ui'
 
+import { getServiceRuntimeSnapshot } from '../api/services'
 import { useAuthStore } from '../stores/auth'
-import { getModuleRuntimeSnapshot } from '../api/modules'
-import type { ModuleMenuItem } from '../types/module'
+import type { ServiceMenuItem } from '../types/service'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const collapsed = ref(false)
-const runtimeMenus = ref<ModuleMenuItem[]>([])
+const runtimeMenus = ref<ServiceMenuItem[]>([])
 
 const canUseAdmin = computed(
   () => auth.hasAnyRole(['super_admin', 'admin']) || auth.hasAnyPermission(['system.admin']),
@@ -37,7 +37,7 @@ const menuOptions = computed<MenuOption[]>(() => {
     menuLink('/dashboard', '总览'),
     ...(primaryMenus.length > 0
       ? primaryMenus
-      : [menuLink('/problems', '题目'), menuLink('/submissions', '提交')]),
+      : [menuLink('/problems', '题库'), menuLink('/submissions', '提交')]),
     menuLink('/me', '账号'),
   ]
 
@@ -78,18 +78,11 @@ const breadcrumbs = computed(() =>
 function menuLink(path: string, label: string): MenuOption {
   return {
     key: path,
-    label: () =>
-      h(
-        RouterLink,
-        { to: path },
-        {
-          default: () => label,
-        },
-      ),
+    label: () => h(RouterLink, { to: path }, { default: () => label }),
   }
 }
 
-function runtimeMenuOptions(items: ModuleMenuItem[]): MenuOption[] {
+function runtimeMenuOptions(items: ServiceMenuItem[]): MenuOption[] {
   const seen = new Set<string>()
   return items
     .filter((item) => item.enabled)
@@ -100,7 +93,7 @@ function runtimeMenuOptions(items: ModuleMenuItem[]): MenuOption[] {
       seen.add(item.route_path)
       const routePath = routeExists(item.route_path)
         ? item.route_path
-        : `/admin/services/contributions/${encodeURIComponent(item.module_id)}`
+        : `/admin/services/contributions/${encodeURIComponent(item.service_id)}`
       return [menuLink(routePath, item.title)]
     })
 }
@@ -109,7 +102,7 @@ function routeExists(path: string): boolean {
   return router.getRoutes().some((item) => item.path === path || item.path.replace(/\/:.*$/, '') === path)
 }
 
-function canUseMenu(item: ModuleMenuItem): boolean {
+function canUseMenu(item: ServiceMenuItem): boolean {
   if (!item.required_permission) return true
   return auth.hasAnyPermission([item.required_permission, 'system.admin'])
 }
@@ -120,7 +113,7 @@ async function loadRuntimeMenus(): Promise<void> {
     return
   }
   try {
-    const snapshot = await getModuleRuntimeSnapshot()
+    const snapshot = await getServiceRuntimeSnapshot()
     runtimeMenus.value = snapshot.menus
   } catch {
     runtimeMenus.value = []
@@ -158,7 +151,7 @@ onMounted(() => void loadRuntimeMenus())
         </div>
       </div>
       <NMenu :options="menuOptions" :value="selectedKey" :default-expanded-keys="expandedKeys" />
-      <div class="sider-footer">安装与拓扑变更请使用 Root Installer GUI/TUI/CLI</div>
+      <div class="sider-footer">安装、热插拔和全局拓扑变更请使用 Root Installer GUI/TUI/CLI</div>
     </NLayoutSider>
 
     <NLayout class="app-main">

@@ -1,10 +1,10 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import OjosStatusTag from '../oj/OjosStatusTag.vue'
 
 withDefaults(
   defineProps<{
     status: string
-    domain?: 'judge' | 'health' | 'worker' | 'module' | 'task' | 'problem'
+    domain?: 'judge' | 'health' | 'worker' | 'service' | 'task' | 'problem'
   }>(),
   {
     domain: 'judge',

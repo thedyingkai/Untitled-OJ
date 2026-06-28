@@ -18,12 +18,12 @@ import {
   getRuntimeOperations,
   getRuntimeService,
   getRuntimeServices,
-  planRuntimeServiceRestart,
   planRuntimeServiceReload,
+  planRuntimeServiceRestart,
   planRuntimeServiceStart,
   planRuntimeServiceStop,
   reloadRuntimeServices,
-} from '../../api/modules'
+} from '../../api/services'
 import { toApiClientError, type ApiClientError } from '../../api/client'
 import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
 import EmptyView from '../../components/common/EmptyView.vue'
@@ -33,11 +33,11 @@ import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
 import OjosSection from '../../components/oj/OjosSection.vue'
 import OjosStatCard from '../../components/oj/OjosStatCard.vue'
 import type {
-  ModuleRuntimeService,
   RuntimeOperationItem,
   RuntimePlanItem,
   RuntimeServicesResponse,
-} from '../../types/module'
+  ServiceRuntimeService,
+} from '../../types/service'
 
 const route = useRoute()
 const message = useMessage()
@@ -46,7 +46,7 @@ const refreshing = ref(false)
 const planning = ref('')
 const error = ref<ApiClientError | null>(null)
 const services = ref<RuntimeServicesResponse | null>(null)
-const selectedService = ref<ModuleRuntimeService | null>(null)
+const selectedService = ref<ServiceRuntimeService | null>(null)
 const plan = ref<RuntimePlanItem | null>(null)
 const operations = ref<RuntimeOperationItem[]>([])
 
@@ -63,18 +63,12 @@ const visibleOperations = computed(() => {
   if (!selectedService.value) return operations.value
   return operations.value.filter((item) => item.service_id === selectedService.value?.service_id)
 })
-const ojosctlDryRun = computed(() => plan.value
-  ? `ojosctl runtime apply-plan ${plan.value.plan_id}.json --dry-run`
-  : '',
-)
-const ojosctlConfirm = computed(() => plan.value
-  ? `ojosctl runtime apply-plan ${plan.value.plan_id}.json --confirm`
-  : '',
-)
+const ojosctlDryRun = computed(() => plan.value ? `ojosctl runtime apply-plan ${plan.value.plan_id}.json --dry-run` : '')
+const ojosctlConfirm = computed(() => plan.value ? `ojosctl runtime apply-plan ${plan.value.plan_id}.json --confirm` : '')
 
-const serviceColumns: DataTableColumns<ModuleRuntimeService> = [
+const serviceColumns: DataTableColumns<ServiceRuntimeService> = [
   {
-    title: '服务',
+    title: 'Service',
     key: 'service_id',
     minWidth: 220,
     render: (row) =>
@@ -84,24 +78,14 @@ const serviceColumns: DataTableColumns<ModuleRuntimeService> = [
         { default: () => row.service_id },
       ),
   },
-  { title: '模块', key: 'module_id', minWidth: 240 },
+  { title: 'Owner', key: 'owner_service_id', minWidth: 220 },
   { title: '类型', key: 'kind', width: 120 },
-  { title: '运行时', key: 'runtime', width: 120 },
+  { title: 'Runtime', key: 'runtime', width: 120 },
   { title: '生命周期', key: 'lifecycle', width: 130 },
   { title: '状态', key: 'state', width: 130, render: (row) => stateTag(row.state) },
   { title: '健康', key: 'health', width: 120, render: (row) => healthTag(row.health) },
-  {
-    title: '路由',
-    key: 'routes',
-    minWidth: 220,
-    render: (row) => row.routes.join(', ') || '无',
-  },
-  {
-    title: '警告',
-    key: 'warnings',
-    minWidth: 260,
-    render: (row) => [...row.blocked_by, ...row.warnings].join('; ') || '无',
-  },
+  { title: '路由', key: 'routes', minWidth: 220, render: (row) => row.routes.join(', ') || '无' },
+  { title: '警告', key: 'warnings', minWidth: 260, render: (row) => [...row.blocked_by, ...row.warnings].join('; ') || '无' },
 ]
 
 const operationColumns: DataTableColumns<RuntimeOperationItem> = [
@@ -114,20 +98,15 @@ const operationColumns: DataTableColumns<RuntimeOperationItem> = [
 ]
 
 async function load(silent = false): Promise<void> {
-  if (silent) {
-    refreshing.value = true
-  } else {
-    loading.value = true
-  }
+  refreshing.value = silent
+  loading.value = !silent
   error.value = null
   try {
     services.value = await getRuntimeServices()
     operations.value = (await getRuntimeOperations()).operations
-    if (selectedServiceId.value) {
-      selectedService.value = (await getRuntimeService(selectedServiceId.value)).service
-    } else {
-      selectedService.value = null
-    }
+    selectedService.value = selectedServiceId.value
+      ? (await getRuntimeService(selectedServiceId.value)).service
+      : null
   } catch (err) {
     error.value = toApiClientError(err)
   } finally {
@@ -155,15 +134,10 @@ async function generatePlan(action: 'start' | 'stop' | 'restart' | 'reload'): Pr
   error.value = null
   try {
     const serviceId = selectedService.value.service_id
-    if (action === 'start') {
-      plan.value = (await planRuntimeServiceStart(serviceId)).plan
-    } else if (action === 'stop') {
-      plan.value = (await planRuntimeServiceStop(serviceId)).plan
-    } else if (action === 'restart') {
-      plan.value = (await planRuntimeServiceRestart(serviceId)).plan
-    } else {
-      plan.value = (await planRuntimeServiceReload(serviceId)).plan
-    }
+    if (action === 'start') plan.value = (await planRuntimeServiceStart(serviceId)).plan
+    else if (action === 'stop') plan.value = (await planRuntimeServiceStop(serviceId)).plan
+    else if (action === 'restart') plan.value = (await planRuntimeServiceRestart(serviceId)).plan
+    else plan.value = (await planRuntimeServiceReload(serviceId)).plan
   } catch (err) {
     error.value = toApiClientError(err)
   } finally {
@@ -231,12 +205,12 @@ onMounted(() => void load())
   <div class="runtime-services-page">
     <OjosPageHeader
       :title="pageTitle"
-      description="来自 Kernel Runtime driver 的服务与 Worker 状态视图。Web Shell 只生成计划，不执行 apply。"
-      eyebrow="Hotplug L2"
+      description="来自 Runtime driver 的 Service 与 Worker 状态视图。Web Shell 只生成计划和展示记录，不执行 apply。"
+      eyebrow="只读 Runtime"
     >
       <template #actions>
         <NSpace>
-          <NButton secondary :loading="refreshing" @click="reloadRuntime()">重载 Runtime</NButton>
+          <NButton secondary :loading="refreshing" @click="reloadRuntime()">重新读取 Runtime</NButton>
           <NButton secondary :loading="refreshing" @click="load(true)">刷新</NButton>
         </NSpace>
       </template>
@@ -255,10 +229,10 @@ onMounted(() => void load())
 
         <OjosSection v-if="selectedService" title="服务详情">
           <NDescriptions :column="2" bordered label-placement="left">
-            <NDescriptionsItem label="服务">{{ selectedService.service_id }}</NDescriptionsItem>
-            <NDescriptionsItem label="模块">{{ selectedService.module_id }}</NDescriptionsItem>
+            <NDescriptionsItem label="Service">{{ selectedService.service_id }}</NDescriptionsItem>
+            <NDescriptionsItem label="Owner">{{ selectedService.owner_service_id }}</NDescriptionsItem>
             <NDescriptionsItem label="类型">{{ selectedService.kind }}</NDescriptionsItem>
-            <NDescriptionsItem label="运行时">{{ selectedService.runtime }}</NDescriptionsItem>
+            <NDescriptionsItem label="Runtime">{{ selectedService.runtime }}</NDescriptionsItem>
             <NDescriptionsItem label="生命周期">{{ selectedService.lifecycle }}</NDescriptionsItem>
             <NDescriptionsItem label="Compose">{{ selectedService.compose_service || '无' }}</NDescriptionsItem>
             <NDescriptionsItem label="状态">
@@ -332,20 +306,14 @@ onMounted(() => void load())
 }
 
 .plan-actions {
-  margin-top: 14px;
+  margin-top: 12px;
 }
 
 .plan-meta {
   margin: 12px 0;
 }
 
-@media (max-width: 960px) {
-  .runtime-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 640px) {
+@media (max-width: 900px) {
   .runtime-summary {
     grid-template-columns: 1fr;
   }

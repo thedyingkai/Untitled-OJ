@@ -1,16 +1,16 @@
-import type { PermissionCode, RoleName } from './auth'
+﻿import type { PermissionCode, RoleName } from './auth'
 
 export interface RoleItem {
   id: number
   name: RoleName
-  module_code?: string
+  service_code?: string
   description?: string
   is_system?: boolean
 }
 
 export interface PermissionItem {
   code: PermissionCode
-  module_code: string
+  service_code: string
   name: string
   description?: string
 }
