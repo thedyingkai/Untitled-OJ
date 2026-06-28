@@ -30,13 +30,13 @@ const canUseAdmin = computed(
 )
 
 const menuOptions = computed<MenuOption[]>(() => {
-  const primaryModuleMenus = moduleMenuOptions(
+  const primaryMenus = runtimeMenuOptions(
     runtimeMenus.value.filter((item) => !item.route_path.startsWith('/admin')),
   )
   const options: MenuOption[] = [
     menuLink('/dashboard', '总览'),
-    ...(primaryModuleMenus.length > 0
-      ? primaryModuleMenus
+    ...(primaryMenus.length > 0
+      ? primaryMenus
       : [menuLink('/problems', '题目'), menuLink('/submissions', '提交')]),
     menuLink('/me', '账号'),
   ]
@@ -47,12 +47,10 @@ const menuOptions = computed<MenuOption[]>(() => {
       label: '管理',
       children: [
         menuLink('/admin/health', '健康'),
-        ...moduleMenuOptions(runtimeMenus.value.filter((item) => item.route_path.startsWith('/admin'))),
-        menuLink('/admin/modules', '模块'),
-        menuLink('/admin/runtime/services', 'Runtime'),
-        menuLink('/admin/modules/installer', '安装器视图'),
-        menuLink('/admin/modules/contributions', '贡献'),
-        menuLink('/admin/modules/topology', '拓扑'),
+        ...runtimeMenuOptions(runtimeMenus.value.filter((item) => item.route_path.startsWith('/admin'))),
+        menuLink('/admin/runtime/services', 'Runtime 服务'),
+        menuLink('/admin/topology', 'Topology 只读'),
+        menuLink('/admin/services/contributions', 'Service UI'),
         menuLink('/admin/users', '用户'),
         menuLink('/admin/permissions', '权限'),
         menuLink('/admin/permission-check', '权限检查'),
@@ -64,11 +62,9 @@ const menuOptions = computed<MenuOption[]>(() => {
 })
 
 const selectedKey = computed(() => {
-  if (route.path.startsWith('/admin/modules/topology')) return '/admin/modules/topology'
-  if (route.path.startsWith('/admin/modules/contributions')) return '/admin/modules/contributions'
-  if (route.path.startsWith('/admin/modules/installer')) return '/admin/modules/installer'
+  if (route.path.startsWith('/admin/topology')) return '/admin/topology'
+  if (route.path.startsWith('/admin/services/contributions')) return '/admin/services/contributions'
   if (route.path.startsWith('/admin/runtime/services')) return '/admin/runtime/services'
-  if (route.path.startsWith('/admin/modules/')) return '/admin/modules'
   if (route.path.startsWith('/problems')) return '/problems'
   if (route.path.startsWith('/submissions')) return '/submissions'
   return route.path
@@ -93,7 +89,7 @@ function menuLink(path: string, label: string): MenuOption {
   }
 }
 
-function moduleMenuOptions(items: ModuleMenuItem[]): MenuOption[] {
+function runtimeMenuOptions(items: ModuleMenuItem[]): MenuOption[] {
   const seen = new Set<string>()
   return items
     .filter((item) => item.enabled)
@@ -104,7 +100,7 @@ function moduleMenuOptions(items: ModuleMenuItem[]): MenuOption[] {
       seen.add(item.route_path)
       const routePath = routeExists(item.route_path)
         ? item.route_path
-        : `/admin/modules/contributions/${encodeURIComponent(item.module_id)}`
+        : `/admin/services/contributions/${encodeURIComponent(item.module_id)}`
       return [menuLink(routePath, item.title)]
     })
 }
@@ -158,11 +154,11 @@ onMounted(() => void loadRuntimeMenus())
         <div class="brand-mark">OJ</div>
         <div class="brand-copy">
           <strong>OJOS</strong>
-          <span>评测控制台</span>
+          <span>Service Runtime</span>
         </div>
       </div>
       <NMenu :options="menuOptions" :value="selectedKey" :default-expanded-keys="expandedKeys" />
-      <div class="sider-footer">官方安装入口：ojosctl / TUI</div>
+      <div class="sider-footer">安装与拓扑变更请使用 Root Installer GUI/TUI/CLI</div>
     </NLayoutSider>
 
     <NLayout class="app-main">
