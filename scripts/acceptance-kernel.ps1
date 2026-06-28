@@ -67,11 +67,11 @@ if (-not $WorkerToken) {
 $summary = [ordered]@{
   static_failed = $false
   api_failed = $false
-  compat_failed = $false
+  service_runtime_failed = $false
   path_leaks = 0
   admin_health_status = ""
   admin_health_judge_status = ""
-  module_compat = "not_run"
+  service_runtime = "not_run"
   controlled_apply = "skipped"
   overall_status = "unknown"
 }
@@ -113,34 +113,29 @@ try {
     }
   }
 
-  Run-Step "module compatibility" {
+  Run-Step "service runtime e2e" {
     $args = @(
-      "-NoProfile", "-File", "scripts\e2e-module-compat.ps1",
-      "-BaseUrl", $BaseUrl,
-      "-AdminUsername", $AdminUsername,
-      "-AdminPassword", $AdminPassword,
-      "-UserUsername", $UserUsername,
-      "-UserPassword", $UserPassword
+      "-NoProfile", "-File", "scripts\e2e-service-runtime.ps1"
     )
-    $result = Run-Capture "e2e-module-compat" "powershell" $args
+    $result = Run-Capture "e2e-service-runtime" "powershell" $args
     $json = Last-JsonObject $result.Text
     if ($result.ExitCode -ne 0 -or $null -eq $json) {
-      $summary.compat_failed = $true
-      $summary.module_compat = "failed"
+      $summary.service_runtime_failed = $true
+      $summary.service_runtime = "failed"
     } else {
-      if ([int]$json.failed -ne 0) { $summary.compat_failed = $true }
+      if ([int]$json.failed -ne 0) { $summary.service_runtime_failed = $true }
       $summary.path_leaks += [int]$json.path_leaks
-      $summary.module_compat = [string]$json.sample_module_compat
+      $summary.service_runtime = [string]$json.overall_status
     }
   }
 
   Run-Step "ojosctl smoke" {
     $commands = @(
-      @("run", "-q", "-p", "ojosctl", "--", "module", "doctor"),
-      @("run", "-q", "-p", "ojosctl", "--", "module", "validate", "modules/sample-hello/module.yaml", "--repo-root", "."),
-      @("run", "-q", "-p", "ojosctl", "--", "runtime", "services"),
-      @("run", "-q", "-p", "ojosctl", "--", "runtime", "plan-restart", "problem-api", "--out", ".tmp/agent/scratch/acceptance-problem-api-restart.json"),
-      @("run", "-q", "-p", "ojosctl", "--", "runtime", "apply-plan", ".tmp/agent/scratch/acceptance-problem-api-restart.json", "--dry-run")
+      @("run", "-q", "-p", "ojosctl", "--", "service", "validate", "services/gateway/service.yaml", "--repo-root", "."),
+      @("run", "-q", "-p", "ojosctl", "--", "service", "install-plan", "services/judge-worker/service.yaml", "--repo-root", "."),
+      @("run", "-q", "-p", "ojosctl", "--", "set", "expand", "sets/distributed-root.yaml", "--repo-root", "."),
+      @("run", "-q", "-p", "ojosctl", "--", "endpoint", "validate", "127.0.0.1:8080"),
+      @("run", "-q", "-p", "ojosctl", "--", "topology", "snapshot", "--repo-root", ".")
     )
     $index = 0
     foreach ($cmdArgs in $commands) {
@@ -155,7 +150,13 @@ try {
   if ($RunControlledApply -and -not $SkipControlledApply) {
     Run-Step "controlled apply smoke" {
       $planPath = ".tmp/agent/scratch/acceptance-problem-api-restart.json"
-      $result = Run-Capture "controlled-apply" "cargo" ([string[]]@("run", "-q", "-p", "ojosctl", "--", "runtime", "apply-plan", $planPath, "--confirm"))
+      New-Item -ItemType Directory -Force (Split-Path -Parent $planPath) | Out-Null
+      $planResult = Run-Capture "controlled-apply-plan" "cargo" ([string[]]@("run", "-q", "-p", "ojosctl", "--", "runtime", "plan-restart", "problem-api", "--out", $planPath, "--repo-root", "."))
+      if ($planResult.ExitCode -ne 0 -or -not (Test-Path $planPath)) {
+        $summary.controlled_apply = "failed"
+        throw "controlled apply plan generation failed"
+      }
+      $result = Run-Capture "controlled-apply" "cargo" ([string[]]@("run", "-q", "-p", "ojosctl", "--", "runtime", "apply-plan", $planPath, "--confirm", "--repo-root", "."))
       if ($result.ExitCode -ne 0) {
         $summary.controlled_apply = "failed"
         throw "controlled apply smoke failed"
@@ -166,7 +167,7 @@ try {
     $summary.controlled_apply = "skipped"
   }
 
-  if (-not $summary.static_failed -and -not $summary.api_failed -and -not $summary.compat_failed -and [int]$summary.path_leaks -eq 0) {
+  if (-not $summary.static_failed -and -not $summary.api_failed -and -not $summary.service_runtime_failed -and [int]$summary.path_leaks -eq 0) {
     $summary.overall_status = "ok"
   } else {
     $summary.overall_status = "failed"

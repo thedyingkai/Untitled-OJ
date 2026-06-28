@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "v0.1.0",
+  [string]$Version = "service-first",
   [switch]$SkipDockerBuild
 )
 
@@ -10,7 +10,6 @@ $Root = Split-Path -Parent $PSScriptRoot
 $OutDir = Join-Path $Root ".tmp/release/$Version"
 $BinDir = Join-Path $OutDir "bin"
 $PackageDir = Join-Path $OutDir "packages"
-$FrontendDir = Join-Path $OutDir "frontend"
 
 function Step($Name, [scriptblock]$Body) {
   Write-Host ""
@@ -36,44 +35,10 @@ function Add-Checksum($Path, [System.Collections.Generic.List[string]]$Rows) {
   $Rows.Add("$($hash.Hash.ToLowerInvariant())  $rel") | Out-Null
 }
 
-function Write-Utf8NoBom($Path, [string]$Content) {
-  $encoding = [System.Text.UTF8Encoding]::new($false)
-  [System.IO.File]::WriteAllText($Path, $Content, $encoding)
-}
-
-function Test-LoopbackProxy([string]$Value) {
-  if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
-  try {
-    $uri = [Uri]$Value
-    return @("127.0.0.1", "localhost", "::1") -contains $uri.Host
-  } catch {
-    return $false
-  }
-}
-
-function Invoke-WithoutLoopbackProxy([scriptblock]$Body) {
-  $names = @("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-  $saved = @{}
-  foreach ($name in $names) {
-    $saved[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-    if (Test-LoopbackProxy $saved[$name]) {
-      [Environment]::SetEnvironmentVariable($name, "", "Process")
-    }
-  }
-
-  try {
-    & $Body
-  } finally {
-    foreach ($name in $names) {
-      [Environment]::SetEnvironmentVariable($name, $saved[$name], "Process")
-    }
-  }
-}
-
 Push-Location $Root
 try {
   if (Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
-  New-Item -ItemType Directory -Force $BinDir, $PackageDir, $FrontendDir | Out-Null
+  New-Item -ItemType Directory -Force $BinDir, $PackageDir | Out-Null
 
   Step "Rust release binaries" {
     Run "cargo" @("build", "--release", "-p", "ojosctl", "-p", "ojos-installer-tui")
@@ -81,40 +46,17 @@ try {
     Copy-Artifact "target/release/ojos-installer-tui.exe" (Join-Path $BinDir "ojos-installer-tui.exe")
   }
 
-  Step "Sample module package" {
-    Run "cargo" @("run", "-q", "-p", "ojosctl", "--", "--json", "module", "package", "modules/sample-hello", "-o", (Join-Path $PackageDir "sample-hello.ojosmod"))
-    Run "cargo" @("run", "-q", "-p", "ojosctl", "--", "--json", "module", "verify", (Join-Path $PackageDir "sample-hello.ojosmod"))
-  }
-
-  Step "Frontend build" {
-    Push-Location "frontend"
-    try {
-      Run "npm" @("run", "build")
-    } finally {
-      Pop-Location
+  Step "Service packages" {
+    foreach ($service in @("gateway", "problem-api", "judge-api", "judge-worker")) {
+      $out = Join-Path $PackageDir "$service.ojos-service"
+      Run "cargo" @("run", "-q", "-p", "ojosctl", "--", "--json", "service", "package", "services/$service", "-o", $out)
+      Run "cargo" @("run", "-q", "-p", "ojosctl", "--", "--json", "service", "verify", $out)
     }
-    Copy-Item -Recurse -Force "frontend/dist" (Join-Path $FrontendDir "dist")
   }
 
   if (-not $SkipDockerBuild) {
     Step "Docker images" {
-      Invoke-WithoutLoopbackProxy {
-        Run "docker" @("compose", "--env-file", ".env.example", "-f", "deploy/compose/docker-compose.yml", "build", "gateway", "auth", "problem-api", "judge-api", "judge-worker", "module-installer")
-      }
-    }
-  }
-
-  Step "Release documents" {
-    foreach ($doc in @(
-      "docs/release/v0.1.0-release-notes.md",
-      "docs/release/v0.1.0-ship-checklist.md",
-      "docs/release/v0.1.0-acceptance-report.md",
-      "docs/release/v0.1.0-known-limitations.md",
-      "docs/release/v0.1.0-artifacts.md"
-    )) {
-      if (Test-Path $doc) {
-        Copy-Item -Force $doc $OutDir
-      }
+      Run "docker" @("compose", "--env-file", ".env.example", "-f", "deploy/compose/docker-compose.yml", "build", "gateway", "auth", "problem-api", "judge-api", "judge-worker", "root-runtime-manager")
     }
   }
 
@@ -132,13 +74,12 @@ try {
     artifacts = @(
       "bin/ojosctl.exe",
       "bin/ojos-installer-tui.exe",
-      "packages/sample-hello.ojosmod",
-      "frontend/dist",
+      "packages/*.ojos-service",
       "checksums.sha256"
     )
     docker_images = if ($SkipDockerBuild) { "skipped" } else { "built_by_docker_compose" }
   }
-  Write-Utf8NoBom (Join-Path $OutDir "artifact-manifest.json") ($manifest | ConvertTo-Json -Depth 5)
+  [System.IO.File]::WriteAllText((Join-Path $OutDir "artifact-manifest.json"), ($manifest | ConvertTo-Json -Depth 5), [System.Text.UTF8Encoding]::new($false))
   $manifest | ConvertTo-Json -Depth 5
 } finally {
   Pop-Location

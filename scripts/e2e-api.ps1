@@ -1,12 +1,10 @@
 <#
 用途:
-  在 Docker Control Plane 已经启动后，通过 Gateway 对现有核心 API 做真实运行时验收。
-
+  在 Docker Service Runtime 已启动后，通过 Gateway 对当前 API 做真实运行时验收。
 运行前提:
   1. 已在项目根目录准备好 .env。
   2. 已执行 docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build。
-  3. 数据库迁移已执行，且 Postgres/Redis/Gateway/Auth/Problem/Judge 服务可用。
-
+  3. 数据库迁移已执行，且 Postgres/Redis/Gateway/Auth/Problem API/Judge API 服务可用。
 运行方式:
   powershell -NoProfile -File scripts\e2e-api.ps1 `
     -BaseUrl http://localhost:8080/api `
@@ -21,14 +19,11 @@
   -UserUsername  普通测试账号用户名。
   -UserPassword  普通测试账号密码。
   -WorkerToken   Worker Link 接口使用的 X-OJOS-Worker-Token。
-
 输出位置:
-  所有运行报告、响应摘要、token 临时文件只写入 .tmp/agent/reports/api-runtime/。
-
+  运行报告、响应摘要、token 运行文件只写入 .tmp/agent/reports/api-runtime/。
 失败处理:
   任一接口状态码不符合预期、路径泄露扫描命中、worker claim 未拿到任务时，脚本返回非零退出码。
 #>
-
 param(
   [string]$BaseUrl = "http://localhost:8080/api",
   [string]$AdminUsername = "admin1",
@@ -670,92 +665,20 @@ try {
   Invoke-Api "modules.installer.discover.admin" GET "/admin/modules/discover" -Token $script:AdminToken -Expected @(200) | Out-Null
   Invoke-Api "modules.installer.discover.user" GET "/admin/modules/discover" -Token $script:UserToken -Expected @(403) | Out-Null
   Invoke-Api "modules.installer.discover.none" GET "/admin/modules/discover" -Expected @(401) | Out-Null
-  $demoManifest = @{ manifest_path = "modules/demo-module/module.yaml"; dry_run = $true }
-  Invoke-Api "modules.installer.validate.demo" POST "/admin/modules/validate" $demoManifest -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.plan.demo" POST "/admin/modules/plan" $demoManifest -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.install.dry-run.demo" POST "/admin/modules/install" $demoManifest -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.install.apply.demo" POST "/admin/modules/install" @{ manifest_path = "modules/demo-module/module.yaml"; dry_run = $false } -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.enable.demo" POST "/admin/modules/ojos.demo-module/enable" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
-  $demoActiveSnapshot = Invoke-Api "modules.runtime-snapshot.demo-enabled" GET "/admin/modules/runtime-snapshot" -Token $script:AdminToken -Expected @(200)
-  if ($demoActiveSnapshot.Json) {
-    $demoActiveModules = Get-JsonArray $demoActiveSnapshot.Json "modules"
-    $demoActivePermissions = Get-JsonArray $demoActiveSnapshot.Json "permissions"
-    $demoActiveTopologyNodes = Get-JsonArray $demoActiveSnapshot.Json.topology "nodes"
-    if (-not (Has-JsonItem $demoActiveModules "module_id" "ojos.demo-module")) {
-      $failures.Add("enabled demo module missing from active runtime snapshot") | Out-Null
-    }
-    if (-not (Has-JsonItem $demoActivePermissions "permission_key" "demo.view")) {
-      $failures.Add("enabled demo permission missing from active runtime snapshot") | Out-Null
-    }
-    if (-not (Has-JsonItem $demoActiveTopologyNodes "module_id" "ojos.demo-module")) {
-      $failures.Add("enabled demo topology contribution missing from active runtime snapshot") | Out-Null
-    }
-  } else {
-    $failures.Add("demo enabled runtime snapshot response is not JSON") | Out-Null
-  }
-  $demoMetadataPlan = Invoke-Api "runtime.service.demo-metadata.plan-start.blocked" POST "/admin/runtime/services/demo-metadata-service/plan-start" @{} -Token $script:AdminToken -Expected @(200)
-  if ($demoMetadataPlan.Json) {
-    $blockedBy = @($demoMetadataPlan.Json.plan.blocked_by)
-    if ($blockedBy -notcontains "metadata lifecycle cannot start") {
-      $failures.Add("demo metadata service plan-start expected metadata lifecycle block got $($blockedBy -join ',')") | Out-Null
-    }
-    if ($demoMetadataPlan.Json.plan.can_apply -ne $false) {
-      $failures.Add("demo metadata service plan-start should not be applyable") | Out-Null
-    }
-  } else {
-    $failures.Add("demo metadata plan-start response is not JSON") | Out-Null
-  }
-  $demoRoutesAll = Invoke-Api "modules.runtime.routes.demo-enabled.include-disabled" GET "/admin/modules/runtime/routes?include_disabled=true" -Token $script:AdminToken -Expected @(200)
-  if ($demoRoutesAll.Json) {
-    $demoRouteItems = Get-JsonArray $demoRoutesAll.Json "routes"
-    if (-not (Has-JsonItem $demoRouteItems "prefix" "/api/demo-module")) {
-      $failures.Add("demo metadata gateway route missing from runtime route table include_disabled") | Out-Null
-    }
-    $demoRoute = Get-JsonItem $demoRouteItems "prefix" "/api/demo-module"
-    if ($null -ne $demoRoute -and [string]$demoRoute.service_id -ne "demo-api") {
-      $failures.Add("demo gateway route expected service_id demo-api got $($demoRoute.service_id)") | Out-Null
-    }
-  }
-  Invoke-Api "modules.installer.disable.demo" POST "/admin/modules/ojos.demo-module/disable" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
-  $demoDisabledActiveSnapshot = Invoke-Api "modules.runtime-snapshot.demo-disabled.active" GET "/admin/modules/runtime-snapshot" -Token $script:AdminToken -Expected @(200)
-  $demoDisabledAllSnapshot = Invoke-Api "modules.runtime-snapshot.demo-disabled.include-disabled" GET "/admin/modules/runtime-snapshot?include_disabled=true" -Token $script:AdminToken -Expected @(200)
-  if ($demoDisabledActiveSnapshot.Json) {
-    $demoDisabledActiveModules = Get-JsonArray $demoDisabledActiveSnapshot.Json "modules"
-    $demoDisabledActivePermissions = Get-JsonArray $demoDisabledActiveSnapshot.Json "permissions"
-    if (Has-JsonItem $demoDisabledActiveModules "module_id" "ojos.demo-module") {
-      $failures.Add("disabled demo module should not appear in active runtime snapshot") | Out-Null
-    }
-    if (Has-JsonItem $demoDisabledActivePermissions "permission_key" "demo.view") {
-      $failures.Add("disabled demo permission should not appear as active runtime contribution") | Out-Null
-    }
-  }
-  if ($demoDisabledAllSnapshot.Json) {
-    $demoDisabledAllModules = Get-JsonArray $demoDisabledAllSnapshot.Json "modules"
-    $demoDisabledAllPermissions = Get-JsonArray $demoDisabledAllSnapshot.Json "permissions"
-    if (-not (Has-JsonItem $demoDisabledAllModules "module_id" "ojos.demo-module")) {
-      $failures.Add("include_disabled runtime snapshot should include disabled demo module") | Out-Null
-    }
-    if (-not (Has-JsonItem $demoDisabledAllPermissions "permission_key" "demo.view")) {
-      $failures.Add("include_disabled runtime snapshot should include disabled demo permission") | Out-Null
-    }
-  }
-  Invoke-Api "modules.runtime.reload.after-demo-disabled" POST "/admin/modules/runtime/reload" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "dynamic.proxy.demo.disabled.not-proxied" GET "/demo-module/ping" -Token $script:AdminToken -Expected @(404) | Out-Null
-  Invoke-Api "modules.installer.upgrade-plan.demo" POST "/admin/modules/ojos.demo-module/upgrade-plan" $demoManifest -Token $script:AdminToken -Expected @(200, 400) | Out-Null
-  Invoke-Api "modules.installer.rollback-plan.demo" POST "/admin/modules/ojos.demo-module/rollback-plan" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.uninstall-dry-run.demo" POST "/admin/modules/ojos.demo-module/uninstall-dry-run" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.health.demo" GET "/admin/modules/ojos.demo-module/health" -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.operations.demo" GET "/admin/modules/ojos.demo-module/operations" -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.disable.judge-core.refused" POST "/admin/modules/ojos.judge-core/disable" @{} -Token $script:AdminToken -Expected @(403) | Out-Null
-  Invoke-Api "modules.installer.uninstall.judge-core.refused" POST "/admin/modules/ojos.judge-core/uninstall-dry-run" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.install.user.denied" POST "/admin/modules/install" $demoManifest -Token $script:UserToken -Expected @(403) | Out-Null
-
+  $legacyManifest = @{ manifest_path = "modules/demo-module/module.yaml"; dry_run = $true }
+  Invoke-Api "legacy.modules.installer.validate.demo.blocked" POST "/admin/modules/validate" $legacyManifest -Token $script:AdminToken -Expected @(400) | Out-Null
+  Invoke-Api "legacy.modules.installer.plan.demo.blocked" POST "/admin/modules/plan" $legacyManifest -Token $script:AdminToken -Expected @(400) | Out-Null
+  Invoke-Api "legacy.modules.installer.install.dry-run.demo.blocked" POST "/admin/modules/install" $legacyManifest -Token $script:AdminToken -Expected @(400) | Out-Null
+  Invoke-Api "legacy.modules.installer.install.user.denied" POST "/admin/modules/install" $legacyManifest -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "legacy.modules.installer.install.none.denied" POST "/admin/modules/install" $legacyManifest -Expected @(401) | Out-Null
+  Invoke-Api "legacy.modules.installer.disable.judge-core.refused" POST "/admin/modules/ojos.judge-core/disable" @{} -Token $script:AdminToken -Expected @(403) | Out-Null
+  Invoke-Api "legacy.modules.installer.uninstall.judge-core.refused" POST "/admin/modules/ojos.judge-core/uninstall-dry-run" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
   $composeRows = @(docker compose --env-file .env -f $ComposeFile ps --format json | ForEach-Object { $_ | ConvertFrom-Json })
   $internalServices = @(
     [pscustomobject]@{ Service = "auth"; Port = 8081 },
     [pscustomobject]@{ Service = "judge-api"; Port = 8082 },
     [pscustomobject]@{ Service = "problem-api"; Port = 8083 },
-    [pscustomobject]@{ Service = "module-installer"; Port = 8090 },
+    [pscustomobject]@{ Service = "root-runtime-manager"; Port = 8090 },
     [pscustomobject]@{ Service = "postgres"; Port = 5432 },
     [pscustomobject]@{ Service = "redis"; Port = 6379 }
   )
