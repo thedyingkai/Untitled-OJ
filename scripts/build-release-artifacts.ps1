@@ -48,7 +48,7 @@ try {
 
   Step "Service packages" {
     foreach ($service in @("gateway", "problem-api", "judge-api", "judge-worker")) {
-      $out = Join-Path $PackageDir "$service.ojos-service"
+      $out = Join-Path $PackageDir "$service.ojossvc"
       Run "cargo" @("run", "-q", "-p", "ojosctl", "--", "--json", "service", "package", "services/$service", "-o", $out)
       Run "cargo" @("run", "-q", "-p", "ojosctl", "--", "--json", "service", "verify", $out)
     }
@@ -74,7 +74,7 @@ try {
     artifacts = @(
       "bin/ojosctl.exe",
       "bin/ojos-installer-tui.exe",
-      "packages/*.ojos-service",
+      "packages/*.ojossvc",
       "checksums.sha256"
     )
     docker_images = if ($SkipDockerBuild) { "skipped" } else { "built_by_docker_compose" }

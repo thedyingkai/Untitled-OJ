@@ -65,15 +65,22 @@ jobs:
           npm ci
           npm run build
 
-  schema-package-compat:
-    name: Schema and package compatibility
+  service-runtime-acceptance:
+    name: Service runtime acceptance
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Run compatibility tests
+      - name: Run service-first checks
         run: |
-          cargo test -p module-installer-core checked_in_manifests_are_schema_v1_compatible
-          cargo test -p module-installer-core sample_module_package_verifies
-          cargo test -p module-installer-core package_rejects_banned_entries_and_checksum_mismatch
-          cargo test -p ojosctl module_init
+          cargo test -p service-installer-core checked_in_service_manifests_validate
+          cargo test -p service-installer-core checked_in_gateway_package_verifies
+          cargo test -p service-installer-core service_install_plan_uses_service_actions
+          cargo test -p service-installer-core set_validate_and_expand
+          cargo run -p ojosctl -- service validate services/gateway/service.yaml
+          cargo run -p ojosctl -- service package services/gateway -o .tmp/release/gateway.ojossvc
+          cargo run -p ojosctl -- service verify .tmp/release/gateway.ojossvc
+          cargo run -p ojosctl -- set expand sets/single-node-oj.yaml
+          cargo run -p ojosctl -- endpoint validate 127.0.0.1:8080
+          cargo run -p ojosctl -- link plan-create 127.0.0.1:8080 127.0.0.1:8083
+          cargo run -p ojosctl -- topology snapshot

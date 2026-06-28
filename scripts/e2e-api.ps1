@@ -1,10 +1,12 @@
 <#
 用途:
-  在 Docker Service Runtime 已启动后，通过 Gateway 对当前 API 做真实运行时验收。
+  在 Docker Service Runtime 启动后，通过 Gateway 对当前 API 做真实运行时验收。
+
 运行前提:
-  1. 已在项目根目录准备好 .env。
+  1. 已在当前 PowerShell 进程或本地 .env 中准备必要环境变量。
   2. 已执行 docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build。
-  3. 数据库迁移已执行，且 Postgres/Redis/Gateway/Auth/Problem API/Judge API 服务可用。
+  3. Postgres、Redis、Gateway、Auth、Problem API、Judge API 等服务可用。
+
 运行方式:
   powershell -NoProfile -File scripts\e2e-api.ps1 `
     -BaseUrl http://localhost:8080/api `
@@ -19,10 +21,12 @@
   -UserUsername  普通测试账号用户名。
   -UserPassword  普通测试账号密码。
   -WorkerToken   Worker Link 接口使用的 X-OJOS-Worker-Token。
+
 输出位置:
   运行报告、响应摘要、token 运行文件只写入 .tmp/agent/reports/api-runtime/。
+
 失败处理:
-  任一接口状态码不符合预期、路径泄露扫描命中、worker claim 未拿到任务时，脚本返回非零退出码。
+  任一接口状态码不符合预期、路径泄露扫描命中、Worker claim 未拿到任务时，脚本返回非零退出码。
 #>
 param(
   [string]$BaseUrl = "http://localhost:8080/api",
@@ -38,6 +42,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $Root = (Resolve-Path ".").Path
 $ComposeFile = "deploy\compose\docker-compose.yml"
+$ComposeEnvFile = if (Test-Path (Join-Path $Root ".env")) { ".env" } else { ".env.example" }
 $ReportDir = Join-Path $Root ".tmp/agent/reports/api-runtime"
 $LogDir = Join-Path $Root ".tmp/agent/logs/api-runtime"
 
@@ -92,6 +97,38 @@ $script:HttpClient.DefaultRequestHeaders.ExpectContinue = $false
 function ConvertTo-JsonBody($obj) {
   if ($null -eq $obj) { return $null }
   return ($obj | ConvertTo-Json -Depth 20 -Compress)
+}
+
+function Invoke-Compose {
+  param([Parameter(ValueFromRemainingArguments = $true)][object[]]$ComposeArgs)
+
+  if ($ComposeArgs.Count -eq 1 -and $ComposeArgs[0] -is [array]) {
+    $ComposeArgs = $ComposeArgs[0]
+  }
+
+  $staticEnv = @{
+    POSTGRES_PASSWORD = "api-e2e-postgres-password"
+    POSTGRES_DSN = "postgres://postgres:api-e2e-postgres-password@postgres:5432/ojos?sslmode=disable"
+    JWT_SECRET = "api-e2e-jwt-secret"
+    OJOS_WORKER_TOKEN = if ($WorkerToken) { $WorkerToken } else { "api-e2e-worker-token" }
+    ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN = "api-e2e-runtime-token"
+  }
+  $previous = @{}
+  foreach ($name in $staticEnv.Keys) {
+    $previous[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    if ([string]::IsNullOrWhiteSpace($previous[$name])) {
+      [Environment]::SetEnvironmentVariable($name, $staticEnv[$name], "Process")
+    }
+  }
+
+  try {
+    $dockerArgs = @("compose", "--env-file", $ComposeEnvFile, "-f", $ComposeFile) + @($ComposeArgs)
+    & docker @dockerArgs
+  } finally {
+    foreach ($name in $staticEnv.Keys) {
+      [Environment]::SetEnvironmentVariable($name, $previous[$name], "Process")
+    }
+  }
 }
 
 function New-HttpMethod([string]$Method) {
@@ -275,6 +312,7 @@ function Get-JsonArray($Value, [string]$Property) {
 
 function Has-JsonItem($Items, [string]$Property, [string]$Expected) {
   foreach ($item in @($Items)) {
+    if ($null -eq $item) { continue }
     $prop = $item.PSObject.Properties[$Property]
     if ($null -ne $prop -and [string]$prop.Value -eq $Expected) {
       return $true
@@ -296,14 +334,14 @@ function Get-JsonItem($Items, [string]$Property, [string]$Expected) {
 function Ensure-AdminRole {
   param([int64]$UserId)
   $sql = "insert into user_roles(user_id, role_id) select $UserId, id from roles where name='super_admin' on conflict do nothing;"
-  $sql | docker compose --env-file .env -f $ComposeFile exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d ojos | Out-Null
+  Invoke-Compose @("exec", "-T", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "ojos", "-c", $sql) | Out-Null
 }
 
 function Restart-ComposeWorker([bool]$Start) {
   if ($Start) {
-    docker compose --env-file .env -f $ComposeFile start judge-worker | Out-Null
+    Invoke-Compose @("start", "judge-worker") | Out-Null
   } else {
-    docker compose --env-file .env -f $ComposeFile stop judge-worker | Out-Null
+    Invoke-Compose @("stop", "judge-worker") | Out-Null
   }
 }
 
@@ -330,8 +368,8 @@ function Wait-GatewayReady {
 }
 
 try {
-  docker compose --env-file .env -f $ComposeFile ps | Set-Content (Join-Path $LogDir "compose-ps.txt")
-  docker compose --env-file .env -f $ComposeFile logs --tail=200 | Set-Content (Join-Path $LogDir "compose-logs.txt")
+  Invoke-Compose @("ps") | Set-Content (Join-Path $LogDir "compose-ps.txt")
+  Invoke-Compose @("logs", "--tail=200") | Set-Content (Join-Path $LogDir "compose-logs.txt")
 
   $r = Invoke-Api "auth.register.admin" POST "/auth/register" @{ username = $AdminUsername; password = $AdminPassword } -Expected @(200)
   $r = Invoke-Api "auth.register.user" POST "/auth/register" @{ username = $UserUsername; password = $UserPassword } -Expected @(200)
@@ -481,29 +519,32 @@ try {
   Invoke-Api "admin.health.user" GET "/admin/health" -Token $script:UserToken -Expected @(403) | Out-Null
   Invoke-Api "admin.health.none" GET "/admin/health" -Expected @(401) | Out-Null
 
-  Invoke-Api "modules.list.admin" GET "/admin/modules" -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.list.user" GET "/admin/modules" -Token $script:UserToken -Expected @(403) | Out-Null
-  Invoke-Api "modules.list.none" GET "/admin/modules" -Expected @(401) | Out-Null
-  Invoke-Api "modules.sets.admin" GET "/admin/modules/sets" -Token $script:AdminToken -Expected @(200) | Out-Null
-  $topologyResp = Invoke-Api "modules.topology.admin" GET "/admin/modules/topology" -Token $script:AdminToken -Expected @(200)
+  Invoke-Api "modules.removed.admin" GET "/admin/modules" -Token $script:AdminToken -Expected @(404, 410) | Out-Null
+  Invoke-Api "modules.removed.none" GET "/admin/modules" -Expected @(401, 404, 410) | Out-Null
+  Invoke-Api "services.list.admin" GET "/admin/services" -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "services.list.user" GET "/admin/services" -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "services.list.none" GET "/admin/services" -Expected @(401) | Out-Null
+  Invoke-Api "services.sets.admin" GET "/admin/sets" -Token $script:AdminToken -Expected @(200) | Out-Null
+  Invoke-Api "services.sets.user" GET "/admin/sets" -Token $script:UserToken -Expected @(403) | Out-Null
+  $topologyResp = Invoke-Api "services.topology.admin" GET "/admin/topology" -Token $script:AdminToken -Expected @(200)
   if ($topologyResp.Json) {
     if ((Get-JsonArray $topologyResp.Json "nodes").Count -le 0) {
-      $failures.Add("module topology runtime nodes expected non-empty") | Out-Null
+      $failures.Add("service topology runtime nodes expected non-empty") | Out-Null
     }
-    if ((Get-JsonArray $topologyResp.Json "module_nodes").Count -le 0) {
-      $failures.Add("module topology module_nodes expected non-empty") | Out-Null
+    if ((Get-JsonArray $topologyResp.Json "service_nodes").Count -le 0) {
+      $failures.Add("service topology service_nodes expected non-empty") | Out-Null
     }
   }
-  $runtimeSnapshot = Invoke-Api "modules.runtime-snapshot.admin" GET "/admin/modules/runtime-snapshot" -Token $script:AdminToken -Expected @(200)
-  $runtimeSnapshotAll = Invoke-Api "modules.runtime-snapshot.admin.include-disabled" GET "/admin/modules/runtime-snapshot?include_disabled=true" -Token $script:AdminToken -Expected @(200)
-  Invoke-Api "modules.runtime-snapshot.user" GET "/admin/modules/runtime-snapshot" -Token $script:UserToken -Expected @(403) | Out-Null
-  Invoke-Api "modules.runtime-snapshot.none" GET "/admin/modules/runtime-snapshot" -Expected @(401) | Out-Null
-  $runtimeRoutes = Invoke-Api "modules.runtime.routes.admin" GET "/admin/modules/runtime/routes" -Token $script:AdminToken -Expected @(200)
-  Invoke-Api "modules.runtime.routes.user" GET "/admin/modules/runtime/routes" -Token $script:UserToken -Expected @(403) | Out-Null
-  Invoke-Api "modules.runtime.routes.none" GET "/admin/modules/runtime/routes" -Expected @(401) | Out-Null
-  $runtimeReload = Invoke-Api "modules.runtime.reload.admin" POST "/admin/modules/runtime/reload" @{} -Token $script:AdminToken -Expected @(200)
-  Invoke-Api "modules.runtime.reload.user" POST "/admin/modules/runtime/reload" @{} -Token $script:UserToken -Expected @(403) | Out-Null
-  Invoke-Api "modules.runtime.reload.none" POST "/admin/modules/runtime/reload" @{} -Expected @(401) | Out-Null
+  $runtimeSnapshot = Invoke-Api "services.runtime-snapshot.admin" GET "/admin/runtime/snapshot" -Token $script:AdminToken -Expected @(200)
+  $runtimeSnapshotAll = Invoke-Api "services.runtime-snapshot.admin.include-disabled" GET "/admin/runtime/snapshot?include_disabled=true" -Token $script:AdminToken -Expected @(200)
+  Invoke-Api "services.runtime-snapshot.user" GET "/admin/runtime/snapshot" -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "services.runtime-snapshot.none" GET "/admin/runtime/snapshot" -Expected @(401) | Out-Null
+  $runtimeRoutes = Invoke-Api "services.runtime.routes.admin" GET "/admin/runtime/routes" -Token $script:AdminToken -Expected @(200)
+  Invoke-Api "services.runtime.routes.user" GET "/admin/runtime/routes" -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "services.runtime.routes.none" GET "/admin/runtime/routes" -Expected @(401) | Out-Null
+  $runtimeReload = Invoke-Api "services.runtime.reload.admin" POST "/admin/runtime/reload" @{} -Token $script:AdminToken -Expected @(200)
+  Invoke-Api "services.runtime.reload.user" POST "/admin/runtime/reload" @{} -Token $script:UserToken -Expected @(403) | Out-Null
+  Invoke-Api "services.runtime.reload.none" POST "/admin/runtime/reload" @{} -Expected @(401) | Out-Null
   $runtimeServices = Invoke-Api "runtime.services.admin" GET "/admin/runtime/services" -Token $script:AdminToken -Expected @(200)
   Invoke-Api "runtime.services.user" GET "/admin/runtime/services" -Token $script:UserToken -Expected @(403) | Out-Null
   Invoke-Api "runtime.services.none" GET "/admin/runtime/services" -Expected @(401) | Out-Null
@@ -518,9 +559,9 @@ try {
   Invoke-Api "runtime.operations.user" GET "/admin/runtime/operations" -Token $script:UserToken -Expected @(403) | Out-Null
   Invoke-Api "runtime.operations.none" GET "/admin/runtime/operations" -Expected @(401) | Out-Null
   if ($runtimeSnapshot.Json) {
-    $snapshotModules = Get-JsonArray $runtimeSnapshot.Json "modules"
-    if ($snapshotModules.Count -le 0) {
-      $failures.Add("runtime snapshot modules expected non-empty") | Out-Null
+    $snapshotServiceNodes = Get-JsonArray $runtimeSnapshot.Json "service_nodes"
+    if ($snapshotServiceNodes.Count -le 0) {
+      $failures.Add("runtime snapshot service_nodes expected non-empty") | Out-Null
     }
     if (-not $runtimeSnapshot.Json.topology -or -not $runtimeSnapshot.Json.topology.nodes -or $runtimeSnapshot.Json.topology.nodes.Count -le 0) {
       $failures.Add("runtime snapshot topology nodes expected non-empty") | Out-Null
@@ -537,16 +578,16 @@ try {
       $failures.Add("runtime snapshot workers missing judge-worker") | Out-Null
     }
     $snapshotTopologyNodes = Get-JsonArray $runtimeSnapshot.Json.topology "nodes"
-    if (-not (Has-JsonItem $snapshotTopologyNodes "id" "ojos.judge-core:service:problem-api")) {
+    if (-not (Has-JsonItem $snapshotTopologyNodes "id" "problem-api:service:problem-api")) {
       $failures.Add("runtime topology missing service node problem-api") | Out-Null
     }
-    if (-not (Has-JsonItem $snapshotTopologyNodes "id" "ojos.judge-core:worker:judge-worker")) {
+    if (-not (Has-JsonItem $snapshotTopologyNodes "id" "judge-worker:worker:judge-worker")) {
       $failures.Add("runtime topology missing worker node judge-worker") | Out-Null
     }
-    $snapshotModuleIds = @($snapshotModules | Select-Object -ExpandProperty module_id)
-    foreach ($expectedModule in @("ojos.kernel.installer", "ojos.kernel.module-runtime", "ojos.platform.gateway", "ojos.platform.web-shell", "ojos.judge-core")) {
-      if ($snapshotModuleIds -notcontains $expectedModule) {
-        $failures.Add("runtime snapshot missing $expectedModule") | Out-Null
+    $snapshotServiceIds = @($snapshotServiceNodes | Select-Object -ExpandProperty service_id)
+    foreach ($expectedService in @("root-runtime-manager", "gateway", "web-shell", "problem-api", "judge-api", "judge-worker", "storage", "postgres")) {
+      if ($snapshotServiceIds -notcontains $expectedService) {
+        $failures.Add("runtime snapshot missing $expectedService") | Out-Null
       }
     }
     $permissionItems = Get-JsonArray $runtimeSnapshot.Json "permissions"
@@ -563,7 +604,7 @@ try {
     }
     $problemRoute = Get-JsonItem $routeItems "prefix" "/api/problem"
     if ($null -eq $problemRoute) {
-      $failures.Add("runtime route table missing judge-core /api/problem route") | Out-Null
+      $failures.Add("runtime route table missing /api/problem route") | Out-Null
     } else {
       if ([string]$problemRoute.service_id -ne "problem-api") {
         $failures.Add("runtime route /api/problem expected service_id problem-api got $($problemRoute.service_id)") | Out-Null
@@ -586,7 +627,7 @@ try {
     }
     $judgeRoute = Get-JsonItem $routeItems "prefix" "/api/judge"
     if ($null -eq $judgeRoute) {
-      $failures.Add("runtime route table missing judge-core /api/judge route") | Out-Null
+      $failures.Add("runtime route table missing /api/judge route") | Out-Null
     } else {
       if ($judgeRoute.proxy_enabled -eq $true) {
         $failures.Add("runtime route /api/judge should not proxy because it would cover reserved /api/judge/worker") | Out-Null
@@ -661,19 +702,8 @@ try {
     $failures.Add("runtime reload response is not JSON") | Out-Null
   }
   Invoke-Api "dynamic.proxy.problem.list.user" GET "/problem/problems?page=1&page_size=1" -Token $script:UserToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.detail.judge-core" GET "/admin/modules/ojos.judge-core" -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.discover.admin" GET "/admin/modules/discover" -Token $script:AdminToken -Expected @(200) | Out-Null
-  Invoke-Api "modules.installer.discover.user" GET "/admin/modules/discover" -Token $script:UserToken -Expected @(403) | Out-Null
-  Invoke-Api "modules.installer.discover.none" GET "/admin/modules/discover" -Expected @(401) | Out-Null
-  $legacyManifest = @{ manifest_path = "modules/demo-module/module.yaml"; dry_run = $true }
-  Invoke-Api "legacy.modules.installer.validate.demo.blocked" POST "/admin/modules/validate" $legacyManifest -Token $script:AdminToken -Expected @(400) | Out-Null
-  Invoke-Api "legacy.modules.installer.plan.demo.blocked" POST "/admin/modules/plan" $legacyManifest -Token $script:AdminToken -Expected @(400) | Out-Null
-  Invoke-Api "legacy.modules.installer.install.dry-run.demo.blocked" POST "/admin/modules/install" $legacyManifest -Token $script:AdminToken -Expected @(400) | Out-Null
-  Invoke-Api "legacy.modules.installer.install.user.denied" POST "/admin/modules/install" $legacyManifest -Token $script:UserToken -Expected @(403) | Out-Null
-  Invoke-Api "legacy.modules.installer.install.none.denied" POST "/admin/modules/install" $legacyManifest -Expected @(401) | Out-Null
-  Invoke-Api "legacy.modules.installer.disable.judge-core.refused" POST "/admin/modules/ojos.judge-core/disable" @{} -Token $script:AdminToken -Expected @(403) | Out-Null
-  Invoke-Api "legacy.modules.installer.uninstall.judge-core.refused" POST "/admin/modules/ojos.judge-core/uninstall-dry-run" @{} -Token $script:AdminToken -Expected @(200) | Out-Null
-  $composeRows = @(docker compose --env-file .env -f $ComposeFile ps --format json | ForEach-Object { $_ | ConvertFrom-Json })
+  Invoke-Api "services.detail.problem-api" GET "/admin/services/problem-api" -Token $script:AdminToken -Expected @(200) | Out-Null
+  $composeRows = @(Invoke-Compose @("ps", "--format", "json") | ForEach-Object { $_ | ConvertFrom-Json })
   $internalServices = @(
     [pscustomobject]@{ Service = "auth"; Port = 8081 },
     [pscustomobject]@{ Service = "judge-api"; Port = 8082 },
@@ -709,7 +739,7 @@ try {
     }
   }
 
-  $top = Invoke-Api "modules.topology.summary" GET "/admin/modules/topology" -Token $script:AdminToken -Expected @(200)
+  $top = Invoke-Api "services.topology.summary" GET "/admin/topology" -Token $script:AdminToken -Expected @(200)
 
   Write-Report "auth-api.md" @("auth.*")
   Write-Report "problem-api.md" @("problem.*")
@@ -717,14 +747,14 @@ try {
   Write-Report "worker-api.md" @("worker.*")
   Write-Report "admin-judge-api.md" @("admin.judge.*")
   Write-Report "admin-health-api.md" @("admin.health.*")
-  Write-Report "module-registry-api.md" @("modules.*")
+  Write-Report "service-registry-api.md" @("services.*")
   Write-Report "internal-exposure-check.md" @("internal.exposure.*")
 
   if ($top.Json) {
-    "`n## Topology Summary`n" | Add-Content (Join-Path $ReportDir "module-registry-api.md")
-    "sets=$($top.Json.sets.Count), nodes=$($top.Json.nodes.Count), edges=$($top.Json.edges.Count), components=$($top.Json.components.Count)" | Add-Content (Join-Path $ReportDir "module-registry-api.md")
-    "node ids: $((($top.Json.nodes | Select-Object -ExpandProperty module_id) -join ', '))" | Add-Content (Join-Path $ReportDir "module-registry-api.md")
-    "component ids: $((($top.Json.components | Select-Object -First 20 -ExpandProperty component_id) -join ', '))" | Add-Content (Join-Path $ReportDir "module-registry-api.md")
+    "`n## Topology Summary`n" | Add-Content (Join-Path $ReportDir "service-registry-api.md")
+    "sets=$($top.Json.sets.Count), nodes=$($top.Json.nodes.Count), edges=$($top.Json.edges.Count), components=$($top.Json.components.Count)" | Add-Content (Join-Path $ReportDir "service-registry-api.md")
+    "node ids: $((($top.Json.nodes | Select-Object -ExpandProperty service_id) -join ', '))" | Add-Content (Join-Path $ReportDir "service-registry-api.md")
+    "component ids: $((($top.Json.components | Select-Object -First 20 -ExpandProperty component_id) -join ', '))" | Add-Content (Join-Path $ReportDir "service-registry-api.md")
   }
 
   $results | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ReportDir "runtime-results.json")

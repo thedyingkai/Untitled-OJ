@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$BaseUrl = "http://localhost:8080/api",
   [string]$AdminUsername = "admin1",
   [string]$AdminPassword = "admin123",
@@ -84,7 +84,7 @@ Run-Step "service.yaml validate" {
 }
 
 Run-Step "service package" {
-  $out = ".tmp/release/gateway.ojos-service"
+  $out = ".tmp/release/gateway.ojossvc"
   Run-Cargo -CargoArgs @("run", "-q", "-p", "ojosctl", "--", "service", "package", "services/gateway", "-o", $out)
   Run-Cargo -CargoArgs @("run", "-q", "-p", "ojosctl", "--", "service", "verify", $out)
 }

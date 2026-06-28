@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$SkipDockerBuild,
     [switch]$SkipFrontend,
     [switch]$SkipRust,
@@ -31,6 +31,29 @@ function RunQuiet {
     if ($CommandArgs.Count -eq 1 -and $CommandArgs[0] -is [array]) { $CommandArgs = $CommandArgs[0] }
     & $Command @CommandArgs | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "$Command failed with exit code $LASTEXITCODE" }
+}
+
+function WithStaticComposeEnv([scriptblock]$Body) {
+    $staticEnv = @{
+        POSTGRES_PASSWORD = "static-compose-postgres-password"
+        POSTGRES_DSN = "postgres://postgres:static-compose-postgres-password@postgres:5432/ojos?sslmode=disable"
+        JWT_SECRET = "static-compose-jwt-secret"
+        OJOS_WORKER_TOKEN = "static-compose-worker-token"
+        ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN = "static-compose-runtime-token"
+    }
+    $previous = @{}
+    foreach ($name in $staticEnv.Keys) {
+        $previous[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+        [Environment]::SetEnvironmentVariable($name, $staticEnv[$name], "Process")
+    }
+
+    try {
+        & $Body
+    } finally {
+        foreach ($name in $staticEnv.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $previous[$name], "Process")
+        }
+    }
 }
 
 if (-not $SkipGo) {
@@ -79,8 +102,8 @@ if (-not $SkipRust) {
             Run "cargo" @("run", "-p", "ojosctl", "--", "service", "validate", "services/judge-api/service.yaml")
             Run "cargo" @("run", "-p", "ojosctl", "--", "service", "validate", "services/judge-worker/service.yaml")
             Run "cargo" @("run", "-p", "ojosctl", "--", "service", "install-plan", "services/judge-worker/service.yaml")
-            Run "cargo" @("run", "-p", "ojosctl", "--", "service", "package", "services/gateway", "-o", ".tmp/release/gateway.ojos-service")
-            Run "cargo" @("run", "-p", "ojosctl", "--", "service", "verify", ".tmp/release/gateway.ojos-service")
+            Run "cargo" @("run", "-p", "ojosctl", "--", "service", "package", "services/gateway", "-o", ".tmp/release/gateway.ojossvc")
+            Run "cargo" @("run", "-p", "ojosctl", "--", "service", "verify", ".tmp/release/gateway.ojossvc")
             Run "cargo" @("run", "-p", "ojosctl", "--", "set", "list")
             Run "cargo" @("run", "-p", "ojosctl", "--", "set", "expand", "sets/single-node-oj.yaml")
             Run "cargo" @("run", "-p", "ojosctl", "--", "endpoint", "validate", "192.168.1.10:8082")
@@ -110,10 +133,12 @@ if (-not $SkipFrontend) {
 
 Step "Docker compose config" {
     InDir $root {
-        RunQuiet "docker" @("compose", "--env-file", ".env.example", "-f", "deploy/compose/docker-compose.yml", "config")
-        RunQuiet "docker" @("compose", "--env-file", "deploy/worker/.env.example", "-f", "deploy/worker/docker-compose.yml", "config")
+        WithStaticComposeEnv {
+            RunQuiet "docker" @("compose", "--env-file", ".env.example", "-f", "deploy/compose/docker-compose.yml", "config")
+            RunQuiet "docker" @("compose", "--env-file", "deploy/worker/.env.example", "-f", "deploy/worker/docker-compose.yml", "config")
+        }
         $compose = Get-Content (Join-Path $root "deploy/compose/docker-compose.yml") -Raw
-        foreach ($required in @("root-runtime-manager:", "read_only: true", "no-new-privileges:true", "cap_drop:", "expose:", "../../services:/workspace/services:ro", "../../sets:/workspace/sets:ro", "MODULE_INSTALLER_LOCK_TTL_SECONDS")) {
+        foreach ($required in @("root-runtime-manager:", "read_only: true", "no-new-privileges:true", "cap_drop:", "expose:", "../../services:/workspace/services:ro", "../../sets:/workspace/sets:ro", "ROOT_RUNTIME_MANAGER_LOCK_TTL_SECONDS")) {
             if ($compose -notlike "*$required*") {
                 throw "compose root runtime manager hardening check failed: missing $required"
             }

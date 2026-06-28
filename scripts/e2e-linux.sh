@@ -218,10 +218,10 @@ wait_for_gateway() {
 apply_migrations() {
   echo "applying migrations..."
   local schema_ready
-  schema_ready="$(printf "SELECT CASE WHEN to_regclass('public.module_sets') IS NOT NULL AND to_regclass('public.judge_tasks') IS NOT NULL THEN 'yes' ELSE 'no' END;\n" |
+  schema_ready="$(printf "SELECT CASE WHEN to_regclass('public.service_sets') IS NOT NULL AND to_regclass('public.judge_tasks') IS NOT NULL THEN 'yes' ELSE 'no' END;\n" |
     compose exec -T postgres psql -tA -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" 2>/dev/null || true)"
   if [[ "$schema_ready" == "yes" ]]; then
-    echo "schema already contains module_sets and judge_tasks; skip migrations" >>"$LOG_DIR/migrations.log"
+    echo "schema already contains service_sets and judge_tasks; skip migrations" >>"$LOG_DIR/migrations.log"
     return 0
   fi
   for file in deploy/migrations/*.up.sql; do
@@ -818,7 +818,7 @@ run_permission_rescan() {
   echo "checking permission denials..."
   local checks=(
     "GET /admin/health"
-    "GET /admin/modules"
+    "GET /admin/services"
     "GET /judge/admin/queue"
     "GET /judge/admin/workers"
     "GET /judge/admin/tasks"
