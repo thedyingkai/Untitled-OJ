@@ -125,7 +125,7 @@ fi
 
 schema_ready="$(psql_base -tA <<'SQL'
 SELECT CASE
-  WHEN to_regclass('public.module_sets') IS NOT NULL
+  WHEN to_regclass('public.service_sets') IS NOT NULL
    AND to_regclass('public.judge_tasks') IS NOT NULL
   THEN 'yes'
   ELSE 'no'
