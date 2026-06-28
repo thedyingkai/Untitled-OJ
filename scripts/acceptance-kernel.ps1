@@ -30,12 +30,15 @@ function Run-Step {
 function Run-Capture {
   param([string]$Name, [string]$Command, [string[]]$CommandArgs)
   $previous = $ErrorActionPreference
+  $previousNative = $PSNativeCommandUseErrorActionPreference
   $ErrorActionPreference = "Continue"
+  $PSNativeCommandUseErrorActionPreference = $false
   try {
     $output = & $Command @CommandArgs 2>&1
     $code = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previous
+    $PSNativeCommandUseErrorActionPreference = $previousNative
   }
   $text = ($output | Out-String)
   [System.IO.File]::WriteAllText((Join-Path $ReportDir "$Name.log"), $text, [System.Text.UTF8Encoding]::new($false))

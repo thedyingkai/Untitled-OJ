@@ -5,11 +5,11 @@ param(
     [switch]$SkipGo
 )
 
-# 用途：执行 OJOS 静态验证，包括 Go、Rust、前端构建、compose config 和安全扫描。
-# 运行环境：Windows PowerShell，需安装 go、cargo、npm、docker compose；使用 -SkipDockerBuild 时不需要 Docker daemon 运行镜像构建。
-# 执行目录：从仓库根目录执行：powershell -NoProfile -File scripts\verify-static.ps1 [-SkipDockerBuild]
-# 依赖工具：go、cargo、npm、docker；推荐安装 rg，脚本会在 rg 不可执行时回退到 Select-String。
-# 失败处理：任一步失败都会抛错并停止；应修复对应模块后重新执行。
+# 用途：执行 OJOS 静态验收，覆盖 Go、Rust、前端构建、compose config 和安全扫描。
+# 运行环境：Windows PowerShell，需要 go、cargo、npm、docker compose；使用 -SkipDockerBuild 时不要求构建镜像。
+# 执行目录：仓库根目录，例如 powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild。
+# 依赖工具：推荐安装 rg；rg 不可用时脚本回退到 Select-String。
+# 失败处理：任一步失败都会抛错并停止；修复对应模块后重新执行。
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
@@ -199,6 +199,9 @@ Step "Rust fmt/check module-installer workspace" {
         Run "cargo" @("check")
         Run "cargo" @("test")
         Run "cargo" @("run", "-p", "ojosctl", "--", "--version")
+        Run "cargo" @("run", "-p", "ojos-installer-tui", "--", "--version")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "--json", "doctor")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "--json", "status")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "doctor")
         if (Test-Path ".tmp/agent/scratch/verify-static-sample-init") {
             Remove-Item -Recurse -Force ".tmp/agent/scratch/verify-static-sample-init"
@@ -206,11 +209,18 @@ Step "Rust fmt/check module-installer workspace" {
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "init", "ojos.verify-static-sample", "--name", "Verify Static Sample", "--kind", "feature", "--out", ".tmp/agent/scratch/verify-static-sample-init", "--with-topology")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "validate", "modules/demo-module/module.yaml", "--repo-root", ".")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "validate", "modules/sample-hello/module.yaml", "--repo-root", ".")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "install-plan", "modules/sample-hello/module.yaml", "--repo-root", ".")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "install", "modules/sample-hello/module.yaml", "--dry-run", "--repo-root", ".")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "enable", "ojos.sample-hello", "--repo-root", ".")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "disable", "ojos.sample-hello", "--repo-root", ".")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "module", "uninstall-dry-run", "ojos.sample-hello", "--repo-root", ".")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "package", "modules/demo-module", "-o", ".tmp/agent/scratch/verify-static-demo.ojosmod")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "verify", ".tmp/agent/scratch/verify-static-demo.ojosmod")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "inspect", ".tmp/agent/scratch/verify-static-demo.ojosmod")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "package", "modules/sample-hello", "-o", ".tmp/agent/scratch/verify-static-sample-hello.ojosmod")
         Run "cargo" @("run", "-p", "ojosctl", "--", "module", "verify", ".tmp/agent/scratch/verify-static-sample-hello.ojosmod")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "snapshot")
+        Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "routes")
         Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "services")
         Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "service", "problem-api")
         Run "cargo" @("run", "-p", "ojosctl", "--", "runtime", "plan-restart", "problem-api", "--out", ".tmp/agent/scratch/problem-api-restart.json")
