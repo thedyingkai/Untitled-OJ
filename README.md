@@ -1,81 +1,66 @@
 # OJOS
 
-OJOS is a modular Online Judge platform baseline. It is organized around a Kernel, Gateway, Web Shell, Judge Core feature module, Module Installer, Runtime Snapshot and module SDK.
+OJOS 是模块化 Online Judge 系统。当前 `v0.1.0` 目标是发布题库、评测、Judge Core、Kernel、Module Runtime、Installer 和 Module SDK 的可验收基线。
 
-This repository is not a production-complete full-hotplug release. It is a kernel baseline that can be regression tested before starting the first real business module.
+本仓库不声明生产完全安全，不声明 full hotplug 完成，也不包含 Contest 实现。
 
-## Current Position
+## 当前能力
 
-Implemented baseline capabilities:
+- 认证、题库 API、评测 API、Judge Worker。
+- Kernel Installer Core：manifest 校验、package/verify、install plan、enable/disable plan。
+- Module Registry 和 Runtime Snapshot v1。
+- Dynamic Gateway route table 和受信任 dynamic proxy。
+- Web Shell contribution registry：菜单、路由元数据、权限、拓扑和模块贡献视图。
+- Service Runtime Driver foundation 和 `ojosctl` controlled apply。
+- Module Contract v1、Module SDK、`ojosctl module init`、`modules/sample-hello`。
+- 原生安装入口：`ojosctl` 和 `ojos-installer-tui`。
 
-- Auth, Problem API, Judge API and Judge Worker.
-- Kernel Installer Core with manifest validation, package verification and local metadata lifecycle.
-- Module Registry and Runtime Snapshot v1.
-- Dynamic Gateway route table and trusted dynamic proxy.
-- Web Shell contribution registry for menu, route metadata, permissions, topology and admin contribution views.
-- Service Runtime Driver foundation and controlled apply through `ojosctl` / operator.
-- Module Contract v1, Module SDK docs, `ojosctl module init` and `modules/sample-hello`.
-- Compatibility harness proving ordinary metadata modules can install/enable/disable without sample-specific Kernel/Gateway/Web Shell core changes.
+## 未完成边界
 
-Not complete:
+- Contest 尚未实现。
+- L3 dynamic frontend bundle 未完成。
+- hooks 未实现。
+- remote module market 未实现。
+- package signature / trust policy 未完成。
+- true multi-machine runtime apply 未完成。
+- full hotplug 未完成。
+- Judge Core 不标记 GA。
 
-- L3 dynamic frontend bundles.
-- Hooks.
-- Remote module market.
-- Package publisher signature / trust policy.
-- Full service runtime automation.
-- True multi-machine runtime apply.
-- Full hotplug.
-- Judge Core GA.
+## 本地启动
 
-## Start Locally
-
-Prepare `.env` from `.env.example`, then start the control plane with Docker Compose:
+复制 `.env.example` 为 `.env` 并替换 secret 占位值，然后启动控制面：
 
 ```powershell
 docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build
 ```
 
-Gateway is exposed on `http://localhost:8080`.
+Gateway 默认监听：
 
-## Kernel Acceptance
-
-Run the unified local acceptance gate:
-
-```powershell
-powershell -NoProfile -File scripts\acceptance-kernel.ps1 -SkipDockerBuild
+```text
+http://localhost:8080
 ```
 
-The acceptance script calls:
+## 原生安装器
 
-- `scripts/verify-static.ps1`
-- `scripts/e2e-api.ps1`
-- `scripts/e2e-module-compat.ps1`
-- `ojosctl` smoke commands
-
-Controlled apply is not run by default. It must be explicitly requested:
+正式安装、打包、验证、启用、禁用和 runtime apply 使用原生入口：
 
 ```powershell
-powershell -NoProfile -File scripts\acceptance-kernel.ps1 -RunControlledApply
+cargo run -p ojosctl -- doctor
+cargo run -p ojosctl -- status
+cargo run -p ojos-installer-tui --
 ```
 
-## Static Verification
-
-```powershell
-powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild
-```
-
-This runs Go tests, Rust tests, CLI smoke checks, frontend build, compose config checks and security scans unless skipped with script flags.
+Web Shell 中的 Installer 页面只作为管理视图，不是官方安装器主入口，也不执行危险 apply。
 
 ## Module SDK
 
-Create a safe metadata-only module:
+创建 metadata-only 模块：
 
 ```powershell
 cargo run -p ojosctl -- module init ojos.sample-hello --name "Sample Hello" --kind feature --out modules/sample-hello --with-topology
 ```
 
-Validate and package:
+校验、打包、验证：
 
 ```powershell
 cargo run -p ojosctl -- module validate modules/sample-hello/module.yaml
@@ -83,21 +68,11 @@ cargo run -p ojosctl -- module package modules/sample-hello -o .tmp/agent/scratc
 cargo run -p ojosctl -- module verify .tmp/agent/scratch/sample-hello.ojosmod
 ```
 
-Temporary packages and scratch files must stay under `.tmp/agent/` and must not be committed.
+临时 package 和 plan JSON 只能放在 `.tmp/agent/`，不能提交。
 
-## Runtime Snapshot
+## Runtime Controlled Apply
 
-After the Docker control plane is running, inspect runtime snapshot through Gateway with an admin token:
-
-```powershell
-Invoke-RestMethod http://localhost:8080/api/admin/modules/runtime-snapshot
-```
-
-`include_disabled=true` is admin-only and is for registry inspection, compatibility checks and debugging.
-
-## Controlled Apply Warning
-
-Gateway and Web Shell do not apply runtime plans. Only `ojosctl` / operator controlled apply is allowed:
+Gateway 和 Web Shell 不 apply runtime plan。受控 apply 使用：
 
 ```powershell
 cargo run -p ojosctl -- runtime plan-restart problem-api --out .tmp/agent/scratch/problem-api-restart.json
@@ -105,32 +80,30 @@ cargo run -p ojosctl -- runtime apply-plan .tmp/agent/scratch/problem-api-restar
 cargo run -p ojosctl -- runtime apply-plan .tmp/agent/scratch/problem-api-restart.json --confirm
 ```
 
-Real apply requires explicit confirmation and only targets trusted compose allowlist services.
+真实 apply 必须显式确认，并且只能操作 trusted compose allowlist service。
 
-## Documentation
+## 验收
 
-- [Documentation Index](docs/DOCS_INDEX.md)
-- [Documentation Status](docs/DOCS_STATUS.md)
-- [Kernel Baseline Freeze](docs/release/kernel-baseline-freeze.md)
-- [Pre-Feature Gate](docs/release/pre-feature-gate.md)
-- [Acceptance Matrix](docs/release/acceptance-matrix.md)
-- [Regression Matrix](docs/release/regression-matrix.md)
-- [Kernel Security Review](docs/security/kernel-security-review.md)
-- [Module Contract v1](docs/modules/module-contract-v1.md)
-- [Module SDK](docs/modules/module-sdk.md)
-- [Judge Core Readiness](docs/modules/judge-core-readiness.md)
+```powershell
+powershell -NoProfile -File scripts\acceptance-kernel.ps1 -SkipDockerBuild
+powershell -NoProfile -File scripts\acceptance-kernel.ps1 -RunControlledApply -SkipDockerBuild
+powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild
+```
 
-## Next Stage Gate
+完整发版还需要 e2e、Go、Rust、judge-worker、frontend、npm audit 和 release artifact 构建。
 
-The next feature module may start only after the pre-feature gate is green:
+## Release Artifacts
 
-- `acceptance-kernel` passes.
-- `verify-static` passes.
-- `e2e-api` passes.
-- `e2e-module-compat` passes.
-- Go/Rust/Frontend checks pass.
-- `path_leaks=0`.
-- ordinary user receives `403`.
-- no token receives `401`.
+```powershell
+powershell -NoProfile -File scripts\build-release-artifacts.ps1 -Version v0.1.0
+```
 
-Starting Contest work still requires a separate feature plan. This baseline does not start Contest API or Contest frontend work.
+默认输出到 `.tmp/release/v0.1.0/`，该目录不进入 Git。
+
+## 文档
+
+- [文档索引](docs/DOCS_INDEX.md)
+- [文档状态](docs/DOCS_STATUS.md)
+- [v0.1.0 发布说明](docs/release/v0.1.0-release-notes.md)
+- [v0.1.0 发版清单](docs/release/v0.1.0-ship-checklist.md)
+- [v0.1.0 已知限制](docs/release/v0.1.0-known-limitations.md)

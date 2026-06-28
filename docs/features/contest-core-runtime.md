@@ -1,21 +1,21 @@
-# Contest Core Runtime And Topology Draft
+# Contest Core Runtime 与拓扑草案
 
-Status: design draft only. No runtime service is added in this gate.
-Date: 2026-06-27
+> 文档状态：设计草案，当前未新增 runtime service
+> 最后更新：2026-06-27
 
-## Runtime Strategy
+## Runtime 策略
 
-Contest Core Skeleton should likely introduce a trusted `contest-api` service so the dynamic route path is realistic. If schedule risk is high, the very first skeleton can start metadata-only, but that would not validate API proxy behavior.
+Contest Core Skeleton 建议引入受信任 `contest-api` service，这样 dynamic route path 才能真实验收。如果排期风险过高，最早的 skeleton 可以先 metadata-only，但那无法验证 API proxy behavior。
 
-Recommended skeleton:
+推荐 skeleton：
 
-- `contest-api` as a managed compose service.
-- `contest-scoreboard-worker` as metadata-only future worker.
-- `contest-scoreboard-refresh` as disabled metadata scheduled job.
+- `contest-api` 作为 managed compose service。
+- `contest-scoreboard-worker` 作为 metadata-only future worker。
+- `contest-scoreboard-refresh` 作为 disabled metadata scheduled job。
 
-## Trusted Compose Boundary
+## Trusted Compose 边界
 
-If `contest-api` is implemented, deployment must add it to the trusted compose allowlist. The module manifest must not define arbitrary image, command, script, mount, host path, privileged or capability settings.
+如果实现 `contest-api`，deployment 必须把它加入 trusted compose allowlist。Module manifest 不得定义 arbitrary image、command、script、mount、host path、privileged 或 capability settings。
 
 ## Service Lifecycle
 
@@ -24,7 +24,7 @@ If `contest-api` is implemented, deployment must add it to the trusted compose a
 | `contest-api` | managed | trusted compose | controlled apply through `ojosctl` only |
 | `contest-scoreboard-worker` | metadata | metadata | apply blocked |
 
-Gateway/Web can request plans and view state, but must not apply runtime plans.
+Gateway/Web 可以请求 plans 和查看 state，但不能 apply runtime plans。
 
 ## Health Checks
 
@@ -32,7 +32,7 @@ Gateway/Web can request plans and view state, but must not apply runtime plans.
 | --- | --- | --- |
 | `contest-api-health` | `GET /healthz` on `contest-api` | yes if service exists |
 
-Route `/api/contest` should be degraded or unavailable if `contest-api` is not `RUNNING` or health is not ok.
+如果 `contest-api` 不是 `RUNNING` 或 health 不是 ok，`/api/contest` 应降级或不可用。
 
 ## Runtime Route Table
 
@@ -40,7 +40,7 @@ Route `/api/contest` should be degraded or unavailable if `contest-api` is not `
 | --- | --- | --- | --- |
 | `/api/contest` | `contest-api` | `user` | `contest.view` |
 
-## Topology Draft
+## 拓扑草案
 
 ```text
 ojos.contest-core -> service:contest-api -> route:/api/contest
@@ -50,6 +50,6 @@ ojos.contest-core -> module:ojos.judge-core
 ojos.contest-core -> storage:contest-exports
 ```
 
-## Kernel Change Assessment
+## Kernel 变更评估
 
-Contest Core Skeleton should not require Kernel changes if it stays inside Module Contract v1. Kernel evolution may be needed later for dynamic frontend bundles, new event delivery semantics, package trust signatures or new runtime drivers.
+如果 Contest Core Skeleton 保持在 Module Contract v1 内，不应要求 Kernel changes。后续 dynamic frontend bundles、新 event delivery semantics、package trust signatures 或 new runtime drivers 可能需要 Kernel 演进。

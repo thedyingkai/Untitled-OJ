@@ -1,13 +1,13 @@
-# Contest Core Module Plan
+# Contest Core 模块计划
 
-Status: design draft only. This file is not an installer fixture.
-Date: 2026-06-27
+> 文档状态：设计草案，不是 installer fixture
+> 最后更新：2026-06-27
 
-Contest Core is planned as a Module Contract v1 feature module. No `modules/contest-core/` implementation is created in this planning gate.
+Contest Core 计划作为 Module Contract v1 feature module 接入。当前仓库没有创建 `modules/contest-core/` 实现。
 
-## Module Identity
+## 模块身份
 
-| Field | Draft Value |
+| 字段 | 草案值 |
 | --- | --- |
 | `schema_version` | `1` |
 | `id` | `ojos.contest-core` |
@@ -15,18 +15,18 @@ Contest Core is planned as a Module Contract v1 feature module. No `modules/cont
 | `version` | `0.1.0` |
 | `set` | `contest` |
 | `kind` | `feature` |
-| `status` | `external` during development, not GA |
+| `status` | 开发期为 `external`，不标记 GA |
 
-## Dependencies
+## 依赖
 
-| Dependency | Reason |
+| 依赖 | 原因 |
 | --- | --- |
-| `ojos.judge-core` | Submission and judging integration. |
-| Problem API platform service | Contest problem set references existing problem ids. |
-| Auth/permission registry | Contest admin, participant and viewer permissions. |
-| Runtime Snapshot v1 | Module contribution visibility. |
+| `ojos.judge-core` | 提交与评测集成。 |
+| Problem API platform service | Contest problem set 引用已有 problem ids。 |
+| Auth/permission registry | Contest admin、participant 和 viewer 权限。 |
+| Runtime Snapshot v1 | 模块贡献可见性。 |
 
-## Draft Manifest Contract
+## Manifest 契约草案
 
 ```yaml
 schema_version: 1
@@ -166,11 +166,11 @@ package:
   version: 1
 ```
 
-## Boundary
+## 边界
 
-The skeleton stage may require a trusted compose entry for `contest-api`. That is a deployment allowlist change, not a manifest-provided arbitrary image. The manifest must not contain `command`, `script`, `hook`, `image`, `mount`, `host_path`, `privileged`, `cap_add`, `target_url`, secrets or token fields.
+Skeleton 阶段可能需要为 `contest-api` 增加 trusted compose entry。该变更属于 deployment allowlist，不是 manifest 提供 arbitrary image。Manifest 不得包含 `command`、`script`、`hook`、`image`、`mount`、`host_path`、`privileged`、`cap_add`、`target_url`、secret 或 token 字段。
 
-## Future Submodules
+## 后续子模块
 
 - `ojos.contest-scoreboard`
 - `ojos.contest-clarification`

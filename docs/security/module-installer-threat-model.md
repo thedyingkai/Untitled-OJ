@@ -59,83 +59,84 @@ Module Installer 保护以下资产：
 - rollback apply 和 uninstall apply 默认不是通用生产能力；v0 只保留 plan 边界和 demo module metadata 场景。
 - distroless runtime image 是后续目标；当前 runtime 已从 Rust builder 镜像收敛到 `debian:bookworm-slim`。
 
-## Hotplug L1 Gateway Dynamic Proxy Threats
+## Hotplug L1 Gateway Dynamic Proxy 威胁
 
-New attack surface:
+新增攻击面：
 
-- Manifest-declared `gateway_routes.prefix` values.
-- Manifest-declared `service_id` values.
-- Runtime route table reload and cache replacement.
-- Dynamic proxy request path rewriting.
-- Actor propagation from Gateway to trusted internal services.
+- Manifest 声明的 `gateway_routes.prefix`。
+- Manifest 声明的 `service_id`。
+- Runtime route table reload 与 cache replacement。
+- Dynamic proxy path rewrite。
+- Gateway 向可信内部服务传播 actor 信息。
 
-Main threats:
+主要威胁：
 
-- SSRF if a manifest could declare arbitrary `target_url` values.
-- Reserved API takeover, for example claiming `/api/auth`, `/api/admin/modules`, `/api/admin/health`, `/api/health`, `/api/internal` or `/api/judge/worker`.
-- Permission bypass through weak `auth_mode` mapping.
-- Leakage of raw `Authorization`, internal URLs or upstream errors to module services or users.
-- Route conflict ambiguity through duplicate or overlapping prefixes.
+- 如果 manifest 可声明 arbitrary `target_url`，会产生 SSRF。
+- 模块占用 `/api/auth`、`/api/admin/modules`、`/api/admin/health`、`/api/health`、`/api/internal` 或 `/api/judge/worker` 等 reserved prefix。
+- 弱 `auth_mode` 映射导致权限绕过。
+- 原始 `Authorization`、internal URL 或 upstream error 泄露给模块服务或用户。
+- duplicate/overlap prefix 造成路由冲突歧义。
 
-Mitigations:
+缓解：
 
-- Manifests may reference only `service_id`; Gateway resolves it through trusted configuration.
-- Direct `target_url`, remote URLs, commands, scripts and hooks remain forbidden.
-- Runtime Route Table blocks reserved prefixes, duplicate prefixes, unknown services and unsupported auth modes.
-- Core static routes keep priority for `/api/auth` and `/api/judge/worker`.
-- Dynamic proxy strips hop-by-hop headers and does not forward raw `Authorization` by default.
-- Gateway forwards sanitized actor headers plus internal HMAC headers to trusted services.
-- Admin route table hides `upstream_base` by default; ordinary users cannot access route table APIs.
-## Hotplug L2 Runtime Driver Threats
+- Manifest 只能引用 `service_id`；Gateway 通过 trusted configuration 解析。
+- `target_url`、remote URL、command、script 和 hook 均禁止。
+- Runtime Route Table 阻断 reserved prefix、duplicate prefix、unknown service 和 unsupported auth mode。
+- Core static routes 对 `/api/auth` 和 `/api/judge/worker` 保持优先级。
+- Dynamic proxy 去除 hop-by-hop headers，默认不转发原始 `Authorization`。
+- Gateway 向 trusted service 转发 sanitized actor headers 和 internal HMAC headers。
+- Admin route table 默认隐藏 `upstream_base`；普通用户不能访问 route table API。
 
-New attack surface:
+## Hotplug L2 Runtime Driver 威胁
 
-- Manifest-declared services and workers.
-- `compose_service` identities.
-- Runtime plan generation APIs.
-- Service health affecting gateway route availability.
+新增攻击面：
 
-Threats:
+- Manifest 声明的 services 和 workers。
+- `compose_service` identity。
+- Runtime plan generation API。
+- Service health 对 Gateway route availability 的影响。
 
-- Host control if Gateway, Web Shell or installer could access Docker socket.
-- Arbitrary code execution if manifests could define `command`, `script`, `image`, `host_path`, `mount`, `privileged` or `cap_add` and have them applied automatically.
-- SSRF or internal probing if service health accepted arbitrary URLs.
-- Permission bypass if unavailable dynamic routes returned before auth checks.
+主要威胁：
 
-Mitigations:
+- Gateway、Web Shell 或 installer 若能访问 Docker socket，会获得 host control。
+- Manifest 若能自动应用 `command`、`script`、`image`、`host_path`、`mount`、`privileged` 或 `cap_add`，会造成任意代码执行。
+- Service health 若接受 arbitrary URL，会造成 SSRF 或内部探测。
+- Unavailable dynamic route 若先返回错误再鉴权，可能泄露路由存在性。
 
-- No Docker socket is mounted into Gateway, Web Shell or module-installer.
-- L2 foundation is plan/status/health only; Gateway apply-plan is disabled.
-- Compose driver uses trusted Gateway service configuration and an allowlist.
-- Manifest dangerous runtime fields are rejected by installer core validation.
-- Runtime plans use structured command arrays and never shell strings.
-- Dynamic proxy enforces auth mode before returning service unavailable for matched runtime routes.
-- Admin APIs redact host paths, raw env, DSNs, tokens and internal service URLs.
+缓解：
 
-## Hotplug L2 Controlled Apply Threats
+- Gateway、Web Shell 和 module-installer 均不挂载 Docker socket。
+- L2 foundation 默认只做 plan/status/health，Gateway apply-plan 禁用。
+- Compose driver 使用 trusted Gateway service configuration 和 allowlist。
+- Installer Core 拒绝 dangerous runtime fields。
+- Runtime plan 使用 structured command arrays，不使用 shell string。
+- Dynamic proxy 先执行 auth mode，再返回 service unavailable。
+- Admin API 不返回 host path、raw env、DSN、token 或 internal service URL。
 
-New attack surface:
+## Hotplug L2 Controlled Apply 威胁
 
-- Runtime plan JSON files passed to `ojosctl` or an operator.
-- Local compose apply execution.
-- Operation locks and operation history/audit writes.
-- Plan TTL and confirmation handling.
+新增攻击面：
 
-Threats:
+- 传给 `ojosctl` 或 operator 的 runtime plan JSON。
+- 本地 compose apply 执行。
+- Operation lock、operation history 和 audit 写入。
+- Plan TTL 与确认流程。
 
-- Arbitrary command execution if plan commands were shell strings.
-- Host control if Gateway/Web/module-installer could execute Docker or access Docker socket.
-- Service escape if a plan could choose arbitrary compose file paths or service names.
-- Replay of old plans after topology or service policy changed.
-- Secret leakage through stdout/stderr, env, audit logs, or operation result.
-- Concurrent apply corrupting runtime state.
+主要威胁：
 
-Mitigations:
+- 如果 plan command 是 shell string，会造成任意命令执行。
+- Gateway/Web/module-installer 若能执行 Docker 或访问 Docker socket，会获得 host control。
+- Plan 若能选择任意 compose file 或 service name，会越过 trusted runtime 边界。
+- 旧 plan replay 可能绕过新的 topology/service policy。
+- stdout/stderr、env、audit log 或 operation result 可能泄露 secret。
+- 并发 apply 可能破坏 runtime state。
 
-- `ojosctl` validates argv-only commands, driver, action, TTL, service id, target allowlist, and fixed compose path before apply.
-- Real apply requires `--confirm`; `--dry-run` never executes.
-- Gateway/Web apply is intentionally disabled and returns 501 for admin apply attempts.
-- Compose execution uses argument arrays and a trusted service allowlist.
-- Apply uses service locks with TTL and bounded command timeouts.
-- stdout/stderr and operation request/result are length-limited and redacted before history/audit storage.
-- Manifests still cannot declare command/script/image/mount/privileged/capability fields as executable runtime instructions.
+缓解：
+
+- `ojosctl` 在 apply 前校验 argv-only command、driver、action、TTL、service id、target allowlist 和 fixed compose path。
+- Real apply 必须 `--confirm`；`--dry-run` 不执行。
+- Gateway/Web apply 明确禁用，并对 admin apply 尝试返回 501。
+- Compose execution 使用 argument array 和 trusted service allowlist。
+- Apply 使用 service lock、TTL 和 command timeout。
+- stdout/stderr 与 operation request/result 写入前裁剪和脱敏。
+- Manifest 不能声明 command/script/image/mount/privileged/capability 作为可执行 runtime 指令。

@@ -87,13 +87,13 @@ permission_audit_logs
 - 保护拒绝：kernel disable/uninstall、builtin uninstall、`ojos.judge-core` disable/uninstall。
 - v1 目标：签名信任策略、远程发布者信任、完整 upgrade apply、可审计 rollback apply、更细粒度 operation lock。
 
-## Runtime Wiring v1 Lifecycle Semantics
+## Runtime Wiring v1 生命周期语义
 
-Install/apply writes registry metadata and stored manifest data. Enable changes the module into active Runtime Snapshot scope. Disable keeps registry detail/history, but removes the module's permissions, menus, frontend routes, gateway routes, health checks and topology contributions from the active snapshot.
+Install/apply 写入 registry metadata 和 stored manifest。Enable 让模块进入 active Runtime Snapshot。Disable 保留 registry detail/history，但从 active snapshot 移除该模块的 permissions、menus、frontend routes、gateway routes、health checks 和 topology contribution。
 
-`include_disabled=true` is the admin inspection escape hatch. It is not a public runtime surface and should not be used by Web Shell to create active clickable entries.
+`include_disabled=true` 只供管理员检查，不是 public runtime surface，也不应让 Web Shell 创建 active clickable entry。
 
-Demo module lifecycle acceptance now verifies:
+Demo module 和 Sample module 生命周期验收验证：
 
 - enabled demo module appears in Runtime Snapshot;
 - `demo.view` appears in active permission registry after enable;
@@ -101,7 +101,7 @@ Demo module lifecycle acceptance now verifies:
 - disabled demo module is excluded from active Runtime Snapshot;
 - disabled demo module remains visible through include-disabled admin inspection.
 
-## Hotplug L1 Lifecycle Semantics
+## Hotplug L1 生命周期语义
 
 Enable now affects both metadata and dynamic gateway proxy eligibility. An enabled module can contribute active permissions, menus, frontend route metadata, topology, health metadata and gateway routes. A disabled module is excluded from the active Runtime Snapshot and its gateway routes are not proxy-enabled.
 
@@ -109,7 +109,7 @@ Enable now affects both metadata and dynamic gateway proxy eligibility. An enabl
 
 L1 does not start or stop module services. Service availability still comes from compose/operator-managed deployment. L2 will define the controlled runtime driver.
 
-## Hotplug L2 Lifecycle Semantics
+## Hotplug L2 生命周期语义
 
 Module lifecycle and service lifecycle are separate. Installing/enabling a module activates metadata contributions. L2 foundation additionally exposes declared services/workers, their observed state/health and plan-only lifecycle actions.
 
@@ -123,11 +123,11 @@ plan-reload
 plan-health
 ```
 
-The Gateway admin API returns plans only. Apply is disabled in Gateway. Metadata-only services are blocked from start/stop/restart and remain useful only for snapshot/topology validation.
+Gateway admin API 只返回计划。Gateway apply 禁用。Metadata-only service 的 start/stop/restart 被阻断，只用于 snapshot/topology 验证。
 
 A service health failure can make a dynamic gateway route `degraded` or `unavailable`. Unavailable routes are not proxied; Gateway still enforces auth mode before returning a stable 503.
 
-## Hotplug L2 Controlled Apply Lifecycle
+## Hotplug L2 Controlled Apply 生命周期
 
 Runtime plan apply is now an operator lifecycle action, separate from module install/enable/disable.
 
@@ -140,7 +140,7 @@ ojosctl/operator -> write operation history/audit
 Gateway/Web -> view service state and operation result
 ```
 
-Gateway/Web apply is intentionally disabled. Admin callers can generate plans, inspect `blocked_by` and `warnings`, and view operation history. They cannot directly start, stop, or restart services through Gateway.
+Gateway/Web apply 明确禁用。管理员可以生成计划、查看 `blocked_by`、`warnings` 和 operation history，但不能通过 Gateway 直接 start、stop 或 restart 服务。
 
 Runtime apply operation states:
 

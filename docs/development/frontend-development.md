@@ -87,9 +87,9 @@ npm run build
 
 页面不访问本地文件系统，不连接 internal service，不使用 mock/fake 数据。危险操作必须展示影响范围并二次确认。kernel 和 `ojos.judge-core` 需要展示保护提示，不能提供可执行的禁用/卸载 apply 按钮。
 
-## Runtime Wiring v1 Frontend Guidance
+## Runtime Wiring v1 前端指导
 
-Web Shell should read Runtime Snapshot for module-provided menus and contribution metadata. Static Vue routes remain for compatibility, but new module metadata should flow into Module Contributions and Module Topology without page-specific hardcoding.
+Web Shell 应读取 Runtime Snapshot 中的 module-provided menus 和 contribution metadata。Static Vue routes 只作为兼容入口；新的 module metadata 应进入 Module Contributions 和 Module Topology，不做页面级 hardcoding。
 
 Rules:
 
@@ -99,14 +99,14 @@ Rules:
 - Use `required_permission` from snapshot menus to decide visibility where user permission data is available.
 - Ordinary user navigation keeps static compatibility entries because Runtime Snapshot admin API is not exposed to ordinary users.
 
-## Hotplug L1 Frontend Guidance
+## Hotplug L1 前端指导
 
-Web Shell uses Runtime Snapshot menus and contribution metadata for module surfaces. Unknown `component_key` values must route to `/admin/modules/contributions/:moduleId` and render metadata only. Web Shell must not dynamically import remote module JavaScript, must not load untrusted bundles and must not create fake business pages for metadata-only modules.
+Web Shell 使用 Runtime Snapshot menus 和 contribution metadata 展示模块表面。未知 `component_key` 必须进入 `/admin/modules/contributions/:moduleId` 并只渲染 metadata。Web Shell 不能动态 import remote module JavaScript，不能加载 untrusted bundle，也不能为 metadata-only module 创建假的业务页面。
 
-Static Vue routes remain compatibility entries for current Kernel/Platform/Judge Core pages. Future ordinary modules should contribute menus and frontend route metadata through manifest/package installation.
-## Hotplug L2 Frontend Guidance
+Static Vue routes 只作为当前 Kernel/Platform/Judge Core 页面兼容入口。未来普通模块应通过 manifest/package installation 贡献 menus 和 frontend route metadata。
+## Hotplug L2 前端指导
 
-Web Shell now includes `/admin/runtime/services` for service and worker lifecycle inspection. The page shows service state, health, lifecycle, runtime, routes and generated start/stop/restart plans.
+Web Shell 包含 `/admin/runtime/services`，用于查看 service 和 worker lifecycle。页面展示 service state、health、lifecycle、runtime、routes 和生成的 start/stop/restart plans。
 
 Frontend boundaries:
 
@@ -116,11 +116,11 @@ Frontend boundaries:
 - Metadata-only services should be shown as metadata and blocked from start/stop/restart.
 - Unknown module frontend `component_key` values continue to render through safe contribution metadata pages.
 
-## Hotplug L2 Controlled Apply Frontend Guidance
+## Hotplug L2 Controlled Apply 前端指导
 
-Web Shell may show generated runtime plans, warnings, blocked reasons, and operation history. It must not execute runtime plans.
+Web Shell 可以展示 runtime plans、warnings、blocked reasons 和 operation history，但不能执行 runtime plan。
 
-Allowed UI behavior:
+允许的 UI 行为：
 
 - Generate plan-start, plan-stop, plan-restart, and plan-reload through Gateway admin APIs.
 - Display plan JSON for operator review.
@@ -128,14 +128,14 @@ Allowed UI behavior:
 - Show an `ojosctl runtime apply-plan ... --dry-run` / `--confirm` command example.
 - Show runtime operation history.
 
-Forbidden UI behavior:
+禁止的 UI 行为：
 
 - No direct apply button that calls Docker, compose, Gateway apply, or module-installer internals.
 - No Docker socket, local file, or host path access.
-- No dynamic JavaScript execution from module manifests.
+- 不从 module manifest 执行 dynamic JavaScript。
 
 L2 Controlled Apply keeps apply authority outside the browser.
 
-## Module SDK Frontend Guidance
+## Module SDK 前端指导
 
-Web Shell must not hardcode ordinary SDK sample modules. It should render module menus, frontend route metadata, contribution detail and topology from Runtime Snapshot/registry APIs. Unknown `component_key` values continue to use safe metadata fallback and must not dynamically import JavaScript.
+Web Shell 不能 hardcode 普通 SDK sample module。它应从 Runtime Snapshot/registry APIs 渲染 module menus、frontend route metadata、contribution detail 和 topology。未知 `component_key` 继续使用 safe metadata fallback，不能动态 import JavaScript。

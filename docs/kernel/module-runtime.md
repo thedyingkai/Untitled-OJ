@@ -1,50 +1,14 @@
-# Module Runtime
+﻿# Module Runtime
 
-> 文档状态：当前实现，Phase 1 runtime snapshot
-> 适用范围：Kernel / Gateway / Web Shell / 模块作者
-> 最后更新：2026-06-27
+> 文档状态：当前实现，v0.1.0 发布基线
+> 适用范围：Kernel、Gateway、Web Shell、模块作者
+> 最后更新：2026-06-28
 
-Module Runtime 是 OJOS Kernel 能力。它读取 Module Registry，计算当前 enabled modules，并导出 runtime snapshot。
+Module Runtime 是 OJOS Kernel 能力。它读取 Module Registry 和 stored manifest，计算当前 enabled module 的运行态贡献，并导出 Runtime Snapshot。
 
-## Runtime Snapshot
+## Runtime Snapshot v1
 
-```json
-{
-  "modules": [],
-  "permissions": [],
-  "menus": [],
-  "frontend_routes": [],
-  "gateway_routes": [],
-  "services": [],
-  "workers": [],
-  "health_checks": [],
-  "topology": {
-    "nodes": [],
-    "edges": []
-  }
-}
-```
-
-## Phase 1 行为
-
-- Gateway 新增 `/api/admin/modules/runtime-snapshot`。
-- `/api/admin/modules/topology` 从 runtime snapshot 派生，保持旧响应结构兼容。
-- Runtime snapshot 聚合 module nodes、permissions、menus、frontend routes、gateway routes、components、health checks 和 topology edges。
-- Frontend topology 页面读取 runtime snapshot。
-
-## 未来路线
-
-- L0：metadata hotplug 已作为当前目标。
-- L1：Gateway route hotplug 逐步从 snapshot 读取。
-- L2：service/worker hotplug 通过受控 runtime driver 和 operator plan 实现，不暴露 Docker socket。
-- L3：frontend contribution hotplug 必须依赖签名 package、CSP、sandbox iframe 或 web component，不执行不可信动态 JS。
-- L4：完整安装、部署、路由、权限、frontend、health、rollback 自动化。
-
-## Kernel Runtime Wiring v1
-
-Runtime Snapshot is the running-state source of truth for module contributions. `GET /api/admin/modules/runtime-snapshot` returns only ENABLED module contributions by default. `GET /api/admin/modules/runtime-snapshot?include_disabled=true` returns registry-visible disabled module entries for admin inspection.
-
-Snapshot v1 includes:
+Runtime Snapshot `version: 1` 是当前模块贡献事实源：
 
 ```json
 {
@@ -72,119 +36,102 @@ Snapshot v1 includes:
 }
 ```
 
-Runtime aggregation rules:
+默认只返回 enabled module 的 active contribution。`include_disabled=true` 只供管理员检查 disabled registry contribution，不用于 public runtime surface。
 
-- Active snapshot filters by enabled modules and does not expose disabled module contributions as active runtime surface.
-- `include_disabled=true` is admin-only and is for registry inspection, installer review, and debugging.
-- Every contribution carries `module_id` so operators can trace source ownership.
-- Manifest-only metadata such as roles, storage buckets, events, admin panels, scheduled jobs and topology contributions is derived from the stored manifest when no dedicated registry table exists yet.
-- Snapshot responses must not include secrets, tokens, DB connection strings, local absolute paths, Docker socket paths, or package internals.
+## Aggregation 规则
 
-Gateway route hotplug L1 is implemented for enabled module routes. Gateway exposes `GET /api/admin/modules/runtime/routes` and `POST /api/admin/modules/runtime/reload` to rebuild and validate the runtime route table from registry data. Dynamic proxy matching uses the route table after core static routes and before compatibility fallback routes. The runtime table validates reserved prefixes, duplicate prefixes, overlapping prefixes, unknown services and auth modes. Manifest route declarations may reference only a `service_id`; upstream URLs come from Gateway trusted service configuration, not from module manifests.
+- 每个 contribution 都带 `module_id`，便于追踪来源。
+- disabled module 不进入 active permission、menu、route、topology 或 service surface。
+- roles、storage buckets、events、admin panels、scheduled jobs 和 manifest topology 可从 stored manifest 派生。
+- 响应不得包含 secret、token、DB 连接串、本机绝对路径、Docker socket 路径或 package 内部路径。
 
-Dynamic proxy security rules:
+## Gateway Route Hotplug
 
-- Core static routes keep priority for `/api/auth` and `/api/judge/worker`.
-- Reserved prefixes cannot be claimed by modules: `/api/auth`, `/api/admin/modules`, `/api/admin/health`, `/api/health`, `/api/internal`, `/api/judge/worker`.
-- `service_id` must exist in Gateway trusted service configuration.
-- Admin route table responses hide `upstream_base` by default.
-- Raw `Authorization` is not forwarded through dynamic routes. Gateway forwards sanitized actor headers and internal HMAC headers.
-- `public`, `user`, `admin`, `worker` and `internal` auth modes are explicit. `worker` and `internal` are not public dynamic proxy surfaces.
+Gateway 从 Runtime Snapshot 构建动态路由表：
 
-Topology is generated from Runtime Snapshot. It contains module nodes, dependency edges, service/worker/component nodes, gateway route nodes, frontend menu/route nodes, health nodes, and manifest-declared topology nodes/edges. Admin UI only renders the snapshot; it should not invent topology for future modules.
+- core static routes 优先。
+- enabled module route 才可 proxy。
+- `service_id` 必须存在于 trusted service map。
+- reserved prefixes 不允许被模块声明。
+- duplicate/overlap/unknown service/auth mode 会进入 conflicts、warnings 或 blocked_by。
+- `upstream_base` 默认不返回给普通管理视图。
+- 原始 `Authorization` 不透传到模块服务，Gateway 只转发受控 actor/internal headers。
 
-Current hotplug conclusion:
+## Topology
 
-- L0 Metadata hotplug: implemented for registry/snapshot/menu/permission/topology/health contribution display.
-- L1 Gateway route hotplug: runtime route table, reload, trusted service map, reserved prefix protection and dynamic proxy for enabled routes are implemented. Service start/stop remains out of scope.
-- L2 Service hotplug: runtime driver contract remains future work.
-- L3 Frontend contribution hotplug: metadata display only. OJOS still does not execute untrusted JS or dynamic frontend bundles.
-- L4 Full module hotplug: future work.
+Topology 从 Runtime Snapshot 派生，包含：
 
-## Hotplug L2 Foundation
+- module nodes
+- dependency edges
+- service/worker/component nodes
+- gateway route nodes
+- frontend menu/route nodes
+- health nodes
+- manifest-declared topology nodes/edges
 
-Hotplug L2 is a foundation, not full automatic service hotplug. Kernel Runtime now models service and worker lifecycle metadata, service state, service health, runtime plans and topology nodes from module manifests and registry data.
+Web Shell 只渲染 snapshot，不为未来模块硬编码拓扑。
 
-Implemented L2 foundation behavior:
+## Service Runtime Foundation
 
-- `provides.services` and `provides.workers` enter Runtime Snapshot as structured runtime services.
-- The Gateway Kernel Runtime has a `RuntimeDriver` interface with list, state, plan-start, plan-stop, plan-restart, plan-reload, plan-health and apply-plan methods.
-- The current compose driver reads trusted Gateway service configuration plus an allowlist. It checks HTTP health for trusted HTTP services and marks non-HTTP workers as `UNKNOWN` when no safe probe exists.
-- Runtime plans are structured data. Commands are arrays such as `compose restart problem-api`; no shell strings are generated.
-- `ApplyPlan` is disabled in Gateway for L2 foundation.
-- Route table entries include `service_state` and `service_health`; unavailable services are not proxied and return a stable 503 after auth checks.
-- Topology includes service and worker runtime nodes plus route and health edges.
+当前 L2 foundation 已支持：
 
-State model:
+- `provides.services` 和 `provides.workers` 进入 Runtime Snapshot。
+- Gateway Kernel Runtime 具备 list、state、plan-start、plan-stop、plan-restart、plan-reload、plan-health 接口。
+- compose driver 只读取 trusted service config 和 allowlist。
+- runtime plan 使用 argv array，不生成 shell string。
+- metadata-only service 不能 start/stop/restart。
+- route table 可结合 service state/health 标记 degraded 或 unavailable。
+
+状态模型：
 
 ```text
 DECLARED INSTALLED ENABLED STARTING RUNNING DEGRADED STOPPING STOPPED FAILED DISABLED UNKNOWN
 ```
 
-Security boundary:
+## Controlled Apply
 
-- Gateway, Web Shell and module-installer do not mount or call the Docker socket.
-- Manifests must not declare `image`, `command`, `script`, `host_path`, `mount`, `privileged` or `cap_add` as executable runtime instructions.
-- Compose service names must come from trusted config / allowlist, not arbitrary manifest input.
-- Admin UI generates plans only; it does not apply start/stop/restart.
+Gateway/Web 只生成计划和查看状态，不 apply。真实 apply 由 `ojosctl` 或未来 operator 读取 plan file 后执行：
 
-Current hotplug conclusion:
+```powershell
+cargo run -p ojosctl -- runtime plan-restart problem-api --out .tmp/agent/scratch/problem-api-restart.json
+cargo run -p ojosctl -- runtime apply-plan .tmp/agent/scratch/problem-api-restart.json --dry-run
+cargo run -p ojosctl -- runtime apply-plan .tmp/agent/scratch/problem-api-restart.json --confirm
+```
 
-- L0 metadata hotplug: implemented.
-- L1 gateway route/menu contribution hotplug: implemented for trusted enabled routes and safe Web Shell metadata.
-- L2 foundation: implemented for service/worker declaration, health/state view, plan generation and route-health linkage.
-- L2 service runtime apply, L3 dynamic frontend bundles and L4 full module automation are not implemented.
+计划字段包括：
 
-## Hotplug L2 Controlled Apply
+```text
+plan_id
+operation_id
+module_id
+service_id
+action
+driver
+can_apply
+apply_enabled
+requires_confirmation
+dry_run
+allowed_targets
+commands[].kind
+commands[].argv
+blocked_by
+warnings
+expires_at
+```
 
-L2 Controlled Apply adds a controlled operator path for applying runtime service plans. It is still not full hotplug: OJOS does not pull arbitrary module images, does not run manifest scripts, does not execute hooks, and does not load dynamic frontend bundles.
+安全规则：
 
-Apply architecture:
+- 计划只保存 argv array。
+- apply 前重新校验 service、action、driver、compose file、TTL 和 allowlist。
+- real apply 必须显式 `--confirm`。
+- dry-run 不执行。
+- apply 使用 service lock、timeout、输出长度限制和 redaction。
+- operation history 写入本地日志；数据库可达时同步写入 runtime operation/audit tables。
 
-- Gateway and Web Shell generate plans and show status only.
-- Gateway intentionally does not run `docker compose`, mount Docker socket, or apply plans.
-- Web Shell intentionally has no direct apply button.
-- `ojosctl` or a future operator reads a plan file and applies it locally under trusted runtime policy.
-- Apply results are written to operation history and audit surfaces.
+## Hotplug 结论
 
-Stable plan fields include `plan_id`, `operation_id`, `module_id`, `service_id`, `action`, `driver`, `can_apply`, `apply_enabled`, `requires_confirmation`, `dry_run`, `allowed_targets`, `commands[].kind`, `commands[].argv`, `blocked_by`, `warnings`, and `expires_at`.
-
-Plan safety rules:
-
-- Plans store argv arrays only; shell strings are not valid runtime plan commands.
-- `service_id`, action, driver, compose file, TTL, and target service are revalidated before apply.
-- Compose apply uses a fixed repo-local compose file and a trusted service allowlist.
-- Real apply requires explicit confirmation; dry-run never executes.
-- Apply has a service lock, timeout, output length limit, and redaction.
-
-Gateway still exposes `POST /api/admin/runtime/plans/:id/apply` only as an explicit disabled boundary. It returns `501 not implemented` for admins. Ordinary users receive 403 and missing tokens receive 401.
-
-## Module SDK Compatibility Harness v1
-
-Runtime Snapshot is the compatibility surface for ordinary modules. `modules/sample-hello/module.yaml` proves that permissions, menus, frontend route metadata, disabled gateway routes, metadata services/workers, health checks and topology can appear through manifest install/enable without editing Gateway route code, Web Shell hardcoded menus, topology page code or permission page code.
-
-Schema v1 modules can use L0 metadata, L1 route table contribution and L2 controlled service plan metadata. L3 dynamic frontend bundles, hooks, remote module market and full hotplug remain out of scope.
-
-## Baseline Version Freeze
-
-Runtime Snapshot version is currently `1`. Breaking response-shape changes must introduce snapshot version `2` and keep a compatibility story for Web Shell and admin clients.
-
-Current frozen hotplug status:
-
-- L0 Metadata Hotplug: complete.
-- L1 Route/Menu/Topology/Permission Hotplug: basically complete for trusted metadata and route proxying.
-- L2 Service Runtime Foundation + Controlled Apply: foundation complete; apply is only through `ojosctl` / operator.
-- L3 Dynamic Frontend Extension: not complete.
-- L4 Full Module Hotplug: not complete.
-
-## Baseline Version Freeze
-
-Runtime Snapshot version is currently `1`. Breaking response-shape changes must introduce snapshot version `2` and keep a compatibility story for Web Shell and admin clients.
-
-Current frozen hotplug status:
-
-- L0 Metadata Hotplug: complete.
-- L1 Route/Menu/Topology/Permission Hotplug: basically complete for trusted metadata and route proxying.
-- L2 Service Runtime Foundation + Controlled Apply: foundation complete; apply is only through `ojosctl` / operator.
-- L3 Dynamic Frontend Extension: not complete.
-- L4 Full Module Hotplug: not complete.
+- L0 Metadata Hotplug：完成。
+- L1 Route/Menu/Topology/Permission Hotplug：基本完成。
+- L2 Service Runtime Foundation + Controlled Apply：foundation 完成，apply 只通过 `ojosctl`/operator。
+- L3 Dynamic Frontend Extension：未完成。
+- L4 Full Module Hotplug：未完成。

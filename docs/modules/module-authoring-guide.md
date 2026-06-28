@@ -1,18 +1,18 @@
 # Module Authoring Guide
 
-Start with `ojosctl module init`, then edit `module.yaml` within schema v1.
+模块作者应从 `ojosctl module init` 开始，再在 `schema_version: 1` 范围内编辑 `module.yaml`。
 
-## Permissions
+## 权限
 
-Declare permission keys under `provides.permissions`. Runtime Snapshot exposes enabled module permissions to the admin permission registry.
+在 `provides.permissions` 中声明 permission key。模块启用后，Runtime Snapshot 会把这些权限暴露给管理员权限注册表。
 
-## Menus And Frontend Routes
+## 菜单与前端路由元数据
 
-Declare menu metadata under `provides.menus` and route metadata under `provides.frontend_routes`. Unknown `component_key` values are rendered by safe contribution views; Web Shell does not import dynamic JavaScript.
+在 `provides.menus` 声明菜单元数据，在 `provides.frontend_routes` 声明前端路由元数据。未知 `component_key` 会进入安全的模块贡献视图；Web Shell 不会动态 import JavaScript。
 
-## Gateway Routes
+## Gateway Route
 
-Declare a prefix and `service_id`:
+声明 prefix 和 `service_id`：
 
 ```yaml
 gateway_routes:
@@ -22,11 +22,11 @@ gateway_routes:
     enabled: false
 ```
 
-The manifest cannot provide a URL. Gateway owns trusted upstream configuration and reserved prefix protection.
+Manifest 不能提供 URL。Gateway 负责 trusted upstream configuration 和 reserved prefix protection。
 
-## Services And Workers
+## Services 与 Workers
 
-Metadata-only declarations are safe defaults:
+Metadata-only declaration 是默认安全选择：
 
 ```yaml
 services:
@@ -35,12 +35,12 @@ services:
     trusted_runtime: metadata
 ```
 
-Managed compose services require deploy/operator allowlisting. A module cannot make itself executable by declaring image, command or mount fields.
+Managed compose service 必须由部署/operator allowlist 批准。模块不能通过声明 image、command 或 mount 让自己变成可执行服务。
 
-## Health And Topology
+## Health 与 Topology
 
-Declare health metadata under `provides.health_checks` and topology nodes/edges under `provides.topology`. Runtime Snapshot and Admin Topology render these automatically when the module is enabled.
+在 `provides.health_checks` 中声明 health metadata，在 `provides.topology` 中声明 nodes/edges。模块启用后，Runtime Snapshot 和 Admin Topology 会自动展示这些贡献。
 
-## Lifecycle
+## 生命周期
 
-Install writes registry metadata. Enable activates runtime contributions. Disable preserves registry data but removes active contributions. `include_disabled=true` is for admin inspection only.
+Install 写入 registry metadata。Enable 激活 runtime contribution。Disable 保留 registry data，但从 active snapshot 移除 active contribution。`include_disabled=true` 只供管理员检查。

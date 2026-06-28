@@ -1,6 +1,6 @@
 # Module Testing Guide
 
-Run local SDK checks before proposing a module:
+模块提交前必须先跑本地 SDK 检查：
 
 ```powershell
 cargo run -p ojosctl -- module validate modules/sample-hello/module.yaml
@@ -8,7 +8,7 @@ cargo run -p ojosctl -- module package modules/sample-hello -o .tmp/agent/scratc
 cargo run -p ojosctl -- module verify .tmp/agent/scratch/sample-hello.ojosmod
 ```
 
-Run compatibility harness against Docker control plane:
+针对 live Docker control plane 的兼容性验收：
 
 ```powershell
 powershell -NoProfile -File scripts\e2e-module-compat.ps1 `
@@ -19,6 +19,14 @@ powershell -NoProfile -File scripts\e2e-module-compat.ps1 `
   -UserPassword user123
 ```
 
-The harness verifies scaffold, validate, package, verify, installer dry-run/apply, enable, snapshot, menu, permission, topology, route viewer, runtime service metadata, metadata service plan blocking, disable, include-disabled inspection, uninstall dry-run, permission rejection and path leak scanning.
+该 harness 验证：
 
-Temporary packages and generated scaffolds must stay under `.tmp/agent/scratch`.
+- scaffold、validate、package、verify。
+- installer dry-run/apply、enable、disable、uninstall dry-run。
+- Runtime Snapshot、menu、permission、topology、route viewer。
+- runtime service metadata 和 metadata service plan blocking。
+- `include_disabled=true` 管理员检查。
+- 普通用户 403、无 token 401。
+- `path_leaks=0`。
+
+生成的脚手架、package、plan 和报告只能放在 `.tmp/agent/` 下，不能提交。

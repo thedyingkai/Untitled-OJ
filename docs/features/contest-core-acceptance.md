@@ -1,31 +1,31 @@
-# Contest Core Acceptance Matrix
+# Contest Core 验收矩阵
 
-Status: design draft only. No Contest acceptance script is added in this gate.
-Date: 2026-06-27
+> 文档状态：设计草案，不是已实现能力
+> 最后更新：2026-06-27
 
-This matrix defines the checks required before a future Contest Core Skeleton can be accepted.
+本文定义未来 Contest Core Skeleton 被接受前必须通过的检查。本文件不新增 Contest 验收脚本，也不表示 Contest 已经实现。
 
-| Area | Check | Expected Result |
+| 范围 | 检查 | 预期结果 |
 | --- | --- | --- |
-| Manifest | `ojosctl module validate modules/contest-core` | Schema v1 accepted; no dangerous fields. |
-| Package | `ojosctl module package modules/contest-core` | `.ojosmod` contains manifest, checksums and package metadata. |
-| Verify | `ojosctl module verify <contest-core.ojosmod>` | Checksum verification ok. |
-| Install dry-run | Installer dry-run | Safe plan, no DB writes. |
-| Install apply | Installer apply | Registry entry and contributions written. |
-| Enable | Enable module | Active snapshot includes Contest Core contributions. |
-| Disable | Disable module | Active routes, menus and permissions removed. |
-| Runtime snapshot | Admin runtime snapshot | `ojos.contest-core` appears when enabled. |
-| Runtime routes | Route table | `/api/contest` bound to `contest-api` or disabled metadata route. |
-| Runtime services | Runtime services | `contest-api` state visible; metadata workers visible. |
-| Topology | Topology API/UI | Contest module, service, route, health, Judge Core dependency edges visible. |
-| Permissions | Permission registry | `contest.view`, `contest.participate`, `contest.manage` visible only when active. |
-| Frontend | Web Shell contribution registry | Menu/routes appear without hardcoded Contest menu logic. |
-| API e2e | Contest API smoke | `401` no token, `403` missing permission, no path leaks. |
-| Path leaks | e2e path scan | `path_leaks=0`. |
-| Judge Core | Compatibility | Judge Core remains enabled/protected and not GA. |
-| Module compat | Existing harness | sample-hello and demo/judge-core compatibility still pass. |
+| Manifest | `ojosctl module validate modules/contest-core` | Schema v1 通过；没有危险字段。 |
+| Package | `ojosctl module package modules/contest-core` | `.ojosmod` 包含 manifest、checksums 和 package metadata。 |
+| Verify | `ojosctl module verify <contest-core.ojosmod>` | checksum 校验通过。 |
+| Install dry-run | Installer dry-run | 生成安全计划，不写数据库。 |
+| Install apply | Installer apply | registry entry 与 contributions 写入。 |
+| Enable | 启用模块 | active snapshot 包含 Contest Core contributions。 |
+| Disable | 禁用模块 | active routes、menus 和 permissions 被移除。 |
+| Runtime snapshot | 管理端 runtime snapshot | 启用后能看到 `ojos.contest-core`。 |
+| Runtime routes | Route table | `/api/contest` 绑定到 `contest-api`，或作为 disabled metadata route 展示。 |
+| Runtime services | Runtime services | 可见 `contest-api` 状态；metadata workers 可见。 |
+| Topology | Topology API/UI | 可见 Contest module、service、route、health、Judge Core dependency edges。 |
+| Permissions | Permission registry | `contest.view`、`contest.participate`、`contest.manage` 仅在 active 时可见。 |
+| Frontend | Web Shell contribution registry | 菜单和路由通过 contribution 出现，不硬编码 Contest 菜单。 |
+| API e2e | Contest API smoke | 无 token 返回 `401`，缺权限返回 `403`，不泄露路径。 |
+| Path leaks | e2e path scan | `path_leaks=0`。 |
+| Judge Core | Compatibility | Judge Core 保持 enabled/protected，且不标记 GA。 |
+| Module compat | Existing harness | sample-hello、demo-module、judge-core 兼容性继续通过。 |
 
-## Required Regression Commands
+## 必需回归命令
 
 ```powershell
 powershell -NoProfile -File scripts\acceptance-kernel.ps1 -SkipDockerBuild
@@ -34,6 +34,6 @@ powershell -NoProfile -File scripts\e2e-api.ps1 -BaseUrl http://localhost:8080/a
 powershell -NoProfile -File scripts\e2e-module-compat.ps1 -BaseUrl http://localhost:8080/api -AdminUsername admin1 -AdminPassword admin123 -UserUsername user1 -UserPassword user123
 ```
 
-## Skeleton Acceptance Minimum
+## Skeleton 最小验收
 
-The future skeleton is acceptable only if it proves module install/enable/disable, contribution visibility and API permission boundaries without implementing full scoreboard, clarification, print, balloon, rating or remote OJ.
+未来 skeleton 只有在证明 module install/enable/disable、contribution visibility 和 API permission boundaries 全部成立时才可接受。它不得实现完整 scoreboard、clarification、print、balloon、rating 或 remote OJ。

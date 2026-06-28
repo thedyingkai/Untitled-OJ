@@ -159,7 +159,7 @@ Installer hardening 后，静态验收还必须覆盖：
 
 ## Module SDK Compatibility Harness
 
-Run:
+执行：
 
 ```powershell
 powershell -NoProfile -File scripts\e2e-module-compat.ps1 `
@@ -170,17 +170,17 @@ powershell -NoProfile -File scripts\e2e-module-compat.ps1 `
   -UserPassword user123
 ```
 
-The harness validates scaffold, package, install, enable, Runtime Snapshot, route/menu/topology/permission/service contribution, metadata service plan blocking, disable, include-disabled inspection, uninstall dry-run, auth rejection and path leak checks.
+该 harness 验证 scaffold、package、install、enable、Runtime Snapshot、route/menu/topology/permission/service contribution、metadata service plan blocking、disable、include-disabled inspection、uninstall dry-run、权限拒绝和 path leak checks。
 
 ## Kernel Baseline Acceptance
 
-Run:
+执行：
 
 ```powershell
 powershell -NoProfile -File scripts\acceptance-kernel.ps1 -SkipDockerBuild
 ```
 
-The unified kernel acceptance entry calls static verification, API e2e, module compatibility and `ojosctl` smoke checks. It writes a summary with:
+统一 Kernel 验收入口会调用 static verification、API e2e、module compatibility 和 `ojosctl` smoke checks，并写出以下 summary：
 
 ```text
 static_failed

@@ -20,7 +20,7 @@ kernel/installer/cli/      本地 CLI
 
 ## 当前 v0 能力
 
-v0 已实现：
+v0.1.0 已实现：
 
 - 本地 `modules/*/module.yaml` discover / validate / plan。
 - 本地 `.ojosmod` package / verify / inspect。
@@ -29,8 +29,10 @@ v0 已实现：
 - 依赖解析与 install / enable / disable / upgrade / rollback / uninstall plan。
 - demo module 的 install apply / enable / disable。
 - operation lock、operation history、request/result redaction 和 audit log。
-- Gateway Admin API 接入。
-- 前端 `/admin/modules/installer` 管理页。
+- Gateway Admin API 接入，用于 live control plane 验收和管理适配。
+- 前端 `/admin/modules/installer` 管理视图。该页面不是官方安装器主入口。
+- 原生 CLI `ojosctl`。
+- 原生 TUI `ojos-installer-tui`。
 
 v0 明确不支持：
 
@@ -81,6 +83,21 @@ GET  /api/admin/modules/:id/operations
 ```
 
 Gateway 负责 JWT 鉴权、`admin` / `super_admin` / `system.admin` 权限检查、actor 信息透传和错误映射。前端不直接访问 installer service。
+
+## 官方原生入口
+
+正式安装、打包、验证、启用、禁用和 runtime apply 使用：
+
+```powershell
+cargo run -p ojosctl -- doctor
+cargo run -p ojosctl -- status
+cargo run -p ojosctl -- module validate modules/sample-hello/module.yaml
+cargo run -p ojosctl -- module package modules/sample-hello -o .tmp/agent/scratch/sample-hello.ojosmod
+cargo run -p ojosctl -- runtime snapshot
+cargo run -p ojos-installer-tui --
+```
+
+Web Shell 仅查看计划、健康、Runtime、操作历史和模块贡献，不执行危险 apply。
 
 ## Runtime Image Hardening
 
@@ -166,19 +183,19 @@ powershell -NoProfile -File scripts\e2e-api.ps1 `
 
 ## Runtime Wiring v1 Installer Notes
 
-Installer v0 writes metadata used by Kernel Module Runtime. Module enable/disable directly affects active Runtime Snapshot membership. Disabled module registry records are retained for audit, detail views and include-disabled inspection.
+Installer v0.1.0 写入 Kernel Module Runtime 所需的 metadata。Module enable/disable 会直接影响 active Runtime Snapshot 成员。Disabled module registry record 保留给审计、详情页和 include-disabled 管理检查。
 
-The demo module intentionally declares disabled menu, frontend route and gateway route metadata. This validates the registry/runtime contribution path without pretending a real business API or frontend bundle exists.
+Demo module 和 Sample module 声明 disabled menu、frontend route、gateway route 和 metadata service，用于验证 registry/runtime contribution 路径，不代表真实业务 API 或 frontend bundle 已实现。
 
-Gateway route declarations are validated as metadata in v1. The route table API can aggregate and detect conflicts, but full dynamic proxy cutover is future work.
+Gateway route declaration 在 v1 中作为 metadata 校验；route table 和 trusted dynamic proxy 已用于 enabled trusted route。Full hotplug automation 仍未完成。
 
-## Hotplug L1 Installer Notes
+## Hotplug L1 Installer 说明
 
-Gateway route declarations use `service_id` in the manifest contract. The installer continues to persist the compatibility DB column `target_service`, but it must be treated as a service identifier, not a URL. Direct `target_url` is forbidden.
+Gateway route declaration 在 manifest contract 中使用 `service_id`。Installer 仍会写入兼容 DB column `target_service`，但该字段必须被视为 service identifier，而不是 URL。直接 `target_url` 被禁止。
 
-Enable/disable affects dynamic proxy eligibility through Runtime Snapshot and route table reload. Disabled modules may appear in include-disabled admin inspection, but disabled routes are not proxy-enabled.
+Enable/disable 会通过 Runtime Snapshot 和 route table reload 影响 dynamic proxy eligibility。Disabled modules 可以出现在 include-disabled 管理检查中，但 disabled routes 不会被 proxy-enabled。
 ## Hotplug L2 Boundary
 
-Module Installer validates service and worker manifest fields, including lifecycle, trusted runtime, compose service identity and route paths. It rejects dangerous runtime fields such as `command`, `script`, `image`, `host_path`, `mount`, `privileged` and `cap_add`.
+Module Installer 校验 service 和 worker manifest fields，包括 lifecycle、trusted runtime、compose service identity 和 route paths。它会拒绝 `command`、`script`、`image`、`host_path`、`mount`、`privileged`、`cap_add` 等危险 runtime fields。
 
-Installer does not start, stop or restart module services in L2 foundation. Runtime state and plan generation are Kernel Runtime responsibilities, and actual apply remains reserved for a future controlled operator/ojosctl path.
+Installer service 不直接 start、stop 或 restart 模块服务。Runtime state 和 plan generation 属于 Kernel Runtime；actual apply 由 `ojosctl` 或未来 operator 走 controlled apply。

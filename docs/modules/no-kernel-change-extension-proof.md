@@ -1,45 +1,40 @@
-# No-Kernel-Change Extension Proof
+# No Kernel Change Extension Proof
 
-Sample Hello demonstrates ordinary module extension without changing Kernel, Gateway or Web Shell core logic.
+`modules/sample-hello` 是 SDK 样例模块，用于证明普通 metadata/service/route/menu/permission/topology 模块可以通过 manifest/package/runtime 接入，不需要为样例模块修改 Kernel、Gateway 或 Web Shell 主逻辑。
 
-## Files Added For The Sample
+## 本轮新增或修改
 
-- `modules/sample-hello/module.yaml`
-- `modules/sample-hello/README.md`
-- `modules/sample-hello/frontend/contributions.yaml`
-- `modules/sample-hello/services/README.md`
-- `modules/sample-hello/tests/module-smoke.md`
+- `modules/sample-hello/`
+- `docs/modules/*` SDK、schema、testing 文档
+- `scripts/e2e-module-compat.ps1`
+- `ojosctl module init/package/verify` 相关能力
+- schema/package/installer compatibility tests
 
-The stage also adds SDK docs, schema docs, `ojosctl module init` and compatibility harness tooling.
+## 未为样例模块修改的核心逻辑
 
-## Core Files Not Changed For Sample Runtime Integration
+- 没有为 `sample-hello` 修改 Kernel installer core 校验规则。
+- 没有为 `sample-hello` 修改 Kernel installer service 的核心 install/enable/disable 逻辑。
+- 没有在 Gateway 中写 sample-specific route。
+- 没有在 Web Shell 主菜单硬编码 sample。
+- 没有在 topology 页面硬编码 sample。
+- 没有在 permission 页面硬编码 sample。
 
-The sample module integration does not require changes to:
+## 接入路径
 
-- Kernel installer core validation logic for new sample-specific fields.
-- Kernel installer service install/enable/disable logic.
-- Gateway core route registration for sample routes.
-- Gateway dynamic proxy matching logic.
-- Web Shell main menu hardcoding.
-- Topology page hardcoding.
-- Permission page hardcoding.
+1. Installer 校验并存储 `module.yaml`。
+2. Module Registry 持久化 module node、permission、menu、route、component 等元数据。
+3. Kernel Module Runtime 从 registry 和 stored manifest 派生 Runtime Snapshot。
+4. Gateway 从 Runtime Snapshot 构建 route table。
+5. Web Shell 从 Runtime Snapshot 展示 menu、contribution、topology、permission 和 runtime service。
 
-## How It Enters Runtime
+## 仍可能需要 Kernel 演进的情况
 
-Installer stores the sample `module.yaml` in module registry tables. Kernel Runtime reads stored manifest metadata and derives Runtime Snapshot contributions. Web Shell and admin pages consume Runtime Snapshot and registry APIs.
+- 新增 extension point 类型。
+- 新增 service runtime driver。
+- 新增 dynamic frontend bundle 能力。
+- 新增 remote market trust policy。
+- 新增 hook execution。
+- 新增 package signing policy。
+- 实现 full hotplug automation。
 
-Manifest contributions flow as follows:
-
-- `permissions` -> permission registry.
-- `menus` -> menu contribution registry.
-- `frontend_routes` -> contribution registry and safe fallback route metadata.
-- `gateway_routes` -> runtime route table viewer; disabled route is not proxied.
-- `services` / `workers` -> runtime services API and topology nodes.
-- `health_checks` -> health metadata.
-- `topology.nodes` / `topology.edges` -> topology graph.
-
-## Future Kernel Evolution Still Needed
-
-Kernel evolution is still required for new extension point types, new service runtime drivers, dynamic frontend bundle execution, remote marketplace trust, hook execution, package signing policy and full hotplug automation.
-
-Ordinary metadata/service/route/menu/permission/topology modules fit schema v1 and do not require Kernel/Gateway/Web Shell core edits.
+普通 metadata/service/route/menu/permission/topology 模块在 schema v1 内不需要改 Kernel/Gateway/Web Shell 主逻辑。

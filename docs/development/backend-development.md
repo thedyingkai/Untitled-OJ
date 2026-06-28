@@ -98,7 +98,7 @@ cargo run -p ojosctl -- module doctor
 
 Gateway 仍是唯一 public API 入口。新增 Admin API 必须先在 Gateway 做 JWT 和 `system.admin` 权限校验，再调用 internal installer service。
 
-## Runtime Wiring v1 Backend Guidance
+## Runtime Wiring v1 后端指导
 
 Gateway admin module APIs should use Kernel Module Runtime aggregation for runtime facts. New module contributions should be read from module registry tables or stored manifest metadata instead of page-specific hardcoding.
 
@@ -110,14 +110,14 @@ Current backend contract:
 - Admin Health aggregates module health_check metadata from Runtime Snapshot and marks metadata checks as registered, not as fake service probes.
 - Compatibility proxy routes stay configured until full dynamic proxy cutover.
 
-## Hotplug L1 Backend Guidance
+## Hotplug L1 后端指导
 
-Gateway dynamic proxy now reads the Kernel Runtime route table for enabled module routes. Manifests declare `service_id`, while Gateway configuration owns trusted upstream URLs. Do not add future module routes as hardcoded Gateway routes unless they are core compatibility or reserved platform routes.
+Gateway dynamic proxy 从 Kernel Runtime route table 读取 enabled module routes。Manifest 声明 `service_id`，Gateway configuration 持有 trusted upstream URL。除 core compatibility 或 reserved platform routes 外，不要为未来模块新增 hardcoded Gateway route。
 
 Core static routes keep priority for `/api/auth` and `/api/judge/worker`. Dynamic proxy strips hop-by-hop headers, does not forward raw Authorization by default, forwards sanitized actor headers and signs internal requests. Reserved prefixes and unknown services are blocked by the route table.
-## Hotplug L2 Backend Guidance
+## Hotplug L2 后端指导
 
-Runtime service lifecycle code belongs to Kernel Runtime boundaries. The current compatibility implementation lives in `services/gateway/internal/kernel/moduleruntime`, but it should remain independent from business modules.
+Runtime service lifecycle 代码属于 Kernel Runtime 边界。当前兼容实现位于 `services/gateway/internal/kernel/moduleruntime`，但必须保持与业务模块无关。
 
 Rules for backend changes:
 
@@ -128,7 +128,7 @@ Rules for backend changes:
 - Gateway admin APIs may generate plans and expose sanitized state. They must not apply dangerous host actions.
 - Dynamic proxy must check runtime route health/status and enforce auth before returning unavailable service errors.
 
-## Hotplug L2 Controlled Apply Backend Guidance
+## Hotplug L2 Controlled Apply 后端指导
 
 Gateway remains a plan/status adapter. Do not add code paths that run Docker, call shell, mount Docker socket, or apply runtime plans inside Gateway.
 
@@ -140,8 +140,8 @@ Backend rules:
 - Operation history and audit responses must redact secrets, tokens, DSNs, host paths, and raw env.
 - Any compose apply implementation must validate service allowlist, action allowlist, fixed compose path, TTL, and lock before execution.
 
-Local controlled apply currently belongs to `kernel/installer/cli` (`ojosctl runtime apply-plan`) and future operator code, not to Gateway handlers.
+Local controlled apply 当前属于 `kernel/installer/cli`（`ojosctl runtime apply-plan`）和未来 operator，不属于 Gateway handler。
 
-## Module SDK Backend Guidance
+## Module SDK 后端指导
 
 For ordinary modules, do not add hardcoded Gateway routes or module-specific runtime aggregation code. New modules should enter through `module.yaml`, installer registry writes and Runtime Snapshot. Add Kernel/Gateway code only when introducing a new extension point type, a new runtime driver, or a reviewed platform capability.

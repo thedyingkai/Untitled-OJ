@@ -1,72 +1,89 @@
 # Module Contract v1
 
-Module contract v1 is the stable compatibility starting point for OJOS modules. A module that stays inside this contract can contribute metadata, permissions, menus, frontend route metadata, gateway route metadata, services, workers, health checks, storage metadata, events, admin panel metadata and topology without changing Kernel, Gateway or Web Shell core logic.
+Module Contract v1 是 OJOS 模块的稳定兼容起点。模块只要保持在该契约内，就可以通过 manifest/package/runtime 贡献 metadata、权限、菜单、前端路由元数据、Gateway route 元数据、服务、Worker、健康检查、存储元数据、事件、admin panel 元数据和拓扑，而不需要修改 Kernel、Gateway 或 Web Shell 主逻辑。
 
-## Compatibility Policy
+## 兼容策略
 
-- `schema_version: 1` is the compatibility start.
-- Unknown top-level fields are rejected.
-- Unknown `provides` fields are rejected in v1. This is intentionally strict until extension point governance is formalized.
-- Dangerous unknown fields are rejected anywhere in the manifest.
-- Adding a new optional field to v1 must be backward compatible and must not change existing semantics.
-- Deleting or renaming a field requires `schema_version: 2`.
-- Modules must not use manifest fields to execute code, fetch remote code or control host runtime.
+- `schema_version: 1` 是当前兼容起点。
+- unknown top-level fields 默认拒绝。
+- unknown `provides` fields 在 v1 中拒绝；新增 extension point 需要先设计和评审。
+- dangerous unknown fields 在 manifest 任意位置拒绝。
+- v1 新增字段必须向后兼容，不能改变旧 manifest 语义。
+- 删除或重命名字段必须进入 `schema_version: 2`。
+- 模块不能通过 manifest 执行代码、拉取远程代码或控制 host runtime。
 
-Dangerous field names rejected anywhere include `secret`, `token`, `password`, `private_key`, `env`, `command`, `script`, `hook`, `image`, `mount`, `host_path`, `privileged`, `cap_add`, `postinstall`, `preinstall`, `remote_url`, `download_url` and `target_url`.
+危险字段名包括：
 
-## Required Identity Fields
+```text
+secret
+token
+password
+private_key
+env
+command
+script
+hook
+image
+mount
+host_path
+privileged
+cap_add
+postinstall
+preinstall
+remote_url
+download_url
+target_url
+```
 
-- `schema_version`: must be `1`.
-- `id`: reverse-domain style lowercase module id such as `ojos.sample-hello`.
-- `name`: display name.
-- `version`: semver.
-- `set`: module set/category.
-- `kind`: `kernel`, `platform`, `feature`, `integration` or `metadata`.
-- `status`: `builtin`, `external` or `demo`.
-- `description`: optional, max 2000 characters.
+## 身份字段
 
-## Compatibility And Dependencies
+- `schema_version`：必须为 `1`。
+- `id`：小写模块 ID，例如 `ojos.sample-hello`。
+- `name`：显示名。
+- `version`：semver。
+- `set`：模块集合。
+- `kind`：`kernel`、`platform`、`feature`、`integration` 或 `metadata`。
+- `status`：`builtin`、`external` 或 `demo`。
+- `description`：描述，最长 2000 字符。
 
-`compatibility.platform` and `compatibility.installer` declare minimum platform/installer constraints. `requires.modules` declares module dependencies with optional version constraints.
+## 兼容与依赖
+
+`compatibility.platform` 和 `compatibility.installer` 声明最低平台/安装器约束。`requires.modules` 声明模块依赖和版本约束。
 
 ## Provides
 
-`provides.permissions` declares permission keys.
-
-`provides.roles` declares role metadata.
-
-`provides.components` declares generic component metadata.
-
-`provides.services` declares service lifecycle metadata. Metadata services use `lifecycle: metadata` and `trusted_runtime: metadata`; managed compose services must reference a trusted compose service name and cannot declare images, commands or mounts.
-
-`provides.workers` declares worker lifecycle metadata with the same runtime safety rules.
-
-`provides.frontend_routes` declares frontend route metadata. Web Shell does not dynamically import unknown component keys.
-
-`provides.menus` declares menu metadata. Menu visibility is permission-aware and disabled menus are not active navigation.
-
-`provides.gateway_routes` declares route prefix and `service_id`. It must not declare arbitrary `target_url`; Gateway resolves `service_id` through trusted configuration.
-
-`provides.storage_buckets`, `health_checks`, `migrations`, `events`, `scheduled_jobs`, `admin_panels` and `topology.nodes/edges` are metadata extension points consumed by Runtime Snapshot and admin views.
+- `provides.permissions`：权限 key。
+- `provides.roles`：角色元数据。
+- `provides.components`：通用组件元数据。
+- `provides.services`：服务生命周期元数据。
+- `provides.workers`：Worker 生命周期元数据。
+- `provides.frontend_routes`：前端路由元数据；Web Shell 不动态 import 未知组件。
+- `provides.menus`：菜单元数据；disabled menu 不会成为 active navigation。
+- `provides.gateway_routes`：route prefix 与 `service_id`；不能声明 arbitrary `target_url`。
+- `provides.storage_buckets`：存储桶元数据。
+- `provides.health_checks`：健康检查元数据。
+- `provides.migrations`：模块拥有的迁移元数据。
+- `provides.events`：publish/subscribe 元数据。
+- `provides.scheduled_jobs`：计划任务元数据。
+- `provides.admin_panels`：管理面板元数据。
+- `provides.topology.nodes` / `provides.topology.edges`：拓扑贡献。
 
 ## Package
 
-`.ojosmod` v1 packages contain:
+`.ojosmod` v1 package 包含：
 
-- `module.yaml`
-- `checksums.sha256`
-- `package.yaml`
+```text
+module.yaml
+checksums.sha256
+package.yaml
+```
 
-Package v1 verifies checksum integrity only. Signature trust policy is reserved for a later trust release.
+Package v1 只验证 checksum integrity。Signature trust policy 留到后续版本。
 
 ## Hotplug Level
 
-Schema v1 supports L0 metadata hotplug, L1 Gateway route table contribution, and L2 controlled service plan metadata. It does not implement dynamic frontend bundles, hooks, remote module market or full hotplug automation.
+Schema v1 支持 L0 metadata hotplug、L1 Gateway route table contribution、L2 controlled service plan metadata。不支持 dynamic frontend bundle、hook、remote module market 或 full hotplug automation。
 
-## Version Freeze
+## 版本冻结
 
-`schema_version: 1` is frozen as the current compatibility starting point. Future breaking changes must use `schema_version: 2`; additive fields in v1 must be backward compatible and must not make old manifests unsafe or semantically different.
-
-## Version Freeze
-
-`schema_version: 1` is frozen as the current compatibility starting point. Future breaking changes must use `schema_version: 2`; additive fields in v1 must be backward compatible and must not make old manifests unsafe or semantically different.
+`schema_version: 1` 已冻结为当前兼容起点。破坏性变更必须使用 `schema_version: 2`；v1 的 additive fields 必须保持向后兼容。

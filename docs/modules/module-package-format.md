@@ -1,10 +1,8 @@
 # Module Package Format
 
-Document status: current implementation, package format v1.
+> 文档状态：当前实现，package format v1
 
-## Format
-
-`.ojosmod` is a zip package. Package format version `1` has this required structure:
+`.ojosmod` 是 zip package。Package format `1` 必须包含：
 
 ```text
 module.yaml
@@ -12,7 +10,7 @@ checksums.sha256
 package.yaml
 ```
 
-Optional metadata-only content may include:
+可选 metadata-only 内容：
 
 ```text
 README.md
@@ -24,9 +22,9 @@ services/
 tests/
 ```
 
-`frontend/` and `services/` content is metadata only in v1. OJOS does not dynamically execute frontend bundles, service commands, hooks or scripts from a package.
+v1 中 `frontend/` 和 `services/` 只作为元数据或源码材料保存。OJOS 不会从 package 动态执行前端 bundle、service command、hook 或 script。
 
-`package.yaml` contains:
+## package.yaml
 
 ```yaml
 package:
@@ -38,26 +36,26 @@ package:
   trusted_publisher: null
 ```
 
-## Required Verification
+## 校验规则
 
-`ojosctl module verify <package.ojosmod>` checks:
+`ojosctl module verify <package.ojosmod>` 检查：
 
-- `module.yaml` exists and validates against `schema_version: 1`.
-- `checksums.sha256` exists.
-- `package.yaml` exists with `package.format=ojosmod` and `package.version=1`.
-- Every file checksum matches.
-- Every non-checksum file is listed in the checksum manifest.
-- Path traversal is rejected.
-- Absolute paths are rejected.
-- Symlinks are rejected.
-- `.env`, `.tmp`, `node_modules`, `frontend/dist`, `.git` and `target` entries are rejected.
-- Hook/script/postinstall/preinstall/executable entry semantics are rejected by manifest and package validation.
+- `module.yaml` 存在并符合 `schema_version: 1`。
+- `checksums.sha256` 存在。
+- `package.yaml` 存在，且 `package.format=ojosmod`、`package.version=1`。
+- 每个文件 checksum 匹配。
+- 每个非 checksum 文件都在 checksum manifest 中。
+- 拒绝 path traversal。
+- 拒绝 absolute path。
+- 拒绝 symlink。
+- 拒绝 `.env`、`.tmp`、`node_modules`、`frontend/dist`、`.git`、`target`。
+- Manifest 和 package validation 拒绝 hook/script/postinstall/preinstall/executable 语义。
 
-## Signature Boundary
+## Signature 边界
 
-Package v1 verifies checksum integrity only. It does not prove publisher trust.
+Package v1 只验证 checksum integrity，不证明 publisher trust。
 
-The following fields are reserved:
+以下字段为保留字段，可为 `null`：
 
 ```text
 signature
@@ -65,8 +63,8 @@ signing_key_id
 trusted_publisher
 ```
 
-Remote module market installation remains out of scope until package signature and publisher trust policy are implemented.
+Remote module market 在 package signature 和 publisher trust policy 完成前不支持。
 
-## Baseline Freeze
+## 版本冻结
 
-Package format is frozen as `.ojosmod` package version `1`. Future breaking package layout changes must use package format version `2`.
+`.ojosmod` package format 当前为 `1`。破坏性 package layout 变更必须进入 package format `2`。

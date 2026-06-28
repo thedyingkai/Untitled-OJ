@@ -1,13 +1,29 @@
 # Kernel Acceptance Matrix
 
-| Area | Script / command | Current status | Failure handling | Blocks next feature |
+| 范围 | 验收入口 | 目标状态 | 失败处理 | 是否阻塞发布 |
 | --- | --- | --- | --- | --- |
-| Static verification | `scripts/verify-static.ps1 -SkipDockerBuild` | Required green | Fix failing build/test/scan before merging | Yes |
-| Docker API e2e | `scripts/e2e-api.ps1` | Required green in local Docker acceptance | Inspect `.tmp/agent/reports/api-runtime` and service logs | Yes |
-| Module compatibility | `scripts/e2e-module-compat.ps1` | Required green | Inspect `.tmp/agent/reports/module-compat` | Yes |
-| CLI smoke | `cargo run -p ojosctl -- module doctor`, scaffold, package, runtime plan dry-run | Required green through `verify-static` and `acceptance-kernel` | Fix CLI or contract drift | Yes |
-| Controlled apply | `acceptance-kernel.ps1 -RunControlledApply` | Optional, explicit only | Do not run by default; fix operator path before claiming apply | No for plan-only features, yes for apply changes |
-| Path leak scan | e2e summaries and static scans | Must be `0` | Redact output and remove internal path exposure | Yes |
-| Permission rejection | e2e ordinary user/no token checks | Must be ordinary `403`, no token `401` | Fix auth boundary before merging | Yes |
+| 静态验证 | `scripts/verify-static.ps1 -SkipDockerBuild` | 通过 | 修复 build/test/scan 失败项 | 是 |
+| Docker API e2e | `scripts/e2e-api.ps1` | `failed=0` | 查看 `.tmp/agent/reports/api-runtime` 和服务日志 | 是 |
+| Module Compatibility | `scripts/e2e-module-compat.ps1` | `sample_module_compat=passed` | 查看 `.tmp/agent/reports/module-compat` | 是 |
+| CLI smoke | `ojosctl doctor/status/module/runtime` | 通过 | 修复 CLI 或契约漂移 | 是 |
+| Native TUI smoke | `ojos-installer-tui --version` 和 Rust build | 通过 | 修复 TUI 构建或依赖 | 是 |
+| Controlled Apply | `acceptance-kernel.ps1 -RunControlledApply` | 显式通过 | 修复 allowlist、lock、history、redaction | 涉及 apply 时阻塞 |
+| Release Artifacts | `scripts/build-release-artifacts.ps1 -Version v0.1.0` | 生成 manifest/checksums | 修复构建或网络依赖 | 是 |
+| Path Leak Scan | e2e summary 与 static scan | `path_leaks=0` | 删除泄露字段或修正响应 | 是 |
+| Permission Rejection | e2e 普通用户/无 token | 普通用户 `403`，无 token `401` | 修复认证/授权边界 | 是 |
 
-`scripts/acceptance-kernel.ps1` is the unified local entry and records a summary containing `static_failed`, `api_failed`, `compat_failed`, `path_leaks`, `admin_health_status`, `admin_health_judge_status`, `module_compat`, `controlled_apply` and `overall_status`.
+`scripts/acceptance-kernel.ps1` 是本地统一入口，summary 必须包含：
+
+```text
+static_failed
+api_failed
+compat_failed
+path_leaks
+admin_health_status
+admin_health_judge_status
+module_compat
+controlled_apply
+overall_status
+```
+
+`overall_status=ok` 只表示脚本覆盖范围通过，不自动代表生产完全安全。

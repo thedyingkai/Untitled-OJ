@@ -1,10 +1,10 @@
-# Kernel Overview
+﻿# Kernel Overview
 
-> 文档状态：当前实现，Phase 1 skeleton
-> 适用范围：Kernel 开发 / 模块开发 / 架构评审
-> 最后更新：2026-06-27
+> 文档状态：当前实现，v0.1.0 发布基线
+> 适用范围：Kernel 开发、模块开发、架构评审
+> 最后更新：2026-06-28
 
-OJOS Kernel 负责模块系统的系统级能力。它不包含题目、比赛、训练、讨论或远程 OJ 的业务逻辑。
+OJOS Kernel 负责模块系统和运行时的系统级能力。Kernel 不包含 Contest、Training、Discussion、Remote OJ 等业务功能。
 
 ## Kernel 能力
 
@@ -22,6 +22,7 @@ Module Package Verification
 Module Dependency Resolver
 Module Operation Lock
 Module Operation History
+Native Installer CLI/TUI
 ```
 
 ## Kernel Built-ins
@@ -37,7 +38,7 @@ ojos.kernel.config
 ojos.kernel.health
 ```
 
-Kernel built-ins 不允许 disable 或 uninstall。
+Kernel built-ins 不允许普通 disable 或 uninstall。
 
 ## Platform Built-ins
 
@@ -51,63 +52,58 @@ ojos.platform.observability
 
 Platform built-ins 默认受保护，不作为普通 feature module 卸载。
 
-## Feature Modules
+## 当前 Feature Module
 
 ```text
 ojos.judge-core
 ojos.demo-module
-future ojos.contest
-future ojos.training
-future ojos.group
-future ojos.remote-oj
+ojos.sample-hello
 ```
 
-Feature modules 根据 dependency、dependent 和 safety policy 判断 enable、disable、upgrade、rollback 和 uninstall。
+Judge Core 是第一个核心 feature module，但不标记 GA。Demo 和 Sample 用于 installer/runtime/sdk 验收，不代表真实业务模块。
 
-## Kernel Runtime Wiring v1
+## Runtime Wiring v1
 
-The Kernel now treats Runtime Snapshot as the operational entry point for module-provided permissions, menus, frontend route metadata, gateway route metadata, health checks, topology and component surfaces. Installer, Registry, Runtime and Topology remain Kernel capabilities. Gateway and Web Shell are adapters that read the Kernel runtime surface.
+Runtime Snapshot 是模块贡献的运行态入口。Kernel Installer、Registry、Runtime 和 Topology 负责计算模块贡献；Gateway 和 Web Shell 只是读取该运行态表面。
 
-Future modules should appear in Module Center, runtime snapshot, contribution viewer, topology and permission registry through manifest/package installation. They should not require Kernel code changes for metadata-level L0 hotplug.
+当前普通模块可通过 manifest/package/runtime 贡献：
 
-Boundaries retained:
+- permissions
+- roles
+- menus
+- frontend route metadata
+- gateway route metadata
+- services/workers metadata
+- health checks
+- components
+- storage buckets
+- admin panels metadata
+- topology nodes/edges
 
-- No B Contest work is implemented here.
-- No remote module marketplace is implemented.
-- No hook execution is allowed.
-- No dynamic untrusted frontend bundle is loaded.
-- A/Judge Core remains protected and is not marked GA.
+## Hotplug 当前状态
 
-## Hotplug L1 Completion
+- L0 Metadata Hotplug：完成。
+- L1 Route/Menu/Topology/Permission Hotplug：基本完成，使用 trusted route table、safe contribution registry 和权限过滤。
+- L2 Service Runtime Foundation + Controlled Apply：foundation 完成，`ojosctl` 可对 trusted compose allowlist 计划执行 dry-run/confirm。
+- L3 Dynamic Frontend Extension：未完成，不加载不可信动态 JS。
+- L4 Full Module Hotplug：未完成，不提供 remote market、hook 或任意 service image 部署。
 
-Kernel Runtime now provides dynamic gateway route activation for enabled module routes. Gateway remains the edge adapter and resolves module `service_id` values through a trusted service map. Web Shell remains the frontend shell and renders unknown module components through safe contribution metadata pages.
+## 安全边界
 
-L2 service/worker runtime driver, L3 dynamic frontend bundles and L4 full module hotplug are not implemented.
-## Hotplug L2 Foundation
+- Gateway/Web 不挂载 Docker socket。
+- Gateway/Web 不执行 Docker 或 shell 命令。
+- Module manifest 不能声明 `command`、`script`、`hook`、arbitrary image、host mount、privileged 或 `cap_add`。
+- Compose apply 只允许 fixed compose file 和 trusted service allowlist。
+- Runtime apply 必须有 confirm、dry-run、lock、timeout、operation history 和 redaction。
+- Web Shell Installer 页面只作为管理视图，官方安装入口是 `ojosctl` 和 `ojos-installer-tui`。
 
-Kernel Runtime now owns the service and worker lifecycle model for modules. Gateway remains an adapter: it can read runtime services, generate plans and make routing decisions from service health, but it does not control the host or Docker socket.
+## 明确未完成
 
-New Kernel runtime responsibilities in this foundation phase:
-
-- Parse service and worker declarations from module manifests.
-- Track service state and health in Runtime Snapshot.
-- Generate plan-only start/stop/restart/reload/health responses.
-- Bind gateway route status to service health.
-- Add runtime service and worker nodes to topology.
-
-Still out of scope: arbitrary service image deployment, remote module marketplace, hook execution, Docker socket control, Web-triggered apply, L3 dynamic frontend bundles and L4 full hotplug automation.
-
-## Hotplug L2 Controlled Apply
-
-Kernel Runtime now has a controlled apply boundary for runtime plans. The Kernel generates structured plans, while `ojosctl` or a future operator is the only component allowed to apply trusted local compose actions.
-
-Boundary summary:
-
-- Gateway and Web Shell remain control-plane viewers and plan generators.
-- Gateway/Web do not mount Docker socket and do not execute Docker or shell commands.
-- Module Installer does not become a host-control process.
-- Manifests still cannot specify `command`, `script`, arbitrary `image`, host `mount`, `privileged`, or `cap_add`.
-- Compose apply is limited to trusted allowlisted services and fixed compose configuration.
-- Apply requires confirm, supports dry-run, uses locks/timeouts, and records operation history/audit.
-
-This phase completes a controlled L2 apply path for known local services. It does not implement L3 dynamic frontend bundles, remote module market, hooks, arbitrary module service deployment, or full hotplug automation.
+- Contest 尚未实现。
+- remote module market 未实现。
+- hook execution 未实现。
+- dynamic frontend bundle 未实现。
+- full hotplug 未完成。
+- package signature / trust policy 未完成。
+- true multi-machine runtime apply 未完成。
+- Judge Core 不标记 GA。

@@ -1,26 +1,26 @@
 # Judge Core Readiness
 
-Judge Core is the first core feature module in OJOS. It provides problem catalog, submissions, judging, Worker Link, result storage and judge administration surfaces.
+Judge Core 是 OJOS 当前第一个核心 feature module，提供题库、提交、评测、Worker Link、结果存储和评测管理能力。
 
-## Current Readiness
+## 当前状态
 
-- Judge Core is represented as `ojos.judge-core` in Module Registry.
-- Judge Core appears in Runtime Snapshot, runtime routes, runtime services and topology.
-- Judge Core contributes `problem-api`, `judge-api` and `judge-worker` service/worker declarations.
-- Judge Core route metadata participates in dynamic route table validation while compatibility static routes remain available.
-- Judge Core disable/uninstall remains protected.
+- Judge Core 在 Module Registry 中表示为 `ojos.judge-core`。
+- Judge Core 出现在 Runtime Snapshot、runtime routes、runtime services 和 topology 中。
+- Judge Core 声明 `problem-api`、`judge-api` 和 `judge-worker` 服务/Worker。
+- Judge Core route metadata 参与 dynamic route table 校验，同时保留兼容静态路由。
+- Judge Core disable/uninstall 继续受保护。
 
-## Not GA
+## 不标记 GA
 
-Judge Core is not GA. The following remain incomplete:
+Judge Core 当前不标记 GA，仍缺少：
 
-- True multi-machine worker deployment validation.
-- Network failure and recovery validation across hosts.
-- Clock drift and lease edge-case validation.
-- Long soak tests.
-- Full package signature and trust policy.
-- Full hotplug automation for service deployment.
+- 真实多机 Worker 部署验收。
+- 跨主机网络故障与恢复验收。
+- 时钟漂移和 lease 边界验收。
+- 长时间 soak test。
+- package signature 和 trust policy。
+- 完整 service deployment hotplug automation。
 
-## Gate For Future Work
+## 后续门禁
 
-Judge Core can be used as a baseline feature module for Kernel/runtime regression, but it must not be marketed or documented as GA until the missing operational and trust work is complete.
+Judge Core 可作为 Kernel/runtime 回归基线使用，但不能作为生产 GA 能力宣传。文档、release notes 和 UI 不得写成 Judge Core GA。

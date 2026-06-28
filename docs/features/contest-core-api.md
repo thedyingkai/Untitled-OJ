@@ -1,24 +1,24 @@
-# Contest Core API Draft
+# Contest Core API 草案
 
-Status: design draft only. No Contest API is implemented in this gate.
-Date: 2026-06-27
+> 文档状态：设计草案，不是已实现 API
+> 最后更新：2026-06-27
 
-Contest Core API is expected to route through the dynamic Gateway proxy under `/api/contest` and bind to `service_id: contest-api`.
+Contest Core API 未来应通过 Gateway dynamic proxy 暴露在 `/api/contest`，并绑定到 `service_id: contest-api`。当前仓库没有实现 Contest API，本文件只用于下一阶段设计评审。
 
-## Common Rules
+## 通用规则
 
 - Gateway route prefix: `/api/contest`.
 - Service id: `contest-api`.
 - Auth mode: `user` for normal contest views and submissions; `admin` only for platform-level diagnostics.
-- All responses must use stable error payloads and must not leak host paths.
-- Raw `Authorization` is not forwarded to internal services by default; Gateway internal auth/HMAC rules apply.
-- Ordinary users receive `403` for missing permissions; missing token receives `401`.
+- 所有响应必须使用稳定错误结构，不能泄露 host paths。
+- 原始 `Authorization` 默认不转发到内部服务；Gateway internal auth/HMAC 规则仍适用。
+- 普通用户缺权限返回 `403`，无 token 返回 `401`。
 
 ## Endpoints
 
 ### `GET /api/contest/contests`
 
-Required permission: `contest.view`.
+必需权限：`contest.view`。
 
 Query:
 
@@ -51,11 +51,11 @@ Response:
 }
 ```
 
-Errors: `401`, `403`, `500`.
+错误：`401`、`403`、`500`。
 
 ### `POST /api/contest/contests`
 
-Required permission: `contest.manage`.
+必需权限：`contest.manage`。
 
 Request:
 
@@ -70,29 +70,29 @@ Request:
 }
 ```
 
-Response: created contest object.
+响应：创建后的 contest object。
 
-Errors: `400` validation, `401`, `403`, `409` slug conflict, `500`.
+错误：`400` validation、`401`、`403`、`409` slug conflict、`500`。
 
 ### `GET /api/contest/contests/:id`
 
-Required permission: `contest.view` plus contest visibility/participant policy.
+必需权限：`contest.view`，并叠加 contest visibility/participant policy。
 
-Response: contest detail including problem count and participant status.
+响应：contest detail，包含 problem count 与 participant status。
 
-Errors: `401`, `403`, `404`, `500`.
+错误：`401`、`403`、`404`、`500`。
 
 ### `PATCH /api/contest/contests/:id`
 
-Required permission: `contest.manage`.
+必需权限：`contest.manage`。
 
-Request: partial contest fields such as `title`, `description`, `starts_at`, `ends_at`, `visibility`, `status`.
+请求：局部 contest 字段，例如 `title`、`description`、`starts_at`、`ends_at`、`visibility`、`status`。
 
-Errors: `400`, `401`, `403`, `404`, `409`, `500`.
+错误：`400`、`401`、`403`、`404`、`409`、`500`。
 
 ### `POST /api/contest/contests/:id/problems`
 
-Required permission: `contest.manage`.
+必需权限：`contest.manage`。
 
 Request:
 
@@ -105,13 +105,13 @@ Request:
 }
 ```
 
-This endpoint validates `problem_id` through Problem API or a trusted local problem reference adapter.
+该端点需要通过 Problem API 或受信任本地 problem reference adapter 校验 `problem_id`。
 
-Errors: `400`, `401`, `403`, `404`, `409`, `502` problem dependency unavailable.
+错误：`400`、`401`、`403`、`404`、`409`、`502` problem dependency unavailable。
 
 ### `POST /api/contest/contests/:id/participants`
 
-Required permission: `contest.manage` for adding others; `contest.participate` for self-registration where policy allows.
+必需权限：代他人添加需要 `contest.manage`；策略允许自注册时需要 `contest.participate`。
 
 Request:
 
@@ -122,11 +122,11 @@ Request:
 }
 ```
 
-Errors: `400`, `401`, `403`, `404`, `409`.
+错误：`400`、`401`、`403`、`404`、`409`。
 
 ### `GET /api/contest/contests/:id/scoreboard`
 
-Required permission: `contest.view`; contest policy controls public visibility.
+必需权限：`contest.view`；contest policy 控制 public visibility。
 
 Response:
 
@@ -139,31 +139,31 @@ Response:
 }
 ```
 
-Skeleton may return a placeholder payload until real scoreboard computation is implemented.
+Skeleton 阶段可以返回占位 payload；真实 scoreboard computation 不在 skeleton 范围内。
 
-Errors: `401`, `403`, `404`, `501` if scoreboard is not enabled.
+错误：`401`、`403`、`404`，scoreboard 未启用时可返回 `501`。
 
 ### `GET /api/contest/contests/:id/submissions`
 
-Required permission: `contest.view` with contest participant/admin scope.
+必需权限：`contest.view`，并叠加 contest participant/admin scope。
 
-Query: `user_id`, `problem_id`, `page`, `page_size`.
+查询：`user_id`、`problem_id`、`page`、`page_size`。
 
-Response: contest-scoped submission references and status snapshots.
+响应：contest-scoped submission references 与 status snapshots。
 
-Errors: `401`, `403`, `404`, `500`.
+错误：`401`、`403`、`404`、`500`。
 
-## Path Leak Defense
+## Path Leak 防护
 
-Errors must never include absolute paths, container paths, local compose paths, `.env` values, tokens, worker tokens or database URLs. E2E must keep `path_leaks=0`.
+错误响应不能包含 absolute paths、container paths、local compose paths、`.env` values、tokens、worker tokens 或 database URLs。E2E 必须保持 `path_leaks=0`。
 
 ## Dynamic Gateway Route
 
-The route is contributed by manifest metadata:
+该 route 由 manifest metadata 贡献：
 
 - `prefix: /api/contest`
 - `service_id: contest-api`
 - `auth_mode: user`
 - `required_permission: contest.view`
 
-Gateway must resolve `contest-api` through trusted service configuration, never from manifest-provided `target_url`.
+Gateway 必须通过 trusted service configuration 解析 `contest-api`，不能从 manifest 提供的 `target_url` 解析。

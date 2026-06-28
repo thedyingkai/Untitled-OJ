@@ -1,64 +1,54 @@
-# ADR: Module Installer Repository Boundary
+# ADR：Module Installer 仓库边界
 
-> Superseded in path ownership by [ADR: Project Structure v2, Kernel and Modules](ADR-project-structure-v2-kernel-modules.md). The repository split decision remains valid; canonical source paths are now `kernel/installer/core`, `kernel/installer/service`, and `kernel/installer/cli`.
+> 状态：已接受；路径归属被 [ADR：项目结构 v2、Kernel 与 Modules](ADR-project-structure-v2-kernel-modules.md) 更新
+> 日期：2026-06-27
 
-Status: Accepted
+## 背景
 
-Date: 2026-06-27
+Module Installer 是 OJOS 的系统基础能力。它负责 manifest 校验、package 校验、依赖规划、模块生命周期、operation lock、operation history 和 audit record。它需要与当前 Control Plane 数据库、Gateway Admin API、Web Shell 管理视图、Docker Compose 部署和 Module Registry v0 schema 集成。
 
-## Context
+Installer 需要支持 v0 快速迭代，同时不能把未来独立拆仓变成高成本重写。
 
-The Module Installer is a core OJOS system foundation. It owns manifest validation, package verification, dependency planning, module lifecycle operations, operation locks, and audit/history records. It must integrate with the current Control Plane database, Gateway Admin API, frontend module management pages, Docker Compose deployment, and the Module Registry v0 schema.
+## 决策
 
-The boundary must support fast v0 iteration without making the installer impossible to split into a dedicated repository later.
-
-## Decision
-
-OJOS will not split the Module Installer into a separate repository immediately. Project Structure v2 supersedes the original path sketch; the installer is implemented inside the OJOS monorepo as Kernel-owned Rust source:
+OJOS 当前不把 Module Installer 立即拆到独立仓库。项目结构 v2 更新原始路径草案后，Installer 作为 Kernel-owned Rust source 放在 monorepo 内：
 
 ```text
 kernel/installer/core/
 kernel/installer/service/
 kernel/installer/cli/
+kernel/installer/tui/
 ```
 
-This is option C: monorepo placement with independent-repository boundaries.
+这是“monorepo placement with independent-repository boundaries”：源码在主仓库，但边界按可独立发布组件维护。
 
-The installer code must not depend on Go service internals or frontend code. Its contracts are limited to:
+Installer 代码不得依赖 Go service internals 或 frontend code。它的契约限定为：
 
-- PostgreSQL schema and transactions
-- Internal HTTP API
-- Module manifest schema
-- Module package format
-- Stable JSON request/response models
+- PostgreSQL schema 与 transactions。
+- Internal HTTP API。
+- Module manifest schema。
+- Module package format。
+- Stable JSON request/response models。
 
-## Options
+## 方案比较
 
-### Option A: Keep Installer Directly In The OJOS Monorepo
+### 方案 A：直接保留在 OJOS monorepo
 
-Paths:
+优点：
 
-```text
-kernel/installer/core/
-kernel/installer/service/
-kernel/installer/cli/
-```
+- 与当前 DB schema、Gateway、Web Shell 和 Compose stack 集成最简单。
+- 保持单一 CI 与版本流。
+- 不需要单独发布或 version pinning。
+- 适合 v0 到 v1 的快速迭代。
 
-Pros:
+缺点：
 
-- Simplest integration with the current DB schema, Gateway, frontend, and Compose stack.
-- One CI and version stream.
-- No separate publishing or version pinning process.
-- Best fit for rapid v0 to v1 iteration.
+- 如果 Installer 未来被 OJOS 外部复用，会继承主仓库耦合。
+- 独立基础组件的边界不够显眼，需要文档和 CI 约束。
 
-Cons:
+### 方案 B：立即拆到独立仓库
 
-- If the installer becomes reusable outside OJOS, it will inherit main-repo coupling.
-- The installer foundation is less visibly independent.
-
-### Option B: Split To A Separate Repository Now
-
-Candidate names:
+候选名称：
 
 ```text
 ojos-installer
@@ -66,62 +56,62 @@ ojos-module-installer
 ojos-module-runtime
 ```
 
-Pros:
+优点：
 
-- Clearest architectural boundary.
-- Can independently publish the CLI, library, and service.
-- Better long-term reuse story.
+- 架构边界最清晰。
+- CLI、library 和 service 可独立发布。
+- 长期复用路径更直接。
 
-Cons:
+缺点：
 
-- Current schema and manifest contracts are still changing.
-- Integration cost rises immediately.
-- CI, release, version pinning, and cross-repo compatibility must be solved before v0.
-- It risks slowing the Control Plane v0 path.
+- 当前 schema 和 manifest contracts 仍在稳定。
+- 集成成本立即上升。
+- CI、release、version pinning 和 cross-repo compatibility 需要提前解决。
+- 可能拖慢 Control Plane v0 发布路径。
 
-### Option C: Independent Rust Workspace Inside The Monorepo
+### 方案 C：monorepo 内独立 Rust workspace
 
-Pros:
+优点：
 
-- Keeps v0 integration fast.
-- Gives the installer a real library/service/CLI boundary.
-- Keeps Rust APIs clear and testable.
-- Allows future migration of the workspace to an independent repository.
-- Avoids direct dependencies on Go or frontend implementation details.
+- 保持 v0 集成速度。
+- 形成真实 library/service/CLI/TUI 边界。
+- Rust APIs 清晰且可测试。
+- 未来可迁移到独立仓库。
+- 避免依赖 Go 或 frontend implementation details。
 
-Cons:
+缺点：
 
-- Requires discipline to keep contracts explicit.
-- CI still runs in the main repository until split.
+- 需要持续维护显式契约。
+- 拆仓前 CI 仍在主仓库运行。
 
-## Consequences
+## 后果
 
-The installer workspace is designed so it can later be moved to a separate repository with minimal code changes. All direct integration points must be documented and tested:
+Installer workspace 应保持可迁移性。所有直接集成点必须被文档和测试覆盖：
 
-- DB tables and migrations
-- Internal API endpoints
-- Manifest schema
-- Package format
-- Gateway Admin API mapping
-- Frontend API types
+- DB tables 与 migrations。
+- Internal API endpoints。
+- Manifest schema。
+- Package format。
+- Gateway Admin API mapping。
+- Web Shell API types。
 
-The Gateway remains the only public entry point. It performs JWT authentication and admin/system.admin authorization, then calls the internal Rust installer service. The installer service is not exposed to the host network.
+Gateway 仍是公开入口，负责 JWT authentication 和 admin/system.admin authorization，然后调用内部 Rust installer service。Installer service 不暴露到 host network。
 
-## Future Split Triggers
+## 未来拆分触发条件
 
-The installer should be split into a dedicated repository when one or more of these conditions become true:
+满足以下一个或多个条件时，可以重新评估独立仓库：
 
-- The installer is reused by multiple OJOS deployments or external systems.
-- The module package format is stable.
-- The installer CLI needs independent releases.
-- The installer service needs an independent version lifecycle.
-- Main repository CI is materially slowed by installer build/test cost.
-- Manifest schema and installer API compatibility need formal version pinning.
+- Installer 被多个 OJOS deployments 或外部系统复用。
+- Module package format 稳定。
+- Installer CLI 需要独立 release。
+- Installer service 需要独立 version lifecycle。
+- 主仓库 CI 明显被 Installer build/test 成本拖慢。
+- Manifest schema 与 installer API 需要 formal version pinning。
 
-## Boundaries For v0
+## v0 边界
 
-v0 supports local manifests and local `.ojosmod` packages. It does not support a remote marketplace, untrusted remote install, dynamic frontend bundles, or executable install hooks.
+v0 支持本地 manifests 和本地 `.ojosmod` packages，不支持 remote marketplace、untrusted remote install、dynamic frontend bundles 或 executable install hooks。
 
-v0 performs checksum integrity verification. Signature fields are reserved in the schema, but signature validation and trust policy are deferred to v1.
+v0 执行 checksum integrity verification。Schema 中保留 signature fields，但 signature validation 和 trust policy 延后。
 
-Kernel modules and `ojos.judge-core` are protected from disable/uninstall apply operations. Demo modules may be used for lifecycle acceptance.
+Kernel modules 与 `ojos.judge-core` 受 disable/uninstall apply 保护。Demo module 与 sample module 可用于 lifecycle acceptance。

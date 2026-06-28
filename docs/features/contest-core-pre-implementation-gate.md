@@ -1,43 +1,43 @@
-# Contest Core Pre-Implementation Gate
+# Contest Core 实现前门禁
 
-Status: planning gate.
-Date: 2026-06-27
+> 文档状态：规划门禁，不是实现记录
+> 最后更新：2026-06-27
 
-## Gate Result
+## 门禁结论
 
-Contest Core is recommended as the first real business module, but the next stage should implement only **Contest Core Skeleton**.
+建议把 Contest Core 作为第一个真实业务模块，但下一步只能实现 **Contest Core Skeleton**。
 
-## Recommended First Implementation Scope
+## 推荐第一阶段范围
 
 - `modules/contest-core/` manifest using Module Contract v1.
-- Metadata install, package, verify, enable and disable path.
-- Minimal `contest-api` service skeleton if deployment allowlist work is accepted.
-- Admin/public placeholder route metadata.
-- Permission keys: `contest.view`, `contest.participate`, `contest.manage`.
+- Metadata install、package、verify、enable 和 disable 路径。
+- 如果接受 deployment allowlist 工作，可增加最小 `contest-api` service skeleton。
+- Admin/public 占位 route metadata。
+- Permission keys：`contest.view`、`contest.participate`、`contest.manage`。
 - Runtime snapshot, route table, services and topology visibility.
-- API smoke only: health and placeholder endpoints with correct `401`/`403` behavior.
+- API smoke 只覆盖 health 和占位 endpoints，并验证正确 `401`/`403` 行为。
 
-## Explicitly Out Of Scope
+## 明确不做
 
-- Complete Contest API.
-- Complete Contest frontend.
-- Real scoreboard.
-- Rolling scoreboard.
-- Complex freeze windows.
+- 完整 Contest API。
+- 完整 Contest frontend。
+- 真实 scoreboard。
+- 滚榜。
+- 复杂封榜窗口。
 - Clarification.
 - Print.
 - Balloon.
-- Team management.
+- Team management。
 - Remote OJ.
 - Rating.
-- Advanced anti-cheat.
+- 高级反作弊。
 - Judge Core GA.
 
-## Kernel Prerequisites
+## Kernel 前置条件
 
-No Kernel core change is required for the skeleton if it stays inside Module Contract v1. A trusted compose service allowlist update may be required for `contest-api`; that is not a manifest escape hatch.
+如果 skeleton 保持在 Module Contract v1 内，不需要 Kernel core change。`contest-api` 可能需要 trusted compose service allowlist 更新，但这不是 manifest escape hatch。
 
-## Required Acceptance Commands
+## 必需验收命令
 
 ```powershell
 powershell -NoProfile -File scripts\acceptance-kernel.ps1 -SkipDockerBuild
@@ -46,13 +46,13 @@ powershell -NoProfile -File scripts\e2e-api.ps1 -BaseUrl http://localhost:8080/a
 powershell -NoProfile -File scripts\e2e-module-compat.ps1 -BaseUrl http://localhost:8080/api -AdminUsername admin1 -AdminPassword admin123 -UserUsername user1 -UserPassword user123
 ```
 
-## Rollback Strategy
+## 回滚策略
 
-- Disable `ojos.contest-core` to remove active menus, permissions and routes.
-- Stop or remove trusted `contest-api` compose service if it was introduced.
-- Keep module registry history and audit entries.
-- Do not delete Judge Core or shared problem/submission data.
+- Disable `ojos.contest-core`，移除 active menus、permissions 和 routes。
+- 如果引入了 trusted `contest-api` compose service，则停止或移除它。
+- 保留 module registry history 和 audit entries。
+- 不删除 Judge Core 或共享 problem/submission data。
 
-## Final Decision
+## 最终判断
 
-The planning gate is sufficient to start the skeleton stage after regression checks pass. It is not sufficient to claim Contest is implemented.
+回归检查通过后，该规划门禁足以支持进入 skeleton 阶段；它不足以宣称 Contest 已实现。

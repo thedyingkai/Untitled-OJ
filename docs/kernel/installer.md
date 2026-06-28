@@ -1,58 +1,77 @@
-# Kernel Installer
+﻿# Kernel Installer
 
-> 文档状态：当前实现，Rust installer moved to Kernel
-> 适用范围：Installer 开发 / 部署 / 安全审计
-> 最后更新：2026-06-27
+> 文档状态：当前实现，v0.1.0 发布基线
+> 适用范围：Installer 开发、部署、安全审计、模块作者
+> 最后更新：2026-06-28
 
-Installer 是 OJOS Kernel 能力，不是普通业务服务。
+Installer 是 OJOS Kernel 能力，不属于普通业务模块。它负责 manifest 校验、package 校验、生命周期计划、operation history 和受控 runtime apply 边界。
 
-## Canonical Source Paths
+## 源码位置
 
 ```text
-kernel/installer/core
-kernel/installer/service
-kernel/installer/cli
+kernel/installer/core     纯逻辑核心
+kernel/installer/service  内部 HTTP service
+kernel/installer/cli      ojosctl 原生命令行
+kernel/installer/tui      ojos-installer-tui 原生终端界面
 ```
 
-`kernel/installer/core` 包含 manifest/package/plan/dependency 纯逻辑，不依赖 Gateway 或 frontend。`kernel/installer/service` 是 internal HTTP service，通过 DB 和 internal API 与系统交互。`kernel/installer/cli` 提供 `ojosctl`。
+`core` 不依赖 Gateway 或 Web Shell。`service` 只在 compose 内部网络提供 API。`cli` 和 `tui` 是 v0.1.0 官方原生安装入口。Web Shell 只作为管理视图。
 
-## Adapter Boundary
+## 原生安装入口
 
-- Gateway 是 admin HTTP adapter。
-- Web Shell 是 UI adapter。
-- Compose 是 runtime deployment adapter。
-- Installer Core 不依赖这些 adapter。
+CLI：
 
-## Safety Boundary
+```powershell
+cargo run -p ojosctl -- doctor
+cargo run -p ojosctl -- status
+cargo run -p ojosctl -- module validate modules/sample-hello/module.yaml
+cargo run -p ojosctl -- module package modules/sample-hello -o .tmp/agent/scratch/sample-hello.ojosmod
+cargo run -p ojosctl -- module verify .tmp/agent/scratch/sample-hello.ojosmod
+cargo run -p ojosctl -- runtime snapshot
+cargo run -p ojosctl -- runtime routes
+```
 
-v0 不支持远程市场，不执行 hook，不加载 dynamic frontend bundle。`.ojosmod` v0 只做 checksum integrity，signature/trust policy 留到 v1。
+TUI：
 
-## Runtime Wiring Boundary
+```powershell
+cargo run -p ojos-installer-tui --
+```
 
-Kernel Installer writes module registry data, and Kernel Module Runtime reads registry tables plus stored manifest metadata to build Runtime Snapshot. The installer does not need Gateway or Web Shell dependencies. Gateway only exposes admin adapter APIs and forwards installer operations to the internal Rust service.
+TUI 是 `ratatui + crossterm` 原生终端界面，不是浏览器、Electron 或 WebView。它支持首页状态、模块列表、Runtime 服务、操作历史、拓扑文本视图、计划视图、搜索过滤和帮助页。
 
-`gateway_routes.auth_mode` supports `public`, `user`, `admin`, `worker`, and `internal` as the forward-facing route contract. Compatibility aliases `none`, `optional`, and `required` are still accepted for existing Judge Core routes and normalize to public/user semantics in the runtime route table.
+## Adapter 边界
 
-## Hotplug L1 Route Contract
+- Gateway 是 admin HTTP adapter，负责 JWT、权限和内部 service 调用。
+- Web Shell 是 frontend shell，只查看状态、计划、Runtime、routes、services、operations、topology 和贡献元数据。
+- `ojosctl` / `ojos-installer-tui` 是官方安装器入口。
+- Compose 是受信任本地 runtime deployment adapter。
+- Installer Core 不依赖这些 adapter，也不读取前端代码。
 
-Installer Core accepts `gateway_routes.service_id` as the forward contract and keeps `target_service` as a compatibility alias. It rejects direct `target_url` through deny-unknown-fields and dangerous field checks. The installer never resolves upstream URLs; Gateway owns trusted service resolution.
-## Hotplug L2 Runtime Commands
+## 安全边界
 
-`ojosctl` now includes local runtime inspection commands:
+v0.1.0 不支持：
+
+- remote module market。
+- hook、postinstall、preinstall 或任意 script 执行。
+- dynamic untrusted frontend bundle。
+- manifest 提供 arbitrary target URL。
+- manifest 提供 arbitrary image、mount、host_path、privileged、cap_add。
+- Gateway/Web 直接 runtime apply。
+- package signature / publisher trust policy。
+
+`.ojosmod` v1 只提供 checksum integrity，不证明发布者可信。
+
+## Runtime Wiring
+
+Installer 写入 module registry 和 stored manifest。Kernel Module Runtime 从 registry 和 manifest 派生 Runtime Snapshot。Gateway 和 Web Shell 读取 Runtime Snapshot，不需要为普通 metadata/module contribution 修改核心逻辑。
+
+`gateway_routes.service_id` 是 manifest 合同中的服务标识。兼容 DB 字段 `target_service` 仍表示 service id，不表示 URL。Installer 拒绝 `target_url`，Gateway 只通过 trusted service map 解析 upstream。
+
+## Runtime 命令
 
 ```powershell
 cargo run -p ojosctl -- runtime services
 cargo run -p ojosctl -- runtime service problem-api
-cargo run -p ojosctl -- runtime plan-restart problem-api
-```
-
-These commands read local module manifests and generate JSON output. They are plan-only in L2 foundation. `runtime apply-plan` intentionally returns non-zero / not implemented until a controlled operator path exists.
-
-## Hotplug L2 Controlled Apply Commands
-
-`ojosctl` now provides the controlled local apply path for trusted runtime plans:
-
-```powershell
 cargo run -p ojosctl -- runtime plan-restart problem-api --out .tmp/agent/scratch/problem-api-restart.json
 cargo run -p ojosctl -- runtime apply-plan .tmp/agent/scratch/problem-api-restart.json --dry-run
 cargo run -p ojosctl -- runtime apply-plan .tmp/agent/scratch/problem-api-restart.json --confirm
@@ -60,24 +79,12 @@ cargo run -p ojosctl -- runtime operations
 cargo run -p ojosctl -- runtime operation <operation_id>
 ```
 
-Apply is intentionally not automatic:
+真实 apply 必须显式 `--confirm`。`--dry-run` 不执行 compose。计划会重新校验 action、TTL、compose file、trusted allowlist、target service 和 argv 形状。输出会裁剪并脱敏。
 
-- real apply requires `--confirm`;
-- `--dry-run` does not execute;
-- compose commands are executed from argv arrays, not shell strings;
-- only trusted allowlisted compose services can be targeted;
-- the compose file path is fixed by trusted local configuration;
-- operation output is bounded and redacted;
-- operation history is written locally and, when the local control-plane database is reachable, mirrored to runtime operation/audit tables.
-
-Gateway/Web remain plan-only and do not apply runtime plans.
-
-## Module SDK Commands
-
-`ojosctl module init` scaffolds a metadata-only module:
+## Module SDK 命令
 
 ```powershell
 cargo run -p ojosctl -- module init ojos.sample-hello --name "Sample Hello" --kind feature --out modules/sample-hello --with-topology
 ```
 
-The scaffold refuses to overwrite existing directories unless `--force` is passed. It does not generate hooks, scripts, dynamic frontend bundles, arbitrary target URLs, images, mounts or privileged runtime options. Generated manifests are validated before the command exits.
+脚手架默认 metadata-only，不生成 hook、script、dynamic frontend bundle、target URL、image、mount 或 privileged 配置。已存在目录默认拒绝覆盖，除非显式 `--force`。

@@ -1,16 +1,18 @@
 # Kernel Security Review
 
-Date: 2026-06-27
+日期：2026-06-28
+
+本文记录 v0.1.0 发布基线的 Kernel、Gateway、Runtime、Installer 和 Module SDK 安全边界。
 
 ## Dynamic Gateway Proxy
 
-- Manifest routes reference `service_id`; they do not provide arbitrary upstream URLs.
-- Gateway resolves `service_id` through trusted configuration.
-- Public dynamic routes cannot claim reserved prefixes.
-- Core static routes keep priority over dynamic routes.
-- Unknown services and disabled routes are not proxied.
+- Manifest route 只能引用 `service_id`，不能提供 arbitrary upstream URL。
+- Gateway 通过 trusted configuration 解析 `service_id`。
+- Dynamic route 不能占用 reserved prefix。
+- Core static routes 优先于 dynamic routes。
+- Unknown service、disabled route、conflict route 不会被 proxy。
 
-Reserved prefixes:
+Reserved prefixes：
 
 ```text
 /api/auth
@@ -21,36 +23,38 @@ Reserved prefixes:
 /api/judge/worker
 ```
 
-## Header And Auth Boundary
+## Header 与 Auth 边界
 
-- Raw `Authorization` is not forwarded by default through dynamic proxy.
-- Gateway forwards sanitized actor headers and internal HMAC headers.
-- `public`, `user`, `admin`, `worker` and `internal` auth modes are explicit.
-- Worker/internal dynamic routes are not public surfaces.
+- Dynamic proxy 默认不转发原始 `Authorization`。
+- Gateway 转发受控 actor headers 和 internal HMAC headers。
+- `public`、`user`、`admin`、`worker`、`internal` auth mode 语义明确。
+- `worker` 和 `internal` 不是 public dynamic proxy surface。
 
-## Controlled Apply Boundary
+## Controlled Apply 边界
 
-- Gateway and Web Shell do not apply runtime plans.
-- Gateway/Web/module-installer do not mount Docker socket.
-- `ojosctl` / operator is the controlled apply path.
-- Apply uses argv arrays, fixed compose configuration, allowlisted services, confirmation, dry-run, timeout and service locks.
-- Operation history is redacted and bounded.
+- Gateway/Web 不执行 runtime apply。
+- Gateway/Web/module-installer 不挂载 Docker socket。
+- `ojosctl` 或未来 operator 是 controlled apply path。
+- Apply 使用 argv array、固定 compose 配置、trusted service allowlist、confirm、dry-run、timeout 和 service lock。
+- Operation history 会裁剪和脱敏。
 
-## Package And Manifest Boundary
+## Package 与 Manifest 边界
 
-- Package v1 verifies checksum integrity but does not prove publisher trust.
-- Signature / trust policy remains incomplete.
-- Manifest dangerous fields are rejected, including `command`, `script`, `hook`, `image`, `mount`, `host_path`, `privileged`, `cap_add`, `target_url`, secrets and token-like fields.
-- Remote module market and untrusted hooks remain out of scope.
+- Package v1 只验证 checksum integrity，不证明 publisher trust。
+- Signature / trust policy 未完成。
+- Manifest dangerous fields 会被拒绝，包括 `command`、`script`、`hook`、`image`、`mount`、`host_path`、`privileged`、`cap_add`、`target_url`、secret 和 token-like fields。
+- Remote module market 和 untrusted hooks 不支持。
 
-## Path Leak Boundary
+## Path Leak 边界
 
-- E2E scripts scan responses for internal paths and report `path_leaks`.
-- Public APIs must not expose host paths, Docker socket paths, package dirs, stdout/stderr paths, checker logs, DSNs or secrets.
+- E2E 脚本扫描响应中的内部路径并汇总 `path_leaks`。
+- Public API 不得暴露 host path、Docker socket path、package dir、stdout/stderr path、checker log、DSN 或 secret。
+- CLI 默认不输出本机绝对路径；需要排障时才用 verbose。
 
-## Remaining Risks
+## 剩余风险
 
-- Dynamic frontend bundle security design is not complete.
-- Publisher signature and trust policy are not complete.
-- True multi-machine runtime apply is not complete.
-- Long soak tests for Judge Core are not complete.
+- Dynamic frontend bundle 安全设计未完成。
+- Publisher signature / trust policy 未完成。
+- True multi-machine runtime apply 未完成。
+- Judge Core 长时间 soak test 未完成。
+- Full hotplug automation 未完成。

@@ -1,30 +1,30 @@
-# OJOS Documentation Status
+# OJOS 文档状态
 
-Date: 2026-06-27
+日期：2026-06-28
 
-## Baseline Status
+## v0.1.0 状态
 
-Kernel Baseline Freeze is implemented on `main`. The baseline includes Installer Core, Module Registry, Runtime Snapshot v1, Dynamic Gateway route table/proxy, Web Shell contribution registry, Permission registry, Health aggregation, Service Runtime Driver foundation, controlled `ojosctl` apply, Module SDK and Sample Hello compatibility.
+OJOS 正在进行 `v0.1.0 Release Hardening`。当前目标是发布题库、评测、Judge Core、Kernel、Module Runtime、Installer 和 Module SDK 的可验收基线。
 
-## Feature Planning Gate Status
+正式安装入口为 `ojosctl` 和 `ojos-installer-tui`。Web Shell 中的 Installer 页面只作为管理视图，不作为官方安装器主入口。
 
-Feature Module Planning Gate v1 is documented as a design-only gate. It compares Contest, Training, Group/Team, Discussion, Clarification, Print, Balloon, Remote OJ and Rating/Ranking candidates. The recommendation is Contest Core Skeleton as the first real business module, after acceptance checks pass.
+## Feature Planning 状态
 
-No Contest API, Contest frontend, Contest migration or `modules/contest-core/` implementation is created by this planning gate. Contest Core is not implemented.
+Feature Module Planning Gate v1 已完成，推荐未来第一个真实业务模块为 Contest Core Skeleton。但当前暂停 Contest Core Skeleton，本轮不实现 Contest API、Contest 前端或 Contest migration。
 
-## Current Hotplug Status
+## Hotplug 状态
 
-| Level | Status | Notes |
+| 等级 | 状态 | 说明 |
 | --- | --- | --- |
-| L0 Metadata Hotplug | Complete | Registry, Runtime Snapshot, permissions, menus, topology metadata and health metadata |
-| L1 Route/Menu/Topology/Permission Hotplug | Basically complete | Trusted dynamic route table/proxy and Web Shell contribution registry |
-| L2 Service Runtime Foundation + Controlled Apply | Foundation complete | Services/workers, route-health linkage, plans and `ojosctl` controlled apply |
-| L3 Dynamic Frontend Extension | Not complete | No untrusted dynamic JS or frontend bundle loading |
-| L4 Full Module Hotplug | Not complete | No remote market, hooks or full service automation |
+| L0 Metadata Hotplug | 完成 | Registry、Runtime Snapshot、permissions、menus、topology metadata 和 health metadata |
+| L1 Route/Menu/Topology/Permission Hotplug | 基本完成 | Trusted dynamic route table/proxy 和 Web Shell contribution registry |
+| L2 Service Runtime Foundation + Controlled Apply | foundation 完成 | Services/workers、route-health linkage、plans 和 `ojosctl` controlled apply |
+| L3 Dynamic Frontend Extension | 未完成 | 不加载不可信 dynamic JS 或 frontend bundle |
+| L4 Full Module Hotplug | 未完成 | 无 remote market、hooks 或完整 service automation |
 
-## Required Green Gate
+## 必须通过的门禁
 
-The pre-feature gate requires:
+Pre-feature gate 要求：
 
 - `scripts/acceptance-kernel.ps1 -SkipDockerBuild`
 - `scripts/verify-static.ps1 -SkipDockerBuild`
@@ -35,7 +35,7 @@ The pre-feature gate requires:
 - Judge worker `cargo fmt --check`, `cargo check`, `cargo test`
 - Frontend `npm run build`
 
-Required results:
+要求结果：
 
 - `failed=0`
 - `path_leaks=0`
@@ -45,20 +45,20 @@ Required results:
 - ordinary user `403`
 - no token `401`
 
-## Contract Status
+## 契约状态
 
-| Contract | Status |
+| 契约 | 状态 |
 | --- | --- |
-| Module manifest schema v1 | Frozen compatibility start |
-| Runtime Snapshot v1 | Current source of truth for module contributions |
-| `.ojosmod` package format v1 | Checksum integrity only |
-| Package signature/trust policy | Not complete |
+| Module manifest schema v1 | 当前兼容起点 |
+| Runtime Snapshot v1 | 当前模块贡献事实源 |
+| `.ojosmod` package format v1 | 仅 checksum integrity |
+| Package signature/trust policy | 未完成 |
 
 ## Judge Core Status
 
-Judge Core is the first core feature module and appears through Runtime Snapshot, routes, services and topology. Judge Core disable/uninstall remains protected. Judge Core is not GA; true multi-machine validation, network failure recovery, clock drift checks and long soak tests remain incomplete.
+Judge Core 是当前第一个核心 feature module，已经通过 Runtime Snapshot、routes、services 和 topology 展示。Judge Core disable/uninstall 继续受保护。Judge Core 不标记 GA；真实多机、网络故障恢复、时钟漂移和长时间 soak test 仍未完成。
 
-## Explicitly Out Of Scope
+## 明确不在当前范围
 
 - B Contest implementation.
 - Contest API.
