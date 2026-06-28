@@ -288,9 +288,9 @@ onMounted(() => void load())
             <NDescriptions :column="2" bordered label-placement="left" class="plan-meta">
               <NDescriptionsItem label="操作">{{ plan.operation_id }}</NDescriptionsItem>
               <NDescriptionsItem label="过期时间">{{ plan.expires_at }}</NDescriptionsItem>
-              <NDescriptionsItem label="Operator Apply">{{ plan.can_apply ? '允许' : '阻断' }}</NDescriptionsItem>
-              <NDescriptionsItem label="Gateway Apply">{{ plan.apply_enabled ? '启用' : '禁用' }}</NDescriptionsItem>
-              <NDescriptionsItem label="Dry Run">{{ ojosctlDryRun }}</NDescriptionsItem>
+              <NDescriptionsItem label="Operator 可执行">{{ plan.can_apply ? '允许' : '阻断' }}</NDescriptionsItem>
+              <NDescriptionsItem label="Gateway 执行">{{ plan.apply_enabled ? '启用' : '禁用' }}</NDescriptionsItem>
+              <NDescriptionsItem label="Dry-run 命令">{{ ojosctlDryRun }}</NDescriptionsItem>
               <NDescriptionsItem label="确认命令">{{ ojosctlConfirm }}</NDescriptionsItem>
             </NDescriptions>
             <OjosJsonViewer :value="plan" />

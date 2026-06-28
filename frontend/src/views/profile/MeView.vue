@@ -19,21 +19,21 @@ function logout(): void {
 <template>
   <div class="profile-page">
     <OjosPageHeader
-      title="Profile"
-      description="Current account identity, roles, and effective permission snapshot."
+      title="账号"
+      description="当前账号身份、角色和生效权限快照。"
       eyebrow="Account"
     >
       <template #actions>
         <NButton secondary @click="auth.refreshCurrentUser()">刷新</NButton>
-        <NButton tertiary @click="logout">Logout</NButton>
+        <NButton tertiary @click="logout">退出</NButton>
       </template>
     </OjosPageHeader>
 
-    <OjosSection title="Identity">
+    <OjosSection title="身份">
       <NDescriptions bordered :column="1" label-placement="left">
-        <NDescriptionsItem label="User ID">{{ auth.user?.user_id }}</NDescriptionsItem>
-        <NDescriptionsItem label="Username">{{ auth.user?.username }}</NDescriptionsItem>
-        <NDescriptionsItem label="Roles">
+        <NDescriptionsItem label="用户 ID">{{ auth.user?.user_id }}</NDescriptionsItem>
+        <NDescriptionsItem label="用户名">{{ auth.user?.username }}</NDescriptionsItem>
+        <NDescriptionsItem label="角色">
           <NSpace v-if="auth.roles.length">
             <NTag v-for="role in auth.roles" :key="role" size="small">{{ role }}</NTag>
           </NSpace>
@@ -47,13 +47,13 @@ function logout(): void {
           </NSpace>
           <span v-else>-</span>
         </NDescriptionsItem>
-        <NDescriptionsItem label="Token">
-          {{ auth.token ? 'Available' : 'Not signed in' }}
+        <NDescriptionsItem label="登录凭据">
+          {{ auth.token ? '已保存' : '未登录' }}
         </NDescriptionsItem>
       </NDescriptions>
     </OjosSection>
 
-    <OjosSection title="Permission Snapshot">
+    <OjosSection title="权限快照">
       <OjosJsonViewer :value="{ roles: auth.roles, permissions: auth.permissions }" />
     </OjosSection>
   </div>

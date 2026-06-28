@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_controlled_apply:
-        description: "Run controlled apply smoke"
+        description: "是否运行 controlled apply smoke"
         required: true
         default: "false"
         type: choice
@@ -17,16 +17,16 @@ permissions:
 
 jobs:
   docker-e2e:
-    name: Docker e2e draft
+    name: Docker e2e 草案
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Explain manual boundary
+      - name: 说明手动边界
         run: |
-          echo "Docker e2e is workflow_dispatch only."
-          echo "This workflow does not upload .env, .tmp, .ojosmod packages, tokens or logs."
-          echo "Local full acceptance remains scripts/acceptance-kernel.ps1."
-      - name: Static acceptance without Docker build
+          echo "Docker e2e 仅通过 workflow_dispatch 运行。"
+          echo "本 workflow 不上传 .env、.tmp、.ojosmod、token 或日志。"
+          echo "本地完整验收仍以 scripts/acceptance-kernel.ps1 为准。"
+      - name: 不构建 Docker 镜像的静态验收
         shell: pwsh
         run: |
           ./scripts/verify-static.ps1 -SkipDockerBuild

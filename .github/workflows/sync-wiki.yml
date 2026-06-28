@@ -35,50 +35,50 @@ jobs:
           mkdir -p .wiki-src
           cp -R docs/. .wiki-src/
 
-          # GitHub Wiki uses Home.md as the landing page.
-          cp docs/README.md .wiki-src/Home.md
+          # GitHub Wiki 使用 Home.md 作为首页。
+          cp docs/index.md .wiki-src/Home.md
 
           cat > .wiki-src/_Sidebar.md <<'EOF'
           # OJOS Wiki
 
-          - [Home](Home)
-          - [Documentation Index](DOCS_INDEX)
-          - [Documentation Status](DOCS_STATUS)
+          - [首页](Home)
+          - [文档索引](docs-index)
+          - [文档状态](docs-status)
 
-          ## Architecture
-          - [Overview](architecture/overview)
-          - [Module Topology](architecture/module-topology)
-          - [Service Topology](architecture/service-topology)
-          - [Worker Link Protocol](architecture/worker-link-protocol)
+          ## 架构
+          - [概览](architecture/overview)
+          - [模块拓扑](architecture/module-topology)
+          - [服务拓扑](architecture/service-topology)
+          - [Worker Link 协议](architecture/worker-link-protocol)
 
-          ## Modules
-          - [Module System](modules/README)
+          ## 模块
+          - [模块系统](modules/index)
           - [Judge Core](modules/judge-core)
 
           ## Judge
-          - [Resource Limits](judge/judge-resource-limits)
-          - [Status Model](judge/judge-status-model)
-          - [Worker Cluster](judge/judge-worker-cluster)
+          - [资源限制](judge/judge-resource-limits)
+          - [状态模型](judge/judge-status-model)
+          - [Worker 集群](judge/judge-worker-cluster)
 
-          ## Deployment
-          - [Control Plane](deploy/deploy-control-plane)
-          - [Worker Node](deploy/deploy-worker-node)
+          ## 部署
+          - [Control Plane 部署](deploy/deploy-control-plane)
+          - [Worker Node 部署](deploy/deploy-worker-node)
           - [Docker Compose](deploy/docker-compose)
 
           ## API
-          - [API Index](api/README)
+          - [API 索引](api/index)
           - [Admin API](api/admin-api)
           - [Worker API](api/worker-api)
 
-          ## Security
-          - [Security Boundary](security/security-boundary)
+          ## 安全
+          - [安全边界](security/security-boundary)
           - [Worker Token](security/worker-token)
           - [Internal HMAC](security/internal-hmac)
 
           ## E2E
-          - [Engineering Acceptance](e2e/e2e-engineering-acceptance)
+          - [工程验收](e2e/e2e-engineering-acceptance)
           - [Linux Runtime](e2e/e2e-linux-runtime)
-          - [Static Checks](e2e/e2e-static-checks)
+          - [静态检查](e2e/e2e-static-checks)
           EOF
 
       - name: Push mirror to wiki

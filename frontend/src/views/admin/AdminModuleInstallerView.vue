@@ -196,7 +196,7 @@ onMounted(() => void load())
           <NButton secondary :loading="busy" @click="refreshOperations">操作历史</NButton>
         </NSpace>
         <NAlert v-if="protectedTarget" type="info" :show-icon="true" class="installer-hint">
-          Kernel modules and judge-core 受保护。禁用和卸载 apply 必须由受控原生安装器处理，Web 只展示计划和状态。
+          Kernel 模块和 judge-core 受保护。禁用和卸载 apply 必须由受控原生安装器处理，Web 只展示计划和状态。
         </NAlert>
       </OjosSection>
 

@@ -66,7 +66,7 @@ async function submit(): Promise<void> {
             <NInput
               v-model:value="form.username"
               autocomplete="username"
-              placeholder="admin1"
+              placeholder="请输入用户名"
               size="large"
             />
           </NFormItem>

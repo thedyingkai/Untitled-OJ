@@ -1,34 +1,24 @@
-# =========================
 # OJOS / Untitled-OJ
 # Go + Rust + Vue + Docker Compose
-# =========================
 
-# -------------------------
-# OS junk
-# -------------------------
+# 系统垃圾文件
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# -------------------------
-# Editor / IDE
-# -------------------------
+# 编辑器与 IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 
-# -------------------------
-# Environment / secrets
-# -------------------------
+# 环境变量与本地密钥
 .env
 .env.*
 !.env.example
 
-# -------------------------
-# Logs
-# -------------------------
+# 日志
 *.log
 logs/
 log/
@@ -36,9 +26,7 @@ compose-logs.txt
 compose-ps.txt
 tokens.local.json
 
-# -------------------------
-# Temporary / cache files
-# -------------------------
+# 临时文件与缓存
 tmp/
 temp/
 .tmp/
@@ -51,29 +39,26 @@ temp/
 *.orig
 *.backup
 
-# -------------------------
-# Go build artifacts
-# -------------------------
+# Go 构建产物
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-
 *.test
 *.out
 coverage.*
 *.coverprofile
 profile.cov
 
-# Go workspace file
+# Go workspace 本地文件
 go.work
 go.work.sum
 
-# Optional local vendor directory
+# 本地 vendor 目录
 vendor/
 
-# Service local binaries
+# 服务本地二进制
 services/auth/auth
 services/auth/auth.exe
 services/auth/ojos-auth
@@ -91,94 +76,66 @@ services/judge-api/ojos-judge-api.exe
 services/judge-api/judge.rs-api
 services/judge-api/judge.rs-api.exe
 
-# -------------------------
-# Rust build artifacts
-# -------------------------
+# Rust 构建产物
 target/
 services/*/target/
-services/judge-worker/target/
 
-# Keep Cargo.lock for application binaries.
-# Do NOT ignore Cargo.lock.
+# 应用二进制保留 Cargo.lock，不忽略。
 
-# -------------------------
-# Frontend / Node / Vue
-# -------------------------
+# 前端与 Node 构建产物
 node_modules/
 frontend/node_modules/
 frontend/dist/
-
 dist/
 build/
 .next/
 .nuxt/
 coverage/
-
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-# Logs
-logs
 lerna-debug.log*
-
-node_modules
-dist
 dist-ssr
 *.local
 *.ojosmod
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
+# 其他本地工程文件
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
 
+# 保留 package-lock.json，不忽略。
 
-# Keep package-lock.json.
-# Do NOT ignore package-lock.json.
-
-# -------------------------
-# Python cache, if scripts are added later
-# -------------------------
+# Python 缓存
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
 venv/
 
-# -------------------------
-# Docker / local runtime data
-# -------------------------
+# Docker 与本地运行数据
 docker-data/
 data/
 .local-data/
 
-# -------------------------
-# Database dumps / backups
-# -------------------------
+# 数据库导出和备份
 *.dump
 *.sql.gz
 *.tar.gz
 *.zip
 *.rar
 
-# -------------------------
-# Exported binary documents
-# -------------------------
+# 导出的二进制文档
 *.pdf
 *.docx
 *.pptx
 *.xlsx
 /storage
 
-# -------------------------
-# Project-critical files that must NOT be ignored:
-# -------------------------
+# 以下关键文件不得忽略：
 # deploy/migrations/*.sql
 # deploy/compose/*.yml
 # services/**/etc/*.yaml
