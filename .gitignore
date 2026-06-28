@@ -1,24 +1,21 @@
-# OJOS / Untitled-OJ
-# Go + Rust + Vue + Docker Compose
+# OJOS workspace ignores
 
-# 系统垃圾文件
+# OS and editors
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# 编辑器与 IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 
-# 环境变量与本地密钥
+# Environment and local secrets
 .env
 .env.*
 !.env.example
 
-# 日志
+# Logs and local tokens
 *.log
 logs/
 log/
@@ -26,11 +23,10 @@ compose-logs.txt
 compose-ps.txt
 tokens.local.json
 
-# 临时文件与缓存
+# Temporary files and caches
+.tmp/
 tmp/
 temp/
-.tmp/
-.tmp/agent/
 .cache/
 .cache-*/
 *.tmp
@@ -39,7 +35,7 @@ temp/
 *.orig
 *.backup
 
-# Go 构建产物
+# Go build artifacts
 *.exe
 *.exe~
 *.dll
@@ -50,39 +46,31 @@ temp/
 coverage.*
 *.coverprofile
 profile.cov
-
-# Go workspace 本地文件
 go.work
 go.work.sum
-
-# 本地 vendor 目录
 vendor/
 
-# 服务本地二进制
+# Local service binaries
 services/auth/auth
 services/auth/auth.exe
 services/auth/ojos-auth
 services/auth/ojos-auth.exe
-
 services/gateway/gateway
 services/gateway/gateway.exe
 services/gateway/ojos-gateway
 services/gateway/ojos-gateway.exe
-
 services/judge-api/judge-api
 services/judge-api/judge-api.exe
 services/judge-api/ojos-judge-api
 services/judge-api/ojos-judge-api.exe
-services/judge-api/judge.rs-api
-services/judge-api/judge.rs-api.exe
+services/problem-api/problem-api
+services/problem-api/problem-api.exe
 
-# Rust 构建产物
+# Rust build artifacts
 target/
 services/*/target/
 
-# 应用二进制保留 Cargo.lock，不忽略。
-
-# 前端与 Node 构建产物
+# Frontend and Node
 node_modules/
 frontend/node_modules/
 frontend/dist/
@@ -98,50 +86,31 @@ pnpm-debug.log*
 lerna-debug.log*
 dist-ssr
 *.local
+
+# OJOS packages and release artifacts
 *.ojosmod
+*.ojos-service
 
-# 其他本地工程文件
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# 保留 package-lock.json，不忽略。
-
-# Python 缓存
+# Python caches
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
 venv/
 
-# Docker 与本地运行数据
+# Docker and local data
 docker-data/
 data/
 .local-data/
+/storage
 
-# 数据库导出和备份
+# Database exports and binary documents
 *.dump
 *.sql.gz
 *.tar.gz
 *.zip
 *.rar
-
-# 导出的二进制文档
 *.pdf
 *.docx
 *.pptx
 *.xlsx
-/storage
-
-# 以下关键文件不得忽略：
-# deploy/migrations/*.sql
-# deploy/compose/*.yml
-# services/**/etc/*.yaml
-# services/**/go.mod
-# services/**/go.sum
-# services/**/Cargo.toml
-# services/**/Cargo.lock
-# README.md
-# docs/**
