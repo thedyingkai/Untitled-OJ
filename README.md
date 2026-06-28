@@ -1,109 +1,69 @@
 # OJOS
 
-OJOS 是模块化 Online Judge 系统。当前仓库正在进行全仓人工审计与清理，`v0.1.0` 只能作为待验收目标，不声明已经达到发布标准。
+OJOS 是一个 Installer-first 的分布式 OJ Service Runtime，由唯一 Root Installer / Runtime Manager 维护全局状态，并以 Service、Set、Endpoint、Link、Device、Topology 为核心对象。
 
-本仓库仍处于安全边界审计中，模块热插拔只完成到已记录的 L0/L1/L2 foundation 范围，Contest 相关能力尚未实现。
+## 项目定位
 
-## 当前能力
+OJOS 不再以 Module、Web Shell 或 Gateway 作为系统根。Root Installer / Runtime Manager 是控制面；Service 是最小安装、运行、启停、热插拔和连接单位。
 
-- 认证、题库 API、评测 API、Judge Worker。
-- Kernel Installer Core：manifest 校验、package/verify、install plan、enable/disable plan。
-- Module Registry 和 Runtime Snapshot v1。
-- Dynamic Gateway route table 和受信任 dynamic proxy。
-- Web Shell contribution registry：菜单、路由元数据、权限、拓扑和模块贡献视图。
-- Service Runtime Driver foundation 和 `ojosctl` controlled apply。
-- Module Contract v1、Module SDK、`ojosctl module init`、`modules/sample-hello`。
-- 原生安装入口：`ojosctl` 和 `ojos-installer-tui`。
+核心对象：
 
-## 未完成边界
+- Service：最小功能单元，例如 gateway、web-shell、problem-api、judge-api、judge-worker、storage、postgres。
+- Set：推荐安装集合，不是运行对象。
+- Endpoint：运行中 Service 的 `IP:Port`。
+- Link：`source endpoint -> target endpoint` 的连接关系。
+- Device：Root 或 Non-root 设备。
+- Topology：Device、Service、Endpoint、Link、Set、Health 和 Operation 的关系视图。
 
-- Contest 尚未实现。
-- L3 dynamic frontend bundle 未完成。
-- hooks 未实现。
-- remote module market 未实现。
-- package signature / trust policy 未完成。
-- true multi-machine runtime apply 未完成。
-- 完整模块热插拔自动化未完成。
-- Judge Core 不标记通用可用状态。
+## 基础服务
 
-## 本地启动
+- Gateway：外部 HTTP 入口、鉴权、权限校验、路由转发、统一错误、审计和基础限流。
+- Web Shell：Root 侧可热插拔 Web UI，只展示题库、提交、评测结果、普通管理和只读 Runtime 状态。
+- Problem API：题库、题目详情、题目包、数据文件索引和题目权限。
+- Judge API：提交、任务队列、Worker endpoint 列表、任务分发、结果接收和状态更新。
+- Judge Worker：Root 或 Non-root 上的独立评测服务，内部管理并发和 sandbox slots。
+- Storage / PostgreSQL：即使使用外部实例，也作为可连接 Service 出现在 Runtime、Endpoint、Link 和 Topology 中。
 
-复制 `.env.example` 为 `.env` 并替换 secret 占位值，然后启动控制面：
+## 单机部署
+
+单机部署使用 `sets/single-node-oj.yaml`，Root 设备同时运行 Gateway、Web Shell、Problem API、Judge API、Judge Worker、Storage 和 PostgreSQL。
 
 ```powershell
 docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build
 ```
 
-Gateway 默认监听：
+## 分布式评测部署
 
-```text
-http://localhost:8080
-```
+Root 设备使用 `sets/distributed-root.yaml`。评测机使用 `sets/judge-worker-node.yaml`，只运行 Non-root Device Agent 和 judge-worker，不运行 Web Shell 或 Root Installer GUI。
 
-## 原生安装器
+Non-root 设备只能接收 Root 下发的 Service 安装计划、启动 Service、暴露 Endpoint、上报 Health/Logs，并接收 Link 配置。
 
-正式安装、打包、验证、启用、禁用和 runtime apply 使用原生入口：
+## 命令入口
 
 ```powershell
-cargo run -p ojosctl -- doctor
-cargo run -p ojosctl -- status
-cargo run -p ojos-installer-tui --
+cargo run -p ojosctl -- service discover
+cargo run -p ojosctl -- service validate services\judge-worker\service.yaml
+cargo run -p ojosctl -- set expand sets\single-node-oj.yaml
+cargo run -p ojosctl -- endpoint validate 192.168.1.10:8082
+cargo run -p ojosctl -- link plan-create 192.168.1.21:9101 192.168.1.10:8082
 ```
 
-Web Shell 中的 Installer 页面只作为管理视图，不是官方安装器主入口，也不执行危险 apply。
+旧 `module` 命令只作为 legacy compatibility 保留，不是正式架构入口。
 
-## Module SDK
+## 当前完成能力
 
-创建 metadata-only 模块：
+- `service.yaml` 契约和基础 Service 描述已建立。
+- Set 预设已建立。
+- Endpoint / Link / Topology 命令级计划能力已建立。
+- Root Runtime Manager 数据表迁移已建立。
+- Web Shell 路由边界已调整为只读 Runtime 视图，不再作为 Installer。
 
-```powershell
-cargo run -p ojosctl -- module init ojos.sample-hello --name "Sample Hello" --kind feature --out modules/sample-hello --with-topology
-```
+## 未完成边界
 
-校验、打包、验证：
+- 原生 GUI 目录和边界已建立，完整 GUI 交互仍需后续实现。
+- Gateway 后端 API 仍保留 legacy module 兼容接口，迁移计划见 `docs/roadmap/service-first-migration-plan.md`。
+- Non-root Device Agent 当前完成模型与目录边界，完整远程执行通道仍需后续实现。
 
-```powershell
-cargo run -p ojosctl -- module validate modules/sample-hello/module.yaml
-cargo run -p ojosctl -- module package modules/sample-hello -o .tmp/agent/scratch/sample-hello.ojosmod
-cargo run -p ojosctl -- module verify .tmp/agent/scratch/sample-hello.ojosmod
-```
+## 文档索引
 
-临时 package 和 plan JSON 只能放在 `.tmp/agent/`，不能提交。
-
-## Runtime Controlled Apply
-
-Gateway 和 Web Shell 不 apply runtime plan。受控 apply 使用：
-
-```powershell
-cargo run -p ojosctl -- runtime plan-restart problem-api --out .tmp/agent/scratch/problem-api-restart.json
-cargo run -p ojosctl -- runtime apply-plan .tmp/agent/scratch/problem-api-restart.json --dry-run
-cargo run -p ojosctl -- runtime apply-plan .tmp/agent/scratch/problem-api-restart.json --confirm
-```
-
-真实 apply 必须显式确认，并且只能操作 trusted compose allowlist service。
-
-## 验收
-
-```powershell
-powershell -NoProfile -File scripts\acceptance-kernel.ps1 -SkipDockerBuild
-powershell -NoProfile -File scripts\acceptance-kernel.ps1 -RunControlledApply -SkipDockerBuild
-powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild
-```
-
-完整发版还需要重新通过 e2e、Go、Rust、judge-worker、frontend、npm audit、release artifact 构建和人工审计结论。
-
-## 发布产物
-
-```powershell
-powershell -NoProfile -File scripts\build-release-artifacts.ps1 -Version v0.1.0
-```
-
-默认输出到 `.tmp/release/v0.1.0/`，该目录不进入 Git。
-
-## 文档
-
-- [文档索引](docs/docs-index.md)
-- [文档状态](docs/docs-status.md)
-- [v0.1.0 候选发布说明](docs/release/v0.1.0-release-notes.md)
-- [v0.1.0 发版清单](docs/release/v0.1.0-ship-checklist.md)
-- [v0.1.0 已知限制](docs/release/v0.1.0-known-limitations.md)
+入口文档见 [docs/DOCS_INDEX.md](docs/DOCS_INDEX.md)，状态说明见 [docs/DOCS_STATUS.md](docs/DOCS_STATUS.md)。
