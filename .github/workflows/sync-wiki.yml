@@ -35,50 +35,45 @@ jobs:
           mkdir -p .wiki-src
           cp -R docs/. .wiki-src/
 
-          # GitHub Wiki 使用 Home.md 作为首页。
-          cp docs/index.md .wiki-src/Home.md
+          cp docs/DOCS_INDEX.md .wiki-src/Home.md
 
           cat > .wiki-src/_Sidebar.md <<'EOF'
           # OJOS Wiki
 
           - [首页](Home)
-          - [文档索引](docs-index)
-          - [文档状态](docs-status)
+          - [文档索引](DOCS_INDEX)
+          - [文档状态](DOCS_STATUS)
 
           ## 架构
-          - [概览](architecture/overview)
-          - [模块拓扑](architecture/module-topology)
-          - [服务拓扑](architecture/service-topology)
-          - [Worker Link 协议](architecture/worker-link-protocol)
+          - [Service-first 架构](architecture/service-first-architecture)
+          - [Root Runtime Manager](architecture/root-runtime-manager)
+          - [Service / Endpoint / Link](architecture/service-endpoint-link-model)
+          - [Set 模型](architecture/set-model)
+          - [Device 模型](architecture/device-model)
+          - [Topology 模型](architecture/topology-model)
 
-          ## 模块
-          - [模块系统](modules/index)
-          - [Judge Core](modules/judge-core)
+          ## Service
+          - [service.yaml 契约](services/service-yaml-contract)
+          - [基础服务](services/base-services)
+          - [Gateway Service](services/gateway-service)
+          - [Web Shell Service](services/web-shell-service)
+          - [Judge Worker Service](services/judge-worker-service)
 
-          ## Judge
-          - [资源限制](judge/judge-resource-limits)
-          - [状态模型](judge/judge-status-model)
-          - [Worker 集群](judge/judge-worker-cluster)
+          ## Runtime
+          - [Endpoint Manager](runtime/endpoint-manager)
+          - [Link Manager](runtime/link-manager)
+          - [Topology Manager](runtime/topology-manager)
+          - [Non-root Agent](runtime/non-root-agent)
+          - [Service Registry](runtime/service-registry)
 
-          ## 部署
-          - [Control Plane 部署](deploy/deploy-control-plane)
-          - [Worker Node 部署](deploy/deploy-worker-node)
-          - [Docker Compose](deploy/docker-compose)
+          ## Installer
+          - [CLI](installer/cli)
+          - [Native GUI](installer/native-gui)
+          - [Terminal TUI](installer/terminal-tui)
 
-          ## API
-          - [API 索引](api/index)
-          - [Admin API](api/admin-api)
-          - [Worker API](api/worker-api)
-
-          ## 安全
-          - [安全边界](security/security-boundary)
-          - [Worker Token](security/worker-token)
-          - [Internal HMAC](security/internal-hmac)
-
-          ## E2E
-          - [工程验收](e2e/e2e-engineering-acceptance)
-          - [Linux Runtime](e2e/e2e-linux-runtime)
-          - [静态检查](e2e/e2e-static-checks)
+          ## Release
+          - [Service-first Gate](release/service-first-rebase-gate)
+          - [Service-first Acceptance](release/service-first-acceptance)
           EOF
 
       - name: Push mirror to wiki
@@ -95,8 +90,7 @@ jobs:
 
           rm -rf .wiki-repo
           if ! git clone "$wiki_url" .wiki-repo; then
-            echo "GitHub Wiki 仓库不可访问。请先在仓库 Settings 中启用 Wiki，并创建一次 Wiki 首页。"
-            echo "如果 GITHUB_TOKEN 没有 Wiki 写权限，请创建 repo scope 的 WIKI_PUSH_TOKEN secret。"
+            echo "GitHub Wiki 仓库不可访问。请确认仓库已启用 Wiki，并配置可写 token。"
             exit 1
           fi
 

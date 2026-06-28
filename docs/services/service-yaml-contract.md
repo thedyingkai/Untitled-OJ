@@ -1,8 +1,8 @@
 # service.yaml 契约
 
-`service.yaml` 是 OJOS 正式 Service 契约。旧 `module.yaml` 只保留 legacy compatibility。
+`service.yaml` 是 OJOS 唯一正式 Service 契约。旧 `module.yaml` 已从正式运行模型中删除，不再作为包、CLI、API 或 DB 初始化入口。
 
-必需字段：`id`、`name`、`version`、`kind`、`endpoint`、`runtime`、`requires`、`provides`、`ui`、`permissions`、`security`。
+必需字段包括 `id`、`name`、`version`、`kind`、`endpoint`、`runtime`、`requires`、`provides`、`ui`、`permissions` 和 `security`。
 
 安全规则：
 

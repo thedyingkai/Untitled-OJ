@@ -4,7 +4,7 @@ OJOS 是一个 Installer-first 的分布式 OJ Service Runtime，由唯一 Root 
 
 ## 项目定位
 
-OJOS 不再以 Module、Web Shell 或 Gateway 作为系统根。Root Installer / Runtime Manager 是控制面；Service 是最小安装、运行、启停、热插拔和连接单位。
+OJOS 不以 Web Shell、Gateway 或旧 Module-first 模型作为系统根。Root Installer / Runtime Manager 是控制面；Service 是最小安装、运行、启停、热插拔和连接单位。
 
 核心对象：
 
@@ -24,19 +24,15 @@ OJOS 不再以 Module、Web Shell 或 Gateway 作为系统根。Root Installer /
 - Judge Worker：Root 或 Non-root 上的独立评测服务，内部管理并发和 sandbox slots。
 - Storage / PostgreSQL：即使使用外部实例，也作为可连接 Service 出现在 Runtime、Endpoint、Link 和 Topology 中。
 
-## 单机部署
+## 部署入口
 
-单机部署使用 `sets/single-node-oj.yaml`，Root 设备同时运行 Gateway、Web Shell、Problem API、Judge API、Judge Worker、Storage 和 PostgreSQL。
+单机部署使用 `sets/single-node-oj.yaml`：
 
 ```powershell
 docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build
 ```
 
-## 分布式评测部署
-
-Root 设备使用 `sets/distributed-root.yaml`。评测机使用 `sets/judge-worker-node.yaml`，只运行 Non-root Device Agent 和 judge-worker，不运行 Web Shell 或 Root Installer GUI。
-
-Non-root 设备只能接收 Root 下发的 Service 安装计划、启动 Service、暴露 Endpoint、上报 Health/Logs，并接收 Link 配置。
+分布式评测中，Root 设备使用 `sets/distributed-root.yaml`；评测机使用 `sets/judge-worker-node.yaml`，只运行 Non-root Device Agent 和 judge-worker，不运行 Web Shell 或 Root Installer GUI。
 
 ## 命令入口
 
@@ -48,21 +44,20 @@ cargo run -p ojosctl -- endpoint validate 192.168.1.10:8082
 cargo run -p ojosctl -- link plan-create 192.168.1.21:9101 192.168.1.10:8082
 ```
 
-旧 `module` 命令只作为 legacy compatibility 保留，不是正式架构入口。
+旧 Module-first 设计已删除，不再作为正式运行模型、CLI、API、DB 初始化链路或包格式。
 
 ## 当前完成能力
 
 - `service.yaml` 契约和基础 Service 描述已建立。
 - Set 预设已建立。
 - Endpoint / Link / Topology 命令级计划能力已建立。
-- Root Runtime Manager 数据表迁移已建立。
-- Web Shell 路由边界已调整为只读 Runtime 视图，不再作为 Installer。
+- Root Runtime Manager 数据表与 service-first API 已建立。
+- Web Shell 已调整为只读 Runtime / Topology / Service 状态视图，不作为 Installer。
 
 ## 未完成边界
 
-- 原生 GUI 目录和边界已建立，完整 GUI 交互仍需后续实现。
-- Gateway 后端 API 仍保留 legacy module 兼容接口，迁移计划见 `docs/roadmap/service-first-migration-plan.md`。
-- Non-root Device Agent 当前完成模型与目录边界，完整远程执行通道仍需后续实现。
+- Native GUI 目录和边界已建立，完整 GUI 交互仍需后续实现。
+- Non-root Device Agent 远程执行通道仍需后续实现。
 
 ## 文档索引
 

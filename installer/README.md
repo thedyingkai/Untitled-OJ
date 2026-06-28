@@ -1,13 +1,5 @@
 # Installer
 
-本目录是 OJOS Root Installer / Runtime Manager 的正式源码入口。
+`installer/` 是 Root Installer / Runtime Manager 的目标目录边界，包含 core、gui、tui 和 cli。
 
-当前兼容实现仍保留在 `kernel/installer/*`，迁移映射如下：
-
-- `kernel/installer/core` -> `installer/core`
-- `kernel/installer/service` -> `runtime/manager`
-- `kernel/installer/cli` -> `installer/cli`
-- `kernel/installer/tui` -> `installer/tui`
-- `installer/gui` 为原生 GUI 入口，不使用浏览器、WebView 或 Electron。
-
-旧路径只作为 legacy compatibility 保留，新的文档和命令以 Service-first 对象为准。
+正式对象是 Service、Set、Endpoint、Link、Device、Topology、Plan、Operation、Health 和 Repository Source。旧 Module-first 路径不再作为当前安装入口。

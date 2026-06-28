@@ -1,16 +1,10 @@
-# Service-first 迁移计划
+# Service-first 后续计划
 
-当前兼容路径到目标路径：
+当前正式运行模型已经切换为 Service-first。旧 Module-first 设计已删除，不再作为正式代码、CLI、API、DB 初始化链路、包格式或验收入口。
 
-| 当前兼容路径 | 目标路径 |
-| --- | --- |
-| `kernel/installer/core` | `installer/core` |
-| `kernel/installer/service` | `runtime/manager` |
-| `kernel/installer/cli` | `installer/cli` |
-| `kernel/installer/tui` | `installer/tui` |
-| `modules/*/module.yaml` | `services/*/service.yaml` |
-| `services/gateway/internal/kernel/moduleruntime` | `runtime/manager` |
+后续工作只围绕 Service-first 模型继续：
 
-本轮已完成 Service 契约、Set 预设、Runtime 主表、CLI 主命令、Web Shell 边界和文档主线。
-
-剩余迁移包括后端 API 全面改名、旧 `module_*` 表数据迁移、Native GUI 完整实现和 Non-root Agent 远程执行通道。
+- 完整实现 Native GUI。
+- 完整实现 Non-root Agent 远程执行通道。
+- 在干净 checkout 中重新执行 release gate，再决定是否创建发布 tag。
+- 扩展 Endpoint、Link、Topology 的可视化和操作审计。
