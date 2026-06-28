@@ -1,6 +1,0 @@
-# Metadata-only 前端贡献。
-# Web Shell 必须通过安全贡献视图渲染未知 component_key。
-routes:
-  - path: /admin/modules/sample-hello
-    component_key: sample-hello-placeholder
-    dynamic_js: false

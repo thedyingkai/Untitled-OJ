@@ -26,14 +26,14 @@ type UserListItem struct {
 type RoleListItem struct {
 	ID          int64
 	Name        string
-	ModuleCode  string
+	ServiceCode string
 	Description string
 	IsSystem    bool
 }
 
 type PermissionListItem struct {
 	Code        string
-	ModuleCode  string
+	ServiceCode string
 	Name        string
 	Description string
 }
@@ -86,9 +86,9 @@ LIMIT 500
 
 func (r *AdminRepository) ListRoles(ctx context.Context) ([]RoleListItem, error) {
 	rows, err := r.db.Query(ctx, `
-SELECT id, name, module_code, description, is_system
+SELECT id, name, service_code, description, is_system
 FROM roles
-ORDER BY module_code, name
+ORDER BY service_code, name
 `)
 	if err != nil {
 		return nil, err
@@ -98,7 +98,7 @@ ORDER BY module_code, name
 	items := make([]RoleListItem, 0)
 	for rows.Next() {
 		var item RoleListItem
-		if err := rows.Scan(&item.ID, &item.Name, &item.ModuleCode, &item.Description, &item.IsSystem); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.ServiceCode, &item.Description, &item.IsSystem); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -108,9 +108,9 @@ ORDER BY module_code, name
 
 func (r *AdminRepository) ListPermissions(ctx context.Context) ([]PermissionListItem, error) {
 	rows, err := r.db.Query(ctx, `
-SELECT code, module_code, name, description
+SELECT code, service_code, name, description
 FROM permissions
-ORDER BY module_code, code
+ORDER BY service_code, code
 `)
 	if err != nil {
 		return nil, err
@@ -120,7 +120,7 @@ ORDER BY module_code, code
 	items := make([]PermissionListItem, 0)
 	for rows.Next() {
 		var item PermissionListItem
-		if err := rows.Scan(&item.Code, &item.ModuleCode, &item.Name, &item.Description); err != nil {
+		if err := rows.Scan(&item.Code, &item.ServiceCode, &item.Name, &item.Description); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

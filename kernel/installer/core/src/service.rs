@@ -34,8 +34,6 @@ pub struct ServiceManifest {
     pub permissions: Vec<String>,
     #[serde(default)]
     pub security: ServiceSecurityDecl,
-    #[serde(default)]
-    pub legacy: LegacyCompatDecl,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -116,17 +114,6 @@ impl Default for ServiceSecurityDecl {
             allow_arbitrary_command: false,
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyCompatDecl {
-    #[serde(default)]
-    pub module_id: String,
-    #[serde(default)]
-    pub module_yaml: String,
-    #[serde(default)]
-    pub migration_note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -324,17 +311,6 @@ pub fn validate_service_manifest(manifest: &ServiceManifest) -> Result<()> {
     }
     validate_link_requirements(&manifest.requires.links, &key_re)?;
     validate_link_requirements(&manifest.requires.optional_links, &key_re)?;
-    if !manifest.legacy.module_id.trim().is_empty() {
-        ensure(
-            manifest
-                .legacy
-                .migration_note
-                .to_ascii_lowercase()
-                .contains("legacy")
-                || manifest.legacy.migration_note.contains("鍏煎"),
-            "legacy module compatibility must include migration_note",
-        )?;
-    }
     Ok(())
 }
 

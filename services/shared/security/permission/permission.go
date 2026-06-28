@@ -330,12 +330,12 @@ func RegisterResourceType(
 	ctx context.Context,
 	db *pgxpool.Pool,
 	code string,
-	moduleCode string,
+	ServiceCode string,
 	name string,
 	description string,
 ) error {
 	code = strings.TrimSpace(code)
-	moduleCode = defaultString(moduleCode, "core")
+	ServiceCode = defaultString(ServiceCode, "core")
 	name = strings.TrimSpace(name)
 	description = strings.TrimSpace(description)
 
@@ -349,16 +349,16 @@ func RegisterResourceType(
 	_, err := db.Exec(
 		ctx,
 		`
-		INSERT INTO resource_types(code, module_code, name, description)
+		INSERT INTO resource_types(code, service_code, name, description)
 		VALUES($1,$2,$3,$4)
 		ON CONFLICT(code)
 		DO UPDATE SET
-			module_code = EXCLUDED.module_code,
+			service_code = EXCLUDED.service_code,
 			name = EXCLUDED.name,
 			description = EXCLUDED.description
 		`,
 		code,
-		moduleCode,
+		ServiceCode,
 		name,
 		description,
 	)
@@ -370,12 +370,12 @@ func RegisterPermission(
 	ctx context.Context,
 	db *pgxpool.Pool,
 	code string,
-	moduleCode string,
+	ServiceCode string,
 	name string,
 	description string,
 ) error {
 	code = strings.TrimSpace(code)
-	moduleCode = defaultString(moduleCode, "core")
+	ServiceCode = defaultString(ServiceCode, "core")
 	name = strings.TrimSpace(name)
 	description = strings.TrimSpace(description)
 
@@ -389,16 +389,16 @@ func RegisterPermission(
 	_, err := db.Exec(
 		ctx,
 		`
-		INSERT INTO permissions(code, module_code, name, description)
+		INSERT INTO permissions(code, service_code, name, description)
 		VALUES($1,$2,$3,$4)
 		ON CONFLICT(code)
 		DO UPDATE SET
-			module_code = EXCLUDED.module_code,
+			service_code = EXCLUDED.service_code,
 			name = EXCLUDED.name,
 			description = EXCLUDED.description
 		`,
 		code,
-		moduleCode,
+		ServiceCode,
 		name,
 		description,
 	)

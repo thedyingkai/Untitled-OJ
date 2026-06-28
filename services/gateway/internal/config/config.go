@@ -16,7 +16,7 @@ type Config struct {
 	Proxy        ProxyConfig
 	Runtime      RuntimeConfig
 	InternalAuth InternalAuthConfig
-	Installer    InstallerConfig
+	RootRuntime  RootRuntimeConfig
 }
 
 type DatabaseConfig struct {
@@ -74,7 +74,7 @@ type InternalAuthConfig struct {
 	NonceTTLSeconds         int64 `json:",optional"`
 }
 
-type InstallerConfig struct {
+type RootRuntimeConfig struct {
 	Endpoint      string
 	InternalToken string
 }

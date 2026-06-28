@@ -1,5 +1,5 @@
-ALTER TABLE roles
-    ADD COLUMN IF NOT EXISTS module_code TEXT NOT NULL DEFAULT 'core',
+﻿ALTER TABLE roles
+    ADD COLUMN IF NOT EXISTS service_code TEXT NOT NULL DEFAULT 'core',
     ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS is_system BOOLEAN NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
@@ -9,7 +9,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_name_unique
 
 CREATE TABLE IF NOT EXISTS resource_types (
                                               code TEXT PRIMARY KEY,
-                                              module_code TEXT NOT NULL DEFAULT 'core',
+                                              service_code TEXT NOT NULL DEFAULT 'core',
                                               name TEXT NOT NULL,
                                               description TEXT NOT NULL DEFAULT '',
                                               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS resource_types (
 
 CREATE TABLE IF NOT EXISTS permissions (
                                            code TEXT PRIMARY KEY,
-                                           module_code TEXT NOT NULL DEFAULT 'core',
+                                           service_code TEXT NOT NULL DEFAULT 'core',
                                            name TEXT NOT NULL,
                                            description TEXT NOT NULL DEFAULT '',
                                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -150,9 +150,9 @@ CREATE INDEX IF NOT EXISTS idx_permission_audit_logs_actor
 CREATE INDEX IF NOT EXISTS idx_permission_audit_logs_scope
     ON permission_audit_logs(scope_type, scope_id);
 
-INSERT INTO resource_types(code, module_code, name, description) VALUES
+INSERT INTO resource_types(code, service_code, name, description) VALUES
                                                                      ('system', 'core', 'System', 'Global system scope'),
-                                                                     ('module', 'core', 'Module', 'Platform module resource'),
+                                                                     ('service', 'core', 'service', 'Platform service resource'),
                                                                      ('problem', 'core', 'Problem', 'Problem resource'),
                                                                      ('contest', 'core', 'Contest', 'Contest resource'),
                                                                      ('group', 'core', 'Group', 'Organization or group resource'),
@@ -163,23 +163,23 @@ INSERT INTO resource_types(code, module_code, name, description) VALUES
                                                                      ('balloon', 'core', 'Balloon', 'Contest balloon job resource'),
                                                                      ('print', 'core', 'Print', 'Contest print job resource')
 ON CONFLICT (code) DO UPDATE SET
-                                 module_code = EXCLUDED.module_code,
+                                 service_code = EXCLUDED.service_code,
                                  name = EXCLUDED.name,
                                  description = EXCLUDED.description;
 
-INSERT INTO permissions(code, module_code, name, description) VALUES
+INSERT INTO permissions(code, service_code, name, description) VALUES
                                                                   ('system.admin', 'core', 'System Admin', 'Full system administration permission'),
 
-                                                                  ('module.install', 'core', 'Install Module', 'Install platform modules'),
-                                                                  ('module.enable', 'core', 'Enable Module', 'Enable platform modules'),
-                                                                  ('module.disable', 'core', 'Disable Module', 'Disable platform modules'),
-                                                                  ('module.configure', 'core', 'Configure Module', 'Configure platform modules'),
+                                                                  ('service.install', 'core', 'Install Service', 'Install platform services'),
+                                                                  ('service.enable', 'core', 'Enable Service', 'Enable platform services'),
+                                                                  ('service.disable', 'core', 'Disable Service', 'Disable platform services'),
+                                                                  ('service.configure', 'core', 'Configure Service', 'Configure platform services'),
 
-                                                                  ('launcher.view', 'core', 'View Launcher', 'View module launcher'),
-                                                                  ('launcher.install', 'core', 'Install Through Launcher', 'Install modules through launcher'),
-                                                                  ('launcher.uninstall', 'core', 'Uninstall Through Launcher', 'Uninstall modules through launcher'),
-                                                                  ('launcher.enable', 'core', 'Enable Through Launcher', 'Enable modules through launcher'),
-                                                                  ('launcher.disable', 'core', 'Disable Through Launcher', 'Disable modules through launcher'),
+                                                                  ('launcher.view', 'core', 'View Launcher', 'View service launcher'),
+                                                                  ('launcher.install', 'core', 'Install Through Launcher', 'Install Services through launcher'),
+                                                                  ('launcher.uninstall', 'core', 'Uninstall Through Launcher', 'UnInstall Services through launcher'),
+                                                                  ('launcher.enable', 'core', 'Enable Through Launcher', 'Enable Services through launcher'),
+                                                                  ('launcher.disable', 'core', 'Disable Through Launcher', 'Disable Services through launcher'),
 
                                                                   ('problem.create', 'core', 'Create Problem', 'Create new problems'),
                                                                   ('problem.view', 'core', 'View Problem', 'View problems'),
@@ -225,16 +225,16 @@ INSERT INTO permissions(code, module_code, name, description) VALUES
                                                                   ('clarification.answer', 'core', 'Answer Clarification', 'Answer contest clarification'),
                                                                   ('clarification.publish', 'core', 'Publish Clarification', 'Publish clarification')
 ON CONFLICT (code) DO UPDATE SET
-                                 module_code = EXCLUDED.module_code,
+                                 service_code = EXCLUDED.service_code,
                                  name = EXCLUDED.name,
                                  description = EXCLUDED.description;
 
-INSERT INTO roles(name, module_code, description, is_system) VALUES
+INSERT INTO roles(name, service_code, description, is_system) VALUES
                                                                  ('super_admin', 'core', 'Full system super administrator', true),
                                                                  ('admin', 'core', 'System administrator', true),
                                                                  ('user', 'core', 'Normal user', true),
 
-                                                                 ('module_manager', 'core', 'Module manager', true),
+                                                                 ('service_manager', 'core', 'Service manager', true),
 
                                                                  ('problem_owner', 'core', 'Problem owner', true),
                                                                  ('problem_setter', 'core', 'Problem setter', true),
@@ -250,7 +250,7 @@ INSERT INTO roles(name, module_code, description, is_system) VALUES
                                                                  ('print_operator', 'core', 'Print operator', true),
                                                                  ('forum_moderator', 'core', 'Forum moderator', true)
 ON CONFLICT (name) DO UPDATE SET
-                                 module_code = EXCLUDED.module_code,
+                                 service_code = EXCLUDED.service_code,
                                  description = EXCLUDED.description,
                                  is_system = EXCLUDED.is_system;
 
@@ -267,10 +267,10 @@ FROM roles r
          JOIN permissions p ON p.code IN (
                                           'system.admin',
 
-                                          'module.install',
-                                          'module.enable',
-                                          'module.disable',
-                                          'module.configure',
+                                          'service.install',
+                                          'service.enable',
+                                          'service.disable',
+                                          'service.configure',
 
                                           'launcher.view',
                                           'launcher.install',
@@ -345,17 +345,17 @@ INSERT INTO role_permissions(role_id, permission_code)
 SELECT r.id, p.code
 FROM roles r
          JOIN permissions p ON p.code IN (
-                                          'module.install',
-                                          'module.enable',
-                                          'module.disable',
-                                          'module.configure',
+                                          'service.install',
+                                          'service.enable',
+                                          'service.disable',
+                                          'service.configure',
                                           'launcher.view',
                                           'launcher.install',
                                           'launcher.uninstall',
                                           'launcher.enable',
                                           'launcher.disable'
     )
-WHERE r.name = 'module_manager'
+WHERE r.name = 'service_manager'
 ON CONFLICT DO NOTHING;
 
 INSERT INTO role_permissions(role_id, permission_code)

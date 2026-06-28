@@ -1,6 +1,5 @@
-use crate::manifest::{validate_manifest, validate_package_entry_path};
 use crate::service::validate_service_manifest;
-use crate::{InstallerError, Manifest, Result, ServiceManifest};
+use crate::{InstallerError, Result, ServiceManifest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -14,8 +13,6 @@ use zip::{ZipArchive, ZipWriter};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackageVerification {
     pub valid: bool,
-    pub module_id: String,
-    #[serde(default)]
     pub service_id: String,
     pub version: String,
     pub files_checked: usize,
@@ -41,79 +38,6 @@ pub struct PackageMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct PackageMetadataFile {
     pub package: PackageMetadata,
-}
-
-pub fn package_module(module_dir: &Path, output: &Path) -> Result<PackageVerification> {
-    let manifest_path = module_dir.join("module.yaml");
-    let manifest_text = fs::read_to_string(&manifest_path)?;
-    let manifest: Manifest = serde_yaml::from_str(&manifest_text)?;
-    validate_manifest(&manifest)?;
-
-    let mut entries = Vec::new();
-    for entry in WalkDir::new(module_dir).follow_links(false) {
-        let entry = entry.map_err(|err| InstallerError::Package(err.to_string()))?;
-        if entry.file_type().is_dir() {
-            continue;
-        }
-        if entry.file_type().is_symlink() {
-            return Err(InstallerError::Package(
-                "symlink is not allowed in module package".to_string(),
-            ));
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(module_dir)
-            .map_err(|_| InstallerError::Package("module file is outside module_dir".to_string()))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        validate_package_entry_name(&rel)?;
-        if rel == "checksums.sha256" || rel == "package.yaml" {
-            continue;
-        }
-        entries.push((rel, entry.path().to_path_buf()));
-    }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut checksums = String::new();
-    for (rel, path) in &entries {
-        let hash = sha256_file(path)?;
-        checksums.push_str(&format!("{}  {}\n", hash, rel));
-    }
-    let metadata = PackageMetadata {
-        format: "ojosmod".to_string(),
-        version: 1,
-        created_by: "ojosctl".to_string(),
-        signature: None,
-        signing_key_id: None,
-        trusted_publisher: None,
-    };
-    let metadata_file = PackageMetadataFile {
-        package: metadata.clone(),
-    };
-    let metadata_text = serde_yaml::to_string(&metadata_file)?;
-    checksums.push_str(&format!(
-        "{}  package.yaml\n",
-        sha256_bytes(metadata_text.as_bytes())
-    ));
-
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let file = File::create(output)?;
-    let mut zip = ZipWriter::new(file);
-    let options = SimpleFileOptions::default().unix_permissions(0o644);
-    for (rel, path) in &entries {
-        zip.start_file(rel, options)?;
-        let mut file = File::open(path)?;
-        std::io::copy(&mut file, &mut zip)?;
-    }
-    zip.start_file("checksums.sha256", options)?;
-    zip.write_all(checksums.as_bytes())?;
-    zip.start_file("package.yaml", options)?;
-    zip.write_all(metadata_text.as_bytes())?;
-    zip.finish()?;
-
-    verify_package(output)
 }
 
 pub fn package_service(service_dir: &Path, output: &Path) -> Result<PackageVerification> {
@@ -195,7 +119,6 @@ pub fn verify_package(package_path: &Path) -> Result<PackageVerification> {
     let file = File::open(package_path)?;
     let mut archive = ZipArchive::new(file)?;
     let mut names = HashSet::new();
-    let mut manifest_text = None;
     let mut service_manifest_text = None;
     let mut checksum_text = None;
     let mut metadata_text = None;
@@ -226,12 +149,7 @@ pub fn verify_package(package_path: &Path) -> Result<PackageVerification> {
         file.read_to_end(&mut data)?;
         let hash = sha256_bytes(&data);
         actual.insert(name.clone(), hash);
-        if name == "module.yaml" {
-            manifest_text =
-                Some(String::from_utf8(data).map_err(|_| {
-                    InstallerError::Package("module.yaml must be utf-8".to_string())
-                })?);
-        } else if name == "service.yaml" {
+        if name == "service.yaml" {
             service_manifest_text =
                 Some(String::from_utf8(data).map_err(|_| {
                     InstallerError::Package("service.yaml must be utf-8".to_string())
@@ -248,7 +166,7 @@ pub fn verify_package(package_path: &Path) -> Result<PackageVerification> {
         }
     }
 
-    if manifest_text.is_none() && service_manifest_text.is_none() {
+    if service_manifest_text.is_none() {
         return Err(InstallerError::Package(
             "service.yaml is missing".to_string(),
         ));
@@ -260,16 +178,12 @@ pub fn verify_package(package_path: &Path) -> Result<PackageVerification> {
     let metadata_file: PackageMetadataFile = serde_yaml::from_str(&metadata_text)?;
     let metadata = metadata_file.package;
     validate_package_metadata(&metadata)?;
-    let (module_id, service_id, version, manifest_entry) =
-        if let Some(service_text) = service_manifest_text {
-            let manifest: ServiceManifest = serde_yaml::from_str(&service_text)?;
-            validate_service_manifest(&manifest)?;
-            (String::new(), manifest.id, manifest.version, "service.yaml")
-        } else {
-            let manifest: Manifest = serde_yaml::from_str(&manifest_text.unwrap_or_default())?;
-            validate_manifest(&manifest)?;
-            (manifest.id, String::new(), manifest.version, "module.yaml")
-        };
+    let service_text = service_manifest_text.expect("service manifest checked");
+    let manifest: ServiceManifest = serde_yaml::from_str(&service_text)?;
+    validate_service_manifest(&manifest)?;
+    let service_id = manifest.id;
+    let version = manifest.version;
+    let manifest_entry = "service.yaml";
 
     let expected = parse_checksums(&checksum_text)?;
     if expected.is_empty() {
@@ -306,7 +220,6 @@ pub fn verify_package(package_path: &Path) -> Result<PackageVerification> {
 
     Ok(PackageVerification {
         valid: true,
-        module_id,
         service_id,
         version,
         files_checked: expected.len(),
@@ -319,9 +232,9 @@ pub fn verify_package(package_path: &Path) -> Result<PackageVerification> {
 }
 
 fn validate_package_metadata(metadata: &PackageMetadata) -> Result<()> {
-    if metadata.format != "ojos-service" && metadata.format != "ojosmod" {
+    if metadata.format != "ojos-service" {
         return Err(InstallerError::Package(
-            "package format must be ojos-service or legacy ojosmod".to_string(),
+            "package format must be ojos-service".to_string(),
         ));
     }
     if metadata.version != 1 {
@@ -338,7 +251,7 @@ fn validate_package_metadata(metadata: &PackageMetadata) -> Result<()> {
 }
 
 fn validate_package_entry_name(name: &str) -> Result<()> {
-    validate_package_entry_path(name)?;
+    validate_service_package_entry_path(name)?;
     let lower = name.to_ascii_lowercase();
     let banned_exact = [".env", ".env.local"];
     let banned_segments = [".tmp", "node_modules", "frontend/dist", ".git", "target"];
@@ -369,6 +282,21 @@ fn validate_package_entry_name(name: &str) -> Result<()> {
             "executable hook is not allowed: {}",
             name
         )));
+    }
+    Ok(())
+}
+
+fn validate_service_package_entry_path(path: &str) -> Result<()> {
+    let normalized = path.replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.contains("../")
+        || normalized == ".."
+        || normalized.ends_with("/..")
+    {
+        return Err(InstallerError::UnsafePath(
+            "package entry path is unsafe".to_string(),
+        ));
     }
     Ok(())
 }

@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/moduleruntime"
-	"ojos-gateway/internal/moduleregistry"
+	"ojos-gateway/internal/kernel/serviceruntime"
+	"ojos-gateway/internal/serviceregistry"
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
 
@@ -51,7 +51,7 @@ func (l *AdminHealthLogic) AdminHealth(authHeader string) (*types.AdminHealthRes
 			components = append(components, l.checkHTTP(route))
 		}
 	}
-	if strings.TrimSpace(l.svcCtx.Config.Installer.Endpoint) != "" {
+	if strings.TrimSpace(l.svcCtx.Config.RootRuntime.Endpoint) != "" {
 		components = append(components, l.checkInstaller())
 	}
 	components = append(components, l.runtimeHealthChecks()...)
@@ -141,7 +141,7 @@ func (l *AdminHealthLogic) checkHTTP(route config.ProxyRouteConfig) types.Health
 func (l *AdminHealthLogic) checkInstaller() types.HealthComponent {
 	start := time.Now()
 	client := http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(strings.TrimRight(l.svcCtx.Config.Installer.Endpoint, "/") + "/health")
+	resp, err := client.Get(strings.TrimRight(l.svcCtx.Config.RootRuntime.Endpoint, "/") + "/health")
 	if err == nil && resp != nil {
 		_ = resp.Body.Close()
 		if resp.StatusCode >= 400 {
@@ -155,7 +155,7 @@ func (l *AdminHealthLogic) runtimeHealthChecks() []types.HealthComponent {
 	if l.svcCtx == nil || l.svcCtx.DB == nil {
 		return nil
 	}
-	snapshot, err := moduleruntime.BuildSnapshot(l.ctx, moduleregistry.NewRepository(l.svcCtx.DB))
+	snapshot, err := serviceruntime.BuildSnapshot(l.ctx, serviceregistry.NewRepository(l.svcCtx.DB))
 	if err != nil {
 		c := component("service runtime health registry", time.Now(), nil)
 		c.Status = "warning"
@@ -164,7 +164,7 @@ func (l *AdminHealthLogic) runtimeHealthChecks() []types.HealthComponent {
 	}
 	out := make([]types.HealthComponent, 0, len(snapshot.HealthChecks))
 	for _, check := range snapshot.HealthChecks {
-		name := "module:" + check.ModuleID + "/" + check.ComponentID
+		name := "service:" + check.ServiceID + "/" + check.ComponentID
 		c := component(name, time.Now(), nil)
 		c.Message = runtimeHealthMessage(check)
 		out = append(out, c)
@@ -172,7 +172,7 @@ func (l *AdminHealthLogic) runtimeHealthChecks() []types.HealthComponent {
 	return out
 }
 
-func runtimeHealthMessage(check moduleruntime.RuntimeComponent) string {
+func runtimeHealthMessage(check serviceruntime.RuntimeComponent) string {
 	var config struct {
 		Type     string `json:"type"`
 		Optional bool   `json:"optional"`

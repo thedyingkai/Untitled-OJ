@@ -1,4 +1,4 @@
-Name: gateway-service
+﻿Name: gateway-service
 Host: 0.0.0.0
 Port: 8080
 
@@ -74,6 +74,6 @@ InternalAuth:
   TimestampSkewSeconds: 60
   NonceTTLSeconds: 120
 
-Installer:
+RootRuntime:
   Endpoint: http://root-runtime-manager:8090
   InternalToken: ""

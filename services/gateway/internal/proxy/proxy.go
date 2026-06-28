@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/moduleruntime"
+	"ojos-gateway/internal/kernel/serviceruntime"
 	"ojos-shared/security/internalauth"
 
 	sharedjwt "ojos-shared/security/jwt"
@@ -48,7 +48,7 @@ type routeProxy struct {
 }
 
 type RuntimeReader interface {
-	RuntimeRouteTable(context.Context) (moduleruntime.RouteTable, error)
+	RuntimeRouteTable(context.Context) (serviceruntime.RouteTable, error)
 }
 
 type RuntimeProxy struct {
@@ -149,7 +149,7 @@ func NewRuntimeProxy(
 		staticRoutes:   compiled,
 		trusted:        trusted,
 	}
-	runtimeProxy.table.Store(moduleruntime.RouteTable{Version: "0"})
+	runtimeProxy.table.Store(serviceruntime.RouteTable{Version: "0"})
 	return runtimeProxy, nil
 }
 
@@ -157,16 +157,16 @@ func (p *RuntimeProxy) SetAdminChecker(checker AdminChecker) {
 	p.adminChecker = checker
 }
 
-func (p *RuntimeProxy) Reload(ctx context.Context, reader RuntimeReader) (moduleruntime.RouteTable, error) {
+func (p *RuntimeProxy) Reload(ctx context.Context, reader RuntimeReader) (serviceruntime.RouteTable, error) {
 	table, err := reader.RuntimeRouteTable(ctx)
 	if err != nil {
-		return moduleruntime.RouteTable{}, err
+		return serviceruntime.RouteTable{}, err
 	}
 	p.SetRouteTable(table)
 	return table, nil
 }
 
-func (p *RuntimeProxy) SetRouteTable(table moduleruntime.RouteTable) {
+func (p *RuntimeProxy) SetRouteTable(table serviceruntime.RouteTable) {
 	p.table.Store(table)
 }
 
@@ -202,7 +202,7 @@ func (p *RuntimeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (p *RuntimeProxy) matchBlockedRuntimeRoute(path string) (routeProxy, bool) {
 	value := p.table.Load()
-	table, _ := value.(moduleruntime.RouteTable)
+	table, _ := value.(serviceruntime.RouteTable)
 	for _, route := range table.Routes {
 		if route.ProxyEnabled || !route.Enabled || !matchPrefix(path, route.Prefix) {
 			continue
@@ -216,7 +216,7 @@ func (p *RuntimeProxy) matchBlockedRuntimeRoute(path string) (routeProxy, bool) 
 
 func (p *RuntimeProxy) matchRuntimeRoute(path string) (routeProxy, bool) {
 	value := p.table.Load()
-	table, _ := value.(moduleruntime.RouteTable)
+	table, _ := value.(serviceruntime.RouteTable)
 	for _, route := range table.Routes {
 		if !route.ProxyEnabled || !matchPrefix(path, route.Prefix) {
 			continue

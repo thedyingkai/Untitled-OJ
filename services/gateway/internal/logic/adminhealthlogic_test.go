@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/moduleruntime"
+	"ojos-gateway/internal/kernel/serviceruntime"
 	"ojos-gateway/internal/svc"
 )
 
@@ -123,8 +123,8 @@ func TestCheckHTTPMarksJudgeHealth404AsError(t *testing.T) {
 }
 
 func TestRuntimeHealthMessageMarksMetadataRegistration(t *testing.T) {
-	got := runtimeHealthMessage(moduleruntime.RuntimeComponent{
-		ModuleID:    "ojos.demo-module",
+	got := runtimeHealthMessage(serviceruntime.RuntimeComponent{
+		ServiceID:   "ojos.demo-service",
 		ComponentID: "demo-health",
 		Type:        "health_check",
 		Status:      "DISABLED",

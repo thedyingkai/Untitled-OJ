@@ -1,4 +1,4 @@
-package moduleruntime
+package serviceruntime
 
 import (
 	"context"
@@ -38,8 +38,8 @@ type RuntimeDriver interface {
 }
 
 type RuntimeService struct {
+	OwnerServiceID string   `json:"owner_service_id"`
 	ServiceID      string   `json:"service_id"`
-	ModuleID       string   `json:"module_id"`
 	Name           string   `json:"name"`
 	Kind           string   `json:"kind"`
 	Lifecycle      string   `json:"lifecycle"`
@@ -60,7 +60,6 @@ type RuntimePlan struct {
 	OperationID          string               `json:"operation_id"`
 	Action               string               `json:"action"`
 	ServiceID            string               `json:"service_id"`
-	ModuleID             string               `json:"module_id"`
 	Driver               string               `json:"driver"`
 	CanApply             bool                 `json:"can_apply"`
 	ApplyEnabled         bool                 `json:"apply_enabled"`
@@ -197,7 +196,7 @@ func (d *ComposeDriver) plan(ctx context.Context, snapshot Snapshot, serviceID s
 		plan.BlockedBy = append(plan.BlockedBy, err.Error())
 		return plan, nil
 	}
-	plan.ModuleID = service.ModuleID
+	plan.ServiceID = service.ServiceID
 	plan.Affected = []string{service.ServiceID}
 	plan.BlockedBy = append(plan.BlockedBy, service.BlockedBy...)
 	if service.Lifecycle == LifecycleMetadata {
@@ -330,9 +329,9 @@ func RuntimeServiceStates(services []RuntimeService) map[string]RuntimeService {
 
 func sortRuntimeServices(services []RuntimeService) {
 	sort.Slice(services, func(i, j int) bool {
-		if services[i].ModuleID == services[j].ModuleID {
+		if services[i].ServiceID == services[j].ServiceID {
 			return services[i].ServiceID < services[j].ServiceID
 		}
-		return services[i].ModuleID < services[j].ModuleID
+		return services[i].ServiceID < services[j].ServiceID
 	})
 }

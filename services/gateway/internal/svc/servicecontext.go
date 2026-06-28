@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/moduleruntime"
-	"ojos-gateway/internal/moduleregistry"
+	"ojos-gateway/internal/kernel/serviceruntime"
 	"ojos-gateway/internal/proxy"
+	"ojos-gateway/internal/serviceregistry"
 	"ojos-shared/security/internalauth"
 	sharedperm "ojos-shared/security/permission"
 
@@ -39,8 +39,8 @@ type ServiceContext struct {
 
 	Proxy             http.HandlerFunc
 	RuntimeProxy      *proxy.RuntimeProxy
-	RuntimeDriver     moduleruntime.RuntimeDriver
-	RouteTableOptions moduleruntime.RouteTableOptions
+	RuntimeDriver     serviceruntime.RuntimeDriver
+	RouteTableOptions serviceruntime.RouteTableOptions
 	InternalSigner    *internalauth.Signer
 }
 
@@ -87,9 +87,9 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		internalSigner = internalauth.NewSigner(internalKeyManager)
 	}
 
-	repo := moduleregistry.NewRepository(db)
-	if err := moduleregistry.BootstrapBuiltin(ctx, repo); err != nil {
-		log.Fatalf("bootstrap module registry failed: %v", err)
+	repo := serviceregistry.NewRepository(db)
+	if err := serviceregistry.BootstrapBuiltin(ctx, repo); err != nil {
+		log.Fatalf("bootstrap service registry failed: %v", err)
 	}
 
 	runtimeProxy, err := proxy.NewRuntimeProxy(c.Proxy.Routes, c.Proxy.TrustedServices, c.Jwt.Secret, internalSigner, zlog)
@@ -100,17 +100,17 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		return sharedperm.HasUserPermission(ctx, db, userID, "system.admin", sharedperm.SystemScope())
 	})
 	routeTableOptions := routeTableOptionsFromConfig(c.Proxy)
-	runtimeDriver := moduleruntime.NewComposeDriver(routeTableOptions.TrustedServices, c.Runtime.ComposeServices...)
+	runtimeDriver := serviceruntime.NewComposeDriver(routeTableOptions.TrustedServices, c.Runtime.ComposeServices...)
 	if c.Runtime.ApplyEnabled {
 		zlog.Warn("runtime apply is configured but remains disabled in L2 foundation")
 	}
-	if snapshot, err := moduleruntime.BuildSnapshot(ctx, repo); err == nil {
+	if snapshot, err := serviceruntime.BuildSnapshot(ctx, repo); err == nil {
 		if services, serviceErr := runtimeDriver.ListServices(ctx, snapshot); serviceErr == nil {
 			snapshot.Services = filterRuntimeServicesByKind(services, false)
 			snapshot.Workers = filterRuntimeServicesByKind(services, true)
-			routeTableOptions.ServiceStates = moduleruntime.RuntimeServiceStates(snapshot.Services)
+			routeTableOptions.ServiceStates = serviceruntime.RuntimeServiceStates(snapshot.Services)
 		}
-		runtimeProxy.SetRouteTable(moduleruntime.BuildRouteTableWithOptions(snapshot, routeTableOptions))
+		runtimeProxy.SetRouteTable(serviceruntime.BuildRouteTableWithOptions(snapshot, routeTableOptions))
 	} else {
 		zlog.Warn("initial runtime route table build failed", zap.Error(err))
 	}
@@ -129,13 +129,13 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	}
 }
 
-func routeTableOptionsFromConfig(cfg config.ProxyConfig) moduleruntime.RouteTableOptions {
-	trusted := make(map[string]moduleruntime.TrustedService)
+func routeTableOptionsFromConfig(cfg config.ProxyConfig) serviceruntime.RouteTableOptions {
+	trusted := make(map[string]serviceruntime.TrustedService)
 	for _, item := range cfg.TrustedServices {
 		if strings.TrimSpace(item.ServiceID) == "" {
 			continue
 		}
-		trusted[item.ServiceID] = moduleruntime.TrustedService{
+		trusted[item.ServiceID] = serviceruntime.TrustedService{
 			ServiceID:     item.ServiceID,
 			UpstreamBase:  item.Target,
 			StripPrefix:   item.StripPrefix,
@@ -151,20 +151,20 @@ func routeTableOptionsFromConfig(cfg config.ProxyConfig) moduleruntime.RouteTabl
 		if _, ok := trusted[serviceID]; ok {
 			continue
 		}
-		trusted[serviceID] = moduleruntime.TrustedService{
+		trusted[serviceID] = serviceruntime.TrustedService{
 			ServiceID:     serviceID,
 			UpstreamBase:  route.Target,
 			StripPrefix:   route.StripPrefix,
 			HealthCheckID: serviceID + "-health",
 		}
 	}
-	return moduleruntime.RouteTableOptions{
+	return serviceruntime.RouteTableOptions{
 		TrustedServices: trusted,
 	}
 }
 
-func filterRuntimeServicesByKind(items []moduleruntime.RuntimeService, workers bool) []moduleruntime.RuntimeService {
-	out := make([]moduleruntime.RuntimeService, 0, len(items))
+func filterRuntimeServicesByKind(items []serviceruntime.RuntimeService, workers bool) []serviceruntime.RuntimeService {
+	out := make([]serviceruntime.RuntimeService, 0, len(items))
 	for _, item := range items {
 		if (item.Kind == "worker") == workers {
 			out = append(out, item)
@@ -186,11 +186,11 @@ func applyEnvOverrides(c *config.Config) {
 	if value := strings.TrimSpace(os.Getenv("JWT_SECRET")); value != "" {
 		c.Jwt.Secret = value
 	}
-	if value := strings.TrimSpace(os.Getenv("MODULE_INSTALLER_ENDPOINT")); value != "" {
-		c.Installer.Endpoint = value
+	if value := strings.TrimSpace(os.Getenv("ROOT_RUNTIME_MANAGER_ENDPOINT")); value != "" {
+		c.RootRuntime.Endpoint = value
 	}
-	if value := strings.TrimSpace(os.Getenv("MODULE_INSTALLER_INTERNAL_TOKEN")); value != "" {
-		c.Installer.InternalToken = value
+	if value := strings.TrimSpace(os.Getenv("ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN")); value != "" {
+		c.RootRuntime.InternalToken = value
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEMS_ROOT")); value != "" {
 		c.Storage.ProblemsRoot = value

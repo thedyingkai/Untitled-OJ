@@ -1,4 +1,4 @@
-package moduleruntime
+package serviceruntime
 
 import (
 	"context"
@@ -7,36 +7,36 @@ import (
 	"strings"
 	"time"
 
-	"ojos-gateway/internal/moduleregistry"
+	"ojos-gateway/internal/serviceregistry"
 )
 
 type RegistryReader interface {
-	ListModules(context.Context) ([]moduleregistry.Module, error)
-	ListPermissions(context.Context) ([]moduleregistry.Permission, error)
-	ListMenus(context.Context) ([]moduleregistry.Menu, error)
-	ListFrontendRoutes(context.Context) ([]moduleregistry.FrontendRoute, error)
-	ListGatewayRoutes(context.Context) ([]moduleregistry.GatewayRoute, error)
-	ListComponents(context.Context) ([]moduleregistry.Component, error)
-	ListEdges(context.Context) ([]moduleregistry.Edge, error)
+	ListServices(context.Context) ([]serviceregistry.Service, error)
+	ListPermissions(context.Context) ([]serviceregistry.Permission, error)
+	ListMenus(context.Context) ([]serviceregistry.Menu, error)
+	ListFrontendRoutes(context.Context) ([]serviceregistry.FrontendRoute, error)
+	ListGatewayRoutes(context.Context) ([]serviceregistry.GatewayRoute, error)
+	ListComponents(context.Context) ([]serviceregistry.Component, error)
+	ListEdges(context.Context) ([]serviceregistry.Edge, error)
 }
 
 type Snapshot struct {
-	Version        string                         `json:"version"`
-	GeneratedAt    string                         `json:"generated_at"`
-	Modules        []moduleregistry.Module        `json:"modules"`
-	Permissions    []moduleregistry.Permission    `json:"permissions"`
-	Roles          []RuntimeManifestItem          `json:"roles"`
-	Menus          []moduleregistry.Menu          `json:"menus"`
-	FrontendRoutes []moduleregistry.FrontendRoute `json:"frontend_routes"`
-	GatewayRoutes  []moduleregistry.GatewayRoute  `json:"gateway_routes"`
-	Components     []RuntimeComponent             `json:"components"`
-	Services       []RuntimeService               `json:"services"`
-	Workers        []RuntimeService               `json:"workers"`
-	StorageBuckets []RuntimeManifestItem          `json:"storage_buckets"`
-	HealthChecks   []RuntimeComponent             `json:"health_checks"`
-	Operations     []RuntimeManifestItem          `json:"operations"`
-	Topology       RuntimeTopology                `json:"topology"`
-	Warnings       []string                       `json:"warnings"`
+	Version        string                          `json:"version"`
+	GeneratedAt    string                          `json:"generated_at"`
+	ServiceNodes   []serviceregistry.Service       `json:"service_nodes"`
+	Permissions    []serviceregistry.Permission    `json:"permissions"`
+	Roles          []RuntimeManifestItem           `json:"roles"`
+	Menus          []serviceregistry.Menu          `json:"menus"`
+	FrontendRoutes []serviceregistry.FrontendRoute `json:"frontend_routes"`
+	GatewayRoutes  []serviceregistry.GatewayRoute  `json:"gateway_routes"`
+	Components     []RuntimeComponent              `json:"components"`
+	Services       []RuntimeService                `json:"services"`
+	Workers        []RuntimeService                `json:"workers"`
+	StorageBuckets []RuntimeManifestItem           `json:"storage_buckets"`
+	HealthChecks   []RuntimeComponent              `json:"health_checks"`
+	Operations     []RuntimeManifestItem           `json:"operations"`
+	Topology       RuntimeTopology                 `json:"topology"`
+	Warnings       []string                        `json:"warnings"`
 }
 
 type BuildOptions struct {
@@ -44,7 +44,7 @@ type BuildOptions struct {
 }
 
 type RuntimeComponent struct {
-	ModuleID    string          `json:"module_id"`
+	ServiceID   string          `json:"service_id"`
 	ComponentID string          `json:"component_id"`
 	Type        string          `json:"type"`
 	Status      string          `json:"status"`
@@ -52,39 +52,39 @@ type RuntimeComponent struct {
 }
 
 type RuntimeManifestItem struct {
-	ModuleID string          `json:"module_id"`
-	ID       string          `json:"id"`
-	Type     string          `json:"type"`
-	Status   string          `json:"status"`
-	Enabled  bool            `json:"enabled"`
-	Config   json.RawMessage `json:"config"`
+	ServiceID string          `json:"service_id"`
+	ID        string          `json:"id"`
+	Type      string          `json:"type"`
+	Status    string          `json:"status"`
+	Enabled   bool            `json:"enabled"`
+	Config    json.RawMessage `json:"config"`
 }
 
 type RuntimeTopology struct {
-	Nodes           []RuntimeTopologyNode   `json:"nodes"`
-	Edges           []RuntimeTopologyEdge   `json:"edges"`
-	DependencyEdges []moduleregistry.Edge   `json:"dependency_edges"`
-	ModuleNodes     []moduleregistry.Module `json:"module_nodes"`
+	Nodes           []RuntimeTopologyNode     `json:"nodes"`
+	Edges           []RuntimeTopologyEdge     `json:"edges"`
+	DependencyEdges []serviceregistry.Edge    `json:"dependency_edges"`
+	ServiceNodes    []serviceregistry.Service `json:"service_nodes"`
 }
 
 type RuntimeTopologyNode struct {
-	ID       string          `json:"id"`
-	ModuleID string          `json:"module_id"`
-	Label    string          `json:"label"`
-	Type     string          `json:"type"`
-	Status   string          `json:"status"`
-	Source   string          `json:"source"`
-	Config   json.RawMessage `json:"config"`
+	ID        string          `json:"id"`
+	ServiceID string          `json:"service_id"`
+	Label     string          `json:"label"`
+	Type      string          `json:"type"`
+	Status    string          `json:"status"`
+	Source    string          `json:"source"`
+	Config    json.RawMessage `json:"config"`
 }
 
 type RuntimeTopologyEdge struct {
-	ID       string `json:"id"`
-	ModuleID string `json:"module_id"`
-	From     string `json:"from"`
-	To       string `json:"to"`
-	Type     string `json:"type"`
-	Required bool   `json:"required"`
-	Source   string `json:"source"`
+	ID        string `json:"id"`
+	ServiceID string `json:"service_id"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Type      string `json:"type"`
+	Required  bool   `json:"required"`
+	Source    string `json:"source"`
 }
 
 type RouteTable struct {
@@ -96,27 +96,27 @@ type RouteTable struct {
 }
 
 type RuntimeRoute struct {
-	RouteID       string   `json:"route_id"`
-	ModuleID      string   `json:"module_id"`
-	Prefix        string   `json:"prefix"`
-	ServiceID     string   `json:"service_id"`
-	TargetService string   `json:"target_service"`
-	UpstreamBase  string   `json:"upstream_base,omitempty"`
-	AuthMode      string   `json:"auth_mode"`
-	Methods       []string `json:"methods"`
-	Enabled       bool     `json:"enabled"`
-	ProxyEnabled  bool     `json:"proxy_enabled"`
-	Priority      int      `json:"priority"`
-	StripPrefix   string   `json:"strip_prefix,omitempty"`
-	RewritePrefix string   `json:"rewrite_prefix,omitempty"`
-	HealthCheckID string   `json:"health_check_id,omitempty"`
-	CreatedFrom   string   `json:"created_from"`
-	Status        string   `json:"status"`
-	ServiceState  string   `json:"service_state,omitempty"`
-	ServiceHealth string   `json:"service_health,omitempty"`
-	Conflicts     []string `json:"conflicts"`
-	Warnings      []string `json:"warnings"`
-	BlockedBy     []string `json:"blocked_by"`
+	RouteID        string   `json:"route_id"`
+	OwnerServiceID string   `json:"owner_service_id"`
+	Prefix         string   `json:"prefix"`
+	ServiceID      string   `json:"service_id"`
+	TargetService  string   `json:"target_service"`
+	UpstreamBase   string   `json:"upstream_base,omitempty"`
+	AuthMode       string   `json:"auth_mode"`
+	Methods        []string `json:"methods"`
+	Enabled        bool     `json:"enabled"`
+	ProxyEnabled   bool     `json:"proxy_enabled"`
+	Priority       int      `json:"priority"`
+	StripPrefix    string   `json:"strip_prefix,omitempty"`
+	RewritePrefix  string   `json:"rewrite_prefix,omitempty"`
+	HealthCheckID  string   `json:"health_check_id,omitempty"`
+	CreatedFrom    string   `json:"created_from"`
+	Status         string   `json:"status"`
+	ServiceState   string   `json:"service_state,omitempty"`
+	ServiceHealth  string   `json:"service_health,omitempty"`
+	Conflicts      []string `json:"conflicts"`
+	Warnings       []string `json:"warnings"`
+	BlockedBy      []string `json:"blocked_by"`
 }
 
 type RouteTableOptions struct {
@@ -139,7 +139,7 @@ func BuildSnapshot(ctx context.Context, reader RegistryReader) (Snapshot, error)
 }
 
 func BuildSnapshotWithOptions(ctx context.Context, reader RegistryReader, opts BuildOptions) (Snapshot, error) {
-	modules, err := reader.ListModules(ctx)
+	services, err := reader.ListServices(ctx)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -168,27 +168,27 @@ func BuildSnapshotWithOptions(ctx context.Context, reader RegistryReader, opts B
 		return Snapshot{}, err
 	}
 
-	visibleModules := moduleVisibility(modules, opts.IncludeDisabled)
-	moduleByID := mapModules(modules)
+	visibleServices := serviceVisibility(services, opts.IncludeDisabled)
+	serviceByID := mapServices(services)
 	snapshot := Snapshot{
 		Version:        "1",
 		GeneratedAt:    time.Now().UTC().Format(time.RFC3339Nano),
-		Modules:        filterModules(modules, visibleModules),
-		Permissions:    filterPermissions(permissions, visibleModules),
-		Menus:          filterMenus(menus, visibleModules),
-		FrontendRoutes: filterFrontendRoutes(frontendRoutes, visibleModules),
-		GatewayRoutes:  filterGatewayRoutes(gatewayRoutes, visibleModules),
+		ServiceNodes:   filterServices(services, visibleServices),
+		Permissions:    filterPermissions(permissions, visibleServices),
+		Menus:          filterMenus(menus, visibleServices),
+		FrontendRoutes: filterFrontendRoutes(frontendRoutes, visibleServices),
+		GatewayRoutes:  filterGatewayRoutes(gatewayRoutes, visibleServices),
 		Topology: RuntimeTopology{
-			ModuleNodes:     filterModules(modules, visibleModules),
-			DependencyEdges: filterEdges(edges, visibleModules),
+			ServiceNodes:    filterServices(services, visibleServices),
+			DependencyEdges: filterEdges(edges, visibleServices),
 		},
 	}
 	for _, component := range components {
-		if !visibleModules[component.ModuleID] {
+		if !visibleServices[component.ServiceID] {
 			continue
 		}
 		item := RuntimeComponent{
-			ModuleID:    component.ModuleID,
+			ServiceID:   component.ServiceID,
 			ComponentID: component.ComponentID,
 			Type:        component.ComponentType,
 			Status:      component.Status,
@@ -200,11 +200,11 @@ func BuildSnapshotWithOptions(ctx context.Context, reader RegistryReader, opts B
 			snapshot.HealthChecks = append(snapshot.HealthChecks, item)
 		}
 	}
-	snapshot.Roles = manifestItemsFromModules(snapshot.Modules, "roles")
-	snapshot.StorageBuckets = storageBucketItems(snapshot.Modules, snapshot.Components)
-	snapshot.Operations = manifestItemsFromModules(snapshot.Modules, "operations")
+	snapshot.Roles = manifestItemsFromServices(snapshot.ServiceNodes, "roles")
+	snapshot.StorageBuckets = storageBucketItems(snapshot.ServiceNodes, snapshot.Components)
+	snapshot.Operations = manifestItemsFromServices(snapshot.ServiceNodes, "operations")
 	snapshot.Services, snapshot.Workers = collectRuntimeServiceDeclarations(snapshot)
-	snapshot.Topology.Nodes, snapshot.Topology.Edges = buildTopology(snapshot.Modules, moduleByID, snapshot.Components, snapshot.Services, snapshot.Workers, snapshot.GatewayRoutes, snapshot.Menus, snapshot.FrontendRoutes, snapshot.HealthChecks, snapshot.Topology.DependencyEdges)
+	snapshot.Topology.Nodes, snapshot.Topology.Edges = buildTopology(snapshot.ServiceNodes, serviceByID, snapshot.Components, snapshot.Services, snapshot.Workers, snapshot.GatewayRoutes, snapshot.Menus, snapshot.FrontendRoutes, snapshot.HealthChecks, snapshot.Topology.DependencyEdges)
 	snapshot.Warnings = append(snapshot.Warnings, topologyWarnings(snapshot.Topology)...)
 	sortSnapshot(&snapshot)
 	return snapshot, nil
@@ -230,17 +230,17 @@ func BuildRouteTableWithOptions(snapshot Snapshot, opts RouteTableOptions) Route
 		trustedService, serviceTrusted := trusted[serviceID]
 		serviceState, hasServiceState := opts.ServiceStates[serviceID]
 		item := RuntimeRoute{
-			RouteID:       routeID(route.ModuleID, route.Prefix),
-			ModuleID:      route.ModuleID,
-			Prefix:        cleanPrefix(route.Prefix),
-			ServiceID:     serviceID,
-			TargetService: serviceID,
-			AuthMode:      normalizeRouteAuthMode(route.AuthMode),
-			Methods:       defaultRouteMethods(),
-			Enabled:       route.Enabled,
-			Priority:      len(cleanPrefix(route.Prefix)),
-			CreatedFrom:   "registry",
-			Status:        "active",
+			RouteID:        routeID(route.ServiceID, route.Prefix),
+			OwnerServiceID: route.ServiceID,
+			Prefix:         cleanPrefix(route.Prefix),
+			ServiceID:      serviceID,
+			TargetService:  serviceID,
+			AuthMode:       normalizeRouteAuthMode(route.AuthMode),
+			Methods:        defaultRouteMethods(),
+			Enabled:        route.Enabled,
+			Priority:       len(cleanPrefix(route.Prefix)),
+			CreatedFrom:    "registry",
+			Status:         "active",
 		}
 		if serviceTrusted {
 			item.UpstreamBase = trustedService.UpstreamBase
@@ -304,11 +304,11 @@ func BuildRouteTableWithOptions(snapshot Snapshot, opts RouteTableOptions) Route
 				continue
 			}
 			if left.Prefix == right.Prefix {
-				table.Routes[i].Conflicts = append(table.Routes[i].Conflicts, "duplicate prefix with "+right.ModuleID)
+				table.Routes[i].Conflicts = append(table.Routes[i].Conflicts, "duplicate prefix with "+right.ServiceID)
 				continue
 			}
 			if routePrefixOverlaps(left.Prefix, right.Prefix) {
-				table.Routes[i].Conflicts = append(table.Routes[i].Conflicts, "overlaps prefix "+right.Prefix+" from "+right.ModuleID)
+				table.Routes[i].Conflicts = append(table.Routes[i].Conflicts, "overlaps prefix "+right.Prefix+" from "+right.ServiceID)
 			}
 		}
 	}
@@ -338,88 +338,88 @@ func BuildRouteTableWithOptions(snapshot Snapshot, opts RouteTableOptions) Route
 
 	for _, route := range table.Routes {
 		if len(route.BlockedBy) > 0 {
-			table.Warnings = append(table.Warnings, route.ModuleID+" "+route.Prefix+": blocked by "+strings.Join(route.BlockedBy, "; "))
+			table.Warnings = append(table.Warnings, route.ServiceID+" "+route.Prefix+": blocked by "+strings.Join(route.BlockedBy, "; "))
 		}
 		if len(route.Conflicts) > 0 {
-			table.Warnings = append(table.Warnings, route.ModuleID+" "+route.Prefix+": "+strings.Join(route.Conflicts, "; "))
+			table.Warnings = append(table.Warnings, route.ServiceID+" "+route.Prefix+": "+strings.Join(route.Conflicts, "; "))
 		}
 	}
 	sortRouteTable(&table)
 	return table
 }
 
-func moduleVisibility(items []moduleregistry.Module, includeDisabled bool) map[string]bool {
+func serviceVisibility(items []serviceregistry.Service, includeDisabled bool) map[string]bool {
 	visible := make(map[string]bool, len(items))
 	for _, item := range items {
-		if includeDisabled || item.Status == moduleregistry.StatusEnabled {
-			visible[item.ModuleID] = true
+		if includeDisabled || item.Status == serviceregistry.StatusEnabled {
+			visible[item.ServiceID] = true
 		}
 	}
 	return visible
 }
 
-func mapModules(items []moduleregistry.Module) map[string]moduleregistry.Module {
-	out := make(map[string]moduleregistry.Module, len(items))
+func mapServices(items []serviceregistry.Service) map[string]serviceregistry.Service {
+	out := make(map[string]serviceregistry.Service, len(items))
 	for _, item := range items {
-		out[item.ModuleID] = item
+		out[item.ServiceID] = item
 	}
 	return out
 }
 
-func filterModules(items []moduleregistry.Module, visible map[string]bool) []moduleregistry.Module {
-	out := make([]moduleregistry.Module, 0, len(items))
+func filterServices(items []serviceregistry.Service, visible map[string]bool) []serviceregistry.Service {
+	out := make([]serviceregistry.Service, 0, len(items))
 	for _, item := range items {
-		if visible[item.ModuleID] {
+		if visible[item.ServiceID] {
 			out = append(out, item)
 		}
 	}
 	return out
 }
 
-func filterPermissions(items []moduleregistry.Permission, visible map[string]bool) []moduleregistry.Permission {
-	out := make([]moduleregistry.Permission, 0, len(items))
+func filterPermissions(items []serviceregistry.Permission, visible map[string]bool) []serviceregistry.Permission {
+	out := make([]serviceregistry.Permission, 0, len(items))
 	for _, item := range items {
-		if visible[item.ModuleID] {
+		if visible[item.ServiceID] {
 			out = append(out, item)
 		}
 	}
 	return out
 }
 
-func filterMenus(items []moduleregistry.Menu, visible map[string]bool) []moduleregistry.Menu {
-	out := make([]moduleregistry.Menu, 0, len(items))
+func filterMenus(items []serviceregistry.Menu, visible map[string]bool) []serviceregistry.Menu {
+	out := make([]serviceregistry.Menu, 0, len(items))
 	for _, item := range items {
-		if visible[item.ModuleID] {
+		if visible[item.ServiceID] {
 			out = append(out, item)
 		}
 	}
 	return out
 }
 
-func filterFrontendRoutes(items []moduleregistry.FrontendRoute, visible map[string]bool) []moduleregistry.FrontendRoute {
-	out := make([]moduleregistry.FrontendRoute, 0, len(items))
+func filterFrontendRoutes(items []serviceregistry.FrontendRoute, visible map[string]bool) []serviceregistry.FrontendRoute {
+	out := make([]serviceregistry.FrontendRoute, 0, len(items))
 	for _, item := range items {
-		if visible[item.ModuleID] {
+		if visible[item.ServiceID] {
 			out = append(out, item)
 		}
 	}
 	return out
 }
 
-func filterGatewayRoutes(items []moduleregistry.GatewayRoute, visible map[string]bool) []moduleregistry.GatewayRoute {
-	out := make([]moduleregistry.GatewayRoute, 0, len(items))
+func filterGatewayRoutes(items []serviceregistry.GatewayRoute, visible map[string]bool) []serviceregistry.GatewayRoute {
+	out := make([]serviceregistry.GatewayRoute, 0, len(items))
 	for _, item := range items {
-		if visible[item.ModuleID] {
+		if visible[item.ServiceID] {
 			out = append(out, item)
 		}
 	}
 	return out
 }
 
-func filterEdges(items []moduleregistry.Edge, visible map[string]bool) []moduleregistry.Edge {
-	out := make([]moduleregistry.Edge, 0, len(items))
+func filterEdges(items []serviceregistry.Edge, visible map[string]bool) []serviceregistry.Edge {
+	out := make([]serviceregistry.Edge, 0, len(items))
 	for _, item := range items {
-		if visible[item.FromModuleID] && visible[item.ToModuleID] {
+		if visible[item.FromServiceID] && visible[item.ToServiceID] {
 			out = append(out, item)
 		}
 	}
@@ -497,10 +497,10 @@ type manifestTopologyEdge struct {
 	Type string `json:"type"`
 }
 
-func manifestItemsFromModules(modules []moduleregistry.Module, kind string) []RuntimeManifestItem {
+func manifestItemsFromServices(services []serviceregistry.Service, kind string) []RuntimeManifestItem {
 	items := make([]RuntimeManifestItem, 0)
-	for _, module := range modules {
-		manifest, ok := decodeManifest(module.Manifest)
+	for _, service := range services {
+		manifest, ok := decodeManifest(service.Manifest)
 		if !ok {
 			continue
 		}
@@ -511,55 +511,55 @@ func manifestItemsFromModules(modules []moduleregistry.Module, kind string) []Ru
 				if id == "" {
 					continue
 				}
-				items = append(items, manifestItem(module.ModuleID, id, "role", module.Status, true, map[string]any{"description": role.Description}))
+				items = append(items, manifestItem(service.ServiceID, id, "role", service.Status, true, map[string]any{"description": role.Description}))
 			}
 		case "operations":
 			for _, job := range manifest.Provides.ScheduledJobs {
-				items = append(items, manifestItem(module.ModuleID, job.ID, "scheduled_job", module.Status, job.Enabled, map[string]any{"description": job.Description}))
+				items = append(items, manifestItem(service.ServiceID, job.ID, "scheduled_job", service.Status, job.Enabled, map[string]any{"description": job.Description}))
 			}
 			for _, panel := range manifest.Provides.AdminPanels {
-				items = append(items, manifestItem(module.ModuleID, panel.ID, "admin_panel", module.Status, true, map[string]any{"route_path": panel.RoutePath, "required_permission": panel.RequiredPermission}))
+				items = append(items, manifestItem(service.ServiceID, panel.ID, "admin_panel", service.Status, true, map[string]any{"route_path": panel.RoutePath, "required_permission": panel.RequiredPermission}))
 			}
 			for _, event := range manifest.Provides.Events.Publishes {
-				items = append(items, manifestItem(module.ModuleID, event, "event_publish", module.Status, true, map[string]any{}))
+				items = append(items, manifestItem(service.ServiceID, event, "event_publish", service.Status, true, map[string]any{}))
 			}
 			for _, event := range manifest.Provides.Events.Subscribes {
-				items = append(items, manifestItem(module.ModuleID, event, "event_subscribe", module.Status, true, map[string]any{}))
+				items = append(items, manifestItem(service.ServiceID, event, "event_subscribe", service.Status, true, map[string]any{}))
 			}
 		}
 	}
 	return items
 }
 
-func storageBucketItems(modules []moduleregistry.Module, components []RuntimeComponent) []RuntimeManifestItem {
+func storageBucketItems(services []serviceregistry.Service, components []RuntimeComponent) []RuntimeManifestItem {
 	items := make([]RuntimeManifestItem, 0)
 	seen := map[string]bool{}
 	for _, component := range components {
 		if component.Type != "storage_bucket" {
 			continue
 		}
-		key := component.ModuleID + "/" + component.ComponentID
+		key := component.ServiceID + "/" + component.ComponentID
 		seen[key] = true
 		items = append(items, RuntimeManifestItem{
-			ModuleID: component.ModuleID,
-			ID:       component.ComponentID,
-			Type:     "storage_bucket",
-			Status:   component.Status,
-			Enabled:  component.Status == moduleregistry.StatusEnabled,
-			Config:   component.Config,
+			ServiceID: component.ServiceID,
+			ID:        component.ComponentID,
+			Type:      "storage_bucket",
+			Status:    component.Status,
+			Enabled:   component.Status == serviceregistry.StatusEnabled,
+			Config:    component.Config,
 		})
 	}
-	for _, module := range modules {
-		manifest, ok := decodeManifest(module.Manifest)
+	for _, service := range services {
+		manifest, ok := decodeManifest(service.Manifest)
 		if !ok {
 			continue
 		}
 		for _, bucket := range manifest.Provides.StorageBuckets {
 			id := firstNonEmpty(bucket.ID, bucket.Key)
-			if id == "" || seen[module.ModuleID+"/"+id] {
+			if id == "" || seen[service.ServiceID+"/"+id] {
 				continue
 			}
-			items = append(items, manifestItem(module.ModuleID, id, "storage_bucket", module.Status, module.Status == moduleregistry.StatusEnabled, map[string]any{"description": bucket.Description}))
+			items = append(items, manifestItem(service.ServiceID, id, "storage_bucket", service.Status, service.Status == serviceregistry.StatusEnabled, map[string]any{"description": bucket.Description}))
 		}
 	}
 	return items
@@ -592,16 +592,16 @@ func collectRuntimeServiceDeclarations(snapshot Snapshot) ([]RuntimeService, []R
 		services = append(services, item)
 	}
 
-	for _, module := range snapshot.Modules {
-		manifest, ok := decodeManifest(module.Manifest)
+	for _, service := range snapshot.ServiceNodes {
+		manifest, ok := decodeManifest(service.Manifest)
 		if !ok {
 			continue
 		}
 		for _, item := range manifest.Provides.Services {
-			addService(runtimeServiceFromManifest(module.ModuleID, item, false), false)
+			addService(runtimeServiceFromManifest(service.ServiceID, item, false), false)
 		}
 		for _, item := range manifest.Provides.Workers {
-			addService(runtimeServiceFromManifest(module.ModuleID, item, true), true)
+			addService(runtimeServiceFromManifest(service.ServiceID, item, true), true)
 		}
 	}
 	for _, component := range snapshot.Components {
@@ -619,8 +619,8 @@ func collectRuntimeServiceDeclarations(snapshot Snapshot) ([]RuntimeService, []R
 
 func RebuildRuntimeTopology(snapshot Snapshot) ([]RuntimeTopologyNode, []RuntimeTopologyEdge) {
 	return buildTopology(
-		snapshot.Modules,
-		mapModules(snapshot.Modules),
+		snapshot.ServiceNodes,
+		mapServices(snapshot.ServiceNodes),
 		snapshot.Components,
 		snapshot.Services,
 		snapshot.Workers,
@@ -632,7 +632,7 @@ func RebuildRuntimeTopology(snapshot Snapshot) ([]RuntimeTopologyNode, []Runtime
 	)
 }
 
-func runtimeServiceFromManifest(moduleID string, item manifestServiceItem, isWorker bool) RuntimeService {
+func runtimeServiceFromManifest(serviceID string, item manifestServiceItem, isWorker bool) RuntimeService {
 	kind := strings.TrimSpace(item.Kind)
 	if kind == "" {
 		if isWorker {
@@ -653,11 +653,11 @@ func runtimeServiceFromManifest(moduleID string, item manifestServiceItem, isWor
 			runtime = "compose"
 		}
 	}
-	serviceID := strings.TrimSpace(item.ID)
+	runtimeServiceID := strings.TrimSpace(item.ID)
 	return RuntimeService{
-		ServiceID:      serviceID,
-		ModuleID:       moduleID,
-		Name:           firstNonEmpty(item.Name, serviceID),
+		OwnerServiceID: serviceID,
+		ServiceID:      runtimeServiceID,
+		Name:           firstNonEmpty(item.Name, runtimeServiceID),
 		Kind:           kind,
 		Lifecycle:      lifecycle,
 		Runtime:        runtime,
@@ -703,8 +703,8 @@ func runtimeServiceFromComponent(component RuntimeComponent, routes []string, is
 		}
 	}
 	return RuntimeService{
+		OwnerServiceID: component.ServiceID,
 		ServiceID:      serviceID,
-		ModuleID:       component.ModuleID,
 		Name:           serviceID,
 		Kind:           kind,
 		Lifecycle:      lifecycle,
@@ -719,7 +719,7 @@ func runtimeServiceFromComponent(component RuntimeComponent, routes []string, is
 	}
 }
 
-func routesByService(routes []moduleregistry.GatewayRoute) map[string][]string {
+func routesByService(routes []serviceregistry.GatewayRoute) map[string][]string {
 	out := map[string][]string{}
 	for _, route := range routes {
 		serviceID := strings.TrimSpace(route.TargetService)
@@ -732,16 +732,16 @@ func routesByService(routes []moduleregistry.GatewayRoute) map[string][]string {
 }
 
 func buildTopology(
-	modules []moduleregistry.Module,
-	moduleByID map[string]moduleregistry.Module,
+	serviceNodes []serviceregistry.Service,
+	serviceByID map[string]serviceregistry.Service,
 	components []RuntimeComponent,
 	services []RuntimeService,
 	workers []RuntimeService,
-	gatewayRoutes []moduleregistry.GatewayRoute,
-	menus []moduleregistry.Menu,
-	frontendRoutes []moduleregistry.FrontendRoute,
+	gatewayRoutes []serviceregistry.GatewayRoute,
+	menus []serviceregistry.Menu,
+	frontendRoutes []serviceregistry.FrontendRoute,
 	healthChecks []RuntimeComponent,
-	dependencyEdges []moduleregistry.Edge,
+	dependencyEdges []serviceregistry.Edge,
 ) ([]RuntimeTopologyNode, []RuntimeTopologyEdge) {
 	nodes := make([]RuntimeTopologyNode, 0)
 	edges := make([]RuntimeTopologyEdge, 0)
@@ -753,219 +753,219 @@ func buildTopology(
 		knownNodes[node.ID] = true
 		nodes = append(nodes, node)
 	}
-	for _, module := range modules {
+	for _, service := range services {
 		addNode(RuntimeTopologyNode{
-			ID:       module.ModuleID,
-			ModuleID: module.ModuleID,
-			Label:    firstNonEmpty(module.Name, module.ModuleID),
-			Type:     "module",
-			Status:   module.Status,
-			Source:   "registry",
-			Config:   json.RawMessage(`{}`),
+			ID:        service.ServiceID,
+			ServiceID: service.ServiceID,
+			Label:     firstNonEmpty(service.Name, service.ServiceID),
+			Type:      "service",
+			Status:    service.Status,
+			Source:    "registry",
+			Config:    json.RawMessage(`{}`),
 		})
 	}
 	for _, edge := range dependencyEdges {
 		edges = append(edges, RuntimeTopologyEdge{
-			ID:       edge.FromModuleID + "->" + edge.ToModuleID + ":" + edge.EdgeType,
-			ModuleID: edge.FromModuleID,
-			From:     edge.FromModuleID,
-			To:       edge.ToModuleID,
-			Type:     edge.EdgeType,
-			Required: edge.Required,
-			Source:   "registry",
+			ID:        edge.FromServiceID + "->" + edge.ToServiceID + ":" + edge.EdgeType,
+			ServiceID: edge.FromServiceID,
+			From:      edge.FromServiceID,
+			To:        edge.ToServiceID,
+			Type:      edge.EdgeType,
+			Required:  edge.Required,
+			Source:    "registry",
 		})
 	}
 	for _, component := range components {
-		id := topologyID(component.ModuleID, "component", component.ComponentID)
+		id := topologyID(component.ServiceID, "component", component.ComponentID)
 		addNode(RuntimeTopologyNode{
-			ID:       id,
-			ModuleID: component.ModuleID,
-			Label:    component.ComponentID,
-			Type:     component.Type,
-			Status:   component.Status,
-			Source:   "registry",
-			Config:   component.Config,
+			ID:        id,
+			ServiceID: component.ServiceID,
+			Label:     component.ComponentID,
+			Type:      component.Type,
+			Status:    component.Status,
+			Source:    "registry",
+			Config:    component.Config,
 		})
 		edges = append(edges, RuntimeTopologyEdge{
-			ID:       component.ModuleID + "->" + id,
-			ModuleID: component.ModuleID,
-			From:     component.ModuleID,
-			To:       id,
-			Type:     "provides",
-			Required: false,
-			Source:   "registry",
+			ID:        component.ServiceID + "->" + id,
+			ServiceID: component.ServiceID,
+			From:      component.ServiceID,
+			To:        id,
+			Type:      "provides",
+			Required:  false,
+			Source:    "registry",
 		})
 	}
 	for _, service := range services {
-		id := topologyID(service.ModuleID, "service", service.ServiceID)
+		id := topologyID(service.ServiceID, "service", service.ServiceID)
 		addNode(RuntimeTopologyNode{
-			ID:       id,
-			ModuleID: service.ModuleID,
-			Label:    firstNonEmpty(service.Name, service.ServiceID),
-			Type:     "service",
-			Status:   service.State,
-			Source:   "runtime",
-			Config:   mustRaw(map[string]any{"service_id": service.ServiceID, "runtime": service.Runtime, "lifecycle": service.Lifecycle, "health": service.Health, "routes": service.Routes}),
+			ID:        id,
+			ServiceID: service.ServiceID,
+			Label:     firstNonEmpty(service.Name, service.ServiceID),
+			Type:      "service",
+			Status:    service.State,
+			Source:    "runtime",
+			Config:    mustRaw(map[string]any{"service_id": service.ServiceID, "runtime": service.Runtime, "lifecycle": service.Lifecycle, "health": service.Health, "routes": service.Routes}),
 		})
 		edges = append(edges, RuntimeTopologyEdge{
-			ID:       service.ModuleID + "->" + id + ":runtime-service",
-			ModuleID: service.ModuleID,
-			From:     service.ModuleID,
-			To:       id,
-			Type:     "runtime_service",
-			Required: service.Required,
-			Source:   "runtime",
+			ID:        service.ServiceID + "->" + id + ":runtime-service",
+			ServiceID: service.ServiceID,
+			From:      service.ServiceID,
+			To:        id,
+			Type:      "runtime_service",
+			Required:  service.Required,
+			Source:    "runtime",
 		})
 		if service.HealthCheckID != "" {
 			edges = append(edges, RuntimeTopologyEdge{
-				ID:       id + "->" + topologyID(service.ModuleID, "health", service.HealthCheckID),
-				ModuleID: service.ModuleID,
-				From:     id,
-				To:       topologyID(service.ModuleID, "health", service.HealthCheckID),
-				Type:     "health",
-				Required: service.Required,
-				Source:   "runtime",
+				ID:        id + "->" + topologyID(service.ServiceID, "health", service.HealthCheckID),
+				ServiceID: service.ServiceID,
+				From:      id,
+				To:        topologyID(service.ServiceID, "health", service.HealthCheckID),
+				Type:      "health",
+				Required:  service.Required,
+				Source:    "runtime",
 			})
 		}
 	}
 	for _, worker := range workers {
-		id := topologyID(worker.ModuleID, "worker", worker.ServiceID)
+		id := topologyID(worker.ServiceID, "worker", worker.ServiceID)
 		addNode(RuntimeTopologyNode{
-			ID:       id,
-			ModuleID: worker.ModuleID,
-			Label:    firstNonEmpty(worker.Name, worker.ServiceID),
-			Type:     "worker",
-			Status:   worker.State,
-			Source:   "runtime",
-			Config:   mustRaw(map[string]any{"service_id": worker.ServiceID, "runtime": worker.Runtime, "lifecycle": worker.Lifecycle, "health": worker.Health}),
+			ID:        id,
+			ServiceID: worker.ServiceID,
+			Label:     firstNonEmpty(worker.Name, worker.ServiceID),
+			Type:      "worker",
+			Status:    worker.State,
+			Source:    "runtime",
+			Config:    mustRaw(map[string]any{"service_id": worker.ServiceID, "runtime": worker.Runtime, "lifecycle": worker.Lifecycle, "health": worker.Health}),
 		})
 		edges = append(edges, RuntimeTopologyEdge{
-			ID:       worker.ModuleID + "->" + id + ":runtime-worker",
-			ModuleID: worker.ModuleID,
-			From:     worker.ModuleID,
-			To:       id,
-			Type:     "runtime_worker",
-			Required: worker.Required,
-			Source:   "runtime",
+			ID:        worker.ServiceID + "->" + id + ":runtime-worker",
+			ServiceID: worker.ServiceID,
+			From:      worker.ServiceID,
+			To:        id,
+			Type:      "runtime_worker",
+			Required:  worker.Required,
+			Source:    "runtime",
 		})
 		if worker.HealthCheckID != "" {
 			edges = append(edges, RuntimeTopologyEdge{
-				ID:       id + "->" + topologyID(worker.ModuleID, "health", worker.HealthCheckID),
-				ModuleID: worker.ModuleID,
-				From:     id,
-				To:       topologyID(worker.ModuleID, "health", worker.HealthCheckID),
-				Type:     "health",
-				Required: worker.Required,
-				Source:   "runtime",
+				ID:        id + "->" + topologyID(worker.ServiceID, "health", worker.HealthCheckID),
+				ServiceID: worker.ServiceID,
+				From:      id,
+				To:        topologyID(worker.ServiceID, "health", worker.HealthCheckID),
+				Type:      "health",
+				Required:  worker.Required,
+				Source:    "runtime",
 			})
 		}
 	}
 	for _, route := range gatewayRoutes {
-		id := topologyID(route.ModuleID, "gateway_route", route.Prefix)
+		id := topologyID(route.ServiceID, "gateway_route", route.Prefix)
 		addNode(RuntimeTopologyNode{
-			ID:       id,
-			ModuleID: route.ModuleID,
-			Label:    route.Prefix,
-			Type:     "gateway_route",
-			Status:   boolStatus(route.Enabled),
-			Source:   "registry",
-			Config:   mustRaw(map[string]any{"auth_mode": route.AuthMode, "target_service": route.TargetService}),
+			ID:        id,
+			ServiceID: route.ServiceID,
+			Label:     route.Prefix,
+			Type:      "gateway_route",
+			Status:    boolStatus(route.Enabled),
+			Source:    "registry",
+			Config:    mustRaw(map[string]any{"auth_mode": route.AuthMode, "target_service": route.TargetService}),
 		})
 		edges = append(edges, RuntimeTopologyEdge{
-			ID:       route.ModuleID + "->" + id,
-			ModuleID: route.ModuleID,
-			From:     route.ModuleID,
-			To:       id,
-			Type:     "routes",
-			Required: false,
-			Source:   "registry",
+			ID:        route.ServiceID + "->" + id,
+			ServiceID: route.ServiceID,
+			From:      route.ServiceID,
+			To:        id,
+			Type:      "routes",
+			Required:  false,
+			Source:    "registry",
 		})
 	}
 	for _, menu := range menus {
-		id := topologyID(menu.ModuleID, "menu", menu.MenuKey)
+		id := topologyID(menu.ServiceID, "menu", menu.MenuKey)
 		addNode(RuntimeTopologyNode{
-			ID:       id,
-			ModuleID: menu.ModuleID,
-			Label:    menu.Title,
-			Type:     "menu",
-			Status:   boolStatus(menu.Enabled),
-			Source:   "registry",
-			Config:   mustRaw(map[string]any{"route_path": menu.RoutePath, "required_permission": menu.RequiredPermission}),
+			ID:        id,
+			ServiceID: menu.ServiceID,
+			Label:     menu.Title,
+			Type:      "menu",
+			Status:    boolStatus(menu.Enabled),
+			Source:    "registry",
+			Config:    mustRaw(map[string]any{"route_path": menu.RoutePath, "required_permission": menu.RequiredPermission}),
 		})
 		edges = append(edges, RuntimeTopologyEdge{
-			ID:       menu.ModuleID + "->" + id,
-			ModuleID: menu.ModuleID,
-			From:     menu.ModuleID,
-			To:       id,
-			Type:     "menu",
-			Required: false,
-			Source:   "registry",
+			ID:        menu.ServiceID + "->" + id,
+			ServiceID: menu.ServiceID,
+			From:      menu.ServiceID,
+			To:        id,
+			Type:      "menu",
+			Required:  false,
+			Source:    "registry",
 		})
 	}
 	for _, route := range frontendRoutes {
-		id := topologyID(route.ModuleID, "frontend_route", route.RoutePath)
+		id := topologyID(route.ServiceID, "frontend_route", route.RoutePath)
 		addNode(RuntimeTopologyNode{
-			ID:       id,
-			ModuleID: route.ModuleID,
-			Label:    firstNonEmpty(route.RouteName, route.RoutePath),
-			Type:     "frontend_route",
-			Status:   boolStatus(route.Enabled),
-			Source:   "registry",
-			Config:   mustRaw(map[string]any{"route_path": route.RoutePath, "component_key": route.ComponentKey, "required_permission": route.RequiredPermission}),
+			ID:        id,
+			ServiceID: route.ServiceID,
+			Label:     firstNonEmpty(route.RouteName, route.RoutePath),
+			Type:      "frontend_route",
+			Status:    boolStatus(route.Enabled),
+			Source:    "registry",
+			Config:    mustRaw(map[string]any{"route_path": route.RoutePath, "component_key": route.ComponentKey, "required_permission": route.RequiredPermission}),
 		})
 	}
 	for _, health := range healthChecks {
-		id := topologyID(health.ModuleID, "health", health.ComponentID)
+		id := topologyID(health.ServiceID, "health", health.ComponentID)
 		if knownNodes[id] {
 			continue
 		}
 		addNode(RuntimeTopologyNode{
-			ID:       id,
-			ModuleID: health.ModuleID,
-			Label:    health.ComponentID,
-			Type:     "health_check",
-			Status:   health.Status,
-			Source:   "registry",
-			Config:   health.Config,
+			ID:        id,
+			ServiceID: health.ServiceID,
+			Label:     health.ComponentID,
+			Type:      "health_check",
+			Status:    health.Status,
+			Source:    "registry",
+			Config:    health.Config,
 		})
 	}
-	for _, module := range modules {
-		manifest, ok := decodeManifest(module.Manifest)
+	for _, service := range serviceNodes {
+		manifest, ok := decodeManifest(service.Manifest)
 		if !ok {
 			continue
 		}
 		for _, item := range manifest.Provides.Topology.Nodes {
-			id := topologyID(module.ModuleID, "manifest", item.ID)
+			id := topologyID(service.ServiceID, "manifest", item.ID)
 			addNode(RuntimeTopologyNode{
-				ID:       id,
-				ModuleID: module.ModuleID,
-				Label:    firstNonEmpty(item.Label, item.ID),
-				Type:     item.Type,
-				Status:   module.Status,
-				Source:   "manifest",
-				Config:   json.RawMessage(`{}`),
+				ID:        id,
+				ServiceID: service.ServiceID,
+				Label:     firstNonEmpty(item.Label, item.ID),
+				Type:      item.Type,
+				Status:    service.Status,
+				Source:    "manifest",
+				Config:    json.RawMessage(`{}`),
 			})
-			if moduleByID[module.ModuleID].ModuleID != "" {
+			if serviceByID[service.ServiceID].ServiceID != "" {
 				edges = append(edges, RuntimeTopologyEdge{
-					ID:       module.ModuleID + "->" + id + ":declares",
-					ModuleID: module.ModuleID,
-					From:     module.ModuleID,
-					To:       id,
-					Type:     "declares",
-					Required: false,
-					Source:   "manifest",
+					ID:        service.ServiceID + "->" + id + ":declares",
+					ServiceID: service.ServiceID,
+					From:      service.ServiceID,
+					To:        id,
+					Type:      "declares",
+					Required:  false,
+					Source:    "manifest",
 				})
 			}
 		}
 		for _, edge := range manifest.Provides.Topology.Edges {
 			edges = append(edges, RuntimeTopologyEdge{
-				ID:       topologyID(module.ModuleID, "manifest_edge", edge.From+"->"+edge.To+":"+edge.Type),
-				ModuleID: module.ModuleID,
-				From:     topologyID(module.ModuleID, "manifest", edge.From),
-				To:       topologyID(module.ModuleID, "manifest", edge.To),
-				Type:     edge.Type,
-				Required: false,
-				Source:   "manifest",
+				ID:        topologyID(service.ServiceID, "manifest_edge", edge.From+"->"+edge.To+":"+edge.Type),
+				ServiceID: service.ServiceID,
+				From:      topologyID(service.ServiceID, "manifest", edge.From),
+				To:        topologyID(service.ServiceID, "manifest", edge.To),
+				Type:      edge.Type,
+				Required:  false,
+				Source:    "manifest",
 			})
 		}
 	}
@@ -1000,14 +1000,14 @@ func decodeManifest(raw json.RawMessage) (manifestEnvelope, bool) {
 	return manifest, true
 }
 
-func manifestItem(moduleID string, id string, typ string, status string, enabled bool, config map[string]any) RuntimeManifestItem {
+func manifestItem(serviceID string, id string, typ string, status string, enabled bool, config map[string]any) RuntimeManifestItem {
 	return RuntimeManifestItem{
-		ModuleID: moduleID,
-		ID:       id,
-		Type:     typ,
-		Status:   status,
-		Enabled:  enabled,
-		Config:   mustRaw(config),
+		ServiceID: serviceID,
+		ID:        id,
+		Type:      typ,
+		Status:    status,
+		Enabled:   enabled,
+		Config:    mustRaw(config),
 	}
 }
 
@@ -1030,7 +1030,7 @@ func firstNonEmpty(values ...string) string {
 
 func boolStatus(enabled bool) string {
 	if enabled {
-		return moduleregistry.StatusEnabled
+		return serviceregistry.StatusEnabled
 	}
 	return "DISABLED"
 }
@@ -1065,9 +1065,9 @@ func appendMissingStrings(items []string, values ...string) []string {
 	return items
 }
 
-func topologyID(moduleID string, kind string, value string) string {
+func topologyID(serviceID string, kind string, value string) string {
 	cleaned := strings.NewReplacer("/", "_", ":", "_", " ", "_").Replace(strings.TrimSpace(value))
-	return moduleID + ":" + kind + ":" + cleaned
+	return serviceID + ":" + kind + ":" + cleaned
 }
 
 func cleanPrefix(prefix string) string {
@@ -1118,8 +1118,8 @@ func defaultRouteMethods() []string {
 	return []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
 }
 
-func routeID(moduleID string, prefix string) string {
-	return moduleID + ":" + cleanPrefix(prefix)
+func routeID(serviceID string, prefix string) string {
+	return serviceID + ":" + cleanPrefix(prefix)
 }
 
 func normalizeTrustedServices(items map[string]TrustedService) map[string]TrustedService {
@@ -1164,7 +1164,7 @@ func normalizeReservedPrefixes(items []string) []string {
 func DefaultReservedPrefixes() []string {
 	return []string{
 		"/api/auth",
-		"/api/admin/modules",
+		"/api/admin/services",
 		"/api/admin/health",
 		"/api/health",
 		"/api/internal",
@@ -1191,12 +1191,12 @@ func hasDuplicateConflict(items []string) bool {
 }
 
 func sortSnapshot(snapshot *Snapshot) {
-	sort.Slice(snapshot.Modules, func(i, j int) bool { return snapshot.Modules[i].ModuleID < snapshot.Modules[j].ModuleID })
+	sort.Slice(snapshot.ServiceNodes, func(i, j int) bool { return snapshot.ServiceNodes[i].ServiceID < snapshot.ServiceNodes[j].ServiceID })
 	sort.Slice(snapshot.Permissions, func(i, j int) bool {
-		if snapshot.Permissions[i].ModuleID == snapshot.Permissions[j].ModuleID {
+		if snapshot.Permissions[i].ServiceID == snapshot.Permissions[j].ServiceID {
 			return snapshot.Permissions[i].PermissionKey < snapshot.Permissions[j].PermissionKey
 		}
-		return snapshot.Permissions[i].ModuleID < snapshot.Permissions[j].ModuleID
+		return snapshot.Permissions[i].ServiceID < snapshot.Permissions[j].ServiceID
 	})
 	sort.Slice(snapshot.Roles, func(i, j int) bool { return manifestLess(snapshot.Roles[i], snapshot.Roles[j]) })
 	sort.Slice(snapshot.Menus, func(i, j int) bool {
@@ -1210,10 +1210,10 @@ func sortSnapshot(snapshot *Snapshot) {
 	})
 	sort.Slice(snapshot.GatewayRoutes, func(i, j int) bool { return snapshot.GatewayRoutes[i].Prefix < snapshot.GatewayRoutes[j].Prefix })
 	sort.Slice(snapshot.Components, func(i, j int) bool {
-		if snapshot.Components[i].ModuleID == snapshot.Components[j].ModuleID {
+		if snapshot.Components[i].ServiceID == snapshot.Components[j].ServiceID {
 			return snapshot.Components[i].ComponentID < snapshot.Components[j].ComponentID
 		}
-		return snapshot.Components[i].ModuleID < snapshot.Components[j].ModuleID
+		return snapshot.Components[i].ServiceID < snapshot.Components[j].ServiceID
 	})
 	sortRuntimeServices(snapshot.Services)
 	sortRuntimeServices(snapshot.Workers)
@@ -1224,23 +1224,23 @@ func sortSnapshot(snapshot *Snapshot) {
 	sort.Slice(snapshot.Operations, func(i, j int) bool { return manifestLess(snapshot.Operations[i], snapshot.Operations[j]) })
 	sort.Slice(snapshot.Topology.Nodes, func(i, j int) bool { return snapshot.Topology.Nodes[i].ID < snapshot.Topology.Nodes[j].ID })
 	sort.Slice(snapshot.Topology.Edges, func(i, j int) bool { return snapshot.Topology.Edges[i].ID < snapshot.Topology.Edges[j].ID })
-	sort.Slice(snapshot.Topology.ModuleNodes, func(i, j int) bool {
-		return snapshot.Topology.ModuleNodes[i].ModuleID < snapshot.Topology.ModuleNodes[j].ModuleID
+	sort.Slice(snapshot.Topology.ServiceNodes, func(i, j int) bool {
+		return snapshot.Topology.ServiceNodes[i].ServiceID < snapshot.Topology.ServiceNodes[j].ServiceID
 	})
 	sort.Slice(snapshot.Topology.DependencyEdges, func(i, j int) bool {
-		if snapshot.Topology.DependencyEdges[i].FromModuleID == snapshot.Topology.DependencyEdges[j].FromModuleID {
-			return snapshot.Topology.DependencyEdges[i].ToModuleID < snapshot.Topology.DependencyEdges[j].ToModuleID
+		if snapshot.Topology.DependencyEdges[i].FromServiceID == snapshot.Topology.DependencyEdges[j].FromServiceID {
+			return snapshot.Topology.DependencyEdges[i].ToServiceID < snapshot.Topology.DependencyEdges[j].ToServiceID
 		}
-		return snapshot.Topology.DependencyEdges[i].FromModuleID < snapshot.Topology.DependencyEdges[j].FromModuleID
+		return snapshot.Topology.DependencyEdges[i].FromServiceID < snapshot.Topology.DependencyEdges[j].FromServiceID
 	})
 	sort.Strings(snapshot.Warnings)
 }
 
 func manifestLess(left RuntimeManifestItem, right RuntimeManifestItem) bool {
-	if left.ModuleID == right.ModuleID {
+	if left.ServiceID == right.ServiceID {
 		return left.ID < right.ID
 	}
-	return left.ModuleID < right.ModuleID
+	return left.ServiceID < right.ServiceID
 }
 
 func sortRouteTable(table *RouteTable) {

@@ -1,40 +1,4 @@
-CREATE TABLE IF NOT EXISTS service_sets (
-    id BIGSERIAL PRIMARY KEY,
-    set_id TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
-    non_root_only BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS services (
-    id BIGSERIAL PRIMARY KEY,
-    service_id TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    version TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'INSTALLED',
-    manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
-    legacy_module_id TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS service_installations (
-    id BIGSERIAL PRIMARY KEY,
-    service_id TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'INSTALLED',
-    runtime_mode TEXT NOT NULL,
-    config JSONB NOT NULL DEFAULT '{}'::jsonb,
-    installed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(service_id, device_id)
-);
-
-CREATE TABLE IF NOT EXISTS devices (
+﻿CREATE TABLE IF NOT EXISTS devices (
     id BIGSERIAL PRIMARY KEY,
     device_id TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
@@ -78,29 +42,10 @@ CREATE TABLE IF NOT EXISTS service_links (
     UNIQUE(source_endpoint, target_endpoint)
 );
 
-CREATE TABLE IF NOT EXISTS runtime_operations (
-    id BIGSERIAL PRIMARY KEY,
-    operation_id TEXT NOT NULL UNIQUE,
-    object_type TEXT NOT NULL,
-    object_id TEXT NOT NULL,
-    action TEXT NOT NULL,
-    status TEXT NOT NULL,
-    actor_user_id BIGINT,
-    actor_username TEXT NOT NULL DEFAULT '',
-    request JSONB NOT NULL DEFAULT '{}'::jsonb,
-    plan JSONB NOT NULL DEFAULT '{}'::jsonb,
-    result JSONB NOT NULL DEFAULT '{}'::jsonb,
-    error_message TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_services_status ON services(status);
-CREATE INDEX IF NOT EXISTS idx_service_installations_device ON service_installations(device_id);
 CREATE INDEX IF NOT EXISTS idx_service_endpoints_service ON service_endpoints(service_id);
+CREATE INDEX IF NOT EXISTS idx_service_endpoints_device ON service_endpoints(device_id);
 CREATE INDEX IF NOT EXISTS idx_service_links_source ON service_links(source_endpoint);
 CREATE INDEX IF NOT EXISTS idx_service_links_target ON service_links(target_endpoint);
-CREATE INDEX IF NOT EXISTS idx_runtime_operations_object ON runtime_operations(object_type, object_id, created_at DESC);
 
 INSERT INTO devices(device_id, name, kind, endpoint, health)
 VALUES ('root-local', 'Root Local Device', 'root', '127.0.0.1:0', 'unknown')
@@ -109,7 +54,7 @@ ON CONFLICT(device_id) DO UPDATE SET
     kind = EXCLUDED.kind,
     updated_at = NOW();
 
-INSERT INTO permissions(code, module_code, name, description) VALUES
+INSERT INTO permissions(code, service_code, name, description) VALUES
     ('service.install', 'runtime', 'Install Service', '安装 Service'),
     ('service.enable', 'runtime', 'Enable Service', '启用 Service'),
     ('service.disable', 'runtime', 'Disable Service', '禁用 Service'),
@@ -118,6 +63,6 @@ INSERT INTO permissions(code, module_code, name, description) VALUES
     ('link.configure', 'runtime', 'Configure Link', '配置 Link'),
     ('topology.read', 'runtime', 'Read Topology', '查看 Topology')
 ON CONFLICT (code) DO UPDATE SET
-    module_code = EXCLUDED.module_code,
+    service_code = EXCLUDED.service_code,
     name = EXCLUDED.name,
     description = EXCLUDED.description;

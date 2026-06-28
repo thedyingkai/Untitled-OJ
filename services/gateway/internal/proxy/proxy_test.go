@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/moduleruntime"
+	"ojos-gateway/internal/kernel/serviceruntime"
 	sharedjwt "ojos-shared/security/jwt"
 
 	"go.uber.org/zap"
@@ -35,16 +35,16 @@ func TestRuntimeProxyUsesTrustedServiceAndStripsAuthorization(t *testing.T) {
 		Target:      upstream.URL,
 		StripPrefix: "/api",
 	}})
-	rp.SetRouteTable(moduleruntime.RouteTable{
-		Routes: []moduleruntime.RuntimeRoute{{
-			RouteID:      "demo:/api/demo",
-			ModuleID:     "demo",
-			Prefix:       "/api/demo",
-			ServiceID:    "demo-api",
-			AuthMode:     "user",
-			Enabled:      true,
-			ProxyEnabled: true,
-			Status:       "active",
+	rp.SetRouteTable(serviceruntime.RouteTable{
+		Routes: []serviceruntime.RuntimeRoute{{
+			RouteID:        "demo:/api/demo",
+			OwnerServiceID: "demo",
+			Prefix:         "/api/demo",
+			ServiceID:      "demo-api",
+			AuthMode:       "user",
+			Enabled:        true,
+			ProxyEnabled:   true,
+			Status:         "active",
 		}},
 		CanProxy: true,
 	})
@@ -98,16 +98,16 @@ func TestRuntimeProxyAuthModes(t *testing.T) {
 				Target:      upstream.URL,
 				StripPrefix: "/api",
 			}})
-			rp.SetRouteTable(moduleruntime.RouteTable{
-				Routes: []moduleruntime.RuntimeRoute{{
-					RouteID:      "demo:/api/demo",
-					ModuleID:     "demo",
-					Prefix:       "/api/demo",
-					ServiceID:    "demo-api",
-					AuthMode:     tc.authMode,
-					Enabled:      true,
-					ProxyEnabled: true,
-					Status:       "active",
+			rp.SetRouteTable(serviceruntime.RouteTable{
+				Routes: []serviceruntime.RuntimeRoute{{
+					RouteID:        "demo:/api/demo",
+					OwnerServiceID: "demo",
+					Prefix:         "/api/demo",
+					ServiceID:      "demo-api",
+					AuthMode:       tc.authMode,
+					Enabled:        true,
+					ProxyEnabled:   true,
+					Status:         "active",
 				}},
 				CanProxy: true,
 			})
@@ -139,8 +139,8 @@ func TestRuntimeProxyAdminAuthCanUsePermissionChecker(t *testing.T) {
 	rp.SetAdminChecker(func(ctx context.Context, userID int64) (bool, error) {
 		return userID == 42, nil
 	})
-	rp.SetRouteTable(moduleruntime.RouteTable{
-		Routes: []moduleruntime.RuntimeRoute{{
+	rp.SetRouteTable(serviceruntime.RouteTable{
+		Routes: []serviceruntime.RuntimeRoute{{
 			RouteID:      "demo:/api/admin-demo",
 			Prefix:       "/api/admin-demo",
 			ServiceID:    "admin-api",
@@ -184,8 +184,8 @@ func TestRuntimeProxyRejectsUnknownServiceAndPrefersStaticRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rp.SetRouteTable(moduleruntime.RouteTable{
-		Routes: []moduleruntime.RuntimeRoute{
+	rp.SetRouteTable(serviceruntime.RouteTable{
+		Routes: []serviceruntime.RuntimeRoute{
 			{RouteID: "demo:/api/auth", Prefix: "/api/auth", ServiceID: "demo-api", AuthMode: "public", Enabled: true, ProxyEnabled: true, Status: "active"},
 			{RouteID: "bad:/api/bad", Prefix: "/api/bad", ServiceID: "missing", AuthMode: "public", Enabled: true, ProxyEnabled: true, Status: "active"},
 		},
@@ -224,8 +224,8 @@ func TestRuntimeProxyUnavailableRuntimeRouteReturnsStableError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rp.SetRouteTable(moduleruntime.RouteTable{
-		Routes: []moduleruntime.RuntimeRoute{{
+	rp.SetRouteTable(serviceruntime.RouteTable{
+		Routes: []serviceruntime.RuntimeRoute{{
 			RouteID:      "ojos.judge-core:/api/problem",
 			Prefix:       "/api/problem",
 			ServiceID:    "problem-api",
@@ -233,7 +233,7 @@ func TestRuntimeProxyUnavailableRuntimeRouteReturnsStableError(t *testing.T) {
 			Enabled:      true,
 			ProxyEnabled: false,
 			Status:       "unavailable",
-			ServiceState: moduleruntime.ServiceStateStopped,
+			ServiceState: serviceruntime.ServiceStateStopped,
 			BlockedBy:    []string{"service not running"},
 		}},
 	})
@@ -253,9 +253,9 @@ func TestRuntimeProxyUnavailableRuntimeRouteReturnsStableError(t *testing.T) {
 }
 
 func TestRuntimeProxyReloadAtomicallyReplacesTable(t *testing.T) {
-	reader := fakeRuntimeReader{table: moduleruntime.RouteTable{
+	reader := fakeRuntimeReader{table: serviceruntime.RouteTable{
 		Version: "2",
-		Routes: []moduleruntime.RuntimeRoute{{
+		Routes: []serviceruntime.RuntimeRoute{{
 			RouteID:      "demo:/api/demo",
 			Prefix:       "/api/demo",
 			ServiceID:    "demo-api",
@@ -280,10 +280,10 @@ func TestRuntimeProxyReloadAtomicallyReplacesTable(t *testing.T) {
 }
 
 type fakeRuntimeReader struct {
-	table moduleruntime.RouteTable
+	table serviceruntime.RouteTable
 }
 
-func (f fakeRuntimeReader) RuntimeRouteTable(context.Context) (moduleruntime.RouteTable, error) {
+func (f fakeRuntimeReader) RuntimeRouteTable(context.Context) (serviceruntime.RouteTable, error) {
 	return f.table, nil
 }
 

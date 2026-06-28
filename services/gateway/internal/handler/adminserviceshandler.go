@@ -8,10 +8,10 @@ import (
 	"ojos-gateway/internal/svc"
 )
 
-func adminModulesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func adminServicesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		l := logic.NewAdminModulesLogic(r.Context(), svcCtx)
-		resp, err := l.ListModules(r.Header.Get("Authorization"))
+		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
+		resp, err := l.ListServices(r.Header.Get("Authorization"))
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 		} else {
@@ -20,9 +20,9 @@ func adminModulesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
-func adminModuleSetsHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func adminServiceSetsHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		l := logic.NewAdminModulesLogic(r.Context(), svcCtx)
+		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
 		resp, err := l.ListSets(r.Header.Get("Authorization"))
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
@@ -32,9 +32,9 @@ func adminModuleSetsHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
-func adminModuleTopologyHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func adminServiceTopologyHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		l := logic.NewAdminModulesLogic(r.Context(), svcCtx)
+		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
 		resp, err := l.Topology(r.Header.Get("Authorization"))
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
@@ -44,9 +44,9 @@ func adminModuleTopologyHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
-func adminModuleRuntimeSnapshotHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func adminServiceRuntimeSnapshotHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		l := logic.NewAdminModulesLogic(r.Context(), svcCtx)
+		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
 		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
 		resp, err := l.RuntimeSnapshot(r.Header.Get("Authorization"), includeDisabled)
 		if err != nil {
@@ -57,9 +57,9 @@ func adminModuleRuntimeSnapshotHandler(svcCtx *svc.ServiceContext) http.HandlerF
 	}
 }
 
-func adminModuleRuntimeRoutesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func adminServiceRuntimeRoutesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		l := logic.NewAdminModulesLogic(r.Context(), svcCtx)
+		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
 		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
 		includeUpstream := r.URL.Query().Get("debug_upstream") == "true"
 		resp, err := l.RuntimeRoutes(r.Header.Get("Authorization"), includeDisabled, false, includeUpstream)
@@ -71,9 +71,9 @@ func adminModuleRuntimeRoutesHandler(svcCtx *svc.ServiceContext) http.HandlerFun
 	}
 }
 
-func adminModuleRuntimeReloadHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func adminServiceRuntimeReloadHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		l := logic.NewAdminModulesLogic(r.Context(), svcCtx)
+		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
 		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
 		includeUpstream := r.URL.Query().Get("debug_upstream") == "true"
 		resp, err := l.RuntimeRoutes(r.Header.Get("Authorization"), includeDisabled, true, includeUpstream)
@@ -85,7 +85,7 @@ func adminModuleRuntimeReloadHandler(svcCtx *svc.ServiceContext) http.HandlerFun
 	}
 }
 
-func adminModuleDetailHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func adminServiceDetailHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Id string `path:"id"`
@@ -95,12 +95,29 @@ func adminModuleDetailHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 
-		l := logic.NewAdminModulesLogic(r.Context(), svcCtx)
+		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
 		resp, err := l.Detail(r.Header.Get("Authorization"), req.Id)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 		} else {
 			httpx.OkJsonCtx(r.Context(), w, resp)
 		}
+	}
+}
+
+func adminServiceDevicesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
+		if _, err := l.ListServices(r.Header.Get("Authorization")); err != nil {
+			httpx.ErrorCtx(r.Context(), w, err)
+			return
+		}
+		httpx.OkJsonCtx(r.Context(), w, map[string]any{
+			"devices": []map[string]any{{
+				"device_id": "root-local",
+				"kind":      "root",
+				"health":    "unknown",
+			}},
+		})
 	}
 }

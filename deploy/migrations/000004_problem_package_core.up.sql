@@ -1,4 +1,4 @@
-ALTER TABLE problems
+﻿ALTER TABLE problems
     ADD COLUMN IF NOT EXISTS slug TEXT,
     ADD COLUMN IF NOT EXISTS statement TEXT NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS problem_type TEXT NOT NULL DEFAULT 'traditional',
@@ -114,10 +114,10 @@ CREATE INDEX IF NOT EXISTS idx_problem_files_kind
 CREATE INDEX IF NOT EXISTS idx_problem_files_sha256
     ON problem_files(sha256);
 
-INSERT INTO resource_types(code, module_code, name, description)
+INSERT INTO resource_types(code, service_code, name, description)
 VALUES
     ('problem_package', 'problem-core', 'Problem Package', 'Canonical file-based problem package')
 ON CONFLICT(code) DO UPDATE SET
-                                module_code = EXCLUDED.module_code,
+                                service_code = EXCLUDED.service_code,
                                 name = EXCLUDED.name,
                                 description = EXCLUDED.description;

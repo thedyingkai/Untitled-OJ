@@ -8,66 +8,65 @@ import (
 	"testing"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/moduleruntime"
-	"ojos-gateway/internal/moduleregistry"
+	"ojos-gateway/internal/kernel/serviceruntime"
+	"ojos-gateway/internal/serviceregistry"
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
 	sharedjwt "ojos-shared/security/jwt"
 )
 
-type fakeModuleRegistry struct {
-	data moduleregistry.BootstrapData
+type fakeServiceRegistry struct {
+	data serviceregistry.BootstrapData
 }
 
 type fakeRuntimeDriver struct {
-	services []moduleruntime.RuntimeService
+	services []serviceruntime.RuntimeService
 }
 
-func (f fakeRuntimeDriver) ListServices(context.Context, moduleruntime.Snapshot) ([]moduleruntime.RuntimeService, error) {
+func (f fakeRuntimeDriver) ListServices(context.Context, serviceruntime.Snapshot) ([]serviceruntime.RuntimeService, error) {
 	return f.services, nil
 }
 
-func (f fakeRuntimeDriver) GetServiceState(_ context.Context, _ moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimeService, error) {
+func (f fakeRuntimeDriver) GetServiceState(_ context.Context, _ serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimeService, error) {
 	for _, service := range f.services {
 		if service.ServiceID == serviceID {
 			return service, nil
 		}
 	}
-	return moduleruntime.RuntimeService{}, errors.New("not found: runtime service")
+	return serviceruntime.RuntimeService{}, errors.New("not found: runtime service")
 }
 
-func (f fakeRuntimeDriver) PlanStart(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimePlan, error) {
+func (f fakeRuntimeDriver) PlanStart(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimePlan, error) {
 	return f.plan(ctx, snapshot, serviceID, "start")
 }
 
-func (f fakeRuntimeDriver) PlanStop(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimePlan, error) {
+func (f fakeRuntimeDriver) PlanStop(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimePlan, error) {
 	return f.plan(ctx, snapshot, serviceID, "stop")
 }
 
-func (f fakeRuntimeDriver) PlanRestart(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimePlan, error) {
+func (f fakeRuntimeDriver) PlanRestart(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimePlan, error) {
 	return f.plan(ctx, snapshot, serviceID, "restart")
 }
 
-func (f fakeRuntimeDriver) PlanReload(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimePlan, error) {
+func (f fakeRuntimeDriver) PlanReload(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimePlan, error) {
 	return f.plan(ctx, snapshot, serviceID, "reload")
 }
 
-func (f fakeRuntimeDriver) PlanHealth(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string) (moduleruntime.RuntimePlan, error) {
+func (f fakeRuntimeDriver) PlanHealth(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimePlan, error) {
 	return f.plan(ctx, snapshot, serviceID, "health")
 }
 
-func (f fakeRuntimeDriver) ApplyPlan(context.Context, moduleruntime.RuntimePlan) (moduleruntime.RuntimePlanResult, error) {
-	return moduleruntime.RuntimePlanResult{}, errors.New("not implemented")
+func (f fakeRuntimeDriver) ApplyPlan(context.Context, serviceruntime.RuntimePlan) (serviceruntime.RuntimePlanResult, error) {
+	return serviceruntime.RuntimePlanResult{}, errors.New("not implemented")
 }
 
-func (f fakeRuntimeDriver) plan(ctx context.Context, snapshot moduleruntime.Snapshot, serviceID string, action string) (moduleruntime.RuntimePlan, error) {
+func (f fakeRuntimeDriver) plan(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string, action string) (serviceruntime.RuntimePlan, error) {
 	service, _ := f.GetServiceState(ctx, snapshot, serviceID)
-	plan := moduleruntime.RuntimePlan{
+	plan := serviceruntime.RuntimePlan{
 		PlanID:               fmt.Sprintf("test-%s-%s", action, serviceID),
 		OperationID:          fmt.Sprintf("test-%s-%s-op", action, serviceID),
 		Action:               action,
 		ServiceID:            serviceID,
-		ModuleID:             service.ModuleID,
 		Driver:               "compose",
 		CanApply:             false,
 		ApplyEnabled:         false,
@@ -78,77 +77,77 @@ func (f fakeRuntimeDriver) plan(ctx context.Context, snapshot moduleruntime.Snap
 		CreatedAt:            "2026-01-01T00:00:00Z",
 		ExpiresAt:            "2026-01-01T00:05:00Z",
 	}
-	if service.Lifecycle == moduleruntime.LifecycleMetadata {
+	if service.Lifecycle == serviceruntime.LifecycleMetadata {
 		plan.BlockedBy = append(plan.BlockedBy, "metadata lifecycle cannot "+action)
 		return plan, nil
 	}
-	plan.Commands = []moduleruntime.RuntimePlanCommand{{Kind: "compose", Argv: []string{"docker", "compose", action, service.ComposeService}}}
+	plan.Commands = []serviceruntime.RuntimePlanCommand{{Kind: "compose", Argv: []string{"docker", "compose", action, service.ComposeService}}}
 	plan.CanApply = true
 	return plan, nil
 }
 
-func (f fakeModuleRegistry) ListModules(context.Context) ([]moduleregistry.Module, error) {
-	return f.data.Modules, nil
+func (f fakeServiceRegistry) ListServices(context.Context) ([]serviceregistry.Service, error) {
+	return f.data.Services, nil
 }
 
-func (f fakeModuleRegistry) ListSets(context.Context) ([]moduleregistry.Set, error) {
+func (f fakeServiceRegistry) ListSets(context.Context) ([]serviceregistry.Set, error) {
 	return f.data.Sets, nil
 }
 
-func (f fakeModuleRegistry) Topology(context.Context) (moduleregistry.Topology, error) {
-	return moduleregistry.Topology{
+func (f fakeServiceRegistry) Topology(context.Context) (serviceregistry.Topology, error) {
+	return serviceregistry.Topology{
 		Sets:       f.data.Sets,
-		Nodes:      f.data.Modules,
+		Nodes:      f.data.Services,
 		Edges:      f.data.Edges,
 		Components: f.data.Components,
 	}, nil
 }
 
-func (f fakeModuleRegistry) ListPermissions(context.Context) ([]moduleregistry.Permission, error) {
+func (f fakeServiceRegistry) ListPermissions(context.Context) ([]serviceregistry.Permission, error) {
 	return f.data.Permissions, nil
 }
 
-func (f fakeModuleRegistry) ListMenus(context.Context) ([]moduleregistry.Menu, error) {
+func (f fakeServiceRegistry) ListMenus(context.Context) ([]serviceregistry.Menu, error) {
 	return f.data.Menus, nil
 }
 
-func (f fakeModuleRegistry) ListFrontendRoutes(context.Context) ([]moduleregistry.FrontendRoute, error) {
+func (f fakeServiceRegistry) ListFrontendRoutes(context.Context) ([]serviceregistry.FrontendRoute, error) {
 	return f.data.FrontendRoutes, nil
 }
 
-func (f fakeModuleRegistry) ListGatewayRoutes(context.Context) ([]moduleregistry.GatewayRoute, error) {
+func (f fakeServiceRegistry) ListGatewayRoutes(context.Context) ([]serviceregistry.GatewayRoute, error) {
 	return f.data.GatewayRoutes, nil
 }
 
-func (f fakeModuleRegistry) ListComponents(context.Context) ([]moduleregistry.Component, error) {
+func (f fakeServiceRegistry) ListComponents(context.Context) ([]serviceregistry.Component, error) {
 	return f.data.Components, nil
 }
 
-func (f fakeModuleRegistry) ListEdges(context.Context) ([]moduleregistry.Edge, error) {
+func (f fakeServiceRegistry) ListEdges(context.Context) ([]serviceregistry.Edge, error) {
 	return f.data.Edges, nil
 }
 
-func (f fakeModuleRegistry) Detail(_ context.Context, moduleID string) (moduleregistry.Detail, error) {
-	var detail moduleregistry.Detail
-	for _, module := range f.data.Modules {
-		if module.ModuleID == moduleID {
-			detail.Module = module
+func (f fakeServiceRegistry) Detail(_ context.Context, serviceID string) (serviceregistry.Detail, error) {
+	var detail serviceregistry.Detail
+	for _, service := range f.data.Services {
+		if service.ServiceID == serviceID {
+			detail.Service = service
 			break
 		}
 	}
-	if detail.Module.ModuleID == "" {
-		return moduleregistry.Detail{}, errors.New("module not found")
+	if detail.Service.ServiceID == "" {
+		return serviceregistry.Detail{}, errors.New("service not found")
 	}
 	for _, edge := range f.data.Edges {
-		if edge.FromModuleID == moduleID {
+		if edge.FromServiceID == serviceID {
 			detail.Dependencies = append(detail.Dependencies, edge)
 		}
-		if edge.ToModuleID == moduleID {
+		if edge.ToServiceID == serviceID {
 			detail.Dependents = append(detail.Dependents, edge)
 		}
 	}
 	for _, component := range f.data.Components {
-		if component.ModuleID == moduleID {
+		if component.ServiceID == serviceID {
 			detail.Components = append(detail.Components, component)
 			if component.ComponentType == "health_check" {
 				detail.HealthChecks = append(detail.HealthChecks, component)
@@ -156,34 +155,34 @@ func (f fakeModuleRegistry) Detail(_ context.Context, moduleID string) (modulere
 		}
 	}
 	for _, permission := range f.data.Permissions {
-		if permission.ModuleID == moduleID {
+		if permission.ServiceID == serviceID {
 			detail.Permissions = append(detail.Permissions, permission)
 		}
 	}
 	for _, menu := range f.data.Menus {
-		if menu.ModuleID == moduleID {
+		if menu.ServiceID == serviceID {
 			detail.Menus = append(detail.Menus, menu)
 		}
 	}
 	for _, route := range f.data.FrontendRoutes {
-		if route.ModuleID == moduleID {
+		if route.ServiceID == serviceID {
 			detail.FrontendRoutes = append(detail.FrontendRoutes, route)
 		}
 	}
 	for _, route := range f.data.GatewayRoutes {
-		if route.ModuleID == moduleID {
+		if route.ServiceID == serviceID {
 			detail.GatewayRoutes = append(detail.GatewayRoutes, route)
 		}
 	}
 	for _, installation := range f.data.Installations {
-		if installation.ModuleID == moduleID {
+		if installation.ServiceID == serviceID {
 			detail.Installations = append(detail.Installations, installation)
 		}
 	}
 	return detail, nil
 }
 
-func TestListModulesRejectsOrdinaryUser(t *testing.T) {
+func TestListServicesRejectsOrdinaryUser(t *testing.T) {
 	oldChecker := hasSystemAdminPermission
 	hasSystemAdminPermission = func(context.Context, *svc.ServiceContext, int64) (bool, error) {
 		return false, nil
@@ -197,12 +196,12 @@ func TestListModulesRejectsOrdinaryUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logic := NewAdminModulesLogic(context.Background(), &svc.ServiceContext{
+	logic := NewAdminServicesLogic(context.Background(), &svc.ServiceContext{
 		Config: config.Config{
 			Jwt: config.JwtConfig{Secret: "test-secret"},
 		},
 	})
-	_, err = logic.ListModules("Bearer " + token)
+	_, err = logic.ListServices("Bearer " + token)
 	if err == nil || !strings.Contains(err.Error(), "forbidden") {
 		t.Fatalf("expected forbidden error, got %v", err)
 	}
@@ -215,14 +214,14 @@ func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logic := &AdminModulesLogic{
+	logic := &AdminServicesLogic{
 		ctx: ctx,
 		svcCtx: &svc.ServiceContext{
 			Config: config.Config{
 				Jwt: config.JwtConfig{Secret: "test-secret"},
 			},
 		},
-		repo: fakeModuleRegistry{data: moduleregistry.BuiltinData()},
+		repo: fakeServiceRegistry{data: serviceregistry.BuiltinData()},
 	}
 
 	resp, err := logic.Topology("Bearer " + token)
@@ -241,59 +240,59 @@ func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
 	if len(resp.Components) == 0 {
 		t.Fatalf("topology components should be non-empty")
 	}
-	if !hasSet(resp.Sets, "runtime") || !hasSet(resp.Sets, "core-capability") {
-		t.Fatalf("topology should include runtime and core-capability sets: %#v", resp.Sets)
+	if !hasSet(resp.Sets, "single-node-oj") || !hasSet(resp.Sets, "distributed-root") {
+		t.Fatalf("topology should include runtime and single-node-oj sets: %#v", resp.Sets)
 	}
-	if !hasNode(resp.ModuleNodes, "ojos.judge-core") {
-		t.Fatalf("topology should include ojos.judge-core node")
+	if !hasNode(resp.ServiceNodes, "judge-api") {
+		t.Fatalf("topology should include judge-api node")
 	}
 	for _, edge := range [][2]string{
-		{"ojos.judge-core", "ojos.platform.web-shell"},
-		{"ojos.judge-core", "ojos.platform.identity-access"},
-		{"ojos.judge-core", "ojos.kernel.module-runtime"},
+		{"gateway", "problem-api"},
+		{"gateway", "judge-api"},
+		{"judge-worker", "judge-api"},
 	} {
 		if !hasEdge(resp.DependencyEdges, edge[0], edge[1]) {
 			t.Fatalf("topology should include edge %s -> %s", edge[0], edge[1])
 		}
 	}
-	for _, componentID := range []string{"problem-api", "judge-api", "judge-worker", "frontend-routes", "gateway-routes", "permissions"} {
-		if !hasComponent(resp.Components, "ojos.judge-core", componentID) {
+	for _, componentID := range []string{"problem-api-endpoint", "problem-api-health"} {
+		if !hasComponent(resp.Components, "problem-api", componentID) {
 			t.Fatalf("topology should include component %s", componentID)
 		}
 	}
 }
 
-func TestRuntimeSnapshotReturnsKernelPlatformAndJudgeCore(t *testing.T) {
+func TestRuntimeSnapshotReturnsServiceFirstBaseServices(t *testing.T) {
 	ctx := context.Background()
 	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	logic := &AdminModulesLogic{
+	logic := &AdminServicesLogic{
 		ctx: ctx,
 		svcCtx: &svc.ServiceContext{
 			Config: config.Config{
 				Jwt: config.JwtConfig{Secret: "test-secret"},
 			},
 		},
-		repo: fakeModuleRegistry{data: moduleregistry.BuiltinData()},
+		repo: fakeServiceRegistry{data: serviceregistry.BuiltinData()},
 	}
 
 	resp, err := logic.RuntimeSnapshot("Bearer "+token, false)
 	if err != nil {
 		t.Fatalf("runtime snapshot failed: %v", err)
 	}
-	for _, moduleID := range []string{"ojos.kernel.installer", "ojos.kernel.module-runtime", "ojos.platform.gateway", "ojos.platform.web-shell", "ojos.judge-core"} {
-		if !hasNode(resp.Modules, moduleID) {
-			t.Fatalf("runtime snapshot should include %s", moduleID)
+	for _, serviceID := range []string{"root-runtime-manager", "root-runtime-manager", "gateway", "web-shell", "judge-api"} {
+		if !hasNode(resp.ServiceNodes, serviceID) {
+			t.Fatalf("runtime snapshot should include %s", serviceID)
 		}
 	}
 	if len(resp.Topology.Nodes) == 0 || len(resp.Topology.Edges) == 0 {
 		t.Fatalf("runtime snapshot topology should be non-empty")
 	}
-	if len(resp.Topology.ModuleNodes) == 0 || len(resp.Topology.DependencyEdges) == 0 {
-		t.Fatalf("runtime snapshot should expose module graph compatibility fields")
+	if len(resp.Topology.ServiceNodes) == 0 || len(resp.Topology.DependencyEdges) == 0 {
+		t.Fatalf("runtime snapshot should expose service graph compatibility fields")
 	}
 	if len(resp.Services) == 0 || len(resp.Workers) == 0 || len(resp.HealthChecks) == 0 {
 		t.Fatalf("runtime snapshot should include services/workers/health checks")
@@ -310,51 +309,51 @@ func TestRuntimeSnapshotIncludeDisabledControlsActiveContributions(t *testing.T)
 		t.Fatal(err)
 	}
 
-	data := moduleregistry.BuiltinData()
-	data.Modules = append(data.Modules, moduleregistry.Module{
-		ModuleID: "ojos.demo-module",
-		SetID:    "demo",
-		Name:     "Demo Module",
-		Version:  "0.1.0",
-		Status:   "DISABLED",
-		Kind:     "feature",
+	data := serviceregistry.BuiltinData()
+	data.Services = append(data.Services, serviceregistry.Service{
+		ServiceID: "demo-service",
+		SetID:     "demo",
+		Name:      "Demo Service",
+		Version:   "0.1.0",
+		Status:    "DISABLED",
+		Kind:      "feature",
 	})
-	data.Permissions = append(data.Permissions, moduleregistry.Permission{
-		ModuleID:      "ojos.demo-module",
+	data.Permissions = append(data.Permissions, serviceregistry.Permission{
+		ServiceID:     "demo-service",
 		PermissionKey: "demo.view",
-		Description:   "View demo module metadata.",
+		Description:   "View demo service metadata.",
 	})
-	data.Menus = append(data.Menus, moduleregistry.Menu{
-		ModuleID:  "ojos.demo-module",
-		MenuKey:   "demo-module",
-		Title:     "Demo Module",
-		RoutePath: "/admin/modules/demo",
+	data.Menus = append(data.Menus, serviceregistry.Menu{
+		ServiceID: "demo-service",
+		MenuKey:   "demo-service",
+		Title:     "Demo Service",
+		RoutePath: "/admin/services/demo",
 		Enabled:   false,
 	})
 
-	logic := &AdminModulesLogic{
+	logic := &AdminServicesLogic{
 		ctx: ctx,
 		svcCtx: &svc.ServiceContext{
 			Config: config.Config{
 				Jwt: config.JwtConfig{Secret: "test-secret"},
 			},
 		},
-		repo: fakeModuleRegistry{data: data},
+		repo: fakeServiceRegistry{data: data},
 	}
 
 	active, err := logic.RuntimeSnapshot("Bearer "+token, false)
 	if err != nil {
 		t.Fatalf("active runtime snapshot failed: %v", err)
 	}
-	if hasNode(active.Modules, "ojos.demo-module") || hasPermissionItem(active.Permissions, "demo.view") {
-		t.Fatalf("disabled demo module should not appear in active runtime snapshot")
+	if hasNode(active.ServiceNodes, "demo-service") || hasPermissionItem(active.Permissions, "demo.view") {
+		t.Fatalf("disabled demo service should not appear in active runtime snapshot")
 	}
 
 	all, err := logic.RuntimeSnapshot("Bearer "+token, true)
 	if err != nil {
 		t.Fatalf("include-disabled runtime snapshot failed: %v", err)
 	}
-	if !hasNode(all.Modules, "ojos.demo-module") || !hasPermissionItem(all.Permissions, "demo.view") {
+	if !hasNode(all.ServiceNodes, "demo-service") || !hasPermissionItem(all.Permissions, "demo.view") {
 		t.Fatalf("include-disabled runtime snapshot should expose disabled demo registry entries")
 	}
 }
@@ -366,24 +365,24 @@ func TestRuntimeRoutesReturnsRegistryRouteTable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	data := moduleregistry.BuiltinData()
-	data.GatewayRoutes = append(data.GatewayRoutes, moduleregistry.GatewayRoute{
-		ModuleID:      "ojos.demo-module",
+	data := serviceregistry.BuiltinData()
+	data.GatewayRoutes = append(data.GatewayRoutes, serviceregistry.GatewayRoute{
+		ServiceID:     "demo-service",
 		Prefix:        "/api/demo",
 		TargetService: "demo-api",
 		AuthMode:      "admin",
 		Enabled:       false,
 	})
-	data.Modules = append(data.Modules, moduleregistry.Module{
-		ModuleID: "ojos.demo-module",
-		SetID:    "demo",
-		Name:     "Demo Module",
-		Version:  "0.1.0",
-		Status:   "DISABLED",
-		Kind:     "feature",
+	data.Services = append(data.Services, serviceregistry.Service{
+		ServiceID: "demo-service",
+		SetID:     "demo",
+		Name:      "Demo Service",
+		Version:   "0.1.0",
+		Status:    "DISABLED",
+		Kind:      "feature",
 	})
 
-	logic := &AdminModulesLogic{
+	logic := &AdminServicesLogic{
 		ctx: ctx,
 		svcCtx: &svc.ServiceContext{
 			Config: config.Config{
@@ -391,7 +390,7 @@ func TestRuntimeRoutesReturnsRegistryRouteTable(t *testing.T) {
 			},
 			RouteTableOptions: testRouteTableOptions(),
 		},
-		repo: fakeModuleRegistry{data: data},
+		repo: fakeServiceRegistry{data: data},
 	}
 
 	active, err := logic.RuntimeRoutes("Bearer "+token, false, false, false)
@@ -435,40 +434,40 @@ func TestRuntimeServicesAdminAPIUsesRuntimeDriver(t *testing.T) {
 		ctx: ctx,
 		svcCtx: &svc.ServiceContext{
 			Config: config.Config{Jwt: config.JwtConfig{Secret: "test-secret"}},
-			RuntimeDriver: fakeRuntimeDriver{services: []moduleruntime.RuntimeService{
+			RuntimeDriver: fakeRuntimeDriver{services: []serviceruntime.RuntimeService{
 				{
 					ServiceID:      "problem-api",
-					ModuleID:       "ojos.judge-core",
+					OwnerServiceID: "judge-api",
 					Kind:           "http",
-					Lifecycle:      moduleruntime.LifecycleManaged,
+					Lifecycle:      serviceruntime.LifecycleManaged,
 					Runtime:        "compose",
 					ComposeService: "problem-api",
-					State:          moduleruntime.ServiceStateRunning,
+					State:          serviceruntime.ServiceStateRunning,
 					Health:         "ok",
 					Routes:         []string{"/api/problem"},
 					Required:       true,
 				},
 				{
-					ServiceID: "demo-metadata-service",
-					ModuleID:  "ojos.demo-module",
-					Kind:      "metadata",
-					Lifecycle: moduleruntime.LifecycleMetadata,
-					Runtime:   "metadata",
-					State:     moduleruntime.ServiceStateDeclared,
-					Health:    "metadata",
+					ServiceID:      "demo-metadata-service",
+					OwnerServiceID: "demo-service",
+					Kind:           "metadata",
+					Lifecycle:      serviceruntime.LifecycleMetadata,
+					Runtime:        "metadata",
+					State:          serviceruntime.ServiceStateDeclared,
+					Health:         "metadata",
 				},
 				{
-					ServiceID: "judge-worker",
-					ModuleID:  "ojos.judge-core",
-					Kind:      "worker",
-					Lifecycle: moduleruntime.LifecycleManaged,
-					Runtime:   "compose",
-					State:     moduleruntime.ServiceStateUnknown,
-					Health:    "unknown",
+					ServiceID:      "judge-worker",
+					OwnerServiceID: "judge-api",
+					Kind:           "worker",
+					Lifecycle:      serviceruntime.LifecycleManaged,
+					Runtime:        "compose",
+					State:          serviceruntime.ServiceStateUnknown,
+					Health:         "unknown",
 				},
 			}},
 		},
-		repo: fakeModuleRegistry{data: moduleregistry.BuiltinData()},
+		repo: fakeServiceRegistry{data: serviceregistry.BuiltinData()},
 	}
 
 	resp, err := logic.ListServices("Bearer " + token)
@@ -482,7 +481,7 @@ func TestRuntimeServicesAdminAPIUsesRuntimeDriver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runtime service detail failed: %v", err)
 	}
-	if detail.Service.ServiceId != "problem-api" || detail.Service.State != moduleruntime.ServiceStateRunning {
+	if detail.Service.ServiceId != "problem-api" || detail.Service.State != serviceruntime.ServiceStateRunning {
 		t.Fatalf("unexpected service detail: %#v", detail)
 	}
 	plan, err := logic.PlanRestart("Bearer "+token, "problem-api")
@@ -519,7 +518,7 @@ func TestRuntimeServicesRejectOrdinaryUser(t *testing.T) {
 		svcCtx: &svc.ServiceContext{
 			Config: config.Config{Jwt: config.JwtConfig{Secret: "test-secret"}},
 		},
-		repo: fakeModuleRegistry{data: moduleregistry.BuiltinData()},
+		repo: fakeServiceRegistry{data: serviceregistry.BuiltinData()},
 	}
 
 	_, err = logic.ListServices("Bearer " + token)
@@ -540,7 +539,7 @@ func TestIsAdminRole(t *testing.T) {
 	}
 }
 
-func hasSet(items []types.ModuleSetItem, setID string) bool {
+func hasSet(items []types.ServiceSetItem, setID string) bool {
 	for _, item := range items {
 		if item.SetId == setID {
 			return true
@@ -549,16 +548,16 @@ func hasSet(items []types.ModuleSetItem, setID string) bool {
 	return false
 }
 
-func hasNode(items []types.ModuleNodeItem, moduleID string) bool {
+func hasNode(items []types.ServiceNodeItem, serviceID string) bool {
 	for _, item := range items {
-		if item.ModuleId == moduleID {
+		if item.ServiceId == serviceID {
 			return true
 		}
 	}
 	return false
 }
 
-func hasPermissionItem(items []types.ModulePermissionItem, key string) bool {
+func hasPermissionItem(items []types.ServicePermissionItem, key string) bool {
 	for _, item := range items {
 		if item.PermissionKey == key {
 			return true
@@ -567,7 +566,7 @@ func hasPermissionItem(items []types.ModulePermissionItem, key string) bool {
 	return false
 }
 
-func hasRuntimeRoute(items []types.ModuleRuntimeRouteItem, prefix string) bool {
+func hasRuntimeRoute(items []types.ServiceRuntimeRouteItem, prefix string) bool {
 	for _, item := range items {
 		if item.Prefix == prefix {
 			return true
@@ -576,7 +575,7 @@ func hasRuntimeRoute(items []types.ModuleRuntimeRouteItem, prefix string) bool {
 	return false
 }
 
-func hasRuntimeRouteUpstream(items []types.ModuleRuntimeRouteItem, prefix string) bool {
+func hasRuntimeRouteUpstream(items []types.ServiceRuntimeRouteItem, prefix string) bool {
 	for _, item := range items {
 		if item.Prefix == prefix && item.UpstreamBase != "" {
 			return true
@@ -594,27 +593,27 @@ func containsString(items []string, want string) bool {
 	return false
 }
 
-func hasEdge(items []types.ModuleEdgeItem, from string, to string) bool {
+func hasEdge(items []types.ServiceEdgeItem, from string, to string) bool {
 	for _, item := range items {
-		if item.FromModuleId == from && item.ToModuleId == to {
+		if item.FromServiceId == from && item.ToServiceId == to {
 			return true
 		}
 	}
 	return false
 }
 
-func hasComponent(items []types.ModuleComponentItem, moduleID string, componentID string) bool {
+func hasComponent(items []types.ServiceComponentItem, serviceID string, componentID string) bool {
 	for _, item := range items {
-		if item.ModuleId == moduleID && item.ComponentId == componentID {
+		if item.ServiceId == serviceID && item.ComponentId == componentID {
 			return true
 		}
 	}
 	return false
 }
 
-func testRouteTableOptions() moduleruntime.RouteTableOptions {
-	return moduleruntime.RouteTableOptions{
-		TrustedServices: map[string]moduleruntime.TrustedService{
+func testRouteTableOptions() serviceruntime.RouteTableOptions {
+	return serviceruntime.RouteTableOptions{
+		TrustedServices: map[string]serviceruntime.TrustedService{
 			"demo-api":    {ServiceID: "demo-api", UpstreamBase: "http://demo-api:8080"},
 			"problem-api": {ServiceID: "problem-api", UpstreamBase: "http://problem-api:8083"},
 			"judge-api":   {ServiceID: "judge-api", UpstreamBase: "http://judge-api:8082"},

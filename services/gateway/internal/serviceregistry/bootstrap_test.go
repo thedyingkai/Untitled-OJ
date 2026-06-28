@@ -1,4 +1,4 @@
-package moduleregistry
+package serviceregistry
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 
 type recordingWriter struct {
 	sets           map[string]int
-	modules        map[string]int
+	services       map[string]int
 	edges          map[string]int
 	components     map[string]int
 	installations  map[string]int
@@ -21,7 +21,7 @@ type recordingWriter struct {
 func newRecordingWriter() *recordingWriter {
 	return &recordingWriter{
 		sets:           map[string]int{},
-		modules:        map[string]int{},
+		services:       map[string]int{},
 		edges:          map[string]int{},
 		components:     map[string]int{},
 		installations:  map[string]int{},
@@ -38,23 +38,23 @@ func (w *recordingWriter) UpsertSet(_ context.Context, item Set) error {
 	return nil
 }
 
-func (w *recordingWriter) UpsertModule(_ context.Context, item Module) error {
-	w.modules[item.ModuleID]++
+func (w *recordingWriter) UpsertService(_ context.Context, item Service) error {
+	w.services[item.ServiceID]++
 	return nil
 }
 
 func (w *recordingWriter) UpsertEdge(_ context.Context, item Edge) error {
-	w.edges[item.FromModuleID+"->"+item.ToModuleID+":"+item.EdgeType]++
+	w.edges[item.FromServiceID+"->"+item.ToServiceID+":"+item.EdgeType]++
 	return nil
 }
 
 func (w *recordingWriter) UpsertComponent(_ context.Context, item Component) error {
-	w.components[item.ModuleID+"/"+item.ComponentID]++
+	w.components[item.ServiceID+"/"+item.ComponentID]++
 	return nil
 }
 
 func (w *recordingWriter) UpsertInstallation(_ context.Context, item Installation) error {
-	w.installations[item.ModuleID]++
+	w.installations[item.ServiceID]++
 	return nil
 }
 
@@ -69,7 +69,7 @@ func (w *recordingWriter) UpsertMenu(_ context.Context, item Menu) error {
 }
 
 func (w *recordingWriter) UpsertFrontendRoute(_ context.Context, item FrontendRoute) error {
-	w.frontendRoutes[item.ModuleID+item.RoutePath]++
+	w.frontendRoutes[item.ServiceID+item.RoutePath]++
 	return nil
 }
 
@@ -79,56 +79,36 @@ func (w *recordingWriter) UpsertGatewayRoute(_ context.Context, item GatewayRout
 }
 
 func (w *recordingWriter) UpsertMigration(_ context.Context, item Migration) error {
-	w.migrations[item.ModuleID+item.MigrationName]++
+	w.migrations[item.ServiceID+item.MigrationName]++
 	return nil
 }
 
-func TestBuiltinDataContainsJudgeCoreTopology(t *testing.T) {
+func TestBuiltinDataContainsBaseServicesTopology(t *testing.T) {
 	data := BuiltinData()
 
-	if len(data.Sets) == 0 || len(data.Modules) == 0 || len(data.Edges) == 0 || len(data.Components) == 0 {
-		t.Fatalf("expected non-empty sets/modules/edges/components")
+	if len(data.Sets) == 0 || len(data.Services) == 0 || len(data.Edges) == 0 || len(data.Components) == 0 {
+		t.Fatalf("expected non-empty sets/services/edges/components")
 	}
 
-	var foundJudgeCore bool
-	for _, module := range data.Modules {
-		if module.ModuleID == "ojos.judge-core" {
-			foundJudgeCore = true
-			if module.SetID != "core-capability" || module.Status != StatusEnabled || module.Kind != KindFeature {
-				t.Fatalf("unexpected judge-core metadata: %#v", module)
-			}
-			if len(module.Manifest) == 0 {
-				t.Fatalf("judge-core manifest should be embedded")
-			}
-		}
-	}
-	if !foundJudgeCore {
-		t.Fatalf("judge-core module not found")
-	}
-	for _, moduleID := range []string{
-		"ojos.kernel.installer",
-		"ojos.kernel.module-runtime",
-		"ojos.kernel.module-registry",
-		"ojos.kernel.topology",
-		"ojos.kernel.policy",
-		"ojos.kernel.audit",
-		"ojos.kernel.config",
-		"ojos.kernel.health",
-		"ojos.platform.gateway",
-		"ojos.platform.web-shell",
-		"ojos.platform.identity-access",
-		"ojos.platform.storage",
-		"ojos.platform.observability",
+	for _, serviceID := range []string{
+		"root-runtime-manager",
+		"gateway",
+		"web-shell",
+		"problem-api",
+		"judge-api",
+		"judge-worker",
+		"storage",
+		"postgres",
 	} {
-		if !bootstrapHasModule(data.Modules, moduleID) {
-			t.Fatalf("builtin module %s not found", moduleID)
+		if !bootstrapHasService(data.Services, serviceID) {
+			t.Fatalf("builtin service %s not found", serviceID)
 		}
 	}
-	if !bootstrapHasEdge(data.Edges, "ojos.judge-core", "ojos.kernel.module-runtime") {
-		t.Fatalf("judge-core should depend on kernel module-runtime")
+	if !bootstrapHasEdge(data.Edges, "judge-worker", "judge-api") {
+		t.Fatalf("judge-worker should link to judge-api")
 	}
-	if !bootstrapHasEdge(data.Edges, "ojos.judge-core", "ojos.platform.web-shell") {
-		t.Fatalf("judge-core should depend on platform web-shell")
+	if !bootstrapHasEdge(data.Edges, "gateway", "problem-api") {
+		t.Fatalf("gateway should route to problem-api")
 	}
 }
 
@@ -143,25 +123,25 @@ func TestBootstrapBuiltinIsRepeatable(t *testing.T) {
 		t.Fatalf("second bootstrap failed: %v", err)
 	}
 
-	for key, count := range writer.modules {
+	for key, count := range writer.services {
 		if count != 2 {
-			t.Fatalf("expected module %s to be upserted twice, got %d", key, count)
+			t.Fatalf("expected service %s to be upserted twice, got %d", key, count)
 		}
 	}
-	if writer.modules["ojos.judge-core"] != 2 {
-		t.Fatalf("judge-core should be bootstrapped twice")
+	if writer.services["judge-worker"] != 2 {
+		t.Fatalf("judge-worker should be bootstrapped twice")
 	}
-	if writer.permissions["problem.manage.data"] != 2 {
-		t.Fatalf("problem.manage.data permission should be bootstrapped twice")
+	if writer.permissions["judge.submit"] != 2 {
+		t.Fatalf("judge.submit permission should be bootstrapped twice")
 	}
 	if writer.permissions["system.admin"] != 2 {
 		t.Fatalf("system.admin permission should be bootstrapped twice")
 	}
 }
 
-func bootstrapHasModule(items []Module, moduleID string) bool {
+func bootstrapHasService(items []Service, serviceID string) bool {
 	for _, item := range items {
-		if item.ModuleID == moduleID {
+		if item.ServiceID == serviceID {
 			return true
 		}
 	}
@@ -170,7 +150,7 @@ func bootstrapHasModule(items []Module, moduleID string) bool {
 
 func bootstrapHasEdge(items []Edge, from string, to string) bool {
 	for _, item := range items {
-		if item.FromModuleID == from && item.ToModuleID == to {
+		if item.FromServiceID == from && item.ToServiceID == to {
 			return true
 		}
 	}

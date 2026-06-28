@@ -61,7 +61,7 @@ func (l *AdminPermissionsLogic) ListRoles() (*types.ListRolesResp, error) {
 		items = append(items, types.RoleItem{
 			Id:          role.ID,
 			Name:        role.Name,
-			ModuleCode:  role.ModuleCode,
+			ServiceCode: role.ServiceCode,
 			Description: role.Description,
 			IsSystem:    role.IsSystem,
 		})
@@ -81,7 +81,7 @@ func (l *AdminPermissionsLogic) ListPermissions() (*types.ListPermissionsResp, e
 	for _, perm := range perms {
 		items = append(items, types.PermissionItem{
 			Code:        perm.Code,
-			ModuleCode:  perm.ModuleCode,
+			ServiceCode: perm.ServiceCode,
 			Name:        perm.Name,
 			Description: perm.Description,
 		})

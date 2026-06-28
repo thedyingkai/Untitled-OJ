@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"ojos-gateway/internal/kernel/moduleruntime"
-	"ojos-gateway/internal/moduleregistry"
+	"ojos-gateway/internal/kernel/serviceruntime"
+	"ojos-gateway/internal/serviceregistry"
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
 
@@ -17,7 +17,7 @@ type AdminRuntimeLogic struct {
 	logx.Logger
 	ctx    context.Context
 	svcCtx *svc.ServiceContext
-	repo   moduleruntime.RegistryReader
+	repo   serviceruntime.RegistryReader
 }
 
 func NewAdminRuntimeLogic(ctx context.Context, svcCtx *svc.ServiceContext) *AdminRuntimeLogic {
@@ -25,7 +25,7 @@ func NewAdminRuntimeLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Admi
 		Logger: logx.WithContext(ctx),
 		ctx:    ctx,
 		svcCtx: svcCtx,
-		repo:   moduleregistry.NewRepository(svcCtx.DB),
+		repo:   serviceregistry.NewRepository(svcCtx.DB),
 	}
 }
 
@@ -33,7 +33,7 @@ func (l *AdminRuntimeLogic) ListServices(authHeader string) (*types.RuntimeServi
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
 	}
-	snapshot, err := moduleruntime.BuildSnapshot(l.ctx, l.repo)
+	snapshot, err := serviceruntime.BuildSnapshot(l.ctx, l.repo)
 	if err != nil {
 		return nil, err
 	}
@@ -79,9 +79,9 @@ func (l *AdminRuntimeLogic) PlanReload(authHeader string, serviceID string) (*ty
 	return l.plan(authHeader, serviceID, "reload")
 }
 
-func (l *AdminRuntimeLogic) Reload(authHeader string) (*types.ModuleRuntimeRoutesResp, error) {
-	modulesLogic := NewAdminModulesLogic(l.ctx, l.svcCtx)
-	return modulesLogic.RuntimeRoutes(authHeader, false, true, false)
+func (l *AdminRuntimeLogic) Reload(authHeader string) (*types.ServiceRuntimeRoutesResp, error) {
+	servicesLogic := NewAdminServicesLogic(l.ctx, l.svcCtx)
+	return servicesLogic.RuntimeRoutes(authHeader, false, true, false)
 }
 
 func (l *AdminRuntimeLogic) Operations(authHeader string) (*types.RuntimeOperationsResp, error) {
@@ -89,9 +89,9 @@ func (l *AdminRuntimeLogic) Operations(authHeader string) (*types.RuntimeOperati
 		return nil, err
 	}
 	rows, err := l.svcCtx.DB.Query(l.ctx, `
-SELECT operation_id, module_id, action, status, actor_username,
+	SELECT operation_id, object_id AS service_id, action, status, actor_username,
        request, plan, result, error_message, created_at::text, updated_at::text
-FROM module_operations
+FROM service_runtime_operations
 WHERE action LIKE 'runtime.%'
 ORDER BY created_at DESC
 LIMIT 100
@@ -108,9 +108,9 @@ func (l *AdminRuntimeLogic) OperationDetail(authHeader string, operationID strin
 		return nil, err
 	}
 	rows, err := l.svcCtx.DB.Query(l.ctx, `
-SELECT operation_id, module_id, action, status, actor_username,
+	SELECT operation_id, object_id AS service_id, action, status, actor_username,
        request, plan, result, error_message, created_at::text, updated_at::text
-FROM module_operations
+FROM service_runtime_operations
 WHERE operation_id = $1 AND action LIKE 'runtime.%'
 ORDER BY created_at DESC
 LIMIT 1
@@ -143,11 +143,11 @@ func (l *AdminRuntimeLogic) plan(authHeader string, serviceID string, action str
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
 	}
-	snapshot, err := moduleruntime.BuildSnapshot(l.ctx, l.repo)
+	snapshot, err := serviceruntime.BuildSnapshot(l.ctx, l.repo)
 	if err != nil {
 		return nil, err
 	}
-	var plan moduleruntime.RuntimePlan
+	var plan serviceruntime.RuntimePlan
 	switch action {
 	case "start":
 		plan, err = l.driver().PlanStart(l.ctx, snapshot, serviceID)
@@ -166,22 +166,22 @@ func (l *AdminRuntimeLogic) plan(authHeader string, serviceID string, action str
 	return &types.RuntimeServicePlanResp{Plan: runtimePlanItem(plan)}, nil
 }
 
-func (l *AdminRuntimeLogic) getService(serviceID string) (moduleruntime.RuntimeService, error) {
-	snapshot, err := moduleruntime.BuildSnapshot(l.ctx, l.repo)
+func (l *AdminRuntimeLogic) getService(serviceID string) (serviceruntime.RuntimeService, error) {
+	snapshot, err := serviceruntime.BuildSnapshot(l.ctx, l.repo)
 	if err != nil {
-		return moduleruntime.RuntimeService{}, err
+		return serviceruntime.RuntimeService{}, err
 	}
 	return l.driver().GetServiceState(l.ctx, snapshot, serviceID)
 }
 
-func (l *AdminRuntimeLogic) driver() moduleruntime.RuntimeDriver {
+func (l *AdminRuntimeLogic) driver() serviceruntime.RuntimeDriver {
 	if l.svcCtx.RuntimeDriver != nil {
 		return l.svcCtx.RuntimeDriver
 	}
-	return moduleruntime.NewComposeDriver(l.svcCtx.RouteTableOptions.TrustedServices)
+	return serviceruntime.NewComposeDriver(l.svcCtx.RouteTableOptions.TrustedServices)
 }
 
-func runtimePlanItem(plan moduleruntime.RuntimePlan) types.RuntimePlanItem {
+func runtimePlanItem(plan serviceruntime.RuntimePlan) types.RuntimePlanItem {
 	commands := make([]types.RuntimePlanCommand, 0, len(plan.Commands))
 	for _, command := range plan.Commands {
 		commands = append(commands, types.RuntimePlanCommand{Kind: command.Kind, Argv: command.Argv})
@@ -191,7 +191,6 @@ func runtimePlanItem(plan moduleruntime.RuntimePlan) types.RuntimePlanItem {
 		OperationId:          plan.OperationID,
 		Action:               plan.Action,
 		ServiceId:            plan.ServiceID,
-		ModuleId:             plan.ModuleID,
 		Driver:               plan.Driver,
 		CanApply:             plan.CanApply,
 		ApplyEnabled:         plan.ApplyEnabled,
@@ -213,7 +212,7 @@ func scanRuntimeOperations(rows pgx.Rows) (*types.RuntimeOperationsResp, error) 
 		var item types.RuntimeOperationItem
 		if err := rows.Scan(
 			&item.OperationId,
-			&item.ModuleId,
+			&item.ServiceId,
 			&item.Action,
 			&item.Status,
 			&item.ActorUsername,

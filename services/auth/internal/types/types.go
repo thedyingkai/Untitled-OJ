@@ -63,7 +63,7 @@ type ListUsersResp struct {
 type RoleItem struct {
 	Id          int64  `json:"id"`
 	Name        string `json:"name"`
-	ModuleCode  string `json:"module_code"`
+	ServiceCode string `json:"service_code"`
 	Description string `json:"description"`
 	IsSystem    bool   `json:"is_system"`
 }
@@ -76,7 +76,7 @@ type ListRolesResp struct {
 
 type PermissionItem struct {
 	Code        string `json:"code"`
-	ModuleCode  string `json:"module_code"`
+	ServiceCode string `json:"service_code"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }

@@ -1,4 +1,4 @@
-package moduleruntime
+package serviceruntime
 
 import (
 	"context"
@@ -7,86 +7,86 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"ojos-gateway/internal/moduleregistry"
+	"ojos-gateway/internal/serviceregistry"
 )
 
 type fakeReader struct {
-	modules        []moduleregistry.Module
-	permissions    []moduleregistry.Permission
-	menus          []moduleregistry.Menu
-	frontendRoutes []moduleregistry.FrontendRoute
-	gatewayRoutes  []moduleregistry.GatewayRoute
-	components     []moduleregistry.Component
-	edges          []moduleregistry.Edge
+	services       []serviceregistry.Service
+	permissions    []serviceregistry.Permission
+	menus          []serviceregistry.Menu
+	frontendRoutes []serviceregistry.FrontendRoute
+	gatewayRoutes  []serviceregistry.GatewayRoute
+	components     []serviceregistry.Component
+	edges          []serviceregistry.Edge
 }
 
-func (f fakeReader) ListModules(context.Context) ([]moduleregistry.Module, error) {
-	return f.modules, nil
+func (f fakeReader) ListServices(context.Context) ([]serviceregistry.Service, error) {
+	return f.services, nil
 }
-func (f fakeReader) ListPermissions(context.Context) ([]moduleregistry.Permission, error) {
+func (f fakeReader) ListPermissions(context.Context) ([]serviceregistry.Permission, error) {
 	return f.permissions, nil
 }
-func (f fakeReader) ListMenus(context.Context) ([]moduleregistry.Menu, error) {
+func (f fakeReader) ListMenus(context.Context) ([]serviceregistry.Menu, error) {
 	return f.menus, nil
 }
-func (f fakeReader) ListFrontendRoutes(context.Context) ([]moduleregistry.FrontendRoute, error) {
+func (f fakeReader) ListFrontendRoutes(context.Context) ([]serviceregistry.FrontendRoute, error) {
 	return f.frontendRoutes, nil
 }
-func (f fakeReader) ListGatewayRoutes(context.Context) ([]moduleregistry.GatewayRoute, error) {
+func (f fakeReader) ListGatewayRoutes(context.Context) ([]serviceregistry.GatewayRoute, error) {
 	return f.gatewayRoutes, nil
 }
-func (f fakeReader) ListComponents(context.Context) ([]moduleregistry.Component, error) {
+func (f fakeReader) ListComponents(context.Context) ([]serviceregistry.Component, error) {
 	return f.components, nil
 }
-func (f fakeReader) ListEdges(context.Context) ([]moduleregistry.Edge, error) {
+func (f fakeReader) ListEdges(context.Context) ([]serviceregistry.Edge, error) {
 	return f.edges, nil
 }
 
-func TestBuildSnapshotContainsKernelPlatformAndJudgeCore(t *testing.T) {
+func TestBuildSnapshotContainsServiceFirstBaseServices(t *testing.T) {
 	reader := fakeReader{
-		modules: []moduleregistry.Module{
-			{ModuleID: "ojos.kernel.installer", Status: "ENABLED", Kind: "kernel", Name: "Installer"},
-			{ModuleID: "ojos.platform.gateway", Status: "ENABLED", Kind: "platform", Name: "Gateway"},
-			{ModuleID: "ojos.judge-core", Status: "ENABLED", Kind: "feature", Name: "Judge Core", Manifest: rawManifest(map[string]any{
+		services: []serviceregistry.Service{
+			{ServiceID: "root-runtime-manager", Status: "ENABLED", Kind: "kernel", Name: "Installer"},
+			{ServiceID: "gateway", Status: "ENABLED", Kind: "platform", Name: "Gateway"},
+			{ServiceID: "judge-api", Status: "ENABLED", Kind: "feature", Name: "Judge API", Manifest: rawManifest(map[string]any{
 				"provides": map[string]any{
 					"topology": map[string]any{
 						"nodes": []map[string]any{{"id": "judge-api", "type": "service", "label": "Judge API"}},
 					},
 				},
 			})},
-			{ModuleID: "ojos.disabled", Status: "DISABLED", Kind: "feature", Name: "Disabled"},
+			{ServiceID: "ojos.disabled", Status: "DISABLED", Kind: "feature", Name: "Disabled"},
 		},
-		permissions: []moduleregistry.Permission{
-			{ModuleID: "ojos.judge-core", PermissionKey: "judge.submit"},
-			{ModuleID: "ojos.disabled", PermissionKey: "disabled.view"},
+		permissions: []serviceregistry.Permission{
+			{ServiceID: "judge-api", PermissionKey: "judge.submit"},
+			{ServiceID: "ojos.disabled", PermissionKey: "disabled.view"},
 		},
-		menus: []moduleregistry.Menu{
-			{ModuleID: "ojos.judge-core", MenuKey: "problems", Enabled: true},
-			{ModuleID: "ojos.disabled", MenuKey: "disabled", Enabled: true},
+		menus: []serviceregistry.Menu{
+			{ServiceID: "judge-api", MenuKey: "problems", Enabled: true},
+			{ServiceID: "ojos.disabled", MenuKey: "disabled", Enabled: true},
 		},
-		frontendRoutes: []moduleregistry.FrontendRoute{{
-			ModuleID: "ojos.judge-core", RoutePath: "/problems", Enabled: true,
+		frontendRoutes: []serviceregistry.FrontendRoute{{
+			ServiceID: "judge-api", RoutePath: "/problems", Enabled: true,
 		}},
-		gatewayRoutes: []moduleregistry.GatewayRoute{{
-			ModuleID: "ojos.judge-core", Prefix: "/api/judge", Enabled: true,
+		gatewayRoutes: []serviceregistry.GatewayRoute{{
+			ServiceID: "judge-api", Prefix: "/api/judge", Enabled: true,
 		}},
-		components: []moduleregistry.Component{
-			{ModuleID: "ojos.judge-core", ComponentID: "judge-api", ComponentType: "backend_service", Status: "ENABLED"},
-			{ModuleID: "ojos.judge-core", ComponentID: "judge-worker", ComponentType: "worker_service", Status: "ENABLED"},
-			{ModuleID: "ojos.judge-core", ComponentID: "judge-health", ComponentType: "health_check", Status: "ENABLED"},
+		components: []serviceregistry.Component{
+			{ServiceID: "judge-api", ComponentID: "judge-api", ComponentType: "backend_service", Status: "ENABLED"},
+			{ServiceID: "judge-api", ComponentID: "judge-worker", ComponentType: "worker_service", Status: "ENABLED"},
+			{ServiceID: "judge-api", ComponentID: "judge-health", ComponentType: "health_check", Status: "ENABLED"},
 		},
-		edges: []moduleregistry.Edge{{FromModuleID: "ojos.judge-core", ToModuleID: "ojos.kernel.installer", EdgeType: "requires", Required: true}},
+		edges: []serviceregistry.Edge{{FromServiceID: "judge-api", ToServiceID: "root-runtime-manager", EdgeType: "requires", Required: true}},
 	}
 
 	snapshot, err := BuildSnapshot(context.Background(), reader)
 	if err != nil {
 		t.Fatalf("BuildSnapshot failed: %v", err)
 	}
-	assertHasModule(t, snapshot.Modules, "ojos.kernel.installer")
-	assertHasModule(t, snapshot.Modules, "ojos.platform.gateway")
-	assertHasModule(t, snapshot.Modules, "ojos.judge-core")
-	if len(snapshot.Modules) != 3 {
-		t.Fatalf("disabled modules should not be runtime-enabled modules: %#v", snapshot.Modules)
+	assertHasService(t, snapshot.ServiceNodes, "root-runtime-manager")
+	assertHasService(t, snapshot.ServiceNodes, "gateway")
+	assertHasService(t, snapshot.ServiceNodes, "judge-api")
+	if len(snapshot.ServiceNodes) != 3 {
+		t.Fatalf("disabled services should not be registry-enabled services: %#v", snapshot.ServiceNodes)
 	}
 	if len(snapshot.Services) != 1 || len(snapshot.Workers) != 1 || len(snapshot.HealthChecks) != 1 {
 		t.Fatalf("unexpected component grouping: services=%d workers=%d health=%d", len(snapshot.Services), len(snapshot.Workers), len(snapshot.HealthChecks))
@@ -94,30 +94,30 @@ func TestBuildSnapshotContainsKernelPlatformAndJudgeCore(t *testing.T) {
 	if len(snapshot.Components) != 3 {
 		t.Fatalf("runtime snapshot should retain active component surface")
 	}
-	if len(snapshot.Topology.ModuleNodes) != 3 || len(snapshot.Topology.DependencyEdges) != 1 {
+	if len(snapshot.Topology.ServiceNodes) != 3 || len(snapshot.Topology.DependencyEdges) != 1 {
 		t.Fatalf("topology should retain active registry graph")
 	}
 	if hasPermission(snapshot.Permissions, "disabled.view") || hasMenu(snapshot.Menus, "disabled") {
-		t.Fatalf("disabled module contributions should not appear in active snapshot")
+		t.Fatalf("disabled service contributions should not appear in active snapshot")
 	}
-	if !hasTopologyNode(snapshot.Topology.Nodes, "ojos.judge-core:manifest:judge-api") {
+	if !hasTopologyNode(snapshot.Topology.Nodes, "judge-api:manifest:judge-api") {
 		t.Fatalf("manifest topology node should enter runtime topology")
 	}
-	if !hasTopologyNode(snapshot.Topology.Nodes, "ojos.judge-core:service:judge-api") {
+	if !hasTopologyNode(snapshot.Topology.Nodes, "judge-api:service:judge-api") {
 		t.Fatalf("runtime service node should enter topology")
 	}
-	if !hasTopologyNode(snapshot.Topology.Nodes, "ojos.judge-core:worker:judge-worker") {
+	if !hasTopologyNode(snapshot.Topology.Nodes, "judge-worker:worker:judge-worker") {
 		t.Fatalf("runtime worker node should enter topology")
 	}
 }
 
 func TestBuildSnapshotParsesManifestServicesAndWorkers(t *testing.T) {
 	reader := fakeReader{
-		modules: []moduleregistry.Module{{
-			ModuleID: "ojos.judge-core",
-			Status:   "ENABLED",
-			Kind:     "feature",
-			Name:     "Judge Core",
+		services: []serviceregistry.Service{{
+			ServiceID: "judge-api",
+			Status:    "ENABLED",
+			Kind:      "feature",
+			Name:      "Judge API",
 			Manifest: rawManifest(map[string]any{
 				"provides": map[string]any{
 					"services": []map[string]any{{
@@ -144,8 +144,8 @@ func TestBuildSnapshotParsesManifestServicesAndWorkers(t *testing.T) {
 				},
 			}),
 		}},
-		gatewayRoutes: []moduleregistry.GatewayRoute{{
-			ModuleID:      "ojos.judge-core",
+		gatewayRoutes: []serviceregistry.GatewayRoute{{
+			ServiceID:     "judge-api",
 			Prefix:        "/api/problem",
 			TargetService: "problem-api",
 			AuthMode:      "user",
@@ -174,27 +174,27 @@ func TestBuildSnapshotParsesManifestServicesAndWorkers(t *testing.T) {
 
 func TestBuildSnapshotIncludeDisabledReturnsDisabledContributions(t *testing.T) {
 	reader := fakeReader{
-		modules: []moduleregistry.Module{
-			{ModuleID: "ojos.kernel.installer", Status: "ENABLED", Kind: "kernel"},
-			{ModuleID: "ojos.demo-module", Status: "DISABLED", Kind: "feature"},
+		services: []serviceregistry.Service{
+			{ServiceID: "root-runtime-manager", Status: "ENABLED", Kind: "kernel"},
+			{ServiceID: "demo-service", Status: "DISABLED", Kind: "feature"},
 		},
-		permissions: []moduleregistry.Permission{{ModuleID: "ojos.demo-module", PermissionKey: "demo.view"}},
-		menus:       []moduleregistry.Menu{{ModuleID: "ojos.demo-module", MenuKey: "demo", Enabled: false}},
-		components:  []moduleregistry.Component{{ModuleID: "ojos.demo-module", ComponentID: "demo-health", ComponentType: "health_check", Status: "DISABLED"}},
+		permissions: []serviceregistry.Permission{{ServiceID: "demo-service", PermissionKey: "demo.view"}},
+		menus:       []serviceregistry.Menu{{ServiceID: "demo-service", MenuKey: "demo", Enabled: false}},
+		components:  []serviceregistry.Component{{ServiceID: "demo-service", ComponentID: "demo-health", ComponentType: "health_check", Status: "DISABLED"}},
 	}
 	active, err := BuildSnapshot(context.Background(), reader)
 	if err != nil {
 		t.Fatalf("BuildSnapshot failed: %v", err)
 	}
-	if hasModule(active.Modules, "ojos.demo-module") || hasPermission(active.Permissions, "demo.view") {
-		t.Fatalf("disabled demo module should not appear in active snapshot")
+	if hasService(active.ServiceNodes, "demo-service") || hasPermission(active.Permissions, "demo.view") {
+		t.Fatalf("disabled demo service should not appear in active snapshot")
 	}
 
 	all, err := BuildSnapshotWithOptions(context.Background(), reader, BuildOptions{IncludeDisabled: true})
 	if err != nil {
 		t.Fatalf("BuildSnapshotWithOptions failed: %v", err)
 	}
-	assertHasModule(t, all.Modules, "ojos.demo-module")
+	assertHasService(t, all.ServiceNodes, "demo-service")
 	if !hasPermission(all.Permissions, "demo.view") || !hasMenu(all.Menus, "demo") {
 		t.Fatalf("include disabled snapshot should expose registry contributions")
 	}
@@ -203,10 +203,10 @@ func TestBuildSnapshotIncludeDisabledReturnsDisabledContributions(t *testing.T) 
 func TestBuildRouteTableDetectsPrefixConflicts(t *testing.T) {
 	table := BuildRouteTableWithOptions(Snapshot{
 		Version: "1",
-		GatewayRoutes: []moduleregistry.GatewayRoute{
-			{ModuleID: "a", Prefix: "/api/admin/modules", TargetService: "a", AuthMode: "admin", Enabled: true},
-			{ModuleID: "b", Prefix: "/api/admin/modules/topology", TargetService: "b", AuthMode: "admin", Enabled: true},
-			{ModuleID: "c", Prefix: "/api/problem", TargetService: "c", AuthMode: "required", Enabled: true},
+		GatewayRoutes: []serviceregistry.GatewayRoute{
+			{ServiceID: "a", Prefix: "/api/admin/services", TargetService: "a", AuthMode: "admin", Enabled: true},
+			{ServiceID: "b", Prefix: "/api/admin/services/topology", TargetService: "b", AuthMode: "admin", Enabled: true},
+			{ServiceID: "c", Prefix: "/api/problem", TargetService: "c", AuthMode: "required", Enabled: true},
 		},
 	}, RouteTableOptions{
 		TrustedServices: map[string]TrustedService{
@@ -229,12 +229,12 @@ func TestBuildRouteTableDetectsPrefixConflicts(t *testing.T) {
 func TestBuildRouteTableBlocksReservedPrefixAndUnknownService(t *testing.T) {
 	table := BuildRouteTableWithOptions(Snapshot{
 		Version: "1",
-		GatewayRoutes: []moduleregistry.GatewayRoute{
-			{ModuleID: "a", Prefix: "/api/auth/shadow", TargetService: "known", AuthMode: "public", Enabled: true},
-			{ModuleID: "b", Prefix: "/api/demo", TargetService: "missing", AuthMode: "user", Enabled: true},
-			{ModuleID: "c", Prefix: "/api/ok", TargetService: "known", AuthMode: "user", Enabled: true},
-			{ModuleID: "d", Prefix: "/api/disabled", TargetService: "known", AuthMode: "user", Enabled: false},
-			{ModuleID: "e", Prefix: "/api/judge", TargetService: "known", AuthMode: "user", Enabled: true},
+		GatewayRoutes: []serviceregistry.GatewayRoute{
+			{ServiceID: "a", Prefix: "/api/auth/shadow", TargetService: "known", AuthMode: "public", Enabled: true},
+			{ServiceID: "b", Prefix: "/api/demo", TargetService: "missing", AuthMode: "user", Enabled: true},
+			{ServiceID: "c", Prefix: "/api/ok", TargetService: "known", AuthMode: "user", Enabled: true},
+			{ServiceID: "d", Prefix: "/api/disabled", TargetService: "known", AuthMode: "user", Enabled: false},
+			{ServiceID: "e", Prefix: "/api/judge", TargetService: "known", AuthMode: "user", Enabled: true},
 		},
 	}, RouteTableOptions{
 		TrustedServices: map[string]TrustedService{
@@ -269,9 +269,9 @@ func TestBuildRouteTableBlocksReservedPrefixAndUnknownService(t *testing.T) {
 func TestBuildRouteTableBlocksDuplicatePrefix(t *testing.T) {
 	table := BuildRouteTableWithOptions(Snapshot{
 		Version: "1",
-		GatewayRoutes: []moduleregistry.GatewayRoute{
-			{ModuleID: "a", Prefix: "/api/demo", TargetService: "svc", AuthMode: "user", Enabled: true},
-			{ModuleID: "b", Prefix: "/api/demo", TargetService: "svc", AuthMode: "user", Enabled: true},
+		GatewayRoutes: []serviceregistry.GatewayRoute{
+			{ServiceID: "a", Prefix: "/api/demo", TargetService: "svc", AuthMode: "user", Enabled: true},
+			{ServiceID: "b", Prefix: "/api/demo", TargetService: "svc", AuthMode: "user", Enabled: true},
 		},
 	}, RouteTableOptions{
 		TrustedServices: map[string]TrustedService{
@@ -291,8 +291,8 @@ func TestBuildRouteTableBlocksDuplicatePrefix(t *testing.T) {
 func TestBuildRouteTableBindsServiceHealth(t *testing.T) {
 	table := BuildRouteTableWithOptions(Snapshot{
 		Version: "1",
-		GatewayRoutes: []moduleregistry.GatewayRoute{{
-			ModuleID:      "ojos.judge-core",
+		GatewayRoutes: []serviceregistry.GatewayRoute{{
+			ServiceID:     "judge-api",
 			Prefix:        "/api/problem",
 			TargetService: "problem-api",
 			AuthMode:      "user",
@@ -335,7 +335,7 @@ func TestComposeDriverPlansOnlyAllowedManagedServices(t *testing.T) {
 		Services: []RuntimeService{
 			{
 				ServiceID:      "problem-api",
-				ModuleID:       "ojos.judge-core",
+				OwnerServiceID: "judge-api",
 				Kind:           "http",
 				Lifecycle:      LifecycleManaged,
 				Runtime:        "compose",
@@ -343,15 +343,15 @@ func TestComposeDriverPlansOnlyAllowedManagedServices(t *testing.T) {
 				Required:       true,
 			},
 			{
-				ServiceID: "demo-metadata-service",
-				ModuleID:  "ojos.demo-module",
-				Kind:      "metadata",
-				Lifecycle: LifecycleMetadata,
-				Runtime:   "metadata",
+				ServiceID:      "demo-metadata-service",
+				OwnerServiceID: "demo-service",
+				Kind:           "metadata",
+				Lifecycle:      LifecycleMetadata,
+				Runtime:        "metadata",
 			},
 			{
 				ServiceID:      "unsafe-service",
-				ModuleID:       "ojos.demo-module",
+				OwnerServiceID: "demo-service",
 				Kind:           "http",
 				Lifecycle:      LifecycleManaged,
 				Runtime:        "compose",
@@ -360,7 +360,7 @@ func TestComposeDriverPlansOnlyAllowedManagedServices(t *testing.T) {
 		},
 		Workers: []RuntimeService{{
 			ServiceID:      "judge-worker",
-			ModuleID:       "ojos.judge-core",
+			OwnerServiceID: "judge-api",
 			Kind:           "worker",
 			Lifecycle:      LifecycleManaged,
 			Runtime:        "compose",
@@ -410,26 +410,26 @@ func TestComposeDriverPlansOnlyAllowedManagedServices(t *testing.T) {
 	}
 }
 
-func assertHasModule(t *testing.T, modules []moduleregistry.Module, id string) {
+func assertHasService(t *testing.T, services []serviceregistry.Service, id string) {
 	t.Helper()
-	for _, module := range modules {
-		if module.ModuleID == id {
+	for _, service := range services {
+		if service.ServiceID == id {
 			return
 		}
 	}
-	t.Fatalf("module %s not found in snapshot", id)
+	t.Fatalf("service %s not found in snapshot", id)
 }
 
-func hasModule(modules []moduleregistry.Module, id string) bool {
-	for _, module := range modules {
-		if module.ModuleID == id {
+func hasService(services []serviceregistry.Service, id string) bool {
+	for _, service := range services {
+		if service.ServiceID == id {
 			return true
 		}
 	}
 	return false
 }
 
-func hasPermission(items []moduleregistry.Permission, key string) bool {
+func hasPermission(items []serviceregistry.Permission, key string) bool {
 	for _, item := range items {
 		if item.PermissionKey == key {
 			return true
@@ -438,7 +438,7 @@ func hasPermission(items []moduleregistry.Permission, key string) bool {
 	return false
 }
 
-func hasMenu(items []moduleregistry.Menu, key string) bool {
+func hasMenu(items []serviceregistry.Menu, key string) bool {
 	for _, item := range items {
 		if item.MenuKey == key {
 			return true

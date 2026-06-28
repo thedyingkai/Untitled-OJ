@@ -1,4 +1,4 @@
-syntax = "v1"
+﻿syntax = "v1"
 
 info (
 	title:   "OJOS Auth API"
@@ -84,7 +84,7 @@ type ListUsersResp {
 type RoleItem {
 	Id          int64  `json:"id"`
 	Name        string `json:"name"`
-	ModuleCode  string `json:"module_code"`
+	ServiceCode  string `json:"service_code"`
 	Description string `json:"description"`
 	IsSystem    bool   `json:"is_system"`
 }
@@ -97,7 +97,7 @@ type ListRolesResp {
 
 type PermissionItem {
 	Code        string `json:"code"`
-	ModuleCode  string `json:"module_code"`
+	ServiceCode  string `json:"service_code"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }

@@ -1,4 +1,4 @@
-package moduleregistry
+package serviceregistry
 
 import "encoding/json"
 
@@ -17,8 +17,8 @@ type Set struct {
 	SortOrder   int    `json:"sort_order"`
 }
 
-type Module struct {
-	ModuleID    string          `json:"module_id"`
+type Service struct {
+	ServiceID   string          `json:"service_id"`
 	SetID       string          `json:"set_id"`
 	Name        string          `json:"name"`
 	Version     string          `json:"version"`
@@ -29,15 +29,15 @@ type Module struct {
 }
 
 type Edge struct {
-	FromModuleID      string `json:"from_module_id"`
-	ToModuleID        string `json:"to_module_id"`
+	FromServiceID     string `json:"from_service_id"`
+	ToServiceID       string `json:"to_service_id"`
 	EdgeType          string `json:"edge_type"`
 	VersionConstraint string `json:"version_constraint"`
 	Required          bool   `json:"required"`
 }
 
 type Component struct {
-	ModuleID      string          `json:"module_id"`
+	ServiceID     string          `json:"service_id"`
 	ComponentID   string          `json:"component_id"`
 	ComponentType string          `json:"component_type"`
 	Status        string          `json:"status"`
@@ -45,7 +45,7 @@ type Component struct {
 }
 
 type Installation struct {
-	ModuleID   string          `json:"module_id"`
+	ServiceID  string          `json:"service_id"`
 	Name       string          `json:"name"`
 	Version    string          `json:"version"`
 	Status     string          `json:"status"`
@@ -55,13 +55,13 @@ type Installation struct {
 }
 
 type Permission struct {
-	ModuleID      string `json:"module_id"`
+	ServiceID     string `json:"service_id"`
 	PermissionKey string `json:"permission_key"`
 	Description   string `json:"description"`
 }
 
 type Menu struct {
-	ModuleID           string `json:"module_id"`
+	ServiceID          string `json:"service_id"`
 	MenuKey            string `json:"menu_key"`
 	Title              string `json:"title"`
 	RoutePath          string `json:"route_path"`
@@ -73,7 +73,7 @@ type Menu struct {
 }
 
 type FrontendRoute struct {
-	ModuleID           string `json:"module_id"`
+	ServiceID          string `json:"service_id"`
 	RoutePath          string `json:"route_path"`
 	RouteName          string `json:"route_name"`
 	ComponentKey       string `json:"component_key"`
@@ -82,7 +82,7 @@ type FrontendRoute struct {
 }
 
 type GatewayRoute struct {
-	ModuleID      string `json:"module_id"`
+	ServiceID     string `json:"service_id"`
 	Prefix        string `json:"prefix"`
 	TargetService string `json:"target_service"`
 	AuthMode      string `json:"auth_mode"`
@@ -90,7 +90,7 @@ type GatewayRoute struct {
 }
 
 type Migration struct {
-	ModuleID      string `json:"module_id"`
+	ServiceID     string `json:"service_id"`
 	Version       string `json:"version"`
 	MigrationName string `json:"migration_name"`
 	Checksum      string `json:"checksum"`
@@ -98,13 +98,13 @@ type Migration struct {
 
 type Topology struct {
 	Sets       []Set       `json:"sets"`
-	Nodes      []Module    `json:"nodes"`
+	Nodes      []Service   `json:"nodes"`
 	Edges      []Edge      `json:"edges"`
 	Components []Component `json:"components"`
 }
 
 type Detail struct {
-	Module         Module          `json:"module"`
+	Service        Service         `json:"service"`
 	Dependencies   []Edge          `json:"dependencies"`
 	Dependents     []Edge          `json:"dependents"`
 	Components     []Component     `json:"components"`
@@ -118,7 +118,7 @@ type Detail struct {
 
 type BootstrapData struct {
 	Sets           []Set
-	Modules        []Module
+	Services       []Service
 	Edges          []Edge
 	Components     []Component
 	Installations  []Installation

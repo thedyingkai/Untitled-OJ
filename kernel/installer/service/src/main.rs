@@ -6,10 +6,11 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use service_installer_core::{
-    InstalledModule, Manifest, ModuleState, Plan, RegistrySnapshot, enable_plan, install_plan,
-    rollback_plan, uninstall_plan, upgrade_plan, validate_manifest, validate_manifest_file,
+    ServiceManifest, ServicePlan, ServicePlanAction, ServicePlanKind, ServiceState,
+    validate_endpoint_id, validate_service_manifest, validate_service_manifest_file,
+    validate_service_set_file,
 };
-use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{Column, PgPool, Row, postgres::PgPoolOptions};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-const INSTALLER_TOKEN_HEADER: &str = "x-ojos-installer-token";
+const RUNTIME_TOKEN_HEADER: &str = "x-ojos-runtime-token";
 const DEFAULT_LOCK_TTL_SECONDS: u64 = 300;
 
 #[derive(Clone)]
@@ -52,20 +53,11 @@ struct AppError {
 }
 
 impl AppError {
-    fn bad_request(msg: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "BAD_REQUEST",
-            msg: msg.into(),
-            details: json!({}),
-        }
-    }
-
     fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
-            code: "INSTALLER_INTERNAL_UNAUTHORIZED",
-            msg: "missing or invalid installer internal token".to_string(),
+            code: "RUNTIME_INTERNAL_UNAUTHORIZED",
+            msg: "missing or invalid runtime internal token".to_string(),
             details: json!({}),
         }
     }
@@ -91,7 +83,7 @@ impl AppError {
     fn not_found(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            code: "MODULE_NOT_FOUND",
+            code: "SERVICE_NOT_FOUND",
             msg: msg.into(),
             details: json!({}),
         }
@@ -149,7 +141,47 @@ struct ManifestReq {
     #[serde(default)]
     manifest_path: String,
     #[serde(default)]
-    manifest: Option<Manifest>,
+    manifest: Option<ServiceManifest>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SetReq {
+    set_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EndpointReq {
+    endpoint: String,
+    service_id: String,
+    #[serde(default = "default_device_id")]
+    device_id: String,
+    #[serde(default)]
+    protocol: String,
+    #[serde(default)]
+    health_path: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LinkReq {
+    source_endpoint: String,
+    target_endpoint: String,
+    protocol: String,
+    #[serde(default = "default_auth_mode")]
+    auth_mode: String,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    config_ref: String,
+    #[serde(default)]
+    secret_ref: String,
     #[serde(default)]
     dry_run: bool,
 }
@@ -164,7 +196,8 @@ struct Envelope<T: Serialize> {
 #[derive(Debug, Clone, Serialize)]
 struct OperationItem {
     operation_id: String,
-    module_id: String,
+    object_type: String,
+    object_id: String,
     action: String,
     status: String,
     actor_user_id: Option<i64>,
@@ -195,13 +228,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let database_url = required_env("DATABASE_URL")?;
-    let internal_token = required_env("MODULE_INSTALLER_INTERNAL_TOKEN")?;
+    let internal_token = required_env("ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN")?;
     let repo_root = std::env::var("OJOS_REPO_ROOT").unwrap_or_else(|_| ".".to_string());
-    let host = std::env::var("MODULE_INSTALLER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port: u16 = std::env::var("MODULE_INSTALLER_PORT")
+    let host = std::env::var("ROOT_RUNTIME_MANAGER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port: u16 = std::env::var("ROOT_RUNTIME_MANAGER_PORT")
         .unwrap_or_else(|_| "8090".to_string())
         .parse()?;
-    let lock_ttl_seconds = std::env::var("MODULE_INSTALLER_LOCK_TTL_SECONDS")
+    let lock_ttl_seconds = std::env::var("ROOT_RUNTIME_MANAGER_LOCK_TTL_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| (30..=3600).contains(value))
@@ -228,11 +261,11 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn healthcheck_command() -> anyhow::Result<()> {
-    let host = std::env::var("MODULE_INSTALLER_HOST")
+    let host = std::env::var("ROOT_RUNTIME_MANAGER_HOST")
         .ok()
         .filter(|value| value != "0.0.0.0")
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    let port: u16 = std::env::var("MODULE_INSTALLER_PORT")
+    let port: u16 = std::env::var("ROOT_RUNTIME_MANAGER_PORT")
         .unwrap_or_else(|_| "8090".to_string())
         .parse()?;
     let addr = format!("{}:{}", host, port);
@@ -252,26 +285,24 @@ fn healthcheck_command() -> anyhow::Result<()> {
 fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/internal/modules/discover", get(discover))
-        .route("/internal/modules/validate", post(validate))
-        .route("/internal/modules/plan", post(plan))
-        .route("/internal/modules/install", post(install))
-        .route("/internal/modules/{id}/enable", post(enable))
-        .route("/internal/modules/{id}/disable", post(disable))
+        .route("/internal/services/discover", get(discover_services))
+        .route("/internal/services/validate", post(validate_service))
         .route(
-            "/internal/modules/{id}/upgrade-plan",
-            post(upgrade_plan_handler),
+            "/internal/services/install-plan",
+            post(service_install_plan_handler),
         )
+        .route("/internal/services/install", post(install_service))
+        .route("/internal/services/{id}/enable", post(enable_service))
+        .route("/internal/services/{id}/disable", post(disable_service))
+        .route("/internal/services/{id}/health", get(service_health))
         .route(
-            "/internal/modules/{id}/rollback-plan",
-            post(rollback_plan_handler),
+            "/internal/services/{id}/operations",
+            get(service_operations),
         )
-        .route(
-            "/internal/modules/{id}/uninstall-dry-run",
-            post(uninstall_dry_run),
-        )
-        .route("/internal/modules/{id}/health", get(module_health))
-        .route("/internal/modules/{id}/operations", get(operations))
+        .route("/internal/sets/expand", post(expand_set_handler))
+        .route("/internal/endpoints/register", post(register_endpoint))
+        .route("/internal/links/create", post(create_link))
+        .route("/internal/topology", get(topology))
         .with_state(state)
 }
 
@@ -280,31 +311,31 @@ async fn health(State(state): State<Arc<AppState>>) -> AppResult<Json<Value>> {
     Ok(Json(json!({ "status": "ok" })))
 }
 
-async fn discover(
+async fn discover_services(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> AppResult<Json<Envelope<Value>>> {
     require_internal(&state, &headers)?;
-    let mut modules = Vec::new();
-    let modules_dir = state.repo_root.join("modules");
-    if modules_dir.exists() {
-        for entry in std::fs::read_dir(modules_dir)
-            .map_err(|_| AppError::internal("module discovery failed"))?
+    let mut services = Vec::new();
+    let services_dir = state.repo_root.join("services");
+    if services_dir.exists() {
+        for entry in std::fs::read_dir(services_dir)
+            .map_err(|_| AppError::internal("service discovery failed"))?
         {
-            let entry = entry.map_err(|_| AppError::internal("module discovery failed"))?;
-            let manifest_path = PathBuf::from("modules")
+            let entry = entry.map_err(|_| AppError::internal("service discovery failed"))?;
+            let manifest_path = PathBuf::from("services")
                 .join(entry.file_name())
-                .join("module.yaml");
+                .join("service.yaml");
             if state.repo_root.join(&manifest_path).exists() {
-                match validate_manifest_file(&state.repo_root, &manifest_path) {
-                    Ok(manifest) => modules.push(json!({
+                match validate_service_manifest_file(&state.repo_root, &manifest_path) {
+                    Ok(manifest) => services.push(json!({
                         "manifest_path": manifest_path.to_string_lossy().replace('\\', "/"),
-                        "module_id": manifest.id,
+                        "service_id": manifest.id,
                         "name": manifest.name,
                         "version": manifest.version,
-                        "status": manifest.status,
+                        "kind": manifest.kind,
                     })),
-                    Err(err) => modules.push(json!({
+                    Err(err) => services.push(json!({
                         "manifest_path": manifest_path.to_string_lossy().replace('\\', "/"),
                         "valid": false,
                         "error": err.to_string(),
@@ -313,44 +344,45 @@ async fn discover(
             }
         }
     }
-    Ok(ok(json!({ "modules": modules })))
+    Ok(ok(json!({ "services": services })))
 }
 
-async fn validate(
+async fn validate_service(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<ManifestReq>,
 ) -> AppResult<Json<Envelope<Value>>> {
     require_internal(&state, &headers)?;
-    let manifest = load_manifest(&state, &req)?;
-    validate_manifest(&manifest)?;
-    Ok(ok(json!({ "valid": true, "manifest": manifest })))
+    let manifest = load_service_manifest(&state, &req)?;
+    validate_service_manifest(&manifest)?;
+    Ok(ok(json!({ "valid": true, "service": manifest })))
 }
 
-async fn plan(
+async fn service_install_plan_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<ManifestReq>,
-) -> AppResult<Json<Envelope<Plan>>> {
+) -> AppResult<Json<Envelope<ServicePlan>>> {
     require_internal(&state, &headers)?;
-    let manifest = load_manifest(&state, &req)?;
-    validate_manifest(&manifest)?;
-    let snapshot = load_snapshot(&state.db).await?;
-    let plan = install_plan(&manifest, &snapshot, true)?;
-    Ok(ok(plan))
+    let manifest = load_service_manifest(&state, &req)?;
+    validate_service_manifest(&manifest)?;
+    let installed = load_service_states(&state.db).await?;
+    Ok(ok(service_installer_core::service_install_plan(
+        &manifest, &installed,
+    )))
 }
 
-async fn install(
+async fn install_service(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<ManifestReq>,
 ) -> AppResult<Json<Envelope<Value>>> {
     require_internal(&state, &headers)?;
     let actor = actor_from_headers(&headers);
-    let manifest = load_manifest(&state, &req)?;
-    validate_manifest(&manifest)?;
-    let snapshot = load_snapshot(&state.db).await?;
-    let plan = install_plan(&manifest, &snapshot, req.dry_run)?;
+    let manifest = load_service_manifest(&state, &req)?;
+    validate_service_manifest(&manifest)?;
+    let installed = load_service_states(&state.db).await?;
+    let plan = service_installer_core::service_install_plan(&manifest, &installed);
     if req.dry_run {
         return Ok(ok(json!({ "plan": plan })));
     }
@@ -358,136 +390,127 @@ async fn install(
         return Err(AppError::forbidden("install plan is blocked"));
     }
     let request = serde_json::to_value(&req).unwrap_or_else(|_| json!({}));
-    let module_id = manifest.id.clone();
+    let service_id = manifest.id.clone();
     let manifest_for_apply = manifest.clone();
-    let result = run_locked_operation(&state, &actor, &module_id, "install", request, plan.clone(), |tx| {
-        Box::pin(async move {
-            apply_install(tx, &manifest_for_apply).await?;
-            Ok(json!({ "installed": true, "module_id": manifest_for_apply.id, "version": manifest_for_apply.version }))
-        })
-    })
+    let result = run_locked_operation(
+        &state,
+        &actor,
+        "service",
+        &service_id,
+        "install",
+        request,
+        serde_json::to_value(&plan).unwrap_or_else(|_| json!({})),
+        |tx| {
+            Box::pin(async move {
+                apply_install(tx, &manifest_for_apply).await?;
+                Ok(json!({ "installed": true, "service_id": manifest_for_apply.id, "version": manifest_for_apply.version }))
+            })
+        },
+    )
     .await?;
     Ok(ok(json!({ "plan": plan, "result": result })))
 }
 
-async fn enable(
+async fn enable_service(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<Envelope<Value>>> {
-    require_internal(&state, &headers)?;
-    let actor = actor_from_headers(&headers);
-    let snapshot = load_snapshot(&state.db).await?;
-    let plan = enable_plan(&id, &snapshot, false)?;
-    if !plan.can_apply {
-        return Err(AppError::forbidden("enable plan is blocked"));
-    }
-    let module_id = id.clone();
-    let result = run_locked_operation(&state, &actor, &id, "enable", json!({ "module_id": id }), plan.clone(), |tx| {
-        Box::pin(async move {
-            sqlx::query("UPDATE module_nodes SET status = 'ENABLED', updated_at = NOW() WHERE module_id = $1")
-                .bind(&module_id)
-                .execute(&mut **tx)
-                .await?;
-            sqlx::query("UPDATE module_installations SET status = 'ENABLED', updated_at = NOW(), enabled_at = COALESCE(enabled_at, NOW()), disabled_at = NULL WHERE module_id = $1")
-                .bind(&module_id)
-                .execute(&mut **tx)
-                .await?;
-            Ok(json!({ "enabled": true, "module_id": module_id }))
-        })
-    })
-    .await?;
-    Ok(ok(json!({ "plan": plan, "result": result })))
+    service_status_operation(state, headers, id, "enable", "ENABLED").await
 }
 
-async fn disable(
+async fn disable_service(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<Envelope<Value>>> {
-    require_internal(&state, &headers)?;
-    let actor = actor_from_headers(&headers);
-    let snapshot = load_snapshot(&state.db).await?;
-    let plan = service_installer_core::disable_plan(&id, &snapshot, false)?;
-    if !plan.can_apply {
-        return Err(AppError::forbidden("disable plan is blocked"));
-    }
-    let module_id = id.clone();
-    let result = run_locked_operation(&state, &actor, &id, "disable", json!({ "module_id": id }), plan.clone(), |tx| {
-        Box::pin(async move {
-            sqlx::query("UPDATE module_nodes SET status = 'DISABLED', updated_at = NOW() WHERE module_id = $1")
-                .bind(&module_id)
-                .execute(&mut **tx)
-                .await?;
-            sqlx::query("UPDATE module_installations SET status = 'DISABLED', updated_at = NOW(), disabled_at = COALESCE(disabled_at, NOW()) WHERE module_id = $1")
-                .bind(&module_id)
-                .execute(&mut **tx)
-                .await?;
-            Ok(json!({ "disabled": true, "module_id": module_id }))
-        })
-    })
-    .await?;
-    Ok(ok(json!({ "plan": plan, "result": result })))
+    service_status_operation(state, headers, id, "disable", "DISABLED").await
 }
 
-async fn upgrade_plan_handler(
-    State(state): State<Arc<AppState>>,
+async fn service_status_operation(
+    state: Arc<AppState>,
     headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-    Json(req): Json<ManifestReq>,
-) -> AppResult<Json<Envelope<Plan>>> {
+    id: String,
+    action: &'static str,
+    status: &'static str,
+) -> AppResult<Json<Envelope<Value>>> {
     require_internal(&state, &headers)?;
-    let new_manifest = if req.manifest.is_some() || !req.manifest_path.trim().is_empty() {
-        load_manifest(&state, &req)?
-    } else {
-        get_installed_manifest(&state.db, &id).await?
+    let actor = actor_from_headers(&headers);
+    let exists = sqlx::query("SELECT 1 FROM service_nodes WHERE service_id = $1")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?
+        .is_some();
+    if !exists {
+        return Err(AppError::not_found("service not found"));
+    }
+    let plan = ServicePlan {
+        kind: if action == "enable" {
+            ServicePlanKind::Enable
+        } else {
+            ServicePlanKind::Disable
+        },
+        service_id: id.clone(),
+        version: String::new(),
+        can_apply: true,
+        actions: vec![ServicePlanAction {
+            action: format!("{}_service", action),
+            target: id.clone(),
+            detail: format!("set service status to {}", status),
+        }],
+        blocked_by: vec![],
+        warnings: vec![],
     };
-    let old_manifest = get_installed_manifest(&state.db, &id).await.ok();
-    let snapshot = load_snapshot(&state.db).await?;
-    let plan = upgrade_plan(old_manifest.as_ref(), &new_manifest, &snapshot, true)?;
-    Ok(ok(plan))
+    let plan_json = serde_json::to_value(&plan).unwrap_or_else(|_| json!({}));
+    let service_id_for_apply = id.clone();
+    let result = run_locked_operation(
+        &state,
+        &actor,
+        "service",
+        &id,
+        action,
+        json!({ "service_id": id }),
+        plan_json,
+        |tx| {
+            Box::pin(async move {
+                sqlx::query("UPDATE service_nodes SET status = $2, updated_at = NOW() WHERE service_id = $1")
+                    .bind(&service_id_for_apply)
+                    .bind(status)
+                    .execute(&mut **tx)
+                    .await?;
+                sqlx::query("UPDATE service_installations SET status = $2, updated_at = NOW(), enabled_at = CASE WHEN $2 = 'ENABLED' THEN COALESCE(enabled_at, NOW()) ELSE enabled_at END, disabled_at = CASE WHEN $2 = 'DISABLED' THEN COALESCE(disabled_at, NOW()) ELSE NULL END WHERE service_id = $1")
+                    .bind(&service_id_for_apply)
+                    .bind(status)
+                    .execute(&mut **tx)
+                    .await?;
+                Ok(json!({ "service_id": service_id_for_apply, "status": status }))
+            })
+        },
+    )
+    .await?;
+    Ok(ok(json!({ "plan": plan, "result": result })))
 }
 
-async fn rollback_plan_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-) -> AppResult<Json<Envelope<Plan>>> {
-    require_internal(&state, &headers)?;
-    let snapshot = load_snapshot(&state.db).await?;
-    Ok(ok(rollback_plan(&id, &snapshot, true)?))
-}
-
-async fn uninstall_dry_run(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-) -> AppResult<Json<Envelope<Plan>>> {
-    require_internal(&state, &headers)?;
-    let snapshot = load_snapshot(&state.db).await?;
-    Ok(ok(uninstall_plan(&id, &snapshot, true)?))
-}
-
-async fn module_health(
+async fn service_health(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<Envelope<Value>>> {
     require_internal(&state, &headers)?;
-    let status = sqlx::query("SELECT status FROM module_nodes WHERE module_id = $1")
+    let status = sqlx::query("SELECT status FROM service_nodes WHERE service_id = $1")
         .bind(&id)
         .fetch_optional(&state.db)
         .await?
         .map(|row| row.get::<String, _>("status"));
     match status {
         Some(status) => Ok(ok(
-            json!({ "module_id": id, "status": "ok", "module_status": status }),
+            json!({ "service_id": id, "status": "ok", "service_status": status }),
         )),
-        None => Err(AppError::not_found("module not found")),
+        None => Err(AppError::not_found("service not found")),
     }
 }
 
-async fn operations(
+async fn service_operations(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
@@ -495,10 +518,10 @@ async fn operations(
     require_internal(&state, &headers)?;
     let rows = sqlx::query(
         r#"
-SELECT operation_id, module_id, action, status, actor_user_id, actor_username,
+SELECT operation_id, object_type, object_id, action, status, actor_user_id, actor_username,
        request, plan, result, error_message, created_at::text, updated_at::text
-FROM module_operations
-WHERE module_id = $1
+FROM service_runtime_operations
+WHERE object_type = 'service' AND object_id = $1
 ORDER BY created_at DESC
 LIMIT 50
 "#,
@@ -510,7 +533,8 @@ LIMIT 50
         .into_iter()
         .map(|row| OperationItem {
             operation_id: row.get("operation_id"),
-            module_id: row.get("module_id"),
+            object_type: row.get("object_type"),
+            object_id: row.get("object_id"),
             action: row.get("action"),
             status: row.get("status"),
             actor_user_id: row.get("actor_user_id"),
@@ -526,98 +550,208 @@ LIMIT 50
     Ok(ok(json!({ "operations": items })))
 }
 
-fn load_manifest(state: &AppState, req: &ManifestReq) -> AppResult<Manifest> {
+async fn expand_set_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<SetReq>,
+) -> AppResult<Json<Envelope<Value>>> {
+    require_internal(&state, &headers)?;
+    let set = validate_service_set_file(&state.repo_root, Path::new(req.set_path.trim()))?;
+    Ok(ok(json!(service_installer_core::expand_set(&set))))
+}
+
+async fn register_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<EndpointReq>,
+) -> AppResult<Json<Envelope<Value>>> {
+    require_internal(&state, &headers)?;
+    validate_endpoint_id(&req.endpoint)?;
+    let protocol = if req.protocol.trim().is_empty() {
+        "http".to_string()
+    } else {
+        req.protocol.clone()
+    };
+    let plan = json!({
+        "kind": "endpoint_register",
+        "endpoint": req.endpoint,
+        "service_id": req.service_id,
+        "device_id": req.device_id,
+        "can_apply": true
+    });
+    if req.dry_run {
+        return Ok(ok(json!({ "plan": plan })));
+    }
+    sqlx::query(
+        r#"
+INSERT INTO service_endpoints(endpoint, service_id, device_id, protocol, health_path, display_name, note)
+VALUES($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT(endpoint) DO UPDATE SET
+    service_id = EXCLUDED.service_id,
+    device_id = EXCLUDED.device_id,
+    protocol = EXCLUDED.protocol,
+    health_path = EXCLUDED.health_path,
+    display_name = EXCLUDED.display_name,
+    note = EXCLUDED.note,
+    updated_at = NOW()
+"#,
+    )
+    .bind(&req.endpoint)
+    .bind(&req.service_id)
+    .bind(&req.device_id)
+    .bind(&protocol)
+    .bind(&req.health_path)
+    .bind(&req.display_name)
+    .bind(&req.note)
+    .execute(&state.db)
+    .await?;
+    Ok(ok(json!({ "plan": plan, "endpoint": req.endpoint })))
+}
+
+async fn create_link(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<LinkReq>,
+) -> AppResult<Json<Envelope<Value>>> {
+    require_internal(&state, &headers)?;
+    validate_endpoint_id(&req.source_endpoint)?;
+    validate_endpoint_id(&req.target_endpoint)?;
+    let plan = json!({
+        "kind": "link_create",
+        "source_endpoint": req.source_endpoint,
+        "target_endpoint": req.target_endpoint,
+        "can_apply": true
+    });
+    if req.dry_run {
+        return Ok(ok(json!({ "plan": plan })));
+    }
+    sqlx::query(
+        r#"
+INSERT INTO service_links(source_endpoint, target_endpoint, protocol, auth_mode, scope, config_ref, secret_ref)
+VALUES($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT(source_endpoint, target_endpoint) DO UPDATE SET
+    protocol = EXCLUDED.protocol,
+    auth_mode = EXCLUDED.auth_mode,
+    scope = EXCLUDED.scope,
+    config_ref = EXCLUDED.config_ref,
+    secret_ref = EXCLUDED.secret_ref,
+    updated_at = NOW()
+"#,
+    )
+    .bind(&req.source_endpoint)
+    .bind(&req.target_endpoint)
+    .bind(&req.protocol)
+    .bind(&req.auth_mode)
+    .bind(&req.scope)
+    .bind(&req.config_ref)
+    .bind(&req.secret_ref)
+    .execute(&state.db)
+    .await?;
+    Ok(ok(
+        json!({ "plan": plan, "link": format!("{} -> {}", req.source_endpoint, req.target_endpoint) }),
+    ))
+}
+
+async fn topology(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> AppResult<Json<Envelope<Value>>> {
+    require_internal(&state, &headers)?;
+    let devices = query_json_rows(
+        &state.db,
+        "SELECT device_id, name, kind, endpoint, health FROM devices ORDER BY device_id",
+    )
+    .await?;
+    let services = query_json_rows(
+        &state.db,
+        "SELECT service_id, name, version, status, kind FROM service_nodes ORDER BY service_id",
+    )
+    .await?;
+    let endpoints = query_json_rows(
+        &state.db,
+        "SELECT endpoint, service_id, device_id, protocol, health, reachable FROM service_endpoints ORDER BY endpoint",
+    )
+    .await?;
+    let links = query_json_rows(
+        &state.db,
+        "SELECT source_endpoint, target_endpoint, protocol, auth_mode, scope, health, latency_ms FROM service_links ORDER BY source_endpoint, target_endpoint",
+    )
+    .await?;
+    let sets = query_json_rows(
+        &state.db,
+        "SELECT set_id, name, description, non_root_only FROM service_sets ORDER BY set_id",
+    )
+    .await?;
+    Ok(ok(json!({
+        "devices": devices,
+        "services": services,
+        "endpoints": endpoints,
+        "links": links,
+        "sets": sets
+    })))
+}
+
+fn load_service_manifest(state: &AppState, req: &ManifestReq) -> AppResult<ServiceManifest> {
     if let Some(manifest) = &req.manifest {
-        validate_manifest(manifest)?;
+        validate_service_manifest(manifest)?;
         return Ok(manifest.clone());
     }
     let path = if req.manifest_path.trim().is_empty() {
-        "modules/demo-module/module.yaml"
+        "services/gateway/service.yaml"
     } else {
         req.manifest_path.trim()
     };
-    let manifest = validate_manifest_file(&state.repo_root, Path::new(path))?;
-    Ok(manifest)
+    validate_service_manifest_file(&state.repo_root, Path::new(path)).map_err(AppError::from)
 }
 
-async fn load_snapshot(db: &PgPool) -> AppResult<RegistrySnapshot> {
+async fn load_service_states(db: &PgPool) -> AppResult<Vec<ServiceState>> {
     let rows = sqlx::query(
         r#"
-SELECT module_id, name, version, status, kind, manifest
-FROM module_nodes
-ORDER BY module_id
+SELECT service_id, version, status
+FROM service_nodes
+ORDER BY service_id
 "#,
     )
     .fetch_all(db)
     .await?;
-    let modules = rows
+    Ok(rows
         .into_iter()
-        .map(|row| {
-            let manifest_value: Value = row.get("manifest");
-            let manifest = serde_json::from_value::<Manifest>(manifest_value).ok();
-            InstalledModule {
-                module_id: row.get("module_id"),
-                name: row.get("name"),
-                version: row.get("version"),
-                status: parse_state(row.get::<String, _>("status")),
-                kind: row.get("kind"),
-                manifest,
-            }
+        .map(|row| ServiceState {
+            service_id: row.get("service_id"),
+            version: row.get("version"),
+            enabled: row.get::<String, _>("status") == "ENABLED",
+            endpoint: None,
         })
-        .collect();
-    Ok(RegistrySnapshot { modules })
-}
-
-async fn get_installed_manifest(db: &PgPool, module_id: &str) -> AppResult<Manifest> {
-    let row = sqlx::query("SELECT manifest FROM module_nodes WHERE module_id = $1")
-        .bind(module_id)
-        .fetch_optional(db)
-        .await?
-        .ok_or_else(|| AppError::not_found("module not found"))?;
-    let value: Value = row.get("manifest");
-    serde_json::from_value(value)
-        .map_err(|_| AppError::bad_request("installed manifest is not schema_version 1"))
-}
-
-fn parse_state(status: String) -> ModuleState {
-    match status.as_str() {
-        "ENABLED" => ModuleState::Enabled,
-        "DISABLED" => ModuleState::Disabled,
-        "FAILED_INSTALL" => ModuleState::FailedInstall,
-        "FAILED_UPGRADE" => ModuleState::FailedUpgrade,
-        "REMOVED" => ModuleState::Removed,
-        _ => ModuleState::Installed,
-    }
+        .collect())
 }
 
 async fn apply_install(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    manifest: &Manifest,
+    manifest: &ServiceManifest,
 ) -> Result<(), sqlx::Error> {
     let manifest_json = serde_json::to_value(manifest).unwrap_or_else(|_| json!({}));
-    let install_status =
-        if manifest.kind == "kernel" || manifest.kind == "platform" || manifest.status == "builtin"
-        {
-            "ENABLED"
-        } else {
-            "DISABLED"
-        };
+    let set_id = default_set_for_service(&manifest.id);
+    let install_status = if manifest.id == "root-runtime-manager" || manifest.runtime.root_allowed {
+        "ENABLED"
+    } else {
+        "DISABLED"
+    };
     sqlx::query(
         r#"
-INSERT INTO module_sets(set_id, name, description, sort_order)
+INSERT INTO service_sets(set_id, name, description, sort_order)
 VALUES($1, $1, '', 100)
 ON CONFLICT(set_id) DO NOTHING
 "#,
     )
-    .bind(&manifest.set)
+    .bind(&set_id)
     .execute(&mut **tx)
     .await?;
 
     sqlx::query(
         r#"
-INSERT INTO module_nodes(module_id, set_id, name, version, status, kind, description, manifest)
+INSERT INTO service_nodes(service_id, set_id, name, version, status, kind, description, manifest)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-ON CONFLICT(module_id) DO UPDATE SET
+ON CONFLICT(service_id) DO UPDATE SET
     set_id = EXCLUDED.set_id,
     name = EXCLUDED.name,
     version = EXCLUDED.version,
@@ -629,28 +763,28 @@ ON CONFLICT(module_id) DO UPDATE SET
 "#,
     )
     .bind(&manifest.id)
-    .bind(&manifest.set)
+    .bind(&set_id)
     .bind(&manifest.name)
     .bind(&manifest.version)
     .bind(install_status)
     .bind(&manifest.kind)
-    .bind(&manifest.description)
+    .bind("")
     .bind(&manifest_json)
     .execute(&mut **tx)
     .await?;
 
     sqlx::query(
         r#"
-INSERT INTO module_installations(module_id, name, version, status, manifest, enabled_at)
+INSERT INTO service_installations(service_id, name, version, status, manifest, enabled_at)
 VALUES($1,$2,$3,$4,$5,CASE WHEN $4 = 'ENABLED' THEN NOW() ELSE NULL END)
-ON CONFLICT(module_id) DO UPDATE SET
+ON CONFLICT(service_id) DO UPDATE SET
     name = EXCLUDED.name,
     version = EXCLUDED.version,
     status = EXCLUDED.status,
     manifest = EXCLUDED.manifest,
     updated_at = NOW(),
-    enabled_at = CASE WHEN EXCLUDED.status = 'ENABLED' THEN COALESCE(module_installations.enabled_at, NOW()) ELSE module_installations.enabled_at END,
-    disabled_at = CASE WHEN EXCLUDED.status = 'DISABLED' THEN COALESCE(module_installations.disabled_at, NOW()) ELSE NULL END
+    enabled_at = CASE WHEN EXCLUDED.status = 'ENABLED' THEN COALESCE(service_installations.enabled_at, NOW()) ELSE service_installations.enabled_at END,
+    disabled_at = CASE WHEN EXCLUDED.status = 'DISABLED' THEN COALESCE(service_installations.disabled_at, NOW()) ELSE NULL END
 "#,
     )
     .bind(&manifest.id)
@@ -661,226 +795,45 @@ ON CONFLICT(module_id) DO UPDATE SET
     .execute(&mut **tx)
     .await?;
 
-    for dep in &manifest.requires.modules {
+    for link in &manifest.requires.links {
         sqlx::query(
             r#"
-INSERT INTO module_edges(from_module_id, to_module_id, edge_type, version_constraint, required)
-VALUES($1,$2,'requires',$3,true)
-ON CONFLICT(from_module_id, to_module_id, edge_type) DO UPDATE SET
-    version_constraint = EXCLUDED.version_constraint,
-    required = EXCLUDED.required
+INSERT INTO service_edges(from_service_id, to_service_id, edge_type, version_constraint, required)
+VALUES($1,$2,'requires','',true)
+ON CONFLICT(from_service_id, to_service_id, edge_type) DO UPDATE SET required = EXCLUDED.required
 "#,
         )
         .bind(&manifest.id)
-        .bind(&dep.id)
-        .bind(&dep.version)
+        .bind(&link.id)
         .execute(&mut **tx)
         .await?;
     }
 
-    for component in &manifest.provides.components {
-        upsert_component(
-            tx,
-            &manifest.id,
-            &component.id,
-            &component.component_type,
-            &component.status,
-            &component.config,
-        )
-        .await?;
-    }
-    for service in &manifest.provides.services {
-        upsert_component(
-            tx,
-            &manifest.id,
-            &service.id,
-            "backend_service",
-            install_status,
-            &json!({
-                "path": service.path,
-                "health": service.health,
-                "exposure": service.exposure
-            }),
-        )
-        .await?;
-    }
-    for worker in &manifest.provides.workers {
-        upsert_component(
-            tx,
-            &manifest.id,
-            &worker.id,
-            "worker_service",
-            install_status,
-            &json!({
-                "path": worker.path,
-                "mode": worker.mode
-            }),
-        )
-        .await?;
-    }
-    for bucket in &manifest.provides.storage_buckets {
-        upsert_component(
-            tx,
-            &manifest.id,
-            &bucket.id,
-            "storage_bucket",
-            install_status,
-            &json!({ "description": bucket.description }),
-        )
-        .await?;
-    }
-    for health in &manifest.provides.health_checks {
-        upsert_component(
-            tx,
-            &manifest.id,
-            &health.id,
-            "health_check",
-            if health.optional {
-                "DISABLED"
-            } else {
-                install_status
-            },
-            &json!({ "type": health.check_type, "optional": health.optional }),
-        )
-        .await?;
-    }
-
-    for permission in &manifest.provides.permissions {
+    for permission in &manifest.permissions {
         sqlx::query(
             r#"
-INSERT INTO module_permissions(module_id, permission_key, description)
-VALUES($1,$2,$3)
-ON CONFLICT(permission_key) DO UPDATE SET
-    module_id = EXCLUDED.module_id,
-    description = EXCLUDED.description
+INSERT INTO service_permissions(service_id, permission_key, description)
+VALUES($1,$2,'')
+ON CONFLICT(permission_key) DO UPDATE SET service_id = EXCLUDED.service_id
 "#,
         )
         .bind(&manifest.id)
-        .bind(&permission.key)
-        .bind(&permission.description)
+        .bind(permission)
         .execute(&mut **tx)
         .await?;
         sqlx::query(
             r#"
-INSERT INTO permissions(code, module_code, name, description)
-VALUES($1,$2,$1,$3)
-ON CONFLICT(code) DO UPDATE SET
-    module_code = EXCLUDED.module_code,
-    description = EXCLUDED.description
+INSERT INTO permissions(code, service_code, name, description)
+VALUES($1,$2,$1,'Service permission')
+ON CONFLICT(code) DO UPDATE SET service_code = EXCLUDED.service_code
 "#,
         )
-        .bind(&permission.key)
+        .bind(permission)
         .bind(&manifest.id)
-        .bind(&permission.description)
         .execute(&mut **tx)
         .await?;
     }
 
-    for menu in &manifest.provides.menus {
-        sqlx::query(
-            r#"
-INSERT INTO module_menus(module_id, menu_key, title, route_path, icon, parent_key, sort_order, required_permission, enabled)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-ON CONFLICT(menu_key) DO UPDATE SET
-    module_id = EXCLUDED.module_id,
-    title = EXCLUDED.title,
-    route_path = EXCLUDED.route_path,
-    icon = EXCLUDED.icon,
-    parent_key = EXCLUDED.parent_key,
-    sort_order = EXCLUDED.sort_order,
-    required_permission = EXCLUDED.required_permission,
-    enabled = EXCLUDED.enabled
-"#,
-        )
-        .bind(&manifest.id)
-        .bind(&menu.key)
-        .bind(&menu.title)
-        .bind(&menu.route_path)
-        .bind(&menu.icon)
-        .bind(&menu.parent_key)
-        .bind(menu.sort_order)
-        .bind(&menu.required_permission)
-        .bind(menu.enabled)
-        .execute(&mut **tx)
-        .await?;
-    }
-
-    for route in &manifest.provides.frontend_routes {
-        sqlx::query(
-            r#"
-INSERT INTO module_frontend_routes(module_id, route_path, route_name, component_key, required_permission, enabled)
-VALUES($1,$2,$3,$4,$5,$6)
-ON CONFLICT(module_id, route_path) DO UPDATE SET
-    route_name = EXCLUDED.route_name,
-    component_key = EXCLUDED.component_key,
-    required_permission = EXCLUDED.required_permission,
-    enabled = EXCLUDED.enabled
-"#,
-        )
-        .bind(&manifest.id)
-        .bind(&route.path)
-        .bind(&route.name)
-        .bind(&route.component_key)
-        .bind(&route.required_permission)
-        .bind(route.enabled)
-        .execute(&mut **tx)
-        .await?;
-    }
-
-    for route in &manifest.provides.gateway_routes {
-        sqlx::query(
-            r#"
-INSERT INTO module_gateway_routes(module_id, prefix, target_service, auth_mode, enabled)
-VALUES($1,$2,$3,$4,$5)
-ON CONFLICT(prefix) DO UPDATE SET
-    module_id = EXCLUDED.module_id,
-    target_service = EXCLUDED.target_service,
-    auth_mode = EXCLUDED.auth_mode,
-    enabled = EXCLUDED.enabled
-"#,
-        )
-        .bind(&manifest.id)
-        .bind(&route.prefix)
-        .bind(&route.target_service)
-        .bind(&route.auth_mode)
-        .bind(route.enabled)
-        .execute(&mut **tx)
-        .await?;
-    }
-
-    Ok(())
-}
-
-async fn upsert_component(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    module_id: &str,
-    component_id: &str,
-    component_type: &str,
-    status: &str,
-    config: &Value,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-INSERT INTO module_components(module_id, component_id, component_type, status, config)
-VALUES($1,$2,$3,$4,$5)
-ON CONFLICT(module_id, component_id) DO UPDATE SET
-    component_type = EXCLUDED.component_type,
-    status = EXCLUDED.status,
-    config = EXCLUDED.config,
-    updated_at = NOW()
-"#,
-    )
-    .bind(module_id)
-    .bind(component_id)
-    .bind(component_type)
-    .bind(if status.trim().is_empty() {
-        "DISABLED"
-    } else {
-        status
-    })
-    .bind(config)
-    .execute(&mut **tx)
-    .await?;
     Ok(())
 }
 
@@ -890,10 +843,11 @@ type BoxFutureResult<'a> =
 async fn run_locked_operation<F>(
     state: &AppState,
     actor: &Actor,
-    module_id: &str,
+    object_type: &str,
+    object_id: &str,
     action: &str,
     request: Value,
-    plan: Plan,
+    plan: Value,
     apply: F,
 ) -> AppResult<Value>
 where
@@ -909,31 +863,38 @@ where
     )
     .await?;
     let mut tx = state.db.begin().await?;
-    let plan_json = serde_json::to_value(&plan).unwrap_or_else(|_| json!({}));
     let request_json = redact_json(request.clone());
-    let initial_result = json!({});
     sqlx::query(
         r#"
-INSERT INTO module_operations(operation_id, module_id, action, status, actor_user_id, actor_username, request, plan, result)
-VALUES($1,$2,$3,'RUNNING',$4,$5,$6,$7,$8)
+INSERT INTO service_runtime_operations(operation_id, object_type, object_id, action, status, actor_user_id, actor_username, request, plan, result)
+VALUES($1,$2,$3,$4,'RUNNING',$5,$6,$7,$8,$9)
 "#,
     )
     .bind(&operation_id)
-    .bind(module_id)
+    .bind(object_type)
+    .bind(object_id)
     .bind(action)
     .bind(actor.user_id)
     .bind(&actor.username)
     .bind(&request_json)
-    .bind(&plan_json)
-    .bind(&initial_result)
+    .bind(&plan)
+    .bind(json!({}))
     .execute(&mut *tx)
     .await?;
     match apply(&mut tx).await {
         Ok(result) => {
-            write_audit(&mut tx, actor, module_id, action, &operation_id).await?;
+            write_audit(
+                &mut tx,
+                actor,
+                object_type,
+                object_id,
+                action,
+                &operation_id,
+            )
+            .await?;
             sqlx::query(
                 r#"
-UPDATE module_operations
+UPDATE service_runtime_operations
 SET status = 'SUCCEEDED', result = $2, updated_at = NOW()
 WHERE operation_id = $1
 "#,
@@ -947,12 +908,11 @@ WHERE operation_id = $1
             Ok(json!({ "operation_id": operation_id, "result": result }))
         }
         Err(err) => {
-            let message = "operation failed";
             let _ = tx.rollback().await;
             let _ = sqlx::query(
                 r#"
-INSERT INTO module_operations(operation_id, module_id, action, status, actor_user_id, actor_username, request, plan, result, error_message)
-VALUES($1,$2,$3,'FAILED',$4,$5,$6,$7,$8,$9)
+INSERT INTO service_runtime_operations(operation_id, object_type, object_id, action, status, actor_user_id, actor_username, request, plan, result, error_message)
+VALUES($1,$2,$3,$4,'FAILED',$5,$6,$7,$8,$9,$10)
 ON CONFLICT(operation_id) DO UPDATE SET
     status = 'FAILED',
     error_message = EXCLUDED.error_message,
@@ -960,18 +920,19 @@ ON CONFLICT(operation_id) DO UPDATE SET
 "#,
             )
             .bind(&operation_id)
-            .bind(module_id)
+            .bind(object_type)
+            .bind(object_id)
             .bind(action)
             .bind(actor.user_id)
             .bind(&actor.username)
             .bind(&request_json)
-            .bind(&plan_json)
+            .bind(&plan)
             .bind(json!({}))
-            .bind(message)
+            .bind("operation failed")
             .execute(&state.db)
             .await;
             release_lock(&state.db, "root-runtime-manager-global", &owner).await;
-            tracing::error!(error = %err, "module operation failed");
+            tracing::error!(error = %err, "service operation failed");
             Err(AppError::internal("operation failed"))
         }
     }
@@ -980,13 +941,13 @@ ON CONFLICT(operation_id) DO UPDATE SET
 async fn acquire_lock(db: &PgPool, key: &str, owner: &str, ttl_seconds: u64) -> AppResult<()> {
     let row = sqlx::query(
         r#"
-INSERT INTO module_operation_locks(lock_key, owner, expires_at)
+INSERT INTO service_operation_locks(lock_key, owner, expires_at)
 VALUES($1,$2,NOW() + ($3::text || ' seconds')::interval)
 ON CONFLICT(lock_key) DO UPDATE SET
     owner = EXCLUDED.owner,
     acquired_at = NOW(),
     expires_at = EXCLUDED.expires_at
-WHERE module_operation_locks.expires_at < NOW()
+WHERE service_operation_locks.expires_at < NOW()
 RETURNING owner
 "#,
     )
@@ -996,13 +957,13 @@ RETURNING owner
     .fetch_optional(db)
     .await?;
     if row.is_none() {
-        return Err(AppError::conflict("module operation lock is held"));
+        return Err(AppError::conflict("service operation lock is held"));
     }
     Ok(())
 }
 
 async fn release_lock(db: &PgPool, key: &str, owner: &str) {
-    let _ = sqlx::query("DELETE FROM module_operation_locks WHERE lock_key = $1 AND owner = $2")
+    let _ = sqlx::query("DELETE FROM service_operation_locks WHERE lock_key = $1 AND owner = $2")
         .bind(key)
         .bind(owner)
         .execute(db)
@@ -1012,27 +973,53 @@ async fn release_lock(db: &PgPool, key: &str, owner: &str) {
 async fn write_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     actor: &Actor,
-    module_id: &str,
+    object_type: &str,
+    object_id: &str,
     action: &str,
     operation_id: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
 INSERT INTO permission_audit_logs(actor_type, actor_id, action, target_type, target_id, metadata)
-VALUES('user', COALESCE($1, 0), $2, 'module', 0, $3)
+VALUES('user', COALESCE($1, 0), $2, $3, 0, $4)
 "#,
     )
     .bind(actor.user_id)
-    .bind(format!("module.{}", action))
-    .bind(json!({ "module_id": module_id, "operation_id": operation_id }))
+    .bind(format!("service.{}", action))
+    .bind(object_type)
+    .bind(json!({ "object_id": object_id, "operation_id": operation_id }))
     .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
+async fn query_json_rows(db: &PgPool, sql: &str) -> AppResult<Vec<Value>> {
+    let rows = sqlx::query(sql).fetch_all(db).await?;
+    let values = rows
+        .into_iter()
+        .map(|row| {
+            let mut map = serde_json::Map::new();
+            for column in row.columns() {
+                let name = column.name();
+                if let Ok(value) = row.try_get::<String, _>(name) {
+                    map.insert(name.to_string(), Value::String(value));
+                } else if let Ok(value) = row.try_get::<bool, _>(name) {
+                    map.insert(name.to_string(), Value::Bool(value));
+                } else if let Ok(value) = row.try_get::<i32, _>(name) {
+                    map.insert(name.to_string(), json!(value));
+                } else if let Ok(value) = row.try_get::<Option<i32>, _>(name) {
+                    map.insert(name.to_string(), json!(value));
+                }
+            }
+            Value::Object(map)
+        })
+        .collect();
+    Ok(values)
+}
+
 fn require_internal(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
     let got = headers
-        .get(INSTALLER_TOKEN_HEADER)
+        .get(RUNTIME_TOKEN_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if got.is_empty() || got != state.internal_token {
@@ -1064,13 +1051,13 @@ fn ok<T: Serialize>(data: T) -> Json<Envelope<T>> {
 
 fn installer_error_code(err: &service_installer_core::InstallerError) -> &'static str {
     match err {
-        service_installer_core::InstallerError::UnsafePath(_) => "MANIFEST_PATH_ESCAPE",
-        service_installer_core::InstallerError::InvalidManifest(_) => "MANIFEST_INVALID",
+        service_installer_core::InstallerError::UnsafePath(_) => "SERVICE_PATH_ESCAPE",
+        service_installer_core::InstallerError::InvalidManifest(_) => "SERVICE_MANIFEST_INVALID",
         service_installer_core::InstallerError::Dependency(_) => "DEPENDENCY_CONFLICT",
         service_installer_core::InstallerError::Blocked(_) => "OPERATION_BLOCKED",
         service_installer_core::InstallerError::Package(_) => "PACKAGE_INVALID",
         service_installer_core::InstallerError::Io(_) => "IO_ERROR",
-        service_installer_core::InstallerError::Yaml(_) => "MANIFEST_PARSE_ERROR",
+        service_installer_core::InstallerError::Yaml(_) => "SERVICE_MANIFEST_PARSE_ERROR",
         service_installer_core::InstallerError::Json(_) => "JSON_ERROR",
         service_installer_core::InstallerError::Zip(_) => "PACKAGE_INVALID",
     }
@@ -1107,6 +1094,22 @@ fn required_env(name: &str) -> anyhow::Result<String> {
     Ok(value)
 }
 
+fn default_set_for_service(service_id: &str) -> String {
+    if service_id == "judge-worker" {
+        "judge-worker-node".to_string()
+    } else {
+        "single-node-oj".to_string()
+    }
+}
+
+fn default_device_id() -> String {
+    "root-local".to_string()
+}
+
+fn default_auth_mode() -> String {
+    "internal".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1123,11 +1126,6 @@ mod tests {
         };
         let headers = HeaderMap::new();
         assert!(require_internal(&state, &headers).is_err());
-    }
-
-    #[test]
-    fn state_parse_accepts_enabled() {
-        assert!(parse_state("ENABLED".to_string()).is_enabled());
     }
 
     #[test]
