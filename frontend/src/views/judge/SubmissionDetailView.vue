@@ -55,22 +55,22 @@ const canDebug = computed(
 )
 
 const columns: DataTableColumns<SubmissionCaseItem> = [
-  { title: 'Case', key: 'case_no', width: 82 },
+  { title: '测试点', key: 'case_no', width: 82 },
   {
-    title: 'Status',
+    title: '状态',
     key: 'status',
     width: 160,
     render: (row) => h(OjosStatusTag, { status: row.status }),
   },
-  { title: 'Score', key: 'score', width: 82 },
-  { title: 'Time', key: 'time_ms', width: 105, render: (row) => formatDuration(row.time_ms) },
-  { title: 'Memory', key: 'memory_kb', width: 120, render: (row) => formatMemory(row.memory_kb) },
-  { title: 'Message', key: 'message', render: (row) => row.message || '-' },
+  { title: '分数', key: 'score', width: 82 },
+  { title: '耗时', key: 'time_ms', width: 105, render: (row) => formatDuration(row.time_ms) },
+  { title: '内存', key: 'memory_kb', width: 120, render: (row) => formatMemory(row.memory_kb) },
+  { title: '消息', key: 'message', render: (row) => row.message || '-' },
 ]
 
 async function load(showLoading = true): Promise<void> {
   if (!Number.isFinite(submissionId.value) || submissionId.value <= 0) {
-    error.value = new Error('Invalid submission id')
+    error.value = new Error('提交 ID 无效')
     return
   }
 
@@ -150,71 +150,71 @@ onUnmounted(() => {
   <div class="submission-detail-page">
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && !submission" />
-    <EmptyView v-else-if="!loading && !error && !submission" description="Submission not found" />
+    <EmptyView v-else-if="!loading && !error && !submission" description="未找到提交" />
 
     <template v-if="submission">
       <OjosPageHeader
-        :title="`Submission #${submission.id}`"
-        :description="isTerminal ? 'Final judge result is available.' : 'This submission is still being processed.'"
-        eyebrow="Judge Result"
+        :title="`提交 #${submission.id}`"
+        :description="isTerminal ? '最终评测结果已生成。' : '本次提交仍在处理中。'"
+        eyebrow="评测结果"
       >
         <template #actions>
           <RouterLink to="/submissions">
-            <NButton secondary>Back</NButton>
+            <NButton secondary>返回</NButton>
           </RouterLink>
-          <NButton secondary :loading="loading" @click="() => load()">Refresh</NButton>
+          <NButton secondary :loading="loading" @click="() => load()">刷新</NButton>
         </template>
       </OjosPageHeader>
 
       <div class="submission-summary-grid">
-        <OjosStatCard label="Score" :value="submission.score" tone="primary" />
-        <OjosStatCard label="Time" :value="formatDuration(submission.time_ms)" />
-        <OjosStatCard label="Memory" :value="formatMemory(submission.memory_kb)" />
-        <OjosStatCard label="Cases" :value="cases.length" />
+        <OjosStatCard label="分数" :value="submission.score" tone="primary" />
+        <OjosStatCard label="耗时" :value="formatDuration(submission.time_ms)" />
+        <OjosStatCard label="内存" :value="formatMemory(submission.memory_kb)" />
+        <OjosStatCard label="测试点" :value="cases.length" />
       </div>
 
-      <OjosSection title="Overview">
+      <OjosSection title="概览">
         <NDescriptions :column="2" label-placement="left" bordered>
-          <NDescriptionsItem label="Status">
+          <NDescriptionsItem label="状态">
             <OjosStatusTag :status="submission.status" />
           </NDescriptionsItem>
-          <NDescriptionsItem label="Language">
+          <NDescriptionsItem label="语言">
             <OjosLanguageTag :language="submission.language" />
           </NDescriptionsItem>
-          <NDescriptionsItem label="Problem">
+          <NDescriptionsItem label="题目">
             <RouterLink :to="`/problems/${submission.problem_id}`" class="table-link">
               {{ submission.problem_id }}
             </RouterLink>
           </NDescriptionsItem>
-          <NDescriptionsItem label="User">{{ submission.user_id }}</NDescriptionsItem>
+          <NDescriptionsItem label="用户">{{ submission.user_id }}</NDescriptionsItem>
           <NDescriptionsItem label="Code sha256">{{ submission.code_sha256 || '-' }}</NDescriptionsItem>
-          <NDescriptionsItem label="Created">{{ formatDateTime(submission.created_at) }}</NDescriptionsItem>
-          <NDescriptionsItem label="Judged">{{ formatDateTime(submission.judged_at) }}</NDescriptionsItem>
-          <NDescriptionsItem label="Message" :span="2">
+          <NDescriptionsItem label="创建时间">{{ formatDateTime(submission.created_at) }}</NDescriptionsItem>
+          <NDescriptionsItem label="评测时间">{{ formatDateTime(submission.judged_at) }}</NDescriptionsItem>
+          <NDescriptionsItem label="消息" :span="2">
             <NText>{{ submission.message || '-' }}</NText>
           </NDescriptionsItem>
         </NDescriptions>
       </OjosSection>
 
-      <OjosSection title="Case Results">
+      <OjosSection title="测试点结果">
         <NDataTable :columns="columns" :data="cases" :loading="loading" :bordered="false" />
       </OjosSection>
 
-      <OjosSection v-if="canDebug" title="Debug Logs">
+      <OjosSection v-if="canDebug" title="调试日志">
         <NSpace vertical size="medium">
           <NAlert type="warning" :show-icon="true">
-            Logs are returned by the API with truncation. Internal paths must not be exposed.
+            日志由 API 截断返回；界面不得暴露内部路径。
           </NAlert>
           <NSpace align="center">
-            <NText>Case</NText>
+            <NText>测试点</NText>
             <NInputNumber v-model:value="debugCaseNo" :min="1" style="width: 140px" />
-            <NButton :loading="debugLoading" @click="loadDebugLogs">Load logs</NButton>
+            <NButton :loading="debugLoading" @click="loadDebugLogs">加载日志</NButton>
           </NSpace>
           <ApiErrorAlert :error="debugError" />
           <div v-if="debugLogs" class="debug-log-grid">
             <OjosCodeBlock label="stdout" :code="debugLogs.stdout" />
             <OjosCodeBlock label="stderr" :code="debugLogs.stderr" />
-            <OjosCodeBlock label="checker log" :code="debugLogs.checker_log" />
+            <OjosCodeBlock label="checker 日志" :code="debugLogs.checker_log" />
           </div>
         </NSpace>
       </OjosSection>

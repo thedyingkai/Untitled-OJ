@@ -21,13 +21,13 @@ const routes: RouteRecordRaw[] = [
     path: '/login',
     name: 'login',
     component: () => import('../views/auth/LoginView.vue'),
-    meta: { title: 'Login', guestOnly: true },
+    meta: { title: '登录', guestOnly: true },
   },
   {
     path: '/register',
     name: 'register',
     component: () => import('../views/auth/RegisterView.vue'),
-    meta: { title: 'Register', guestOnly: true },
+    meta: { title: '注册', guestOnly: true },
   },
   {
     path: '/',
@@ -39,26 +39,26 @@ const routes: RouteRecordRaw[] = [
         path: 'dashboard',
         name: 'dashboard',
         component: () => import('../views/dashboard/DashboardView.vue'),
-        meta: { title: 'Dashboard', requiresAuth: true },
+        meta: { title: '总览', requiresAuth: true },
       },
       {
         path: 'me',
         name: 'me',
         component: () => import('../views/profile/MeView.vue'),
-        meta: { title: 'Profile', requiresAuth: true },
+        meta: { title: '账号', requiresAuth: true },
       },
       {
         path: 'problems',
         name: 'problems',
         component: () => import('../views/problem/ProblemListView.vue'),
-        meta: { title: 'Problems', requiresAuth: true },
+        meta: { title: '题目', requiresAuth: true },
       },
       {
         path: 'problems/new',
         name: 'problem-create',
         component: () => import('../views/problem/ProblemCreateView.vue'),
         meta: {
-          title: 'New Problem',
+          title: '新建题目',
           requiresAuth: true,
           roles: adminRoles,
           permissions: ['problem.create', 'system.admin'],
@@ -68,44 +68,44 @@ const routes: RouteRecordRaw[] = [
         path: 'problems/:id/edit',
         name: 'problem-edit',
         component: () => import('../views/problem/ProblemEditView.vue'),
-        meta: { title: 'Edit Problem', requiresAuth: true },
+        meta: { title: '编辑题目', requiresAuth: true },
       },
       {
         path: 'problems/:id/package',
         name: 'problem-package',
         component: () => import('../views/problem/ProblemPackageView.vue'),
-        meta: { title: 'Problem Package', requiresAuth: true },
+        meta: { title: '题目数据包', requiresAuth: true },
       },
       {
         path: 'problems/:id/submit',
         name: 'problem-submit',
         component: () => import('../views/judge/ProblemSubmitView.vue'),
-        meta: { title: 'Submit', requiresAuth: true },
+        meta: { title: '提交代码', requiresAuth: true },
       },
       {
         path: 'problems/:id',
         name: 'problem-detail',
         component: () => import('../views/problem/ProblemDetailView.vue'),
-        meta: { title: 'Problem Detail', requiresAuth: true },
+        meta: { title: '题目详情', requiresAuth: true },
       },
       {
         path: 'submissions',
         name: 'submissions',
         component: () => import('../views/judge/SubmissionsListView.vue'),
-        meta: { title: 'Submissions', requiresAuth: true },
+        meta: { title: '提交记录', requiresAuth: true },
       },
       {
         path: 'submissions/:id',
         name: 'submission-detail',
         component: () => import('../views/judge/SubmissionDetailView.vue'),
-        meta: { title: 'Submission Detail', requiresAuth: true },
+        meta: { title: '提交详情', requiresAuth: true },
       },
       {
         path: 'admin/health',
         name: 'admin-health',
         component: () => import('../views/admin/AdminHealthView.vue'),
         meta: {
-          title: 'Service Health',
+          title: '服务健康',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -116,7 +116,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-judge',
         component: () => import('../views/admin/AdminJudgeView.vue'),
         meta: {
-          title: 'Judge Cluster',
+          title: '评测集群',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -127,7 +127,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-modules',
         component: () => import('../views/admin/AdminModulesView.vue'),
         meta: {
-          title: 'Modules',
+          title: '模块中心',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -138,7 +138,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-module-topology',
         component: () => import('../views/admin/AdminModuleTopologyView.vue'),
         meta: {
-          title: 'Module Topology',
+          title: '模块拓扑',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -149,7 +149,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-module-installer',
         component: () => import('../views/admin/AdminModuleInstallerView.vue'),
         meta: {
-          title: 'Module Installer',
+          title: '安装器视图',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -160,7 +160,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-module-contributions',
         component: () => import('../views/admin/AdminModuleContributionsView.vue'),
         meta: {
-          title: 'Module Contributions',
+          title: '模块贡献',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -171,7 +171,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-module-contribution-detail',
         component: () => import('../views/admin/AdminModuleContributionsView.vue'),
         meta: {
-          title: 'Module Contribution',
+          title: '模块贡献详情',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -182,7 +182,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-runtime-services',
         component: () => import('../views/admin/AdminRuntimeServicesView.vue'),
         meta: {
-          title: 'Runtime Services',
+          title: 'Runtime 服务',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -193,7 +193,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-runtime-service-detail',
         component: () => import('../views/admin/AdminRuntimeServicesView.vue'),
         meta: {
-          title: 'Runtime Service',
+          title: 'Runtime 服务详情',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -204,7 +204,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-module-detail',
         component: () => import('../views/admin/AdminModuleDetailView.vue'),
         meta: {
-          title: 'Module Detail',
+          title: '模块详情',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -215,7 +215,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-users',
         component: () => import('../views/admin/AdminUsersView.vue'),
         meta: {
-          title: 'Users',
+          title: '用户',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -226,7 +226,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-permissions',
         component: () => import('../views/admin/AdminPermissionsView.vue'),
         meta: {
-          title: 'Permissions',
+          title: '权限',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -237,7 +237,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-permission-check',
         component: () => import('../views/admin/AdminPermissionCheckView.vue'),
         meta: {
-          title: 'Permission Check',
+          title: '权限检查',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -248,7 +248,7 @@ const routes: RouteRecordRaw[] = [
         name: 'admin-problem-permissions',
         component: () => import('../views/admin/AdminProblemPermissionsView.vue'),
         meta: {
-          title: 'Problem Permissions',
+          title: '题目权限',
           requiresAuth: true,
           roles: adminRoles,
           permissions: adminPermissions,
@@ -260,19 +260,19 @@ const routes: RouteRecordRaw[] = [
     path: '/403',
     name: 'forbidden',
     component: () => import('../views/errors/ForbiddenView.vue'),
-    meta: { title: 'Forbidden' },
+    meta: { title: '无权访问' },
   },
   {
     path: '/500',
     name: 'server-error',
     component: () => import('../views/errors/ServerErrorView.vue'),
-    meta: { title: 'Server Error' },
+    meta: { title: '服务错误' },
   },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
     component: () => import('../views/errors/NotFoundView.vue'),
-    meta: { title: 'Not Found' },
+    meta: { title: '页面不存在' },
   },
 ]
 

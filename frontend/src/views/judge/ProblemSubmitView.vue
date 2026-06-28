@@ -47,7 +47,7 @@ const canSubmit = computed(
 
 async function load(): Promise<void> {
   if (!Number.isFinite(problemId.value) || problemId.value <= 0) {
-    error.value = new Error('Invalid problem id')
+    error.value = new Error('题目 ID 无效')
     return
   }
 
@@ -86,7 +86,7 @@ async function submit(): Promise<void> {
       language: language.value,
       code: code.value,
     })
-    message.success(`Submission #${data.submission_id} created`)
+    message.success(`提交 #${data.submission_id} 已创建`)
     await router.push(`/submissions/${data.submission_id}`)
   } catch (err) {
     error.value = err
@@ -123,40 +123,40 @@ onMounted(() => {
   <div class="submit-page">
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && !problem" />
-    <EmptyView v-else-if="!loading && !error && !problem" description="Problem not found" />
+    <EmptyView v-else-if="!loading && !error && !problem" description="未找到题目" />
 
     <template v-if="problem">
       <OjosPageHeader
-        :title="`Submit: ${problem.title}`"
+        :title="`提交：${problem.title}`"
         :description="`${problem.id} · ${problem.slug}`"
-        eyebrow="Submission"
+        eyebrow="提交"
       >
         <template #actions>
           <RouterLink :to="`/problems/${problem.id}`">
-            <NButton secondary>Back to problem</NButton>
+            <NButton secondary>返回题目</NButton>
           </RouterLink>
-          <NButton secondary :loading="loading" @click="load">Refresh</NButton>
+          <NButton secondary :loading="loading" @click="load">刷新</NButton>
         </template>
       </OjosPageHeader>
 
       <div class="submit-layout">
         <main class="submit-editor">
-          <OjosSection title="Source Code">
+          <OjosSection title="源代码">
             <NForm label-placement="top">
-              <NFormItem label="Language" required>
+              <NFormItem label="语言" required>
                 <NSelect
                   v-model:value="language"
                   :options="languageOptions"
-                  placeholder="Select language"
+                  placeholder="选择语言"
                   @update:value="onLanguageChange"
                 />
               </NFormItem>
-              <NFormItem label="Code" required>
+              <NFormItem label="代码" required>
                 <CodeEditor v-model="code" :language="language" :max-length="262144" />
               </NFormItem>
               <NSpace justify="end">
                 <NButton type="primary" :disabled="!canSubmit" :loading="submitting" @click="submit">
-                  Submit
+                  提交
                 </NButton>
               </NSpace>
             </NForm>
@@ -164,10 +164,10 @@ onMounted(() => {
         </main>
 
         <aside class="submit-aside">
-          <OjosSection title="Problem">
+          <OjosSection title="题目信息">
             <div class="submit-meta-stack">
-              <OjosStatCard label="Time Limit" :value="formatDuration(problem.time_limit_ms)" />
-              <OjosStatCard label="Memory Limit" :value="formatMemoryLimit(problem.memory_limit_mb)" />
+              <OjosStatCard label="时间限制" :value="formatDuration(problem.time_limit_ms)" />
+              <OjosStatCard label="内存限制" :value="formatMemoryLimit(problem.memory_limit_mb)" />
               <div class="submit-tags">
                 <OjosDifficultyTag :difficulty="problem.difficulty" />
                 <OjosVisibilityTag :visibility="problem.visibility" />

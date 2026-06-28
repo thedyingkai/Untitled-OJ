@@ -27,7 +27,7 @@ const roleOptions = [
 
 async function submit(add: boolean): Promise<void> {
   if (!form.user_id || !problemId.value) {
-    message.warning('User ID is required')
+    message.warning('请填写用户 ID')
     return
   }
   const payload = {
@@ -39,10 +39,10 @@ async function submit(add: boolean): Promise<void> {
   try {
     if (add) {
       await addProblemRole(payload)
-      message.success('Problem role granted')
+      message.success('题目角色已授予')
     } else {
       await removeProblemRole(payload)
-      message.success('Problem role removed')
+      message.success('题目角色已移除')
     }
   } catch (err) {
     message.error(toApiClientError(err).message)
@@ -55,35 +55,35 @@ async function submit(add: boolean): Promise<void> {
 <template>
   <div class="problem-permissions-page">
     <OjosPageHeader
-      title="Problem Permissions"
-      :description="`Grant or remove scoped roles for problem #${problemId}.`"
-      eyebrow="Admin"
+      title="题目权限"
+      :description="`授予或移除题目 #${problemId} 的作用域角色。`"
+      eyebrow="管理"
     />
 
     <OjosSection
-      title="Scoped Role Binding"
-      description="Problem roles are applied through Auth admin APIs and are not stored in the frontend."
+      title="作用域角色绑定"
+      description="题目角色通过 Auth 管理 API 生效，不存储在前端。"
     >
       <NForm :model="form" label-placement="left" label-width="120" class="problem-permission-form">
-      <NFormItem label="Problem ID">
+      <NFormItem label="题目 ID">
         <NInputNumber :value="problemId" disabled />
       </NFormItem>
-      <NFormItem label="User ID" required>
+      <NFormItem label="用户 ID" required>
         <NInputNumber v-model:value="form.user_id" :min="1" />
       </NFormItem>
-      <NFormItem label="Role" required>
+      <NFormItem label="角色" required>
         <NSelect v-model:value="form.role" :options="roleOptions" style="width: 220px" />
       </NFormItem>
     </NForm>
 
       <OjosToolbar>
         <NSpace align="center">
-          <span class="muted-text">Selected role</span>
+          <span class="muted-text">当前角色</span>
           <OjosRoleTag :role="form.role" />
         </NSpace>
         <template #actions>
-          <NButton type="primary" :loading="saving" @click="submit(true)">Grant</NButton>
-          <NButton secondary :loading="saving" @click="submit(false)">Remove</NButton>
+          <NButton type="primary" :loading="saving" @click="submit(true)">授予</NButton>
+          <NButton secondary :loading="saving" @click="submit(false)">移除</NButton>
         </template>
       </OjosToolbar>
     </OjosSection>

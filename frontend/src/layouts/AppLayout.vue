@@ -34,28 +34,28 @@ const menuOptions = computed<MenuOption[]>(() => {
     runtimeMenus.value.filter((item) => !item.route_path.startsWith('/admin')),
   )
   const options: MenuOption[] = [
-    menuLink('/dashboard', 'Overview'),
+    menuLink('/dashboard', '总览'),
     ...(primaryModuleMenus.length > 0
       ? primaryModuleMenus
-      : [menuLink('/problems', 'Problems'), menuLink('/submissions', 'Submissions')]),
-    menuLink('/me', 'Profile'),
+      : [menuLink('/problems', '题目'), menuLink('/submissions', '提交')]),
+    menuLink('/me', '账号'),
   ]
 
   if (canUseAdmin.value) {
     options.push({
       key: 'admin',
-      label: 'Administration',
+      label: '管理',
       children: [
-        menuLink('/admin/health', 'Health'),
+        menuLink('/admin/health', '健康'),
         ...moduleMenuOptions(runtimeMenus.value.filter((item) => item.route_path.startsWith('/admin'))),
-        menuLink('/admin/modules', 'Modules'),
-        menuLink('/admin/runtime/services', 'Runtime Services'),
-        menuLink('/admin/modules/installer', 'Installer'),
-        menuLink('/admin/modules/contributions', 'Contributions'),
-        menuLink('/admin/modules/topology', 'Topology'),
-        menuLink('/admin/users', 'Users'),
-        menuLink('/admin/permissions', 'Permissions'),
-        menuLink('/admin/permission-check', 'Permission Check'),
+        menuLink('/admin/modules', '模块'),
+        menuLink('/admin/runtime/services', 'Runtime'),
+        menuLink('/admin/modules/installer', '安装器视图'),
+        menuLink('/admin/modules/contributions', '贡献'),
+        menuLink('/admin/modules/topology', '拓扑'),
+        menuLink('/admin/users', '用户'),
+        menuLink('/admin/permissions', '权限'),
+        menuLink('/admin/permission-check', '权限检查'),
       ],
     })
   }
@@ -158,11 +158,11 @@ onMounted(() => void loadRuntimeMenus())
         <div class="brand-mark">OJ</div>
         <div class="brand-copy">
           <strong>OJOS</strong>
-          <span>Control Plane</span>
+          <span>评测控制台</span>
         </div>
       </div>
       <NMenu :options="menuOptions" :value="selectedKey" :default-expanded-keys="expandedKeys" />
-      <div class="sider-footer">Gateway routed through /api</div>
+      <div class="sider-footer">官方安装入口：ojosctl / TUI</div>
     </NLayoutSider>
 
     <NLayout class="app-main">
@@ -170,7 +170,7 @@ onMounted(() => void loadRuntimeMenus())
         <div class="header-inner">
           <div class="header-left">
             <NButton size="small" secondary @click="collapsed = !collapsed">
-              {{ collapsed ? 'Menu' : 'Hide' }}
+              {{ collapsed ? '菜单' : '收起' }}
             </NButton>
             <div class="header-title">
               <h1>{{ route.meta.title || 'OJOS' }}</h1>
@@ -184,7 +184,7 @@ onMounted(() => void loadRuntimeMenus())
 
           <div class="header-actions">
             <RouterLink v-if="canUseAdmin" to="/admin/health" class="header-link">
-              Health
+              健康
             </RouterLink>
             <NTag size="small" type="success">
               {{ auth.user?.username || 'user' }}
@@ -192,7 +192,7 @@ onMounted(() => void loadRuntimeMenus())
             <NText class="role-text">
               {{ auth.roles.join(', ') || 'user' }}
             </NText>
-            <NButton size="small" tertiary @click="logout">Logout</NButton>
+            <NButton size="small" tertiary @click="logout">退出</NButton>
           </div>
         </div>
       </NLayoutHeader>

@@ -23,15 +23,15 @@ const lastUpdated = ref<string>('')
 let timer: number | undefined
 
 const columns = computed<DataTableColumns<HealthComponent>>(() => [
-  { title: 'Component', key: 'name', minWidth: 170 },
+  { title: '组件', key: 'name', minWidth: 170 },
   {
-    title: 'Status',
+    title: '状态',
     key: 'status',
     width: 130,
     render: (row) => h(OjosHealthBadge, { status: row.status }),
   },
-  { title: 'Latency', key: 'latency_ms', width: 120, render: (row) => formatDuration(row.latency_ms) },
-  { title: 'Message', key: 'message', render: (row) => row.message || '-' },
+  { title: '延迟', key: 'latency_ms', width: 120, render: (row) => formatDuration(row.latency_ms) },
+  { title: '消息', key: 'message', render: (row) => row.message || '-' },
 ])
 
 async function load(silent = false): Promise<void> {
@@ -79,15 +79,15 @@ onBeforeUnmount(stopTimer)
 <template>
   <div class="admin-health-page">
     <OjosPageHeader
-      title="Service Health"
-      description="Runtime health for gateway, APIs, PostgreSQL, Redis, storage, workers, and queue."
-      eyebrow="Admin"
+      title="服务健康"
+      description="Gateway、API、PostgreSQL、Redis、存储、Worker 和队列的运行状态。"
+      eyebrow="管理"
     >
       <template #actions>
         <NSpace align="center">
-          <NText depth="3">Auto refresh</NText>
+          <NText depth="3">自动刷新</NText>
           <NSwitch v-model:value="autoRefresh" />
-          <NButton :loading="refreshing" secondary @click="load(true)">Refresh</NButton>
+          <NButton :loading="refreshing" secondary @click="load(true)">刷新</NButton>
         </NSpace>
       </template>
     </OjosPageHeader>
@@ -98,23 +98,23 @@ onBeforeUnmount(stopTimer)
       <template v-else>
         <div class="health-summary-grid">
           <div class="health-state-card">
-            <span>Overall status</span>
+            <span>整体状态</span>
             <OjosHealthBadge :status="health?.status || 'unknown'" />
-            <small>Last updated {{ formatDateTime(lastUpdated) }}</small>
+            <small>最近更新 {{ formatDateTime(lastUpdated) }}</small>
           </div>
           <OjosStatCard
-            label="Workers Online"
+            label="在线 Worker"
             :value="health?.worker_online_count ?? 0"
             tone="success"
           />
-          <OjosStatCard label="Queue Pending" :value="health?.queue_pending ?? 0" tone="primary" />
-          <OjosStatCard label="Internal Auth" :value="health?.internal_auth || '-'" />
+          <OjosStatCard label="队列等待" :value="health?.queue_pending ?? 0" tone="primary" />
+          <OjosStatCard label="内部认证" :value="health?.internal_auth || '-'" />
         </div>
 
-        <OjosSection title="Components" description="Each row is reported by the real Admin Health API.">
+        <OjosSection title="组件" description="每一行均来自真实 Admin Health API。">
           <EmptyView
             v-if="(health?.components || []).length === 0"
-            description="No health components reported"
+            description="暂无健康组件报告"
           />
           <NDataTable v-else :columns="columns" :data="health?.components || []" :bordered="false" />
         </OjosSection>

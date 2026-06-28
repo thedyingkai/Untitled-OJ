@@ -20,7 +20,7 @@ async function handleSubmit(payload: ProblemFormInput): Promise<void> {
 
   try {
     const data = await createProblem(payload)
-    message.success('Problem created')
+    message.success('题目已创建')
     await router.push(`/problems/${data.problem_id}`)
   } catch (err) {
     error.value = err
@@ -37,7 +37,7 @@ function cancel(): void {
 <template>
   <NSpace vertical size="large">
     <ApiErrorAlert :error="error" />
-    <PageCard title="New Problem">
+    <PageCard title="新建题目">
       <ProblemForm mode="create" :loading="saving" @submit="handleSubmit" @cancel="cancel" />
     </PageCard>
   </NSpace>

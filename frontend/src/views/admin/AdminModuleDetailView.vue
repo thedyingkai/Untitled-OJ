@@ -42,64 +42,64 @@ const error = ref<ApiClientError | null>(null)
 const moduleId = computed(() => String(route.params.id || ''))
 
 const edgeColumns: DataTableColumns<ModuleEdgeItem> = [
-  { title: 'From', key: 'from_module_id', minWidth: 220 },
-  { title: 'To', key: 'to_module_id', minWidth: 220 },
-  { title: 'Type', key: 'edge_type', width: 130 },
-  { title: 'Constraint', key: 'version_constraint', width: 160 },
-  { title: 'Required', key: 'required', width: 100, render: (row) => (row.required ? 'yes' : 'no') },
+  { title: '来源', key: 'from_module_id', minWidth: 220 },
+  { title: '目标', key: 'to_module_id', minWidth: 220 },
+  { title: '类型', key: 'edge_type', width: 130 },
+  { title: '约束', key: 'version_constraint', width: 160 },
+  { title: '必需', key: 'required', width: 100, render: (row) => (row.required ? '是' : '否') },
 ]
 
 const componentColumns: DataTableColumns<ModuleComponentItem> = [
-  { title: 'Component', key: 'component_id', minWidth: 220 },
-  { title: 'Type', key: 'component_type', width: 170 },
+  { title: '组件', key: 'component_id', minWidth: 220 },
+  { title: '类型', key: 'component_type', width: 170 },
   {
-    title: 'Status',
+    title: '状态',
     key: 'status',
     width: 130,
     render: (row) => h(OjosModuleStatusTag, { status: row.status }),
   },
-  { title: 'Config', key: 'config', render: (row) => h(OjosJsonViewer, { value: row.config }) },
+  { title: '配置', key: 'config', render: (row) => h(OjosJsonViewer, { value: row.config }) },
 ]
 
 const permissionColumns: DataTableColumns<ModulePermissionItem> = [
-  { title: 'Permission', key: 'permission_key', minWidth: 260 },
-  { title: 'Description', key: 'description' },
+  { title: '权限', key: 'permission_key', minWidth: 260 },
+  { title: '说明', key: 'description' },
 ]
 
 const menuColumns: DataTableColumns<ModuleMenuItem> = [
-  { title: 'Menu', key: 'menu_key', minWidth: 160 },
-  { title: 'Title', key: 'title', minWidth: 160 },
-  { title: 'Route', key: 'route_path', minWidth: 220 },
-  { title: 'Permission', key: 'required_permission', minWidth: 220 },
-  { title: 'Enabled', key: 'enabled', width: 100, render: (row) => (row.enabled ? 'yes' : 'no') },
+  { title: '菜单', key: 'menu_key', minWidth: 160 },
+  { title: '标题', key: 'title', minWidth: 160 },
+  { title: '路由', key: 'route_path', minWidth: 220 },
+  { title: '权限', key: 'required_permission', minWidth: 220 },
+  { title: '启用', key: 'enabled', width: 100, render: (row) => (row.enabled ? '是' : '否') },
 ]
 
 const frontendRouteColumns: DataTableColumns<ModuleFrontendRouteItem> = [
-  { title: 'Route', key: 'route_path', minWidth: 240 },
-  { title: 'Name', key: 'route_name', minWidth: 180 },
-  { title: 'Component', key: 'component_key', minWidth: 220 },
-  { title: 'Permission', key: 'required_permission', minWidth: 220 },
-  { title: 'Enabled', key: 'enabled', width: 100, render: (row) => (row.enabled ? 'yes' : 'no') },
+  { title: '路由', key: 'route_path', minWidth: 240 },
+  { title: '名称', key: 'route_name', minWidth: 180 },
+  { title: '组件', key: 'component_key', minWidth: 220 },
+  { title: '权限', key: 'required_permission', minWidth: 220 },
+  { title: '启用', key: 'enabled', width: 100, render: (row) => (row.enabled ? '是' : '否') },
 ]
 
 const gatewayRouteColumns: DataTableColumns<ModuleGatewayRouteItem> = [
-  { title: 'Prefix', key: 'prefix', minWidth: 220 },
-  { title: 'Target service', key: 'target_service', minWidth: 180 },
-  { title: 'Auth mode', key: 'auth_mode', width: 140 },
-  { title: 'Enabled', key: 'enabled', width: 100, render: (row) => (row.enabled ? 'yes' : 'no') },
+  { title: '前缀', key: 'prefix', minWidth: 220 },
+  { title: '目标服务', key: 'target_service', minWidth: 180 },
+  { title: '认证模式', key: 'auth_mode', width: 140 },
+  { title: '启用', key: 'enabled', width: 100, render: (row) => (row.enabled ? '是' : '否') },
 ]
 
 const installationColumns: DataTableColumns<ModuleInstallationItem> = [
-  { title: 'Name', key: 'name', minWidth: 180 },
-  { title: 'Version', key: 'version', width: 110 },
+  { title: '名称', key: 'name', minWidth: 180 },
+  { title: '版本', key: 'version', width: 110 },
   {
-    title: 'Status',
+    title: '状态',
     key: 'status',
     width: 140,
     render: (row) => h(OjosModuleStatusTag, { status: row.status }),
   },
-  { title: 'Enabled At', key: 'enabled_at', width: 180, render: (row) => formatDateTime(row.enabled_at) },
-  { title: 'Disabled At', key: 'disabled_at', width: 180, render: (row) => formatDateTime(row.disabled_at) },
+  { title: '启用时间', key: 'enabled_at', width: 180, render: (row) => formatDateTime(row.enabled_at) },
+  { title: '禁用时间', key: 'disabled_at', width: 180, render: (row) => formatDateTime(row.disabled_at) },
 ]
 
 async function load(silent = false): Promise<void> {
@@ -126,20 +126,20 @@ onMounted(() => void load())
   <div class="module-detail-page">
     <OjosPageHeader
       :title="moduleId"
-      :description="detail?.module.description || 'Module detail from the registry API.'"
-      eyebrow="Module"
+      :description="detail?.module.description || '来自模块注册表 API 的模块详情。'"
+      eyebrow="模块"
     >
       <template #actions>
         <RouterLink to="/admin/modules">
-          <NButton secondary>Registry</NButton>
+          <NButton secondary>注册表</NButton>
         </RouterLink>
         <RouterLink to="/admin/modules/topology">
-          <NButton secondary>Topology</NButton>
+          <NButton secondary>拓扑</NButton>
         </RouterLink>
         <RouterLink to="/admin/modules/installer">
-          <NButton secondary>Installer</NButton>
+          <NButton secondary>安装器视图</NButton>
         </RouterLink>
-        <NButton secondary :loading="refreshing" @click="load(true)">Refresh</NButton>
+        <NButton secondary :loading="refreshing" @click="load(true)">刷新</NButton>
       </template>
     </OjosPageHeader>
 
@@ -148,40 +148,40 @@ onMounted(() => void load())
       <ApiErrorAlert v-if="error" :error="error" @retry="load()" />
       <template v-else-if="detail">
         <div class="module-detail-summary">
-          <OjosStatCard label="Components" :value="detail.components.length" tone="primary" />
-          <OjosStatCard label="Dependencies" :value="detail.dependencies.length" />
-          <OjosStatCard label="Dependents" :value="detail.dependents.length" />
-          <OjosStatCard label="Permissions" :value="detail.permissions.length" />
+          <OjosStatCard label="组件" :value="detail.components.length" tone="primary" />
+          <OjosStatCard label="依赖" :value="detail.dependencies.length" />
+          <OjosStatCard label="被依赖" :value="detail.dependents.length" />
+          <OjosStatCard label="权限" :value="detail.permissions.length" />
         </div>
 
-        <OjosSection title="Basic Information">
+        <OjosSection title="基础信息">
           <NDescriptions bordered :column="2">
             <NDescriptionsItem label="Module ID">{{ detail.module.module_id }}</NDescriptionsItem>
-            <NDescriptionsItem label="Name">{{ detail.module.name }}</NDescriptionsItem>
-            <NDescriptionsItem label="Set">{{ detail.module.set_id }}</NDescriptionsItem>
-            <NDescriptionsItem label="Version">{{ detail.module.version }}</NDescriptionsItem>
-            <NDescriptionsItem label="Status">
+            <NDescriptionsItem label="名称">{{ detail.module.name }}</NDescriptionsItem>
+            <NDescriptionsItem label="集合">{{ detail.module.set_id }}</NDescriptionsItem>
+            <NDescriptionsItem label="版本">{{ detail.module.version }}</NDescriptionsItem>
+            <NDescriptionsItem label="状态">
               <OjosModuleStatusTag :status="detail.module.status" />
             </NDescriptionsItem>
-            <NDescriptionsItem label="Kind">{{ detail.module.kind }}</NDescriptionsItem>
-            <NDescriptionsItem label="Description" :span="2">
+            <NDescriptionsItem label="类型">{{ detail.module.kind }}</NDescriptionsItem>
+            <NDescriptionsItem label="说明" :span="2">
               {{ detail.module.description }}
             </NDescriptionsItem>
           </NDescriptions>
         </OjosSection>
 
-        <OjosSection title="Registry Details">
+        <OjosSection title="注册表详情">
           <NTabs type="line" animated>
-            <NTabPane name="dependencies" tab="Dependencies">
-              <EmptyView v-if="detail.dependencies.length === 0" description="No dependencies" />
+            <NTabPane name="dependencies" tab="依赖">
+              <EmptyView v-if="detail.dependencies.length === 0" description="暂无依赖" />
               <NDataTable v-else :columns="edgeColumns" :data="detail.dependencies" :bordered="false" />
             </NTabPane>
-            <NTabPane name="dependents" tab="Dependents">
-              <EmptyView v-if="detail.dependents.length === 0" description="No dependents" />
+            <NTabPane name="dependents" tab="被依赖">
+              <EmptyView v-if="detail.dependents.length === 0" description="暂无被依赖模块" />
               <NDataTable v-else :columns="edgeColumns" :data="detail.dependents" :bordered="false" />
             </NTabPane>
-            <NTabPane name="components" tab="Components">
-              <EmptyView v-if="detail.components.length === 0" description="No components" />
+            <NTabPane name="components" tab="组件">
+              <EmptyView v-if="detail.components.length === 0" description="暂无组件" />
               <NDataTable
                 v-else
                 :columns="componentColumns"
@@ -190,8 +190,8 @@ onMounted(() => void load())
                 :bordered="false"
               />
             </NTabPane>
-            <NTabPane name="permissions" tab="Permissions">
-              <EmptyView v-if="detail.permissions.length === 0" description="No permissions" />
+            <NTabPane name="permissions" tab="权限">
+              <EmptyView v-if="detail.permissions.length === 0" description="暂无权限" />
               <NDataTable
                 v-else
                 :columns="permissionColumns"
@@ -200,12 +200,12 @@ onMounted(() => void load())
                 :bordered="false"
               />
             </NTabPane>
-            <NTabPane name="menus" tab="Menus">
-              <EmptyView v-if="detail.menus.length === 0" description="No menus" />
+            <NTabPane name="menus" tab="菜单">
+              <EmptyView v-if="detail.menus.length === 0" description="暂无菜单" />
               <NDataTable v-else :columns="menuColumns" :data="detail.menus" :bordered="false" />
             </NTabPane>
-            <NTabPane name="frontend" tab="Frontend Routes">
-              <EmptyView v-if="detail.frontend_routes.length === 0" description="No frontend routes" />
+            <NTabPane name="frontend" tab="前端路由">
+              <EmptyView v-if="detail.frontend_routes.length === 0" description="暂无前端路由" />
               <NDataTable
                 v-else
                 :columns="frontendRouteColumns"
@@ -214,8 +214,8 @@ onMounted(() => void load())
                 :bordered="false"
               />
             </NTabPane>
-            <NTabPane name="gateway" tab="Gateway Routes">
-              <EmptyView v-if="detail.gateway_routes.length === 0" description="No gateway routes" />
+            <NTabPane name="gateway" tab="Gateway 路由">
+              <EmptyView v-if="detail.gateway_routes.length === 0" description="暂无 Gateway 路由" />
               <NDataTable
                 v-else
                 :columns="gatewayRouteColumns"
@@ -223,8 +223,8 @@ onMounted(() => void load())
                 :bordered="false"
               />
             </NTabPane>
-            <NTabPane name="health" tab="Health Checks">
-              <EmptyView v-if="detail.health_checks.length === 0" description="No health checks" />
+            <NTabPane name="health" tab="健康检查">
+              <EmptyView v-if="detail.health_checks.length === 0" description="暂无健康检查" />
               <NDataTable
                 v-else
                 :columns="componentColumns"
@@ -232,8 +232,8 @@ onMounted(() => void load())
                 :bordered="false"
               />
             </NTabPane>
-            <NTabPane name="installations" tab="Installations">
-              <EmptyView v-if="detail.installations.length === 0" description="No installations" />
+            <NTabPane name="installations" tab="安装记录">
+              <EmptyView v-if="detail.installations.length === 0" description="暂无安装记录" />
               <NDataTable
                 v-else
                 :columns="installationColumns"

@@ -36,7 +36,7 @@ const canUseAdmin = computed(
 
 const problemColumns: DataTableColumns<ProblemItem> = [
   {
-    title: 'Problem',
+    title: '题目',
     key: 'title',
     render: (row) =>
       h(
@@ -46,13 +46,13 @@ const problemColumns: DataTableColumns<ProblemItem> = [
       ),
   },
   {
-    title: 'Difficulty',
+    title: '难度',
     key: 'difficulty',
     width: 120,
     render: (row) => h(OjosDifficultyTag, { difficulty: row.difficulty }),
   },
   {
-    title: 'Visibility',
+    title: '可见性',
     key: 'visibility',
     width: 120,
     render: (row) => h(OjosVisibilityTag, { visibility: row.visibility }),
@@ -68,13 +68,13 @@ const submissionColumns: DataTableColumns<SubmissionItem> = [
       h(RouterLink, { to: `/submissions/${row.id}`, class: 'table-link' }, { default: () => row.id }),
   },
   {
-    title: 'Status',
+    title: '状态',
     key: 'status',
     width: 150,
     render: (row) => h(OjosStatusTag, { status: row.status }),
   },
   {
-    title: 'Problem',
+    title: '题目',
     key: 'problem_id',
     width: 100,
     render: (row) =>
@@ -85,14 +85,14 @@ const submissionColumns: DataTableColumns<SubmissionItem> = [
       ),
   },
   {
-    title: 'Language',
+    title: '语言',
     key: 'language',
     width: 120,
     render: (row) => h(OjosLanguageTag, { language: row.language }),
   },
-  { title: 'Time', key: 'time_ms', width: 100, render: (row) => formatDuration(row.time_ms) },
-  { title: 'Memory', key: 'memory_kb', width: 110, render: (row) => formatMemory(row.memory_kb) },
-  { title: 'Submitted', key: 'created_at', width: 180, render: (row) => formatDateTime(row.created_at) },
+  { title: '耗时', key: 'time_ms', width: 100, render: (row) => formatDuration(row.time_ms) },
+  { title: '内存', key: 'memory_kb', width: 110, render: (row) => formatMemory(row.memory_kb) },
+  { title: '提交时间', key: 'created_at', width: 180, render: (row) => formatDateTime(row.created_at) },
 ]
 
 async function load(): Promise<void> {
@@ -122,51 +122,51 @@ onMounted(() => void load())
   <div class="dashboard-page">
     <OjosPageHeader
       title="OJOS"
-      :description="`Signed in as ${auth.user?.username || 'user'} · ${auth.roles.join(', ') || 'user'}`"
+      :description="`当前用户 ${auth.user?.username || 'user'}，角色 ${auth.roles.join(', ') || 'user'}`"
       eyebrow="Online Judge"
     >
       <template #actions>
         <RouterLink to="/problems">
-          <NButton type="primary">Problems</NButton>
+          <NButton type="primary">题库</NButton>
         </RouterLink>
         <RouterLink to="/submissions">
-          <NButton secondary>Submissions</NButton>
+          <NButton secondary>提交</NButton>
         </RouterLink>
-        <NButton secondary :loading="loading" @click="load">Refresh</NButton>
+        <NButton secondary :loading="loading" @click="load">刷新</NButton>
       </template>
     </OjosPageHeader>
 
     <ApiErrorAlert :error="error" />
 
     <div class="dashboard-stats">
-      <OjosStatCard label="Visible Problems" :value="problems.length" tone="primary" />
-      <OjosStatCard label="Recent Submissions" :value="submissions.length" />
-      <OjosStatCard label="Roles" :value="auth.roles.length || 1" />
+      <OjosStatCard label="可见题目" :value="problems.length" tone="primary" />
+      <OjosStatCard label="最近提交" :value="submissions.length" />
+      <OjosStatCard label="角色数" :value="auth.roles.length || 1" />
       <div class="dashboard-health-card">
-        <span>System Health</span>
+        <span>系统健康</span>
         <OjosHealthBadge v-if="health" :status="health.status" />
-        <NTag v-else size="small">User scope</NTag>
+        <NTag v-else size="small">用户视图</NTag>
       </div>
     </div>
 
     <div class="quick-grid">
       <RouterLink to="/problems" class="quick-card">
-        <strong>Problem Set</strong>
-        <span>Search, read statements, and submit solutions.</span>
+        <strong>题库</strong>
+        <span>检索题目、阅读题面并提交代码。</span>
       </RouterLink>
       <RouterLink to="/submissions" class="quick-card">
-        <strong>Submissions</strong>
-        <span>Inspect verdicts, resource usage, and case results.</span>
+        <strong>提交记录</strong>
+        <span>查看评测结果、资源占用和测试点详情。</span>
       </RouterLink>
       <RouterLink to="/me" class="quick-card">
-        <strong>Account</strong>
-        <span>Review your roles and effective permissions.</span>
+        <strong>账号</strong>
+        <span>查看角色和当前生效权限。</span>
       </RouterLink>
     </div>
 
     <div class="dashboard-grid">
-      <OjosSection title="Recent Problems">
-        <EmptyView v-if="!loading && problems.length === 0" description="No problems" />
+      <OjosSection title="最近题目">
+        <EmptyView v-if="!loading && problems.length === 0" description="暂无题目" />
         <NDataTable
           v-else
           :columns="problemColumns"
@@ -176,8 +176,8 @@ onMounted(() => void load())
         />
       </OjosSection>
 
-      <OjosSection title="Recent Submissions">
-        <EmptyView v-if="!loading && submissions.length === 0" description="No submissions" />
+      <OjosSection title="最近提交">
+        <EmptyView v-if="!loading && submissions.length === 0" description="暂无提交" />
         <NDataTable
           v-else
           :columns="submissionColumns"
@@ -189,23 +189,23 @@ onMounted(() => void load())
     </div>
 
     <PermissionGuard :roles="['super_admin', 'admin']" :permissions="['system.admin']">
-      <OjosSection title="Operations">
+      <OjosSection title="运维入口">
         <div class="quick-grid">
           <RouterLink to="/admin/health" class="quick-card">
-            <strong>Service Health</strong>
-            <span>Check gateway, APIs, database, Redis, storage, workers, and queue.</span>
+            <strong>服务健康</strong>
+            <span>查看 Gateway、API、数据库、Redis、存储、Worker 和队列。</span>
           </RouterLink>
           <RouterLink to="/admin/judge" class="quick-card">
-            <strong>Judge Cluster</strong>
-            <span>Inspect workers, task leases, queue signals, and requeue actions.</span>
+            <strong>评测集群</strong>
+            <span>查看 Worker、任务租约、队列信号和重排队操作。</span>
           </RouterLink>
           <RouterLink to="/admin/modules" class="quick-card">
-            <strong>Modules</strong>
-            <span>Browse module registry, manifests, components, and topology.</span>
+            <strong>模块中心</strong>
+            <span>查看模块注册表、manifest、组件和拓扑。</span>
           </RouterLink>
           <RouterLink to="/admin/permissions" class="quick-card">
-            <strong>Permissions</strong>
-            <span>Manage roles, grants, and problem-level authorization.</span>
+            <strong>权限</strong>
+            <span>管理角色、授权和题目级权限。</span>
           </RouterLink>
         </div>
       </OjosSection>

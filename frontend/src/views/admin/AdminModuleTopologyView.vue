@@ -28,15 +28,15 @@ const refreshing = ref(false)
 const error = ref<ApiClientError | null>(null)
 
 const setColumns: DataTableColumns<ModuleSetItem> = [
-  { title: 'Set ID', key: 'set_id', width: 180 },
-  { title: 'Name', key: 'name', width: 180 },
-  { title: 'Description', key: 'description' },
-  { title: 'Order', key: 'sort_order', width: 100 },
+  { title: '集合 ID', key: 'set_id', width: 180 },
+  { title: '名称', key: 'name', width: 180 },
+  { title: '说明', key: 'description' },
+  { title: '排序', key: 'sort_order', width: 100 },
 ]
 
 const moduleNodeColumns = computed<DataTableColumns<ModuleNodeItem>>(() => [
   {
-    title: 'Module',
+    title: '模块',
     key: 'module_id',
     width: 260,
     render: (row) =>
@@ -49,43 +49,43 @@ const moduleNodeColumns = computed<DataTableColumns<ModuleNodeItem>>(() => [
         { default: () => row.module_id },
       ),
   },
-  { title: 'Set', key: 'set_id', width: 160 },
-  { title: 'Version', key: 'version', width: 100 },
-  { title: 'Status', key: 'status', width: 120, render: (row) => hStatus(row.status) },
-  { title: 'Kind', key: 'kind', width: 120 },
+  { title: '集合', key: 'set_id', width: 160 },
+  { title: '版本', key: 'version', width: 100 },
+  { title: '状态', key: 'status', width: 120, render: (row) => hStatus(row.status) },
+  { title: '类型', key: 'kind', width: 120 },
 ])
 
 const dependencyEdgeColumns: DataTableColumns<ModuleEdgeItem> = [
-  { title: 'From', key: 'from_module_id' },
-  { title: 'To', key: 'to_module_id' },
-  { title: 'Type', key: 'edge_type', width: 120 },
-  { title: 'Constraint', key: 'version_constraint', width: 160 },
-  { title: 'Required', key: 'required', width: 100, render: (row) => (row.required ? 'yes' : 'no') },
+  { title: '来源', key: 'from_module_id' },
+  { title: '目标', key: 'to_module_id' },
+  { title: '类型', key: 'edge_type', width: 120 },
+  { title: '约束', key: 'version_constraint', width: 160 },
+  { title: '必需', key: 'required', width: 100, render: (row) => (row.required ? '是' : '否') },
 ]
 
 const topologyNodeColumns: DataTableColumns<ModuleRuntimeTopologyNode> = [
-  { title: 'Node', key: 'id', minWidth: 280 },
-  { title: 'Label', key: 'label', minWidth: 180 },
-  { title: 'Type', key: 'type', width: 160 },
-  { title: 'Module', key: 'module_id', minWidth: 220 },
-  { title: 'Status', key: 'status', width: 120, render: (row) => hStatus(row.status) },
-  { title: 'Source', key: 'source', width: 120 },
+  { title: '节点', key: 'id', minWidth: 280 },
+  { title: '标签', key: 'label', minWidth: 180 },
+  { title: '类型', key: 'type', width: 160 },
+  { title: '模块', key: 'module_id', minWidth: 220 },
+  { title: '状态', key: 'status', width: 120, render: (row) => hStatus(row.status) },
+  { title: '来源', key: 'source', width: 120 },
 ]
 
 const topologyEdgeColumns: DataTableColumns<ModuleRuntimeTopologyEdge> = [
-  { title: 'From', key: 'from', minWidth: 280 },
-  { title: 'To', key: 'to', minWidth: 280 },
-  { title: 'Type', key: 'type', width: 140 },
-  { title: 'Module', key: 'module_id', minWidth: 220 },
-  { title: 'Source', key: 'source', width: 120 },
+  { title: '来源', key: 'from', minWidth: 280 },
+  { title: '目标', key: 'to', minWidth: 280 },
+  { title: '类型', key: 'type', width: 140 },
+  { title: '模块', key: 'module_id', minWidth: 220 },
+  { title: '来源类型', key: 'source', width: 120 },
 ]
 
 const componentColumns: DataTableColumns<ModuleComponentItem> = [
-  { title: 'Module', key: 'module_id', width: 240 },
-  { title: 'Component', key: 'component_id', width: 220 },
-  { title: 'Type', key: 'component_type', width: 160 },
-  { title: 'Status', key: 'status', width: 120, render: (row) => hStatus(row.status) },
-  { title: 'Config', key: 'config', render: (row) => h(JsonViewer, { value: row.config }) },
+  { title: '模块', key: 'module_id', width: 240 },
+  { title: '组件', key: 'component_id', width: 220 },
+  { title: '类型', key: 'component_type', width: 160 },
+  { title: '状态', key: 'status', width: 120, render: (row) => hStatus(row.status) },
+  { title: '配置', key: 'config', render: (row) => h(JsonViewer, { value: row.config }) },
 ]
 
 function runtimeComponentToComponent(item: ModuleRuntimeComponent): ModuleComponentItem {
@@ -139,11 +139,11 @@ onMounted(() => void load())
 </script>
 
 <template>
-  <PageCard title="Module Topology">
+  <PageCard title="模块拓扑">
     <template #headerExtra>
       <NSpace>
-        <RouterLink to="/admin/modules" class="header-link">Registry</RouterLink>
-        <NButton size="small" secondary :loading="refreshing" @click="load(true)">Refresh</NButton>
+        <RouterLink to="/admin/modules" class="header-link">注册表</RouterLink>
+        <NButton size="small" secondary :loading="refreshing" @click="load(true)">刷新</NButton>
       </NSpace>
     </template>
 
@@ -151,8 +151,8 @@ onMounted(() => void load())
     <template v-else>
       <ApiErrorAlert v-if="error" :error="error" @retry="load()" />
       <NTabs v-else type="line" animated>
-        <NTabPane name="sets" tab="Sets">
-          <EmptyView v-if="!topology?.sets.length" description="No module sets" />
+        <NTabPane name="sets" tab="集合">
+          <EmptyView v-if="!topology?.sets.length" description="暂无模块集合" />
           <NDataTable
             v-else
             :columns="setColumns"
@@ -161,8 +161,8 @@ onMounted(() => void load())
             :bordered="false"
           />
         </NTabPane>
-        <NTabPane name="nodes" tab="Nodes">
-          <EmptyView v-if="!topology?.nodes.length" description="No module nodes" />
+        <NTabPane name="nodes" tab="节点">
+          <EmptyView v-if="!topology?.nodes.length" description="暂无模块节点" />
           <NDataTable
             v-else
             :columns="topologyNodeColumns"
@@ -171,8 +171,8 @@ onMounted(() => void load())
             :bordered="false"
           />
         </NTabPane>
-        <NTabPane name="edges" tab="Edges">
-          <EmptyView v-if="!topology?.edges.length" description="No topology edges" />
+        <NTabPane name="edges" tab="边">
+          <EmptyView v-if="!topology?.edges.length" description="暂无拓扑边" />
           <NDataTable
             v-else
             :columns="topologyEdgeColumns"
@@ -181,8 +181,8 @@ onMounted(() => void load())
             :bordered="false"
           />
         </NTabPane>
-        <NTabPane name="modules" tab="Module Graph">
-          <EmptyView v-if="!topology?.module_nodes.length" description="No module graph nodes" />
+        <NTabPane name="modules" tab="模块图">
+          <EmptyView v-if="!topology?.module_nodes.length" description="暂无模块图节点" />
           <NDataTable
             v-else
             :columns="moduleNodeColumns"
@@ -191,8 +191,8 @@ onMounted(() => void load())
             :bordered="false"
           />
         </NTabPane>
-        <NTabPane name="dependencies" tab="Dependencies">
-          <EmptyView v-if="!topology?.dependency_edges.length" description="No dependency edges" />
+        <NTabPane name="dependencies" tab="依赖">
+          <EmptyView v-if="!topology?.dependency_edges.length" description="暂无依赖边" />
           <NDataTable
             v-else
             :columns="dependencyEdgeColumns"
@@ -201,8 +201,8 @@ onMounted(() => void load())
             :bordered="false"
           />
         </NTabPane>
-        <NTabPane name="components" tab="Components">
-          <EmptyView v-if="!topology?.components.length" description="No components" />
+        <NTabPane name="components" tab="组件">
+          <EmptyView v-if="!topology?.components.length" description="暂无组件" />
           <NDataTable
             v-else
             :columns="componentColumns"

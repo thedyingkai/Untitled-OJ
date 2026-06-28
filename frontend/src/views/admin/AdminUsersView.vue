@@ -32,17 +32,17 @@ const adminUsers = computed(() =>
 const columns = computed<DataTableColumns<UserAdminItem>>(() => [
   { title: 'ID', key: 'user_id', width: 80 },
   {
-    title: 'Account',
+    title: '账号',
     key: 'username',
     minWidth: 180,
     render: (row) =>
       h('div', { class: 'identity-cell' }, [
         h('strong', row.username),
-        h('span', row.email || 'No email'),
+        h('span', row.email || '无邮箱'),
       ]),
   },
   {
-    title: 'Roles',
+    title: '角色',
     key: 'roles',
     render: (row) =>
       h(NSpace, { size: 4 }, () =>
@@ -54,9 +54,9 @@ const columns = computed<DataTableColumns<UserAdminItem>>(() => [
         ),
       ),
   },
-  { title: 'Created', key: 'created_at', render: (row) => h(TimeText, { value: row.created_at }) },
+  { title: '创建时间', key: 'created_at', render: (row) => h(TimeText, { value: row.created_at }) },
   {
-    title: 'Grant Role',
+    title: '授予角色',
     key: 'grant',
     render: (row) =>
       h(NSpace, { align: 'center' }, () => [
@@ -72,7 +72,7 @@ const columns = computed<DataTableColumns<UserAdminItem>>(() => [
         h(
           NButton,
           { size: 'small', secondary: true, onClick: () => handleGrant(row) },
-          { default: () => 'Grant' },
+          { default: () => '授予' },
         ),
       ]),
   },
@@ -95,13 +95,13 @@ async function load(): Promise<void> {
 async function handleGrant(user: UserAdminItem): Promise<void> {
   const role = selectedRole.value[user.user_id]
   if (!role) {
-    message.warning('Select a role first')
+    message.warning('请先选择角色')
     return
   }
   saving.value = true
   try {
     await addUserRole({ user_id: user.user_id, role })
-    message.success('Role granted')
+    message.success('角色已授予')
     await load()
   } catch (err) {
     message.error(toApiClientError(err).message)
@@ -114,7 +114,7 @@ async function handleRemove(user: UserAdminItem, role: string): Promise<void> {
   saving.value = true
   try {
     await removeUserRole({ user_id: user.user_id, role })
-    message.success('Role removed')
+    message.success('角色已移除')
     await load()
   } catch (err) {
     message.error(toApiClientError(err).message)
@@ -129,12 +129,12 @@ onMounted(() => void load())
 <template>
   <div class="admin-users-page">
     <OjosPageHeader
-      title="Users"
-      description="Manage platform users and grant or remove system roles through the real Auth API."
-      eyebrow="Admin"
+      title="用户"
+      description="通过真实 Auth API 管理平台用户，并授予或移除系统角色。"
+      eyebrow="管理"
     >
       <template #actions>
-        <NButton :loading="saving || loading" secondary @click="load()">Refresh</NButton>
+        <NButton :loading="saving || loading" secondary @click="load()">刷新</NButton>
       </template>
     </OjosPageHeader>
 
@@ -143,20 +143,20 @@ onMounted(() => void load())
       <OjosErrorState v-if="error" :error="error" @retry="load()" />
       <template v-else>
         <div class="admin-summary-grid">
-          <OjosStatCard label="Users" :value="users.length" tone="primary" />
-          <OjosStatCard label="Admin Accounts" :value="adminUsers" tone="warning" />
-          <OjosStatCard label="Available Roles" :value="roles.length" />
+          <OjosStatCard label="用户" :value="users.length" tone="primary" />
+          <OjosStatCard label="管理员账号" :value="adminUsers" tone="warning" />
+          <OjosStatCard label="可用角色" :value="roles.length" />
         </div>
 
-        <OjosSection title="Role Assignment" description="Grant one role at a time and remove non-default roles from the table.">
+        <OjosSection title="角色分配" description="每次授予一个角色，可在表格中移除非默认角色。">
           <OjosToolbar>
-            <span class="muted-text">Role changes are applied immediately and recorded by the Auth service.</span>
+            <span class="muted-text">角色变更会立即生效，并由 Auth 服务记录。</span>
             <template #actions>
-              <NButton :loading="saving" secondary @click="load()">Reload users</NButton>
+              <NButton :loading="saving" secondary @click="load()">重载用户</NButton>
             </template>
           </OjosToolbar>
 
-          <OjosEmptyState v-if="users.length === 0" description="No users" />
+          <OjosEmptyState v-if="users.length === 0" description="暂无用户" />
           <OjosDataTable v-else :columns="columns" :data="users" :page-size="12" />
         </OjosSection>
       </template>

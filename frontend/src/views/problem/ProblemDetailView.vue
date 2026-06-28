@@ -38,7 +38,7 @@ const canManage = computed(() => {
 
 async function load(): Promise<void> {
   if (!Number.isFinite(problemId.value) || problemId.value <= 0) {
-    error.value = new Error('Invalid problem id')
+    error.value = new Error('题目 ID 无效')
     return
   }
 
@@ -64,42 +64,42 @@ onMounted(() => {
   <div class="problem-detail-page">
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && !problem" />
-    <EmptyView v-else-if="!loading && !error && !problem" description="Problem not found" />
+    <EmptyView v-else-if="!loading && !error && !problem" description="未找到题目" />
 
     <template v-if="problem">
       <OjosPageHeader
         :title="problem.title"
         :description="`${problem.id} · ${problem.slug}`"
-        eyebrow="Problem"
+        eyebrow="题目"
       >
         <template #actions>
           <RouterLink :to="`/problems/${problem.id}/submit`">
-            <NButton type="primary">Submit</NButton>
+            <NButton type="primary">提交</NButton>
           </RouterLink>
           <RouterLink v-if="canManage" :to="`/problems/${problem.id}/edit`">
-            <NButton secondary>Edit</NButton>
+            <NButton secondary>编辑</NButton>
           </RouterLink>
           <RouterLink v-if="canManage" :to="`/problems/${problem.id}/package`">
-            <NButton secondary>Package</NButton>
+            <NButton secondary>题目包</NButton>
           </RouterLink>
         </template>
       </OjosPageHeader>
 
       <div class="problem-reading-layout">
         <main class="problem-main">
-          <OjosSection title="Statement">
+          <OjosSection title="题面">
             <article class="statement-view">
-              {{ problem.statement || 'No statement yet.' }}
+              {{ problem.statement || '暂无题面。' }}
             </article>
           </OjosSection>
 
-          <OjosSection v-if="problem.samples?.length" title="Samples">
+          <OjosSection v-if="problem.samples?.length" title="样例">
             <NSpace vertical size="medium">
               <div v-for="sample in problem.samples" :key="sample.case_no" class="sample-block">
-                <NText strong>Sample {{ sample.case_no }}</NText>
+                <NText strong>样例 {{ sample.case_no }}</NText>
                 <div class="sample-grid">
-                  <OjosCodeBlock label="Input" :code="sample.input" />
-                  <OjosCodeBlock label="Output" :code="sample.output" />
+                  <OjosCodeBlock label="输入" :code="sample.input" />
+                  <OjosCodeBlock label="输出" :code="sample.output" />
                 </div>
               </div>
             </NSpace>
@@ -107,34 +107,34 @@ onMounted(() => {
         </main>
 
         <aside class="problem-aside">
-          <OjosSection title="Summary">
+          <OjosSection title="概览">
             <NDescriptions :column="1" label-placement="left">
-              <NDescriptionsItem label="Difficulty">
+              <NDescriptionsItem label="难度">
                 <OjosDifficultyTag :difficulty="problem.difficulty" />
               </NDescriptionsItem>
-              <NDescriptionsItem label="Visibility">
+              <NDescriptionsItem label="可见性">
                 <OjosVisibilityTag :visibility="problem.visibility" />
               </NDescriptionsItem>
-              <NDescriptionsItem label="Status">
+              <NDescriptionsItem label="状态">
                 <OjosStatusTag :status="problem.status" domain="problem" />
               </NDescriptionsItem>
-              <NDescriptionsItem label="Time">
+              <NDescriptionsItem label="时间">
                 {{ formatDuration(problem.time_limit_ms) }}
               </NDescriptionsItem>
-              <NDescriptionsItem label="Memory">
+              <NDescriptionsItem label="内存">
                 {{ formatMemoryLimit(problem.memory_limit_mb) }}
               </NDescriptionsItem>
-              <NDescriptionsItem label="Updated">
+              <NDescriptionsItem label="更新时间">
                 {{ formatDateTime(problem.updated_at) }}
               </NDescriptionsItem>
             </NDescriptions>
           </OjosSection>
 
-          <OjosSection title="Tags">
+          <OjosSection title="标签">
             <NSpace v-if="splitCsv(problem.tags).length">
               <NTag v-for="tag in splitCsv(problem.tags)" :key="tag" size="small">{{ tag }}</NTag>
             </NSpace>
-            <NText v-else depth="3">No tags</NText>
+            <NText v-else depth="3">暂无标签</NText>
           </OjosSection>
         </aside>
       </div>

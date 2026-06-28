@@ -24,7 +24,7 @@ function logout(): void {
       eyebrow="Account"
     >
       <template #actions>
-        <NButton secondary @click="auth.refreshCurrentUser()">Refresh</NButton>
+        <NButton secondary @click="auth.refreshCurrentUser()">刷新</NButton>
         <NButton tertiary @click="logout">Logout</NButton>
       </template>
     </OjosPageHeader>
@@ -39,7 +39,7 @@ function logout(): void {
           </NSpace>
           <span v-else>-</span>
         </NDescriptionsItem>
-        <NDescriptionsItem label="Permissions">
+        <NDescriptionsItem label="权限">
           <NSpace v-if="auth.permissions.length">
             <NTag v-for="permission in auth.permissions" :key="permission" size="small">
               {{ permission }}

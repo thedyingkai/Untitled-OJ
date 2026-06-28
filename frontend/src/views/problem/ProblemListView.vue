@@ -52,7 +52,7 @@ const canCreate = computed(
 
 const columns: DataTableColumns<ProblemItem> = [
   {
-    title: 'Problem',
+    title: '题目',
     key: 'title',
     minWidth: 280,
     render: (row) =>
@@ -66,25 +66,25 @@ const columns: DataTableColumns<ProblemItem> = [
       ]),
   },
   {
-    title: 'Difficulty',
+    title: '难度',
     key: 'difficulty',
     width: 120,
     render: (row) => h(OjosDifficultyTag, { difficulty: row.difficulty }),
   },
   {
-    title: 'State',
+    title: '状态',
     key: 'status',
     width: 120,
     render: (row) => h(OjosStatusTag, { status: row.status, domain: 'problem' }),
   },
   {
-    title: 'Visibility',
+    title: '可见性',
     key: 'visibility',
     width: 120,
     render: (row) => h(OjosVisibilityTag, { visibility: row.visibility }),
   },
   {
-    title: 'Tags',
+    title: '标签',
     key: 'tags',
     minWidth: 180,
     render: (row) =>
@@ -101,13 +101,13 @@ const columns: DataTableColumns<ProblemItem> = [
       ),
   },
   {
-    title: 'Limits',
+    title: '限制',
     key: 'limits',
     width: 150,
     render: (row) => `${formatDuration(row.time_limit_ms)} / ${formatMemoryLimit(row.memory_limit_mb)}`,
   },
   {
-    title: 'Updated',
+    title: '更新',
     key: 'updated_at',
     width: 180,
     render: (row) => formatDateTime(row.updated_at),
@@ -149,52 +149,52 @@ onMounted(() => {
 <template>
   <div class="problem-list-page">
     <OjosPageHeader
-      title="Problems"
-      description="Browse available problems, filter by difficulty or tags, and jump directly into submissions."
-      eyebrow="Online Judge"
+      title="题目"
+      description="按难度、可见性和标签筛选题目，快速进入题面或提交入口。"
+      eyebrow="题库"
     >
       <template #actions>
         <RouterLink v-if="canCreate" to="/problems/new">
-          <NButton type="primary">New problem</NButton>
+          <NButton type="primary">新建题目</NButton>
         </RouterLink>
-        <NButton secondary :loading="loading" @click="load">Refresh</NButton>
+        <NButton secondary :loading="loading" @click="load">刷新</NButton>
       </template>
     </OjosPageHeader>
 
     <OjosToolbar>
       <NForm :model="filters" label-placement="top" class="problem-filter-form">
         <NGrid :cols="4" :x-gap="12" :y-gap="8" responsive="screen">
-          <NFormItemGi label="Keyword">
+          <NFormItemGi label="关键词">
             <NInput
               v-model:value="filters.keyword"
               clearable
-              placeholder="Title or slug"
+              placeholder="标题或短标识"
               @keydown.enter.prevent="search"
             />
           </NFormItemGi>
-          <NFormItemGi label="Visibility">
+          <NFormItemGi label="可见性">
             <NSelect
               v-model:value="filters.visibility"
               clearable
               :options="[
-                { label: 'Public', value: 'public' },
-                { label: 'Private', value: 'private' },
-                { label: 'Contest', value: 'contest_only' },
+                { label: '公开', value: 'public' },
+                { label: '私有', value: 'private' },
+                { label: '仅比赛', value: 'contest_only' },
               ]"
             />
           </NFormItemGi>
-          <NFormItemGi label="Difficulty">
+          <NFormItemGi label="难度">
             <NSelect
               v-model:value="filters.difficulty"
               clearable
               :options="[
-                { label: 'Easy', value: 'easy' },
-                { label: 'Medium', value: 'medium' },
-                { label: 'Hard', value: 'hard' },
+                { label: '简单', value: 'easy' },
+                { label: '中等', value: 'medium' },
+                { label: '困难', value: 'hard' },
               ]"
             />
           </NFormItemGi>
-          <NFormItemGi label="Tags">
+          <NFormItemGi label="标签">
             <NInput
               v-model:value="filters.tags"
               clearable
@@ -205,13 +205,13 @@ onMounted(() => {
         </NGrid>
       </NForm>
       <template #actions>
-        <NButton type="primary" @click="search">Search</NButton>
+        <NButton type="primary" @click="search">搜索</NButton>
       </template>
     </OjosToolbar>
 
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && problems.length === 0" />
-    <EmptyView v-else-if="!loading && !error && problems.length === 0" description="No problems" />
+    <EmptyView v-else-if="!loading && !error && problems.length === 0" description="暂无题目" />
 
     <template v-else>
       <NDataTable

@@ -24,13 +24,13 @@ const setFilter = ref<string | null>(null)
 const statusFilter = ref<string | null>(null)
 
 const setOptions = computed(() => [
-  { label: 'All sets', value: '' },
+  { label: '全部集合', value: '' },
   ...sets.value.map((item) => ({ label: `${item.name} (${item.set_id})`, value: item.set_id })),
 ])
 
 const statusOptions = computed(() => {
   const values = Array.from(new Set(modules.value.map((item) => item.status))).sort()
-  return [{ label: 'All statuses', value: '' }, ...values.map((value) => ({ label: value, value }))]
+  return [{ label: '全部状态', value: '' }, ...values.map((value) => ({ label: value, value }))]
 })
 
 const filteredModules = computed(() => {
@@ -49,7 +49,7 @@ const filteredModules = computed(() => {
 
 const columns = computed<DataTableColumns<ModuleNodeItem>>(() => [
   {
-    title: 'Module',
+    title: '模块',
     key: 'module_id',
     width: 260,
     render: (row) =>
@@ -62,12 +62,12 @@ const columns = computed<DataTableColumns<ModuleNodeItem>>(() => [
         { default: () => row.module_id },
       ),
   },
-  { title: 'Name', key: 'name', width: 180 },
-  { title: 'Set', key: 'set_id', width: 160 },
-  { title: 'Version', key: 'version', width: 110 },
-  { title: 'Status', key: 'status', width: 120, render: (row) => h(OjosModuleStatusTag, { status: row.status }) },
-  { title: 'Kind', key: 'kind', width: 120 },
-  { title: 'Description', key: 'description' },
+  { title: '名称', key: 'name', width: 180 },
+  { title: '集合', key: 'set_id', width: 160 },
+  { title: '版本', key: 'version', width: 110 },
+  { title: '状态', key: 'status', width: 120, render: (row) => h(OjosModuleStatusTag, { status: row.status }) },
+  { title: '类型', key: 'kind', width: 120 },
+  { title: '描述', key: 'description' },
 ])
 
 async function load(silent = false): Promise<void> {
@@ -95,18 +95,18 @@ onMounted(() => void load())
 <template>
   <div class="modules-page">
     <OjosPageHeader
-      title="Module Registry"
-      description="Installed and built-in modules with status, set membership, versions, and components."
-      eyebrow="Admin"
+      title="模块中心"
+      description="查看已安装模块、内置模块、集合归属、版本、状态和组件。"
+      eyebrow="管理"
     >
       <template #actions>
         <RouterLink to="/admin/modules/topology">
-          <NButton secondary>Topology</NButton>
+          <NButton secondary>拓扑</NButton>
         </RouterLink>
         <RouterLink to="/admin/modules/installer">
-          <NButton secondary>Installer</NButton>
+          <NButton secondary>安装器视图</NButton>
         </RouterLink>
-        <NButton secondary :loading="refreshing" @click="load(true)">Refresh</NButton>
+        <NButton secondary :loading="refreshing" @click="load(true)">刷新</NButton>
       </template>
     </OjosPageHeader>
 
@@ -115,36 +115,36 @@ onMounted(() => void load())
       <ApiErrorAlert v-if="error" :error="error" @retry="load()" />
       <template v-else>
         <div class="module-summary">
-          <OjosStatCard label="Modules" :value="modules.length" tone="primary" />
-          <OjosStatCard label="Sets" :value="sets.length" />
-          <OjosStatCard label="Visible" :value="filteredModules.length" />
+          <OjosStatCard label="模块" :value="modules.length" tone="primary" />
+          <OjosStatCard label="集合" :value="sets.length" />
+          <OjosStatCard label="当前可见" :value="filteredModules.length" />
         </div>
 
-        <OjosSection title="Registry">
+        <OjosSection title="注册表">
           <NSpace class="module-filters">
             <NInput
               v-model:value="keyword"
               clearable
-              placeholder="Search module id, name, or description"
+              placeholder="搜索模块 ID、名称或描述"
               style="min-width: 280px"
             />
             <NSelect
               v-model:value="setFilter"
               :options="setOptions"
               clearable
-              placeholder="Filter by set"
+              placeholder="按集合过滤"
               style="width: 240px"
             />
             <NSelect
               v-model:value="statusFilter"
               :options="statusOptions"
               clearable
-              placeholder="Filter by status"
+              placeholder="按状态过滤"
               style="width: 180px"
             />
           </NSpace>
 
-          <EmptyView v-if="filteredModules.length === 0" description="No matching modules" />
+          <EmptyView v-if="filteredModules.length === 0" description="没有匹配的模块" />
           <NDataTable
             v-else
             :columns="columns"

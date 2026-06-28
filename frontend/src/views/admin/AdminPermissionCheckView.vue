@@ -23,7 +23,7 @@ const allowed = ref<boolean | null>(null)
 
 async function submit(): Promise<void> {
   if (!form.user_id || !form.permission.trim()) {
-    message.warning('User ID and permission are required')
+    message.warning('请填写用户 ID 和权限')
     return
   }
   loading.value = true
@@ -48,46 +48,46 @@ async function submit(): Promise<void> {
 <template>
   <div class="permission-check-page">
     <OjosPageHeader
-      title="Permission Check"
-      description="Probe the live authorization service with a user, permission, and optional scope."
-      eyebrow="Admin"
+      title="权限检查"
+      description="使用用户、权限和可选作用域检查实时授权服务。"
+      eyebrow="管理"
     />
 
     <OjosSection
-      title="Authorization Probe"
-      description="The check is evaluated by the real Auth API. Empty scope defaults to system scope."
+      title="授权探测"
+      description="检查由真实 Auth API 执行；空作用域默认视为 system。"
     >
       <OjosErrorState v-if="error" :error="error" />
 
       <NForm :model="form" label-placement="left" label-width="120" class="permission-check-form">
-        <NFormItem label="User ID" required>
+        <NFormItem label="用户 ID" required>
           <NInputNumber v-model:value="form.user_id" :min="1" />
         </NFormItem>
-        <NFormItem label="Permission" required>
+        <NFormItem label="权限" required>
           <NInput v-model:value="form.permission" placeholder="problem.edit" />
         </NFormItem>
-        <NFormItem label="Scope Type">
-          <NInput v-model:value="form.scope_type" placeholder="system or problem" />
+        <NFormItem label="作用域类型">
+          <NInput v-model:value="form.scope_type" placeholder="system 或 problem" />
         </NFormItem>
-        <NFormItem label="Scope ID">
+        <NFormItem label="作用域 ID">
           <NInputNumber v-model:value="form.scope_id" :min="0" />
         </NFormItem>
       </NForm>
 
       <OjosToolbar>
         <span class="muted-text">
-          Result is not cached in the frontend and no permission decision is simulated.
+          结果不会缓存在前端，也不会由前端模拟权限决策。
         </span>
         <template #actions>
-          <NButton type="primary" :loading="loading" @click="submit">Check</NButton>
+          <NButton type="primary" :loading="loading" @click="submit">检查</NButton>
         </template>
       </OjosToolbar>
 
       <NResult
         v-if="allowed !== null"
         :status="allowed ? 'success' : '403'"
-        :title="allowed ? 'Allowed' : 'Denied'"
-        :description="allowed ? 'The user currently has this permission.' : 'The user is not authorized for this permission and scope.'"
+        :title="allowed ? '允许' : '拒绝'"
+        :description="allowed ? '该用户当前拥有此权限。' : '该用户在此权限和作用域下未被授权。'"
       >
         <template #footer>
           <NSpace justify="center">

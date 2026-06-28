@@ -31,8 +31,8 @@ const form = reactive<LoginRequest>({
 })
 
 const rules: FormRules = {
-  username: [{ required: true, message: 'Please enter your username', trigger: ['input', 'blur'] }],
-  password: [{ required: true, message: 'Please enter your password', trigger: ['input', 'blur'] }],
+  username: [{ required: true, message: '请输入用户名', trigger: ['input', 'blur'] }],
+  password: [{ required: true, message: '请输入密码', trigger: ['input', 'blur'] }],
 }
 
 async function submit(): Promise<void> {
@@ -41,7 +41,7 @@ async function submit(): Promise<void> {
 
   try {
     await auth.login(form)
-    message.success('Signed in')
+    message.success('登录成功')
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/dashboard'
     await router.push(redirect)
   } catch (err) {
@@ -55,14 +55,14 @@ async function submit(): Promise<void> {
     <PageCard class="auth-card">
       <NSpace vertical size="large">
         <div class="auth-heading">
-          <h1>Sign in to OJOS</h1>
-          <p>Use your account to manage problems, submissions, and judge operations.</p>
+          <h1>登录 OJOS</h1>
+          <p>使用账号进入题库、提交记录和评测运维控制台。</p>
         </div>
 
-        <ApiErrorAlert :error="error" title="Sign in failed" />
+        <ApiErrorAlert :error="error" title="登录失败" />
 
         <NForm ref="formRef" :model="form" :rules="rules" label-placement="top" @submit.prevent>
-          <NFormItem label="Username" path="username">
+          <NFormItem label="用户名" path="username">
             <NInput
               v-model:value="form.username"
               autocomplete="username"
@@ -70,25 +70,25 @@ async function submit(): Promise<void> {
               size="large"
             />
           </NFormItem>
-          <NFormItem label="Password" path="password">
+          <NFormItem label="密码" path="password">
             <NInput
               v-model:value="form.password"
               type="password"
               autocomplete="current-password"
-              placeholder="Password"
+              placeholder="密码"
               show-password-on="click"
               size="large"
               @keydown.enter.prevent="submit"
             />
           </NFormItem>
           <NButton type="primary" block size="large" :loading="auth.loading" @click="submit">
-            Sign in
+            登录
           </NButton>
         </NForm>
 
         <NText depth="3">
-          Need an account?
-          <RouterLink to="/register" class="header-link">Create one</RouterLink>
+          还没有账号？
+          <RouterLink to="/register" class="header-link">创建账号</RouterLink>
         </NText>
       </NSpace>
     </PageCard>

@@ -69,7 +69,7 @@ async function handleSubmit(payload: ProblemFormInput): Promise<void> {
   try {
     const data = await updateProblem(problem.value.id, payload)
     problem.value = data.problem
-    message.success('Problem saved')
+    message.success('题目已保存')
     await router.push(`/problems/${problem.value.id}`)
   } catch (err) {
     error.value = err
@@ -88,7 +88,7 @@ async function handleDelete(): Promise<void> {
 
   try {
     await deleteProblem(problem.value.id)
-    message.success('Problem deleted')
+    message.success('题目已删除')
     await router.push('/problems')
   } catch (err) {
     error.value = err
@@ -114,19 +114,19 @@ onMounted(() => {
   <NSpace vertical size="large">
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && !problem" />
-    <EmptyView v-else-if="!loading && !error && !problem" description="Problem not found" />
+    <EmptyView v-else-if="!loading && !error && !problem" description="未找到题目" />
 
-    <PageCard v-if="problem" :title="`Edit ${problem.title}`">
+    <PageCard v-if="problem" :title="`编辑 ${problem.title}`">
       <template #headerExtra>
         <NSpace>
           <RouterLink :to="`/problems/${problem.id}`">
-            <NButton secondary>View</NButton>
+            <NButton secondary>查看</NButton>
           </RouterLink>
           <ConfirmAction
-            label="Delete"
+            label="删除"
             type="error"
-            title="Delete problem"
-            content="Problems with existing submissions cannot be deleted. This action cannot be undone."
+            title="删除题目"
+            content="已有提交记录的题目不能删除。此操作不可撤销。"
             :disabled="deleting || saving"
             @confirm="handleDelete"
           />

@@ -29,7 +29,7 @@ const emit = defineEmits<{
 <template>
   <div class="pagination-table">
     <NSpace v-if="showRefresh" justify="end" class="table-actions">
-      <NButton size="small" @click="emit('refresh')">Refresh</NButton>
+      <NButton size="small" @click="emit('refresh')">刷新</NButton>
     </NSpace>
     <NDataTable
       :columns="columns"

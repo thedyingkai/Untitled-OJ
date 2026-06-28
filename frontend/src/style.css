@@ -1,27 +1,27 @@
 :root {
-  --ojos-primary: #0f766e;
-  --ojos-primary-strong: #0b5f59;
-  --ojos-success: #0f8a5f;
-  --ojos-warning: #b76e00;
-  --ojos-danger: #c24132;
-  --ojos-info: #2563eb;
+  --ojos-primary: #0b4f8a;
+  --ojos-primary-strong: #083b66;
+  --ojos-success: #12805c;
+  --ojos-warning: #a86400;
+  --ojos-danger: #b42318;
+  --ojos-info: #0b63b6;
   --ojos-muted: #667085;
   --ojos-card-bg: #ffffff;
   --ojos-border: #d9e0e8;
-  --ojos-radius: 8px;
+  --ojos-radius: 4px;
   --ojos-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
 
-  --bg: #f4f6f8;
+  --bg: #eef2f6;
   --surface: #ffffff;
   --surface-raised: #ffffff;
-  --surface-soft: #f8fafb;
-  --surface-tint: #eef7f5;
+  --surface-soft: #f5f7fa;
+  --surface-tint: #e8f1f9;
   --text: #17202a;
   --text-strong: #0f1720;
   --muted: #667085;
   --muted-2: #8a95a3;
   --border: #d9e0e8;
-  --border-soft: #e8edf2;
+  --border-soft: #dfe6ee;
   --accent: var(--ojos-primary);
   --accent-strong: var(--ojos-primary-strong);
   --info: var(--ojos-info);
@@ -29,7 +29,7 @@
   --warning: var(--ojos-warning);
   --danger: var(--ojos-danger);
   --shadow-sm: var(--ojos-shadow);
-  --shadow-md: 0 10px 30px rgba(16, 24, 40, 0.08);
+  --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.08);
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   --sans:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -57,9 +57,7 @@ body,
 }
 
 body {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(244, 246, 248, 0) 260px),
-    var(--bg);
+  background: var(--bg);
 }
 
 a {
@@ -73,17 +71,18 @@ a {
 }
 
 .app-sider {
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  border-right: 1px solid #0b2037;
+  background: #10263f;
+  box-shadow: none;
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 72px;
-  padding: 0 18px;
-  border-bottom: 1px solid var(--border-soft);
+  height: 56px;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .brand-mark {
@@ -92,10 +91,10 @@ a {
   width: 36px;
   height: 36px;
   place-items: center;
-  border: 1px solid rgba(15, 118, 110, 0.25);
-  border-radius: 8px;
-  background: var(--surface-tint);
-  color: var(--accent-strong);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 4px;
+  background: #0b4f8a;
+  color: #ffffff;
   font-weight: 800;
 }
 
@@ -105,13 +104,13 @@ a {
 
 .brand strong {
   display: block;
-  color: var(--text-strong);
+  color: #ffffff;
   font-size: 16px;
   line-height: 1.15;
 }
 
 .brand span {
-  color: var(--muted);
+  color: #b8c7d6;
   font-size: 12px;
 }
 
@@ -120,25 +119,25 @@ a {
   right: 14px;
   bottom: 14px;
   left: 14px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  background: var(--surface-soft);
-  color: var(--muted);
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  background: #0b2037;
+  color: #c6d3df;
   font-size: 12px;
 }
 
 .app-sider .n-menu {
-  padding: 12px 10px;
+  padding: 8px;
 }
 
 .app-sider .n-menu .n-menu-item-content {
-  height: 38px;
-  border-radius: 8px;
+  height: 32px;
+  border-radius: 4px;
 }
 
 .app-sider .n-menu .n-menu-item-content::before {
-  border-radius: 8px;
+  border-radius: 4px;
 }
 
 .app-main {
@@ -149,10 +148,10 @@ a {
   position: sticky;
   top: 0;
   z-index: 10;
-  padding: 12px 24px;
-  border-bottom: 1px solid rgba(217, 224, 232, 0.82);
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(12px);
+  padding: 8px 18px;
+  border-bottom: 1px solid #c8d2de;
+  background: #ffffff;
+  backdrop-filter: none;
 }
 
 .header-inner,
@@ -185,7 +184,7 @@ a {
   margin: 0;
   overflow: hidden;
   color: var(--text-strong);
-  font-size: 19px;
+  font-size: 17px;
   font-weight: 700;
   line-height: 1.25;
   letter-spacing: 0;
@@ -218,22 +217,22 @@ a {
   width: 100%;
   max-width: 1480px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 16px;
 }
 
 .page-card.n-card {
-  border-radius: 8px;
+  border-radius: 4px;
   box-shadow: var(--shadow-sm);
 }
 
 .page-card > .n-card-header {
-  min-height: 58px;
-  padding: 18px 20px 12px;
+  min-height: 44px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border-soft);
 }
 
 .page-card > .n-card__content {
-  padding: 18px 20px 20px;
+  padding: 12px 14px 14px;
 }
 
 .page-card .n-card-header__main {
@@ -247,9 +246,7 @@ a {
   display: grid;
   min-height: 100vh;
   padding: 28px;
-  background:
-    linear-gradient(180deg, rgba(238, 247, 245, 0.78), rgba(244, 246, 248, 0.2) 360px),
-    var(--bg);
+  background: var(--bg);
   place-items: center;
 }
 
@@ -294,9 +291,9 @@ a {
   max-height: 480px;
   overflow: auto;
   margin: 0;
-  padding: 14px;
+  padding: 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 4px;
   background: #101820;
   color: #dce8ee;
   font-family: var(--mono);
@@ -330,17 +327,19 @@ pre {
 }
 
 .n-data-table {
-  border-radius: 8px;
+  border-radius: 4px;
 }
 
 .n-data-table .n-data-table-th {
-  color: var(--muted);
+  color: #27384a;
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
 }
 
 .n-data-table .n-data-table-td {
+  padding-top: 5px;
+  padding-bottom: 5px;
   vertical-align: middle;
 }
 
@@ -355,7 +354,7 @@ pre {
 
 .nav-card .n-card {
   height: 100%;
-  border-radius: 8px;
+  border-radius: 4px;
   transition:
     border-color 0.16s ease,
     box-shadow 0.16s ease,
@@ -363,7 +362,7 @@ pre {
 }
 
 .nav-card:hover .n-card {
-  border-color: rgba(15, 118, 110, 0.35);
+  border-color: rgba(11, 79, 138, 0.35);
   box-shadow: var(--shadow-md);
   transform: translateY(-1px);
 }
@@ -371,17 +370,17 @@ pre {
 .quick-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 14px;
+  gap: 10px;
 }
 
 .quick-card {
   display: flex;
-  min-height: 112px;
+  min-height: 92px;
   flex-direction: column;
   justify-content: space-between;
-  padding: 16px;
+  padding: 12px;
   border: 1px solid var(--border-soft);
-  border-radius: 8px;
+  border-radius: 4px;
   background: var(--surface);
   box-shadow: var(--shadow-sm);
   transition:
@@ -391,7 +390,7 @@ pre {
 }
 
 .quick-card:hover {
-  border-color: rgba(15, 118, 110, 0.35);
+  border-color: rgba(11, 79, 138, 0.35);
   box-shadow: var(--shadow-md);
   transform: translateY(-1px);
 }
@@ -409,8 +408,8 @@ pre {
 .metric,
 .metric-card {
   border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  padding: 14px 16px;
+  border-radius: 4px;
+  padding: 10px 12px;
   background: var(--surface);
   box-shadow: var(--shadow-sm);
 }
@@ -433,14 +432,14 @@ pre {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 18px;
-  margin-bottom: 18px;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .ojos-page-header h1 {
   margin: 0;
   color: var(--text-strong);
-  font-size: 24px;
+  font-size: 22px;
   line-height: 1.15;
   letter-spacing: 0;
 }
@@ -476,7 +475,7 @@ pre {
 }
 
 .ojos-section + .ojos-section {
-  margin-top: 16px;
+  margin-top: 12px;
 }
 
 .ojos-section-header {
@@ -484,7 +483,7 @@ pre {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 9px 12px;
   border-bottom: 1px solid var(--border-soft);
 }
 
@@ -502,15 +501,15 @@ pre {
 }
 
 .ojos-section > :not(.ojos-section-header) {
-  margin: 16px;
+  margin: 12px;
 }
 
 .ojos-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
+  gap: 8px;
+  padding: 8px;
   border: 1px solid var(--border-soft);
   border-radius: var(--ojos-radius);
   background: var(--surface-soft);
@@ -535,12 +534,12 @@ pre {
 
 .ojos-stat-card {
   display: flex;
-  min-height: 92px;
+  min-height: 76px;
   flex-direction: column;
   justify-content: center;
   border: 1px solid var(--border-soft);
   border-radius: var(--ojos-radius);
-  padding: 14px 16px;
+  padding: 10px 12px;
   background: var(--surface);
   box-shadow: var(--shadow-sm);
 }
@@ -554,7 +553,7 @@ pre {
 .ojos-stat-card strong {
   margin-top: 6px;
   color: var(--text-strong);
-  font-size: 26px;
+  font-size: 22px;
   line-height: 1;
 }
 
@@ -565,7 +564,7 @@ pre {
 
 .ojos-stat-card.tone-primary {
   border-color: rgba(15, 118, 110, 0.28);
-  background: #f1faf8;
+  background: #edf5fc;
 }
 
 .ojos-stat-card.tone-success {
@@ -606,11 +605,11 @@ pre {
   overflow: auto;
   max-height: 520px;
   margin: 0;
-  padding: 14px;
+  padding: 10px;
   color: #dce8ee;
   font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: 12px;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
 }

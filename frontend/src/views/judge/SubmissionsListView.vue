@@ -25,6 +25,7 @@ import OjosStatusTag from '../../components/oj/OjosStatusTag.vue'
 import OjosToolbar from '../../components/oj/OjosToolbar.vue'
 import type { JudgeLanguage, JudgeStatus, SubmissionItem } from '../../types/judge'
 import { formatDateTime, formatDuration, formatMemory } from '../../utils/format'
+import { getJudgeStatusMeta } from '../../utils/status'
 
 const loading = ref(false)
 const error = ref<unknown>()
@@ -56,7 +57,7 @@ const statusOptions = [
   'SYSTEM_ERROR',
   'CANCELLED',
   'UNSUPPORTED_LANGUAGE',
-].map((value) => ({ label: value, value }))
+].map((value) => ({ label: getJudgeStatusMeta(value).label, value }))
 
 const columns: DataTableColumns<SubmissionItem> = [
   {
@@ -67,13 +68,13 @@ const columns: DataTableColumns<SubmissionItem> = [
       h(RouterLink, { to: `/submissions/${row.id}`, class: 'table-link' }, { default: () => row.id }),
   },
   {
-    title: 'Status',
+    title: '状态',
     key: 'status',
     width: 160,
     render: (row) => h(OjosStatusTag, { status: row.status }),
   },
   {
-    title: 'Problem',
+    title: '题目',
     key: 'problem_id',
     width: 110,
     render: (row) =>
@@ -83,24 +84,24 @@ const columns: DataTableColumns<SubmissionItem> = [
         { default: () => row.problem_id },
       ),
   },
-  { title: 'User', key: 'user_id', width: 90 },
+  { title: '用户', key: 'user_id', width: 90 },
   {
-    title: 'Language',
+    title: '语言',
     key: 'language',
     width: 130,
     render: (row) => h(OjosLanguageTag, { language: row.language }),
   },
-  { title: 'Score', key: 'score', width: 82 },
-  { title: 'Time', key: 'time_ms', width: 100, render: (row) => formatDuration(row.time_ms) },
-  { title: 'Memory', key: 'memory_kb', width: 110, render: (row) => formatMemory(row.memory_kb) },
+  { title: '分数', key: 'score', width: 82 },
+  { title: '耗时', key: 'time_ms', width: 100, render: (row) => formatDuration(row.time_ms) },
+  { title: '内存', key: 'memory_kb', width: 110, render: (row) => formatMemory(row.memory_kb) },
   {
-    title: 'Submitted',
+    title: '提交时间',
     key: 'created_at',
     width: 180,
     render: (row) => formatDateTime(row.created_at),
   },
   {
-    title: 'Judged',
+    title: '评测时间',
     key: 'judged_at',
     width: 180,
     render: (row) => formatDateTime(row.judged_at),
@@ -154,22 +155,22 @@ onMounted(() => {
 <template>
   <div class="submissions-page">
     <OjosPageHeader
-      title="Submissions"
-      description="High-density judging history with verdicts, resource usage, and timestamps."
-      eyebrow="Judge"
+      title="提交记录"
+      description="按评测状态、资源占用和时间排序的高密度提交历史。"
+      eyebrow="评测"
     >
       <template #actions>
-        <NButton secondary :loading="loading" @click="load">Refresh</NButton>
+        <NButton secondary :loading="loading" @click="load">刷新</NButton>
       </template>
     </OjosPageHeader>
 
     <OjosToolbar>
       <NForm :model="filters" label-placement="top" class="submission-filter-form">
         <NGrid :cols="6" :x-gap="12" :y-gap="8" responsive="screen">
-          <NFormItemGi label="Status">
+          <NFormItemGi label="状态">
             <NSelect v-model:value="filters.status" clearable :options="statusOptions" />
           </NFormItemGi>
-          <NFormItemGi label="Language">
+          <NFormItemGi label="语言">
             <NSelect
               v-model:value="filters.language"
               clearable
@@ -180,13 +181,13 @@ onMounted(() => {
               }))"
             />
           </NFormItemGi>
-          <NFormItemGi label="Problem">
+          <NFormItemGi label="题目">
             <NInputNumber v-model:value="filters.problemId" clearable :min="1" style="width: 100%" />
           </NFormItemGi>
-          <NFormItemGi label="User">
+          <NFormItemGi label="用户">
             <NInputNumber v-model:value="filters.userId" clearable :min="1" style="width: 100%" />
           </NFormItemGi>
-          <NFormItemGi label="From">
+          <NFormItemGi label="开始日期">
             <NInput
               v-model:value="filters.createdFrom"
               clearable
@@ -194,7 +195,7 @@ onMounted(() => {
               @keydown.enter.prevent="search"
             />
           </NFormItemGi>
-          <NFormItemGi label="To">
+          <NFormItemGi label="结束日期">
             <NInput
               v-model:value="filters.createdTo"
               clearable
@@ -205,7 +206,7 @@ onMounted(() => {
         </NGrid>
       </NForm>
       <template #actions>
-        <NButton type="primary" @click="search">Filter</NButton>
+        <NButton type="primary" @click="search">筛选</NButton>
       </template>
     </OjosToolbar>
 
@@ -213,7 +214,7 @@ onMounted(() => {
     <LoadingView v-if="loading && submissions.length === 0" />
     <EmptyView
       v-else-if="!loading && !error && submissions.length === 0"
-      description="No submissions"
+      description="暂无提交"
     />
     <template v-else>
       <NDataTable

@@ -58,17 +58,17 @@ const workerColumns = computed<DataTableColumns<WorkerItem>>(() => [
         h('span', row.worker_id),
       ]),
   },
-  { title: 'Host', key: 'hostname', minWidth: 150 },
-  { title: 'Version', key: 'version', width: 110 },
+  { title: '主机', key: 'hostname', minWidth: 150 },
+  { title: '版本', key: 'version', width: 110 },
   {
-    title: 'Status',
+    title: '状态',
     key: 'status',
     width: 120,
     render: (row) => h(OjosWorkerStatusTag, { status: row.status }),
   },
-  { title: 'Slots', key: 'slots', width: 100, render: (row) => `${row.running_count}/${row.max_concurrency}` },
+  { title: '槽位', key: 'slots', width: 100, render: (row) => `${row.running_count}/${row.max_concurrency}` },
   {
-    title: 'Languages',
+    title: '语言',
     key: 'supported_languages',
     minWidth: 220,
     render: (row) =>
@@ -85,22 +85,22 @@ const workerColumns = computed<DataTableColumns<WorkerItem>>(() => [
         },
       ),
   },
-  { title: 'Last Seen', key: 'last_seen', width: 180, render: (row) => formatDateTime(row.last_seen) },
+  { title: '最近心跳', key: 'last_seen', width: 180, render: (row) => formatDateTime(row.last_seen) },
   {
-    title: 'Action',
+    title: '操作',
     key: 'action',
     width: 110,
     render: (row) =>
       row.status === 'DRAINING'
-        ? h(NTag, { size: 'small', type: 'warning' }, { default: () => 'Draining' })
-        : hButton('Drain', () => handleDrain(row.worker_id)),
+        ? h(NTag, { size: 'small', type: 'warning' }, { default: () => '排空中' })
+        : hButton('排空', () => handleDrain(row.worker_id)),
   },
 ])
 
 const taskColumns = computed<DataTableColumns<JudgeTaskItem>>(() => [
-  { title: 'Task', key: 'task_id', minWidth: 140 },
+  { title: '任务', key: 'task_id', minWidth: 140 },
   {
-    title: 'Submission',
+    title: '提交',
     key: 'submission_id',
     width: 120,
     render: (row) =>
@@ -112,24 +112,24 @@ const taskColumns = computed<DataTableColumns<JudgeTaskItem>>(() => [
   },
   { title: 'Worker', key: 'worker_id', minWidth: 160, render: (row) => row.worker_id || '-' },
   {
-    title: 'Status',
+    title: '状态',
     key: 'status',
     width: 120,
     render: (row) => h(OjosStatusTag, { status: row.status, domain: 'task' }),
   },
-  { title: 'Attempt', key: 'attempt', width: 90 },
-  { title: 'Heartbeat', key: 'heartbeat_at', width: 180, render: (row) => formatDateTime(row.heartbeat_at) },
+  { title: '尝试', key: 'attempt', width: 90 },
+  { title: '心跳', key: 'heartbeat_at', width: 180, render: (row) => formatDateTime(row.heartbeat_at) },
   {
-    title: 'Lease Expires',
+    title: '租约到期',
     key: 'lease_expires_at',
     width: 180,
     render: (row) => formatDateTime(row.lease_expires_at),
   },
   {
-    title: 'Action',
+    title: '操作',
     key: 'action',
     width: 110,
-    render: (row) => hButton('Requeue', () => handleRequeue(row.submission_id)),
+    render: (row) => hButton('重排队', () => handleRequeue(row.submission_id)),
   },
 ])
 
@@ -160,7 +160,7 @@ async function load(silent = false): Promise<void> {
 async function handleDrain(workerId: string): Promise<void> {
   try {
     await drainWorker(workerId)
-    message.success('Worker set to draining')
+    message.success('Worker 已进入排空状态')
     await load(true)
   } catch (err) {
     message.error(toApiClientError(err).message)
@@ -170,7 +170,7 @@ async function handleDrain(workerId: string): Promise<void> {
 async function handleRequeue(submissionId: number): Promise<void> {
   try {
     await requeueSubmission(submissionId)
-    message.success('Submission requeued')
+    message.success('提交已重新入队')
     await load(true)
   } catch (err) {
     message.error(toApiClientError(err).message)
@@ -208,15 +208,15 @@ onBeforeUnmount(stopTimer)
 <template>
   <div class="admin-judge-page">
     <OjosPageHeader
-      title="Judge Cluster"
-      description="Operational view of queue signals, PostgreSQL task leases, workers, and requeue controls."
-      eyebrow="Admin"
+      title="评测集群"
+      description="队列信号、PostgreSQL 任务租约、Worker 和重排队控制的运维视图。"
+      eyebrow="管理"
     >
       <template #actions>
         <NSpace align="center">
-          <NText depth="3">Auto refresh</NText>
+          <NText depth="3">自动刷新</NText>
           <NSwitch v-model:value="autoRefresh" />
-          <NButton :loading="refreshing" secondary @click="load(true)">Refresh</NButton>
+          <NButton :loading="refreshing" secondary @click="load(true)">刷新</NButton>
         </NSpace>
       </template>
     </OjosPageHeader>
@@ -227,32 +227,32 @@ onBeforeUnmount(stopTimer)
 
       <template v-else>
         <div class="judge-summary-grid">
-          <OjosStatCard label="Stream Length" :value="queue?.stream_length ?? 0" tone="primary" />
-          <OjosStatCard label="Redis Pending" :value="queue?.pending_count ?? 0" />
-          <OjosStatCard label="Scheduled" :value="queue?.scheduled ?? 0" />
-          <OjosStatCard label="Judging" :value="queue?.judging ?? 0" tone="success" />
-          <OjosStatCard label="Running Tasks" :value="runningTasks" />
-          <OjosStatCard label="Lease Rows" :value="staleHint" />
+          <OjosStatCard label="Stream 长度" :value="queue?.stream_length ?? 0" tone="primary" />
+          <OjosStatCard label="Redis 等待" :value="queue?.pending_count ?? 0" />
+          <OjosStatCard label="已调度" :value="queue?.scheduled ?? 0" />
+          <OjosStatCard label="评测中" :value="queue?.judging ?? 0" tone="success" />
+          <OjosStatCard label="运行任务" :value="runningTasks" />
+          <OjosStatCard label="租约行" :value="staleHint" />
         </div>
 
         <OjosSection
-          title="Queue"
-          description="Redis Streams are signal history; PostgreSQL judge_tasks is the task ownership source."
+          title="队列"
+          description="Redis Streams 是信号历史；PostgreSQL judge_tasks 是任务所有权事实源。"
         >
           <div class="queue-detail-grid">
             <span>Consumer group</span>
             <strong>{{ queue?.consumer_group || '-' }}</strong>
-            <span>Last stream id</span>
+            <span>最后 stream id</span>
             <strong>{{ queue?.last_id || '-' }}</strong>
-            <span>Trim strategy</span>
+            <span>裁剪策略</span>
             <strong>{{ queue?.trim_strategy || '-' }}</strong>
-            <span>Oldest pending idle</span>
+            <span>最久等待空闲</span>
             <strong>{{ queue?.pending_oldest_idle_ms ? formatDuration(queue.pending_oldest_idle_ms) : '-' }}</strong>
           </div>
         </OjosSection>
 
-        <OjosSection title="Workers" description="Registered workers, heartbeats, languages, and concurrency slots.">
-          <EmptyView v-if="workers.length === 0" description="No workers registered" />
+        <OjosSection title="Worker" description="已注册 Worker、心跳、语言和并发槽位。">
+          <EmptyView v-if="workers.length === 0" description="暂无注册 Worker" />
           <NDataTable
             v-else
             :columns="workerColumns"
@@ -262,8 +262,8 @@ onBeforeUnmount(stopTimer)
           />
         </OjosSection>
 
-        <OjosSection title="Tasks" description="Current task rows with worker leases and requeue controls.">
-          <EmptyView v-if="tasks.length === 0" description="No judge tasks" />
+        <OjosSection title="任务" description="当前任务行、Worker 租约和重排队控制。">
+          <EmptyView v-if="tasks.length === 0" description="暂无评测任务" />
           <NDataTable
             v-else
             :columns="taskColumns"

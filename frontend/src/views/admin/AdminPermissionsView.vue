@@ -57,25 +57,25 @@ const systemRoleCount = computed(() => roles.value.filter((role) => role.is_syst
 const problemRoleCount = computed(() => roles.value.filter((role) => role.name.startsWith('problem_')).length)
 
 const roleColumns: DataTableColumns<RoleItem> = [
-  { title: 'Role', key: 'name', render: (row) => h(OjosRoleTag, { role: row.name }) },
-  { title: 'Module', key: 'module_code' },
-  { title: 'Description', key: 'description' },
+  { title: '角色', key: 'name', render: (row) => h(OjosRoleTag, { role: row.name }) },
+  { title: '模块', key: 'module_code' },
+  { title: '说明', key: 'description' },
 ]
 
 const permissionColumns: DataTableColumns<ModulePermissionItem> = [
-  { title: 'Permission', key: 'permission_key', render: (row) => h(OjosPermissionTag, { permission: row.permission_key }) },
-  { title: 'Module', key: 'module_id' },
-  { title: 'Description', key: 'description' },
+  { title: '权限', key: 'permission_key', render: (row) => h(OjosPermissionTag, { permission: row.permission_key }) },
+  { title: '模块', key: 'module_id' },
+  { title: '说明', key: 'description' },
 ]
 
 const auditColumns: DataTableColumns<AuditLogItem> = [
-  { title: 'Action', key: 'action' },
-  { title: 'Target', key: 'target', render: (row) => `${row.target_type}:${row.target_id}` },
-  { title: 'Role', key: 'role_name' },
-  { title: 'Permission', key: 'permission_code' },
-  { title: 'Scope', key: 'scope', render: (row) => `${row.scope_type}:${row.scope_id}` },
-  { title: 'Actor', key: 'actor', render: (row) => `${row.actor_type}:${row.actor_id}` },
-  { title: 'Created', key: 'created_at', render: (row) => h(TimeText, { value: row.created_at }) },
+  { title: '动作', key: 'action' },
+  { title: '目标', key: 'target', render: (row) => `${row.target_type}:${row.target_id}` },
+  { title: '角色', key: 'role_name' },
+  { title: '权限', key: 'permission_code' },
+  { title: '作用域', key: 'scope', render: (row) => `${row.scope_type}:${row.scope_id}` },
+  { title: '操作者', key: 'actor', render: (row) => `${row.actor_type}:${row.actor_id}` },
+  { title: '创建时间', key: 'created_at', render: (row) => h(TimeText, { value: row.created_at }) },
 ]
 
 async function load(): Promise<void> {
@@ -99,7 +99,7 @@ async function load(): Promise<void> {
 
 async function submitGrant(add: boolean): Promise<void> {
   if (!grantForm.user_id || !grantForm.problem_id || !grantForm.role) {
-    message.warning('Complete the problem role form')
+    message.warning('请填写完整的题目角色表单')
     return
   }
   const payload = {
@@ -111,10 +111,10 @@ async function submitGrant(add: boolean): Promise<void> {
   try {
     if (add) {
       await addProblemRole(payload)
-      message.success('Problem role granted')
+      message.success('题目角色已授予')
     } else {
       await removeProblemRole(payload)
-      message.success('Problem role removed')
+      message.success('题目角色已移除')
     }
     await load()
   } catch (err) {
@@ -130,12 +130,12 @@ onMounted(() => void load())
 <template>
   <div class="admin-permissions-page">
     <OjosPageHeader
-      title="Permissions"
-      description="Review role definitions, permission points, problem-scoped grants, and audit history."
-      eyebrow="Admin"
+      title="权限"
+      description="查看角色定义、权限点、题目作用域授权和审计历史。"
+      eyebrow="管理"
     >
       <template #actions>
-        <NButton secondary :loading="loading || saving" @click="load()">Refresh</NButton>
+        <NButton secondary :loading="loading || saving" @click="load()">刷新</NButton>
       </template>
     </OjosPageHeader>
 
@@ -144,50 +144,50 @@ onMounted(() => void load())
       <OjosErrorState v-if="error" :error="error" @retry="load()" />
       <template v-else>
         <div class="admin-summary-grid">
-          <OjosStatCard label="Roles" :value="roles.length" tone="primary" />
-          <OjosStatCard label="Problem Roles" :value="problemRoleCount" tone="warning" />
-          <OjosStatCard label="Permissions" :value="permissions.length" />
-          <OjosStatCard label="Audit Logs" :value="auditLogs.length" />
+          <OjosStatCard label="角色" :value="roles.length" tone="primary" />
+          <OjosStatCard label="题目角色" :value="problemRoleCount" tone="warning" />
+          <OjosStatCard label="权限" :value="permissions.length" />
+          <OjosStatCard label="审计日志" :value="auditLogs.length" />
         </div>
 
         <OjosSection
-          title="Problem-scoped Role"
-          description="Grant or remove roles bound to one problem. This uses the same Gateway admin API as runtime validation."
+          title="题目作用域角色"
+          description="授予或移除绑定到单个题目的角色；使用与 Runtime 校验一致的 Gateway 管理 API。"
         >
           <OjosToolbar>
             <NForm inline :model="grantForm" class="permission-grant-form">
-              <NFormItem label="User ID">
+              <NFormItem label="用户 ID">
                 <NInputNumber v-model:value="grantForm.user_id" :min="1" />
               </NFormItem>
-              <NFormItem label="Problem ID">
+              <NFormItem label="题目 ID">
                 <NInputNumber v-model:value="grantForm.problem_id" :min="1" />
               </NFormItem>
-              <NFormItem label="Role">
+              <NFormItem label="角色">
                 <NSelect v-model:value="grantForm.role" :options="roleOptions" style="width: 190px" />
               </NFormItem>
             </NForm>
             <template #actions>
-              <NButton type="primary" :loading="saving" @click="submitGrant(true)">Grant</NButton>
-              <NButton secondary :loading="saving" @click="submitGrant(false)">Remove</NButton>
+              <NButton type="primary" :loading="saving" @click="submitGrant(true)">授予</NButton>
+              <NButton secondary :loading="saving" @click="submitGrant(false)">移除</NButton>
             </template>
           </OjosToolbar>
         </OjosSection>
 
         <OjosSection
-          title="Authorization Registry"
-          :description="`${systemRoleCount} system roles, ${problemRoleCount} problem roles, and ${permissions.length} active module permission points.`"
+          title="授权注册表"
+          :description="`${systemRoleCount} 个系统角色，${problemRoleCount} 个题目角色，${permissions.length} 个启用的模块权限点。`"
         >
           <NTabs type="line" animated>
-            <NTabPane name="roles" tab="Roles">
-              <OjosEmptyState v-if="roles.length === 0" description="No roles" />
+            <NTabPane name="roles" tab="角色">
+              <OjosEmptyState v-if="roles.length === 0" description="暂无角色" />
               <OjosDataTable v-else :columns="roleColumns" :data="roles" :page-size="12" />
             </NTabPane>
-            <NTabPane name="permissions" tab="Permissions">
-              <OjosEmptyState v-if="permissions.length === 0" description="No permissions" />
+            <NTabPane name="permissions" tab="权限">
+              <OjosEmptyState v-if="permissions.length === 0" description="暂无权限" />
               <OjosDataTable v-else :columns="permissionColumns" :data="permissions" :page-size="12" />
             </NTabPane>
-            <NTabPane name="audit" tab="Audit Logs">
-              <OjosEmptyState v-if="auditLogs.length === 0" description="No audit logs" />
+            <NTabPane name="audit" tab="审计日志">
+              <OjosEmptyState v-if="auditLogs.length === 0" description="暂无审计日志" />
               <OjosDataTable v-else :columns="auditColumns" :data="auditLogs" :page-size="10" />
             </NTabPane>
           </NTabs>

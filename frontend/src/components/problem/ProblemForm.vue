@@ -70,7 +70,7 @@ const rules: FormRules = {
   title: [
     {
       required: true,
-      validator: (_rule, value: string) => Boolean(value?.trim()) || new Error('Title is required'),
+      validator: (_rule, value: string) => Boolean(value?.trim()) || new Error('题目标题必填'),
       trigger: ['input', 'blur'],
     },
   ],
@@ -82,7 +82,7 @@ const rules: FormRules = {
         }
         return (
           /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value.trim()) ||
-          new Error('Use lowercase letters, numbers, and hyphen')
+          new Error('只能使用小写字母、数字和连字符')
         )
       },
       trigger: ['input', 'blur'],
@@ -93,7 +93,7 @@ const rules: FormRules = {
       required: true,
       validator: (_rule, value: number) =>
         (Number.isFinite(value) && value >= 1 && value <= 600000) ||
-        new Error('Time limit must be 1..600000 ms'),
+        new Error('时间限制必须为 1 到 600000 ms'),
       trigger: ['change', 'blur'],
     },
   ],
@@ -102,37 +102,37 @@ const rules: FormRules = {
       required: true,
       validator: (_rule, value: number) =>
         (Number.isFinite(value) && value >= 1 && value <= 65536) ||
-        new Error('Memory limit must be 1..65536 MB'),
+        new Error('内存限制必须为 1 到 65536 MB'),
       trigger: ['change', 'blur'],
     },
   ],
 }
 
 const problemTypeOptions = [
-  { label: 'Traditional', value: 'traditional' },
-  { label: 'Interactive', value: 'interactive' },
-  { label: 'Communication', value: 'communication' },
-  { label: 'Output only', value: 'output_only' },
-  { label: 'Heuristic', value: 'heuristic' },
+  { label: '传统题', value: 'traditional' },
+  { label: '交互题', value: 'interactive' },
+  { label: '通信题', value: 'communication' },
+  { label: '输出题', value: 'output_only' },
+  { label: '启发式', value: 'heuristic' },
 ]
 
 const visibilityOptions = [
-  { label: 'Private', value: 'private' },
-  { label: 'Public', value: 'public' },
-  { label: 'Contest only', value: 'contest_only' },
+  { label: '私有', value: 'private' },
+  { label: '公开', value: 'public' },
+  { label: '仅比赛', value: 'contest_only' },
 ]
 
 const difficultyOptions = [
-  { label: 'Easy', value: 'easy' },
-  { label: 'Medium', value: 'medium' },
-  { label: 'Hard', value: 'hard' },
+  { label: '简单', value: 'easy' },
+  { label: '中等', value: 'medium' },
+  { label: '困难', value: 'hard' },
 ]
 
 const statusOptions = [
-  { label: 'Draft', value: 'draft' },
-  { label: 'Ready', value: 'ready' },
-  { label: 'Published', value: 'published' },
-  { label: 'Archived', value: 'archived' },
+  { label: '草稿', value: 'draft' },
+  { label: '就绪', value: 'ready' },
+  { label: '已发布', value: 'published' },
+  { label: '已归档', value: 'archived' },
 ]
 
 watch(
@@ -179,31 +179,31 @@ async function submit(): Promise<void> {
 <template>
   <NForm ref="formRef" :model="model" :rules="rules" label-placement="top">
     <NGrid :cols="2" :x-gap="16" :y-gap="8" responsive="screen">
-      <NFormItemGi label="Title" path="title">
-        <NInput v-model:value="model.title" placeholder="A + B Problem" />
+      <NFormItemGi label="标题" path="title">
+        <NInput v-model:value="model.title" placeholder="A + B" />
       </NFormItemGi>
 
-      <NFormItemGi v-if="mode === 'create'" label="Slug" path="slug">
+      <NFormItemGi v-if="mode === 'create'" label="短标识" path="slug">
         <NInput v-model:value="model.slug" placeholder="a-plus-b" />
       </NFormItemGi>
 
-      <NFormItemGi label="Visibility" path="visibility">
+      <NFormItemGi label="可见性" path="visibility">
         <NSelect v-model:value="model.visibility" :options="visibilityOptions" />
       </NFormItemGi>
 
-      <NFormItemGi label="Difficulty" path="difficulty">
+      <NFormItemGi label="难度" path="difficulty">
         <NSelect v-model:value="model.difficulty" :options="difficultyOptions" />
       </NFormItemGi>
 
-      <NFormItemGi label="Problem type" path="problem_type">
+      <NFormItemGi label="题型" path="problem_type">
         <NSelect v-model:value="model.problem_type" :options="problemTypeOptions" />
       </NFormItemGi>
 
-      <NFormItemGi v-if="mode === 'edit'" label="Status" path="status">
+      <NFormItemGi v-if="mode === 'edit'" label="状态" path="status">
         <NSelect v-model:value="model.status" :options="statusOptions" />
       </NFormItemGi>
 
-      <NFormItemGi label="Time limit (ms)" path="time_limit_ms">
+      <NFormItemGi label="时间限制 (ms)" path="time_limit_ms">
         <NInputNumber
           v-model:value="model.time_limit_ms"
           :min="1"
@@ -213,7 +213,7 @@ async function submit(): Promise<void> {
         />
       </NFormItemGi>
 
-      <NFormItemGi label="Memory limit (MB)" path="memory_limit_mb">
+      <NFormItemGi label="内存限制 (MB)" path="memory_limit_mb">
         <NInputNumber
           v-model:value="model.memory_limit_mb"
           :min="1"
@@ -224,23 +224,23 @@ async function submit(): Promise<void> {
       </NFormItemGi>
     </NGrid>
 
-    <NFormItem label="Tags" path="tags">
+    <NFormItem label="标签" path="tags">
       <NInput v-model:value="model.tags" placeholder="math, implementation" />
     </NFormItem>
 
-    <NFormItem label="Statement" path="statement">
+    <NFormItem label="题面" path="statement">
       <NInput
         v-model:value="model.statement"
         type="textarea"
-        placeholder="Problem statement, input/output description, and constraints"
+        placeholder="题目描述、输入输出格式和数据范围"
         :autosize="{ minRows: 10, maxRows: 24 }"
       />
     </NFormItem>
 
     <NSpace justify="end">
-      <NButton :disabled="loading" @click="emit('cancel')">Cancel</NButton>
+      <NButton :disabled="loading" @click="emit('cancel')">取消</NButton>
       <NButton type="primary" :loading="loading" @click="submit">
-        {{ mode === 'create' ? 'Create problem' : 'Save changes' }}
+        {{ mode === 'create' ? '创建题目' : '保存修改' }}
       </NButton>
     </NSpace>
   </NForm>

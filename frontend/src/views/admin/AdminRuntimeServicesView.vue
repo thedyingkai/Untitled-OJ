@@ -55,7 +55,7 @@ const allServices = computed(() => [
   ...(services.value?.services ?? []),
   ...(services.value?.workers ?? []),
 ])
-const pageTitle = computed(() => selectedServiceId.value ? 'Runtime Service' : 'Runtime Services')
+const pageTitle = computed(() => selectedServiceId.value ? 'Runtime 服务详情' : 'Runtime 服务')
 const runningCount = computed(() => allServices.value.filter((item) => item.state === 'RUNNING').length)
 const blockedCount = computed(() => allServices.value.filter((item) => item.blocked_by.length > 0).length)
 const planJson = computed(() => plan.value ? JSON.stringify(plan.value, null, 2) : '')
@@ -74,7 +74,7 @@ const ojosctlConfirm = computed(() => plan.value
 
 const serviceColumns: DataTableColumns<ModuleRuntimeService> = [
   {
-    title: 'Service',
+    title: '服务',
     key: 'service_id',
     minWidth: 220,
     render: (row) =>
@@ -84,33 +84,33 @@ const serviceColumns: DataTableColumns<ModuleRuntimeService> = [
         { default: () => row.service_id },
       ),
   },
-  { title: 'Module', key: 'module_id', minWidth: 240 },
-  { title: 'Kind', key: 'kind', width: 120 },
-  { title: 'Runtime', key: 'runtime', width: 120 },
-  { title: 'Lifecycle', key: 'lifecycle', width: 130 },
-  { title: 'State', key: 'state', width: 130, render: (row) => stateTag(row.state) },
-  { title: 'Health', key: 'health', width: 120, render: (row) => healthTag(row.health) },
+  { title: '模块', key: 'module_id', minWidth: 240 },
+  { title: '类型', key: 'kind', width: 120 },
+  { title: '运行时', key: 'runtime', width: 120 },
+  { title: '生命周期', key: 'lifecycle', width: 130 },
+  { title: '状态', key: 'state', width: 130, render: (row) => stateTag(row.state) },
+  { title: '健康', key: 'health', width: 120, render: (row) => healthTag(row.health) },
   {
-    title: 'Routes',
+    title: '路由',
     key: 'routes',
     minWidth: 220,
-    render: (row) => row.routes.join(', ') || 'none',
+    render: (row) => row.routes.join(', ') || '无',
   },
   {
-    title: 'Warnings',
+    title: '警告',
     key: 'warnings',
     minWidth: 260,
-    render: (row) => [...row.blocked_by, ...row.warnings].join('; ') || 'none',
+    render: (row) => [...row.blocked_by, ...row.warnings].join('; ') || '无',
   },
 ]
 
 const operationColumns: DataTableColumns<RuntimeOperationItem> = [
-  { title: 'Operation', key: 'operation_id', minWidth: 260 },
-  { title: 'Action', key: 'action', width: 140 },
-  { title: 'Status', key: 'status', width: 120, render: (row) => stateTag(row.status) },
-  { title: 'Actor', key: 'actor_username', width: 140 },
-  { title: 'Updated', key: 'updated_at', minWidth: 180 },
-  { title: 'Error', key: 'error_message', minWidth: 220 },
+  { title: '操作', key: 'operation_id', minWidth: 260 },
+  { title: '动作', key: 'action', width: 140 },
+  { title: '状态', key: 'status', width: 120, render: (row) => stateTag(row.status) },
+  { title: '操作者', key: 'actor_username', width: 140 },
+  { title: '更新时间', key: 'updated_at', minWidth: 180 },
+  { title: '错误', key: 'error_message', minWidth: 220 },
 ]
 
 async function load(silent = false): Promise<void> {
@@ -174,7 +174,7 @@ async function generatePlan(action: 'start' | 'stop' | 'restart' | 'reload'): Pr
 async function copyPlan(): Promise<void> {
   if (!planJson.value) return
   await navigator.clipboard.writeText(planJson.value)
-  message.success('Plan JSON copied')
+  message.success('计划 JSON 已复制')
 }
 
 function downloadPlan(): void {
@@ -231,13 +231,13 @@ onMounted(() => void load())
   <div class="runtime-services-page">
     <OjosPageHeader
       :title="pageTitle"
-      description="Plan-only service and worker lifecycle view from the Kernel Runtime driver."
+      description="来自 Kernel Runtime driver 的服务与 Worker 状态视图。Web Shell 只生成计划，不执行 apply。"
       eyebrow="Hotplug L2"
     >
       <template #actions>
         <NSpace>
-          <NButton secondary :loading="refreshing" @click="reloadRuntime()">Reload Runtime</NButton>
-          <NButton secondary :loading="refreshing" @click="load(true)">Refresh</NButton>
+          <NButton secondary :loading="refreshing" @click="reloadRuntime()">重载 Runtime</NButton>
+          <NButton secondary :loading="refreshing" @click="load(true)">刷新</NButton>
         </NSpace>
       </template>
     </OjosPageHeader>
@@ -247,68 +247,68 @@ onMounted(() => void load())
       <ApiErrorAlert v-if="error" :error="error" @retry="load()" />
       <template v-else>
         <div class="runtime-summary">
-          <OjosStatCard label="Services" :value="services?.services.length ?? 0" tone="primary" />
-          <OjosStatCard label="Workers" :value="services?.workers.length ?? 0" />
-          <OjosStatCard label="Running" :value="runningCount" />
-          <OjosStatCard label="Blocked" :value="blockedCount" tone="warning" />
+          <OjosStatCard label="服务" :value="services?.services.length ?? 0" tone="primary" />
+          <OjosStatCard label="Worker" :value="services?.workers.length ?? 0" />
+          <OjosStatCard label="运行中" :value="runningCount" />
+          <OjosStatCard label="受阻" :value="blockedCount" tone="warning" />
         </div>
 
-        <OjosSection v-if="selectedService" title="Service Detail">
+        <OjosSection v-if="selectedService" title="服务详情">
           <NDescriptions :column="2" bordered label-placement="left">
-            <NDescriptionsItem label="Service">{{ selectedService.service_id }}</NDescriptionsItem>
-            <NDescriptionsItem label="Module">{{ selectedService.module_id }}</NDescriptionsItem>
-            <NDescriptionsItem label="Kind">{{ selectedService.kind }}</NDescriptionsItem>
-            <NDescriptionsItem label="Runtime">{{ selectedService.runtime }}</NDescriptionsItem>
-            <NDescriptionsItem label="Lifecycle">{{ selectedService.lifecycle }}</NDescriptionsItem>
-            <NDescriptionsItem label="Compose">{{ selectedService.compose_service || 'none' }}</NDescriptionsItem>
-            <NDescriptionsItem label="State">
+            <NDescriptionsItem label="服务">{{ selectedService.service_id }}</NDescriptionsItem>
+            <NDescriptionsItem label="模块">{{ selectedService.module_id }}</NDescriptionsItem>
+            <NDescriptionsItem label="类型">{{ selectedService.kind }}</NDescriptionsItem>
+            <NDescriptionsItem label="运行时">{{ selectedService.runtime }}</NDescriptionsItem>
+            <NDescriptionsItem label="生命周期">{{ selectedService.lifecycle }}</NDescriptionsItem>
+            <NDescriptionsItem label="Compose">{{ selectedService.compose_service || '无' }}</NDescriptionsItem>
+            <NDescriptionsItem label="状态">
               <NTag :type="stateTagType(selectedService.state)" size="small">
                 {{ selectedService.state || 'UNKNOWN' }}
               </NTag>
             </NDescriptionsItem>
-            <NDescriptionsItem label="Health">
+            <NDescriptionsItem label="健康">
               <NTag :type="healthTagType(selectedService.health)" size="small">
                 {{ selectedService.health || 'unknown' }}
               </NTag>
             </NDescriptionsItem>
-            <NDescriptionsItem label="Routes">{{ selectedService.routes.join(', ') || 'none' }}</NDescriptionsItem>
-            <NDescriptionsItem label="Warnings">{{ [...selectedService.blocked_by, ...selectedService.warnings].join('; ') || 'none' }}</NDescriptionsItem>
+            <NDescriptionsItem label="路由">{{ selectedService.routes.join(', ') || '无' }}</NDescriptionsItem>
+            <NDescriptionsItem label="警告">{{ [...selectedService.blocked_by, ...selectedService.warnings].join('; ') || '无' }}</NDescriptionsItem>
           </NDescriptions>
           <NSpace class="plan-actions">
-            <NButton secondary :loading="planning === 'start'" @click="generatePlan('start')">Plan Start</NButton>
-            <NButton secondary :loading="planning === 'stop'" @click="generatePlan('stop')">Plan Stop</NButton>
-            <NButton secondary :loading="planning === 'restart'" @click="generatePlan('restart')">Plan Restart</NButton>
-            <NButton secondary :loading="planning === 'reload'" @click="generatePlan('reload')">Plan Reload</NButton>
+            <NButton secondary :loading="planning === 'start'" @click="generatePlan('start')">生成 Start 计划</NButton>
+            <NButton secondary :loading="planning === 'stop'" @click="generatePlan('stop')">生成 Stop 计划</NButton>
+            <NButton secondary :loading="planning === 'restart'" @click="generatePlan('restart')">生成 Restart 计划</NButton>
+            <NButton secondary :loading="planning === 'reload'" @click="generatePlan('reload')">生成 Reload 计划</NButton>
           </NSpace>
-          <OjosSection v-if="plan" title="Runtime Plan">
+          <OjosSection v-if="plan" title="Runtime 计划">
             <NSpace class="plan-actions">
-              <NButton secondary @click="copyPlan()">Copy JSON</NButton>
-              <NButton secondary @click="downloadPlan()">Download JSON</NButton>
+              <NButton secondary @click="copyPlan()">复制 JSON</NButton>
+              <NButton secondary @click="downloadPlan()">下载 JSON</NButton>
             </NSpace>
             <NDescriptions :column="2" bordered label-placement="left" class="plan-meta">
-              <NDescriptionsItem label="Operation">{{ plan.operation_id }}</NDescriptionsItem>
-              <NDescriptionsItem label="Expires">{{ plan.expires_at }}</NDescriptionsItem>
-              <NDescriptionsItem label="Operator Apply">{{ plan.can_apply ? 'allowed' : 'blocked' }}</NDescriptionsItem>
-              <NDescriptionsItem label="Gateway Apply">{{ plan.apply_enabled ? 'enabled' : 'disabled' }}</NDescriptionsItem>
+              <NDescriptionsItem label="操作">{{ plan.operation_id }}</NDescriptionsItem>
+              <NDescriptionsItem label="过期时间">{{ plan.expires_at }}</NDescriptionsItem>
+              <NDescriptionsItem label="Operator Apply">{{ plan.can_apply ? '允许' : '阻断' }}</NDescriptionsItem>
+              <NDescriptionsItem label="Gateway Apply">{{ plan.apply_enabled ? '启用' : '禁用' }}</NDescriptionsItem>
               <NDescriptionsItem label="Dry Run">{{ ojosctlDryRun }}</NDescriptionsItem>
-              <NDescriptionsItem label="Confirm">{{ ojosctlConfirm }}</NDescriptionsItem>
+              <NDescriptionsItem label="确认命令">{{ ojosctlConfirm }}</NDescriptionsItem>
             </NDescriptions>
             <OjosJsonViewer :value="plan" />
           </OjosSection>
-          <OjosSection title="Operation History">
-            <EmptyView v-if="visibleOperations.length === 0" description="No runtime operations" />
+          <OjosSection title="操作历史">
+            <EmptyView v-if="visibleOperations.length === 0" description="暂无 runtime 操作" />
             <NDataTable v-else :columns="operationColumns" :data="visibleOperations" :pagination="{ pageSize: 8 }" :bordered="false" />
           </OjosSection>
         </OjosSection>
 
-        <OjosSection title="Runtime Inventory">
+        <OjosSection title="Runtime 清单">
           <NTabs type="line" animated>
-            <NTabPane name="services" tab="Services">
-              <EmptyView v-if="!services?.services.length" description="No runtime services" />
+            <NTabPane name="services" tab="服务">
+              <EmptyView v-if="!services?.services.length" description="暂无 runtime 服务" />
               <NDataTable v-else :columns="serviceColumns" :data="services.services" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
-            <NTabPane name="workers" tab="Workers">
-              <EmptyView v-if="!services?.workers.length" description="No runtime workers" />
+            <NTabPane name="workers" tab="Worker">
+              <EmptyView v-if="!services?.workers.length" description="暂无 runtime Worker" />
               <NDataTable v-else :columns="serviceColumns" :data="services.workers" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
           </NTabs>

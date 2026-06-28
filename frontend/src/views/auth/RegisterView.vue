@@ -39,19 +39,19 @@ const form = reactive<RegisterForm>({
 
 const rules: FormRules = {
   username: [
-    { required: true, message: 'Please enter a username', trigger: ['input', 'blur'] },
-    { min: 3, max: 32, message: 'Username must be 3 to 32 characters', trigger: ['input', 'blur'] },
+    { required: true, message: '请输入用户名', trigger: ['input', 'blur'] },
+    { min: 3, max: 32, message: '用户名长度必须为 3 到 32 个字符', trigger: ['input', 'blur'] },
   ],
-  email: [{ type: 'email', message: 'Please enter a valid email', trigger: ['input', 'blur'] }],
+  email: [{ type: 'email', message: '请输入有效邮箱', trigger: ['input', 'blur'] }],
   password: [
-    { required: true, message: 'Please enter a password', trigger: ['input', 'blur'] },
-    { min: 6, message: 'Password must be at least 6 characters', trigger: ['input', 'blur'] },
+    { required: true, message: '请输入密码', trigger: ['input', 'blur'] },
+    { min: 6, message: '密码至少 6 个字符', trigger: ['input', 'blur'] },
   ],
   confirmPassword: [
-    { required: true, message: 'Please confirm your password', trigger: ['input', 'blur'] },
+    { required: true, message: '请再次输入密码', trigger: ['input', 'blur'] },
     {
       validator: (_rule, value: string) => value === form.password,
-      message: 'Passwords do not match',
+      message: '两次输入的密码不一致',
       trigger: ['input', 'blur'],
     },
   ],
@@ -67,7 +67,7 @@ async function submit(): Promise<void> {
       email: form.email || undefined,
       password: form.password,
     })
-    message.success('Account created')
+    message.success('账号已创建')
     await router.push({ name: 'login' })
   } catch (err) {
     error.value = err
@@ -80,20 +80,20 @@ async function submit(): Promise<void> {
     <PageCard class="auth-card">
       <NSpace vertical size="large">
         <div class="auth-heading">
-          <h1>Create an OJOS account</h1>
-          <p>Register a user account for problem browsing and submissions.</p>
+          <h1>创建 OJOS 账号</h1>
+          <p>注册后可以浏览题目、提交代码并查看评测结果。</p>
         </div>
 
-        <ApiErrorAlert :error="error" title="Registration failed" />
+        <ApiErrorAlert :error="error" title="注册失败" />
 
         <NForm ref="formRef" :model="form" :rules="rules" label-placement="top" @submit.prevent>
-          <NFormItem label="Username" path="username">
+          <NFormItem label="用户名" path="username">
             <NInput v-model:value="form.username" autocomplete="username" size="large" />
           </NFormItem>
-          <NFormItem label="Email" path="email">
+          <NFormItem label="邮箱" path="email">
             <NInput v-model:value="form.email" autocomplete="email" size="large" />
           </NFormItem>
-          <NFormItem label="Password" path="password">
+          <NFormItem label="密码" path="password">
             <NInput
               v-model:value="form.password"
               type="password"
@@ -102,7 +102,7 @@ async function submit(): Promise<void> {
               size="large"
             />
           </NFormItem>
-          <NFormItem label="Confirm password" path="confirmPassword">
+          <NFormItem label="确认密码" path="confirmPassword">
             <NInput
               v-model:value="form.confirmPassword"
               type="password"
@@ -113,13 +113,13 @@ async function submit(): Promise<void> {
             />
           </NFormItem>
           <NButton type="primary" block size="large" :loading="auth.loading" @click="submit">
-            Create account
+            创建账号
           </NButton>
         </NForm>
 
         <NText depth="3">
-          Already registered?
-          <RouterLink to="/login" class="header-link">Sign in</RouterLink>
+          已有账号？
+          <RouterLink to="/login" class="header-link">去登录</RouterLink>
         </NText>
       </NSpace>
     </PageCard>

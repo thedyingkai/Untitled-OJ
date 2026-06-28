@@ -46,13 +46,13 @@ const cases = ref<TestCaseItem[]>([])
 const problemId = computed(() => Number(route.params.id))
 
 const caseColumns: DataTableColumns<TestCaseItem> = [
-  { title: 'Case', key: 'no', width: 82 },
-  { title: 'Input', key: 'input', minWidth: 180 },
-  { title: 'Answer', key: 'answer', minWidth: 180 },
-  { title: 'Score', key: 'score', width: 82 },
-  { title: 'Group', key: 'group', width: 82 },
+  { title: '测试点', key: 'no', width: 82 },
+  { title: '输入', key: 'input', minWidth: 180 },
+  { title: '答案', key: 'answer', minWidth: 180 },
+  { title: '分数', key: 'score', width: 82 },
+  { title: '分组', key: 'group', width: 82 },
   {
-    title: 'Flags',
+    title: '标记',
     key: 'flags',
     width: 150,
     render: (row) =>
@@ -61,16 +61,16 @@ const caseColumns: DataTableColumns<TestCaseItem> = [
         { size: 6 },
         {
           default: () => [
-            row.sample ? h(NTag, { size: 'small', type: 'info' }, { default: () => 'sample' }) : null,
+            row.sample ? h(NTag, { size: 'small', type: 'info' }, { default: () => '样例' }) : null,
             row.hidden
-              ? h(NTag, { size: 'small', type: 'warning' }, { default: () => 'hidden' })
+              ? h(NTag, { size: 'small', type: 'warning' }, { default: () => '隐藏' })
               : null,
           ],
         },
       ),
   },
   {
-    title: 'Limits',
+    title: '限制',
     key: 'limits',
     width: 170,
     render: (row) =>
@@ -81,14 +81,14 @@ const caseColumns: DataTableColumns<TestCaseItem> = [
 ]
 
 const languageLimitColumns: DataTableColumns<PackageLanguageLimit> = [
-  { title: 'Language', key: 'language' },
-  { title: 'Time', key: 'time_limit_ms', render: (row) => formatDuration(row.time_limit_ms) },
-  { title: 'Memory', key: 'memory_limit_mb', render: (row) => formatMemoryLimit(row.memory_limit_mb) },
+  { title: '语言', key: 'language' },
+  { title: '时间', key: 'time_limit_ms', render: (row) => formatDuration(row.time_limit_ms) },
+  { title: '内存', key: 'memory_limit_mb', render: (row) => formatMemoryLimit(row.memory_limit_mb) },
 ]
 
 async function load(): Promise<void> {
   if (!Number.isFinite(problemId.value) || problemId.value <= 0) {
-    error.value = new Error('Invalid problem id')
+    error.value = new Error('题目 ID 无效')
     return
   }
 
@@ -144,56 +144,56 @@ onMounted(() => {
   <div class="package-page">
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && !pkg" />
-    <EmptyView v-else-if="!loading && !error && !pkg" description="Package not found" />
+    <EmptyView v-else-if="!loading && !error && !pkg" description="未找到题目包" />
 
     <template v-if="pkg">
       <OjosPageHeader
-        :title="`Package: ${pkg.title || pkg.slug}`"
-        :description="`Manifest ${pkg.manifest_sha256 || 'not available'}`"
-        eyebrow="Problem Data"
+        :title="`题目包：${pkg.title || pkg.slug}`"
+        :description="`Manifest ${pkg.manifest_sha256 || '不可用'}`"
+        eyebrow="题目数据"
       >
         <template #actions>
           <RouterLink :to="`/problems/${problemId}`">
-            <NButton secondary>Back</NButton>
+            <NButton secondary>返回</NButton>
           </RouterLink>
-          <NButton secondary :loading="loading" @click="load">Refresh</NButton>
-          <NButton type="primary" :loading="validating" @click="runValidation">Validate</NButton>
+          <NButton secondary :loading="loading" @click="load">刷新</NButton>
+          <NButton type="primary" :loading="validating" @click="runValidation">验证</NButton>
         </template>
       </OjosPageHeader>
 
       <div class="package-summary-grid">
-        <OjosStatCard label="Cases" :value="pkg.total_cases" />
-        <OjosStatCard label="Score" :value="pkg.total_score" />
-        <OjosStatCard label="Samples" :value="pkg.sample_count" />
-        <OjosStatCard label="Size" :value="formatBytes(pkg.size_bytes)" />
+        <OjosStatCard label="测试点" :value="pkg.total_cases" />
+        <OjosStatCard label="总分" :value="pkg.total_score" />
+        <OjosStatCard label="样例" :value="pkg.sample_count" />
+        <OjosStatCard label="体积" :value="formatBytes(pkg.size_bytes)" />
       </div>
 
-      <OjosSection title="Package Summary">
+      <OjosSection title="题目包概览">
         <NDescriptions :column="2" label-placement="left" bordered>
           <NDescriptionsItem label="Schema">{{ pkg.schema }}</NDescriptionsItem>
           <NDescriptionsItem label="Slug">{{ pkg.slug }}</NDescriptionsItem>
-          <NDescriptionsItem label="Type">{{ pkg.problem_type }}</NDescriptionsItem>
-          <NDescriptionsItem label="Visibility">
+          <NDescriptionsItem label="类型">{{ pkg.problem_type }}</NDescriptionsItem>
+          <NDescriptionsItem label="可见性">
             <OjosVisibilityTag :visibility="pkg.visibility" />
           </NDescriptionsItem>
-          <NDescriptionsItem label="Status">
+          <NDescriptionsItem label="状态">
             <OjosStatusTag :status="pkg.status" domain="problem" />
           </NDescriptionsItem>
-          <NDescriptionsItem label="Source">{{ pkg.source_format }}</NDescriptionsItem>
-          <NDescriptionsItem label="Files">{{ pkg.file_count }}</NDescriptionsItem>
+          <NDescriptionsItem label="来源格式">{{ pkg.source_format }}</NDescriptionsItem>
+          <NDescriptionsItem label="文件数">{{ pkg.file_count }}</NDescriptionsItem>
           <NDescriptionsItem label="Manifest">{{ pkg.manifest_sha256 || '-' }}</NDescriptionsItem>
         </NDescriptions>
       </OjosSection>
 
-      <OjosSection title="Validation">
+      <OjosSection title="验证结果">
         <NSpace vertical size="medium">
           <NAlert :type="validation?.valid ? 'success' : 'error'" :show-icon="true">
-            {{ validation?.valid ? 'Package is valid' : 'Package has validation errors' }}
+            {{ validation?.valid ? '题目包验证通过' : '题目包存在验证错误' }}
           </NAlert>
 
           <NGrid :cols="2" :x-gap="16" :y-gap="12" responsive="screen">
             <NGi>
-              <NText strong>Errors</NText>
+              <NText strong>错误</NText>
               <NList v-if="validation?.errors.length" bordered>
                 <NListItem
                   v-for="issue in validation.errors"
@@ -202,10 +202,10 @@ onMounted(() => {
                   {{ issueText(issue) }}
                 </NListItem>
               </NList>
-              <EmptyView v-else description="No errors" />
+              <EmptyView v-else description="无错误" />
             </NGi>
             <NGi>
-              <NText strong>Warnings</NText>
+              <NText strong>警告</NText>
               <NList v-if="validation?.warnings.length" bordered>
                 <NListItem
                   v-for="issue in validation.warnings"
@@ -214,19 +214,19 @@ onMounted(() => {
                   {{ issueText(issue) }}
                 </NListItem>
               </NList>
-              <EmptyView v-else description="No warnings" />
+              <EmptyView v-else description="无警告" />
             </NGi>
           </NGrid>
         </NSpace>
       </OjosSection>
 
-      <OjosSection title="Limits">
+      <OjosSection title="资源限制">
         <NSpace vertical size="medium">
           <NDescriptions :column="2" label-placement="left" bordered>
-            <NDescriptionsItem label="Default time">
+            <NDescriptionsItem label="默认时间">
               {{ formatDuration(pkg.limits.default_time_limit_ms) }}
             </NDescriptionsItem>
-            <NDescriptionsItem label="Default memory">
+            <NDescriptionsItem label="默认内存">
               {{ formatMemoryLimit(pkg.limits.default_memory_limit_mb) }}
             </NDescriptionsItem>
           </NDescriptions>
@@ -234,7 +234,7 @@ onMounted(() => {
         </NSpace>
       </OjosSection>
 
-      <OjosSection title="Components">
+      <OjosSection title="组件">
         <NDescriptions :column="3" label-placement="top" bordered>
           <NDescriptionsItem label="Runner">
             {{ pkg.runner.type }} / {{ pkg.runner.name }} / {{ pkg.runner.config_path }}
@@ -248,7 +248,7 @@ onMounted(() => {
         </NDescriptions>
       </OjosSection>
 
-      <OjosSection title="Cases">
+      <OjosSection title="测试点">
         <NDataTable :columns="caseColumns" :data="cases" :loading="loading" :bordered="false" />
       </OjosSection>
     </template>
