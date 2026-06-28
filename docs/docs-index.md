@@ -36,7 +36,7 @@
 
 ## 模块系统
 
-- [模块系统入口](modules/README.md)
+- [模块系统入口](modules/index.md)
 - [模块契约](modules/module-contract.md)
 - [Module Contract v1](modules/module-contract-v1.md)
 - [Module Schema v1](modules/module-schema-v1.yaml)
@@ -64,7 +64,7 @@
 
 ## API
 
-- [API 索引](api/README.md)
+- [API 索引](api/index.md)
 - [Admin API](api/admin-api.md)
 - [Auth API](api/auth-api.md)
 - [Problem API](api/problem-api.md)
@@ -89,7 +89,7 @@
 - [前端开发](development/frontend-development.md)
 - [静态验证](development/static-verification.md)
 - [编码规范](development/coding-standards.md)
-- [临时文件规则](development/temp-file-policy.md)
+- [临时文件规则](development/workspace-file-policy.md)
 - [UI 风格指南](development/ui-style-guide.md)
 
 ## E2E
@@ -124,7 +124,7 @@
 ## 脚本
 
 - `scripts/acceptance-kernel.ps1`：统一本地 Kernel 基线验收。
-- `scripts/verify-static.ps1`：静态构建、测试与安全扫描。
+- `scripts/verify-static.ps1`：静态构建、测试、compose config 和 Installer smoke。
 - `scripts/e2e-api.ps1`：Docker control plane API e2e。
 - `scripts/e2e-module-compat.ps1`：Module SDK compatibility harness。
 - `scripts/build-release-artifacts.ps1`：v0.1.0 发布产物构建。

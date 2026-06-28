@@ -1,8 +1,8 @@
-# Kernel Baseline Freeze
+# Kernel 基线冻结
 
 日期：2026-06-28
 
-本文冻结 OJOS v0.1.0 发布基线中的 Kernel、Installer、Runtime、Module SDK 和 Judge Core 当前能力。本文只描述已经实现并可验收的能力，不代表 Contest 已实现，也不代表 full hotplug 完成。
+本文冻结 OJOS v0.1.0 发布基线中的 Kernel、Installer、Runtime、Module SDK 和 Judge Core 当前能力。本文只描述已经实现并可验收的能力；Contest 相关能力与完整模块热插拔自动化不在当前完成范围内。
 
 ## 已完成能力
 
@@ -29,9 +29,9 @@
 - remote module market。
 - package signature / publisher trust policy。
 - hook execution。
-- full hotplug automation。
+- 完整模块热插拔自动化。
 - true multi-machine runtime apply。
-- Judge Core GA。
+- Judge Core 通用可用状态。
 - Contest 或其他真实业务模块。
 
 ## Hotplug 等级
@@ -42,7 +42,7 @@
 | L1 Route/Menu/Topology/Permission Hotplug | 基本完成 | dynamic route table、trusted proxy、Web Shell contribution registry、安全 fallback | 不加载动态前端 JS |
 | L2 Service Runtime Foundation + Controlled Apply | foundation 完成 | service/worker 声明、health/state、plan、`ojosctl` controlled apply | Gateway/Web 不 apply |
 | L3 Dynamic Frontend Extension | 未完成 | 只展示 metadata | 需要签名、CSP、sandbox 等安全设计 |
-| L4 Full Module Hotplug | 未完成 | 无完整自动化 | 需要 market/trust/runtime/operator 设计 |
+| L4 完整模块热插拔 | 未完成 | 无完整自动化 | 需要 market/trust/runtime/operator 设计 |
 
 ## 统一验收入口
 

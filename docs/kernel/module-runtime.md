@@ -1,4 +1,4 @@
-﻿# Module Runtime
+# 模块运行时
 
 > 文档状态：当前实现，v0.1.0 发布基线
 > 适用范围：Kernel、Gateway、Web Shell、模块作者
@@ -38,14 +38,14 @@ Runtime Snapshot `version: 1` 是当前模块贡献事实源：
 
 默认只返回 enabled module 的 active contribution。`include_disabled=true` 只供管理员检查 disabled registry contribution，不用于 public runtime surface。
 
-## Aggregation 规则
+## 聚合规则
 
 - 每个 contribution 都带 `module_id`，便于追踪来源。
 - disabled module 不进入 active permission、menu、route、topology 或 service surface。
 - roles、storage buckets、events、admin panels、scheduled jobs 和 manifest topology 可从 stored manifest 派生。
 - 响应不得包含 secret、token、DB 连接串、本机绝对路径、Docker socket 路径或 package 内部路径。
 
-## Gateway Route Hotplug
+## Gateway 路由热插拔
 
 Gateway 从 Runtime Snapshot 构建动态路由表：
 
@@ -57,7 +57,7 @@ Gateway 从 Runtime Snapshot 构建动态路由表：
 - `upstream_base` 默认不返回给普通管理视图。
 - 原始 `Authorization` 不透传到模块服务，Gateway 只转发受控 actor/internal headers。
 
-## Topology
+## 拓扑
 
 Topology 从 Runtime Snapshot 派生，包含：
 
@@ -71,7 +71,7 @@ Topology 从 Runtime Snapshot 派生，包含：
 
 Web Shell 只渲染 snapshot，不为未来模块硬编码拓扑。
 
-## Service Runtime Foundation
+## 服务运行时基础能力
 
 当前 L2 foundation 已支持：
 
@@ -134,4 +134,4 @@ expires_at
 - L1 Route/Menu/Topology/Permission Hotplug：基本完成。
 - L2 Service Runtime Foundation + Controlled Apply：foundation 完成，apply 只通过 `ojosctl`/operator。
 - L3 Dynamic Frontend Extension：未完成。
-- L4 Full Module Hotplug：未完成。
+- L4 完整模块热插拔：未完成。

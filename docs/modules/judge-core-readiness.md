@@ -1,4 +1,4 @@
-# Judge Core Readiness
+# Judge Core 就绪度
 
 Judge Core 是 OJOS 当前第一个核心 feature module，提供题库、提交、评测、Worker Link、结果存储和评测管理能力。
 
@@ -10,9 +10,9 @@ Judge Core 是 OJOS 当前第一个核心 feature module，提供题库、提交
 - Judge Core route metadata 参与 dynamic route table 校验，同时保留兼容静态路由。
 - Judge Core disable/uninstall 继续受保护。
 
-## 不标记 GA
+## 通用可用状态
 
-Judge Core 当前不标记 GA，仍缺少：
+Judge Core 当前不标记通用可用状态，仍缺少：
 
 - 真实多机 Worker 部署验收。
 - 跨主机网络故障与恢复验收。
@@ -23,4 +23,4 @@ Judge Core 当前不标记 GA，仍缺少：
 
 ## 后续门禁
 
-Judge Core 可作为 Kernel/runtime 回归基线使用，但不能作为生产 GA 能力宣传。文档、release notes 和 UI 不得写成 Judge Core GA。
+Judge Core 可作为 Kernel/runtime 回归基线使用，但不能作为生产通用可用能力宣传。文档、release notes 和 UI 不得写成已经达到通用可用状态。

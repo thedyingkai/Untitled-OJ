@@ -1,4 +1,4 @@
-# Module Lifecycle
+# 模块生命周期
 
 > 文档状态：当前实现，v0 metadata lifecycle
 > 最后更新：2026-06-27
@@ -43,7 +43,7 @@ REMOVED
 
 当前 demo module install apply 默认写为 `DISABLED`，随后可 enable / disable。builtin 和 kernel 模块保持 `ENABLED`。
 
-## Plan
+## 计划结构
 
 每个 plan 返回：
 
@@ -95,23 +95,23 @@ Install/apply 写入 registry metadata 和 stored manifest。Enable 让模块进
 
 Demo module 和 Sample module 生命周期验收验证：
 
-- enabled demo module appears in Runtime Snapshot;
-- `demo.view` appears in active permission registry after enable;
-- demo topology metadata appears after enable;
-- disabled demo module is excluded from active Runtime Snapshot;
-- disabled demo module remains visible through include-disabled admin inspection.
+- 已启用 demo module 会出现在 Runtime Snapshot。
+- `demo.view` 会在 enable 后进入 active permission registry。
+- demo topology metadata 会在 enable 后出现。
+- 已禁用 demo module 会从 active Runtime Snapshot 移除。
+- 已禁用 demo module 仍可通过 include-disabled 管理检查查看。
 
 ## Hotplug L1 生命周期语义
 
-Enable now affects both metadata and dynamic gateway proxy eligibility. An enabled module can contribute active permissions, menus, frontend route metadata, topology, health metadata and gateway routes. A disabled module is excluded from the active Runtime Snapshot and its gateway routes are not proxy-enabled.
+Enable 同时影响 metadata 和 dynamic gateway proxy eligibility。已启用模块可以贡献 active permissions、menus、frontend route metadata、topology、health metadata 和 gateway routes。已禁用模块会从 active Runtime Snapshot 移除，其 gateway routes 不会进入可代理状态。
 
-`POST /api/admin/modules/runtime/reload` rebuilds the active route table and atomically replaces Gateway's in-memory dynamic proxy table. Dry-run or include-disabled views can show disabled route metadata, but disabled routes must not receive traffic.
+`POST /api/admin/modules/runtime/reload` 会重建 active route table，并原子替换 Gateway 内存中的 dynamic proxy table。Dry-run 或 include-disabled 视图可以展示 disabled route metadata，但 disabled routes 不能接收流量。
 
-L1 does not start or stop module services. Service availability still comes from compose/operator-managed deployment. L2 will define the controlled runtime driver.
+L1 不负责启动或停止模块服务。服务可用性仍来自 compose/operator 管理的部署。L2 只定义受控 runtime driver foundation。
 
 ## Hotplug L2 生命周期语义
 
-Module lifecycle and service lifecycle are separate. Installing/enabling a module activates metadata contributions. L2 foundation additionally exposes declared services/workers, their observed state/health and plan-only lifecycle actions.
+Module lifecycle 与 service lifecycle 相互独立。安装或启用模块只激活 metadata contribution。L2 foundation 额外暴露 declared services/workers、观测到的 state/health 和 plan-only lifecycle actions。
 
 Service plan actions:
 
@@ -125,11 +125,11 @@ plan-health
 
 Gateway admin API 只返回计划。Gateway apply 禁用。Metadata-only service 的 start/stop/restart 被阻断，只用于 snapshot/topology 验证。
 
-A service health failure can make a dynamic gateway route `degraded` or `unavailable`. Unavailable routes are not proxied; Gateway still enforces auth mode before returning a stable 503.
+服务健康失败可以让 dynamic gateway route 进入 `degraded` 或 `unavailable`。`unavailable` 路由不会被代理；Gateway 仍会先执行 auth mode 检查，再返回稳定的 `503`。
 
 ## Hotplug L2 Controlled Apply 生命周期
 
-Runtime plan apply is now an operator lifecycle action, separate from module install/enable/disable.
+Runtime plan apply 是 operator lifecycle action，与 module install/enable/disable 分离。
 
 Allowed apply path:
 
@@ -153,13 +153,13 @@ EXPIRED
 BLOCKED
 ```
 
-Apply rules:
+Apply 规则：
 
-- `--confirm` is required for real apply.
-- `--dry-run` prints the argv that would run and does not execute it.
-- Expired plans are rejected.
-- Metadata-only services cannot be applied.
-- A service lock prevents concurrent apply for the same service.
-- Operation request/result data is redacted before being stored.
+- 真实 apply 必须提供 `--confirm`。
+- `--dry-run` 只打印将要执行的 argv，不执行命令。
+- 过期 plan 会被拒绝。
+- Metadata-only service 不能 apply。
+- service lock 会阻止同一服务并发 apply。
+- operation request/result data 入库前必须 redaction。
 
-L2 Controlled Apply remains limited to trusted local compose services. It is not a generic module code execution or deployment system.
+L2 Controlled Apply 仅限 trusted local compose services，不是通用模块代码执行或部署系统。

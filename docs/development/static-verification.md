@@ -14,11 +14,11 @@
 
 ## 3. 当前实现
 
-脚本位于 `scripts/verify-static.ps1`，已经包含中文文件头说明。它会执行 Go、Rust、前端和部署配置检查，并扫描危险内容。
+脚本位于 `scripts/verify-static.ps1`，已经包含中文文件头说明。它会执行 Go、Rust、前端和部署配置检查。secret、路径泄露和危险配置还需要人工复核，不能只凭文本扫描得出完成结论。
 
 ## 4. 目标设计
 
-静态验证应覆盖所有无需外部运行环境即可发现的问题。新增 API schema、前端路径、部署配置或 worker 协议时，应同步更新扫描规则。
+静态验证应覆盖所有无需外部运行环境即可发现的问题。新增 API schema、前端路径、部署配置或 worker 协议时，应同步补充真实编译、测试、E2E 或人工审计入口。
 
 ## 5. 关键流程
 
@@ -44,7 +44,7 @@ powershell -NoProfile -File scripts\verify-static.ps1
 
 ## 7. 安全边界
 
-脚本会扫描 public schema 内部路径、前端直接 API 调用、mock、危险部署配置和 docs/archive 之外的危险内容。它不判断生产 secret 是否已按实际环境轮换。
+脚本不会替代人工安全审计。public schema、前端展示、部署配置、secret、worker artifact 和运行时响应都需要结合代码审查与 E2E 结果确认。
 
 ## 8. 验收方式
 

@@ -1,4 +1,4 @@
-# Pre-Feature Gate
+# 功能实现前门禁
 
 本文定义 v0.1.0 发布基线之后、开始第一个真实业务模块之前必须满足的门禁。当前暂停 Contest Core Skeleton，本门禁不允许写 Contest API、Contest 前端或 Contest migration。
 
@@ -47,4 +47,4 @@
 - 执行 hook。
 - 动态加载不可信 JS。
 - 把 Judge Core 标记 GA。
-- 宣称 full hotplug 完成。
+- 宣称完整模块热插拔自动化已经完成。

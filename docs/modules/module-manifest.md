@@ -1,4 +1,4 @@
-﻿# Module Manifest
+# 模块 Manifest
 
 > 文档状态：当前实现，`schema_version: 1`
 > 最后更新：2026-06-28

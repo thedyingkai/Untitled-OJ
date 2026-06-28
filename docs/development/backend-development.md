@@ -45,7 +45,7 @@ cd services\judge-api
 go test ./...
 ```
 
-全仓库静态验证会依次执行 `go build ./...`、`go test ./...` 和路径泄露扫描。
+全仓库静态验证会依次执行 Go build/test、Rust check/test、前端构建、compose config 和 Installer smoke。路径泄露必须结合代码审计与 E2E 响应结果确认。
 
 ## 9. 常见问题
 
@@ -100,15 +100,15 @@ Gateway 仍是唯一 public API 入口。新增 Admin API 必须先在 Gateway �
 
 ## Runtime Wiring v1 后端指导
 
-Gateway admin module APIs should use Kernel Module Runtime aggregation for runtime facts. New module contributions should be read from module registry tables or stored manifest metadata instead of page-specific hardcoding.
+Gateway admin module API 应使用 Kernel Module Runtime 聚合运行时事实。新增模块贡献应来自 module registry 表或已存储的 manifest metadata，不能写页面专用硬编码。
 
-Current backend contract:
+当前后端契约：
 
-- Runtime Snapshot defaults to ENABLED module contributions.
-- `include_disabled=true` is admin-only inspection.
-- Runtime route table validates duplicate and overlapping prefixes.
-- Admin Health aggregates module health_check metadata from Runtime Snapshot and marks metadata checks as registered, not as fake service probes.
-- Compatibility proxy routes stay configured until full dynamic proxy cutover.
+- Runtime Snapshot 默认只返回 ENABLED 模块贡献。
+- `include_disabled=true` 只用于管理员检查。
+- Runtime route table 校验重复前缀和重叠前缀。
+- Admin Health 从 Runtime Snapshot 聚合 `health_check` metadata，并把 metadata check 标记为 registered，不伪造成真实 service probe。
+- core compatibility proxy routes 在完整 dynamic proxy 切换前保留。
 
 ## Hotplug L1 后端指导
 
@@ -130,18 +130,18 @@ Rules for backend changes:
 
 ## Hotplug L2 Controlled Apply 后端指导
 
-Gateway remains a plan/status adapter. Do not add code paths that run Docker, call shell, mount Docker socket, or apply runtime plans inside Gateway.
+Gateway 只作为 plan/status adapter。不要在 Gateway 中新增运行 Docker、调用 shell、挂载 Docker socket 或 apply runtime plan 的代码路径。
 
-Backend rules:
+后端规则：
 
-- Runtime plan commands must be argv arrays, never shell strings.
-- `POST /api/admin/runtime/plans/:id/apply` must remain a 501 boundary unless a separately reviewed operator component owns apply.
-- Plan generation may set `can_apply=true` for externally applicable trusted plans, but Gateway must keep `apply_enabled=false`.
-- Operation history and audit responses must redact secrets, tokens, DSNs, host paths, and raw env.
-- Any compose apply implementation must validate service allowlist, action allowlist, fixed compose path, TTL, and lock before execution.
+- Runtime plan command 必须是 argv array，不能是 shell string。
+- `POST /api/admin/runtime/plans/:id/apply` 必须保持 501 边界，除非独立评审过的 operator component 接管 apply。
+- Plan generation 可以对外部可执行的 trusted plan 设置 `can_apply=true`，但 Gateway 必须保持 `apply_enabled=false`。
+- Operation history 和 audit response 必须 redaction secret、token、DSN、host path 和 raw env。
+- 任何 compose apply 实现都必须在执行前校验 service allowlist、action allowlist、固定 compose path、TTL 和 lock。
 
 Local controlled apply 当前属于 `kernel/installer/cli`（`ojosctl runtime apply-plan`）和未来 operator，不属于 Gateway handler。
 
 ## Module SDK 后端指导
 
-For ordinary modules, do not add hardcoded Gateway routes or module-specific runtime aggregation code. New modules should enter through `module.yaml`, installer registry writes and Runtime Snapshot. Add Kernel/Gateway code only when introducing a new extension point type, a new runtime driver, or a reviewed platform capability.
+普通模块不能新增 hardcoded Gateway route 或 module-specific runtime aggregation code。新增模块应通过 `module.yaml`、installer registry writes 和 Runtime Snapshot 接入。只有引入新的 extension point 类型、新 runtime driver 或已评审的平台能力时，才允许修改 Kernel/Gateway 代码。

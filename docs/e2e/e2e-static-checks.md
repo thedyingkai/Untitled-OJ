@@ -6,7 +6,7 @@
 
 ## 1. 文档目的
 
-本文档说明在 Windows 或无 Linux sandbox 环境中可以执行的静态验收。静态检查用于尽早发现格式、构建、类型、安全扫描和 compose 配置问题，但不能证明 nsjail、cgroup v2 或多 worker runtime 行为通过。
+本文档说明在 Windows 或无 Linux sandbox 环境中可以执行的静态验收。静态检查用于尽早发现格式、构建、类型和 compose 配置问题，但不能证明 nsjail、cgroup v2、多 worker runtime 行为或安全边界已经通过。
 
 ## 2. 适用范围
 
@@ -18,7 +18,7 @@
 
 ## 4. 目标设计
 
-静态验收应保持快速、确定、可在普通开发机执行。新增 public API、前端页面、worker 协议或部署文件时，应同步扩展扫描规则，避免路径泄露和危险部署配置回归。
+静态验收应保持快速、确定、可在普通开发机执行。新增 public API、前端页面、worker 协议或部署文件时，应同步补充编译、测试、E2E 和人工审计要求，避免路径泄露和危险部署配置回归。
 
 ## 5. 关键流程
 
@@ -34,9 +34,8 @@ powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild
 - `cargo check`。
 - `npm run build`。
 - `docker compose config`。
-- 前端直接 API 调用和 mock 扫描。
-- Public schema 内部路径扫描。
-- 危险部署配置扫描。
+- Docker compose 配置检查。
+- 关键安全边界由人工审计和 E2E 结果确认。
 
 ## 6. 配置说明
 
@@ -44,24 +43,24 @@ powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild
 
 ## 7. 安全边界
 
-静态扫描会阻止 public schema 泄露内部路径、前端绕过统一 API client、部署文件出现危险配置。它不检查生产网络策略和真实 worker sandbox。
+静态检查只能发现部分配置和构建问题。public schema、前端绕过统一 API client、危险部署配置、生产网络策略和真实 worker sandbox 都必须结合人工审计与运行时验收。
 
 ## 8. 验收方式
 
-脚本退出码为 0 才能记录为通过。失败时查看输出的阶段名，例如 `Frontend build` 或 `Dangerous deployment scan`，修复后重新执行完整命令。
+脚本退出码为 0 才能记录为通过。失败时查看输出的阶段名，例如 `Frontend build` 或 `Docker compose config`，修复后重新执行完整命令。
 
 ## 9. 常见问题
 
 - `npm run build` 失败：进入 `frontend` 单独执行并修复 TypeScript/Vite 错误。
 - compose config 失败：检查 `.env.example` 和 compose 文件。
-- public schema scan 失败：移除 API schema 中的内部路径字段。
-- frontend direct-call scan 失败：改为统一 API client。
+- API 响应出现内部路径：修复 schema、handler 或 response mapper，并重新跑 E2E。
+- 前端绕过统一 API client：改为统一 client 后重新构建并人工审查页面。
 
 ## 10. 相关文档
 
 - [工程验收总入口](e2e-engineering-acceptance.md)
 - [静态验证](../development/static-verification.md)
-- [临时文件隔离规则](../development/temp-file-policy.md)
+- [临时文件隔离规则](../development/workspace-file-policy.md)
 ## 2026-06-26 验收边界补充
 
 `scripts\verify-static.ps1 -SkipDockerBuild` 只属于静态验证入口，不能证明 Docker Control Plane 已启动、数据库迁移已执行、Gateway 转发正常或 API 权限拒绝正确。需要 API 运行时验收时，必须先真实启动 compose：

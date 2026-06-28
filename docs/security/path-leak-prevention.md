@@ -14,7 +14,7 @@
 
 ## 3. 当前实现
 
-静态验证会扫描 public schema 和前端中常见内部路径字段。worker artifact 通过 URL、digest 和 size metadata 传输，不传 Control Plane 本地路径。
+worker artifact 通过 URL、digest 和 size metadata 传输，不传 Control Plane 本地路径。路径泄露防护必须通过 DTO 审查、前端页面审查和 E2E `path_leaks=0` 共同确认。
 
 ## 4. 目标设计
 
@@ -46,16 +46,15 @@ Public API 不返回源码路径、结果路径、题目包目录、stdout/stder
 
 ## 8. 验收方式
 
-执行 `scripts/verify-static.ps1 -SkipDockerBuild`，确认 public schema/internal path scan 通过。
-
-补充人工检查：
+执行人工检查和 E2E：
 
 1. 打开题目详情和题目包页面，确认只显示题面、样例、限制和校验摘要。
 2. 打开提交详情，确认只显示状态、分数、耗时、内存、case 摘要和截断日志。
 3. 以普通用户访问他人 private 题目或提交，确认返回 403/404。
 4. 检查前端源码没有直接引用内部路径字段。
+5. 执行 Docker API E2E，确认 summary 中 `path_leaks=0`。
 
-如果扫描命中内部字段名，先判断它是否位于安全说明或内部结构中。只要字段进入 public schema、前端展示或 worker task artifact 之外的响应，就必须修复。
+只要内部路径字段进入 public schema、前端展示或 worker task artifact 之外的响应，就必须修复。
 
 ## 9. 常见问题
 

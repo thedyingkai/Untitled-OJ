@@ -58,7 +58,8 @@ Public API 不允许返回绝对路径、内部路径字段或主机目录结构
 - 提交详情和题目包 API 不返回内部路径。
 - worker 下载源码和题目包后校验 sha256。
 - result 上传时校验 task owner 和 `lease_version`。
-- `scripts/verify-static.ps1 -SkipDockerBuild` 的 public schema path scan 通过。
+- E2E 响应汇总保持 `path_leaks=0`。
+- 人工审查 public DTO、前端展示和 worker artifact 响应不包含本机路径字段。
 
 ## 9. 常见问题
 

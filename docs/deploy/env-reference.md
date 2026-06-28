@@ -48,7 +48,7 @@ Worker：`OJOS_WORKER_ID`、`OJOS_WORKER_NAME`、`OJOS_CONTROL_PLANE_URL`、`OJO
 
 ## 8. 验收方式
 
-执行 compose config 和静态验证，确认变量完整、无危险默认值。
+执行 compose config、静态验证和人工配置审查，确认变量完整、无危险默认值。
 
 最小检查：
 
@@ -58,7 +58,7 @@ docker compose --env-file deploy/worker/.env.example -f deploy/worker/docker-com
 powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild
 ```
 
-如果配置扫描命中危险默认 secret，应替换为占位说明或删除默认值。生产运行前还要确认 `.env` 没有进入 Git 状态。
+如果发现危险默认 secret，应替换为占位说明或删除默认值。生产运行前还要确认 `.env` 没有进入 Git 状态。
 
 ## 9. 常见问题
 

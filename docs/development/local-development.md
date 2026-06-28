@@ -36,7 +36,7 @@ npm run dev
 
 ## 7. 安全边界
 
-本地 `.env` 不应提交。临时日志、扫描报告和调试脚本放入 `.tmp/agent/`，不能放在根目录或正式源码目录。
+本地 `.env` 不应提交。过程日志、本地报告和短期调试脚本只能放入 `.tmp/agent/`，审计或提交前必须清理，不能放在根目录或正式源码目录。
 
 ## 8. 验收方式
 
@@ -53,4 +53,4 @@ npm run dev
 
 - [静态验证](static-verification.md)
 - [前端开发](frontend-development.md)
-- [临时文件隔离规则](temp-file-policy.md)
+- [仓库文件隔离规则](workspace-file-policy.md)

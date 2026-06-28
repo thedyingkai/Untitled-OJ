@@ -1,4 +1,4 @@
-# Module Installer
+# 模块安装器
 
 > 文档状态：当前实现，v0 本地 manifest / 本地 package 验收中
 > 适用范围：模块开发 / 后端开发 / 运维 / 安全审计
@@ -16,7 +16,7 @@ kernel/installer/service/  内部 HTTP service
 kernel/installer/cli/      本地 CLI
 ```
 
-仓库边界见 [Project Structure v2 ADR](../architecture/adr/ADR-project-structure-v2-kernel-modules.md) 和 [ADR: Module Installer Repository Boundary](../architecture/adr/ADR-module-installer-repository-boundary.md)。当前不立即拆仓，但 Installer 已从普通 service 提升为 Kernel 能力。
+仓库边界见 [Project Structure v2 ADR](../architecture/adr/adr-project-structure-v2-kernel-modules.md) 和 [ADR: Module Installer Repository Boundary](../architecture/adr/adr-module-installer-repository-boundary.md)。当前不立即拆仓，但 Installer 已从普通 service 提升为 Kernel 能力。
 
 ## 当前 v0 能力
 

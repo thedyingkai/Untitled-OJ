@@ -75,7 +75,7 @@ Copy-Item deploy\worker\.env.example deploy\worker\.env
 docker compose --env-file deploy\worker\.env -f deploy\worker\docker-compose.yml up -d --build
 ```
 
-Docker daemon 不可用时，只能执行 compose config 或静态扫描，不能声明 worker runtime 已通过。
+Docker daemon 不可用时，只能执行 compose config 或静态构建检查，不能声明 worker runtime 已通过。
 
 ## 8. 注册验证
 

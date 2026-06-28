@@ -1,4 +1,4 @@
-# Module Contract v1
+# 模块契约 v1
 
 Module Contract v1 是 OJOS 模块的稳定兼容起点。模块只要保持在该契约内，就可以通过 manifest/package/runtime 贡献 metadata、权限、菜单、前端路由元数据、Gateway route 元数据、服务、Worker、健康检查、存储元数据、事件、admin panel 元数据和拓扑，而不需要修改 Kernel、Gateway 或 Web Shell 主逻辑。
 
@@ -82,7 +82,7 @@ Package v1 只验证 checksum integrity。Signature trust policy 留到后续版
 
 ## Hotplug Level
 
-Schema v1 支持 L0 metadata hotplug、L1 Gateway route table contribution、L2 controlled service plan metadata。不支持 dynamic frontend bundle、hook、remote module market 或 full hotplug automation。
+Schema v1 支持 L0 metadata hotplug、L1 Gateway route table contribution、L2 controlled service plan metadata。不支持 dynamic frontend bundle、hook、remote module market 或完整模块热插拔自动化。
 
 ## 版本冻结
 

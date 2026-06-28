@@ -1,8 +1,8 @@
 # OJOS
 
-OJOS 是模块化 Online Judge 系统。当前 `v0.1.0` 目标是发布题库、评测、Judge Core、Kernel、Module Runtime、Installer 和 Module SDK 的可验收基线。
+OJOS 是模块化 Online Judge 系统。当前仓库正在进行全仓人工审计与清理，`v0.1.0` 只能作为待验收目标，不声明已经达到发布标准。
 
-本仓库不声明生产完全安全，不声明 full hotplug 完成，也不包含 Contest 实现。
+本仓库仍处于安全边界审计中，模块热插拔只完成到已记录的 L0/L1/L2 foundation 范围，Contest 相关能力尚未实现。
 
 ## 当前能力
 
@@ -23,8 +23,8 @@ OJOS 是模块化 Online Judge 系统。当前 `v0.1.0` 目标是发布题库、
 - remote module market 未实现。
 - package signature / trust policy 未完成。
 - true multi-machine runtime apply 未完成。
-- full hotplug 未完成。
-- Judge Core 不标记 GA。
+- 完整模块热插拔自动化未完成。
+- Judge Core 不标记通用可用状态。
 
 ## 本地启动
 
@@ -90,9 +90,9 @@ powershell -NoProfile -File scripts\acceptance-kernel.ps1 -RunControlledApply -S
 powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild
 ```
 
-完整发版还需要 e2e、Go、Rust、judge-worker、frontend、npm audit 和 release artifact 构建。
+完整发版还需要重新通过 e2e、Go、Rust、judge-worker、frontend、npm audit、release artifact 构建和人工审计结论。
 
-## Release Artifacts
+## 发布产物
 
 ```powershell
 powershell -NoProfile -File scripts\build-release-artifacts.ps1 -Version v0.1.0
@@ -102,8 +102,8 @@ powershell -NoProfile -File scripts\build-release-artifacts.ps1 -Version v0.1.0
 
 ## 文档
 
-- [文档索引](docs/DOCS_INDEX.md)
-- [文档状态](docs/DOCS_STATUS.md)
-- [v0.1.0 发布说明](docs/release/v0.1.0-release-notes.md)
+- [文档索引](docs/docs-index.md)
+- [文档状态](docs/docs-status.md)
+- [v0.1.0 候选发布说明](docs/release/v0.1.0-release-notes.md)
 - [v0.1.0 发版清单](docs/release/v0.1.0-ship-checklist.md)
 - [v0.1.0 已知限制](docs/release/v0.1.0-known-limitations.md)

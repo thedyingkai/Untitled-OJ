@@ -45,5 +45,5 @@ PostgreSQL/Redis/internal API 不公开；worker 不直连 DB/Redis；Public API
 ## 10. 相关文档
 
 - [架构总览](../architecture/overview.md)
-- [文档状态](../DOCS_STATUS.md)
+- [文档状态](../docs-status.md)
 - [E2E 工程验收](../e2e/e2e-engineering-acceptance.md)

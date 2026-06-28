@@ -1,4 +1,4 @@
-# Module SDK
+# 模块 SDK
 
 Module SDK 是普通 OJOS 模块的开发入口，由 Module Contract v1、`ojosctl`、`.ojosmod` package、compatibility harness 和文档组成。
 

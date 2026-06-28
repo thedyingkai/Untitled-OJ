@@ -1,4 +1,4 @@
-# Module Authoring Guide
+# 模块编写指南
 
 模块作者应从 `ojosctl module init` 开始，再在 `schema_version: 1` 范围内编辑 `module.yaml`。
 

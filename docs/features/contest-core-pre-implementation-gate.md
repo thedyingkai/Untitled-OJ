@@ -31,7 +31,7 @@
 - Remote OJ.
 - Rating.
 - 高级反作弊。
-- Judge Core GA.
+- 将 Judge Core 描述为通用可用能力。
 
 ## Kernel 前置条件
 
@@ -55,4 +55,4 @@ powershell -NoProfile -File scripts\e2e-module-compat.ps1 -BaseUrl http://localh
 
 ## 最终判断
 
-回归检查通过后，该规划门禁足以支持进入 skeleton 阶段；它不足以宣称 Contest 已实现。
+回归检查通过后，该规划门禁足以支持进入 skeleton 阶段；它不足以宣称 Contest 具备真实业务能力。

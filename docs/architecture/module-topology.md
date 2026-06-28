@@ -4,7 +4,7 @@
 > 适用范围：架构、模块开发、运行时验收
 > 最后更新：2026-06-28
 
-本文说明 OJOS v0.1.0 的模块拓扑模型。历史长版设计已归档到 `docs/archive/legacy-docs/root-module-topology-original.md`，正式文档只描述当前可验收能力和明确边界。
+本文说明 OJOS 当前模块拓扑模型。正式文档只描述当前可验收能力和明确边界。
 
 ## 拓扑层级
 
@@ -75,12 +75,12 @@ Web Shell 从 snapshot 读取菜单、前端路由元数据、admin panel、perm
 以下能力不属于 v0.1.0 当前完成范围：
 
 - L3 dynamic frontend bundle。
-- L4 full module hotplug。
+- L4 完整模块热插拔自动化。
 - 远程模块市场。
 - hook 执行。
 - package signature / trust policy 完整实现。
 - true multi-machine runtime apply。
-- Judge Core GA。
+- Judge Core 通用可用状态。
 - Contest、Training、Remote OJ 等真实业务模块实现。
 
 ## 验收入口

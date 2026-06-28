@@ -22,7 +22,7 @@ Docker API 验收必须确认 `GET /api/admin/health` 在 Control Plane 正常�
 
 当前仓库提供：
 
-- `scripts/verify-static.ps1`：Go/Rust/Frontend/compose/安全扫描的静态验收。
+- `scripts/verify-static.ps1`：Go/Rust/Frontend/compose、Installer CLI/TUI smoke 和模块包校验的静态验收。
 - `scripts/e2e-linux.sh`：Linux runtime 验收入口，依赖 Docker、cgroup v2、nsjail 和有效 worker token。
 - 前端页面覆盖登录、题目、提交、权限、健康检查和 worker 管理。
 - Worker Link 支持 register、heartbeat、claim、task heartbeat、result upload 和 fail upload。
@@ -42,7 +42,7 @@ powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild
 - `cargo fmt --check` 与 `cargo check` 通过。
 - `npm run build` 通过。
 - `docker compose config` 通过。
-- frontend direct-call、public schema 内部路径、危险部署配置扫描通过。
+- Installer CLI/TUI smoke、模块 validate/package/verify 和 compose hardening 检查通过。
 
 失败排查：进入失败服务目录单独执行对应命令。例如前端失败时执行：
 
@@ -119,7 +119,7 @@ Redis Streams 只作为 signal history，不是任务所有权来源。验收时
 
 本仓库现在区分四类验收入口：
 
-- 静态验证：`powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild`，只覆盖格式、构建、单元测试、文档扫描、compose config 和前端 build 等静态事项。
+- 静态验证：`powershell -NoProfile -File scripts\verify-static.ps1 -SkipDockerBuild`，只覆盖格式、构建、单元测试、compose config、前端 build、Installer smoke 和模块包校验等静态事项。
 - Docker API 验证：先真实执行 `docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build`，再执行 `powershell -NoProfile -File scripts\e2e-api.ps1 -BaseUrl http://localhost:8080/api -AdminUsername admin1 -AdminPassword admin123 -UserUsername user1 -UserPassword user123 -WorkerToken $env:OJOS_WORKER_TOKEN`。
 - Linux 资源限制验收：`scripts/e2e-linux.sh`，用于 nsjail、cgroup v2、TLE/MLE/OLE 等 Linux worker runtime 行为。
 - 多机 worker 验收：需要 Linux/Docker/多机网络环境，验证远程 worker、并发、lease 恢复和故障切换。

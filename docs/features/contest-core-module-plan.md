@@ -15,7 +15,7 @@ Contest Core 计划作为 Module Contract v1 feature module 接入。当前仓�
 | `version` | `0.1.0` |
 | `set` | `contest` |
 | `kind` | `feature` |
-| `status` | 开发期为 `external`，不标记 GA |
+| `status` | 开发期为 `external`，不标记通用可用状态 |
 
 ## 依赖
 

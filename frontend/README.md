@@ -1,5 +1,14 @@
-# Vue 3 + TypeScript + Vite
+# OJOS Web Shell
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+本目录是 OJOS 浏览器管理界面。它负责登录、题库、提交、评测状态、模块管理视图、Runtime Snapshot、路由、服务、操作历史、拓扑和权限展示。
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+Web Shell 不是官方安装器入口，不执行模块安装、启用、禁用或 runtime apply。正式安装和运维入口是 `ojosctl` 与 `ojos-installer-tui`。
+
+## 开发命令
+
+```powershell
+npm install
+npm run build
+```
+
+本地开发使用 `frontend/.env` 中的 `VITE_API_BASE_URL`。构建产物写入 `frontend/dist/`，该目录不能提交。

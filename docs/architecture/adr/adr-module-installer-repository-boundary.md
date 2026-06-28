@@ -1,6 +1,6 @@
 # ADR：Module Installer 仓库边界
 
-> 状态：已接受；路径归属被 [ADR：项目结构 v2、Kernel 与 Modules](ADR-project-structure-v2-kernel-modules.md) 更新
+> 状态：已接受；路径归属被 [项目结构 v2、Kernel 与 Modules](adr-project-structure-v2-kernel-modules.md) 更新
 > 日期：2026-06-27
 
 ## 背景

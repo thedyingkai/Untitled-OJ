@@ -47,4 +47,4 @@ Go 使用 `gofmt` 和 `go test ./...`；Rust 使用 `cargo fmt --check` 和 `car
 
 - [后端开发](backend-development.md)
 - [前端开发](frontend-development.md)
-- [临时文件隔离规则](temp-file-policy.md)
+- [临时文件隔离规则](workspace-file-policy.md)

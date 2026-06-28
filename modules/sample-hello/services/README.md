@@ -1,5 +1,5 @@
-# Services
+# 服务声明
 
-Sample Hello declares metadata-only service and worker entries in `module.yaml`.
+Sample Hello 只在 `module.yaml` 中声明 metadata-only service 和 worker。
 
-It does not ship a container image, command, script, hook, host mount, privileged flag, or runtime driver.
+它不包含 container image、command、script、hook、host mount、privileged flag 或 runtime driver。

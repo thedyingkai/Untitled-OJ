@@ -1,4 +1,4 @@
-# No Kernel Change Extension Proof
+# 不改 Kernel 的扩展证明
 
 `modules/sample-hello` 是 SDK 样例模块，用于证明普通 metadata/service/route/menu/permission/topology 模块可以通过 manifest/package/runtime 接入，不需要为样例模块修改 Kernel、Gateway 或 Web Shell 主逻辑。
 
@@ -35,6 +35,6 @@
 - 新增 remote market trust policy。
 - 新增 hook execution。
 - 新增 package signing policy。
-- 实现 full hotplug automation。
+- 实现完整模块热插拔自动化。
 
 普通 metadata/service/route/menu/permission/topology 模块在 schema v1 内不需要改 Kernel/Gateway/Web Shell 主逻辑。

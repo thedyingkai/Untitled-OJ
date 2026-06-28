@@ -70,7 +70,7 @@ Kernel 拥有：
 Modules 拥有：
 
 - Feature-specific services、workers、frontend contributions、migrations、permissions、health checks 和 topology declarations。
-- Judge Core 是当前第一个核心 feature module，但不标记 GA。
+- Judge Core 是当前第一个核心 feature module，但不标记通用可用状态。
 
 Apps 拥有：
 
@@ -131,7 +131,7 @@ v0 不执行 operation hooks，也不动态加载不可信 frontend bundle。
 - L3 Dynamic frontend extension：未完成，不执行不可信 JavaScript。
 - L4 Full module hotplug：未完成，package verification、service deployment、routes、permissions、frontend contributions、health 和 rollback 尚未全部自动化。
 
-v0.1.0 目标是冻结 L0、L1 与 L2 foundation，不宣称 full hotplug 完成。
+v0.1.0 目标是冻结 L0、L1 与 L2 foundation，不宣称完整模块热插拔自动化已经完成。
 
 ## 后果
 

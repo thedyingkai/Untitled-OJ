@@ -1,4 +1,4 @@
-﻿# Kernel Installer
+# Kernel Installer
 
 > 文档状态：当前实现，v0.1.0 发布基线
 > 适用范围：Installer 开发、部署、安全审计、模块作者

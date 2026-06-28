@@ -66,7 +66,7 @@ Gateway 是唯一公开 API 入口。PostgreSQL、Redis 和内部 API 不公开�
 
 ## 9. 常见问题
 
-- 把目标架构当成当前实现：以 `DOCS_STATUS.md` 为准。
+- 把目标架构当成当前实现：以 `docs-status.md` 为准。
 - worker 需要本地 storage：说明部署方式错误。
 - Contest 功能放进 Core：应等待模块契约和安装器。
 

@@ -1,10 +1,10 @@
-﻿# 模块系统
+# 模块系统
 
 > 文档状态：当前实现，v0.1.0 发布基线
 > 适用范围：模块开发、Kernel/Runtime 维护、管理后台
 > 最后更新：2026-06-28
 
-OJOS 模块系统用于把 Kernel、Platform、Judge Core 和未来普通模块统一登记为可审计、可展示、可验收的系统能力。当前版本不声明 full hotplug 完成，也不包含 Contest 实现。
+OJOS 模块系统用于把 Kernel、Platform、Judge Core 和未来普通模块统一登记为可审计、可展示、可验收的系统能力。当前版本只覆盖已记录的 L0/L1/L2 foundation 范围，不包含 Contest 实现。
 
 ## 当前实现
 
@@ -99,7 +99,7 @@ Disabled module 不进入 active snapshot。管理员可用 `include_disabled=tr
 - Gateway/Web 不执行 runtime apply。
 - module-installer 不挂载 Docker socket。
 - `ojosctl` controlled apply 只允许 trusted compose allowlist。
-- Judge Core disable/uninstall 受保护，且不标记 GA。
+- Judge Core disable/uninstall 受保护，且不标记通用可用状态。
 
 ## 验收
 

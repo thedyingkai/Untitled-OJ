@@ -22,7 +22,7 @@
 | Frontend | Web Shell contribution registry | 菜单和路由通过 contribution 出现，不硬编码 Contest 菜单。 |
 | API e2e | Contest API smoke | 无 token 返回 `401`，缺权限返回 `403`，不泄露路径。 |
 | Path leaks | e2e path scan | `path_leaks=0`。 |
-| Judge Core | Compatibility | Judge Core 保持 enabled/protected，且不标记 GA。 |
+| Judge Core | Compatibility | Judge Core 保持 enabled/protected，且不标记通用可用状态。 |
 | Module compat | Existing harness | sample-hello、demo-module、judge-core 兼容性继续通过。 |
 
 ## 必需回归命令

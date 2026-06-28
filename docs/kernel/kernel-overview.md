@@ -1,4 +1,4 @@
-﻿# Kernel Overview
+# Kernel 总览
 
 > 文档状态：当前实现，v0.1.0 发布基线
 > 适用范围：Kernel 开发、模块开发、架构评审
@@ -25,7 +25,7 @@ Module Operation History
 Native Installer CLI/TUI
 ```
 
-## Kernel Built-ins
+## Kernel 内置模块
 
 ```text
 ojos.kernel.installer
@@ -38,9 +38,9 @@ ojos.kernel.config
 ojos.kernel.health
 ```
 
-Kernel built-ins 不允许普通 disable 或 uninstall。
+Kernel 内置模块不允许普通 disable 或 uninstall。
 
-## Platform Built-ins
+## Platform 内置模块
 
 ```text
 ojos.platform.gateway
@@ -50,7 +50,7 @@ ojos.platform.storage
 ojos.platform.observability
 ```
 
-Platform built-ins 默认受保护，不作为普通 feature module 卸载。
+Platform 内置模块默认受保护，不作为普通 feature module 卸载。
 
 ## 当前 Feature Module
 
@@ -60,7 +60,7 @@ ojos.demo-module
 ojos.sample-hello
 ```
 
-Judge Core 是第一个核心 feature module，但不标记 GA。Demo 和 Sample 用于 installer/runtime/sdk 验收，不代表真实业务模块。
+Judge Core 是第一个核心 feature module，但不标记通用可用状态。Demo 和 Sample 用于 installer/runtime/sdk 验收，不代表真实业务模块。
 
 ## Runtime Wiring v1
 
@@ -86,7 +86,7 @@ Runtime Snapshot 是模块贡献的运行态入口。Kernel Installer、Registry
 - L1 Route/Menu/Topology/Permission Hotplug：基本完成，使用 trusted route table、safe contribution registry 和权限过滤。
 - L2 Service Runtime Foundation + Controlled Apply：foundation 完成，`ojosctl` 可对 trusted compose allowlist 计划执行 dry-run/confirm。
 - L3 Dynamic Frontend Extension：未完成，不加载不可信动态 JS。
-- L4 Full Module Hotplug：未完成，不提供 remote market、hook 或任意 service image 部署。
+- L4 完整模块热插拔：未完成，不提供 remote market、hook 或任意 service image 部署。
 
 ## 安全边界
 
@@ -103,7 +103,7 @@ Runtime Snapshot 是模块贡献的运行态入口。Kernel Installer、Registry
 - remote module market 未实现。
 - hook execution 未实现。
 - dynamic frontend bundle 未实现。
-- full hotplug 未完成。
+- 完整模块热插拔自动化未完成。
 - package signature / trust policy 未完成。
 - true multi-machine runtime apply 未完成。
-- Judge Core 不标记 GA。
+- Judge Core 不标记通用可用状态。

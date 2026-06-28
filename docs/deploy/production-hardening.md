@@ -14,7 +14,7 @@
 
 ## 3. 当前实现
 
-当前仓库提供 compose、环境变量模板、Gateway 内部 HMAC、worker token、权限系统和静态危险配置扫描。
+当前仓库提供 compose、环境变量模板、Gateway 内部 HMAC、worker token、权限系统和 E2E/人工审计入口。
 
 ## 4. 目标设计
 
@@ -34,7 +34,7 @@
 
 ## 8. 验收方式
 
-执行静态危险扫描，检查普通用户不能访问 admin，worker token 错误不能注册，内部服务不公开。
+执行人工配置审计和运行时验收，确认普通用户不能访问 admin、worker token 错误不能注册、内部服务不公开、日志不泄露 secret 或本机路径。
 
 ## 9. 常见问题
 

@@ -1,4 +1,4 @@
-# Regression Matrix
+# 回归矩阵
 
 | 范围 | 验证脚本或命令 | 当前要求 | 失败处理 | 是否阻塞下一阶段 |
 | --- | --- | --- | --- | --- |
@@ -14,8 +14,8 @@
 | Module SDK | `ojosctl module init/package/verify` | 必须通过 | 修复 scaffold、schema、package format | 是 |
 | Sample Module | `scripts/e2e-module-compat.ps1` | 必须通过 | 修复 sample manifest 或 registry/runtime 流 | 是 |
 | Frontend Shell | `npm run build`、贡献视图 e2e | 必须通过 | 修复构建或 Runtime Snapshot 渲染 | 是 |
-| Security Scan | `verify-static`、secret/path scan | 必须通过 | 删除 secret、路径泄露或危险配置 | 是 |
+| Security Review | 人工审计、E2E `path_leaks`、secret/tracked garbage 检查 | 必须通过 | 删除 secret、路径泄露或危险配置 | 是 |
 | Permission Rejection | e2e user/no-token checks | 普通用户 `403`，无 token `401` | 修复 middleware 或 admin boundary | 是 |
-| Docs | `DOCS_INDEX`、`DOCS_STATUS`、release docs | 当前状态准确 | 修正旧阶段、英文流水账或过度承诺 | 是 |
+| Docs | `docs-index`、`docs-status`、release docs | 当前状态准确 | 修正旧阶段、英文流水账或过度承诺 | 是 |
 
-任何失败都不能用“已知问题”绕过发布，除非该问题已经写入 `v0.1.0-known-limitations.md` 且不影响 v0.1.0 声明的可发布能力。
+任何失败都不能用“已知问题”绕过发布。只有全仓审计、编译、测试、E2E 和 release artifact 构建重新通过后，才能重新评估 `v0.1.0` 是否达到 Release Candidate。

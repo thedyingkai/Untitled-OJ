@@ -12,7 +12,7 @@
 | Submission ownership | 高 | 是 | 通过用户、题目和 contest time window 绑定 contest submissions。 |
 | Scoreboard consistency | 高 | 否 | 先做 snapshot 占位，后续再引入 worker。 |
 | High-concurrency submissions | 中 | 否 | Skeleton 只读取已有 submissions 或保存最小 binding。 |
-| Judge Core dependency drift | 中 | 是 | 明确 Judge Core dependency，且不标记 GA。 |
+| Judge Core dependency drift | 中 | 是 | 明确 Judge Core dependency，且不标记通用可用状态。 |
 | Cross-module data references | 中 | 是 | 使用 soft references 和 service validation，避免 cross-module FKs。 |
 | Dynamic proxy exposure | 中 | 是 | 只使用 `service_id` 和 trusted route table。 |
 | Frontend permission bypass | 中 | 是 | 前端 guard 只作为 UX；API 保持权威校验。 |

@@ -13,7 +13,7 @@ OJOS 当前处于 Core Judge Platform 阶段，已具备分布式 OJ 的主体�
 1. [当前状态](development/current-state.md)
 2. [架构总览](architecture/overview.md)
 3. [服务拓扑](architecture/service-topology.md)
-4. [API 文档总览](api/README.md)
+4. [API 文档总览](api/index.md)
 5. [前端开发指南](development/frontend-development.md)
 6. [UI 风格指南](development/ui-style-guide.md)
 7. [静态验证](development/static-verification.md)
@@ -31,7 +31,7 @@ OJOS 当前处于 Core Judge Platform 阶段，已具备分布式 OJ 的主体�
 
 ## API
 
-- [API 文档总览](api/README.md)
+- [API 文档总览](api/index.md)
 - [Auth API](api/auth-api.md)
 - [Problem API](api/problem-api.md)
 - [Judge API](api/judge-api.md)
@@ -45,7 +45,7 @@ OJOS 当前处于 Core Judge Platform 阶段，已具备分布式 OJ 的主体�
 
 ## 模块系统
 
-- [模块系统首页](modules/README.md)
+- [模块系统首页](modules/index.md)
 - [模块契约](modules/module-contract.md)
 - [模块清单](modules/module-manifest.md)
 - [模块生命周期](modules/module-lifecycle.md)
@@ -92,8 +92,8 @@ OJOS 当前处于 Core Judge Platform 阶段，已具备分布式 OJ 的主体�
 
 ## 文档地图
 
-- [文档索引](DOCS_INDEX.md)
-- [文档状态](DOCS_STATUS.md)
+- [文档索引](docs-index.md)
+- [文档状态](docs-status.md)
 - [历史文档目录](archive/legacy-docs/)
 
 ## 验收方式

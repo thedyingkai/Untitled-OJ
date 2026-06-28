@@ -46,7 +46,7 @@ cd frontend
 npm run build
 ```
 
-预期 TypeScript 与 Vite 构建通过。还应通过静态扫描确认没有 mock、直接 API 调用、`console.log` 和占位页面。
+预期 TypeScript 与 Vite 构建通过。还应人工审查页面是否存在 mock、直接 API 调用、`console.log`、演示数据或未完成页面，并在 Docker Control Plane 可用时执行 E2E。
 
 ## 9. 常见问题
 
@@ -57,7 +57,7 @@ npm run build
 
 ## 10. 相关文档
 
-- [API 文档总览](../api/README.md)
+- [API 文档总览](../api/index.md)
 - [编码规范](coding-standards.md)
 - [静态验证](static-verification.md)
 
@@ -67,7 +67,7 @@ npm run build
 
 状态颜色、难度颜色、worker 状态、module 状态和 health 状态统一由 `frontend/src/utils/status.ts` 提供。时间、内存、字节、百分比和列表展示统一由 `frontend/src/utils/format.ts` 提供。
 
-前端页面必须继续接真实 Gateway API，不写演示数据，不写本地固定 ID，不绕过统一 API client。Docker Control Plane 可用时，UI 修改后应同时执行 `scripts/e2e-api.ps1`，确认 auth、problem、judge、worker、admin health、admin judge、module registry、permission 和路径泄露扫描不被破坏。
+前端页面必须继续接真实 Gateway API，不写演示数据，不写本地固定 ID，不绕过统一 API client。Docker Control Plane 可用时，UI 修改后应同时执行 `scripts/e2e-api.ps1`，确认 auth、problem、judge、worker、admin health、admin judge、module registry、permission 和路径泄露防护不被破坏。
 
 详细设计规则见 [UI 风格指南](ui-style-guide.md)。
 # 2026-06-27 Module Installer 前端开发补充
@@ -91,13 +91,13 @@ npm run build
 
 Web Shell 应读取 Runtime Snapshot 中的 module-provided menus 和 contribution metadata。Static Vue routes 只作为兼容入口；新的 module metadata 应进入 Module Contributions 和 Module Topology，不做页面级 hardcoding。
 
-Rules:
+规则：
 
-- Do not execute dynamic remote bundles.
-- Do not add fake clickable routes for disabled or metadata-only frontend contributions.
-- Use `/admin/modules/contributions` for generic metadata display.
-- Use `required_permission` from snapshot menus to decide visibility where user permission data is available.
-- Ordinary user navigation keeps static compatibility entries because Runtime Snapshot admin API is not exposed to ordinary users.
+- 不执行 dynamic remote bundle。
+- 不为 disabled 或 metadata-only frontend contribution 添加假的可点击业务路由。
+- 使用 `/admin/modules/contributions` 展示通用 metadata。
+- 用户权限数据可用时，使用 snapshot menus 中的 `required_permission` 判断可见性。
+- 普通用户导航保留静态兼容入口，因为 Runtime Snapshot admin API 不暴露给普通用户。
 
 ## Hotplug L1 前端指导
 
@@ -108,13 +108,13 @@ Static Vue routes 只作为当前 Kernel/Platform/Judge Core 页面兼容入口�
 
 Web Shell 包含 `/admin/runtime/services`，用于查看 service 和 worker lifecycle。页面展示 service state、health、lifecycle、runtime、routes 和生成的 start/stop/restart plans。
 
-Frontend boundaries:
+前端边界：
 
-- Generate plans only; do not provide Web-triggered apply controls in L2 foundation.
-- Do not connect to Docker, compose, module-installer internals or local files.
-- Do not execute dynamic JavaScript from module manifests.
-- Metadata-only services should be shown as metadata and blocked from start/stop/restart.
-- Unknown module frontend `component_key` values continue to render through safe contribution metadata pages.
+- 只生成 plan；L2 foundation 不提供 Web-triggered apply control。
+- 不连接 Docker、compose、module-installer internal service 或本地文件。
+- 不执行 module manifest 中的 dynamic JavaScript。
+- Metadata-only service 只作为 metadata 展示，并阻止 start/stop/restart。
+- 未知 module frontend `component_key` 继续通过安全的 contribution metadata 页面渲染。
 
 ## Hotplug L2 Controlled Apply 前端指导
 
@@ -134,7 +134,7 @@ Web Shell 可以展示 runtime plans、warnings、blocked reasons 和 operation 
 - No Docker socket, local file, or host path access.
 - 不从 module manifest 执行 dynamic JavaScript。
 
-L2 Controlled Apply keeps apply authority outside the browser.
+L2 Controlled Apply 把 apply 权限保留在浏览器之外。
 
 ## Module SDK 前端指导
 
