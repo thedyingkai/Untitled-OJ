@@ -1,5 +1,5 @@
-# Sample Hello Module
+# Sample Hello 模块
 
-Sample Hello is an SDK compatibility module. It is intentionally metadata-only: no Contest, Training, Remote OJ, hooks, dynamic frontend bundles, host mounts, privileged containers, or executable runtime commands.
+Sample Hello 是 SDK 兼容性样例模块。它刻意保持 metadata-only：不包含 Contest、Training、Remote OJ、hooks、dynamic frontend bundles、host mounts、privileged containers 或 executable runtime commands。
 
-It demonstrates schema v1 contributions for permissions, components, menu metadata, frontend route metadata, a disabled gateway route, metadata service/worker declarations, optional health, storage metadata, events, admin panel metadata, and topology.
+它演示 schema v1 的 permissions、components、menu metadata、frontend route metadata、disabled gateway route、metadata service/worker declarations、optional health、storage metadata、events、admin panel metadata 和 topology。

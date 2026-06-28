@@ -32,6 +32,9 @@ desktop.ini
 *.log
 logs/
 log/
+compose-logs.txt
+compose-ps.txt
+tokens.local.json
 
 # -------------------------
 # Temporary / cache files
@@ -39,6 +42,7 @@ log/
 tmp/
 temp/
 .tmp/
+.tmp/agent/
 .cache/
 .cache-*/
 *.tmp
@@ -102,6 +106,7 @@ services/judge-worker/target/
 # -------------------------
 node_modules/
 frontend/node_modules/
+frontend/dist/
 
 dist/
 build/
@@ -121,6 +126,7 @@ node_modules
 dist
 dist-ssr
 *.local
+*.ojosmod
 
 # Editor directories and files
 .vscode/*

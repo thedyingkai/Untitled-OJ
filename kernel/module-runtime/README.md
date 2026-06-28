@@ -1,20 +1,20 @@
 # Kernel Module Runtime
 
-This directory is the canonical Project Structure v2 boundary for OJOS Kernel Module Runtime.
+本目录是 OJOS Kernel Module Runtime 的项目结构边界。当前可执行 Go 兼容实现仍位于 `services/gateway/internal/kernel/moduleruntime`，因为 Gateway 仍是公开管理 API 进程；一次性移动所有 Go 服务会增加运行风险。
 
-Phase 1 keeps the executable Go implementation under `services/gateway/internal/kernel/moduleruntime` as a compatibility adapter, because Gateway is still the public admin API process and moving every Go service in one step would create unnecessary runtime risk. The runtime contract is owned here:
+Runtime 契约归属本目录，职责包括：
 
-- read module registry tables
-- compute enabled modules
-- export runtime snapshot
-- aggregate permissions, menus, frontend routes, gateway routes, components, services, workers, health checks, and topology
-- provide future runtime driver interfaces for controlled service and worker start/stop plans
+- 读取 module registry tables。
+- 计算 enabled modules。
+- 导出 Runtime Snapshot。
+- 聚合 permissions、menus、frontend routes、gateway routes、components、services、workers、health checks 和 topology。
+- 为 controlled service/worker start/stop plans 提供 runtime driver interfaces。
 
-The canonical API surface is:
+当前 API 表面：
 
 ```text
 GET /api/admin/modules/runtime-snapshot
 GET /api/admin/modules/topology
 ```
 
-Current hotplug level is L0 metadata hotplug with partial L1 route-snapshot groundwork. L2 service hotplug and L3 frontend contribution hotplug are design targets only; OJOS v0 does not execute untrusted scripts or dynamic frontend bundles.
+当前热插拔等级为 L0 metadata hotplug 和 L1 route-snapshot 基础。L2 service runtime foundation 已具备 plan/controlled apply 基础；L3 dynamic frontend bundle 与 L4 full hotplug 未完成。OJOS v0.1.0 不执行不可信脚本，也不加载不可信 dynamic frontend bundles。

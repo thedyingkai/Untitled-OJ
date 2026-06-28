@@ -237,14 +237,14 @@ func BuiltinData() BootstrapData {
 
 	data := BootstrapData{
 		Sets: []Set{
-			{SetID: "kernel", Name: "Kernel Set", Description: "OJOS kernel capabilities: installer, runtime, registry, topology, policy, audit, config, and health.", SortOrder: 0},
-			{SetID: "platform", Name: "Platform Set", Description: "Platform application adapters and base services: gateway, web shell, identity, storage, and observability.", SortOrder: 5},
-			{SetID: "core-capability", Name: "Core Capability Set", Description: "Problem, submission, judging, and foundational online judge capability modules.", SortOrder: 10},
-			{SetID: "competition", Name: "Competition Set", Description: "Future contest capabilities; not implemented in this phase.", SortOrder: 20},
-			{SetID: "education", Name: "Education Set", Description: "Future training and education capabilities; not implemented in this phase.", SortOrder: 30},
-			{SetID: "collaboration", Name: "Collaboration Set", Description: "Future group, discussion, clarification, print, and balloon capabilities; not implemented in this phase.", SortOrder: 40},
-			{SetID: "integration", Name: "Integration Set", Description: "Future external integration capabilities; not implemented in this phase.", SortOrder: 50},
-			{SetID: "operations", Name: "Operations Set", Description: "Operations and observability capabilities.", SortOrder: 60},
+			{SetID: "kernel", Name: "Kernel Set", Description: "OJOS Kernel 能力：installer、runtime、registry、topology、policy、audit、config 和 health。", SortOrder: 0},
+			{SetID: "platform", Name: "Platform Set", Description: "平台 adapter 和基础服务：gateway、web shell、identity、storage 和 observability。", SortOrder: 5},
+			{SetID: "core-capability", Name: "Core Capability Set", Description: "题库、提交、评测和在线评测基础能力模块。", SortOrder: 10},
+			{SetID: "competition", Name: "Competition Set", Description: "竞赛能力规划集合；v0.1.0 未实现 Contest。", SortOrder: 20},
+			{SetID: "education", Name: "Education Set", Description: "训练和教学能力规划集合；v0.1.0 未实现 Training。", SortOrder: 30},
+			{SetID: "collaboration", Name: "Collaboration Set", Description: "协作能力规划集合；v0.1.0 未实现 group、discussion、clarification、print 或 balloon。", SortOrder: 40},
+			{SetID: "integration", Name: "Integration Set", Description: "外部集成能力规划集合；v0.1.0 未实现 Remote OJ。", SortOrder: 50},
+			{SetID: "operations", Name: "Operations Set", Description: "运维和可观测能力。", SortOrder: 60},
 		},
 		Modules: modules,
 		Edges: []Edge{
