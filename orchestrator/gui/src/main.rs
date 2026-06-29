@@ -4,6 +4,7 @@ use eframe::egui;
 use orchestrator_core::{
     OperationWorkbenchContext, OperationWorkbenchSession, OperationWorkbenchView, OrchestratorView,
     OrchestratorViewPage, endpoint_hosts, load_operation_workbench_context, load_orchestrator_view,
+    merge_operation_workbench_session_into_view,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -83,7 +84,7 @@ impl GuiApp {
     fn select_action(&mut self, action: &str) {
         match self.context.build_session(action) {
             Ok(session) => {
-                self.session = session;
+                self.set_session(session);
                 self.last_error = None;
             }
             Err(err) => {
@@ -95,7 +96,7 @@ impl GuiApp {
     fn update_field(&mut self, field: &str, value: String) {
         match self.context.update_field(&self.session, field, value) {
             Ok(session) => {
-                self.session = session;
+                self.set_session(session);
                 self.last_error = None;
             }
             Err(err) => {
@@ -107,7 +108,7 @@ impl GuiApp {
     fn confirm_session(&mut self) {
         match self.context.confirm(&self.session) {
             Ok(session) => {
-                self.session = session;
+                self.set_session(session);
                 self.last_error = None;
             }
             Err(err) => {
@@ -119,7 +120,7 @@ impl GuiApp {
     fn apply_session(&mut self) {
         match self.context.apply(&self.session) {
             Ok(session) => {
-                self.session = session;
+                self.set_session(session);
                 self.last_error = None;
             }
             Err(err) => {
@@ -131,13 +132,18 @@ impl GuiApp {
     fn rollback_session(&mut self) {
         match self.context.rollback(&self.session) {
             Ok(session) => {
-                self.session = session;
+                self.set_session(session);
                 self.last_error = None;
             }
             Err(err) => {
                 self.last_error = Some(err.to_string());
             }
         }
+    }
+
+    fn set_session(&mut self, session: OperationWorkbenchSession) {
+        merge_operation_workbench_session_into_view(&mut self.view, &session);
+        self.session = session;
     }
 }
 
@@ -596,7 +602,33 @@ mod tests {
         app.confirm_session();
         app.apply_session();
         assert_eq!(app.session.result_status, "SUCCEEDED");
+        assert!(
+            app.view
+                .operations
+                .iter()
+                .any(|operation| operation.operation_id
+                    == app.session.current_operation.operation_id
+                    && operation.status == "SUCCEEDED"
+                    && operation.log_count == app.session.logs.len()),
+            "GUI view should reflect the current core-backed operation session"
+        );
+        assert!(
+            app.view
+                .logs
+                .iter()
+                .any(|log| log.operation_id == app.session.current_operation.operation_id),
+            "GUI LogView should include current operation logs"
+        );
         app.rollback_session();
         assert_eq!(app.session.result_status, "ROLLED_BACK");
+        assert!(
+            app.view
+                .operations
+                .iter()
+                .any(|operation| operation.operation_id
+                    == app.session.current_operation.operation_id
+                    && operation.status == "ROLLED_BACK"),
+            "GUI view should reflect rollback state"
+        );
     }
 }

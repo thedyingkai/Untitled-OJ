@@ -32,6 +32,41 @@ impl OperationWorkbenchView {
     }
 }
 
+pub fn merge_operation_workbench_session_into_view(
+    view: &mut OrchestratorView,
+    session: &OperationWorkbenchSession,
+) {
+    let operation_id = session.current_operation.operation_id.clone();
+    let mut log_counts = HashMap::new();
+    log_counts.insert(operation_id.clone(), session.logs.len());
+    if let Some(row) = operation_store_rows(
+        std::slice::from_ref(&session.current_operation),
+        &log_counts,
+    )
+    .into_iter()
+    .next()
+    {
+        if let Some(existing) = view.operations.iter_mut().find(|existing| {
+            existing.operation_id == operation_id
+                || (existing.action == session.current_operation.action
+                    && existing.status == "CATALOG")
+        }) {
+            *existing = row;
+        } else {
+            view.operations.insert(0, row);
+        }
+    }
+
+    view.logs.retain(|log| log.operation_id != operation_id);
+    view.logs.extend(
+        session
+            .logs
+            .iter()
+            .map(|record| operation_log_row(&session.current_operation, record)),
+    );
+    view.operation_workbench = Some(OperationWorkbenchView::from_session(session));
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceViewRow {
     pub id: String,

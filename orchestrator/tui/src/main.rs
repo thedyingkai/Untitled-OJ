@@ -8,6 +8,7 @@ use crossterm::terminal::{
 use orchestrator_core::{
     OperationWorkbenchContext, OperationWorkbenchSession, OperationWorkbenchView, OrchestratorView,
     OrchestratorViewPage, endpoint_hosts, load_operation_workbench_context, load_orchestrator_view,
+    merge_operation_workbench_session_into_view,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -116,7 +117,7 @@ impl App {
         let action = self.view.operations[index].action.clone();
         match self.context.build_session(&action) {
             Ok(session) => {
-                self.session = session;
+                self.set_session(session);
                 self.selected_field_index = 0;
                 self.last_message = format!("已选择 {action}");
             }
@@ -148,7 +149,7 @@ impl App {
         };
         match self.context.cycle_field_value(&self.session, &field.name) {
             Ok(session) => {
-                self.session = session;
+                self.set_session(session);
                 self.last_message = format!("已更新字段 {}", field.name);
             }
             Err(err) => {
@@ -160,7 +161,7 @@ impl App {
     fn confirm_session(&mut self) {
         match self.context.confirm(&self.session) {
             Ok(session) => {
-                self.session = session;
+                self.set_session(session);
                 self.last_message = "Operation 已确认".to_string();
             }
             Err(err) => {
@@ -172,7 +173,7 @@ impl App {
     fn apply_session(&mut self) {
         match self.context.apply(&self.session) {
             Ok(session) => {
-                self.session = session;
+                self.set_session(session);
                 self.last_message = "Operation 已执行".to_string();
             }
             Err(err) => {
@@ -184,13 +185,18 @@ impl App {
     fn rollback_session(&mut self) {
         match self.context.rollback(&self.session) {
             Ok(session) => {
-                self.session = session;
+                self.set_session(session);
                 self.last_message = "Operation 已回滚".to_string();
             }
             Err(err) => {
                 self.last_message = err.to_string();
             }
         }
+    }
+
+    fn set_session(&mut self, session: OperationWorkbenchSession) {
+        merge_operation_workbench_session_into_view(&mut self.view, &session);
+        self.session = session;
     }
 }
 
@@ -822,7 +828,33 @@ mod tests {
         app.confirm_session();
         app.apply_session();
         assert_eq!(app.session.result_status, "SUCCEEDED");
+        assert!(
+            app.view
+                .operations
+                .iter()
+                .any(|operation| operation.operation_id
+                    == app.session.current_operation.operation_id
+                    && operation.status == "SUCCEEDED"
+                    && operation.log_count == app.session.logs.len()),
+            "TUI view should reflect the current core-backed operation session"
+        );
+        assert!(
+            app.view
+                .logs
+                .iter()
+                .any(|log| log.operation_id == app.session.current_operation.operation_id),
+            "TUI LogView should include current operation logs"
+        );
         app.rollback_session();
         assert_eq!(app.session.result_status, "ROLLED_BACK");
+        assert!(
+            app.view
+                .operations
+                .iter()
+                .any(|operation| operation.operation_id
+                    == app.session.current_operation.operation_id
+                    && operation.status == "ROLLED_BACK"),
+            "TUI view should reflect rollback state"
+        );
     }
 }

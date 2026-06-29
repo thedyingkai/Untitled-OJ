@@ -3443,6 +3443,44 @@ fn orchestrator_view_can_load_from_store_state() {
 }
 
 #[test]
+fn operation_workbench_session_merges_into_view_operations_and_logs() {
+    let root = repo_root();
+    let context = load_operation_workbench_context(&root)
+        .expect("workbench context")
+        .with_memory_store();
+    let mut view = load_orchestrator_view(&root).expect("repo view");
+    let session = context
+        .build_session("service.install")
+        .and_then(|session| context.confirm(&session))
+        .and_then(|session| context.apply(&session))
+        .expect("applied session");
+
+    merge_operation_workbench_session_into_view(&mut view, &session);
+
+    let row = view
+        .operations
+        .iter()
+        .find(|row| row.operation_id == session.current_operation.operation_id)
+        .expect("merged operation row");
+    assert_eq!(row.status, "SUCCEEDED");
+    assert_eq!(row.result, "SUCCEEDED");
+    assert_eq!(row.log_count, session.logs.len());
+    assert!(
+        view.logs.iter().any(
+            |log| log.operation_id == session.current_operation.operation_id
+                && log.path.starts_with("step:")
+        ),
+        "merged view should expose current operation logs"
+    );
+    assert_eq!(
+        view.operation_workbench
+            .as_ref()
+            .map(|workbench| workbench.result_status.as_str()),
+        Some("SUCCEEDED")
+    );
+}
+
+#[test]
 fn diagnostic_report_json_exports_observable_summary() {
     let topology = build_topology(
         "127.0.0.1:8080".to_string(),
