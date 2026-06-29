@@ -356,6 +356,10 @@ pub fn diagnostic_report_json(topology: &Topology) -> Result<String> {
             "count": topology.services.len(),
             "services": topology.services,
         },
+        "sets_summary": {
+            "count": topology.sets.len(),
+            "sets": topology.sets,
+        },
         "endpoints_summary": {
             "count": topology.endpoints.len(),
             "unhealthy": unhealthy_endpoints,

@@ -3680,7 +3680,7 @@ fn action_console_keeps_memory_store_changes_visible_after_refresh() {
         view.endpoints
             .iter()
             .any(|endpoint| endpoint.endpoint == "127.0.0.1:19000"),
-        "Memory fallback must keep GUI/TUI action results visible for the session"
+        "Memory store must keep GUI/TUI action results visible for the session"
     );
     let context = console.context().expect("context");
     assert!(
@@ -4069,7 +4069,7 @@ fn pg_orchestrator_store_maps_operation_state_markers_to_db_time() {
     assert_eq!(
         crate::database::db_time_text("session"),
         "",
-        "session-style lock expiry should still use the DB fallback interval"
+        "session-style lock expiry should still use the DB default interval"
     );
     assert_eq!(
         crate::database::db_time_text("2026-06-29T00:00:00Z"),
@@ -4471,12 +4471,15 @@ fn driver_output_decoder_rejects_non_utf8_text() {
 
 #[test]
 fn orchestrator_code_forbids_lossy_text_decoding() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("orchestrator root")
+        .to_path_buf();
     let mut offenders = Vec::new();
     collect_lossy_decoding_markers(&root, &root, &mut offenders);
     assert!(
         offenders.is_empty(),
-        "orchestrator user-visible text must be strict UTF-8, found lossy decoding in {offenders:?}"
+        "orchestrator user-visible text must be strict UTF-8 with no lossy or non-UTF-8 decoding in {offenders:?}"
     );
 }
 
@@ -4497,6 +4500,7 @@ fn collect_lossy_decoding_markers(root: &Path, dir: &Path, offenders: &mut Vec<S
             ["to_string_", "lossy"].concat(),
             ["encoding", "_rs"].concat(),
             ["G", "BK"].concat(),
+            ["A", "NSI"].concat(),
             ["ch", "cp"].concat(),
         ];
         if forbidden_markers
@@ -5162,6 +5166,7 @@ fn diagnostic_report_json_exports_observable_summary() {
     .expect("topology");
     let report = diagnostic_report_json(&topology).expect("diagnostic report json");
     assert!(report.contains("services_summary"));
+    assert!(report.contains("sets_summary"));
     assert!(report.contains("database_schema_check"));
     assert!(report.contains("forbidden_concept_scan_summary"));
 }
@@ -5223,6 +5228,15 @@ fn diagnostic_report_builds_from_store_and_exports_json_and_markdown() {
     assert!(
         report
             .data
+            .get("sets_summary")
+            .and_then(|summary| summary.get("count"))
+            .and_then(serde_json::Value::as_u64)
+            .is_some(),
+        "DiagnosticReport should include sets summary"
+    );
+    assert!(
+        report
+            .data
             .get("recent_operation_logs")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|items| items.iter().any(|item| item.get("operation_id")
@@ -5261,6 +5275,22 @@ fn diagnostic_report_builds_from_store_and_exports_json_and_markdown() {
         markdown_export
             .content
             .contains("# DiagnosticReport diag-current")
+    );
+    assert!(markdown_export.content.contains("- services: 1"));
+    assert!(
+        markdown_export
+            .content
+            .contains("- endpoints: 1 unhealthy: 1")
+    );
+    assert!(markdown_export.content.contains("## Evidence"));
+    assert!(markdown_export.content.contains("recent_operation_logs"));
+    assert!(markdown_export.content.contains("action_matrix"));
+    assert!(markdown_export.content.contains("unsupported_capabilities"));
+    assert!(markdown_export.content.contains("database_schema_check"));
+    assert!(
+        markdown_export
+            .content
+            .contains("forbidden_concept_scan_summary")
     );
     assert!(export_diagnostic_report(&report, "html").is_err());
 }

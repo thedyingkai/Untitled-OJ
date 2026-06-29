@@ -28,7 +28,8 @@ GUI/TUI 操作证据：
 ```text
 gui_exposes_dispatcher_backed_actions
 tui_exposes_dispatcher_backed_actions
-gui_fonts_force_cjk_fallback_for_all_text_styles
+gui_fonts_force_required_cjk_font_for_all_text_styles
+orchestrator_code_forbids_lossy_text_decoding
 gui_source_keeps_utf8_chinese_text_without_mojibake
 tui_source_keeps_utf8_chinese_text_without_mojibake
 ```

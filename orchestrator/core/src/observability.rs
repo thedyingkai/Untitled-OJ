@@ -153,6 +153,10 @@ pub fn build_diagnostic_report<S: OrchestratorStore>(
                 "count": topology.services.len(),
                 "services": topology.services,
             },
+            "sets_summary": {
+                "count": topology.sets.len(),
+                "sets": topology.sets,
+            },
             "endpoints_summary": {
                 "count": topology.endpoints.len(),
                 "unhealthy": unhealthy_endpoints,
@@ -293,6 +297,36 @@ fn diagnostic_markdown(report: &DiagnosticReport) -> String {
         format!("- target: {} {}", report.target_type, report.target_id),
         format!("- summary: {}", redact_secret_text(&report.summary)),
     ];
+    if let Some(services) = report.data.get("services_summary") {
+        lines.push(format!(
+            "- services: {}",
+            json_count(services).unwrap_or_default()
+        ));
+    }
+    if let Some(sets) = report.data.get("sets_summary") {
+        lines.push(format!("- sets: {}", json_count(sets).unwrap_or_default()));
+    }
+    if let Some(endpoints) = report.data.get("endpoints_summary") {
+        lines.push(format!(
+            "- endpoints: {} unhealthy: {}",
+            json_count(endpoints).unwrap_or_default(),
+            json_array_len(endpoints.get("unhealthy")).unwrap_or_default()
+        ));
+    }
+    if let Some(links) = report.data.get("links_summary") {
+        lines.push(format!(
+            "- links: {} unhealthy: {}",
+            json_count(links).unwrap_or_default(),
+            json_array_len(links.get("unhealthy")).unwrap_or_default()
+        ));
+    }
+    if let Some(operations) = report.data.get("operations_summary") {
+        lines.push(format!(
+            "- operations: {} failed: {}",
+            json_count(operations).unwrap_or_default(),
+            json_array_len(operations.get("failed")).unwrap_or_default()
+        ));
+    }
     if !report.findings.is_empty() {
         lines.push(String::new());
         lines.push("## Findings".to_string());
@@ -305,5 +339,36 @@ fn diagnostic_markdown(report: &DiagnosticReport) -> String {
             ));
         }
     }
+    lines.push(String::new());
+    lines.push("## Evidence".to_string());
+    lines.push(format!(
+        "- recent_operation_logs: {}",
+        json_array_len(report.data.get("recent_operation_logs")).unwrap_or_default()
+    ));
+    lines.push(format!(
+        "- action_matrix: {}",
+        json_array_len(report.data.get("action_matrix")).unwrap_or_default()
+    ));
+    lines.push(format!(
+        "- unsupported_capabilities: {}",
+        json_array_len(report.data.get("unsupported_capabilities")).unwrap_or_default()
+    ));
+    if let Some(schema) = report.data.get("database_schema_check") {
+        lines.push(format!(
+            "- database_schema_check formal_tables: {}",
+            json_array_len(schema.get("formal_tables")).unwrap_or_default()
+        ));
+    }
+    if report.data.get("forbidden_concept_scan_summary").is_some() {
+        lines.push("- forbidden_concept_scan_summary: present".to_string());
+    }
     lines.join("\n")
+}
+
+fn json_count(value: &serde_json::Value) -> Option<usize> {
+    value.get("count")?.as_u64().map(|count| count as usize)
+}
+
+fn json_array_len(value: Option<&serde_json::Value>) -> Option<usize> {
+    value?.as_array().map(Vec::len)
 }

@@ -44,10 +44,10 @@ docs/release/
 - GUI/TUI 共享工作台：`orchestrator/core/src/workbench.rs`，未设置 `ORCHESTRATOR_DATABASE_URL` 时使用 Memory store，设置后通过 `load_operation_workbench_context_from_store` 读取 Store 中的 Service、Set、Endpoint、Link、Topology，并让 plan/confirm/apply/rollback 走 `PgOrchestratorStore`；覆盖测试为 `operation_workbench_context_can_load_from_store_state`
 - GUI/TUI Action Console：`orchestrator/core/src/dispatcher.rs`，GUI/TUI 只提交 `ActionRequest`，dispatcher 返回 `REAL`、`STORE_BACKED`、`UNSUPPORTED` 或 `READONLY`；覆盖测试为 `action_dispatcher_routes_schema_actions`、`endpoint_register_update_delete_and_health_write_store`、`link_create_update_delete_and_health_write_store`、`set_expand_apply_and_diagnostic_report_are_console_actions`、`operation_plan_confirm_apply_rollback_and_logs_are_visible`
 - GUI/TUI 操作入口：`gui_exposes_dispatcher_backed_actions`、`tui_exposes_dispatcher_backed_actions`
-- GUI 字体证据：`gui_fonts_force_cjk_fallback_for_all_text_styles`，GUI 启动时强制加载中文字体 fallback，避免 CJK 字符显示为方块
+- GUI 字体与编码证据：`gui_fonts_force_required_cjk_font_for_all_text_styles` 强制 GUI 加载可覆盖中文的字体，`orchestrator_code_forbids_lossy_text_decoding` 禁止 Orchestrator 源码引入 GBK、ANSI、`encoding_rs`、`chcp` 或 lossy 解码路径
 - GUI/TUI Operation/LogView 观测：`orchestrator/core/src/view.rs` 从 Store 读取 Operation 与 OperationLog，GUI/TUI 展示 `operation_id`、状态、结果、错误、日志数量、日志消息、`created_at` 和 `updated_at`
 - Endpoint / Link 表单证据：`orchestrator/schemas/forms.yaml` 覆盖 Endpoint 的 `config` 和 Link 的 `scope`、`config_ref`、`secret_ref`、`policy`；`orchestrator/core/src/planner.rs` 会解析 JSON 字段并写入 Store，覆盖测试为 `endpoint_register_update_delete_and_health_write_store`、`link_create_update_delete_and_health_write_store`
-- DiagnosticReport 能力矩阵证据：`build_diagnostic_report` 写入 `action_matrix` 和 `unsupported_capabilities`，覆盖测试为 `diagnostic_report_json_exports_observable_summary`、`diagnostic_report_builds_from_store_and_exports_json_and_markdown`
+- DiagnosticReport 能力矩阵与发布证据：`build_diagnostic_report` 写入 services、sets、endpoints、links、operations、failed operations、unhealthy endpoints、unhealthy links、recent operation logs、database schema check、action matrix、unsupported capabilities 和 forbidden concept scan summary；`export_diagnostic_report` 支持 JSON 与 Markdown。覆盖测试为 `diagnostic_report_json_exports_observable_summary`、`diagnostic_report_builds_from_store_and_exports_json_and_markdown`
 - Orchestrator migration：`deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`
 
 ## 当前限制

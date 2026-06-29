@@ -719,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn gui_fonts_force_cjk_fallback_for_all_text_styles() {
+    fn gui_fonts_force_required_cjk_font_for_all_text_styles() {
         let fonts = gui_font_definitions(LoadedGuiFont {
             name: "test-cjk.ttf".to_string(),
             bytes: vec![0],
