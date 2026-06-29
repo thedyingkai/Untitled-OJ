@@ -42,6 +42,16 @@ struct App {
 impl App {
     fn new(repo_root: PathBuf) -> Result<Self> {
         let context = load_operation_workbench_context(&repo_root)?;
+        Self::from_context(repo_root, context)
+    }
+
+    #[cfg(test)]
+    fn new_memory(repo_root: PathBuf) -> Result<Self> {
+        let context = load_operation_workbench_context(&repo_root)?.with_memory_store();
+        Self::from_context(repo_root, context)
+    }
+
+    fn from_context(repo_root: PathBuf, context: OperationWorkbenchContext) -> Result<Self> {
         let session = context.build_session("service.install")?;
         let view = load_orchestrator_view(&repo_root)?;
         Ok(Self {
@@ -739,7 +749,7 @@ mod tests {
 
     #[test]
     fn tui_loads_shared_orchestrator_view_from_core() {
-        let app = App::new(repo_root()).expect("TUI app should load orchestrator/core view");
+        let app = App::new_memory(repo_root()).expect("TUI app should load orchestrator/core view");
         assert!(!app.view.services.is_empty());
         assert!(!app.view.sets.is_empty());
         assert!(!app.view.endpoints.is_empty());
@@ -766,7 +776,7 @@ mod tests {
 
     #[test]
     fn tui_workbench_uses_core_session_for_action_field_and_apply() {
-        let mut app = App::new(repo_root()).expect("TUI app should load");
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
         app.next_action();
         assert_ne!(app.session.workbench.selected_action, "");
         app.selected_field_index = app
@@ -779,7 +789,7 @@ mod tests {
         app.cycle_selected_field();
         assert!(app.session.workbench.request.field("service_id").is_some());
 
-        app = App::new(repo_root()).expect("TUI app should reload");
+        app = App::new_memory(repo_root()).expect("TUI app should reload");
         app.confirm_session();
         app.apply_session();
         assert_eq!(app.session.result_status, "SUCCEEDED");

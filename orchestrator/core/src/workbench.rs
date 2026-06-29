@@ -1,8 +1,8 @@
 use crate::{
     ActionPlanPreview, ActionRequest, Endpoint, FormFieldSchema, MemoryOrchestratorStore,
     Operation, OperationExecutor, OperationLogRecord, OperationStatus, OrchestratorError,
-    OrchestratorStore, Result, ServiceManifest, ServiceSet, SharedSchemas, Topology,
-    action_descriptor, build_topology, confirm_operation, default_action_request,
+    OrchestratorStore, PgOrchestratorStore, Result, ServiceManifest, ServiceSet, SharedSchemas,
+    Topology, action_descriptor, build_topology, confirm_operation, default_action_request,
     plan_action_request, preview_operation, validate_service_manifest_file,
     validate_service_set_file,
 };
@@ -20,9 +20,20 @@ pub struct OperationWorkbenchContext {
     pub topology: Option<Topology>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    #[serde(skip)]
+    store_mode: WorkbenchStoreMode,
 }
 
 impl OperationWorkbenchContext {
+    pub fn with_memory_store(mut self) -> Self {
+        self.store_mode = WorkbenchStoreMode::Memory;
+        self
+    }
+
+    pub fn uses_persistent_store(&self) -> bool {
+        matches!(self.store_mode, WorkbenchStoreMode::PersistentFromEnv)
+    }
+
     pub fn build_workbench(&self, action: &str) -> Result<OperationWorkbench> {
         build_operation_workbench(
             action,
@@ -151,16 +162,32 @@ impl OperationWorkbenchContext {
     }
 
     pub fn apply(&self, session: &OperationWorkbenchSession) -> Result<OperationWorkbenchSession> {
-        let store = self.session_store(session)?;
-        apply_operation_workbench_session_with_store(session, store)
+        match self.store_mode {
+            WorkbenchStoreMode::Memory => {
+                let mut store = self.session_store(session)?;
+                apply_operation_workbench_session_with_store(session, &mut store)
+            }
+            WorkbenchStoreMode::PersistentFromEnv => {
+                let mut store = self.persistent_session_store(session)?;
+                apply_operation_workbench_session_with_store(session, &mut store)
+            }
+        }
     }
 
     pub fn rollback(
         &self,
         session: &OperationWorkbenchSession,
     ) -> Result<OperationWorkbenchSession> {
-        let store = self.session_store(session)?;
-        rollback_operation_workbench_session_with_store(session, store)
+        match self.store_mode {
+            WorkbenchStoreMode::Memory => {
+                let mut store = self.session_store(session)?;
+                rollback_operation_workbench_session_with_store(session, &mut store)
+            }
+            WorkbenchStoreMode::PersistentFromEnv => {
+                let mut store = self.persistent_session_store(session)?;
+                rollback_operation_workbench_session_with_store(session, &mut store)
+            }
+        }
     }
 
     fn session_store(
@@ -189,6 +216,22 @@ impl OperationWorkbenchContext {
         }
         Ok(store)
     }
+
+    fn persistent_session_store(
+        &self,
+        session: &OperationWorkbenchSession,
+    ) -> Result<PgOrchestratorStore> {
+        let mut store = PgOrchestratorStore::from_env()?;
+        seed_session_store(&mut store, self, session)?;
+        Ok(store)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum WorkbenchStoreMode {
+    #[default]
+    Memory,
+    PersistentFromEnv,
 }
 
 pub fn load_operation_workbench_context(repo_root: &Path) -> Result<OperationWorkbenchContext> {
@@ -214,6 +257,11 @@ pub fn load_operation_workbench_context(repo_root: &Path) -> Result<OperationWor
         links,
         topology,
         warnings,
+        store_mode: if std::env::var(PgOrchestratorStore::ENV_NAME).is_ok() {
+            WorkbenchStoreMode::PersistentFromEnv
+        } else {
+            WorkbenchStoreMode::Memory
+        },
     })
 }
 
@@ -354,15 +402,14 @@ pub fn apply_operation_workbench_session(
     for record in &session.logs {
         store.append_operation_log(record.clone())?;
     }
-    apply_operation_workbench_session_with_store(session, store)
+    apply_operation_workbench_session_with_store(session, &mut store)
 }
 
 fn apply_operation_workbench_session_with_store(
     session: &OperationWorkbenchSession,
-    mut store: MemoryOrchestratorStore,
+    store: &mut impl OrchestratorStore,
 ) -> Result<OperationWorkbenchSession> {
-    let applied =
-        OperationExecutor::new(&mut store).apply(&session.current_operation.operation_id)?;
+    let applied = OperationExecutor::new(store).apply(&session.current_operation.operation_id)?;
     let result_status = applied
         .result
         .get("status")
@@ -371,7 +418,7 @@ fn apply_operation_workbench_session_with_store(
         .to_string();
     let mut next = session.clone();
     next.current_operation = applied;
-    next.logs = store.operation_logs(&session.current_operation.operation_id);
+    next.logs = store.operation_logs(&session.current_operation.operation_id)?;
     next.result_status = result_status;
     Ok(next)
 }
@@ -384,15 +431,15 @@ pub fn rollback_operation_workbench_session(
     for record in &session.logs {
         store.append_operation_log(record.clone())?;
     }
-    rollback_operation_workbench_session_with_store(session, store)
+    rollback_operation_workbench_session_with_store(session, &mut store)
 }
 
 fn rollback_operation_workbench_session_with_store(
     session: &OperationWorkbenchSession,
-    mut store: MemoryOrchestratorStore,
+    store: &mut impl OrchestratorStore,
 ) -> Result<OperationWorkbenchSession> {
     let rolled_back =
-        OperationExecutor::new(&mut store).rollback(&session.current_operation.operation_id)?;
+        OperationExecutor::new(store).rollback(&session.current_operation.operation_id)?;
     let result_status = rolled_back
         .result
         .get("status")
@@ -401,9 +448,36 @@ fn rollback_operation_workbench_session_with_store(
         .to_string();
     let mut next = session.clone();
     next.current_operation = rolled_back;
-    next.logs = store.operation_logs(&session.current_operation.operation_id);
+    next.logs = store.operation_logs(&session.current_operation.operation_id)?;
     next.result_status = result_status;
     Ok(next)
+}
+
+fn seed_session_store(
+    store: &mut impl OrchestratorStore,
+    context: &OperationWorkbenchContext,
+    session: &OperationWorkbenchSession,
+) -> Result<()> {
+    for service in &context.services {
+        store.put_service(service.clone())?;
+    }
+    for set in &context.sets {
+        store.put_set(set.clone())?;
+    }
+    for endpoint in &context.endpoints {
+        store.put_endpoint(endpoint.clone())?;
+    }
+    for link in &context.links {
+        store.put_link(link.clone())?;
+    }
+    if let Some(topology) = &context.topology {
+        store.put_topology(topology.clone())?;
+    }
+    store.put_operation(session.current_operation.clone())?;
+    for record in &session.logs {
+        store.append_operation_log(record.clone())?;
+    }
+    Ok(())
 }
 
 pub fn run_operation_workbench_flow(

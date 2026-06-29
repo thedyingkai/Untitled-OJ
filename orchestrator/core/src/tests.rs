@@ -1076,7 +1076,9 @@ fn operation_workbench_updates_fields_and_runs_step_by_step() {
 #[test]
 fn operation_workbench_context_loads_repo_and_drives_sessions() {
     let root = repo_root();
-    let context = load_operation_workbench_context(&root).expect("workbench context");
+    let context = load_operation_workbench_context(&root)
+        .expect("workbench context")
+        .with_memory_store();
 
     assert_eq!(context.schemas.action_count(), 39);
     assert_eq!(context.services.len(), 9);
@@ -1133,7 +1135,9 @@ fn operation_workbench_context_loads_repo_and_drives_sessions() {
 #[test]
 fn operation_workbench_context_applies_store_backed_core_actions() {
     let root = repo_root();
-    let context = load_operation_workbench_context(&root).expect("workbench context");
+    let context = load_operation_workbench_context(&root)
+        .expect("workbench context")
+        .with_memory_store();
 
     let endpoint_session = context
         .build_session("endpoint.register")
@@ -1172,6 +1176,26 @@ fn operation_workbench_context_applies_store_backed_core_actions() {
         OperationStatus::Succeeded
     );
     assert_eq!(set_applied.result_status, "SUCCEEDED");
+}
+
+#[test]
+fn operation_workbench_context_selects_persistent_store_from_env() {
+    let root = repo_root();
+    let previous = std::env::var(PgOrchestratorStore::ENV_NAME).ok();
+    unsafe {
+        std::env::set_var(
+            PgOrchestratorStore::ENV_NAME,
+            "postgres://postgres:local@localhost:5432/ojos_orchestrator",
+        );
+    }
+    let context = load_operation_workbench_context(&root).expect("workbench context");
+    assert!(context.uses_persistent_store());
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var(PgOrchestratorStore::ENV_NAME, value),
+            None => std::env::remove_var(PgOrchestratorStore::ENV_NAME),
+        }
+    }
 }
 
 #[test]

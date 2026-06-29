@@ -29,6 +29,16 @@ struct GuiApp {
 impl GuiApp {
     fn new(repo_root: PathBuf) -> Result<Self> {
         let context = load_operation_workbench_context(&repo_root)?;
+        Self::from_context(repo_root, context)
+    }
+
+    #[cfg(test)]
+    fn new_memory(repo_root: PathBuf) -> Result<Self> {
+        let context = load_operation_workbench_context(&repo_root)?.with_memory_store();
+        Self::from_context(repo_root, context)
+    }
+
+    fn from_context(repo_root: PathBuf, context: OperationWorkbenchContext) -> Result<Self> {
         let session = context.build_session("service.install")?;
         let view = load_orchestrator_view(&repo_root)?;
         Ok(Self {
@@ -526,7 +536,8 @@ mod tests {
             .and_then(|path| path.parent())
             .expect("repo root")
             .to_path_buf();
-        let app = GuiApp::new(repo_root).expect("GUI app should load orchestrator/core view");
+        let app =
+            GuiApp::new_memory(repo_root).expect("GUI app should load orchestrator/core view");
         let workbench = OperationWorkbenchView::from_session(&app.session);
         assert_eq!(workbench.selected_action, "service.install");
         assert!(workbench.fields.contains("service_id*"));
@@ -551,7 +562,7 @@ mod tests {
             .and_then(|path| path.parent())
             .expect("repo root")
             .to_path_buf();
-        let mut app = GuiApp::new(repo_root).expect("GUI app should load");
+        let mut app = GuiApp::new_memory(repo_root).expect("GUI app should load");
         app.update_field("service_id", "problem-api".to_string());
         assert_eq!(
             app.session.workbench.request.field("service_id"),

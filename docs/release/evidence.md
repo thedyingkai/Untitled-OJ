@@ -37,7 +37,7 @@ docs/release/
 - LogView 查询与 DiagnosticReport 导出：`orchestrator/core/src/observability.rs`
 - Reconcile tick：`orchestrator/core/src/reconciler.rs`
 - GUI/TUI 共享视图：`orchestrator/core/src/view.rs`
-- GUI/TUI 共享工作台：`orchestrator/core/src/workbench.rs`
+- GUI/TUI 共享工作台：`orchestrator/core/src/workbench.rs`，未设置 `ORCHESTRATOR_DATABASE_URL` 时使用 Memory store，设置后 apply/rollback 走 `PgOrchestratorStore`
 - Orchestrator migration：`deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`
 
 ## 当前限制
