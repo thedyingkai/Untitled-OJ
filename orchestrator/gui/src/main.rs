@@ -345,6 +345,8 @@ fn draw_operations(ui: &mut egui::Ui, app: &mut GuiApp) {
                     "错误",
                     "日志",
                     "摘要",
+                    "Created",
+                    "Updated",
                 ],
             );
             for operation in app.view.operations.clone() {
@@ -366,6 +368,8 @@ fn draw_operations(ui: &mut egui::Ui, app: &mut GuiApp) {
                 ui.label(&operation.error);
                 ui.label(operation.log_count.to_string());
                 ui.label(&operation.summary);
+                ui.label(&operation.created_at);
+                ui.label(&operation.updated_at);
                 ui.end_row();
             }
         });
@@ -520,7 +524,7 @@ fn header(ui: &mut egui::Ui, labels: &[&str]) {
 }
 
 fn main() -> Result<()> {
-    configure_utf8_console();
+    configure_utf8_console()?;
     let cli = Cli::parse();
     let repo_root = fs::canonicalize(&cli.repo_root).unwrap_or(cli.repo_root);
     let app = GuiApp::new(repo_root)?;
@@ -600,15 +604,17 @@ fn gui_font_candidates() -> Vec<PathBuf> {
     paths
 }
 
-fn configure_utf8_console() {
+fn configure_utf8_console() -> Result<()> {
     #[cfg(windows)]
     {
         const CP_UTF8: u32 = 65001;
-        unsafe {
-            SetConsoleOutputCP(CP_UTF8);
-            SetConsoleCP(CP_UTF8);
+        let output_ok = unsafe { SetConsoleOutputCP(CP_UTF8) } != 0;
+        let input_ok = unsafe { SetConsoleCP(CP_UTF8) } != 0;
+        if !output_ok || !input_ok {
+            anyhow::bail!("无法将 Windows 控制台输入/输出编码设置为 UTF-8");
         }
     }
+    Ok(())
 }
 
 #[cfg(windows)]

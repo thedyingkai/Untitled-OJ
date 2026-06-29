@@ -670,6 +670,7 @@ pub fn endpoint_register_operation(
             "health_path": endpoint.health_path,
             "display_name": endpoint.display_name,
             "note": endpoint.note,
+            "config": endpoint.config,
         }),
         serde_json::json!({
             "steps": [
@@ -709,6 +710,7 @@ pub fn endpoint_update_operation(
             "health_path": endpoint.health_path,
             "display_name": endpoint.display_name,
             "note": endpoint.note,
+            "config": endpoint.config,
         }),
         serde_json::json!({
             "steps": [
@@ -817,6 +819,7 @@ pub fn link_create_operation(
             "scope": link.scope,
             "config_ref": link.config_ref,
             "secret_ref": link.secret_ref,
+            "policy": link.policy,
         }),
         serde_json::json!({
             "steps": [
@@ -862,6 +865,7 @@ pub fn link_update_operation(
             "scope": link.scope,
             "config_ref": link.config_ref,
             "secret_ref": link.secret_ref,
+            "policy": link.policy,
         }),
         serde_json::json!({
             "steps": [

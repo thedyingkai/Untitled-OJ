@@ -124,6 +124,8 @@ pub struct OperationViewRow {
     pub error: String,
     pub log_count: usize,
     pub summary: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -667,6 +669,8 @@ fn operation_rows(
                     error: String::new(),
                     log_count: 0,
                     summary: descriptor.summary.to_string(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
                 }
             })
             .collect(),
@@ -686,6 +690,8 @@ fn operation_rows(
             error: err.to_string(),
             log_count: 0,
             summary: err.to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
         }],
     }
 }
@@ -724,6 +730,8 @@ fn operation_store_rows(
                 .copied()
                 .unwrap_or_default(),
             summary: operation_summary(operation),
+            created_at: operation.created_at.clone(),
+            updated_at: operation.updated_at.clone(),
         })
         .collect()
 }

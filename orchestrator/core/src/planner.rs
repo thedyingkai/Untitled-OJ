@@ -370,7 +370,7 @@ fn endpoint_from_request(
             .or_else(|| current.map(|item| item.note.as_str()))
             .unwrap_or("")
             .to_string(),
-        config: Value::Null,
+        config: json_field(request, "config")?,
         created_at: String::new(),
         updated_at: String::new(),
     })
@@ -391,7 +391,7 @@ fn link_from_request(request: &ActionRequest) -> Result<Link> {
         latency_ms: None,
         config_ref: request.field("config_ref").unwrap_or("").to_string(),
         secret_ref: request.field("secret_ref").unwrap_or("").to_string(),
-        policy: Value::Null,
+        policy: json_field(request, "policy")?,
         created_at: String::new(),
         updated_at: String::new(),
     })
@@ -421,6 +421,18 @@ fn operation_step_names(operation: &Operation) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn json_field(request: &ActionRequest, name: &str) -> Result<Value> {
+    match request.field(name) {
+        Some(value) => serde_json::from_str(value).map_err(|err| {
+            OrchestratorError::InvalidManifest(format!(
+                "{} field {} must be valid JSON: {err}",
+                request.action, name
+            ))
+        }),
+        None => Ok(Value::Null),
+    }
 }
 
 fn map<const N: usize>(items: [(&str, &str); N]) -> BTreeMap<String, String> {

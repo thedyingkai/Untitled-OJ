@@ -34,4 +34,6 @@ unknown
 
 Link health 同样使用这些状态，并可附带 `latency_ms`。Topology 修改必须通过 Operation plan、confirm 和 apply 完成。
 
+GUI/TUI 中的 Endpoint/Link 操作通过 Action Dispatcher 写 Store。`endpoint.register/update/delete` 与 `link.create/update/delete` 会产生 Operation 和 OperationLog；`endpoint.health.check` 与 `link.health.check` 会执行真实探测或基于已登记 Endpoint 状态检查，并把 health 写回 Store。Topology 视图只反映 Store 中已经登记的 Endpoint、Link、Operation、LogView 和 DiagnosticReport。
+
 DiagnosticReport 从 Topology 和 Store 中的 Operation log 生成可导出摘要。Topology 中只展示已登记的 LogView 和 DiagnosticReport，不提供任意路径读取或远程 shell。

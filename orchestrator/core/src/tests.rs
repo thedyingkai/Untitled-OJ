@@ -2919,6 +2919,7 @@ fn endpoint_register_update_delete_and_health_write_store() {
                 ("health_path", "/health"),
                 ("display_name", "Local Gateway"),
                 ("note", "本机 Gateway"),
+                ("config", r#"{"region":"local"}"#),
             ],
         ))
         .expect("endpoint register");
@@ -2932,6 +2933,15 @@ fn endpoint_register_update_delete_and_health_write_store() {
             .contains(&"Endpoint:127.0.0.1:8080".to_string())
     );
     assert!(store.endpoint("127.0.0.1:8080").is_some());
+    assert_eq!(
+        store
+            .endpoint("127.0.0.1:8080")
+            .expect("registered endpoint")
+            .config
+            .get("region")
+            .and_then(serde_json::Value::as_str),
+        Some("local")
+    );
 
     let updated =
         OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
@@ -2944,6 +2954,7 @@ fn endpoint_register_update_delete_and_health_write_store() {
                     ("health_path", "/ready"),
                     ("display_name", "Gateway TCP"),
                     ("note", "更新后的 Endpoint"),
+                    ("config", r#"{"region":"updated"}"#),
                     ("confirm", "true"),
                 ],
             ))
@@ -2958,6 +2969,15 @@ fn endpoint_register_update_delete_and_health_write_store() {
             .expect("updated endpoint")
             .protocol,
         "tcp"
+    );
+    assert_eq!(
+        store
+            .endpoint("127.0.0.1:8080")
+            .expect("updated endpoint")
+            .config
+            .get("region")
+            .and_then(serde_json::Value::as_str),
+        Some("updated")
     );
 
     let health = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
@@ -3026,6 +3046,9 @@ fn link_create_update_delete_and_health_write_store() {
                     ("protocol", "http"),
                     ("auth_mode", "internal"),
                     ("scope", "gateway-to-auth"),
+                    ("config_ref", "config://gateway/auth"),
+                    ("secret_ref", "secret://gateway/auth"),
+                    ("policy", r#"{"required":true}"#),
                     ("confirm", "true"),
                 ],
             ))
@@ -3039,6 +3062,19 @@ fn link_create_update_delete_and_health_write_store() {
             .get_link("127.0.0.1:8080", "127.0.0.1:8001")
             .expect("get link")
             .is_some()
+    );
+    let stored_link = store
+        .get_link("127.0.0.1:8080", "127.0.0.1:8001")
+        .expect("get link")
+        .expect("link");
+    assert_eq!(stored_link.config_ref, "config://gateway/auth");
+    assert_eq!(stored_link.secret_ref, "secret://gateway/auth");
+    assert_eq!(
+        stored_link
+            .policy
+            .get("required")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
     );
 
     OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
@@ -3834,19 +3870,17 @@ fn docker_compose_driver_runs_only_when_explicitly_enabled() {
 #[test]
 fn driver_output_decoder_preserves_utf8_text() {
     assert_eq!(
-        crate::executor::decode_driver_output_bytes("服务已启动".as_bytes()),
+        crate::executor::decode_driver_output_bytes("服务已启动".as_bytes())
+            .expect("UTF-8 output should decode"),
         "服务已启动"
     );
 }
 
-#[cfg(target_os = "windows")]
 #[test]
-fn windows_driver_output_decoder_reads_gbk_text() {
-    let (bytes, _, _) = encoding_rs::GBK.encode("服务已启动");
-    assert_eq!(
-        crate::executor::decode_driver_output_bytes(bytes.as_ref()),
-        "服务已启动"
-    );
+fn driver_output_decoder_rejects_non_utf8_text() {
+    let err = crate::executor::decode_driver_output_bytes(&[0xff, 0xfe, 0xfd])
+        .expect_err("driver output must be valid UTF-8");
+    assert!(err.to_string().contains("driver output is not UTF-8"));
 }
 
 #[test]
@@ -4113,6 +4147,14 @@ fn orchestrator_view_can_load_from_store_state() {
     assert_eq!(view.operations[0].error, "health check failed");
     assert_eq!(view.operations[0].log_count, 1);
     assert!(
+        view.operations[0].created_at.is_empty(),
+        "memory store operation rows expose created_at even when local tests use marker-free time"
+    );
+    assert!(
+        view.operations[0].updated_at.is_empty(),
+        "memory store operation rows expose updated_at even when local tests use marker-free time"
+    );
+    assert!(
         view.logs
             .iter()
             .any(|log| log.operation_id == "op-store-view"
@@ -4251,6 +4293,31 @@ fn diagnostic_report_builds_from_store_and_exports_json_and_markdown() {
             .and_then(serde_json::Value::as_array)
             .is_some_and(|items| items.iter().any(|item| item.get("operation_id")
                 == Some(&serde_json::Value::String("op-failed".to_string()))))
+    );
+    assert!(
+        report
+            .data
+            .get("action_matrix")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| {
+                item.get("action_id").and_then(serde_json::Value::as_str)
+                    == Some("endpoint.register")
+                    && item
+                        .get("capability_status")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("STORE_BACKED")
+            })),
+        "DiagnosticReport should include action matrix evidence"
+    );
+    assert!(
+        report
+            .data
+            .get("unsupported_capabilities")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items
+                .iter()
+                .any(|item| item.as_str() == Some("service.start"))),
+        "DiagnosticReport should list unsupported capabilities honestly"
     );
 
     let json_export = export_diagnostic_report(&report, "json").expect("json export");

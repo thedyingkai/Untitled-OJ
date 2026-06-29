@@ -1196,9 +1196,11 @@ fn endpoint_from_operation<S: OrchestratorStore>(
             .or_else(|| current.as_ref().map(|endpoint| endpoint.note.as_str()))
             .unwrap_or("")
             .to_string(),
-        config: current
-            .as_ref()
-            .map(|endpoint| endpoint.config.clone())
+        config: operation
+            .request
+            .get("config")
+            .cloned()
+            .or_else(|| current.as_ref().map(|endpoint| endpoint.config.clone()))
             .unwrap_or_else(|| serde_json::json!({})),
         created_at: current
             .as_ref()
@@ -1254,7 +1256,11 @@ fn link_from_operation(operation: &Operation) -> Link {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string(),
-        policy: serde_json::json!({}),
+        policy: operation
+            .request
+            .get("policy")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
         created_at: String::new(),
         updated_at: String::new(),
     }

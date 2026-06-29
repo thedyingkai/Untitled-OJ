@@ -195,6 +195,7 @@ fn ensure_form_fields_are_valid(schemas: &SharedSchemas) -> Result<()> {
         "boolean",
         "endpoint",
         "enum",
+        "json",
         "secret_ref",
         "service_id",
         "set_id",

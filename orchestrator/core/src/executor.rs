@@ -1,6 +1,4 @@
 use crate::{Endpoint, Link, LogView, OrchestratorError, Result, validate_endpoint_id};
-#[cfg(target_os = "windows")]
-use encoding_rs::GBK;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -146,7 +144,7 @@ impl ExecutionDriver for DockerComposeDriver {
             return Ok(DriverResult {
                 action: request.action.clone(),
                 status: status.to_string(),
-                message: driver_output_message(&output),
+                message: driver_output_message(&output)?,
                 command,
             });
         }
@@ -249,38 +247,31 @@ fn safe_executable(value: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-fn driver_output_message(output: &std::process::Output) -> String {
-    let stdout = decode_driver_output_bytes(&output.stdout)
+fn driver_output_message(output: &std::process::Output) -> Result<String> {
+    let stdout = decode_driver_output_bytes(&output.stdout)?
         .trim()
         .to_string();
-    let stderr = decode_driver_output_bytes(&output.stderr)
+    let stderr = decode_driver_output_bytes(&output.stderr)?
         .trim()
         .to_string();
     if output.status.success() {
         if stdout.is_empty() {
-            "fixed docker compose command succeeded".to_string()
+            Ok("fixed docker compose command succeeded".to_string())
         } else {
-            stdout
+            Ok(stdout)
         }
     } else if stderr.is_empty() {
-        format!("fixed docker compose command exited with {}", output.status)
+        Ok(format!(
+            "fixed docker compose command exited with {}",
+            output.status
+        ))
     } else {
-        stderr
+        Ok(stderr)
     }
 }
 
-pub(crate) fn decode_driver_output_bytes(bytes: &[u8]) -> String {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(text) = std::str::from_utf8(bytes) {
-            return text.to_string();
-        }
-        let (decoded, _, _) = GBK.decode(bytes);
-        decoded.into_owned()
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        String::from_utf8_lossy(bytes).to_string()
-    }
+pub(crate) fn decode_driver_output_bytes(bytes: &[u8]) -> Result<String> {
+    std::str::from_utf8(bytes)
+        .map(str::to_string)
+        .map_err(|err| OrchestratorError::Dependency(format!("driver output is not UTF-8: {err}")))
 }

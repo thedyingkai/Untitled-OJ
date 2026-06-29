@@ -119,6 +119,17 @@ pub fn build_diagnostic_report<S: OrchestratorStore>(
         unhealthy_endpoints.len(),
         unhealthy_links.len(),
     );
+    let action_matrix = crate::action_matrix();
+    let unsupported_capabilities = action_matrix
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.capability_status,
+                crate::ActionCapabilityStatus::Unsupported
+            )
+        })
+        .map(|entry| entry.action_id.clone())
+        .collect::<Vec<_>>();
 
     Ok(DiagnosticReport {
         report_id: report_id.into(),
@@ -158,6 +169,8 @@ pub fn build_diagnostic_report<S: OrchestratorStore>(
             "database_schema_check": {
                 "formal_tables": crate::ORCHESTRATOR_TABLES,
             },
+            "action_matrix": action_matrix,
+            "unsupported_capabilities": unsupported_capabilities,
             "forbidden_concept_scan_summary": {
                 "formal_core_objects": [
                     "Service",

@@ -254,22 +254,24 @@ impl App {
 }
 
 fn main() -> Result<()> {
-    configure_utf8_console();
+    configure_utf8_console()?;
     let cli = Cli::parse();
     let repo_root = fs::canonicalize(&cli.repo_root).unwrap_or(cli.repo_root);
     let app = App::new(repo_root)?;
     run(app)
 }
 
-fn configure_utf8_console() {
+fn configure_utf8_console() -> Result<()> {
     #[cfg(windows)]
     {
         const CP_UTF8: u32 = 65001;
-        unsafe {
-            SetConsoleOutputCP(CP_UTF8);
-            SetConsoleCP(CP_UTF8);
+        let output_ok = unsafe { SetConsoleOutputCP(CP_UTF8) } != 0;
+        let input_ok = unsafe { SetConsoleCP(CP_UTF8) } != 0;
+        if !output_ok || !input_ok {
+            anyhow::bail!("无法将 Windows 控制台输入/输出编码设置为 UTF-8");
         }
     }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -578,6 +580,8 @@ fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             Cell::from(operation.error.clone()),
             Cell::from(operation.log_count.to_string()),
             Cell::from(operation.summary.clone()),
+            Cell::from(operation.created_at.clone()),
+            Cell::from(operation.updated_at.clone()),
             Cell::from(operation.preview_steps.clone()),
         ])
     });
@@ -599,6 +603,8 @@ fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 Constraint::Length(18),
                 Constraint::Length(6),
                 Constraint::Length(18),
+                Constraint::Length(16),
+                Constraint::Length(16),
                 Constraint::Min(24),
             ],
         )
@@ -618,6 +624,8 @@ fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 "错误",
                 "日志",
                 "摘要",
+                "Created",
+                "Updated",
                 "预览步骤",
             ])
             .style(Style::default().fg(Color::Yellow)),

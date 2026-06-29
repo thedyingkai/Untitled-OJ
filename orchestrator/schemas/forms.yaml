@@ -81,6 +81,7 @@ forms:
       - { name: health_path, type: string }
       - { name: display_name, type: string }
       - { name: note, type: text }
+      - { name: config, type: json }
   endpoint.update:
     fields:
       - { name: endpoint, type: endpoint, required: true }
@@ -88,6 +89,7 @@ forms:
       - { name: health_path, type: string }
       - { name: display_name, type: string }
       - { name: note, type: text }
+      - { name: config, type: json }
   endpoint.delete:
     fields:
       - { name: endpoint, type: endpoint, required: true }
@@ -102,14 +104,20 @@ forms:
       - { name: target_endpoint, type: endpoint, required: true }
       - { name: protocol, type: enum, values: [http, https, tcp, postgres, redis], required: true }
       - { name: auth_mode, type: enum, values: [none, internal, service-token, secret-ref] }
+      - { name: scope, type: string }
+      - { name: config_ref, type: string }
       - { name: secret_ref, type: secret_ref }
+      - { name: policy, type: json }
   link.update:
     fields:
       - { name: source_endpoint, type: endpoint, required: true }
       - { name: target_endpoint, type: endpoint, required: true }
       - { name: protocol, type: enum, values: [http, https, tcp, postgres, redis] }
       - { name: auth_mode, type: enum, values: [none, internal, service-token, secret-ref] }
+      - { name: scope, type: string }
+      - { name: config_ref, type: string }
       - { name: secret_ref, type: secret_ref }
+      - { name: policy, type: json }
   link.delete:
     fields:
       - { name: source_endpoint, type: endpoint, required: true }

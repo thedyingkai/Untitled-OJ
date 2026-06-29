@@ -36,6 +36,8 @@ diagnostic_reports
 
 GUI/TUI 的 `OperationWorkbenchContext` 会根据 `ORCHESTRATOR_DATABASE_URL` 选择 Store。未设置时使用 `MemoryOrchestratorStore` 做无数据库演示；设置后，工作台先通过 `PgOrchestratorStore` 读取当前 Service、Set、Endpoint、Link 和 Topology，再把 plan/confirm/apply/rollback 持久化为 Operation、operation logs、result、rollback 和相关核心对象。GUI/TUI 仍不直接写数据库，只通过 core Store trait。
 
+`OrchestratorActionConsole` 在无数据库时持有会话级 `MemoryOrchestratorStore`，因此 GUI/TUI 操作后的 Endpoint、Link、Operation 和 LogView 会在本次会话刷新后继续可见。设置 `ORCHESTRATOR_DATABASE_URL` 时，Action Console 通过 `PgOrchestratorStore` 写入独立 Orchestrator DB；它不会读取或写入 `OJ_DATABASE_URL`。
+
 PostgreSQL Store 集成测试位于 `orchestrator/core/tests/pg_store_integration.rs`。普通 `cargo test` 只编译该测试；需要真实数据库时，先对独立 Orchestrator DB 应用 `deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`，再运行：
 
 ```powershell

@@ -46,12 +46,14 @@ ExternalEndpointDriver
 
 `OperationExecutor` 在 Service 生命周期 Operation 中根据 Service 的 `runtime.mode` 选择固定 driver，并把 `DriverResult` 写入 `orchestrator_operation_logs`。当前 container Service 走 `DockerComposeDriver` 的计划模式；local-process 生命周期动作仍返回 Unsupported 并落入 `FAILED` Operation；external Service 不执行生命周期控制。
 
-GUI/TUI 通过 `OperationWorkbenchContext` 和 `OperationWorkbenchSession` 使用同一套状态机。GUI/TUI 可以生成 plan、confirm、apply、rollback，并查看 result、error 和 operation logs；不能绕过 core 自行执行动作。
+GUI/TUI 通过 `OperationWorkbenchContext` 和 `OperationWorkbenchSession` 使用同一套状态机。GUI/TUI 可以生成 plan、confirm、apply、rollback，并查看 result、error、operation logs、`created_at` 和 `updated_at`；不能绕过 core 自行执行动作。
+
+`OrchestratorActionDispatcher` 是 GUI/TUI 的正式 action 执行入口。它会把表单字段转换为 `ActionRequest`，写入 `PLANNED` Operation，按 action 要求确认，然后调用 `OperationExecutor`。未接真实执行器的 action 会落为 `UNSUPPORTED`，写入失败 Operation 和 warning log，不能显示成功。
 
 当 `ORCHESTRATOR_DATABASE_URL` 存在时，`OperationWorkbenchContext` 会使用 `PgOrchestratorStore` 持久化工作台生成的 plan、confirm、apply 和 rollback。生成或更新 plan 时写入 `PLANNED` Operation；confirm 后写入 `AWAITING_CONFIRMATION` 和 `confirmed_at`；apply/rollback 继续由 `OperationExecutor` 写入 lock、step log、result、error 和最终状态。没有该变量时，工作台保持 `MemoryOrchestratorStore` 本地演示模式。
 
 日志读取只围绕 `LogView` 和 `OperationLogRecord`。core 提供按 `service_id`、`endpoint`、`operation_id`、`source_id` 过滤的查询能力，并要求 `LogView.path` 使用 service-scoped、operation-scoped 或 endpoint-scoped 策略；它不是任意文件浏览器，也不读取未登记路径。
 
-DiagnosticReport 可以从当前 Store 构建，内容包含 Service、Endpoint、Link、Operation 摘要、失败 Operation、不健康 Endpoint/Link、近期 Operation log、数据库 schema 检查和禁用概念扫描摘要。当前支持 JSON 和 Markdown 导出。
+DiagnosticReport 可以从当前 Store 构建，内容包含 Service、Endpoint、Link、Operation 摘要、失败 Operation、不健康 Endpoint/Link、近期 Operation log、数据库 schema 检查、禁用概念扫描摘要、action matrix 和 unsupported capabilities。当前支持 JSON 和 Markdown 导出。
 
 `run_reconcile_tick` 是当前长期运行能力的核心原语。它执行单次 tick：过期未确认 Operation、刷新 Endpoint/Link health、保存 Topology snapshot，并生成 DiagnosticReport。`run_reconcile_loop` 在同一 Store 路径上提供可停止、可设定 tick 数和间隔的循环原语，供 GUI、TUI 或后续常驻进程调用；本轮仍不宣称已经具备完整生产 daemon、远程部署 agent 或跨主机发布能力。
