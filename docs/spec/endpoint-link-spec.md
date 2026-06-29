@@ -1,4 +1,4 @@
-# Endpoint / Link 规范
+﻿# Endpoint / Link 规范
 
 Endpoint 是运行时唯一连接身份，格式固定为：
 
@@ -6,11 +6,9 @@ Endpoint 是运行时唯一连接身份，格式固定为：
 IP:Port
 ```
 
-一个 Endpoint 直接代表一个运行中的 Service 入口，并直接绑定 `service_id`。同一个 Service 可以拥有多个 Endpoint。Orchestrator 不通过额外主机对象、设备对象或安装实例对象包装运行实例。
+Endpoint 直接绑定 `service_id`，不通过额外运行实例对象包装。
 
-## Endpoint
-
-Endpoint 至少包含：
+Endpoint 字段包括：
 
 ```text
 endpoint
@@ -26,19 +24,23 @@ created_at
 updated_at
 ```
 
-Endpoint 由 Orchestrator 注册、更新、删除和检查健康。Service 只能在 `service.yaml` 中声明 `default_port`，不能决定最终 IP。
+Endpoint health 规则：
 
-## Link
+- `http` / `https`：GET `health_path`，2xx/3xx 为 healthy，连接失败为 unreachable，非成功状态为 degraded 或 unhealthy。
+- `tcp`：能建立 TCP 连接为 healthy，失败为 unreachable。
+- `postgres` / `redis`：当前至少执行 TCP 级检查。
 
 Link 是 Endpoint Pair：
 
 ```text
-source endpoint -> target endpoint
+source_endpoint -> target_endpoint
 ```
 
-Link 可附带：
+Link 字段包括：
 
 ```text
+source_endpoint
+target_endpoint
 protocol
 auth_mode
 scope
@@ -51,16 +53,6 @@ created_at
 updated_at
 ```
 
-Link 由 Orchestrator 创建、更新、删除和检查健康。Service 只能声明需要哪些连接，不能自行修改全局 Link。
+Link health 至少检查 source endpoint 是否存在、target endpoint 是否存在、target 是否 reachable、protocol 是否匹配、auth_mode 与 scope 是否完整。可测得延迟时写入 `latency_ms`。
 
-Link 是通信授权来源。`source endpoint -> target endpoint` 不存在时，Gateway 不能为该连接生成代理路由，也不能把请求转发到目标 Endpoint。Endpoint 不健康或不可达时，对应 route 必须进入 degraded 状态，不能被当成健康上游。
-
-Gateway 只能根据 Orchestrator 输出的 Endpoint / Link routing snapshot 代理业务流量。Gateway 可以认证、鉴权、审计、限流和上报 health，但不能写 Endpoint、Link 或 Topology。
-
-Endpoint 的 IP 部分可以用于展示某个 host 上的所有 Service、日志和状态：
-
-```text
-group by endpoint host/IP
-```
-
-这只是视图分组，不引入额外核心对象。
+Gateway 只能读取 Orchestrator 输出的 Endpoint/Link routing snapshot 并代理业务流量；它不能写 Endpoint、Link 或 Topology。

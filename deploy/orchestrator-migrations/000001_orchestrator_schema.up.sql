@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS service_sets (
     set_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     sort_order INT NOT NULL DEFAULT 100,
     manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -10,13 +11,12 @@ CREATE TABLE IF NOT EXISTS service_sets (
 
 CREATE TABLE IF NOT EXISTS services (
     service_id TEXT PRIMARY KEY,
-    set_id TEXT NOT NULL DEFAULT '',
     name TEXT NOT NULL,
     version TEXT NOT NULL,
-    status TEXT NOT NULL,
     kind TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+    health TEXT NOT NULL DEFAULT 'unknown',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -65,32 +65,34 @@ CREATE TABLE IF NOT EXISTS orchestrator_operations (
     result JSONB NOT NULL DEFAULT '{}'::jsonb,
     error_message TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confirmed_at TIMESTAMPTZ,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    rolled_back_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS orchestrator_operation_logs (
     log_id BIGSERIAL PRIMARY KEY,
     operation_id TEXT NOT NULL,
+    step_id TEXT NOT NULL DEFAULT '',
     level TEXT NOT NULL DEFAULT 'info',
     message TEXT NOT NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    data JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS orchestrator_operation_locks (
     lock_key TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL,
     owner TEXT NOT NULL,
-    acquired_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS topology_snapshots (
     snapshot_id TEXT PRIMARY KEY,
-    root_host TEXT NOT NULL,
-    root_endpoint TEXT NOT NULL DEFAULT '',
-    authority JSONB NOT NULL DEFAULT '{}'::jsonb,
-    exposure_policy TEXT NOT NULL DEFAULT '',
-    snapshot JSONB NOT NULL,
+    topology JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -99,23 +101,24 @@ CREATE TABLE IF NOT EXISTS log_sources (
     endpoint TEXT NOT NULL,
     service_id TEXT NOT NULL,
     kind TEXT NOT NULL,
-    location TEXT NOT NULL,
-    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    path TEXT NOT NULL,
+    driver TEXT NOT NULL,
+    read_policy TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS diagnostic_reports (
     report_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL DEFAULT '',
     target_type TEXT NOT NULL,
     target_id TEXT NOT NULL,
     status TEXT NOT NULL,
     summary TEXT NOT NULL DEFAULT '',
-    report JSONB NOT NULL DEFAULT '{}'::jsonb,
+    data JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_services_set_id ON services(set_id);
 CREATE INDEX IF NOT EXISTS idx_service_endpoints_service ON service_endpoints(service_id);
 CREATE INDEX IF NOT EXISTS idx_service_links_source ON service_links(source_endpoint);
 CREATE INDEX IF NOT EXISTS idx_service_links_target ON service_links(target_endpoint);

@@ -1,41 +1,146 @@
 use crate::{
-    DiagnosticReport, Endpoint, Link, LogView, Operation, OperationLogRecord, OperationStatus,
-    OrchestratorError, Result, ServiceManifest, ServiceSet, Topology, operation_log_record,
-    validate_endpoint, validate_link, validate_topology,
+    DiagnosticReport, Endpoint, Link, LogView, Operation, OperationLock, OperationLogRecord,
+    OperationStatus, OrchestratorError, Result, ServiceManifest, ServiceSet, Topology,
+    TopologySnapshot, build_topology, operation_log_record, operation_step_log_record,
+    start_operation, succeed_operation, validate_endpoint, validate_link, validate_topology,
 };
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 
 pub trait OrchestratorStore {
-    fn put_service(&mut self, service: ServiceManifest) -> Result<()>;
-    fn put_set(&mut self, set: ServiceSet) -> Result<()>;
-    fn put_endpoint(&mut self, endpoint: Endpoint) -> Result<()>;
-    fn put_link(&mut self, link: Link) -> Result<()>;
-    fn put_operation(&mut self, operation: Operation) -> Result<()>;
-    fn append_operation_log(&mut self, record: OperationLogRecord) -> Result<()>;
-    fn put_topology(&mut self, topology: Topology) -> Result<()>;
-    fn put_log_view(&mut self, log_view: LogView) -> Result<()>;
-    fn put_diagnostic_report(&mut self, report: DiagnosticReport) -> Result<()>;
+    fn list_services(&self) -> Result<Vec<ServiceManifest>>;
+    fn get_service(&self, service_id: &str) -> Result<Option<ServiceManifest>>;
+    fn upsert_service(&mut self, service: ServiceManifest) -> Result<()>;
     fn delete_service(&mut self, service_id: &str) -> Result<()>;
+
+    fn list_sets(&self) -> Result<Vec<ServiceSet>>;
+    fn get_set(&self, set_id: &str) -> Result<Option<ServiceSet>>;
+    fn upsert_set(&mut self, set: ServiceSet) -> Result<()>;
+    fn delete_set(&mut self, set_id: &str) -> Result<()>;
+
+    fn list_endpoints(&self) -> Result<Vec<Endpoint>>;
+    fn get_endpoint(&self, endpoint: &str) -> Result<Option<Endpoint>>;
+    fn upsert_endpoint(&mut self, endpoint: Endpoint) -> Result<()>;
     fn delete_endpoint(&mut self, endpoint: &str) -> Result<()>;
+    fn update_endpoint_health(
+        &mut self,
+        endpoint: &str,
+        health: String,
+        reachable: bool,
+    ) -> Result<()>;
+
+    fn list_links(&self) -> Result<Vec<Link>>;
+    fn get_link(&self, source_endpoint: &str, target_endpoint: &str) -> Result<Option<Link>>;
+    fn upsert_link(&mut self, link: Link) -> Result<()>;
     fn delete_link(&mut self, source_endpoint: &str, target_endpoint: &str) -> Result<()>;
+    fn update_link_health(
+        &mut self,
+        source_endpoint: &str,
+        target_endpoint: &str,
+        health: String,
+        latency_ms: Option<u32>,
+    ) -> Result<()>;
+
+    fn create_operation(&mut self, operation: Operation) -> Result<()>;
+    fn get_operation(&self, operation_id: &str) -> Result<Option<Operation>>;
+    fn list_operations(&self) -> Result<Vec<Operation>>;
+    fn update_operation(&mut self, operation: Operation) -> Result<()>;
+    fn update_operation_status(
+        &mut self,
+        operation_id: &str,
+        status: OperationStatus,
+        error_message: String,
+    ) -> Result<()>;
+    fn update_operation_result(
+        &mut self,
+        operation_id: &str,
+        result: serde_json::Value,
+    ) -> Result<()>;
+    fn append_operation_log(&mut self, record: OperationLogRecord) -> Result<()>;
+    fn list_operation_logs(&self, operation_id: &str) -> Result<Vec<OperationLogRecord>>;
+    fn acquire_operation_lock(&mut self, lock: OperationLock) -> Result<bool>;
+    fn release_operation_lock(&mut self, lock_key: &str, operation_id: &str) -> Result<()>;
+
+    fn save_topology_snapshot(&mut self, snapshot: TopologySnapshot) -> Result<()>;
+    fn get_latest_topology_snapshot(&self) -> Result<Option<TopologySnapshot>>;
+    fn build_topology_view(&self) -> Result<Topology>;
     fn delete_topology(&mut self, root_endpoint: &str) -> Result<()>;
 
-    fn service(&self, service_id: &str) -> Option<&ServiceManifest>;
-    fn set(&self, set_id: &str) -> Option<&ServiceSet>;
-    fn endpoint(&self, endpoint: &str) -> Option<&Endpoint>;
-    fn operation(&self, operation_id: &str) -> Option<&Operation>;
-    fn topology(&self, root_endpoint: &str) -> Option<&Topology>;
+    fn list_log_sources(&self) -> Result<Vec<LogView>>;
+    fn upsert_log_source(&mut self, log_view: LogView) -> Result<()>;
+    fn delete_log_source(&mut self, source_id: &str) -> Result<()>;
 
-    fn services(&self) -> Vec<ServiceManifest>;
-    fn sets(&self) -> Vec<ServiceSet>;
-    fn endpoints(&self) -> Vec<Endpoint>;
-    fn links(&self) -> Vec<Link>;
-    fn operations(&self) -> Vec<Operation>;
-    fn operation_logs(&self, operation_id: &str) -> Vec<OperationLogRecord>;
-    fn topologies(&self) -> Vec<Topology>;
-    fn log_views(&self) -> Vec<LogView>;
-    fn diagnostic_reports(&self) -> Vec<DiagnosticReport>;
+    fn create_diagnostic_report(&mut self, report: DiagnosticReport) -> Result<()>;
+    fn get_diagnostic_report(&self, report_id: &str) -> Result<Option<DiagnosticReport>>;
+    fn list_diagnostic_reports(&self) -> Result<Vec<DiagnosticReport>>;
+
+    fn put_service(&mut self, service: ServiceManifest) -> Result<()> {
+        self.upsert_service(service)
+    }
+
+    fn put_set(&mut self, set: ServiceSet) -> Result<()> {
+        self.upsert_set(set)
+    }
+
+    fn put_endpoint(&mut self, endpoint: Endpoint) -> Result<()> {
+        self.upsert_endpoint(endpoint)
+    }
+
+    fn put_link(&mut self, link: Link) -> Result<()> {
+        self.upsert_link(link)
+    }
+
+    fn put_operation(&mut self, operation: Operation) -> Result<()> {
+        self.update_operation(operation)
+    }
+
+    fn put_topology(&mut self, topology: Topology) -> Result<()> {
+        self.save_topology_snapshot(TopologySnapshot {
+            snapshot_id: topology.root_endpoint.clone(),
+            topology,
+            created_at: String::new(),
+        })
+    }
+
+    fn put_log_view(&mut self, log_view: LogView) -> Result<()> {
+        self.upsert_log_source(log_view)
+    }
+
+    fn put_diagnostic_report(&mut self, report: DiagnosticReport) -> Result<()> {
+        self.create_diagnostic_report(report)
+    }
+
+    fn services(&self) -> Result<Vec<ServiceManifest>> {
+        self.list_services()
+    }
+
+    fn sets(&self) -> Result<Vec<ServiceSet>> {
+        self.list_sets()
+    }
+
+    fn endpoints(&self) -> Result<Vec<Endpoint>> {
+        self.list_endpoints()
+    }
+
+    fn links(&self) -> Result<Vec<Link>> {
+        self.list_links()
+    }
+
+    fn operations(&self) -> Result<Vec<Operation>> {
+        self.list_operations()
+    }
+
+    fn operation_logs(&self, operation_id: &str) -> Result<Vec<OperationLogRecord>> {
+        self.list_operation_logs(operation_id)
+    }
+
+    fn log_views(&self) -> Result<Vec<LogView>> {
+        self.list_log_sources()
+    }
+
+    fn diagnostic_reports(&self) -> Result<Vec<DiagnosticReport>> {
+        self.list_diagnostic_reports()
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -46,88 +151,95 @@ pub struct MemoryOrchestratorStore {
     links: BTreeMap<(String, String), Link>,
     operations: BTreeMap<String, Operation>,
     operation_logs: Vec<OperationLogRecord>,
-    topologies: BTreeMap<String, Topology>,
+    topology_snapshots: BTreeMap<String, TopologySnapshot>,
     log_views: BTreeMap<String, LogView>,
     diagnostic_reports: BTreeMap<String, DiagnosticReport>,
+    operation_locks: BTreeMap<String, OperationLock>,
 }
 
 impl MemoryOrchestratorStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn service(&self, service_id: &str) -> Option<&ServiceManifest> {
+        self.services.get(service_id)
+    }
+
+    pub fn set(&self, set_id: &str) -> Option<&ServiceSet> {
+        self.sets.get(set_id)
+    }
+
+    pub fn endpoint(&self, endpoint: &str) -> Option<&Endpoint> {
+        self.endpoints.get(endpoint)
+    }
+
+    pub fn operation(&self, operation_id: &str) -> Option<&Operation> {
+        self.operations.get(operation_id)
+    }
+
+    pub fn topology(&self, root_endpoint: &str) -> Option<&Topology> {
+        self.topology_snapshots
+            .values()
+            .find(|snapshot| snapshot.topology.root_endpoint == root_endpoint)
+            .map(|snapshot| &snapshot.topology)
+    }
+
+    pub fn services(&self) -> Vec<ServiceManifest> {
+        self.services.values().cloned().collect()
+    }
+
+    pub fn sets(&self) -> Vec<ServiceSet> {
+        self.sets.values().cloned().collect()
+    }
+
+    pub fn endpoints(&self) -> Vec<Endpoint> {
+        self.endpoints.values().cloned().collect()
+    }
+
+    pub fn links(&self) -> Vec<Link> {
+        self.links.values().cloned().collect()
+    }
+
+    pub fn operations(&self) -> Vec<Operation> {
+        self.operations.values().cloned().collect()
+    }
+
+    pub fn operation_logs(&self, operation_id: &str) -> Vec<OperationLogRecord> {
+        self.operation_logs
+            .iter()
+            .filter(|record| record.operation_id == operation_id)
+            .cloned()
+            .collect()
+    }
+
+    pub fn topologies(&self) -> Vec<Topology> {
+        self.topology_snapshots
+            .values()
+            .map(|snapshot| snapshot.topology.clone())
+            .collect()
+    }
+
+    pub fn log_views(&self) -> Vec<LogView> {
+        self.log_views.values().cloned().collect()
+    }
+
+    pub fn diagnostic_reports(&self) -> Vec<DiagnosticReport> {
+        self.diagnostic_reports.values().cloned().collect()
+    }
 }
 
 impl OrchestratorStore for MemoryOrchestratorStore {
-    fn put_service(&mut self, service: ServiceManifest) -> Result<()> {
+    fn list_services(&self) -> Result<Vec<ServiceManifest>> {
+        Ok(self.services())
+    }
+
+    fn get_service(&self, service_id: &str) -> Result<Option<ServiceManifest>> {
+        Ok(self.services.get(service_id).cloned())
+    }
+
+    fn upsert_service(&mut self, service: ServiceManifest) -> Result<()> {
         self.services.insert(service.id.clone(), service);
-        Ok(())
-    }
-
-    fn put_set(&mut self, set: ServiceSet) -> Result<()> {
-        self.sets.insert(set.id.clone(), set);
-        Ok(())
-    }
-
-    fn put_endpoint(&mut self, endpoint: Endpoint) -> Result<()> {
-        validate_endpoint(&endpoint)?;
-        if !self.services.contains_key(&endpoint.service_id) {
-            return Err(OrchestratorError::Dependency(format!(
-                "endpoint references missing service {}",
-                endpoint.service_id
-            )));
-        }
-        self.endpoints.insert(endpoint.endpoint.clone(), endpoint);
-        Ok(())
-    }
-
-    fn put_link(&mut self, link: Link) -> Result<()> {
-        let endpoints = self.endpoints();
-        validate_link(&link, &endpoints)?;
-        self.links.insert(
-            (link.source_endpoint.clone(), link.target_endpoint.clone()),
-            link,
-        );
-        Ok(())
-    }
-
-    fn put_operation(&mut self, operation: Operation) -> Result<()> {
-        self.operations
-            .insert(operation.operation_id.clone(), operation);
-        Ok(())
-    }
-
-    fn append_operation_log(&mut self, record: OperationLogRecord) -> Result<()> {
-        if !self.operations.contains_key(&record.operation_id) {
-            return Err(OrchestratorError::Dependency(format!(
-                "operation log references missing operation {}",
-                record.operation_id
-            )));
-        }
-        self.operation_logs.push(record);
-        Ok(())
-    }
-
-    fn put_topology(&mut self, topology: Topology) -> Result<()> {
-        validate_topology(&topology)?;
-        self.topologies
-            .insert(topology.root_endpoint.clone(), topology);
-        Ok(())
-    }
-
-    fn put_log_view(&mut self, log_view: LogView) -> Result<()> {
-        if !self.endpoints.contains_key(&log_view.endpoint) {
-            return Err(OrchestratorError::Dependency(format!(
-                "log view references missing endpoint {}",
-                log_view.endpoint
-            )));
-        }
-        self.log_views.insert(log_view.source_id.clone(), log_view);
-        Ok(())
-    }
-
-    fn put_diagnostic_report(&mut self, report: DiagnosticReport) -> Result<()> {
-        self.diagnostic_reports
-            .insert(report.report_id.clone(), report);
         Ok(())
     }
 
@@ -145,6 +257,44 @@ impl OrchestratorStore for MemoryOrchestratorStore {
         Ok(())
     }
 
+    fn list_sets(&self) -> Result<Vec<ServiceSet>> {
+        Ok(self.sets())
+    }
+
+    fn get_set(&self, set_id: &str) -> Result<Option<ServiceSet>> {
+        Ok(self.sets.get(set_id).cloned())
+    }
+
+    fn upsert_set(&mut self, set: ServiceSet) -> Result<()> {
+        self.sets.insert(set.id.clone(), set);
+        Ok(())
+    }
+
+    fn delete_set(&mut self, set_id: &str) -> Result<()> {
+        self.sets.remove(set_id);
+        Ok(())
+    }
+
+    fn list_endpoints(&self) -> Result<Vec<Endpoint>> {
+        Ok(self.endpoints())
+    }
+
+    fn get_endpoint(&self, endpoint: &str) -> Result<Option<Endpoint>> {
+        Ok(self.endpoints.get(endpoint).cloned())
+    }
+
+    fn upsert_endpoint(&mut self, endpoint: Endpoint) -> Result<()> {
+        validate_endpoint(&endpoint)?;
+        if !self.services.contains_key(&endpoint.service_id) {
+            return Err(OrchestratorError::Dependency(format!(
+                "endpoint references missing service {}",
+                endpoint.service_id
+            )));
+        }
+        self.endpoints.insert(endpoint.endpoint.clone(), endpoint);
+        Ok(())
+    }
+
     fn delete_endpoint(&mut self, endpoint: &str) -> Result<()> {
         self.endpoints.remove(endpoint);
         self.links
@@ -154,75 +304,225 @@ impl OrchestratorStore for MemoryOrchestratorStore {
         Ok(())
     }
 
+    fn update_endpoint_health(
+        &mut self,
+        endpoint: &str,
+        health: String,
+        reachable: bool,
+    ) -> Result<()> {
+        let item = self.endpoints.get_mut(endpoint).ok_or_else(|| {
+            OrchestratorError::Dependency(format!("endpoint {endpoint} not found"))
+        })?;
+        item.health = health;
+        item.reachable = reachable;
+        Ok(())
+    }
+
+    fn list_links(&self) -> Result<Vec<Link>> {
+        Ok(self.links())
+    }
+
+    fn get_link(&self, source_endpoint: &str, target_endpoint: &str) -> Result<Option<Link>> {
+        Ok(self
+            .links
+            .get(&(source_endpoint.to_string(), target_endpoint.to_string()))
+            .cloned())
+    }
+
+    fn upsert_link(&mut self, link: Link) -> Result<()> {
+        let endpoints = self.endpoints();
+        validate_link(&link, &endpoints)?;
+        self.links.insert(
+            (link.source_endpoint.clone(), link.target_endpoint.clone()),
+            link,
+        );
+        Ok(())
+    }
+
     fn delete_link(&mut self, source_endpoint: &str, target_endpoint: &str) -> Result<()> {
         self.links
             .remove(&(source_endpoint.to_string(), target_endpoint.to_string()));
         Ok(())
     }
 
-    fn delete_topology(&mut self, root_endpoint: &str) -> Result<()> {
-        self.topologies.remove(root_endpoint);
+    fn update_link_health(
+        &mut self,
+        source_endpoint: &str,
+        target_endpoint: &str,
+        health: String,
+        latency_ms: Option<u32>,
+    ) -> Result<()> {
+        let item = self
+            .links
+            .get_mut(&(source_endpoint.to_string(), target_endpoint.to_string()))
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(format!(
+                    "link {source_endpoint} -> {target_endpoint} not found"
+                ))
+            })?;
+        item.health = health;
+        item.latency_ms = latency_ms;
         Ok(())
     }
 
-    fn service(&self, service_id: &str) -> Option<&ServiceManifest> {
-        self.services.get(service_id)
+    fn create_operation(&mut self, operation: Operation) -> Result<()> {
+        self.operations
+            .insert(operation.operation_id.clone(), operation);
+        Ok(())
     }
 
-    fn set(&self, set_id: &str) -> Option<&ServiceSet> {
-        self.sets.get(set_id)
+    fn get_operation(&self, operation_id: &str) -> Result<Option<Operation>> {
+        Ok(self.operations.get(operation_id).cloned())
     }
 
-    fn endpoint(&self, endpoint: &str) -> Option<&Endpoint> {
-        self.endpoints.get(endpoint)
+    fn list_operations(&self) -> Result<Vec<Operation>> {
+        Ok(self.operations())
     }
 
-    fn operation(&self, operation_id: &str) -> Option<&Operation> {
-        self.operations.get(operation_id)
+    fn update_operation(&mut self, operation: Operation) -> Result<()> {
+        self.operations
+            .insert(operation.operation_id.clone(), operation);
+        Ok(())
     }
 
-    fn topology(&self, root_endpoint: &str) -> Option<&Topology> {
-        self.topologies.get(root_endpoint)
+    fn update_operation_status(
+        &mut self,
+        operation_id: &str,
+        status: OperationStatus,
+        error_message: String,
+    ) -> Result<()> {
+        let operation = self.operations.get_mut(operation_id).ok_or_else(|| {
+            OrchestratorError::Dependency(format!("operation {operation_id} not found"))
+        })?;
+        operation.status = status;
+        operation.error_message = error_message;
+        Ok(())
     }
 
-    fn services(&self) -> Vec<ServiceManifest> {
-        self.services.values().cloned().collect()
+    fn update_operation_result(
+        &mut self,
+        operation_id: &str,
+        result: serde_json::Value,
+    ) -> Result<()> {
+        let operation = self.operations.get_mut(operation_id).ok_or_else(|| {
+            OrchestratorError::Dependency(format!("operation {operation_id} not found"))
+        })?;
+        operation.result = result;
+        Ok(())
     }
 
-    fn sets(&self) -> Vec<ServiceSet> {
-        self.sets.values().cloned().collect()
+    fn append_operation_log(&mut self, record: OperationLogRecord) -> Result<()> {
+        if !self.operations.contains_key(&record.operation_id) {
+            return Err(OrchestratorError::Dependency(format!(
+                "operation log references missing operation {}",
+                record.operation_id
+            )));
+        }
+        self.operation_logs.push(record);
+        Ok(())
     }
 
-    fn endpoints(&self) -> Vec<Endpoint> {
-        self.endpoints.values().cloned().collect()
+    fn list_operation_logs(&self, operation_id: &str) -> Result<Vec<OperationLogRecord>> {
+        Ok(self.operation_logs(operation_id))
     }
 
-    fn links(&self) -> Vec<Link> {
-        self.links.values().cloned().collect()
+    fn acquire_operation_lock(&mut self, lock: OperationLock) -> Result<bool> {
+        if !self.operations.contains_key(&lock.operation_id) {
+            return Err(OrchestratorError::Dependency(format!(
+                "lock references missing operation {}",
+                lock.operation_id
+            )));
+        }
+        if self.operation_locks.contains_key(&lock.lock_key) {
+            return Ok(false);
+        }
+        self.operation_locks.insert(lock.lock_key.clone(), lock);
+        Ok(true)
     }
 
-    fn operations(&self) -> Vec<Operation> {
-        self.operations.values().cloned().collect()
+    fn release_operation_lock(&mut self, lock_key: &str, operation_id: &str) -> Result<()> {
+        if self
+            .operation_locks
+            .get(lock_key)
+            .is_some_and(|lock| lock.operation_id == operation_id)
+        {
+            self.operation_locks.remove(lock_key);
+        }
+        Ok(())
     }
 
-    fn operation_logs(&self, operation_id: &str) -> Vec<OperationLogRecord> {
-        self.operation_logs
+    fn save_topology_snapshot(&mut self, snapshot: TopologySnapshot) -> Result<()> {
+        validate_topology(&snapshot.topology)?;
+        self.topology_snapshots
+            .insert(snapshot.snapshot_id.clone(), snapshot);
+        Ok(())
+    }
+
+    fn get_latest_topology_snapshot(&self) -> Result<Option<TopologySnapshot>> {
+        Ok(self.topology_snapshots.values().last().cloned())
+    }
+
+    fn build_topology_view(&self) -> Result<Topology> {
+        if let Some(snapshot) = self.get_latest_topology_snapshot()? {
+            return Ok(snapshot.topology);
+        }
+        let endpoints = self.endpoints();
+        let root_endpoint = endpoints
             .iter()
-            .filter(|record| record.operation_id == operation_id)
-            .cloned()
-            .collect()
+            .find(|endpoint| endpoint.service_id == "gateway")
+            .or_else(|| endpoints.first())
+            .map(|endpoint| endpoint.endpoint.clone())
+            .ok_or_else(|| OrchestratorError::Dependency("no endpoint for topology".to_string()))?;
+        build_topology(
+            root_endpoint,
+            self.services.keys().cloned().collect(),
+            self.sets.keys().cloned().collect(),
+            endpoints,
+            self.links(),
+            self.operations(),
+            self.log_views(),
+            self.diagnostic_reports(),
+        )
     }
 
-    fn topologies(&self) -> Vec<Topology> {
-        self.topologies.values().cloned().collect()
+    fn delete_topology(&mut self, root_endpoint: &str) -> Result<()> {
+        self.topology_snapshots
+            .retain(|_, snapshot| snapshot.topology.root_endpoint != root_endpoint);
+        Ok(())
     }
 
-    fn log_views(&self) -> Vec<LogView> {
-        self.log_views.values().cloned().collect()
+    fn list_log_sources(&self) -> Result<Vec<LogView>> {
+        Ok(self.log_views())
     }
 
-    fn diagnostic_reports(&self) -> Vec<DiagnosticReport> {
-        self.diagnostic_reports.values().cloned().collect()
+    fn upsert_log_source(&mut self, log_view: LogView) -> Result<()> {
+        if !self.endpoints.contains_key(&log_view.endpoint) {
+            return Err(OrchestratorError::Dependency(format!(
+                "log view references missing endpoint {}",
+                log_view.endpoint
+            )));
+        }
+        self.log_views.insert(log_view.source_id.clone(), log_view);
+        Ok(())
+    }
+
+    fn delete_log_source(&mut self, source_id: &str) -> Result<()> {
+        self.log_views.remove(source_id);
+        Ok(())
+    }
+
+    fn create_diagnostic_report(&mut self, report: DiagnosticReport) -> Result<()> {
+        self.diagnostic_reports
+            .insert(report.report_id.clone(), report);
+        Ok(())
+    }
+
+    fn get_diagnostic_report(&self, report_id: &str) -> Result<Option<DiagnosticReport>> {
+        Ok(self.diagnostic_reports.get(report_id).cloned())
+    }
+
+    fn list_diagnostic_reports(&self) -> Result<Vec<DiagnosticReport>> {
+        Ok(self.diagnostic_reports())
     }
 }
 
@@ -238,8 +538,7 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
     pub fn apply(&mut self, operation_id: &str) -> Result<Operation> {
         let operation = self
             .store
-            .operation(operation_id)
-            .cloned()
+            .get_operation(operation_id)?
             .ok_or_else(|| OrchestratorError::Dependency("operation not found".to_string()))?;
         let requires_confirmation = operation
             .plan
@@ -271,40 +570,78 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
             ));
         }
 
-        let mut running = operation.clone();
-        running.status = OperationStatus::Running;
-        self.store.put_operation(running.clone())?;
+        let lock_key = format!("operation:{operation_id}");
+        let acquired = self.store.acquire_operation_lock(OperationLock {
+            lock_key: lock_key.clone(),
+            operation_id: operation_id.to_string(),
+            owner: "orchestrator-core".to_string(),
+            expires_at: "session".to_string(),
+            created_at: String::new(),
+        })?;
+        if !acquired {
+            return Err(OrchestratorError::Blocked(format!(
+                "operation {operation_id} is locked"
+            )));
+        }
+
+        let running = start_operation(&operation)?;
+        self.store.update_operation(running.clone())?;
         self.store.append_operation_log(operation_log_record(
             &running.operation_id,
             "info",
             format!("operation {} started", running.action),
         ))?;
-        let changed_objects = self.apply_operation_mutation(&running)?;
+        for (index, step) in operation_steps(&running).iter().enumerate() {
+            self.store.append_operation_log(operation_step_log_record(
+                &running.operation_id,
+                step_id(step, index),
+                "info",
+                format!("step {} planned", step_label(step)),
+                step.clone(),
+            ))?;
+        }
 
-        let mut succeeded = running;
-        succeeded.status = OperationStatus::Succeeded;
-        succeeded.result = serde_json::json!({
-            "operation_id": succeeded.operation_id,
-            "status": "SUCCEEDED",
-            "started_at": "",
-            "finished_at": "",
-            "changed_objects": changed_objects,
-            "topology_snapshot_id": serde_json::Value::Null,
-        });
-        self.store.put_operation(succeeded.clone())?;
-        self.store.append_operation_log(operation_log_record(
-            &succeeded.operation_id,
-            "info",
-            format!("operation {} succeeded", succeeded.action),
-        ))?;
-        Ok(succeeded)
+        let result = match self.apply_operation_mutation(&running) {
+            Ok(changed_objects) => {
+                let result = serde_json::json!({
+                    "operation_id": running.operation_id,
+                    "status": "SUCCEEDED",
+                    "started_at": running.started_at,
+                    "finished_at": "finished",
+                    "changed_objects": changed_objects,
+                    "topology_snapshot_id": serde_json::Value::Null,
+                });
+                let succeeded = succeed_operation(&running, result)?;
+                self.store.update_operation(succeeded.clone())?;
+                self.store.append_operation_log(operation_log_record(
+                    &succeeded.operation_id,
+                    "info",
+                    format!("operation {} succeeded", succeeded.action),
+                ))?;
+                Ok(succeeded)
+            }
+            Err(err) => {
+                let failed = crate::fail_operation(&running, err.to_string())?;
+                self.store.update_operation(failed.clone())?;
+                self.store.append_operation_log(operation_log_record(
+                    &failed.operation_id,
+                    "error",
+                    format!(
+                        "operation {} failed: {}",
+                        failed.action, failed.error_message
+                    ),
+                ))?;
+                Err(err)
+            }
+        };
+        self.store.release_operation_lock(&lock_key, operation_id)?;
+        result
     }
 
     pub fn rollback(&mut self, operation_id: &str) -> Result<Operation> {
         let operation = self
             .store
-            .operation(operation_id)
-            .cloned()
+            .get_operation(operation_id)?
             .ok_or_else(|| OrchestratorError::Dependency("operation not found".to_string()))?;
         if !matches!(
             operation.status,
@@ -320,19 +657,19 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
                 "operation rollback plan is not available".to_string(),
             ));
         }
+        let _logs = self.store.list_operation_logs(operation_id)?;
         let changed_objects = self.rollback_operation_mutation(&operation)?;
 
-        let mut rolled_back = operation;
-        rolled_back.status = OperationStatus::RolledBack;
-        rolled_back.result = serde_json::json!({
-            "operation_id": rolled_back.operation_id,
+        let result = serde_json::json!({
+            "operation_id": operation.operation_id,
             "status": "ROLLED_BACK",
-            "started_at": "",
-            "finished_at": "",
+            "started_at": operation.started_at,
+            "finished_at": "rolled_back",
             "changed_objects": changed_objects,
             "topology_snapshot_id": serde_json::Value::Null,
         });
-        self.store.put_operation(rolled_back.clone())?;
+        let rolled_back = crate::rollback_operation(&operation, result)?;
+        self.store.update_operation(rolled_back.clone())?;
         self.store.append_operation_log(operation_log_record(
             &rolled_back.operation_id,
             "info",
@@ -375,10 +712,12 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
                     .and_then(serde_json::Value::as_str)
                     .filter(|value| !value.is_empty())
                 {
-                    if let Some(mut endpoint) = self.store.endpoint(endpoint_id).cloned() {
-                        endpoint.health = "ok".to_string();
-                        endpoint.reachable = true;
-                        self.store.put_endpoint(endpoint)?;
+                    if self.store.get_endpoint(endpoint_id)?.is_some() {
+                        self.store.update_endpoint_health(
+                            endpoint_id,
+                            "healthy".to_string(),
+                            true,
+                        )?;
                         changed.push(changed_object("Endpoint", endpoint_id));
                     }
                 }
@@ -403,12 +742,11 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
             }
             "endpoint.health.check" => {
                 let endpoint_id = operation.target_id.as_str();
-                let mut endpoint = self.store.endpoint(endpoint_id).cloned().ok_or_else(|| {
+                self.store.get_endpoint(endpoint_id)?.ok_or_else(|| {
                     OrchestratorError::Dependency(format!("endpoint {endpoint_id} not found"))
                 })?;
-                endpoint.health = "ok".to_string();
-                endpoint.reachable = true;
-                self.store.put_endpoint(endpoint)?;
+                self.store
+                    .update_endpoint_health(endpoint_id, "healthy".to_string(), true)?;
                 changed.push(changed_object("Endpoint", endpoint_id));
             }
             "link.create" | "link.update" => {
@@ -426,15 +764,17 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
             "link.health.check" => {
                 let link = link_from_operation(operation);
                 let target = link_target_id(&link);
-                let mut links = self.store.links();
-                let current = links.iter_mut().find(|item| {
-                    item.source_endpoint == link.source_endpoint
-                        && item.target_endpoint == link.target_endpoint
-                });
-                if let Some(current) = current {
-                    current.health = "ok".to_string();
-                    current.latency_ms = Some(0);
-                    self.store.put_link(current.clone())?;
+                if self
+                    .store
+                    .get_link(&link.source_endpoint, &link.target_endpoint)?
+                    .is_some()
+                {
+                    self.store.update_link_health(
+                        &link.source_endpoint,
+                        &link.target_endpoint,
+                        "healthy".to_string(),
+                        Some(0),
+                    )?;
                     changed.push(changed_object("Link", &target));
                 } else {
                     return Err(OrchestratorError::Dependency(format!(
@@ -462,6 +802,8 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
                     target_id: operation.target_id.clone(),
                     status: "ok".to_string(),
                     summary: format!("{} 诊断完成", operation.target_id),
+                    operation_id: operation.operation_id.clone(),
+                    data: serde_json::json!({}),
                     findings: Vec::new(),
                     created_at: String::new(),
                 };
@@ -597,7 +939,7 @@ fn endpoint_from_operation<S: OrchestratorStore>(
         .get("endpoint")
         .and_then(serde_json::Value::as_str)
         .unwrap_or(operation.target_id.as_str());
-    let current = store.endpoint(endpoint_id).cloned();
+    let current = store.get_endpoint(endpoint_id)?;
     Ok(Endpoint {
         endpoint: endpoint_id.to_string(),
         service_id: operation
@@ -731,19 +1073,47 @@ fn log_view_from_operation(operation: &Operation) -> Option<LogView> {
         source_id: format!("{service_id}:{endpoint}"),
         service_id: service_id.to_string(),
         endpoint: endpoint.to_string(),
-        location: "/logs".to_string(),
+        operation_id: operation.operation_id.clone(),
+        path: "/logs".to_string(),
+        driver: "external-endpoint".to_string(),
+        read_policy: "service-scoped".to_string(),
         display_name: format!("{service_id} logs"),
     })
 }
 
 fn ensure_service_exists<S: OrchestratorStore>(store: &S, service_id: &str) -> Result<()> {
-    if store.service(service_id).is_some() {
+    if store.get_service(service_id)?.is_some() {
         Ok(())
     } else {
         Err(OrchestratorError::Dependency(format!(
             "service {service_id} not found"
         )))
     }
+}
+
+fn operation_steps(operation: &Operation) -> Vec<serde_json::Value> {
+    operation
+        .plan
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn step_id(step: &serde_json::Value, index: usize) -> String {
+    step.get("id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| step.get("action").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("step-{}", index + 1))
+}
+
+fn step_label(step: &serde_json::Value) -> String {
+    step.get("action")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| step.as_str())
+        .unwrap_or("operation-step")
+        .to_string()
 }
 
 fn changed_object(object_type: &str, id: &str) -> serde_json::Value {

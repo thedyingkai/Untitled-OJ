@@ -625,7 +625,7 @@ fn draw_logs(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             Cell::from(log.source_id.clone()),
             Cell::from(log.service_id.clone()),
             Cell::from(log.endpoint.clone()),
-            Cell::from(log.location.clone()),
+            Cell::from(log.path.clone()),
         ])
     });
     frame.render_widget(

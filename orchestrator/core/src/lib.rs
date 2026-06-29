@@ -1,5 +1,7 @@
 mod action;
 mod database;
+mod executor;
+mod health;
 mod model;
 mod planner;
 mod schema;
@@ -14,13 +16,22 @@ pub use action::{
 };
 pub use database::{
     DatabaseAccessReport, DatabaseSchemaReport, DatabaseStatement, DatabaseWrite,
-    DatabaseWritePlan, ORCHESTRATOR_DATABASE_STATEMENTS, ORCHESTRATOR_TABLES,
+    DatabaseWritePlan, ORCHESTRATOR_DATABASE_STATEMENTS, ORCHESTRATOR_TABLES, PgOrchestratorStore,
     inspect_database_access, inspect_orchestrator_schema, plan_database_writes,
 };
+pub use executor::{
+    DockerComposeDriver, DriverRequest, DriverResult, ExecutionDriver, ExternalEndpointDriver,
+    LocalProcessDriver, driver_request_for_endpoint,
+};
+pub use health::{
+    EndpointHealthResult, EndpointProbe, LinkHealthResult, StaticEndpointProbe, TcpEndpointProbe,
+    check_endpoint_health_with_probe, check_link_health,
+};
 pub use model::{
-    DiagnosticFinding, DiagnosticReport, Endpoint, Link, LogView, Operation, OperationLogRecord,
-    OperationStatus, Topology, TopologyAuthority, build_topology, cancel_operation,
-    confirm_operation, expire_operation, fail_operation, operation_log_record, plan_operation,
+    DiagnosticFinding, DiagnosticReport, Endpoint, Link, LogView, Operation, OperationLock,
+    OperationLogRecord, OperationStatus, Topology, TopologyAuthority, TopologySnapshot,
+    build_topology, cancel_operation, confirm_operation, diagnostic_report_json, expire_operation,
+    fail_operation, operation_log_record, operation_step_log_record, plan_operation,
     redact_secret_text, rollback_operation, start_operation, succeed_operation, topology_authority,
     validate_endpoint, validate_link, validate_topology,
 };
@@ -49,6 +60,7 @@ pub use view::{
     DiagnosticViewRow, EndpointViewRow, LinkViewRow, LogViewRow, OperationViewRow,
     OperationWorkbenchView, OrchestratorView, OrchestratorViewPage, ServiceViewRow, SetViewRow,
     endpoint_hosts, ensure_view_is_loaded, load_orchestrator_view,
+    load_orchestrator_view_from_store,
 };
 pub use workbench::{
     OperationWorkbench, OperationWorkbenchContext, OperationWorkbenchRun,

@@ -62,7 +62,13 @@ fn service_install_operation_requires_confirmation_before_apply() {
         .expect("confirmed operation should apply");
 
     assert_eq!(applied.status, OperationStatus::Succeeded);
-    assert_eq!(store.operation_logs("op-install-gateway").len(), 2);
+    assert!(
+        store
+            .operation_logs("op-install-gateway")
+            .iter()
+            .any(|record| !record.step_id.is_empty()),
+        "confirmed apply should persist step logs"
+    );
 }
 
 #[test]

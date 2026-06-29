@@ -948,7 +948,10 @@ fn operation_workbench_runs_confirm_apply_and_rollback_flow() {
     assert_eq!(run.applied_status, OperationStatus::Succeeded);
     assert_eq!(run.rolled_back_status, Some(OperationStatus::RolledBack));
     assert_eq!(run.result_status, "SUCCEEDED");
-    assert_eq!(run.logs.len(), 3);
+    assert!(
+        run.logs.iter().any(|record| !record.step_id.is_empty()),
+        "workbench apply should preserve persisted step logs"
+    );
 }
 
 #[test]
@@ -1053,14 +1056,17 @@ fn operation_workbench_updates_fields_and_runs_step_by_step() {
     let applied = apply_operation_workbench_session(&confirmed).expect("apply");
     assert_eq!(applied.current_operation.status, OperationStatus::Succeeded);
     assert_eq!(applied.result_status, "SUCCEEDED");
-    assert_eq!(applied.logs.len(), 2);
+    assert!(
+        applied.logs.iter().any(|record| !record.step_id.is_empty()),
+        "apply should write step logs"
+    );
     let rolled_back = rollback_operation_workbench_session(&applied).expect("rollback");
     assert_eq!(
         rolled_back.current_operation.status,
         OperationStatus::RolledBack
     );
     assert_eq!(rolled_back.result_status, "ROLLED_BACK");
-    assert_eq!(rolled_back.logs.len(), 3);
+    assert!(rolled_back.logs.len() > applied.logs.len());
 }
 
 #[test]
@@ -1665,12 +1671,19 @@ fn topology_uses_endpoint_identity_without_machine_or_installation() {
             rollback_plan: serde_json::json!({}),
             created_at: String::new(),
             updated_at: String::new(),
+            confirmed_at: String::new(),
+            started_at: String::new(),
+            finished_at: String::new(),
+            rolled_back_at: String::new(),
         }],
         log_views: vec![LogView {
             source_id: "gateway:health".to_string(),
             service_id: "gateway".to_string(),
             endpoint: "192.168.1.10:8080".to_string(),
-            location: "/health".to_string(),
+            operation_id: String::new(),
+            path: "/health".to_string(),
+            driver: "external-endpoint".to_string(),
+            read_policy: "service-scoped".to_string(),
             display_name: "Gateway health".to_string(),
         }],
         diagnostic_reports: vec![DiagnosticReport {
@@ -1679,6 +1692,8 @@ fn topology_uses_endpoint_identity_without_machine_or_installation() {
             target_id: "current".to_string(),
             status: "ok".to_string(),
             summary: "拓扑合法".to_string(),
+            operation_id: String::new(),
+            data: serde_json::json!({}),
             findings: vec![DiagnosticFinding {
                 code: "topology.valid".to_string(),
                 severity: "info".to_string(),
@@ -1991,7 +2006,13 @@ fn operation_executor_applies_and_rolls_back_through_store() {
             .map(Vec::len),
         Some(1)
     );
-    assert_eq!(store.operation_logs("op-apply-1").len(), 2);
+    assert!(
+        store
+            .operation_logs("op-apply-1")
+            .iter()
+            .any(|record| !record.step_id.is_empty()),
+        "apply should write step logs"
+    );
 
     let rolled_back = OperationExecutor::new(&mut store)
         .rollback("op-apply-1")
@@ -2008,7 +2029,12 @@ fn operation_executor_applies_and_rolls_back_through_store() {
             .and_then(serde_json::Value::as_str),
         Some("ROLLED_BACK")
     );
-    assert_eq!(store.operation_logs("op-apply-1").len(), 3);
+    assert!(
+        store
+            .operation_logs("op-apply-1")
+            .iter()
+            .any(|record| record.message.contains("rolled back"))
+    );
 }
 
 #[test]
@@ -2126,7 +2152,10 @@ fn operation_executor_mutates_core_store_objects() {
             source_id: "gateway:health".to_string(),
             service_id: "gateway".to_string(),
             endpoint: "127.0.0.1:8080".to_string(),
-            location: "/health".to_string(),
+            operation_id: String::new(),
+            path: "/health".to_string(),
+            driver: "external-endpoint".to_string(),
+            read_policy: "service-scoped".to_string(),
             display_name: "Gateway health".to_string(),
         }],
         vec![DiagnosticReport {
@@ -2135,6 +2164,8 @@ fn operation_executor_mutates_core_store_objects() {
             target_id: "127.0.0.1:8080".to_string(),
             status: "ok".to_string(),
             summary: "拓扑可用".to_string(),
+            operation_id: String::new(),
+            data: serde_json::json!({}),
             findings: Vec::new(),
             created_at: String::new(),
         }],
@@ -2171,11 +2202,10 @@ fn orchestrator_database_migration_contains_only_formal_tables() {
         "orchestrator_operations must persist rollback_plan"
     );
     assert!(
-        sql.contains("root_host TEXT NOT NULL")
-            && sql.contains("root_endpoint TEXT NOT NULL DEFAULT ''")
-            && sql.contains("authority JSONB NOT NULL DEFAULT '{}'::jsonb")
-            && sql.contains("exposure_policy TEXT NOT NULL DEFAULT ''"),
-        "topology_snapshots must persist root host authority metadata"
+        sql.contains("snapshot_id TEXT PRIMARY KEY")
+            && sql.contains("topology JSONB NOT NULL")
+            && sql.contains("created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"),
+        "topology_snapshots must persist snapshot_id, topology, and created_at"
     );
     assert!(
         report.non_formal_tables.is_empty(),
@@ -2391,7 +2421,10 @@ fn database_write_plan_maps_store_objects_to_formal_tables() {
             source_id: "gateway:health".to_string(),
             service_id: "gateway".to_string(),
             endpoint: "127.0.0.1:8080".to_string(),
-            location: "/health".to_string(),
+            operation_id: String::new(),
+            path: "/health".to_string(),
+            driver: "external-endpoint".to_string(),
+            read_policy: "service-scoped".to_string(),
             display_name: "Gateway health".to_string(),
         }],
         vec![DiagnosticReport {
@@ -2400,6 +2433,8 @@ fn database_write_plan_maps_store_objects_to_formal_tables() {
             target_id: "gateway".to_string(),
             status: "ok".to_string(),
             summary: "Service 可观测".to_string(),
+            operation_id: String::new(),
+            data: serde_json::json!({}),
             findings: Vec::new(),
             created_at: String::new(),
         }],
@@ -2455,4 +2490,224 @@ fn database_write_plan_maps_store_objects_to_formal_tables() {
 
 fn yaml_text(value: &serde_yaml::Value) -> String {
     serde_yaml::to_string(value).expect("yaml value should render")
+}
+
+#[test]
+fn pg_orchestrator_store_uses_only_orchestrator_database_url() {
+    let store =
+        PgOrchestratorStore::new("postgres://postgres:local@localhost:5432/ojos_orchestrator")
+            .expect("pg store should accept orchestrator database url");
+    assert_eq!(PgOrchestratorStore::ENV_NAME, "ORCHESTRATOR_DATABASE_URL");
+    assert!(
+        !store.database_url().contains("OJ_DATABASE_URL"),
+        "PgOrchestratorStore must not point at the OJ business database"
+    );
+    assert!(
+        store
+            .statements()
+            .iter()
+            .all(|statement| !statement.sql.contains("module_"))
+    );
+}
+
+#[test]
+fn pg_orchestrator_lock_statement_accepts_session_style_locks() {
+    let store =
+        PgOrchestratorStore::new("postgres://postgres:local@localhost:5432/ojos_orchestrator")
+            .expect("pg store should accept orchestrator database url");
+    let lock_statement = store
+        .statements()
+        .iter()
+        .find(|statement| statement.name == "orchestrator_operation_locks.acquire")
+        .expect("lock acquire statement should exist");
+
+    assert!(
+        lock_statement
+            .sql
+            .contains("COALESCE(NULLIF($4, '')::TIMESTAMPTZ"),
+        "empty or non-persistent lock expiration should fall back to a DB-side expiry"
+    );
+    assert!(
+        lock_statement.sql.contains("INTERVAL '5 minutes'"),
+        "session-style operation locks should not be cast directly as timestamps"
+    );
+}
+
+#[test]
+fn memory_store_lock_and_step_logs_are_persisted_by_executor() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut service = valid_service();
+    service.id = "judge-worker".to_string();
+    store.put_service(service).expect("put service");
+    let operation =
+        service_lifecycle_operation("op-lock-log", "service.restart", "judge-worker").unwrap();
+    let operation = confirm_operation(&operation).expect("confirm");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::new(&mut store)
+        .apply("op-lock-log")
+        .expect("apply operation");
+    let logs = store.operation_logs("op-lock-log");
+    assert!(
+        logs.iter().any(|record| !record.step_id.is_empty()),
+        "apply should persist step logs"
+    );
+    assert_eq!(
+        store.operation("op-lock-log").map(|item| &item.status),
+        Some(&OperationStatus::Succeeded)
+    );
+}
+
+#[test]
+fn fixed_executor_drivers_reject_arbitrary_actions() {
+    let endpoint = Endpoint {
+        endpoint: "127.0.0.1:8080".to_string(),
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "unknown".to_string(),
+        reachable: false,
+        display_name: "Gateway".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let request = driver_request_for_endpoint("service.start", &endpoint);
+    assert!(
+        LocalProcessDriver::new().execute(&request).is_err(),
+        "local process driver should not start processes without a supervisor binding"
+    );
+
+    let compose = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml");
+    let command = compose
+        .command_for("service.restart", "gateway")
+        .expect("fixed docker compose command");
+    assert_eq!(command[0], "docker");
+    assert!(command.contains(&"restart".to_string()));
+    assert!(compose.command_for("service.shell", "gateway").is_err());
+
+    let external = ExternalEndpointDriver::default();
+    let health = driver_request_for_endpoint("endpoint.health.check", &endpoint);
+    assert_eq!(
+        external.execute(&health).expect("external health").status,
+        "SUPPORTED"
+    );
+    assert!(external.execute(&request).is_err());
+}
+
+#[test]
+fn endpoint_and_link_health_checks_return_formal_statuses() {
+    let source = Endpoint {
+        endpoint: "127.0.0.1:8080".to_string(),
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "ok".to_string(),
+        reachable: true,
+        display_name: "Gateway".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let target = Endpoint {
+        endpoint: "127.0.0.1:8083".to_string(),
+        service_id: "problem-api".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "healthy".to_string(),
+        reachable: true,
+        display_name: "Problem API".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let result = check_endpoint_health_with_probe(&target, &StaticEndpointProbe)
+        .expect("static health check");
+    assert_eq!(result.health, "healthy");
+    assert!(result.reachable);
+
+    let link = Link {
+        source_endpoint: source.endpoint.clone(),
+        target_endpoint: target.endpoint.clone(),
+        protocol: "http".to_string(),
+        auth_mode: "internal".to_string(),
+        scope: "api".to_string(),
+        health: "unknown".to_string(),
+        latency_ms: None,
+        config_ref: String::new(),
+        secret_ref: String::new(),
+        policy: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let link_result =
+        check_link_health(&link, &[source, target], &result).expect("link health check");
+    assert_eq!(link_result.health, "healthy");
+}
+
+#[test]
+fn orchestrator_view_can_load_from_store_state() {
+    let root = repo_root();
+    let schemas = load_shared_schemas(&root).expect("schemas");
+    let mut store = MemoryOrchestratorStore::new();
+    let gateway =
+        validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
+    store.put_service(gateway).expect("service");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:8080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("endpoint");
+    let operation =
+        service_health_check_operation("op-store-view", "gateway", Some("127.0.0.1:8080"))
+            .expect("operation");
+    store.put_operation(operation).expect("operation");
+    let view = load_orchestrator_view_from_store(schemas, &store).expect("store view");
+    assert_eq!(view.services.len(), 1);
+    assert_eq!(view.endpoints[0].endpoint, "127.0.0.1:8080");
+    assert_eq!(view.operations[0].action, "service.health.check");
+}
+
+#[test]
+fn diagnostic_report_json_exports_observable_summary() {
+    let topology = build_topology(
+        "127.0.0.1:8080".to_string(),
+        vec!["gateway".to_string()],
+        vec!["single-node-oj".to_string()],
+        vec![Endpoint {
+            endpoint: "127.0.0.1:8080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("topology");
+    let report = diagnostic_report_json(&topology).expect("diagnostic report json");
+    assert!(report.contains("services_summary"));
+    assert!(report.contains("database_schema_check"));
+    assert!(report.contains("forbidden_concept_scan_summary"));
 }

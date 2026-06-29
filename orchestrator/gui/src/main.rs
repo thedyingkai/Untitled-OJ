@@ -430,7 +430,7 @@ fn draw_logs(ui: &mut egui::Ui, view: &OrchestratorView) {
             ui.label(&log.source_id);
             ui.label(&log.service_id);
             ui.monospace(&log.endpoint);
-            ui.label(&log.location);
+            ui.label(&log.path);
             ui.end_row();
         }
     });

@@ -85,15 +85,39 @@ pub struct Operation {
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
+    #[serde(default)]
+    pub confirmed_at: String,
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub finished_at: String,
+    #[serde(default)]
+    pub rolled_back_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationLogRecord {
     pub operation_id: String,
+    #[serde(default)]
+    pub step_id: String,
     pub level: String,
     pub message: String,
     #[serde(default)]
+    pub data: Value,
+    #[serde(default)]
     pub redacted: bool,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperationLock {
+    pub lock_key: String,
+    pub operation_id: String,
+    pub owner: String,
+    pub expires_at: String,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,7 +125,11 @@ pub struct LogView {
     pub source_id: String,
     pub service_id: String,
     pub endpoint: String,
-    pub location: String,
+    #[serde(default)]
+    pub operation_id: String,
+    pub path: String,
+    pub driver: String,
+    pub read_policy: String,
     #[serde(default)]
     pub display_name: String,
 }
@@ -113,6 +141,10 @@ pub struct DiagnosticReport {
     pub target_id: String,
     pub status: String,
     pub summary: String,
+    #[serde(default)]
+    pub operation_id: String,
+    #[serde(default)]
+    pub data: Value,
     #[serde(default)]
     pub findings: Vec<DiagnosticFinding>,
     #[serde(default)]
@@ -156,6 +188,14 @@ pub struct Topology {
     pub log_views: Vec<LogView>,
     #[serde(default)]
     pub diagnostic_reports: Vec<DiagnosticReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TopologySnapshot {
+    pub snapshot_id: String,
+    pub topology: Topology,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 pub fn validate_endpoint(endpoint: &Endpoint) -> Result<()> {
@@ -286,6 +326,69 @@ pub fn build_topology(
     Ok(topology)
 }
 
+pub fn diagnostic_report_json(topology: &Topology) -> Result<String> {
+    let failed_operations = topology
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation.status, OperationStatus::Failed))
+        .map(|operation| operation.operation_id.clone())
+        .collect::<Vec<_>>();
+    let unhealthy_endpoints = topology
+        .endpoints
+        .iter()
+        .filter(|endpoint| {
+            matches!(
+                endpoint.health.as_str(),
+                "degraded" | "blocked" | "unreachable"
+            ) || !endpoint.reachable
+        })
+        .map(|endpoint| endpoint.endpoint.clone())
+        .collect::<Vec<_>>();
+    let unhealthy_links = topology
+        .links
+        .iter()
+        .filter(|link| matches!(link.health.as_str(), "degraded" | "blocked" | "unreachable"))
+        .map(|link| format!("{} -> {}", link.source_endpoint, link.target_endpoint))
+        .collect::<Vec<_>>();
+
+    serde_json::to_string_pretty(&serde_json::json!({
+        "services_summary": {
+            "count": topology.services.len(),
+            "services": topology.services,
+        },
+        "endpoints_summary": {
+            "count": topology.endpoints.len(),
+            "unhealthy": unhealthy_endpoints,
+        },
+        "links_summary": {
+            "count": topology.links.len(),
+            "unhealthy": unhealthy_links,
+        },
+        "operations_summary": {
+            "count": topology.operations.len(),
+            "failed": failed_operations,
+        },
+        "recent_operation_logs": topology.log_views,
+        "diagnostic_reports": topology.diagnostic_reports,
+        "database_schema_check": {
+            "formal_tables": crate::ORCHESTRATOR_TABLES,
+        },
+        "forbidden_concept_scan_summary": {
+            "formal_core_objects": [
+                "Service",
+                "Set",
+                "Endpoint",
+                "Link",
+                "Operation",
+                "Topology",
+                "LogView",
+                "DiagnosticReport"
+            ]
+        }
+    }))
+    .map_err(OrchestratorError::Json)
+}
+
 fn endpoint_host(endpoint: &str) -> Result<String> {
     validate_endpoint_id(endpoint)?;
     endpoint
@@ -316,6 +419,10 @@ pub fn plan_operation(
         rollback_plan,
         created_at: String::new(),
         updated_at: String::new(),
+        confirmed_at: String::new(),
+        started_at: String::new(),
+        finished_at: String::new(),
+        rolled_back_at: String::new(),
     };
     validate_operation(&operation)?;
     Ok(operation)
@@ -325,6 +432,7 @@ pub fn confirm_operation(operation: &Operation) -> Result<Operation> {
     ensure_operation_status(operation, &[OperationStatus::Planned])?;
     let mut next = operation.clone();
     next.status = OperationStatus::AwaitingConfirmation;
+    next.confirmed_at = timestamp_marker("confirmed");
     Ok(next)
 }
 
@@ -338,6 +446,7 @@ pub fn start_operation(operation: &Operation) -> Result<Operation> {
     )?;
     let mut next = operation.clone();
     next.status = OperationStatus::Running;
+    next.started_at = timestamp_marker("started");
     Ok(next)
 }
 
@@ -347,6 +456,7 @@ pub fn succeed_operation(operation: &Operation, result: Value) -> Result<Operati
     next.status = OperationStatus::Succeeded;
     next.result = result;
     next.error_message.clear();
+    next.finished_at = timestamp_marker("finished");
     Ok(next)
 }
 
@@ -355,6 +465,7 @@ pub fn fail_operation(operation: &Operation, error_message: impl AsRef<str>) -> 
     let mut next = operation.clone();
     next.status = OperationStatus::Failed;
     next.error_message = redact_secret_text(error_message.as_ref());
+    next.finished_at = timestamp_marker("failed");
     Ok(next)
 }
 
@@ -371,6 +482,7 @@ pub fn rollback_operation(operation: &Operation, result: Value) -> Result<Operat
     let mut next = operation.clone();
     next.status = OperationStatus::RolledBack;
     next.result = result;
+    next.rolled_back_at = timestamp_marker("rolled_back");
     Ok(next)
 }
 
@@ -405,13 +517,26 @@ pub fn operation_log_record(
     level: impl Into<String>,
     message: impl AsRef<str>,
 ) -> OperationLogRecord {
+    operation_step_log_record(operation_id, "", level, message, Value::Null)
+}
+
+pub fn operation_step_log_record(
+    operation_id: impl Into<String>,
+    step_id: impl Into<String>,
+    level: impl Into<String>,
+    message: impl AsRef<str>,
+    data: Value,
+) -> OperationLogRecord {
     let original = message.as_ref();
     let redacted = redact_secret_text(original);
     OperationLogRecord {
         operation_id: operation_id.into(),
+        step_id: step_id.into(),
         level: level.into(),
         redacted: redacted != original,
         message: redacted,
+        data,
+        created_at: String::new(),
     }
 }
 
@@ -461,4 +586,8 @@ fn ensure_operation_status(operation: &Operation, allowed: &[OperationStatus]) -
             operation.status
         )))
     }
+}
+
+fn timestamp_marker(label: &str) -> String {
+    label.to_string()
 }

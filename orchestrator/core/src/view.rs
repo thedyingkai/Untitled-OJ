@@ -1,9 +1,10 @@
 use crate::{
-    Endpoint, Link, OrchestratorError, Result, ServiceManifest, ServiceSet, SharedSchemas,
-    Topology, build_operation_workbench, build_topology, default_action_request, expand_set,
-    load_shared_schemas, new_operation_workbench_session, plan_action_preview,
-    run_operation_workbench_flow, validate_action_catalog, validate_endpoint_id,
-    validate_service_manifest_file, validate_service_set_file,
+    Endpoint, Link, Operation, OrchestratorError, OrchestratorStore, PgOrchestratorStore, Result,
+    ServiceManifest, ServiceSet, SharedSchemas, Topology, build_operation_workbench,
+    build_topology, default_action_request, expand_set, load_shared_schemas,
+    new_operation_workbench_session, plan_action_preview, run_operation_workbench_flow,
+    validate_action_catalog, validate_endpoint_id, validate_service_manifest_file,
+    validate_service_set_file,
 };
 use crate::{OperationWorkbench, OperationWorkbenchSession};
 use serde::{Deserialize, Serialize};
@@ -115,7 +116,7 @@ pub struct LogViewRow {
     pub source_id: String,
     pub service_id: String,
     pub endpoint: String,
-    pub location: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -199,6 +200,50 @@ impl OrchestratorViewPage {
 }
 
 pub fn load_orchestrator_view(repo_root: &Path) -> Result<OrchestratorView> {
+    if std::env::var(PgOrchestratorStore::ENV_NAME).is_ok() {
+        let schemas = load_shared_schemas(repo_root)?;
+        match PgOrchestratorStore::from_env()
+            .and_then(|store| load_orchestrator_view_from_store(schemas.clone(), &store))
+        {
+            Ok(view) => return Ok(view),
+            Err(err) => {
+                let mut view = load_orchestrator_view_from_repo(repo_root)?;
+                view.warnings.push(format!(
+                    "ORCHESTRATOR_DATABASE_URL store unavailable, using repo view: {err}"
+                ));
+                return Ok(view);
+            }
+        }
+    }
+    load_orchestrator_view_from_repo(repo_root)
+}
+
+pub fn load_orchestrator_view_from_store<S: OrchestratorStore>(
+    schemas: SharedSchemas,
+    store: &S,
+) -> Result<OrchestratorView> {
+    let services = store.services()?;
+    let sets = store.sets()?;
+    let endpoints = store.endpoints()?;
+    let links = store.links()?;
+    let operations = store.operations()?;
+    let logs = store.log_views()?;
+    let diagnostics = store.diagnostic_reports()?;
+    Ok(OrchestratorView {
+        schemas,
+        services: services.iter().map(service_model_row).collect(),
+        sets: set_rows(&sets),
+        endpoints: endpoints.iter().map(endpoint_model_row).collect(),
+        links: links.iter().map(link_model_row).collect(),
+        operations: operation_store_rows(&operations),
+        operation_workbench: None,
+        logs: logs.iter().map(log_model_row).collect(),
+        diagnostics: diagnostics.iter().map(diagnostic_model_row).collect(),
+        warnings: Vec::new(),
+    })
+}
+
+fn load_orchestrator_view_from_repo(repo_root: &Path) -> Result<OrchestratorView> {
     let mut warnings = Vec::new();
     let schemas = load_shared_schemas(repo_root)?;
     let manifests = load_service_manifests(repo_root, &mut warnings)?;
@@ -292,6 +337,10 @@ fn load_sets(repo_root: &Path, warnings: &mut Vec<String>) -> Result<Vec<Service
 }
 
 fn service_row((manifest, _rel): &(ServiceManifest, PathBuf)) -> ServiceViewRow {
+    service_model_row(manifest)
+}
+
+fn service_model_row(manifest: &ServiceManifest) -> ServiceViewRow {
     ServiceViewRow {
         id: manifest.id.clone(),
         name: manifest.name.clone(),
@@ -301,6 +350,27 @@ fn service_row((manifest, _rel): &(ServiceManifest, PathBuf)) -> ServiceViewRow 
         runtime: format!("{:?}", manifest.runtime.mode),
         ui: enabled_text(manifest.ui.enabled),
         health: manifest.health.checks.join(","),
+    }
+}
+
+fn endpoint_model_row(endpoint: &Endpoint) -> EndpointViewRow {
+    EndpointViewRow {
+        endpoint: endpoint.endpoint.clone(),
+        service_id: endpoint.service_id.clone(),
+        protocol: endpoint.protocol.clone(),
+        expose: endpoint.health.clone(),
+        source: "store".to_string(),
+    }
+}
+
+fn link_model_row(link: &Link) -> LinkViewRow {
+    LinkViewRow {
+        from: link.source_endpoint.clone(),
+        to: link.target_endpoint.clone(),
+        protocol: link.protocol.clone(),
+        auth_mode: link.auth_mode.clone(),
+        scope: link.scope.clone(),
+        source: link.health.clone(),
     }
 }
 
@@ -558,6 +628,50 @@ fn operation_rows(
     }
 }
 
+fn operation_store_rows(operations: &[Operation]) -> Vec<OperationViewRow> {
+    operations
+        .iter()
+        .map(|operation| OperationViewRow {
+            action: operation.action.clone(),
+            target: operation.target_type.clone(),
+            risk: String::new(),
+            plan_required: operation_status_text(&operation.status),
+            mode: "store".to_string(),
+            fields: operation.target_id.clone(),
+            preview_target: operation.target_id.clone(),
+            preview_steps: operation
+                .plan
+                .get("steps")
+                .and_then(serde_json::Value::as_array)
+                .map(|steps| steps.len().to_string())
+                .unwrap_or_else(|| "0".to_string()),
+            preview_confirmation: operation
+                .confirmed_at
+                .is_empty()
+                .then_some("no".to_string())
+                .unwrap_or_else(|| "yes".to_string()),
+            summary: operation.error_message.clone(),
+        })
+        .collect()
+}
+
+fn log_model_row(log: &crate::LogView) -> LogViewRow {
+    LogViewRow {
+        source_id: log.source_id.clone(),
+        service_id: log.service_id.clone(),
+        endpoint: log.endpoint.clone(),
+        path: log.path.clone(),
+    }
+}
+
+fn diagnostic_model_row(report: &crate::DiagnosticReport) -> DiagnosticViewRow {
+    DiagnosticViewRow {
+        target: format!("{} {}", report.target_type, report.target_id),
+        status: report.status.clone(),
+        summary: report.summary.clone(),
+    }
+}
+
 fn operation_workbench_view(
     schemas: &SharedSchemas,
     manifests: &[(ServiceManifest, PathBuf)],
@@ -673,7 +787,7 @@ fn log_rows(manifests: &[(ServiceManifest, PathBuf)]) -> Vec<LogViewRow> {
             source_id: format!("{}:health", manifest.id),
             service_id: manifest.id.clone(),
             endpoint: endpoint_from_service(manifest),
-            location: if manifest.endpoint.health_path.is_empty() {
+            path: if manifest.endpoint.health_path.is_empty() {
                 "metadata".to_string()
             } else {
                 manifest.endpoint.health_path.clone()
@@ -787,6 +901,20 @@ fn enabled_text(value: bool) -> String {
     } else {
         "否".to_string()
     }
+}
+
+fn operation_status_text(status: &crate::OperationStatus) -> String {
+    match status {
+        crate::OperationStatus::Planned => "PLANNED",
+        crate::OperationStatus::AwaitingConfirmation => "AWAITING_CONFIRMATION",
+        crate::OperationStatus::Running => "RUNNING",
+        crate::OperationStatus::Succeeded => "SUCCEEDED",
+        crate::OperationStatus::Failed => "FAILED",
+        crate::OperationStatus::RolledBack => "ROLLED_BACK",
+        crate::OperationStatus::Cancelled => "CANCELLED",
+        crate::OperationStatus::Expired => "EXPIRED",
+    }
+    .to_string()
 }
 
 pub fn ensure_view_is_loaded(view: &OrchestratorView) -> Result<()> {
