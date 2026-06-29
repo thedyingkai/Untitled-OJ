@@ -33,6 +33,7 @@ docs/release/
 - Executor drivers：`orchestrator/core/src/executor.rs`
 - Endpoint/Link health：`orchestrator/core/src/health.rs`
 - LogView 查询与 DiagnosticReport 导出：`orchestrator/core/src/observability.rs`
+- Reconcile tick：`orchestrator/core/src/reconciler.rs`
 - GUI/TUI 共享视图：`orchestrator/core/src/view.rs`
 - GUI/TUI 共享工作台：`orchestrator/core/src/workbench.rs`
 - Orchestrator migration：`deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`

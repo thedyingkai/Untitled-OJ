@@ -5,6 +5,7 @@ mod health;
 mod model;
 mod observability;
 mod planner;
+mod reconciler;
 mod schema;
 mod service;
 mod store;
@@ -44,6 +45,7 @@ pub use planner::{
     ActionPlanPreview, ActionRequest, default_action_request, plan_action_preview,
     plan_action_request, preview_operation,
 };
+pub use reconciler::{ReconcileTickResult, run_reconcile_tick};
 pub use schema::{
     ActionFormSchema, FormFieldSchema, SharedSchemas, ensure_shared_schemas_loaded,
     load_shared_schemas,

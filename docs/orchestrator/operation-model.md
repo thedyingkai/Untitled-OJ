@@ -49,3 +49,5 @@ GUI/TUI 通过 `OperationWorkbenchContext` 和 `OperationWorkbenchSession` 使�
 日志读取只围绕 `LogView` 和 `OperationLogRecord`。core 提供按 `service_id`、`endpoint`、`operation_id`、`source_id` 过滤的查询能力，并要求 `LogView.path` 使用 service-scoped、operation-scoped 或 endpoint-scoped 策略；它不是任意文件浏览器，也不读取未登记路径。
 
 DiagnosticReport 可以从当前 Store 构建，内容包含 Service、Endpoint、Link、Operation 摘要、失败 Operation、不健康 Endpoint/Link、近期 Operation log、数据库 schema 检查和禁用概念扫描摘要。当前支持 JSON 和 Markdown 导出。
+
+`run_reconcile_tick` 是当前长期运行能力的核心原语。它执行单次 tick：过期未确认 Operation、刷新 Endpoint/Link health、保存 Topology snapshot，并生成 DiagnosticReport。它可以被 GUI、TUI 或后续常驻进程调用，但本轮仍不宣称已经具备完整生产 daemon、远程部署 agent 或跨主机发布能力。

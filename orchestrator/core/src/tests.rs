@@ -2888,3 +2888,200 @@ fn diagnostic_report_builds_from_store_and_exports_json_and_markdown() {
     );
     assert!(export_diagnostic_report(&report, "html").is_err());
 }
+
+#[test]
+fn reconcile_tick_refreshes_health_topology_and_diagnostics() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    let mut problem_api = valid_service();
+    problem_api.id = "problem-api".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store.put_service(problem_api).expect("put problem api");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:8080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "ok".to_string(),
+            reachable: true,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put gateway endpoint");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:8083".to_string(),
+            service_id: "problem-api".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "ok".to_string(),
+            reachable: true,
+            display_name: "Problem API".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put problem endpoint");
+    store
+        .put_link(Link {
+            source_endpoint: "127.0.0.1:8080".to_string(),
+            target_endpoint: "127.0.0.1:8083".to_string(),
+            protocol: "http".to_string(),
+            auth_mode: "internal".to_string(),
+            scope: "api".to_string(),
+            health: "unknown".to_string(),
+            latency_ms: None,
+            config_ref: String::new(),
+            secret_ref: String::new(),
+            policy: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put link");
+    let mut waiting = plan_operation(
+        "op-stale",
+        "service.restart",
+        "Service",
+        "gateway",
+        serde_json::json!({}),
+        serde_json::json!({"steps": ["restart"]}),
+        serde_json::json!({"steps": ["restore"]}),
+    )
+    .expect("operation");
+    waiting.status = OperationStatus::AwaitingConfirmation;
+    waiting.confirmed_at = String::new();
+    store.put_operation(waiting).expect("put operation");
+
+    let result = run_reconcile_tick(&mut store, &StaticEndpointProbe, "unit")
+        .expect("reconcile tick should run");
+    assert_eq!(result.expired_operations, vec!["op-stale"]);
+    assert_eq!(result.checked_endpoints.len(), 2);
+    assert_eq!(
+        store
+            .operation("op-stale")
+            .map(|operation| &operation.status),
+        Some(&OperationStatus::Expired)
+    );
+    assert_eq!(
+        store
+            .endpoint("127.0.0.1:8080")
+            .map(|endpoint| endpoint.health.as_str()),
+        Some("healthy")
+    );
+    assert_eq!(
+        store.links().first().map(|link| link.health.as_str()),
+        Some("healthy")
+    );
+    assert_eq!(result.topology_snapshot_id, Some("tick-unit".to_string()));
+    assert_eq!(
+        result.diagnostic_report_id,
+        Some("diag-tick-unit".to_string())
+    );
+    assert!(
+        store
+            .diagnostic_reports()
+            .iter()
+            .any(|report| report.report_id == "diag-tick-unit")
+    );
+}
+
+#[test]
+fn reconcile_tick_snapshot_uses_refreshed_store_state() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    let mut problem_api = valid_service();
+    problem_api.id = "problem-api".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store.put_service(problem_api).expect("put problem api");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:8080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "ok".to_string(),
+            reachable: true,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put gateway endpoint");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:8083".to_string(),
+            service_id: "problem-api".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "ok".to_string(),
+            reachable: true,
+            display_name: "Problem API".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put problem endpoint");
+    store
+        .put_link(Link {
+            source_endpoint: "127.0.0.1:8080".to_string(),
+            target_endpoint: "127.0.0.1:8083".to_string(),
+            protocol: "http".to_string(),
+            auth_mode: "internal".to_string(),
+            scope: "api".to_string(),
+            health: "unknown".to_string(),
+            latency_ms: None,
+            config_ref: String::new(),
+            secret_ref: String::new(),
+            policy: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put link");
+    let stale_topology = build_topology(
+        "127.0.0.1:8080".to_string(),
+        vec!["gateway".to_string(), "problem-api".to_string()],
+        Vec::new(),
+        store.endpoints(),
+        store.links(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("stale topology");
+    store
+        .put_topology(stale_topology)
+        .expect("put stale topology");
+
+    run_reconcile_tick(&mut store, &StaticEndpointProbe, "fresh")
+        .expect("reconcile tick should run");
+
+    let latest = store
+        .get_latest_topology_snapshot()
+        .expect("latest topology")
+        .expect("snapshot exists");
+    assert_eq!(latest.snapshot_id, "tick-fresh");
+    assert!(
+        latest
+            .topology
+            .endpoints
+            .iter()
+            .all(|endpoint| endpoint.health == "healthy")
+    );
+    assert_eq!(
+        latest
+            .topology
+            .links
+            .first()
+            .map(|link| link.health.as_str()),
+        Some("healthy")
+    );
+}
