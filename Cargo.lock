@@ -2647,6 +2647,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ojos-orchestrator-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "orchestrator-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ojos-orchestrator-gui"
 version = "0.1.0"
 dependencies = [

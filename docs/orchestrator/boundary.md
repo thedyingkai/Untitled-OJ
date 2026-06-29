@@ -20,6 +20,17 @@ Web Shell 是 Service。它负责 OJ 站点前后端业务 UI，例如题库、�
 
 Web Shell 不安装 Service，不管理 Endpoint / Link，不修改 Topology，不执行 Operation，也不充当 Orchestrator。
 
+## Orchestrator daemon
+
+Orchestrator daemon 是编排器的 HTTP API 入口。它只负责：
+
+- 读取 `ORCHESTRATOR_DATABASE_URL` 或使用本地 Store 上下文。
+- 提供 Service、Set、Endpoint、Link、Operation、Topology、LogView 和 DiagnosticReport 的 Orchestrator API。
+- 把写操作转换为 core `ActionRequest`，并交给 `OrchestratorActionDispatcher` 执行。
+- 查询 Operation 状态、日志、Topology 和诊断结果。
+
+Orchestrator daemon 不代理 OJ 业务，不提供 Web Shell 页面，不执行任意 shell，不绕过 GUI/TUI 使用的 core action schema，也不引入额外运行实例对象。
+
 ## root host
 
 root host 不是额外核心对象。root 信息由 Orchestrator 配置、authority 策略和 Topology 起点表达：

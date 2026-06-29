@@ -48,13 +48,14 @@ docs/release/
 - GUI/TUI Operation/LogView 观测：`orchestrator/core/src/view.rs` 从 Store 读取 Operation 与 OperationLog，GUI/TUI 展示 `operation_id`、状态、结果、错误、日志数量、日志消息、`created_at` 和 `updated_at`
 - Endpoint / Link 表单证据：`orchestrator/schemas/forms.yaml` 覆盖 Endpoint 的 `config` 和 Link 的 `scope`、`config_ref`、`secret_ref`、`policy`；`orchestrator/core/src/planner.rs` 会解析 JSON 字段并写入 Store，覆盖测试为 `endpoint_register_update_delete_and_health_write_store`、`link_create_update_delete_and_health_write_store`
 - DiagnosticReport 能力矩阵与发布证据：`build_diagnostic_report` 写入 services、sets、endpoints、links、operations、failed operations、unhealthy endpoints、unhealthy links、recent operation logs、database schema check、action matrix、unsupported capabilities 和 forbidden concept scan summary；`export_diagnostic_report` 支持 JSON 与 Markdown。覆盖测试为 `diagnostic_report_json_exports_observable_summary`、`diagnostic_report_builds_from_store_and_exports_json_and_markdown`
+- Orchestrator daemon 最小入口：`orchestrator/daemon` 提供 `GET /health`、Service/Set/Endpoint/Link/Operation/Topology/DiagnosticReport API，写操作转换为 core `ActionRequest` 并交给 `OrchestratorActionConsole` / `OrchestratorActionDispatcher`；覆盖测试为 `daemon_health_reports_orchestrator_api_status`、`daemon_endpoint_routes_use_core_dispatcher`、`daemon_operation_routes_expose_operation_state_and_logs`、`daemon_diagnostic_route_uses_core_diagnostic_report`、`daemon_decodes_http_requests_as_strict_utf8`
 - Orchestrator migration：`deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`
 
 ## 当前限制
 
 - LocalProcessDriver 尚未接入安全 supervisor，因此生命周期动作返回 Unsupported。
 - DockerComposeDriver 默认只返回固定命令计划并阻止假成功；显式执行模式会运行固定 `docker compose` 参数数组，实际成功仍取决于本机 Docker/Compose 环境。
-- 远程部署 agent、跨主机发布系统和完整生产 daemon 尚未实现。
+- Orchestrator daemon 当前是最小 HTTP API 入口；远程部署 agent、跨主机发布系统和生产级运维外壳尚未实现。
 
 ## 最近本地验证
 

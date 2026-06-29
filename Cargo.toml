@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "orchestrator/core",
+    "orchestrator/daemon",
     "orchestrator/gui",
     "orchestrator/tui",
 ]

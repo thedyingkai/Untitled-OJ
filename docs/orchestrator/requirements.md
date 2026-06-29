@@ -27,6 +27,6 @@ Orchestrator 负责：
 
 Orchestrator 不负责题库、提交、比赛、用户、权限业务后台、公告、训练、Clarification、打印、滚榜、站点前台或站点后台。这些能力必须由被编排的 Service 自己实现。
 
-正式入口只有 Orchestrator GUI 和 Orchestrator TUI。两者必须调用同一套 `orchestrator/core` 与 `orchestrator/schemas`，差别只能是交互形态，不是能力差异。
+正式入口包括 Orchestrator GUI、Orchestrator TUI 和 Orchestrator daemon。GUI/TUI 面向人工交互；daemon 提供最小 HTTP Orchestrator API。三者必须调用同一套 `orchestrator/core` 与 `orchestrator/schemas`，差别只能是交互形态或传输形态，不是能力差异。
 
-当前实现聚焦编排器核心：`orchestrator/core` 提供契约解析、Set 展开、Endpoint / Link 模型、Topology 构建、Operation 状态转换、内存执行模型、数据库结构检查和视图模型。`orchestrator/gui` 与 `orchestrator/tui` 是两个正式入口，读取同一套 schema，并通过 core 获取能力。
+当前实现聚焦编排器核心：`orchestrator/core` 提供契约解析、Set 展开、Endpoint / Link 模型、Topology 构建、Operation 状态转换、Store-backed 执行模型、数据库结构检查和视图模型。`orchestrator/gui`、`orchestrator/tui` 与 `orchestrator/daemon` 是正式入口，读取同一套 schema，并通过 core 获取能力。
