@@ -26,7 +26,7 @@ CANCELLED
 EXPIRED
 ```
 
-创建 plan 时会持久化 `operation_id`、`action`、`plan`、`status` 和 `created_at`。确认后写入 `confirmed_at`。apply 时先获取 `orchestrator_operation_locks`，再进入 `RUNNING`，按 plan step 写入 `orchestrator_operation_logs`，成功后写入 `result` 并进入 `SUCCEEDED`，失败后写入 `error_message` 并进入 `FAILED`。apply 完成后释放对应 lock。
+创建 plan 时会持久化 `operation_id`、`action`、`plan`、`status`、`created_at` 和 `updated_at`。内存 Store 使用 `planned`、`confirmed`、`started`、`finished`、`failed`、`rolled_back` 等确定性 marker 方便 GUI/TUI 和测试核对；PostgreSQL Store 会把这些 marker 映射为数据库侧 `NOW()` 时间戳。确认后写入 `confirmed_at`。apply 时先获取 `orchestrator_operation_locks`，再进入 `RUNNING`，按 plan step 写入 `orchestrator_operation_logs`，成功后写入 `result` 并进入 `SUCCEEDED`，失败后写入 `error_message` 并进入 `FAILED`。apply 完成后释放对应 lock。
 
 rollback 会读取原 Operation 的 plan、result 和 logs，先记录已读取的历史日志数量，再把 `rollback_plan.steps` 写入 `orchestrator_operation_logs`，最后在原 Operation 上写入 `ROLLED_BACK` 与 `rolled_back_at`。当前选择是在原 Operation 上标记回滚，而不是创建新的 rollback Operation。
 
@@ -47,6 +47,19 @@ ExternalEndpointDriver
 `OperationExecutor` 在 Service 生命周期 Operation 中根据 Service 的 `runtime.mode` 选择固定 driver，并把 `DriverResult` 写入 `orchestrator_operation_logs`。当前 container Service 走 `DockerComposeDriver` 的计划模式；local-process 生命周期动作仍返回 Unsupported 并落入 `FAILED` Operation；external Service 不执行生命周期控制。
 
 GUI/TUI 通过 `OperationWorkbenchContext` 和 `OperationWorkbenchSession` 使用同一套状态机。GUI/TUI 可以生成 plan、confirm、apply、rollback，并查看 result、error、operation logs、`created_at` 和 `updated_at`；不能绕过 core 自行执行动作。
+
+直接覆盖 Target B 生命周期的测试为：
+
+```text
+operation_plan_is_persisted_in_store
+operation_confirm_updates_store
+operation_apply_writes_status_and_logs
+operation_apply_failure_writes_error_message
+operation_rollback_updates_store
+operation_logs_can_be_reopened
+workbench_uses_store_backed_operation_lifecycle
+operation_lock_prevents_parallel_apply
+```
 
 `OrchestratorActionDispatcher` 是 GUI/TUI 的正式 action 执行入口。它会把表单字段转换为 `ActionRequest`，写入 `PLANNED` Operation，按 action 要求确认，然后调用 `OperationExecutor`。未接真实执行器的 action 会落为 `UNSUPPORTED`，写入失败 Operation 和 warning log，不能显示成功。
 

@@ -31,6 +31,7 @@ docs/release/
 - Pg Store ignored integration：`orchestrator/core/tests/pg_store_integration.rs`
 - Operation 状态机：`orchestrator/core/src/model.rs`
 - Operation executor：`orchestrator/core/src/store.rs`，apply/rollback 都通过 Store 写入 OperationLog；Service 生命周期会记录固定 `DriverResult`；rollback 会记录历史日志读取和 `rollback_plan.steps`
+- Store-backed Operation 生命周期直接证据：`operation_plan_is_persisted_in_store`、`operation_confirm_updates_store`、`operation_apply_writes_status_and_logs`、`operation_apply_failure_writes_error_message`、`operation_rollback_updates_store`、`operation_logs_can_be_reopened`、`workbench_uses_store_backed_operation_lifecycle`、`operation_lock_prevents_parallel_apply`
 - Executor drivers：`orchestrator/core/src/executor.rs`
 - Endpoint/Link health：`orchestrator/core/src/health.rs`
 - HTTP health_path 检查测试：`tcp_probe_checks_http_health_path_status`

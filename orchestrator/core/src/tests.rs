@@ -2219,6 +2219,258 @@ fn operation_executor_applies_and_rolls_back_through_store() {
 }
 
 #[test]
+fn operation_plan_is_persisted_in_store() {
+    let mut store = MemoryOrchestratorStore::new();
+    let operation = plan_operation(
+        "op-plan-persisted",
+        "operation.plan",
+        "Operation",
+        "gateway",
+        serde_json::json!({"action": "service.install", "target_id": "gateway"}),
+        serde_json::json!({"steps": [{"action": "plan", "target": "gateway"}]}),
+        serde_json::json!({"steps": []}),
+    )
+    .expect("plan operation");
+    store
+        .put_operation(operation)
+        .expect("persist planned operation");
+
+    let persisted = store
+        .get_operation("op-plan-persisted")
+        .expect("get operation")
+        .expect("operation");
+    assert_eq!(persisted.status, OperationStatus::Planned);
+    assert_eq!(persisted.created_at, "planned");
+    assert_eq!(persisted.updated_at, "planned");
+    assert_eq!(persisted.action, "operation.plan");
+    assert!(
+        persisted
+            .plan
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|steps| !steps.is_empty())
+    );
+}
+
+#[test]
+fn operation_confirm_updates_store() {
+    let mut store = MemoryOrchestratorStore::new();
+    let operation = plan_operation(
+        "op-confirm-store",
+        "service.install",
+        "Service",
+        "gateway",
+        serde_json::json!({"service_id": "gateway"}),
+        serde_json::json!({"steps": [{"action": "install", "target": "gateway"}]}),
+        serde_json::json!({"steps": [{"action": "remove_service", "target": "gateway"}]}),
+    )
+    .expect("plan operation");
+    store.put_operation(operation).expect("put operation");
+
+    let confirmed = confirm_operation(
+        &store
+            .get_operation("op-confirm-store")
+            .expect("get operation")
+            .expect("operation"),
+    )
+    .expect("confirm operation");
+    store
+        .put_operation(confirmed)
+        .expect("persist confirmed operation");
+
+    let persisted = store
+        .get_operation("op-confirm-store")
+        .expect("get operation")
+        .expect("operation");
+    assert_eq!(persisted.status, OperationStatus::AwaitingConfirmation);
+    assert_eq!(persisted.confirmed_at, "confirmed");
+    assert_eq!(persisted.updated_at, "confirmed");
+}
+
+#[test]
+fn operation_apply_writes_status_and_logs() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway.clone()).expect("put gateway");
+    let operation = confirm_operation(
+        &service_install_operation("op-apply-store", &gateway, &[])
+            .expect("service install operation"),
+    )
+    .expect("confirm operation");
+    store.put_operation(operation).expect("put operation");
+
+    let applied = OperationExecutor::new(&mut store)
+        .apply("op-apply-store")
+        .expect("apply operation");
+    assert_eq!(applied.status, OperationStatus::Succeeded);
+    assert_eq!(applied.started_at, "started");
+    assert_eq!(applied.finished_at, "finished");
+    assert_eq!(applied.updated_at, "finished");
+    assert!(
+        store
+            .list_operation_logs("op-apply-store")
+            .expect("operation logs")
+            .iter()
+            .any(|record| record.level == "info"
+                && !record.created_at.is_empty()
+                && record.message.contains("succeeded"))
+    );
+}
+
+#[test]
+fn operation_apply_failure_writes_error_message() {
+    let mut store = MemoryOrchestratorStore::new();
+    let operation = confirm_operation(
+        &service_lifecycle_operation("op-apply-failure-store", "service.start", "missing-service")
+            .expect("lifecycle operation"),
+    )
+    .expect("confirm operation");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::new(&mut store)
+        .apply("op-apply-failure-store")
+        .expect_err("missing service should fail apply");
+    let failed = store
+        .get_operation("op-apply-failure-store")
+        .expect("get operation")
+        .expect("operation");
+    assert_eq!(failed.status, OperationStatus::Failed);
+    assert_eq!(failed.updated_at, "failed");
+    assert!(!failed.error_message.is_empty());
+    assert!(
+        store
+            .list_operation_logs("op-apply-failure-store")
+            .expect("operation logs")
+            .iter()
+            .any(
+                |record| record.level == "error" && record.message.contains("service.start failed")
+            )
+    );
+}
+
+#[test]
+fn operation_rollback_updates_store() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway.clone()).expect("put gateway");
+    let operation = confirm_operation(
+        &service_install_operation("op-rollback-store", &gateway, &[])
+            .expect("service install operation"),
+    )
+    .expect("confirm operation");
+    store.put_operation(operation).expect("put operation");
+    OperationExecutor::new(&mut store)
+        .apply("op-rollback-store")
+        .expect("apply operation");
+
+    let rolled_back = OperationExecutor::new(&mut store)
+        .rollback("op-rollback-store")
+        .expect("rollback operation");
+    assert_eq!(rolled_back.status, OperationStatus::RolledBack);
+    assert_eq!(rolled_back.rolled_back_at, "rolled_back");
+    assert_eq!(rolled_back.updated_at, "rolled_back");
+    assert!(
+        store
+            .list_operation_logs("op-rollback-store")
+            .expect("operation logs")
+            .iter()
+            .any(|record| record.step_id.starts_with("rollback:"))
+    );
+}
+
+#[test]
+fn operation_logs_can_be_reopened() {
+    let mut store = MemoryOrchestratorStore::new();
+    let operation = plan_operation(
+        "op-log-source",
+        "operation.plan",
+        "Operation",
+        "gateway",
+        serde_json::json!({}),
+        serde_json::json!({"steps": [{"action": "plan", "target": "gateway"}]}),
+        serde_json::json!({"steps": []}),
+    )
+    .expect("plan operation");
+    store.put_operation(operation).expect("put operation");
+    store
+        .append_operation_log(operation_step_log_record(
+            "op-log-source",
+            "step-1",
+            "info",
+            "first log",
+            serde_json::json!({"seq": 1}),
+        ))
+        .expect("append log");
+
+    let reopened = store
+        .list_operation_logs("op-log-source")
+        .expect("reopen operation logs");
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened[0].step_id, "step-1");
+    assert_eq!(reopened[0].created_at, "log-1");
+}
+
+#[test]
+fn workbench_uses_store_backed_operation_lifecycle() {
+    let root = repo_root();
+    let context = load_operation_workbench_context(&root)
+        .expect("workbench context")
+        .with_memory_store();
+    let session = context
+        .build_session("service.install")
+        .expect("service install session");
+    assert_eq!(session.current_operation.status, OperationStatus::Planned);
+    assert_eq!(session.current_operation.created_at, "planned");
+
+    let confirmed = context.confirm(&session).expect("confirm through context");
+    assert_eq!(
+        confirmed.current_operation.status,
+        OperationStatus::AwaitingConfirmation
+    );
+    let applied = context.apply(&confirmed).expect("apply through context");
+    assert_eq!(applied.current_operation.status, OperationStatus::Succeeded);
+    assert!(!applied.logs.is_empty());
+    let rolled_back = context
+        .rollback(&applied)
+        .expect("rollback through context");
+    assert_eq!(
+        rolled_back.current_operation.status,
+        OperationStatus::RolledBack
+    );
+    assert!(rolled_back.logs.len() > applied.logs.len());
+}
+
+#[test]
+fn operation_lock_prevents_parallel_apply() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway.clone()).expect("put gateway");
+    let operation = confirm_operation(
+        &service_install_operation("op-parallel-lock", &gateway, &[])
+            .expect("service install operation"),
+    )
+    .expect("confirm operation");
+    store.put_operation(operation).expect("put operation");
+    store
+        .acquire_operation_lock(OperationLock {
+            lock_key: "operation:op-parallel-lock".to_string(),
+            operation_id: "op-parallel-lock".to_string(),
+            owner: "test".to_string(),
+            expires_at: "session".to_string(),
+            created_at: String::new(),
+        })
+        .expect("acquire lock");
+
+    let blocked = OperationExecutor::new(&mut store)
+        .apply("op-parallel-lock")
+        .expect_err("locked operation should not apply");
+    assert!(blocked.to_string().contains("is locked"));
+}
+
+#[test]
 fn operation_executor_logs_rollback_mutation_failure() {
     let mut store = MemoryOrchestratorStore::new();
     let mut gateway = valid_service();
@@ -4146,14 +4398,8 @@ fn orchestrator_view_can_load_from_store_state() {
     assert_eq!(view.operations[0].status, "FAILED");
     assert_eq!(view.operations[0].error, "health check failed");
     assert_eq!(view.operations[0].log_count, 1);
-    assert!(
-        view.operations[0].created_at.is_empty(),
-        "memory store operation rows expose created_at even when local tests use marker-free time"
-    );
-    assert!(
-        view.operations[0].updated_at.is_empty(),
-        "memory store operation rows expose updated_at even when local tests use marker-free time"
-    );
+    assert_eq!(view.operations[0].created_at, "planned");
+    assert_eq!(view.operations[0].updated_at, "failed");
     assert!(
         view.logs
             .iter()

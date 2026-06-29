@@ -417,8 +417,8 @@ pub fn plan_operation(
         result: Value::Null,
         error_message: String::new(),
         rollback_plan,
-        created_at: String::new(),
-        updated_at: String::new(),
+        created_at: timestamp_marker("planned"),
+        updated_at: timestamp_marker("planned"),
         confirmed_at: String::new(),
         started_at: String::new(),
         finished_at: String::new(),
@@ -433,6 +433,7 @@ pub fn confirm_operation(operation: &Operation) -> Result<Operation> {
     let mut next = operation.clone();
     next.status = OperationStatus::AwaitingConfirmation;
     next.confirmed_at = timestamp_marker("confirmed");
+    next.updated_at = timestamp_marker("confirmed");
     Ok(next)
 }
 
@@ -447,6 +448,7 @@ pub fn start_operation(operation: &Operation) -> Result<Operation> {
     let mut next = operation.clone();
     next.status = OperationStatus::Running;
     next.started_at = timestamp_marker("started");
+    next.updated_at = timestamp_marker("started");
     Ok(next)
 }
 
@@ -457,6 +459,7 @@ pub fn succeed_operation(operation: &Operation, result: Value) -> Result<Operati
     next.result = result;
     next.error_message.clear();
     next.finished_at = timestamp_marker("finished");
+    next.updated_at = timestamp_marker("finished");
     Ok(next)
 }
 
@@ -466,6 +469,7 @@ pub fn fail_operation(operation: &Operation, error_message: impl AsRef<str>) -> 
     next.status = OperationStatus::Failed;
     next.error_message = redact_secret_text(error_message.as_ref());
     next.finished_at = timestamp_marker("failed");
+    next.updated_at = timestamp_marker("failed");
     Ok(next)
 }
 
@@ -483,6 +487,7 @@ pub fn rollback_operation(operation: &Operation, result: Value) -> Result<Operat
     next.status = OperationStatus::RolledBack;
     next.result = result;
     next.rolled_back_at = timestamp_marker("rolled_back");
+    next.updated_at = timestamp_marker("rolled_back");
     Ok(next)
 }
 
@@ -496,6 +501,7 @@ pub fn cancel_operation(operation: &Operation) -> Result<Operation> {
     )?;
     let mut next = operation.clone();
     next.status = OperationStatus::Cancelled;
+    next.updated_at = timestamp_marker("cancelled");
     Ok(next)
 }
 
@@ -509,6 +515,7 @@ pub fn expire_operation(operation: &Operation) -> Result<Operation> {
     )?;
     let mut next = operation.clone();
     next.status = OperationStatus::Expired;
+    next.updated_at = timestamp_marker("expired");
     Ok(next)
 }
 

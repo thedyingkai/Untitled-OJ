@@ -739,7 +739,14 @@ pub(crate) fn db_time_text(value: &str) -> String {
         String::new()
     } else if matches!(
         trimmed,
-        "confirmed" | "started" | "finished" | "failed" | "rolled_back"
+        "planned"
+            | "confirmed"
+            | "started"
+            | "finished"
+            | "failed"
+            | "rolled_back"
+            | "cancelled"
+            | "expired"
     ) {
         "now".to_string()
     } else if trimmed.contains('T') || trimmed.contains('-') {

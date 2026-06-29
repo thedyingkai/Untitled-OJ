@@ -64,7 +64,7 @@ finished_at
 rolled_back_at
 ```
 
-Operation log 使用 `orchestrator_operation_logs`，按 `operation_id` 和 `step_id` 记录执行过程，结构化数据写入 `data`。
+Operation log 使用 `orchestrator_operation_logs`，按 `operation_id` 和 `step_id` 记录执行过程，结构化数据写入 `data`。内存 Store 会给本地 operation log 写入 `log-1`、`log-2` 这类确定性 marker，PostgreSQL Store 使用数据库 `created_at` 排序并读回。
 
 core 内部的 `confirmed`、`started`、`finished`、`failed`、`rolled_back` 状态 marker 在写入 PostgreSQL 时映射为数据库侧 `now`，因此 `confirmed_at`、`started_at`、`finished_at`、`rolled_back_at` 会落成真实时间戳；`session` 这类非持久锁 marker 仍走数据库默认过期策略。
 

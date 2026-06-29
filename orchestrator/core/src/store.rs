@@ -427,6 +427,10 @@ impl OrchestratorStore for MemoryOrchestratorStore {
                 record.operation_id
             )));
         }
+        let mut record = record;
+        if record.created_at.is_empty() {
+            record.created_at = format!("log-{}", self.operation_logs.len() + 1);
+        }
         self.operation_logs.push(record);
         Ok(())
     }
