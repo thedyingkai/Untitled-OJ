@@ -342,8 +342,13 @@ impl OrchestratorStore for MemoryOrchestratorStore {
 
     fn delete_link(&mut self, source_endpoint: &str, target_endpoint: &str) -> Result<()> {
         self.links
-            .remove(&(source_endpoint.to_string(), target_endpoint.to_string()));
-        Ok(())
+            .remove(&(source_endpoint.to_string(), target_endpoint.to_string()))
+            .map(|_| ())
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(format!(
+                    "link {source_endpoint} -> {target_endpoint} not found"
+                ))
+            })
     }
 
     fn update_link_health(
@@ -679,7 +684,17 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
                 step.clone(),
             ))?;
         }
-        let changed_objects = self.rollback_operation_mutation(&operation)?;
+        let changed_objects = match self.rollback_operation_mutation(&operation) {
+            Ok(changed_objects) => changed_objects,
+            Err(err) => {
+                self.store.append_operation_log(operation_log_record(
+                    &operation.operation_id,
+                    "error",
+                    format!("operation {} rollback failed: {err}", operation.action),
+                ))?;
+                return Err(err);
+            }
+        };
 
         let result = serde_json::json!({
             "operation_id": operation.operation_id,

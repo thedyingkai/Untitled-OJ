@@ -2121,6 +2121,102 @@ fn operation_executor_applies_and_rolls_back_through_store() {
 }
 
 #[test]
+fn operation_executor_logs_rollback_mutation_failure() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway).expect("put gateway service");
+    let mut problem_api = valid_service();
+    problem_api.id = "problem-api".to_string();
+    store
+        .put_service(problem_api)
+        .expect("put problem-api service");
+    let source = Endpoint {
+        endpoint: "127.0.0.1:18080".to_string(),
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "healthy".to_string(),
+        reachable: true,
+        display_name: "Gateway".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let target = Endpoint {
+        endpoint: "127.0.0.1:18081".to_string(),
+        service_id: "problem-api".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "healthy".to_string(),
+        reachable: true,
+        display_name: "Problem API".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    store
+        .put_endpoint(source.clone())
+        .expect("put source endpoint");
+    store
+        .put_endpoint(target.clone())
+        .expect("put target endpoint");
+    let link = Link {
+        source_endpoint: source.endpoint,
+        target_endpoint: target.endpoint,
+        protocol: "http".to_string(),
+        auth_mode: "internal".to_string(),
+        scope: "api".to_string(),
+        health: "unknown".to_string(),
+        latency_ms: None,
+        config_ref: String::new(),
+        secret_ref: String::new(),
+        policy: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let operation = confirm_operation(
+        &link_create_operation("op-rollback-fails", &link, &store.endpoints())
+            .expect("link create operation"),
+    )
+    .expect("confirm link operation");
+    store.put_operation(operation).expect("put operation");
+    let applied = OperationExecutor::new(&mut store)
+        .apply("op-rollback-fails")
+        .expect("apply link operation");
+    assert_eq!(applied.status, OperationStatus::Succeeded);
+    store
+        .delete_link(&link.source_endpoint, &link.target_endpoint)
+        .expect("remove link before rollback");
+
+    let failed = OperationExecutor::new(&mut store)
+        .rollback("op-rollback-fails")
+        .expect_err("rollback mutation should fail");
+    assert!(failed.to_string().contains("not found"));
+    assert!(
+        store
+            .list_operation_logs("op-rollback-fails")
+            .expect("operation logs")
+            .iter()
+            .any(|record| record.level == "error"
+                && record
+                    .message
+                    .contains("operation link.create rollback failed"))
+    );
+    assert_eq!(
+        store
+            .get_operation("op-rollback-fails")
+            .expect("get operation")
+            .expect("operation")
+            .status,
+        OperationStatus::Succeeded,
+        "failed rollback must not mark the original operation rolled back"
+    );
+}
+
+#[test]
 fn log_query_reads_only_scoped_sources_and_operation_logs() {
     let mut store = MemoryOrchestratorStore::new();
     let mut gateway = valid_service();

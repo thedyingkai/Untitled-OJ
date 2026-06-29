@@ -343,10 +343,15 @@ impl OrchestratorStore for PgOrchestratorStore {
     }
 
     fn delete_link(&mut self, source_endpoint: &str, target_endpoint: &str) -> Result<()> {
-        self.execute(
+        let changed = self.execute(
             "DELETE FROM service_links WHERE source_endpoint = $1 AND target_endpoint = $2",
             &[&source_endpoint, &target_endpoint],
         )?;
+        if changed == 0 {
+            return Err(OrchestratorError::Dependency(format!(
+                "link {source_endpoint} -> {target_endpoint} not found"
+            )));
+        }
         Ok(())
     }
 
