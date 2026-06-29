@@ -476,10 +476,15 @@ impl OrchestratorStore for MemoryOrchestratorStore {
     }
 
     fn build_topology_view(&self) -> Result<Topology> {
-        if let Some(snapshot) = self.get_latest_topology_snapshot()? {
-            return Ok(snapshot.topology);
-        }
         let endpoints = self.endpoints();
+        if endpoints.is_empty() {
+            if let Some(snapshot) = self.get_latest_topology_snapshot()? {
+                return Ok(snapshot.topology);
+            }
+            return Err(OrchestratorError::Dependency(
+                "no endpoint for topology".to_string(),
+            ));
+        }
         let root_endpoint = endpoints
             .iter()
             .find(|endpoint| endpoint.service_id == "gateway")

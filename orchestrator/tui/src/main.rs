@@ -101,7 +101,6 @@ impl App {
         self.shift_action(-1);
     }
 
-    #[cfg(test)]
     fn select_action(&mut self, action: &str) {
         match self.context.build_session(action) {
             Ok(session) => {
@@ -172,7 +171,6 @@ impl App {
         }
     }
 
-    #[cfg(test)]
     fn update_field(&mut self, field: &str, value: String) {
         match self.context.update_field(&self.session, field, value) {
             Ok(session) => {
@@ -196,6 +194,57 @@ impl App {
 
     fn rollback_session(&mut self) {
         self.dispatch_current("operation.rollback");
+    }
+
+    fn run_action(&mut self, action: &str) {
+        self.run_action_with_fields(action, []);
+    }
+
+    fn run_action_with_fields<const N: usize>(
+        &mut self,
+        action: &str,
+        fields: [(&str, String); N],
+    ) {
+        self.select_action(action);
+        for (field, value) in fields {
+            self.update_field(field, value);
+        }
+        self.apply_session();
+    }
+
+    fn run_endpoint_action(&mut self, action: &str) {
+        if let Some(endpoint) = self
+            .view
+            .endpoints
+            .first()
+            .map(|endpoint| endpoint.endpoint.clone())
+        {
+            self.run_action_with_fields(action, [("endpoint", endpoint)]);
+        } else {
+            self.run_action(action);
+        }
+    }
+
+    fn run_link_action(&mut self, action: &str) {
+        if let Some(link) = self.view.links.first().cloned() {
+            self.run_action_with_fields(
+                action,
+                [("source_endpoint", link.from), ("target_endpoint", link.to)],
+            );
+        } else {
+            self.run_action(action);
+        }
+    }
+
+    fn run_operation_logs_view(&mut self) {
+        let operation_id = self
+            .view
+            .operations
+            .iter()
+            .find(|operation| operation.status != "CATALOG")
+            .map(|operation| operation.operation_id.clone())
+            .unwrap_or_else(|| self.session.current_operation.operation_id.clone());
+        self.run_action_with_fields("operation.logs.view", [("operation_id", operation_id)]);
     }
 
     fn dispatch_current(&mut self, action: &str) {
@@ -307,6 +356,22 @@ fn run(mut app: App) -> Result<()> {
                 KeyCode::Char('c') => app.confirm_session(),
                 KeyCode::Char('a') => app.apply_session(),
                 KeyCode::Char('u') => app.rollback_session(),
+                KeyCode::Char('e') => app.run_action("endpoint.register"),
+                KeyCode::Char('E') => app.run_endpoint_action("endpoint.update"),
+                KeyCode::Char('x') => app.run_endpoint_action("endpoint.delete"),
+                KeyCode::Char('h') => app.run_endpoint_action("endpoint.health.check"),
+                KeyCode::Char('l') => app.run_action("link.create"),
+                KeyCode::Char('L') => app.run_link_action("link.update"),
+                KeyCode::Char('X') => app.run_link_action("link.delete"),
+                KeyCode::Char('H') => app.run_link_action("link.health.check"),
+                KeyCode::Char('s') => app.run_action("set.expand"),
+                KeyCode::Char('S') => app.run_action("set.apply"),
+                KeyCode::Char('o') => app.run_operation_logs_view(),
+                KeyCode::Char('d') => app.run_action("diagnostics.run"),
+                KeyCode::Char('D') => app.run_action_with_fields(
+                    "diagnostics.export",
+                    [("format", "markdown".to_string())],
+                ),
                 KeyCode::Char(value) => {
                     if let Some(page) = OrchestratorViewPage::all()
                         .iter()
@@ -462,6 +527,15 @@ fn draw_services(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
 }
 
 fn draw_sets(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(4)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new("Set Actions: s expand  S apply")
+            .block(Block::default().borders(Borders::ALL).title("Set Actions")),
+        chunks[0],
+    );
     let rows = app.view.sets.iter().map(|set| {
         Row::new(vec![
             Cell::from(set.id.clone()),
@@ -487,11 +561,23 @@ fn draw_sets(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 .style(Style::default().fg(Color::Yellow)),
         )
         .block(Block::default().borders(Borders::ALL).title("Set")),
-        area,
+        chunks[1],
     );
 }
 
 fn draw_endpoints(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(4)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new("Endpoint Actions: e register  E update  x delete  h health check").block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Endpoint Actions"),
+        ),
+        chunks[0],
+    );
     let rows = app.view.endpoints.iter().map(|endpoint| {
         Row::new(vec![
             Cell::from(endpoint.endpoint.clone()),
@@ -521,11 +607,20 @@ fn draw_endpoints(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .title("Endpoint = IP:Port"),
         ),
-        area,
+        chunks[1],
     );
 }
 
 fn draw_links(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(4)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new("Link Actions: l create  L update  X delete  H health check")
+            .block(Block::default().borders(Borders::ALL).title("Link Actions")),
+        chunks[0],
+    );
     let rows = app.view.links.iter().map(|link| {
         Row::new(vec![
             Cell::from(link.from.clone()),
@@ -553,16 +648,28 @@ fn draw_links(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 .style(Style::default().fg(Color::Yellow)),
         )
         .block(Block::default().borders(Borders::ALL).title("Link")),
-        area,
+        chunks[1],
     );
 }
 
 fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(10), Constraint::Min(8)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(10),
+            Constraint::Min(8),
+        ])
         .split(area);
-    draw_operation_workbench(frame, app, chunks[0]);
+    frame.render_widget(
+        Paragraph::new("Operation Actions: c confirm  a apply  u rollback  o logs").block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Operation Actions"),
+        ),
+        chunks[0],
+    );
+    draw_operation_workbench(frame, app, chunks[1]);
 
     let rows = app.view.operations.iter().map(|operation| {
         Row::new(vec![
@@ -635,7 +742,7 @@ fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .title("Operation Action Registry"),
         ),
-        chunks[1],
+        chunks[2],
     );
 }
 
@@ -773,6 +880,15 @@ fn draw_logs(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
 }
 
 fn draw_diagnostics(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(4)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new("Diagnostics: d run  D export markdown")
+            .block(Block::default().borders(Borders::ALL).title("Diagnostics")),
+        chunks[0],
+    );
     let rows = app.view.diagnostics.iter().map(|diagnostic| {
         Row::new(vec![
             Cell::from(diagnostic.target.clone()),
@@ -795,14 +911,14 @@ fn draw_diagnostics(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .title("DiagnosticReport"),
         ),
-        area,
+        chunks[1],
     );
 }
 
 fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new(
-            "q/Esc 退出  r 刷新  Tab/1-9 切页  n/p 选择 action  f 字段  v 改值  c 确认  a 执行  u 回滚",
+            "q/Esc quit  r refresh  Tab/1-9 pages  e/E/x/h endpoint  l/L/X/H link  s/S set  c/a/u/o operation  d/D diagnostics",
         )
             .block(Block::default().borders(Borders::ALL)),
         area,
@@ -914,6 +1030,112 @@ mod tests {
     }
 
     #[test]
+    fn tui_endpoint_action_menu_exists() {
+        let source =
+            std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+                .expect("TUI source should be readable as UTF-8");
+        assert!(
+            source.contains("Endpoint Actions: e register  E update  x delete  h health check")
+        );
+
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        app.run_action_with_fields(
+            "endpoint.register",
+            [
+                ("endpoint", "127.0.0.1:19301".to_string()),
+                ("service_id", "gateway".to_string()),
+                ("protocol", "http".to_string()),
+            ],
+        );
+        assert!(
+            app.view
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.endpoint == "127.0.0.1:19301")
+        );
+        app.run_endpoint_action("endpoint.health.check");
+        assert!(app.last_message.contains("REAL"));
+    }
+
+    #[test]
+    fn tui_link_action_menu_exists() {
+        let source =
+            std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+                .expect("TUI source should be readable as UTF-8");
+        assert!(source.contains("Link Actions: l create  L update  X delete  H health check"));
+
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        for (endpoint, service_id) in [("127.0.0.1:19310", "gateway"), ("127.0.0.1:19311", "auth")]
+        {
+            app.run_action_with_fields(
+                "endpoint.register",
+                [
+                    ("endpoint", endpoint.to_string()),
+                    ("service_id", service_id.to_string()),
+                    ("protocol", "http".to_string()),
+                ],
+            );
+        }
+        app.run_action_with_fields(
+            "link.create",
+            [
+                ("source_endpoint", "127.0.0.1:19310".to_string()),
+                ("target_endpoint", "127.0.0.1:19311".to_string()),
+            ],
+        );
+        assert!(
+            app.view
+                .links
+                .iter()
+                .any(|link| link.from == "127.0.0.1:19310" && link.to == "127.0.0.1:19311")
+        );
+        app.run_link_action("link.health.check");
+        assert!(app.last_message.contains("REAL"));
+    }
+
+    #[test]
+    fn tui_set_action_menu_exists() {
+        let source =
+            std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+                .expect("TUI source should be readable as UTF-8");
+        assert!(source.contains("Set Actions: s expand  S apply"));
+
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        app.run_action("set.expand");
+        assert!(app.last_message.contains("READONLY"));
+        app.run_action("set.apply");
+        assert!(app.last_message.contains("STORE_BACKED"));
+    }
+
+    #[test]
+    fn tui_diagnostics_action_exists() {
+        let source =
+            std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+                .expect("TUI source should be readable as UTF-8");
+        assert!(source.contains("Diagnostics: d run  D export markdown"));
+
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        app.run_action("diagnostics.run");
+        assert!(
+            app.view
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.target.contains("Topology"))
+        );
+        app.run_action_with_fields("diagnostics.export", [("format", "markdown".to_string())]);
+        assert!(app.last_message.contains("STORE_BACKED"));
+    }
+
+    #[test]
+    fn tui_action_feedback_shows_capability_status() {
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        app.run_action("set.expand");
+        assert!(app.last_message.contains("READONLY"));
+        app.run_action("service.start");
+        assert!(app.last_message.contains("UNSUPPORTED"));
+    }
+
+    #[test]
     fn tui_source_keeps_utf8_chinese_text_without_mojibake() {
         let source =
             std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
@@ -921,7 +1143,8 @@ mod tests {
         assert!(
             source.contains("原生 TUI")
                 && source.contains("核心对象总览")
-                && source.contains("q/Esc 退出"),
+                && source.contains("q/Esc quit")
+                && source.contains("Endpoint Actions"),
             "TUI user-facing text must remain readable UTF-8 Chinese"
         );
         assert_no_mojibake(&source);

@@ -48,23 +48,29 @@ docs/release/
 - GUI/TUI Operation/LogView 观测：`orchestrator/core/src/view.rs` 从 Store 读取 Operation 与 OperationLog，GUI/TUI 展示 `operation_id`、状态、结果、错误、日志数量、日志消息、`created_at` 和 `updated_at`
 - Endpoint / Link 表单证据：`orchestrator/schemas/forms.yaml` 覆盖 Endpoint 的 `config` 和 Link 的 `scope`、`config_ref`、`secret_ref`、`policy`；`orchestrator/core/src/planner.rs` 会解析 JSON 字段并写入 Store，覆盖测试为 `endpoint_register_update_delete_and_health_write_store`、`link_create_update_delete_and_health_write_store`
 - DiagnosticReport 能力矩阵与发布证据：`build_diagnostic_report` 写入 services、sets、endpoints、links、operations、failed operations、unhealthy endpoints、unhealthy links、recent operation logs、database schema check、action matrix、unsupported capabilities 和 forbidden concept scan summary；`export_diagnostic_report` 支持 JSON 与 Markdown。覆盖测试为 `diagnostic_report_json_exports_observable_summary`、`diagnostic_report_builds_from_store_and_exports_json_and_markdown`
-- Orchestrator daemon 最小入口：`orchestrator/daemon` 提供 `GET /health`、Service/Set/Endpoint/Link/Operation/Topology/DiagnosticReport API，写操作转换为 core `ActionRequest` 并交给 `OrchestratorActionConsole` / `OrchestratorActionDispatcher`；覆盖测试为 `daemon_health_reports_orchestrator_api_status`、`daemon_endpoint_routes_use_core_dispatcher`、`daemon_operation_routes_expose_operation_state_and_logs`、`daemon_diagnostic_route_uses_core_diagnostic_report`、`daemon_decodes_http_requests_as_strict_utf8`
+- Orchestrator daemon action API：`orchestrator/daemon` 提供 `GET /health`、Service/Set/Endpoint/Link/Operation/Topology/DiagnosticReport API；`POST /actions`、Endpoint/Link health、Set expand/apply、Operation plan/confirm/apply/rollback/logs、DiagnosticReport run/read/export 都转换为 core `ActionRequest` 并交给 `OrchestratorActionConsole` / `OrchestratorActionDispatcher`
+- daemon Topology 刷新证据：`GET /topology` 从当前 Store 重新 build，能反映 `POST /endpoints` 和 `POST /links` 产生的 Endpoint/Link；覆盖测试为 `daemon_topology_reflects_endpoint_link_mutations`、`topology_is_rebuilt_from_store_after_actions`
+- daemon action route 覆盖测试：`daemon_health_reports_orchestrator_api_status`、`daemon_endpoint_routes_use_core_dispatcher`、`daemon_endpoint_health_route_dispatches_action`、`daemon_link_health_route_dispatches_action`、`daemon_set_expand_route_dispatches_action`、`daemon_set_apply_route_creates_operation`、`daemon_operation_routes_expose_operation_state_and_logs`、`daemon_operation_rollback_route_dispatches_action`、`daemon_diagnostic_route_uses_core_diagnostic_report`、`daemon_diagnostics_export_routes_work`、`daemon_decodes_http_requests_as_strict_utf8`
+- GUI 直接操作入口：Endpoint register/update/delete/health、Link create/update/delete/health、Set expand/apply、Operation confirm/apply/rollback/logs、DiagnosticReport run/export；覆盖测试为 `gui_endpoint_actions_are_directly_available`、`gui_link_actions_are_directly_available`、`gui_set_apply_is_directly_available`、`gui_diagnostics_export_is_directly_available`、`gui_action_feedback_shows_capability_status`
+- TUI 直接操作入口：`e/E/x/h` Endpoint、`l/L/X/H` Link、`s/S` Set、`c/a/u/o` Operation、`d/D` Diagnostics；覆盖测试为 `tui_endpoint_action_menu_exists`、`tui_link_action_menu_exists`、`tui_set_action_menu_exists`、`tui_diagnostics_action_exists`、`tui_action_feedback_shows_capability_status`
 - Orchestrator migration：`deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`
 
 ## 当前限制
 
-- LocalProcessDriver 尚未接入安全 supervisor，因此生命周期动作返回 Unsupported。
-- DockerComposeDriver 默认只返回固定命令计划并阻止假成功；显式执行模式会运行固定 `docker compose` 参数数组，实际成功仍取决于本机 Docker/Compose 环境。
+- Action Console 中的 Service 生命周期动作仍返回 `UNSUPPORTED`，不显示假成功。
+- LocalProcessDriver 尚未接入安全 supervisor，因此生命周期动作不能作为真实启动/停止入口。
+- DockerComposeDriver 只保留固定 driver 能力；Action Console 当前不把它暴露为默认成功路径。显式执行模式实际成功仍取决于本机 Docker/Compose 环境。
 - Orchestrator daemon 当前是最小 HTTP API 入口；远程部署 agent、跨主机发布系统和生产级运维外壳尚未实现。
 
 ## 最近本地验证
 
 ```powershell
 cargo fmt --check
-cargo check -p orchestrator-core -p ojos-orchestrator-gui -p ojos-orchestrator-tui
+cargo check -p orchestrator-core -p ojos-orchestrator-gui -p ojos-orchestrator-tui -p ojos-orchestrator-daemon
 cargo test -p orchestrator-core
 cargo test -p ojos-orchestrator-gui
 cargo test -p ojos-orchestrator-tui
+cargo test -p ojos-orchestrator-daemon
 ```
 
 结果：通过。Go 与 Frontend 本轮未触及，未重跑。

@@ -17,6 +17,28 @@ orchestrator/schemas/errors.yaml
 
 两者现在都通过 `OrchestratorActionConsole` 调用 `OrchestratorActionDispatcher`，不直接修改 Store。GUI 的按钮和 TUI 的快捷键会提交同一类 `ActionRequest`，执行后显示 `REAL`、`STORE_BACKED`、`UNSUPPORTED` 或 `READONLY`，并从 Store 重新加载视图。
 
+GUI 已提供明确操作入口：
+
+```text
+Endpoint 页面：注册、更新、删除、检查 Endpoint Health
+Link 页面：创建、更新、删除、检查 Link Health
+Set 页面：展开 Set、应用 Set
+Operation 页面：Confirm、Apply、Rollback、查看 Logs
+Diagnostics 页面：生成 DiagnosticReport、导出 JSON、导出 Markdown
+```
+
+TUI 提供等价快捷入口：
+
+```text
+Endpoint Actions: e register / E update / x delete / h health check
+Link Actions: l create / L update / X delete / H health check
+Set Actions: s expand / S apply
+Operation Actions: c confirm / a apply / u rollback / o logs
+Diagnostics: d run / D export markdown
+```
+
+这些入口不是纯信息陈列。入口调用同一个 app action 方法，最终提交到 core dispatcher；成功、失败、`UNSUPPORTED` 或 `READONLY` 都会回写反馈文本并刷新 Store-backed 视图。
+
 当前入口默认可以从仓库文件生成本地视图；当存在 `ORCHESTRATOR_DATABASE_URL` 时，`load_orchestrator_view` 会优先尝试 `PgOrchestratorStore`，读取真实 Orchestrator Store 状态。数据库不可用时会回落本地视图并显示 warning。
 
 Operation 工作台同样由 core 统一选择 Store。未设置 `ORCHESTRATOR_DATABASE_URL` 时，plan、confirm、apply、rollback 使用 `MemoryOrchestratorStore` 进行本地演示；设置该变量时，工作台 context 会先从 `PgOrchestratorStore` 读取当前 Service、Set、Endpoint、Link、Topology，再把 plan/update 写成 `PLANNED` Operation，confirm 写成 `AWAITING_CONFIRMATION`，apply/rollback 由 `OperationExecutor` 写入 operation 状态、step log、result 和 rollback 记录。
@@ -28,6 +50,16 @@ GUI/TUI 操作证据：
 ```text
 gui_exposes_dispatcher_backed_actions
 tui_exposes_dispatcher_backed_actions
+gui_endpoint_actions_are_directly_available
+gui_link_actions_are_directly_available
+gui_set_apply_is_directly_available
+gui_diagnostics_export_is_directly_available
+gui_action_feedback_shows_capability_status
+tui_endpoint_action_menu_exists
+tui_link_action_menu_exists
+tui_set_action_menu_exists
+tui_diagnostics_action_exists
+tui_action_feedback_shows_capability_status
 gui_fonts_force_required_cjk_font_for_all_text_styles
 orchestrator_code_forbids_lossy_text_decoding
 gui_source_keeps_utf8_chinese_text_without_mojibake

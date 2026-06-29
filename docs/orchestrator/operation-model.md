@@ -48,6 +48,8 @@ ExternalEndpointDriver
 
 GUI/TUI 通过 `OperationWorkbenchContext` 和 `OperationWorkbenchSession` 使用同一套状态机。GUI/TUI 可以生成 plan、confirm、apply、rollback，并查看 result、error、operation logs、`created_at` 和 `updated_at`；不能绕过 core 自行执行动作。
 
+daemon 也使用同一套状态机。`POST /operations/plan`、`POST /operations/{operation_id}/confirm`、`POST /operations/{operation_id}/apply`、`POST /operations/{operation_id}/rollback` 都转换为 `ActionRequest` 后交给 dispatcher；`GET /operations/{operation_id}` 和 `GET /operations/{operation_id}/logs` 只读取当前 Store 中的 Operation 与 OperationLogRecord。
+
 直接覆盖 Target B 生命周期的测试为：
 
 ```text
@@ -59,11 +61,13 @@ operation_rollback_updates_store
 operation_logs_can_be_reopened
 workbench_uses_store_backed_operation_lifecycle
 operation_lock_prevents_parallel_apply
+daemon_operation_routes_expose_operation_state_and_logs
+daemon_operation_rollback_route_dispatches_action
 ```
 
 `OrchestratorActionDispatcher` 是 GUI/TUI 的正式 action 执行入口。它会把表单字段转换为 `ActionRequest`，写入 `PLANNED` Operation，按 action 要求确认，然后调用 `OperationExecutor`。未接真实执行器的 action 会落为 `UNSUPPORTED`，写入失败 Operation 和 warning log，不能显示成功。
 
-当 `ORCHESTRATOR_DATABASE_URL` 存在时，`OperationWorkbenchContext` 会使用 `PgOrchestratorStore` 持久化工作台生成的 plan、confirm、apply 和 rollback。生成或更新 plan 时写入 `PLANNED` Operation；confirm 后写入 `AWAITING_CONFIRMATION` 和 `confirmed_at`；apply/rollback 继续由 `OperationExecutor` 写入 lock、step log、result、error 和最终状态。没有该变量时，工作台保持 `MemoryOrchestratorStore` 本地演示模式。
+当 `ORCHESTRATOR_DATABASE_URL` 存在时，`OperationWorkbenchContext` 会使用 `PgOrchestratorStore` 持久化工作台生成的 plan、confirm、apply 和 rollback。生成或更新 plan 时写入 `PLANNED` Operation；confirm 后写入 `AWAITING_CONFIRMATION` 和 `confirmed_at`；apply/rollback 继续由 `OperationExecutor` 写入 lock、step log、result、error 和最终状态。没有该变量时，工作台和 daemon 保持 `MemoryOrchestratorStore` 本地演示模式。
 
 日志读取只围绕 `LogView` 和 `OperationLogRecord`。core 提供按 `service_id`、`endpoint`、`operation_id`、`source_id` 过滤的查询能力，并要求 `LogView.path` 使用 service-scoped、operation-scoped 或 endpoint-scoped 策略；它不是任意文件浏览器，也不读取未登记路径。
 

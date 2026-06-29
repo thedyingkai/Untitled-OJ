@@ -117,6 +117,12 @@ fn route_api_request(
                 "action_result": console.dispatch(action)?,
             })))
         }
+        ("POST", ["actions"]) => {
+            let action = action_request_from_body(&request.body)?;
+            Ok(ApiResponse::ok(json!({
+                "action_result": console.dispatch(action)?,
+            })))
+        }
         ("PATCH", ["endpoints", endpoint]) => {
             validate_endpoint_id(endpoint)?;
             let action = action_from_body(
@@ -136,6 +142,23 @@ fn route_api_request(
                 [("endpoint", *endpoint), ("confirm", "true")],
             )?;
             Ok(ApiResponse::no_content(json!({
+                "action_result": console.dispatch(action)?,
+            })))
+        }
+        ("POST", ["endpoints", endpoint, "health"]) => {
+            validate_endpoint_id(endpoint)?;
+            let action = action_from_body(
+                "endpoint.health.check",
+                &request.body,
+                [("endpoint", *endpoint)],
+            )?;
+            Ok(ApiResponse::ok(json!({
+                "action_result": console.dispatch(action)?,
+            })))
+        }
+        ("POST", ["endpoints", "health"]) => {
+            let action = action_from_body("endpoint.health.check", &request.body, [])?;
+            Ok(ApiResponse::ok(json!({
                 "action_result": console.dispatch(action)?,
             })))
         }
@@ -180,15 +203,49 @@ fn route_api_request(
                 "action_result": console.dispatch(action)?,
             })))
         }
+        ("POST", ["links", source, target, "health"]) => {
+            validate_endpoint_id(source)?;
+            validate_endpoint_id(target)?;
+            let action = action_from_body(
+                "link.health.check",
+                &request.body,
+                [("source_endpoint", *source), ("target_endpoint", *target)],
+            )?;
+            Ok(ApiResponse::ok(json!({
+                "action_result": console.dispatch(action)?,
+            })))
+        }
+        ("POST", ["links", "health"]) => {
+            let action = action_from_body("link.health.check", &request.body, [])?;
+            Ok(ApiResponse::ok(json!({
+                "action_result": console.dispatch(action)?,
+            })))
+        }
+        ("POST", ["sets", set_id, "expand"]) => {
+            let action = action_from_body("set.expand", &request.body, [("set_id", *set_id)])?;
+            Ok(ApiResponse::ok(json!({
+                "action_result": console.dispatch(action)?,
+            })))
+        }
+        ("POST", ["sets", set_id, "apply"]) => {
+            let mut action = action_from_body("set.apply", &request.body, [("set_id", *set_id)])?;
+            action.fields.remove("confirm");
+            Ok(ApiResponse::created(json!({
+                "action_result": console.dispatch(action)?,
+            })))
+        }
         ("GET", ["operations"]) => Ok(ApiResponse::ok(json!({
             "operations": console.view()?.operations,
         }))),
+        ("POST", ["operations", "plan"]) => {
+            let action = action_from_body("operation.plan", &request.body, [])?;
+            Ok(ApiResponse::created(json!({
+                "action_result": console.dispatch(action)?,
+            })))
+        }
         ("GET", ["operations", operation_id]) => {
             let operation = console
-                .view()?
-                .operations
-                .into_iter()
-                .find(|operation| operation.operation_id == *operation_id)
+                .operation(operation_id)?
                 .ok_or_else(|| anyhow!("operation {operation_id} not found"))?;
             Ok(ApiResponse::ok(json!({ "operation": operation })))
         }
@@ -211,22 +268,59 @@ fn route_api_request(
             })))
         }
         ("GET", ["operations", operation_id, "logs"]) => {
-            let logs = console
-                .view()?
-                .logs
-                .into_iter()
-                .filter(|log| log.operation_id == *operation_id)
-                .collect::<Vec<_>>();
+            let logs = console.operation_logs(operation_id)?;
             Ok(ApiResponse::ok(json!({ "logs": logs })))
         }
         ("GET", ["topology"]) => Ok(ApiResponse::ok(json!({
-            "topology": console.context()?.topology,
+            "topology": console.topology()?,
         }))),
         ("POST", ["diagnostics"]) => {
             let action = action_from_body("diagnostics.run", &request.body, [])?;
             Ok(ApiResponse::created(json!({
                 "action_result": console.dispatch(action)?,
             })))
+        }
+        ("GET", [report_file]) if report_file.ends_with(".json") => {
+            let report_id = report_file.trim_end_matches(".json");
+            let export = console.diagnostic_export(report_id, "json")?;
+            Ok(ApiResponse::ok(json!({
+                "report_id": export.report_id,
+                "format": export.format,
+                "content": export.content,
+            })))
+        }
+        ("GET", [report_file]) if report_file.ends_with(".md") => {
+            let report_id = report_file.trim_end_matches(".md");
+            let export = console.diagnostic_export(report_id, "markdown")?;
+            Ok(ApiResponse::ok(json!({
+                "report_id": export.report_id,
+                "format": export.format,
+                "content": export.content,
+            })))
+        }
+        ("GET", ["diagnostics", report_file]) if report_file.ends_with(".json") => {
+            let report_id = report_file.trim_end_matches(".json");
+            let export = console.diagnostic_export(report_id, "json")?;
+            Ok(ApiResponse::ok(json!({
+                "report_id": export.report_id,
+                "format": export.format,
+                "content": export.content,
+            })))
+        }
+        ("GET", ["diagnostics", report_file]) if report_file.ends_with(".md") => {
+            let report_id = report_file.trim_end_matches(".md");
+            let export = console.diagnostic_export(report_id, "markdown")?;
+            Ok(ApiResponse::ok(json!({
+                "report_id": export.report_id,
+                "format": export.format,
+                "content": export.content,
+            })))
+        }
+        ("GET", ["diagnostics", report_id]) => {
+            let report = console
+                .diagnostic_report(report_id)?
+                .ok_or_else(|| anyhow!("diagnostic report {report_id} not found"))?;
+            Ok(ApiResponse::ok(json!({ "diagnostic_report": report })))
         }
         _ => Ok(ApiResponse::error(
             404,
@@ -236,6 +330,36 @@ fn route_api_request(
             ),
         )),
     }
+}
+
+fn action_request_from_body(body: &str) -> Result<ActionRequest> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("POST /actions requires a JSON body"));
+    }
+    let value = serde_json::from_str::<Value>(trimmed)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("request body must be a JSON object"))?;
+    let action = object
+        .get("action")
+        .or_else(|| object.get("action_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("POST /actions requires action"))?;
+    let mut request = default_console_request(action)?;
+    for (key, value) in object {
+        match key.as_str() {
+            "action" | "action_id" => {}
+            "operation_id" => request.operation_id = field_value(value)?,
+            "fields" => {
+                merge_json_fields(&mut request.fields, value)?;
+            }
+            _ => {
+                request.fields.insert(key.clone(), field_value(value)?);
+            }
+        }
+    }
+    Ok(request)
 }
 
 fn action_from_body<const N: usize>(
@@ -488,6 +612,56 @@ mod tests {
         }
     }
 
+    fn post_json(console: &mut OrchestratorActionConsole, path: &str, body: &str) -> ApiResponse {
+        route_api_request(console, request("POST", path, body)).expect("POST response")
+    }
+
+    fn get(console: &mut OrchestratorActionConsole, path: &str) -> ApiResponse {
+        route_api_request(console, request("GET", path, "")).expect("GET response")
+    }
+
+    fn seed_gateway_auth_link(console: &mut OrchestratorActionConsole) {
+        let gateway = post_json(
+            console,
+            "/endpoints",
+            r#"{
+                "operation_id": "op-daemon-gateway-endpoint",
+                "endpoint": "127.0.0.1:19180",
+                "service_id": "gateway",
+                "protocol": "http",
+                "health_path": "/health"
+            }"#,
+        );
+        assert_eq!(gateway.status, 201);
+
+        let auth = post_json(
+            console,
+            "/endpoints",
+            r#"{
+                "operation_id": "op-daemon-auth-endpoint",
+                "endpoint": "127.0.0.1:19181",
+                "service_id": "auth",
+                "protocol": "http",
+                "health_path": "/health"
+            }"#,
+        );
+        assert_eq!(auth.status, 201);
+
+        let link = post_json(
+            console,
+            "/links",
+            r#"{
+                "operation_id": "op-daemon-gateway-auth-link",
+                "source_endpoint": "127.0.0.1:19180",
+                "target_endpoint": "127.0.0.1:19181",
+                "protocol": "http",
+                "auth_mode": "internal",
+                "scope": "gateway-to-auth"
+            }"#,
+        );
+        assert_eq!(link.status, 201);
+    }
+
     #[test]
     fn daemon_health_reports_orchestrator_api_status() {
         let mut console = console();
@@ -590,6 +764,225 @@ mod tests {
         assert_eq!(
             response.body["action_result"]["action_id"],
             "diagnostics.run"
+        );
+    }
+
+    #[test]
+    fn daemon_topology_reflects_endpoint_link_mutations() {
+        let mut console = console();
+        seed_gateway_auth_link(&mut console);
+
+        let response = get(&mut console, "/topology");
+        assert_eq!(response.status, 200);
+        let endpoints = response.body["topology"]["endpoints"]
+            .as_array()
+            .expect("topology endpoints");
+        assert!(
+            endpoints
+                .iter()
+                .any(|endpoint| endpoint["endpoint"] == "127.0.0.1:19180")
+        );
+        assert!(
+            endpoints
+                .iter()
+                .any(|endpoint| endpoint["endpoint"] == "127.0.0.1:19181")
+        );
+        let links = response.body["topology"]["links"]
+            .as_array()
+            .expect("topology links");
+        assert!(links.iter().any(|link| {
+            link["source_endpoint"] == "127.0.0.1:19180"
+                && link["target_endpoint"] == "127.0.0.1:19181"
+        }));
+    }
+
+    #[test]
+    fn topology_is_rebuilt_from_store_after_actions() {
+        let mut console = console();
+        let before = get(&mut console, "/topology");
+        let before_count = before.body["topology"]["endpoints"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or_default();
+
+        let response = post_json(
+            &mut console,
+            "/actions",
+            r#"{
+                "action": "endpoint.register",
+                "operation_id": "op-daemon-actions-endpoint",
+                "fields": {
+                    "endpoint": "127.0.0.1:19182",
+                    "service_id": "gateway",
+                    "protocol": "http"
+                }
+            }"#,
+        );
+        assert_eq!(
+            response.body["action_result"]["action_id"],
+            "endpoint.register"
+        );
+
+        let after = get(&mut console, "/topology");
+        let endpoints = after.body["topology"]["endpoints"]
+            .as_array()
+            .expect("topology endpoints");
+        assert!(endpoints.len() >= before_count);
+        assert!(
+            endpoints
+                .iter()
+                .any(|endpoint| endpoint["endpoint"] == "127.0.0.1:19182")
+        );
+    }
+
+    #[test]
+    fn daemon_endpoint_health_route_dispatches_action() {
+        let mut console = console();
+        seed_gateway_auth_link(&mut console);
+
+        let response = post_json(&mut console, "/endpoints/127.0.0.1%3A19180/health", "{}");
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body["action_result"]["action_id"],
+            "endpoint.health.check"
+        );
+        assert_eq!(response.body["action_result"]["capability_status"], "REAL");
+        assert!(
+            !response.body["action_result"]["logs"]
+                .as_array()
+                .expect("logs")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn daemon_link_health_route_dispatches_action() {
+        let mut console = console();
+        seed_gateway_auth_link(&mut console);
+
+        let response = post_json(
+            &mut console,
+            "/links/127.0.0.1%3A19180/127.0.0.1%3A19181/health",
+            "{}",
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body["action_result"]["action_id"],
+            "link.health.check"
+        );
+        assert_eq!(response.body["action_result"]["capability_status"], "REAL");
+    }
+
+    #[test]
+    fn daemon_set_expand_route_dispatches_action() {
+        let mut console = console();
+        let response = post_json(&mut console, "/sets/single-node-oj/expand", "{}");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["action_result"]["action_id"], "set.expand");
+        assert_eq!(
+            response.body["action_result"]["capability_status"],
+            "READONLY"
+        );
+        assert_eq!(
+            response.body["action_result"]["result"]["set_id"],
+            "single-node-oj"
+        );
+    }
+
+    #[test]
+    fn daemon_set_apply_route_creates_operation() {
+        let mut console = console();
+        let response = post_json(
+            &mut console,
+            "/sets/single-node-oj/apply",
+            r#"{"operation_id": "op-daemon-set-apply"}"#,
+        );
+        assert_eq!(response.status, 201);
+        assert_eq!(response.body["action_result"]["action_id"], "set.apply");
+        assert_eq!(
+            response.body["action_result"]["capability_status"],
+            "STORE_BACKED"
+        );
+        assert_eq!(response.body["action_result"]["status"], "PLANNED");
+
+        let operation = get(&mut console, "/operations/op-daemon-set-apply");
+        assert_eq!(operation.status, 200);
+        assert_eq!(
+            operation.body["operation"]["operation_id"],
+            "op-daemon-set-apply"
+        );
+    }
+
+    #[test]
+    fn daemon_operation_rollback_route_dispatches_action() {
+        let mut console = console();
+        let response = post_json(
+            &mut console,
+            "/endpoints",
+            r#"{
+                "operation_id": "op-daemon-rollback-endpoint",
+                "endpoint": "127.0.0.1:19183",
+                "service_id": "gateway",
+                "protocol": "http"
+            }"#,
+        );
+        assert_eq!(response.status, 201);
+
+        let rollback = post_json(
+            &mut console,
+            "/operations/op-daemon-rollback-endpoint/rollback",
+            "{}",
+        );
+        assert_eq!(rollback.status, 200);
+        assert_eq!(
+            rollback.body["action_result"]["action_id"],
+            "endpoint.register"
+        );
+        assert_eq!(rollback.body["action_result"]["status"], "ROLLED_BACK");
+    }
+
+    #[test]
+    fn daemon_diagnostics_export_routes_work() {
+        let mut console = console();
+        let run = post_json(
+            &mut console,
+            "/diagnostics",
+            r#"{"operation_id": "op-daemon-diagnostics"}"#,
+        );
+        assert_eq!(run.status, 201);
+        let report_id = run.body["action_result"]["changed_objects"]
+            .as_array()
+            .expect("changed objects")
+            .iter()
+            .find_map(|value| value.as_str())
+            .and_then(|value| value.strip_prefix("DiagnosticReport:"))
+            .expect("diagnostic report id");
+
+        let report = get(&mut console, &format!("/diagnostics/{report_id}"));
+        assert_eq!(report.status, 200);
+        assert_eq!(
+            report.body["diagnostic_report"]["report_id"],
+            json!(report_id)
+        );
+
+        let json_export = get(&mut console, &format!("/diagnostics/{report_id}.json"));
+        assert_eq!(json_export.status, 200);
+        assert_eq!(json_export.body["format"], "json");
+        assert!(
+            json_export.body["content"]
+                .as_str()
+                .expect("json content")
+                .contains(report_id)
+        );
+
+        let markdown_export = get(&mut console, &format!("/diagnostics/{report_id}.md"));
+        assert_eq!(markdown_export.status, 200);
+        assert_eq!(markdown_export.body["format"], "markdown");
+        assert!(
+            markdown_export.body["content"]
+                .as_str()
+                .expect("markdown content")
+                .contains("# DiagnosticReport")
         );
     }
 

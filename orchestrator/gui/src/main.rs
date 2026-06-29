@@ -116,6 +116,48 @@ impl GuiApp {
         self.dispatch_current("operation.rollback");
     }
 
+    fn run_action(&mut self, action: &str) {
+        self.run_action_with_fields(action, []);
+    }
+
+    fn run_action_with_fields<const N: usize>(
+        &mut self,
+        action: &str,
+        fields: [(&str, String); N],
+    ) {
+        self.select_action(action);
+        for (field, value) in fields {
+            self.update_field(field, value);
+        }
+        self.apply_session();
+    }
+
+    fn run_endpoint_action(&mut self, action: &str, endpoint: Option<String>) {
+        match endpoint {
+            Some(endpoint) => self.run_action_with_fields(action, [("endpoint", endpoint)]),
+            None => self.run_action(action),
+        }
+    }
+
+    fn run_link_action(&mut self, action: &str, source: Option<String>, target: Option<String>) {
+        match (source, target) {
+            (Some(source), Some(target)) => self.run_action_with_fields(
+                action,
+                [("source_endpoint", source), ("target_endpoint", target)],
+            ),
+            _ => self.run_action(action),
+        }
+    }
+
+    fn run_operation_logs_view(&mut self, operation_id: Option<String>) {
+        match operation_id {
+            Some(operation_id) => {
+                self.run_action_with_fields("operation.logs.view", [("operation_id", operation_id)])
+            }
+            None => self.run_action("operation.logs.view"),
+        }
+    }
+
     fn dispatch_current(&mut self, action: &str) {
         let request = if action == "operation.confirm"
             || action == "operation.apply"
@@ -205,13 +247,13 @@ impl eframe::App for GuiApp {
             egui::ScrollArea::both().show(ui, |ui| match self.page {
                 OrchestratorViewPage::Overview => draw_overview(ui, &self.view),
                 OrchestratorViewPage::Services => draw_services(ui, &self.view),
-                OrchestratorViewPage::Sets => draw_sets(ui, &self.view),
-                OrchestratorViewPage::Endpoints => draw_endpoints(ui, &self.view),
-                OrchestratorViewPage::Links => draw_links(ui, &self.view),
+                OrchestratorViewPage::Sets => draw_sets(ui, self),
+                OrchestratorViewPage::Endpoints => draw_endpoints(ui, self),
+                OrchestratorViewPage::Links => draw_links(ui, self),
                 OrchestratorViewPage::Operations => draw_operations(ui, self),
                 OrchestratorViewPage::Topology => draw_topology(ui, &self.view),
                 OrchestratorViewPage::Logs => draw_logs(ui, &self.view),
-                OrchestratorViewPage::Diagnostics => draw_diagnostics(ui, &self.view),
+                OrchestratorViewPage::Diagnostics => draw_diagnostics(ui, self),
             });
         });
     }
@@ -270,11 +312,21 @@ fn draw_services(ui: &mut egui::Ui, view: &OrchestratorView) {
         });
 }
 
-fn draw_sets(ui: &mut egui::Ui, view: &OrchestratorView) {
+fn draw_sets(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.heading("Set");
+    ui.horizontal(|ui| {
+        ui.strong("Set Actions");
+        if ui.button("展开 Set").clicked() {
+            app.run_action("set.expand");
+        }
+        if ui.button("应用 Set").clicked() {
+            app.run_action("set.apply");
+        }
+    });
+    ui.separator();
     egui::Grid::new("sets_grid").striped(true).show(ui, |ui| {
         header(ui, &["ID", "名称", "Service", "Link", "范围"]);
-        for set in &view.sets {
+        for set in &app.view.sets {
             ui.monospace(&set.id);
             ui.label(&set.name);
             ui.label(&set.services);
@@ -285,13 +337,34 @@ fn draw_sets(ui: &mut egui::Ui, view: &OrchestratorView) {
     });
 }
 
-fn draw_endpoints(ui: &mut egui::Ui, view: &OrchestratorView) {
+fn draw_endpoints(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.heading("Endpoint = IP:Port");
+    let selected_endpoint = app
+        .view
+        .endpoints
+        .first()
+        .map(|endpoint| endpoint.endpoint.clone());
+    ui.horizontal(|ui| {
+        ui.strong("Endpoint Actions");
+        if ui.button("注册 Endpoint").clicked() {
+            app.run_action("endpoint.register");
+        }
+        if ui.button("更新 Endpoint").clicked() {
+            app.run_endpoint_action("endpoint.update", selected_endpoint.clone());
+        }
+        if ui.button("删除 Endpoint").clicked() {
+            app.run_endpoint_action("endpoint.delete", selected_endpoint.clone());
+        }
+        if ui.button("检查 Endpoint Health").clicked() {
+            app.run_endpoint_action("endpoint.health.check", selected_endpoint.clone());
+        }
+    });
+    ui.separator();
     egui::Grid::new("endpoints_grid")
         .striped(true)
         .show(ui, |ui| {
             header(ui, &["Endpoint", "Service", "协议", "暴露", "来源"]);
-            for endpoint in &view.endpoints {
+            for endpoint in &app.view.endpoints {
                 ui.monospace(&endpoint.endpoint);
                 ui.label(&endpoint.service_id);
                 ui.label(&endpoint.protocol);
@@ -302,11 +375,34 @@ fn draw_endpoints(ui: &mut egui::Ui, view: &OrchestratorView) {
         });
 }
 
-fn draw_links(ui: &mut egui::Ui, view: &OrchestratorView) {
+fn draw_links(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.heading("Link");
+    let selected_link = app
+        .view
+        .links
+        .first()
+        .map(|link| (link.from.clone(), link.to.clone()));
+    let source = selected_link.as_ref().map(|(source, _)| source.clone());
+    let target = selected_link.as_ref().map(|(_, target)| target.clone());
+    ui.horizontal(|ui| {
+        ui.strong("Link Actions");
+        if ui.button("创建 Link").clicked() {
+            app.run_action("link.create");
+        }
+        if ui.button("更新 Link").clicked() {
+            app.run_link_action("link.update", source.clone(), target.clone());
+        }
+        if ui.button("删除 Link").clicked() {
+            app.run_link_action("link.delete", source.clone(), target.clone());
+        }
+        if ui.button("检查 Link Health").clicked() {
+            app.run_link_action("link.health.check", source.clone(), target.clone());
+        }
+    });
+    ui.separator();
     egui::Grid::new("links_grid").striped(true).show(ui, |ui| {
         header(ui, &["Source", "Target", "协议", "认证", "范围", "来源"]);
-        for link in &view.links {
+        for link in &app.view.links {
             ui.label(&link.from);
             ui.label(&link.to);
             ui.label(&link.protocol);
@@ -320,6 +416,29 @@ fn draw_links(ui: &mut egui::Ui, view: &OrchestratorView) {
 
 fn draw_operations(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.heading("Operation 工作台");
+    let selected_operation = app
+        .view
+        .operations
+        .iter()
+        .find(|operation| operation.status != "CATALOG")
+        .map(|operation| operation.operation_id.clone())
+        .or_else(|| Some(app.session.current_operation.operation_id.clone()));
+    ui.horizontal(|ui| {
+        ui.strong("Operation Actions");
+        if ui.button("Confirm").clicked() {
+            app.confirm_session();
+        }
+        if ui.button("Apply").clicked() {
+            app.apply_session();
+        }
+        if ui.button("Rollback").clicked() {
+            app.rollback_session();
+        }
+        if ui.button("查看 Logs").clicked() {
+            app.run_operation_logs_view(selected_operation.clone());
+        }
+    });
+    ui.separator();
     let workbench = OperationWorkbenchView::from_session(&app.session);
     draw_operation_workbench(ui, app, &workbench);
     ui.heading("Operation Action Registry");
@@ -501,13 +620,26 @@ fn draw_logs(ui: &mut egui::Ui, view: &OrchestratorView) {
     });
 }
 
-fn draw_diagnostics(ui: &mut egui::Ui, view: &OrchestratorView) {
+fn draw_diagnostics(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.heading("DiagnosticReport");
+    ui.horizontal(|ui| {
+        ui.strong("Diagnostics");
+        if ui.button("生成 DiagnosticReport").clicked() {
+            app.run_action("diagnostics.run");
+        }
+        if ui.button("导出 JSON").clicked() {
+            app.run_action_with_fields("diagnostics.export", [("format", "json".to_string())]);
+        }
+        if ui.button("导出 Markdown").clicked() {
+            app.run_action_with_fields("diagnostics.export", [("format", "markdown".to_string())]);
+        }
+    });
+    ui.separator();
     egui::Grid::new("diagnostics_grid")
         .striped(true)
         .show(ui, |ui| {
             header(ui, &["目标", "状态", "摘要"]);
-            for diagnostic in &view.diagnostics {
+            for diagnostic in &app.view.diagnostics {
                 ui.label(&diagnostic.target);
                 ui.label(&diagnostic.status);
                 ui.label(&diagnostic.summary);
@@ -628,6 +760,14 @@ unsafe extern "system" {
 mod tests {
     use super::*;
 
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("repo root")
+            .to_path_buf()
+    }
+
     #[test]
     fn gui_pages_cover_the_same_core_objects_as_tui() {
         let titles = OrchestratorViewPage::all()
@@ -652,13 +792,8 @@ mod tests {
 
     #[test]
     fn gui_loads_shared_operation_workbench_from_core() {
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|path| path.parent())
-            .expect("repo root")
-            .to_path_buf();
         let app =
-            GuiApp::new_memory(repo_root).expect("GUI app should load orchestrator/core view");
+            GuiApp::new_memory(repo_root()).expect("GUI app should load orchestrator/core view");
         let workbench = OperationWorkbenchView::from_session(&app.session);
         assert_eq!(workbench.selected_action, "service.install");
         assert!(workbench.fields.contains("service_id*"));
@@ -678,12 +813,7 @@ mod tests {
 
     #[test]
     fn gui_exposes_dispatcher_backed_actions() {
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|path| path.parent())
-            .expect("repo root")
-            .to_path_buf();
-        let mut app = GuiApp::new_memory(repo_root).expect("GUI app should load");
+        let mut app = GuiApp::new_memory(repo_root()).expect("GUI app should load");
         app.select_action("endpoint.register");
         app.update_field("endpoint", "127.0.0.1:19001".to_string());
         app.update_field("service_id", "gateway".to_string());
@@ -715,6 +845,176 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("UNSUPPORTED")),
             "GUI must not report unsupported lifecycle actions as success"
+        );
+    }
+
+    #[test]
+    fn gui_endpoint_actions_are_directly_available() {
+        let mut app = GuiApp::new_memory(repo_root()).expect("GUI app should load");
+        app.run_action_with_fields(
+            "endpoint.register",
+            [
+                ("endpoint", "127.0.0.1:19201".to_string()),
+                ("service_id", "gateway".to_string()),
+                ("protocol", "http".to_string()),
+            ],
+        );
+        assert!(
+            app.view
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.endpoint == "127.0.0.1:19201")
+        );
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("STORE_BACKED"))
+        );
+
+        app.run_endpoint_action("endpoint.health.check", Some("127.0.0.1:19201".to_string()));
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("REAL"))
+        );
+
+        app.run_endpoint_action("endpoint.update", Some("127.0.0.1:19201".to_string()));
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("STORE_BACKED"))
+        );
+
+        app.run_endpoint_action("endpoint.delete", Some("127.0.0.1:19201".to_string()));
+        assert!(
+            !app.view
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.endpoint == "127.0.0.1:19201")
+        );
+    }
+
+    #[test]
+    fn gui_link_actions_are_directly_available() {
+        let mut app = GuiApp::new_memory(repo_root()).expect("GUI app should load");
+        for (endpoint, service_id) in [("127.0.0.1:19210", "gateway"), ("127.0.0.1:19211", "auth")]
+        {
+            app.run_action_with_fields(
+                "endpoint.register",
+                [
+                    ("endpoint", endpoint.to_string()),
+                    ("service_id", service_id.to_string()),
+                    ("protocol", "http".to_string()),
+                ],
+            );
+        }
+
+        app.run_action_with_fields(
+            "link.create",
+            [
+                ("source_endpoint", "127.0.0.1:19210".to_string()),
+                ("target_endpoint", "127.0.0.1:19211".to_string()),
+            ],
+        );
+        assert!(
+            app.view
+                .links
+                .iter()
+                .any(|link| { link.from == "127.0.0.1:19210" && link.to == "127.0.0.1:19211" })
+        );
+
+        app.run_link_action(
+            "link.health.check",
+            Some("127.0.0.1:19210".to_string()),
+            Some("127.0.0.1:19211".to_string()),
+        );
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("REAL"))
+        );
+
+        app.run_link_action(
+            "link.update",
+            Some("127.0.0.1:19210".to_string()),
+            Some("127.0.0.1:19211".to_string()),
+        );
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("STORE_BACKED"))
+        );
+
+        app.run_link_action(
+            "link.delete",
+            Some("127.0.0.1:19210".to_string()),
+            Some("127.0.0.1:19211".to_string()),
+        );
+        assert!(
+            !app.view
+                .links
+                .iter()
+                .any(|link| { link.from == "127.0.0.1:19210" && link.to == "127.0.0.1:19211" })
+        );
+    }
+
+    #[test]
+    fn gui_set_apply_is_directly_available() {
+        let mut app = GuiApp::new_memory(repo_root()).expect("GUI app should load");
+        app.run_action("set.expand");
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("READONLY"))
+        );
+
+        app.run_action("set.apply");
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("STORE_BACKED"))
+        );
+        assert!(
+            app.view
+                .operations
+                .iter()
+                .any(|operation| operation.action == "set.apply")
+        );
+    }
+
+    #[test]
+    fn gui_diagnostics_export_is_directly_available() {
+        let mut app = GuiApp::new_memory(repo_root()).expect("GUI app should load");
+        app.run_action("diagnostics.run");
+        assert!(
+            app.view
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.target.contains("Topology"))
+        );
+
+        app.run_action_with_fields("diagnostics.export", [("format", "markdown".to_string())]);
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("STORE_BACKED"))
+        );
+    }
+
+    #[test]
+    fn gui_action_feedback_shows_capability_status() {
+        let mut app = GuiApp::new_memory(repo_root()).expect("GUI app should load");
+        app.run_action("set.expand");
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("READONLY"))
+        );
+        app.run_action("service.start");
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("UNSUPPORTED"))
         );
     }
 

@@ -1,8 +1,9 @@
 use crate::{
-    ActionRequest, EndpointProbe, MemoryOrchestratorStore, Operation, OperationExecutor,
-    OperationLogRecord, OperationStatus, OrchestratorError, OrchestratorStore, PgOrchestratorStore,
-    Result, StaticEndpointProbe, TcpEndpointProbe, action_catalog, action_descriptor,
-    confirm_operation, default_action_request, expand_set, load_operation_workbench_context,
+    ActionRequest, DiagnosticExport, DiagnosticReport, EndpointProbe, MemoryOrchestratorStore,
+    Operation, OperationExecutor, OperationLogRecord, OperationStatus, OrchestratorError,
+    OrchestratorStore, PgOrchestratorStore, Result, StaticEndpointProbe, TcpEndpointProbe,
+    Topology, action_catalog, action_descriptor, confirm_operation, default_action_request,
+    expand_set, export_diagnostic_report, load_operation_workbench_context,
     load_operation_workbench_context_from_store, load_orchestrator_view_from_store,
     operation_log_record, operation_step_log_record, plan_action_request, plan_operation,
 };
@@ -510,6 +511,65 @@ impl OrchestratorActionConsole {
             }
         }
         load_operation_workbench_context_from_store(self.schemas.clone(), &self.memory_store)
+    }
+
+    pub fn topology(&self) -> Result<Topology> {
+        if self.uses_persistent_store() {
+            match PgOrchestratorStore::from_env().and_then(|store| store.build_topology_view()) {
+                Ok(topology) => return Ok(topology),
+                Err(err) => {
+                    let mut topology = self.memory_store.build_topology_view()?;
+                    topology.authority.notes.push(format!(
+                        "ORCHESTRATOR_DATABASE_URL store unavailable, using memory topology: {err}"
+                    ));
+                    return Ok(topology);
+                }
+            }
+        }
+        self.memory_store.build_topology_view()
+    }
+
+    pub fn operation(&self, operation_id: &str) -> Result<Option<Operation>> {
+        if self.uses_persistent_store() {
+            match PgOrchestratorStore::from_env()
+                .and_then(|store| store.get_operation(operation_id))
+            {
+                Ok(operation) => return Ok(operation),
+                Err(_) => return self.memory_store.get_operation(operation_id),
+            }
+        }
+        self.memory_store.get_operation(operation_id)
+    }
+
+    pub fn operation_logs(&self, operation_id: &str) -> Result<Vec<OperationLogRecord>> {
+        if self.uses_persistent_store() {
+            match PgOrchestratorStore::from_env()
+                .and_then(|store| store.list_operation_logs(operation_id))
+            {
+                Ok(logs) => return Ok(logs),
+                Err(_) => return self.memory_store.list_operation_logs(operation_id),
+            }
+        }
+        self.memory_store.list_operation_logs(operation_id)
+    }
+
+    pub fn diagnostic_report(&self, report_id: &str) -> Result<Option<DiagnosticReport>> {
+        if self.uses_persistent_store() {
+            match PgOrchestratorStore::from_env()
+                .and_then(|store| store.get_diagnostic_report(report_id))
+            {
+                Ok(report) => return Ok(report),
+                Err(_) => return self.memory_store.get_diagnostic_report(report_id),
+            }
+        }
+        self.memory_store.get_diagnostic_report(report_id)
+    }
+
+    pub fn diagnostic_export(&self, report_id: &str, format: &str) -> Result<DiagnosticExport> {
+        let report = self.diagnostic_report(report_id)?.ok_or_else(|| {
+            OrchestratorError::Dependency(format!("diagnostic report {report_id} not found"))
+        })?;
+        export_diagnostic_report(&report, format)
     }
 
     pub fn dispatch(&mut self, request: ActionRequest) -> Result<ActionDispatchResult> {

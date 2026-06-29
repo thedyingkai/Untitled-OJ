@@ -1,7 +1,7 @@
 use crate::{
     DiagnosticReport, Endpoint, Link, LogView, Operation, OperationLock, OperationLogRecord,
     OperationStatus, OrchestratorError, OrchestratorStore, Result, ServiceManifest, ServiceSet,
-    Topology, TopologySnapshot, validate_log_view,
+    Topology, TopologySnapshot, build_topology, validate_log_view,
 };
 use postgres::{Client, NoTls, Row, types::ToSql};
 use regex::Regex;
@@ -467,9 +467,34 @@ impl OrchestratorStore for PgOrchestratorStore {
     }
 
     fn build_topology_view(&self) -> Result<Topology> {
-        self.get_latest_topology_snapshot()?
-            .map(|snapshot| snapshot.topology)
-            .ok_or_else(|| OrchestratorError::Dependency("topology snapshot not found".to_string()))
+        let endpoints = self.list_endpoints()?;
+        if endpoints.is_empty() {
+            if let Some(snapshot) = self.get_latest_topology_snapshot()? {
+                return Ok(snapshot.topology);
+            }
+            return Err(OrchestratorError::Dependency(
+                "no endpoint for topology".to_string(),
+            ));
+        }
+        let root_endpoint = endpoints
+            .iter()
+            .find(|endpoint| endpoint.service_id == "gateway")
+            .or_else(|| endpoints.first())
+            .map(|endpoint| endpoint.endpoint.clone())
+            .ok_or_else(|| OrchestratorError::Dependency("no endpoint for topology".to_string()))?;
+        build_topology(
+            root_endpoint,
+            self.list_services()?
+                .into_iter()
+                .map(|service| service.id)
+                .collect(),
+            self.list_sets()?.into_iter().map(|set| set.id).collect(),
+            endpoints,
+            self.list_links()?,
+            self.list_operations()?,
+            self.list_log_sources()?,
+            self.list_diagnostic_reports()?,
+        )
     }
 
     fn delete_topology(&mut self, root_endpoint: &str) -> Result<()> {
