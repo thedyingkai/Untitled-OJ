@@ -43,7 +43,7 @@ docs/release/
 ## 当前限制
 
 - LocalProcessDriver 尚未接入安全 supervisor，因此生命周期动作返回 Unsupported。
-- DockerComposeDriver 当前构造固定命令；实际执行仍需要运行环境确认。
+- DockerComposeDriver 默认只返回固定命令计划；显式执行模式会运行固定 `docker compose` 参数数组，实际成功仍取决于本机 Docker/Compose 环境。
 - 远程部署 agent、跨主机发布系统和完整生产 daemon 尚未实现。
 
 ## 最近本地验证

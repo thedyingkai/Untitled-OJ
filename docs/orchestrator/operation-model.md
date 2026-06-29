@@ -40,7 +40,7 @@ ExternalEndpointDriver
 
 `LocalProcessDriver` 当前只允许健康检查和日志查看这类读动作；start/stop/restart 返回明确 Unsupported，直到接入安全 supervisor。
 
-`DockerComposeDriver` 只构造固定 `docker compose` 子命令，如 `up -d`、`stop`、`restart`、`rm`、`logs`、`ps`，不恢复 scripts。
+`DockerComposeDriver` 只构造固定 `docker compose` 子命令，如 `up -d`、`stop`、`restart`、`rm`、`logs`、`ps`，不恢复 scripts。默认模式只返回计划好的固定命令；显式启用执行模式后，core 通过参数数组调用固定 `docker compose` 命令，并把进程退出状态映射为 `SUCCEEDED` 或 `FAILED`。它仍不接受任意 shell、任意脚本路径或用户输入命令。
 
 `ExternalEndpointDriver` 只管理既有 Endpoint 的 metadata、health、logs 和 reachability，不代表额外的主机、设备或安装实例模型。
 

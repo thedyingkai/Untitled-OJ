@@ -2704,6 +2704,39 @@ fn fixed_executor_drivers_reject_arbitrary_actions() {
 }
 
 #[test]
+fn docker_compose_driver_runs_only_when_explicitly_enabled() {
+    let endpoint = Endpoint {
+        endpoint: "127.0.0.1:8080".to_string(),
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "unknown".to_string(),
+        reachable: false,
+        display_name: "Gateway".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let request = driver_request_for_endpoint("service.health.check", &endpoint);
+    let plan_only = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml")
+        .execute(&request)
+        .expect("plan-only docker compose driver");
+    assert_eq!(plan_only.status, "PLANNED");
+
+    let missing_binary = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml")
+        .with_docker_binary_for_test("ojos-docker-compose-missing")
+        .with_execution_enabled()
+        .execute(&request)
+        .expect_err("explicit execution should surface fixed command start errors");
+    assert!(
+        missing_binary
+            .to_string()
+            .contains("docker compose fixed command failed to start")
+    );
+}
+
+#[test]
 fn endpoint_and_link_health_checks_return_formal_statuses() {
     let source = Endpoint {
         endpoint: "127.0.0.1:8080".to_string(),

@@ -185,10 +185,29 @@ impl App {
 }
 
 fn main() -> Result<()> {
+    configure_utf8_console();
     let cli = Cli::parse();
     let repo_root = fs::canonicalize(&cli.repo_root).unwrap_or(cli.repo_root);
     let app = App::new(repo_root)?;
     run(app)
+}
+
+fn configure_utf8_console() {
+    #[cfg(windows)]
+    {
+        const CP_UTF8: u32 = 65001;
+        unsafe {
+            SetConsoleOutputCP(CP_UTF8);
+            SetConsoleCP(CP_UTF8);
+        }
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn SetConsoleOutputCP(code_page_id: u32) -> i32;
+    fn SetConsoleCP(code_page_id: u32) -> i32;
 }
 
 fn run(mut app: App) -> Result<()> {
