@@ -3223,6 +3223,142 @@ fn endpoint_and_link_health_checks_return_formal_statuses() {
 }
 
 #[test]
+fn operation_executor_persists_probed_endpoint_health() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:18080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: false,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+    let operation = endpoint_health_check_operation("op-probe-endpoint", "127.0.0.1:18080")
+        .expect("endpoint health operation");
+    store.put_operation(operation).expect("put operation");
+
+    let applied = OperationExecutor::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .apply("op-probe-endpoint")
+        .expect("apply endpoint health operation");
+    assert_eq!(applied.status, OperationStatus::Succeeded);
+    let endpoint = store
+        .endpoint("127.0.0.1:18080")
+        .expect("endpoint should exist");
+    assert_eq!(endpoint.health, "unreachable");
+    assert!(!endpoint.reachable);
+    assert!(
+        store
+            .operation_logs("op-probe-endpoint")
+            .iter()
+            .any(|record| record.step_id == "health:endpoint:127.0.0.1:18080"
+                && record.level == "warn"
+                && record
+                    .data
+                    .get("reachable")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)),
+        "endpoint health apply should persist probed health in operation logs"
+    );
+}
+
+#[test]
+fn operation_executor_persists_link_health_from_target_probe() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    let mut problem_api = valid_service();
+    problem_api.id = "problem-api".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store.put_service(problem_api).expect("put problem api");
+    let source = Endpoint {
+        endpoint: "127.0.0.1:18080".to_string(),
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "healthy".to_string(),
+        reachable: true,
+        display_name: "Gateway".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let target = Endpoint {
+        endpoint: "127.0.0.1:18081".to_string(),
+        service_id: "problem-api".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "healthy".to_string(),
+        reachable: false,
+        display_name: "Problem API".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    store.put_endpoint(source.clone()).expect("put source");
+    store.put_endpoint(target.clone()).expect("put target");
+    let link = Link {
+        source_endpoint: source.endpoint.clone(),
+        target_endpoint: target.endpoint.clone(),
+        protocol: "http".to_string(),
+        auth_mode: "internal".to_string(),
+        scope: "api".to_string(),
+        health: "healthy".to_string(),
+        latency_ms: Some(1),
+        config_ref: String::new(),
+        secret_ref: String::new(),
+        policy: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    store.put_link(link.clone()).expect("put link");
+    let operation =
+        link_health_check_operation("op-probe-link", &link).expect("link health operation");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .apply("op-probe-link")
+        .expect("apply link health operation");
+    let stored_link = store
+        .get_link(&link.source_endpoint, &link.target_endpoint)
+        .expect("get link")
+        .expect("link should exist");
+    assert_eq!(stored_link.health, "unreachable");
+    assert_eq!(stored_link.latency_ms, None);
+    assert_eq!(
+        store
+            .endpoint(&target.endpoint)
+            .map(|endpoint| endpoint.health.as_str()),
+        Some("unreachable")
+    );
+    assert!(
+        store
+            .operation_logs("op-probe-link")
+            .iter()
+            .any(
+                |record| record.step_id == "health:link:127.0.0.1:18080->127.0.0.1:18081"
+                    && record
+                        .data
+                        .get("health")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("unreachable")
+            ),
+        "link health apply should persist computed link health in operation logs"
+    );
+}
+
+#[test]
 fn tcp_probe_checks_http_health_path_status() {
     let endpoint = local_http_endpoint(
         "/health",

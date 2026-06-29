@@ -1,10 +1,12 @@
 use crate::{
-    DiagnosticReport, DockerComposeDriver, DriverRequest, DriverResult, Endpoint, ExecutionDriver,
-    ExternalEndpointDriver, Link, LocalProcessDriver, LogView, Operation, OperationLock,
-    OperationLogRecord, OperationStatus, OrchestratorError, Result, RuntimeMode, ServiceManifest,
-    ServiceSet, Topology, TopologySnapshot, build_diagnostic_report, build_topology,
-    operation_log_record, operation_step_log_record, start_operation, succeed_operation,
-    validate_endpoint, validate_link, validate_log_view, validate_topology,
+    DiagnosticReport, DockerComposeDriver, DriverRequest, DriverResult, Endpoint,
+    EndpointHealthResult, EndpointProbe, ExecutionDriver, ExternalEndpointDriver, Link,
+    LinkHealthResult, LocalProcessDriver, LogView, Operation, OperationLock, OperationLogRecord,
+    OperationStatus, OrchestratorError, Result, RuntimeMode, ServiceManifest, ServiceSet,
+    StaticEndpointProbe, Topology, TopologySnapshot, build_diagnostic_report, build_topology,
+    check_endpoint_health_with_probe, check_link_health, operation_log_record,
+    operation_step_log_record, start_operation, succeed_operation, validate_endpoint,
+    validate_link, validate_log_view, validate_topology,
 };
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
@@ -534,13 +536,26 @@ impl OrchestratorStore for MemoryOrchestratorStore {
     }
 }
 
-pub struct OperationExecutor<'a, S: OrchestratorStore> {
+pub struct OperationExecutor<'a, S: OrchestratorStore, P: EndpointProbe = StaticEndpointProbe> {
     store: &'a mut S,
+    endpoint_probe: P,
 }
 
-impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
+impl<'a, S: OrchestratorStore> OperationExecutor<'a, S, StaticEndpointProbe> {
     pub fn new(store: &'a mut S) -> Self {
-        Self { store }
+        Self {
+            store,
+            endpoint_probe: StaticEndpointProbe,
+        }
+    }
+}
+
+impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
+    pub fn with_endpoint_probe(store: &'a mut S, endpoint_probe: P) -> Self {
+        Self {
+            store,
+            endpoint_probe,
+        }
     }
 
     pub fn apply(&mut self, operation_id: &str) -> Result<Operation> {
@@ -774,19 +789,40 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
                 }
             }
             "service.health.check" => {
-                if let Some(endpoint_id) = operation
+                ensure_service_exists(self.store, operation.target_id.as_str())?;
+                let requested_endpoint = operation
                     .request
                     .get("endpoint")
                     .and_then(serde_json::Value::as_str)
-                    .filter(|value| !value.is_empty())
-                {
-                    if self.store.get_endpoint(endpoint_id)?.is_some() {
-                        self.store.update_endpoint_health(
-                            endpoint_id,
-                            "healthy".to_string(),
-                            true,
-                        )?;
-                        changed.push(changed_object("Endpoint", endpoint_id));
+                    .filter(|value| !value.is_empty());
+                if let Some(endpoint_id) = requested_endpoint {
+                    let endpoint = self.store.get_endpoint(endpoint_id)?.ok_or_else(|| {
+                        OrchestratorError::Dependency(format!("endpoint {endpoint_id} not found"))
+                    })?;
+                    if endpoint.service_id != operation.target_id {
+                        return Err(OrchestratorError::Dependency(format!(
+                            "endpoint {endpoint_id} does not belong to service {}",
+                            operation.target_id
+                        )));
+                    }
+                    self.probe_endpoint_and_persist(&operation.operation_id, &endpoint)?;
+                    changed.push(changed_object("Endpoint", endpoint_id));
+                } else {
+                    let endpoints = self
+                        .store
+                        .list_endpoints()?
+                        .into_iter()
+                        .filter(|endpoint| endpoint.service_id == operation.target_id)
+                        .collect::<Vec<_>>();
+                    if endpoints.is_empty() {
+                        return Err(OrchestratorError::Dependency(format!(
+                            "service {} has no registered endpoints",
+                            operation.target_id
+                        )));
+                    }
+                    for endpoint in endpoints {
+                        self.probe_endpoint_and_persist(&operation.operation_id, &endpoint)?;
+                        changed.push(changed_object("Endpoint", &endpoint.endpoint));
                     }
                 }
             }
@@ -810,11 +846,10 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
             }
             "endpoint.health.check" => {
                 let endpoint_id = operation.target_id.as_str();
-                self.store.get_endpoint(endpoint_id)?.ok_or_else(|| {
+                let endpoint = self.store.get_endpoint(endpoint_id)?.ok_or_else(|| {
                     OrchestratorError::Dependency(format!("endpoint {endpoint_id} not found"))
                 })?;
-                self.store
-                    .update_endpoint_health(endpoint_id, "healthy".to_string(), true)?;
+                self.probe_endpoint_and_persist(&operation.operation_id, &endpoint)?;
                 changed.push(changed_object("Endpoint", endpoint_id));
             }
             "link.create" | "link.update" => {
@@ -830,25 +865,38 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
                 changed.push(changed_object("Link", &link_target_id(&link)));
             }
             "link.health.check" => {
-                let link = link_from_operation(operation);
-                let target = link_target_id(&link);
-                if self
+                let requested = link_from_operation(operation);
+                let link = self
                     .store
-                    .get_link(&link.source_endpoint, &link.target_endpoint)?
-                    .is_some()
+                    .get_link(&requested.source_endpoint, &requested.target_endpoint)?
+                    .ok_or_else(|| {
+                        OrchestratorError::Dependency(format!(
+                            "link {} not found",
+                            link_target_id(&requested)
+                        ))
+                    })?;
+                let target = link_target_id(&link);
+                let endpoints = self.store.list_endpoints()?;
+                let target_health = if let Some(endpoint) = endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.endpoint == link.target_endpoint)
                 {
-                    self.store.update_link_health(
-                        &link.source_endpoint,
-                        &link.target_endpoint,
-                        "healthy".to_string(),
-                        Some(0),
-                    )?;
-                    changed.push(changed_object("Link", &target));
+                    self.probe_endpoint_and_persist(&operation.operation_id, endpoint)?
                 } else {
-                    return Err(OrchestratorError::Dependency(format!(
-                        "link {target} not found"
-                    )));
-                }
+                    missing_target_health(&link)
+                };
+                let link_health = check_link_health(&link, &endpoints, &target_health)?;
+                self.store.update_link_health(
+                    &link.source_endpoint,
+                    &link.target_endpoint,
+                    link_health.health.clone(),
+                    link_health.latency_ms,
+                )?;
+                self.store.append_operation_log(link_health_log_record(
+                    &operation.operation_id,
+                    &link_health,
+                ))?;
+                changed.push(changed_object("Link", &target));
             }
             "topology.apply" => {
                 let topology: Topology = request_value(operation, "topology_snapshot")?;
@@ -979,6 +1027,22 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
             changed.push(changed_object("Link", &target));
         }
         Ok(())
+    }
+
+    fn probe_endpoint_and_persist(
+        &mut self,
+        operation_id: &str,
+        endpoint: &Endpoint,
+    ) -> Result<EndpointHealthResult> {
+        let health = check_endpoint_health_with_probe(endpoint, &self.endpoint_probe)?;
+        self.store.update_endpoint_health(
+            &health.endpoint,
+            health.health.clone(),
+            health.reachable,
+        )?;
+        self.store
+            .append_operation_log(endpoint_health_log_record(operation_id, &health))?;
+        Ok(health)
     }
 }
 
@@ -1193,6 +1257,64 @@ fn driver_result_log_record(operation_id: &str, result: &DriverResult) -> Operat
             "command": result.command,
         }),
     )
+}
+
+fn endpoint_health_log_record(
+    operation_id: &str,
+    result: &EndpointHealthResult,
+) -> OperationLogRecord {
+    operation_step_log_record(
+        operation_id,
+        format!("health:endpoint:{}", result.endpoint),
+        if result.reachable { "info" } else { "warn" },
+        format!(
+            "endpoint {} health {}: {}",
+            result.endpoint, result.health, result.message
+        ),
+        serde_json::json!({
+            "endpoint": result.endpoint,
+            "health": result.health,
+            "reachable": result.reachable,
+            "latency_ms": result.latency_ms,
+            "message": result.message,
+        }),
+    )
+}
+
+fn link_health_log_record(operation_id: &str, result: &LinkHealthResult) -> OperationLogRecord {
+    operation_step_log_record(
+        operation_id,
+        format!(
+            "health:link:{}->{}",
+            result.source_endpoint, result.target_endpoint
+        ),
+        if result.health == "healthy" {
+            "info"
+        } else {
+            "warn"
+        },
+        format!(
+            "link {} -> {} health {}: {}",
+            result.source_endpoint, result.target_endpoint, result.health, result.message
+        ),
+        serde_json::json!({
+            "source_endpoint": result.source_endpoint,
+            "target_endpoint": result.target_endpoint,
+            "health": result.health,
+            "latency_ms": result.latency_ms,
+            "message": result.message,
+        }),
+    )
+}
+
+fn missing_target_health(link: &Link) -> EndpointHealthResult {
+    EndpointHealthResult {
+        endpoint: link.target_endpoint.clone(),
+        health: "blocked".to_string(),
+        reachable: false,
+        latency_ms: None,
+        message: "target endpoint is missing".to_string(),
+    }
 }
 
 fn operation_steps(operation: &Operation) -> Vec<serde_json::Value> {
