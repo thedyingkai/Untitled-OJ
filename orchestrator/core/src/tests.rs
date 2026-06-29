@@ -2038,6 +2038,100 @@ fn operation_executor_applies_and_rolls_back_through_store() {
 }
 
 #[test]
+fn log_query_reads_only_scoped_sources_and_operation_logs() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:8080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+    store
+        .put_log_view(LogView {
+            source_id: "gateway:service".to_string(),
+            service_id: "gateway".to_string(),
+            endpoint: "127.0.0.1:8080".to_string(),
+            operation_id: String::new(),
+            path: "/logs".to_string(),
+            driver: "external-endpoint".to_string(),
+            read_policy: "service-scoped".to_string(),
+            display_name: "Gateway logs".to_string(),
+        })
+        .expect("put scoped log view");
+    store
+        .put_operation(
+            service_logs_view_operation("op-log-query", "gateway", Some("127.0.0.1:8080"))
+                .expect("service log operation"),
+        )
+        .expect("put operation");
+    store
+        .append_operation_log(operation_step_log_record(
+            "op-log-query",
+            "step-1",
+            "info",
+            "service log collected",
+            serde_json::json!({"service_id": "gateway"}),
+        ))
+        .expect("append operation log");
+
+    let result = query_logs(
+        &store,
+        &LogQuery {
+            service_id: Some("gateway".to_string()),
+            endpoint: Some("127.0.0.1:8080".to_string()),
+            operation_id: Some("op-log-query".to_string()),
+            source_id: None,
+        },
+    )
+    .expect("query logs");
+    assert_eq!(result.sources.len(), 1);
+    assert_eq!(result.operation_logs.len(), 1);
+    assert_eq!(result.operation_logs[0].step_id, "step-1");
+
+    assert!(
+        store
+            .put_log_view(LogView {
+                source_id: "bad".to_string(),
+                service_id: "gateway".to_string(),
+                endpoint: "127.0.0.1:8080".to_string(),
+                operation_id: String::new(),
+                path: "../host.log".to_string(),
+                driver: "external-endpoint".to_string(),
+                read_policy: "service-scoped".to_string(),
+                display_name: String::new(),
+            })
+            .is_err(),
+        "LogView must not become an arbitrary file browser"
+    );
+    assert!(
+        validate_log_view(&LogView {
+            source_id: "bad-endpoint".to_string(),
+            service_id: "gateway".to_string(),
+            endpoint: "gateway.local".to_string(),
+            operation_id: String::new(),
+            path: "/logs".to_string(),
+            driver: "external-endpoint".to_string(),
+            read_policy: "service-scoped".to_string(),
+            display_name: String::new(),
+        })
+        .is_err(),
+        "LogView endpoint identity must remain IP:Port"
+    );
+}
+
+#[test]
 fn operation_executor_allows_planned_apply_when_confirmation_is_not_required() {
     let mut store = MemoryOrchestratorStore::new();
     let mut worker = valid_service();
@@ -2508,6 +2602,15 @@ fn pg_orchestrator_store_uses_only_orchestrator_database_url() {
             .iter()
             .all(|statement| !statement.sql.contains("module_"))
     );
+    let log_statement = store
+        .statements()
+        .iter()
+        .find(|statement| statement.name == "log_sources.upsert")
+        .expect("log source statement should exist");
+    assert!(
+        log_statement.sql.contains("operation_id"),
+        "Pg LogView persistence must preserve operation-scoped log sources"
+    );
 }
 
 #[test]
@@ -2710,4 +2813,78 @@ fn diagnostic_report_json_exports_observable_summary() {
     assert!(report.contains("services_summary"));
     assert!(report.contains("database_schema_check"));
     assert!(report.contains("forbidden_concept_scan_summary"));
+}
+
+#[test]
+fn diagnostic_report_builds_from_store_and_exports_json_and_markdown() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:8080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "unreachable".to_string(),
+            reachable: false,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+    let failed = plan_operation(
+        "op-failed",
+        "service.restart",
+        "Service",
+        "gateway",
+        serde_json::json!({}),
+        serde_json::json!({"steps": ["restart"]}),
+        serde_json::json!({"steps": ["restore"]}),
+    )
+    .and_then(|operation| start_operation(&operation))
+    .and_then(|operation| fail_operation(&operation, "restart failed"))
+    .expect("failed operation");
+    store.put_operation(failed).expect("put failed operation");
+    store
+        .append_operation_log(operation_step_log_record(
+            "op-failed",
+            "restart",
+            "error",
+            "restart failed",
+            serde_json::json!({"endpoint": "127.0.0.1:8080"}),
+        ))
+        .expect("append operation log");
+
+    let topology = store.build_topology_view().expect("topology");
+    store.put_topology(topology).expect("put topology");
+    let report = build_diagnostic_report(&store, "diag-current").expect("diagnostic report");
+    assert_eq!(report.status, "degraded");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "operations.failed")
+    );
+    assert!(
+        report
+            .data
+            .get("recent_operation_logs")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item.get("operation_id")
+                == Some(&serde_json::Value::String("op-failed".to_string()))))
+    );
+
+    let json_export = export_diagnostic_report(&report, "json").expect("json export");
+    assert!(json_export.content.contains("diag-current"));
+    let markdown_export = export_diagnostic_report(&report, "markdown").expect("markdown export");
+    assert!(
+        markdown_export
+            .content
+            .contains("# DiagnosticReport diag-current")
+    );
+    assert!(export_diagnostic_report(&report, "html").is_err());
 }

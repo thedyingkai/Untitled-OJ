@@ -55,4 +55,6 @@ Operation log 使用 `orchestrator_operation_logs`，按 `operation_id` 和 `ste
 
 Operation lock 使用 `orchestrator_operation_locks`，字段为 `lock_key`、`operation_id`、`owner`、`expires_at`、`created_at`。锁表名称保持完整前缀，不使用泛名 `operation_locks`。
 
+LogView 使用 `log_sources`，字段为 `source_id`、`endpoint`、`service_id`、`operation_id`、`kind`、`path`、`driver`、`read_policy`、`created_at`、`updated_at`。`endpoint` 必须是 `IP:Port`，`operation_id` 可为空，`read_policy` 必须是 service-scoped、endpoint-scoped 或 operation-scoped。
+
 Topology snapshot 使用 `snapshot_id`、`topology`、`created_at`。Topology 内容仍然只围绕 Endpoint 和 Link，不引入额外运行实例对象。

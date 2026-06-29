@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS log_sources (
     source_id TEXT PRIMARY KEY,
     endpoint TEXT NOT NULL,
     service_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL DEFAULT '',
     kind TEXT NOT NULL,
     path TEXT NOT NULL,
     driver TEXT NOT NULL,
@@ -127,5 +128,6 @@ CREATE INDEX IF NOT EXISTS idx_orchestrator_operations_target
 CREATE INDEX IF NOT EXISTS idx_orchestrator_operation_locks_expires
     ON orchestrator_operation_locks(expires_at);
 CREATE INDEX IF NOT EXISTS idx_log_sources_endpoint ON log_sources(endpoint);
+CREATE INDEX IF NOT EXISTS idx_log_sources_operation ON log_sources(operation_id);
 CREATE INDEX IF NOT EXISTS idx_diagnostic_reports_target
     ON diagnostic_reports(target_type, target_id, created_at DESC);

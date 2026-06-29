@@ -1,8 +1,9 @@
 use crate::{
     DiagnosticReport, Endpoint, Link, LogView, Operation, OperationLock, OperationLogRecord,
     OperationStatus, OrchestratorError, Result, ServiceManifest, ServiceSet, Topology,
-    TopologySnapshot, build_topology, operation_log_record, operation_step_log_record,
-    start_operation, succeed_operation, validate_endpoint, validate_link, validate_topology,
+    TopologySnapshot, build_diagnostic_report, build_topology, operation_log_record,
+    operation_step_log_record, start_operation, succeed_operation, validate_endpoint,
+    validate_link, validate_log_view, validate_topology,
 };
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
@@ -496,6 +497,7 @@ impl OrchestratorStore for MemoryOrchestratorStore {
     }
 
     fn upsert_log_source(&mut self, log_view: LogView) -> Result<()> {
+        validate_log_view(&log_view)?;
         if !self.endpoints.contains_key(&log_view.endpoint) {
             return Err(OrchestratorError::Dependency(format!(
                 "log view references missing endpoint {}",
@@ -796,17 +798,11 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
                 }
             }
             "diagnostics.run" => {
-                let report = DiagnosticReport {
-                    report_id: format!("diag-{}", operation.operation_id),
-                    target_type: operation.target_type.clone(),
-                    target_id: operation.target_id.clone(),
-                    status: "ok".to_string(),
-                    summary: format!("{} 诊断完成", operation.target_id),
-                    operation_id: operation.operation_id.clone(),
-                    data: serde_json::json!({}),
-                    findings: Vec::new(),
-                    created_at: String::new(),
-                };
+                let mut report = build_diagnostic_report(
+                    self.store,
+                    format!("diag-{}", operation.operation_id),
+                )?;
+                report.operation_id = operation.operation_id.clone();
                 self.store.put_diagnostic_report(report.clone())?;
                 changed.push(changed_object("DiagnosticReport", &report.report_id));
             }

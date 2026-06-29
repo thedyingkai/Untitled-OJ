@@ -33,3 +33,5 @@ unknown
 ```
 
 Link health 同样使用这些状态，并可附带 `latency_ms`。Topology 修改必须通过 Operation plan、confirm 和 apply 完成。
+
+DiagnosticReport 从 Topology 和 Store 中的 Operation log 生成可导出摘要。Topology 中只展示已登记的 LogView 和 DiagnosticReport，不提供任意路径读取或远程 shell。

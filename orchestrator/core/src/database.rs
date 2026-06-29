@@ -1,7 +1,7 @@
 use crate::{
     DiagnosticReport, Endpoint, Link, LogView, Operation, OperationLock, OperationLogRecord,
     OperationStatus, OrchestratorError, OrchestratorStore, Result, ServiceManifest, ServiceSet,
-    Topology, TopologySnapshot,
+    Topology, TopologySnapshot, validate_log_view,
 };
 use postgres::{Client, NoTls, Row, types::ToSql};
 use regex::Regex;
@@ -126,11 +126,12 @@ WHERE orchestrator_operation_locks.expires_at < NOW()
     DatabaseStatement {
         name: "log_sources.upsert",
         sql: r#"
-INSERT INTO log_sources (source_id, endpoint, service_id, kind, path, driver, read_policy, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+INSERT INTO log_sources (source_id, endpoint, service_id, operation_id, kind, path, driver, read_policy, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 ON CONFLICT (source_id) DO UPDATE SET
     endpoint = EXCLUDED.endpoint,
     service_id = EXCLUDED.service_id,
+    operation_id = EXCLUDED.operation_id,
     kind = EXCLUDED.kind,
     path = EXCLUDED.path,
     driver = EXCLUDED.driver,
@@ -475,14 +476,15 @@ impl OrchestratorStore for PgOrchestratorStore {
     }
 
     fn list_log_sources(&self) -> Result<Vec<LogView>> {
-        self.query("SELECT source_id, service_id, endpoint, path, driver, read_policy, created_at::TEXT FROM log_sources ORDER BY source_id", &[])?
+        self.query("SELECT source_id, service_id, endpoint, operation_id, path, driver, read_policy, created_at::TEXT FROM log_sources ORDER BY source_id", &[])?
             .into_iter()
             .map(log_view_from_row)
             .collect()
     }
 
     fn upsert_log_source(&mut self, log_view: LogView) -> Result<()> {
-        self.execute("INSERT INTO log_sources (source_id, endpoint, service_id, kind, path, driver, read_policy, updated_at) VALUES ($1, $2, $3, 'service', $4, $5, $6, NOW()) ON CONFLICT (source_id) DO UPDATE SET endpoint = EXCLUDED.endpoint, service_id = EXCLUDED.service_id, kind = EXCLUDED.kind, path = EXCLUDED.path, driver = EXCLUDED.driver, read_policy = EXCLUDED.read_policy, updated_at = NOW()", &[&log_view.source_id, &log_view.endpoint, &log_view.service_id, &log_view.path, &log_view.driver, &log_view.read_policy])?;
+        validate_log_view(&log_view)?;
+        self.execute("INSERT INTO log_sources (source_id, endpoint, service_id, operation_id, kind, path, driver, read_policy, updated_at) VALUES ($1, $2, $3, $4, 'service', $5, $6, $7, NOW()) ON CONFLICT (source_id) DO UPDATE SET endpoint = EXCLUDED.endpoint, service_id = EXCLUDED.service_id, operation_id = EXCLUDED.operation_id, kind = EXCLUDED.kind, path = EXCLUDED.path, driver = EXCLUDED.driver, read_policy = EXCLUDED.read_policy, updated_at = NOW()", &[&log_view.source_id, &log_view.endpoint, &log_view.service_id, &log_view.operation_id, &log_view.path, &log_view.driver, &log_view.read_policy])?;
         Ok(())
     }
 
@@ -673,10 +675,10 @@ fn log_view_from_row(row: Row) -> Result<LogView> {
         source_id: row.get(0),
         service_id: row.get(1),
         endpoint: row.get(2),
-        operation_id: String::new(),
-        path: row.get(3),
-        driver: row.get(4),
-        read_policy: row.get(5),
+        operation_id: row.get(3),
+        path: row.get(4),
+        driver: row.get(5),
+        read_policy: row.get(6),
         display_name: row.get(0),
     })
 }

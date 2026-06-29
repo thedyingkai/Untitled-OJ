@@ -3,6 +3,7 @@ mod database;
 mod executor;
 mod health;
 mod model;
+mod observability;
 mod planner;
 mod schema;
 mod service;
@@ -34,6 +35,10 @@ pub use model::{
     fail_operation, operation_log_record, operation_step_log_record, plan_operation,
     redact_secret_text, rollback_operation, start_operation, succeed_operation, topology_authority,
     validate_endpoint, validate_link, validate_topology,
+};
+pub use observability::{
+    DiagnosticExport, LogQuery, LogQueryResult, build_diagnostic_report, export_diagnostic_report,
+    query_logs, validate_log_view,
 };
 pub use planner::{
     ActionPlanPreview, ActionRequest, default_action_request, plan_action_preview,
