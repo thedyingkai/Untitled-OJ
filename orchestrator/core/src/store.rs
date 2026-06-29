@@ -586,7 +586,13 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
             )));
         }
 
-        let running = start_operation(&operation)?;
+        let result = self.apply_with_acquired_lock(&operation);
+        self.store.release_operation_lock(&lock_key, operation_id)?;
+        result
+    }
+
+    fn apply_with_acquired_lock(&mut self, operation: &Operation) -> Result<Operation> {
+        let running = start_operation(operation)?;
         self.store.update_operation(running.clone())?;
         self.store.append_operation_log(operation_log_record(
             &running.operation_id,
@@ -636,7 +642,6 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
                 Err(err)
             }
         };
-        self.store.release_operation_lock(&lock_key, operation_id)?;
         result
     }
 

@@ -2264,6 +2264,53 @@ fn operation_executor_allows_planned_apply_when_confirmation_is_not_required() {
 }
 
 #[test]
+fn operation_executor_releases_lock_after_apply_failure() {
+    let mut store = MemoryOrchestratorStore::new();
+    let endpoint = Endpoint {
+        endpoint: "127.0.0.1:19090".to_string(),
+        service_id: "missing-service".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "unknown".to_string(),
+        reachable: false,
+        display_name: "Missing Service Endpoint".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let operation = endpoint_register_operation("op-apply-fails", &endpoint)
+        .expect("endpoint register operation");
+    store.put_operation(operation).expect("put operation");
+
+    let failed = OperationExecutor::new(&mut store)
+        .apply("op-apply-fails")
+        .expect_err("missing service should fail inside apply mutation");
+    assert!(failed.to_string().contains("missing-service"));
+    let stored = store.operation("op-apply-fails").expect("stored operation");
+    assert_eq!(stored.status, OperationStatus::Failed);
+    assert!(stored.error_message.contains("missing-service"));
+    assert!(store.operation_logs("op-apply-fails").iter().any(|record| {
+        record.level == "error"
+            && record
+                .message
+                .contains("operation endpoint.register failed")
+    }));
+    assert!(
+        store
+            .acquire_operation_lock(OperationLock {
+                lock_key: "operation:op-apply-fails".to_string(),
+                operation_id: "op-apply-fails".to_string(),
+                owner: "test".to_string(),
+                expires_at: "session".to_string(),
+                created_at: String::new(),
+            })
+            .expect("lock can be acquired after failure"),
+        "apply failure must release operation lock"
+    );
+}
+
+#[test]
 fn operation_executor_mutates_core_store_objects() {
     let root = repo_root();
     let mut store = MemoryOrchestratorStore::new();
