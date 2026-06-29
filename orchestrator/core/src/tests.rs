@@ -1142,6 +1142,95 @@ fn operation_workbench_context_loads_repo_and_drives_sessions() {
 }
 
 #[test]
+fn operation_workbench_context_can_load_from_store_state() {
+    let root = repo_root();
+    let schemas = load_shared_schemas(&root).expect("schemas");
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    let mut problem_api = valid_service();
+    problem_api.id = "problem-api".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store.put_service(problem_api).expect("put problem api");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "10.0.0.10:8080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put gateway endpoint");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "10.0.0.10:8081".to_string(),
+            service_id: "problem-api".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: "Problem API".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put problem endpoint");
+    store
+        .put_link(Link {
+            source_endpoint: "10.0.0.10:8080".to_string(),
+            target_endpoint: "10.0.0.10:8081".to_string(),
+            protocol: "http".to_string(),
+            auth_mode: "internal".to_string(),
+            scope: "api".to_string(),
+            health: "healthy".to_string(),
+            latency_ms: Some(2),
+            config_ref: String::new(),
+            secret_ref: String::new(),
+            policy: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put link");
+    let topology = store.build_topology_view().expect("topology");
+    store.put_topology(topology).expect("put topology");
+
+    let context = load_operation_workbench_context_from_store(schemas, &store)
+        .expect("store-backed workbench context");
+    assert!(
+        !context.uses_persistent_store(),
+        "direct Store-backed contexts do not assume ORCHESTRATOR_DATABASE_URL persistence"
+    );
+    assert_eq!(context.services.len(), 2);
+    assert_eq!(context.endpoints[0].endpoint, "10.0.0.10:8080");
+    assert_eq!(context.links.len(), 1);
+    assert!(context.topology.is_some());
+
+    let session = context
+        .build_session("link.health.check")
+        .expect("link health session from store context");
+    assert_eq!(
+        session.workbench.request.field("source_endpoint"),
+        Some("127.0.0.1:8080"),
+        "default request remains schema-driven before fields are changed"
+    );
+    let updated = context
+        .update_field(&session, "source_endpoint", "10.0.0.10:8080")
+        .and_then(|session| context.update_field(&session, "target_endpoint", "10.0.0.10:8081"))
+        .expect("store endpoint fields should be accepted");
+    assert_eq!(
+        updated.workbench.preview.target_id,
+        "10.0.0.10:8080 -> 10.0.0.10:8081"
+    );
+}
+
+#[test]
 fn operation_workbench_context_applies_store_backed_core_actions() {
     let root = repo_root();
     let context = load_operation_workbench_context(&root)

@@ -30,6 +30,11 @@ impl OperationWorkbenchContext {
         self
     }
 
+    fn with_persistent_store(mut self) -> Self {
+        self.store_mode = WorkbenchStoreMode::PersistentFromEnv;
+        self
+    }
+
     pub fn uses_persistent_store(&self) -> bool {
         matches!(self.store_mode, WorkbenchStoreMode::PersistentFromEnv)
     }
@@ -259,6 +264,17 @@ enum WorkbenchStoreMode {
 pub fn load_operation_workbench_context(repo_root: &Path) -> Result<OperationWorkbenchContext> {
     let mut warnings = Vec::new();
     let schemas = crate::load_shared_schemas(repo_root)?;
+    if std::env::var(PgOrchestratorStore::ENV_NAME).is_ok() {
+        match PgOrchestratorStore::from_env().and_then(|store| {
+            load_operation_workbench_context_from_store(schemas.clone(), &store)
+                .map(OperationWorkbenchContext::with_persistent_store)
+        }) {
+            Ok(context) => return Ok(context),
+            Err(err) => warnings.push(format!(
+                "ORCHESTRATOR_DATABASE_URL store unavailable, using repo context: {err}"
+            )),
+        }
+    }
     let services = load_service_manifests(repo_root, &mut warnings)?;
     let sets = load_sets(repo_root, &mut warnings)?;
     let endpoints = endpoint_models(&services, &sets);
@@ -284,6 +300,30 @@ pub fn load_operation_workbench_context(repo_root: &Path) -> Result<OperationWor
         } else {
             WorkbenchStoreMode::Memory
         },
+    })
+}
+
+pub fn load_operation_workbench_context_from_store<S: OrchestratorStore>(
+    schemas: SharedSchemas,
+    store: &S,
+) -> Result<OperationWorkbenchContext> {
+    let services = store.list_services()?;
+    let sets = store.list_sets()?;
+    let endpoints = store.list_endpoints()?;
+    let links = store.list_links()?;
+    let topology = store
+        .get_latest_topology_snapshot()?
+        .map(|snapshot| snapshot.topology)
+        .or_else(|| topology_model(&services, &sets, &endpoints, &links).ok());
+    Ok(OperationWorkbenchContext {
+        schemas,
+        services,
+        sets,
+        endpoints,
+        links,
+        topology,
+        warnings: Vec::new(),
+        store_mode: WorkbenchStoreMode::Memory,
     })
 }
 

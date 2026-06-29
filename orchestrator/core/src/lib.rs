@@ -77,9 +77,9 @@ pub use workbench::{
     OperationWorkbench, OperationWorkbenchContext, OperationWorkbenchRun,
     OperationWorkbenchSession, apply_operation_workbench_session, build_operation_workbench,
     build_operation_workbench_from_request, confirm_operation_workbench_session,
-    load_operation_workbench_context, new_operation_workbench_session,
-    rollback_operation_workbench_session, run_operation_workbench_flow,
-    update_operation_workbench_field,
+    load_operation_workbench_context, load_operation_workbench_context_from_store,
+    new_operation_workbench_session, rollback_operation_workbench_session,
+    run_operation_workbench_flow, update_operation_workbench_field,
 };
 
 use thiserror::Error;

@@ -38,7 +38,7 @@ docs/release/
 - `operation.logs.view` 与 `diagnostics.export` 执行证据：`orchestrator/core/src/store.rs` 会创建 operation-scoped LogView、写入导出元数据 OperationLog；覆盖测试为 `operation_executor_materializes_operation_log_view_and_diagnostic_export`
 - Reconcile tick / loop：`orchestrator/core/src/reconciler.rs`，`run_reconcile_tick` 执行单次刷新，`run_reconcile_loop` 提供可停止的 bounded loop 原语；覆盖测试为 `reconcile_loop_runs_bounded_ticks_and_can_stop`
 - GUI/TUI 共享视图：`orchestrator/core/src/view.rs`
-- GUI/TUI 共享工作台：`orchestrator/core/src/workbench.rs`，未设置 `ORCHESTRATOR_DATABASE_URL` 时使用 Memory store，设置后 plan/confirm/apply/rollback 走 `PgOrchestratorStore`
+- GUI/TUI 共享工作台：`orchestrator/core/src/workbench.rs`，未设置 `ORCHESTRATOR_DATABASE_URL` 时使用 Memory store，设置后通过 `load_operation_workbench_context_from_store` 读取 Store 中的 Service、Set、Endpoint、Link、Topology，并让 plan/confirm/apply/rollback 走 `PgOrchestratorStore`；覆盖测试为 `operation_workbench_context_can_load_from_store_state`
 - GUI/TUI Operation/LogView 观测：`orchestrator/core/src/view.rs` 从 Store 读取 Operation 与 OperationLog，GUI/TUI 展示 `operation_id`、状态、结果、错误、日志数量与日志消息
 - Orchestrator migration：`deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`
 
