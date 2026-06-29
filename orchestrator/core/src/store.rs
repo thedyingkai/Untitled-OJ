@@ -669,6 +669,27 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
                 "operation rollback plan is not available".to_string(),
             ));
         }
+        let lock_key = format!("operation:{operation_id}");
+        let acquired = self.store.acquire_operation_lock(OperationLock {
+            lock_key: lock_key.clone(),
+            operation_id: operation_id.to_string(),
+            owner: "orchestrator-core".to_string(),
+            expires_at: "session".to_string(),
+            created_at: String::new(),
+        })?;
+        if !acquired {
+            return Err(OrchestratorError::Blocked(format!(
+                "operation {operation_id} is locked"
+            )));
+        }
+
+        let result = self.rollback_with_acquired_lock(&operation);
+        self.store.release_operation_lock(&lock_key, operation_id)?;
+        result
+    }
+
+    fn rollback_with_acquired_lock(&mut self, operation: &Operation) -> Result<Operation> {
+        let operation_id = operation.operation_id.as_str();
         let prior_logs = self.store.list_operation_logs(operation_id)?;
         self.store.append_operation_log(operation_log_record(
             &operation.operation_id,

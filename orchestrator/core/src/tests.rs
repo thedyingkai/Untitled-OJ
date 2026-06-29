@@ -2214,6 +2214,67 @@ fn operation_executor_logs_rollback_mutation_failure() {
         OperationStatus::Succeeded,
         "failed rollback must not mark the original operation rolled back"
     );
+    assert!(
+        store
+            .acquire_operation_lock(OperationLock {
+                lock_key: "operation:op-rollback-fails".to_string(),
+                operation_id: "op-rollback-fails".to_string(),
+                owner: "test".to_string(),
+                expires_at: "session".to_string(),
+                created_at: String::new(),
+            })
+            .expect("lock can be acquired after rollback failure"),
+        "rollback failure must release operation lock"
+    );
+}
+
+#[test]
+fn operation_executor_rejects_rollback_when_operation_is_locked() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut worker = valid_service();
+    worker.id = "judge-worker".to_string();
+    store.put_service(worker).expect("put judge-worker service");
+    let operation = confirm_operation(
+        &plan_operation(
+            "op-rollback-locked",
+            "service.restart",
+            "Service",
+            "judge-worker",
+            serde_json::json!({}),
+            serde_json::json!({"steps": ["stop", "start"]}),
+            serde_json::json!({"steps": ["restore"]}),
+        )
+        .expect("plan operation"),
+    )
+    .expect("confirm operation");
+    store.put_operation(operation).expect("put operation");
+    OperationExecutor::new(&mut store)
+        .apply("op-rollback-locked")
+        .expect("apply operation");
+    assert!(
+        store
+            .acquire_operation_lock(OperationLock {
+                lock_key: "operation:op-rollback-locked".to_string(),
+                operation_id: "op-rollback-locked".to_string(),
+                owner: "test".to_string(),
+                expires_at: "session".to_string(),
+                created_at: String::new(),
+            })
+            .expect("manual lock")
+    );
+
+    let blocked = OperationExecutor::new(&mut store)
+        .rollback("op-rollback-locked")
+        .expect_err("rollback should honor operation lock");
+    assert!(blocked.to_string().contains("is locked"));
+    assert_eq!(
+        store
+            .get_operation("op-rollback-locked")
+            .expect("get operation")
+            .expect("operation")
+            .status,
+        OperationStatus::Succeeded
+    );
 }
 
 #[test]
