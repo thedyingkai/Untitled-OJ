@@ -166,15 +166,32 @@ impl ExecutionDriver for ExternalEndpointDriver {
         if !request.endpoint.is_empty() {
             validate_endpoint_id(&request.endpoint)?;
         }
+        if matches!(
+            request.action.as_str(),
+            "link.create" | "link.update" | "link.delete" | "link.health.check"
+        ) {
+            let link = request.link.as_ref().ok_or_else(|| {
+                OrchestratorError::InvalidManifest(
+                    "external endpoint link action requires source_endpoint and target_endpoint"
+                        .to_string(),
+                )
+            })?;
+            validate_endpoint_id(&link.source_endpoint)?;
+            validate_endpoint_id(&link.target_endpoint)?;
+        }
         match request.action.as_str() {
             "endpoint.register"
             | "endpoint.update"
             | "endpoint.delete"
             | "endpoint.health.check"
+            | "link.create"
+            | "link.update"
+            | "link.delete"
             | "link.health.check"
             | "service.logs.view"
             | "operation.logs.view"
-            | "diagnostics.run" => Ok(DriverResult {
+            | "diagnostics.run"
+            | "diagnostics.export" => Ok(DriverResult {
                 action: request.action.clone(),
                 status: "SUPPORTED".to_string(),
                 message: "external endpoint metadata action is allowed".to_string(),

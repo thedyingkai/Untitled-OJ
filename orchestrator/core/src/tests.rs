@@ -2800,6 +2800,62 @@ fn fixed_executor_drivers_reject_arbitrary_actions() {
         "SUPPORTED"
     );
     assert!(external.execute(&request).is_err());
+
+    let link = Link {
+        source_endpoint: "127.0.0.1:8080".to_string(),
+        target_endpoint: "127.0.0.1:8081".to_string(),
+        protocol: "http".to_string(),
+        auth_mode: "none".to_string(),
+        scope: "internal".to_string(),
+        health: "unknown".to_string(),
+        latency_ms: None,
+        config_ref: String::new(),
+        secret_ref: String::new(),
+        policy: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let link_request = DriverRequest {
+        action: "link.create".to_string(),
+        service_id: endpoint.service_id.clone(),
+        endpoint: endpoint.endpoint.clone(),
+        link: Some(link),
+        log_source: None,
+    };
+    assert_eq!(
+        external
+            .execute(&link_request)
+            .expect("external link metadata action")
+            .status,
+        "SUPPORTED"
+    );
+
+    let missing_link_request = DriverRequest {
+        action: "link.update".to_string(),
+        service_id: endpoint.service_id.clone(),
+        endpoint: endpoint.endpoint.clone(),
+        link: None,
+        log_source: None,
+    };
+    assert!(
+        external.execute(&missing_link_request).is_err(),
+        "link metadata actions must carry source_endpoint and target_endpoint"
+    );
+
+    let diagnostics_export = DriverRequest {
+        action: "diagnostics.export".to_string(),
+        service_id: String::new(),
+        endpoint: String::new(),
+        link: None,
+        log_source: None,
+    };
+    assert_eq!(
+        external
+            .execute(&diagnostics_export)
+            .expect("external diagnostics export action")
+            .status,
+        "SUPPORTED"
+    );
 }
 
 #[test]
