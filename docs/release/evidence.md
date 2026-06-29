@@ -32,7 +32,7 @@ docs/release/
 - Operation 状态机：`orchestrator/core/src/model.rs`
 - Operation executor：`orchestrator/core/src/store.rs`，apply/rollback 都通过 Store 写入 OperationLog；Service 生命周期会记录固定 `DriverResult`；rollback 会记录历史日志读取和 `rollback_plan.steps`
 - Store-backed Operation 生命周期直接证据：`operation_plan_is_persisted_in_store`、`operation_confirm_updates_store`、`operation_apply_writes_status_and_logs`、`operation_apply_failure_writes_error_message`、`operation_rollback_updates_store`、`operation_logs_can_be_reopened`、`workbench_uses_store_backed_operation_lifecycle`、`operation_lock_prevents_parallel_apply`
-- Executor drivers：`orchestrator/core/src/executor.rs`
+- Executor drivers：`orchestrator/core/src/executor.rs`，覆盖测试为 `executor_rejects_arbitrary_shell`、`docker_compose_driver_builds_allowed_commands`、`docker_compose_driver_rejects_unknown_action`、`local_process_driver_reports_unsupported_safely`、`external_endpoint_driver_does_not_start_services`、`unsupported_driver_action_writes_operation_log`
 - Endpoint/Link health：`orchestrator/core/src/health.rs`
 - Endpoint health 真实探测：HTTP/HTTPS 请求 `health_path`，TCP/Postgres/Redis 使用 TCP connect；覆盖测试为 `endpoint_http_health_updates_store`、`endpoint_tcp_health_updates_store`、`endpoint_unreachable_is_recorded`、`tcp_probe_checks_http_health_path_status`、`tcp_probe_marks_http_non_success_status_as_degraded`
 - Link health 写回与 Topology 展示：覆盖测试为 `link_health_requires_existing_endpoints`、`link_health_uses_target_reachability`、`operation_executor_persists_link_health_from_target_probe`、`topology_reflects_endpoint_link_health`

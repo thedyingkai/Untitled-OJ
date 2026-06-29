@@ -68,7 +68,8 @@ impl DockerComposeDriver {
 
     pub fn command_for(&self, action: &str, service_id: &str) -> Result<Vec<String>> {
         let subcommand = match action {
-            "service.start" | "service.enable" | "service.install" => "up",
+            "service.install" | "service.enable" => "up",
+            "service.start" => "start",
             "service.stop" | "service.disable" => "stop",
             "service.restart" => "restart",
             "service.delete" => "rm",

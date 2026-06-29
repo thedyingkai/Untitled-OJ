@@ -4094,6 +4094,169 @@ fn fixed_executor_drivers_reject_arbitrary_actions() {
 }
 
 #[test]
+fn executor_rejects_arbitrary_shell() {
+    let compose = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml");
+    for action in [
+        "service.shell",
+        "service.exec",
+        "script.run",
+        "powershell.run",
+        "bash.run",
+    ] {
+        let err = compose
+            .command_for(action, "gateway")
+            .expect_err("fixed docker compose driver must reject arbitrary action");
+        assert!(
+            err.to_string().contains("not fixed"),
+            "{action} should be rejected as non-fixed command"
+        );
+    }
+    let unsafe_binary = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml")
+        .with_docker_binary_for_test("docker.exe /c calc");
+    assert!(
+        unsafe_binary
+            .command_for("service.start", "gateway")
+            .is_err(),
+        "driver executable must be a single safe binary name"
+    );
+}
+
+#[test]
+fn docker_compose_driver_builds_allowed_commands() {
+    let compose = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml");
+    let cases = [
+        ("service.install", "up", true),
+        ("service.enable", "up", true),
+        ("service.start", "start", false),
+        ("service.stop", "stop", false),
+        ("service.restart", "restart", false),
+        ("service.delete", "rm", false),
+        ("service.logs.view", "logs", false),
+        ("service.health.check", "ps", false),
+    ];
+    for (action, subcommand, detached) in cases {
+        let command = compose
+            .command_for(action, "gateway")
+            .expect("allowed docker compose command");
+        assert_eq!(command[0], "docker");
+        assert!(command.contains(&subcommand.to_string()));
+        if detached {
+            assert!(command.contains(&"-d".to_string()));
+        }
+        if subcommand != "ps" {
+            assert_eq!(command.last().map(String::as_str), Some("gateway"));
+        }
+    }
+}
+
+#[test]
+fn docker_compose_driver_rejects_unknown_action() {
+    let compose = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml");
+    let err = compose
+        .command_for("endpoint.register", "gateway")
+        .expect_err("docker compose driver must reject endpoint metadata actions");
+    assert!(
+        err.to_string()
+            .contains("docker compose driver action is not fixed")
+    );
+}
+
+#[test]
+fn local_process_driver_reports_unsupported_safely() {
+    let endpoint = Endpoint {
+        endpoint: "127.0.0.1:8080".to_string(),
+        service_id: "web-shell".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "unknown".to_string(),
+        reachable: false,
+        display_name: "Web Shell".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let start = driver_request_for_endpoint("service.start", &endpoint);
+    let err = LocalProcessDriver::new()
+        .execute(&start)
+        .expect_err("local process start requires supervisor binding");
+    assert!(err.to_string().contains("supervisor binding"));
+
+    let logs = driver_request_for_endpoint("service.logs.view", &endpoint);
+    assert_eq!(
+        LocalProcessDriver::new()
+            .execute(&logs)
+            .expect("read-only logs action")
+            .status,
+        "SUPPORTED"
+    );
+}
+
+#[test]
+fn external_endpoint_driver_does_not_start_services() {
+    let endpoint = Endpoint {
+        endpoint: "127.0.0.1:8080".to_string(),
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "unknown".to_string(),
+        reachable: false,
+        display_name: "Gateway".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let start = driver_request_for_endpoint("service.start", &endpoint);
+    let err = ExternalEndpointDriver
+        .execute(&start)
+        .expect_err("external endpoint driver must not start services");
+    assert!(err.to_string().contains("cannot control service lifecycle"));
+
+    let register = driver_request_for_endpoint("endpoint.register", &endpoint);
+    assert_eq!(
+        ExternalEndpointDriver
+            .execute(&register)
+            .expect("external endpoint metadata action")
+            .status,
+        "SUPPORTED"
+    );
+}
+
+#[test]
+fn unsupported_driver_action_writes_operation_log() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut service = valid_service();
+    service.id = "web-shell".to_string();
+    service.runtime.mode = RuntimeMode::LocalProcess;
+    service.runtime.driver = "local-process".to_string();
+    store.put_service(service).expect("put service");
+    let operation =
+        service_lifecycle_operation("op-unsupported-driver", "service.start", "web-shell")
+            .expect("lifecycle operation");
+    store.put_operation(operation).expect("put operation");
+
+    let err = OperationExecutor::new(&mut store)
+        .apply("op-unsupported-driver")
+        .expect_err("unsupported driver action should fail operation");
+    assert!(err.to_string().contains("supervisor binding"));
+    assert_eq!(
+        store
+            .operation("op-unsupported-driver")
+            .map(|operation| &operation.status),
+        Some(&OperationStatus::Failed)
+    );
+    assert!(
+        store
+            .operation_logs("op-unsupported-driver")
+            .iter()
+            .any(|record| record.level == "error"
+                && record.message.contains("operation service.start failed")),
+        "unsupported driver action must be recorded as an operation log"
+    );
+}
+
+#[test]
 fn docker_compose_driver_runs_only_when_explicitly_enabled() {
     let endpoint = Endpoint {
         endpoint: "127.0.0.1:8080".to_string(),

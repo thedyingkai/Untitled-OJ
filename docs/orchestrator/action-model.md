@@ -63,3 +63,5 @@ ExternalEndpointDriver
 ```
 
 这些 driver 只接受固定 action。任意 shell、任意脚本路径、用户输入命令和远程 root shell 都不属于 Action 模型。
+
+DockerComposeDriver 只构造固定参数数组：`service.install/enable` 使用 `docker compose up -d <service>`，`service.start` 使用 `start`，`service.stop/disable` 使用 `stop`，`service.restart` 使用 `restart`，`service.logs.view` 使用 `logs`，`service.health.check` 使用 `ps`。LocalProcessDriver 在没有安全 supervisor 绑定前只允许只读 health/logs；ExternalEndpointDriver 只处理 Endpoint、Link、logs 和 diagnostics 的元数据动作，不启动或停止 Service。
