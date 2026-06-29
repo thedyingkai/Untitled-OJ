@@ -5,6 +5,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconcileTickResult {
@@ -13,6 +15,30 @@ pub struct ReconcileTickResult {
     pub checked_links: Vec<String>,
     pub topology_snapshot_id: Option<String>,
     pub diagnostic_report_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileLoopConfig {
+    pub loop_id: String,
+    pub max_ticks: usize,
+    pub interval_millis: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileLoopResult {
+    pub loop_id: String,
+    pub ticks: Vec<ReconcileTickResult>,
+    pub stopped: bool,
+}
+
+impl ReconcileLoopConfig {
+    pub fn bounded(loop_id: impl Into<String>, max_ticks: usize) -> Self {
+        Self {
+            loop_id: loop_id.into(),
+            max_ticks,
+            interval_millis: 0,
+        }
+    }
 }
 
 pub fn run_reconcile_tick<S, P>(
@@ -80,6 +106,37 @@ where
         result.diagnostic_report_id = Some(report_id);
     }
 
+    Ok(result)
+}
+
+pub fn run_reconcile_loop<S, P, F>(
+    store: &mut S,
+    probe: &P,
+    config: ReconcileLoopConfig,
+    mut should_stop: F,
+) -> Result<ReconcileLoopResult>
+where
+    S: OrchestratorStore,
+    P: EndpointProbe,
+    F: FnMut(usize, &ReconcileTickResult) -> bool,
+{
+    let mut result = ReconcileLoopResult {
+        loop_id: config.loop_id.clone(),
+        ticks: Vec::new(),
+        stopped: false,
+    };
+    for index in 0..config.max_ticks {
+        let tick = run_reconcile_tick(store, probe, format!("{}-{}", config.loop_id, index + 1))?;
+        let stop = should_stop(index + 1, &tick);
+        result.ticks.push(tick);
+        if stop {
+            result.stopped = true;
+            break;
+        }
+        if config.interval_millis > 0 && index + 1 < config.max_ticks {
+            thread::sleep(Duration::from_millis(config.interval_millis));
+        }
+    }
     Ok(result)
 }
 

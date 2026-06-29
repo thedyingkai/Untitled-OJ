@@ -3891,6 +3891,56 @@ fn reconcile_tick_snapshot_uses_refreshed_store_state() {
     );
 }
 
+#[test]
+fn reconcile_loop_runs_bounded_ticks_and_can_stop() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:8080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "ok".to_string(),
+            reachable: true,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+
+    let loop_result = run_reconcile_loop(
+        &mut store,
+        &StaticEndpointProbe,
+        ReconcileLoopConfig::bounded("daemon-core", 3),
+        |tick_index, tick| tick_index == 2 && tick.topology_snapshot_id.is_some(),
+    )
+    .expect("bounded reconcile loop");
+
+    assert_eq!(loop_result.loop_id, "daemon-core");
+    assert!(loop_result.stopped);
+    assert_eq!(loop_result.ticks.len(), 2);
+    assert_eq!(
+        loop_result.ticks[0].topology_snapshot_id.as_deref(),
+        Some("tick-daemon-core-1")
+    );
+    assert_eq!(
+        loop_result.ticks[1].diagnostic_report_id.as_deref(),
+        Some("diag-tick-daemon-core-2")
+    );
+    assert!(
+        store
+            .diagnostic_reports()
+            .iter()
+            .any(|report| report.report_id == "diag-tick-daemon-core-2"),
+        "loop should persist diagnostics through the same Store path as a daemon tick"
+    );
+}
+
 fn local_http_endpoint(health_path: &str, response: &'static str) -> Endpoint {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local http listener");
     let endpoint = listener.local_addr().expect("local addr").to_string();

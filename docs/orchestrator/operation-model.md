@@ -54,4 +54,4 @@ GUI/TUI 通过 `OperationWorkbenchContext` 和 `OperationWorkbenchSession` 使�
 
 DiagnosticReport 可以从当前 Store 构建，内容包含 Service、Endpoint、Link、Operation 摘要、失败 Operation、不健康 Endpoint/Link、近期 Operation log、数据库 schema 检查和禁用概念扫描摘要。当前支持 JSON 和 Markdown 导出。
 
-`run_reconcile_tick` 是当前长期运行能力的核心原语。它执行单次 tick：过期未确认 Operation、刷新 Endpoint/Link health、保存 Topology snapshot，并生成 DiagnosticReport。它可以被 GUI、TUI 或后续常驻进程调用，但本轮仍不宣称已经具备完整生产 daemon、远程部署 agent 或跨主机发布能力。
+`run_reconcile_tick` 是当前长期运行能力的核心原语。它执行单次 tick：过期未确认 Operation、刷新 Endpoint/Link health、保存 Topology snapshot，并生成 DiagnosticReport。`run_reconcile_loop` 在同一 Store 路径上提供可停止、可设定 tick 数和间隔的循环原语，供 GUI、TUI 或后续常驻进程调用；本轮仍不宣称已经具备完整生产 daemon、远程部署 agent 或跨主机发布能力。
