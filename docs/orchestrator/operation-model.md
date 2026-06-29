@@ -28,7 +28,7 @@ EXPIRED
 
 创建 plan 时会持久化 `operation_id`、`action`、`plan`、`status` 和 `created_at`。确认后写入 `confirmed_at`。apply 时先获取 `orchestrator_operation_locks`，再进入 `RUNNING`，按 plan step 写入 `orchestrator_operation_logs`，成功后写入 `result` 并进入 `SUCCEEDED`，失败后写入 `error_message` 并进入 `FAILED`。apply 完成后释放对应 lock。
 
-rollback 会读取原 Operation 的 plan、result 和 logs，记录 rollback 日志，并在原 Operation 上写入 `ROLLED_BACK` 与 `rolled_back_at`。当前选择是在原 Operation 上标记回滚，而不是创建新的 rollback Operation。
+rollback 会读取原 Operation 的 plan、result 和 logs，先记录已读取的历史日志数量，再把 `rollback_plan.steps` 写入 `orchestrator_operation_logs`，最后在原 Operation 上写入 `ROLLED_BACK` 与 `rolled_back_at`。当前选择是在原 Operation 上标记回滚，而不是创建新的 rollback Operation。
 
 Executor 只支持固定 action，不执行任意 shell、任意脚本路径、用户输入命令或远程 root shell。当前固定 driver 为：
 

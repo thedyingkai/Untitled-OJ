@@ -30,7 +30,7 @@ docs/release/
 - Pg Store：`PgOrchestratorStore`，位于 `orchestrator/core/src/database.rs`，使用 `ORCHESTRATOR_DATABASE_URL`
 - Pg Store ignored integration：`orchestrator/core/tests/pg_store_integration.rs`
 - Operation 状态机：`orchestrator/core/src/model.rs`
-- Operation executor：`orchestrator/core/src/store.rs`
+- Operation executor：`orchestrator/core/src/store.rs`，apply/rollback 都通过 Store 写入 OperationLog；rollback 会记录历史日志读取和 `rollback_plan.steps`
 - Executor drivers：`orchestrator/core/src/executor.rs`
 - Endpoint/Link health：`orchestrator/core/src/health.rs`
 - HTTP health_path 检查测试：`tcp_probe_checks_http_health_path_status`

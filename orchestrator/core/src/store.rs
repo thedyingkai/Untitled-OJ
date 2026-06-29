@@ -659,7 +659,21 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
                 "operation rollback plan is not available".to_string(),
             ));
         }
-        let _logs = self.store.list_operation_logs(operation_id)?;
+        let prior_logs = self.store.list_operation_logs(operation_id)?;
+        self.store.append_operation_log(operation_log_record(
+            &operation.operation_id,
+            "info",
+            format!("rollback loaded {} prior operation logs", prior_logs.len()),
+        ))?;
+        for (index, step) in rollback_steps(&operation).iter().enumerate() {
+            self.store.append_operation_log(operation_step_log_record(
+                &operation.operation_id,
+                format!("rollback:{}", step_id(step, index)),
+                "info",
+                format!("rollback step {} planned", step_label(step)),
+                step.clone(),
+            ))?;
+        }
         let changed_objects = self.rollback_operation_mutation(&operation)?;
 
         let result = serde_json::json!({
@@ -1088,8 +1102,15 @@ fn ensure_service_exists<S: OrchestratorStore>(store: &S, service_id: &str) -> R
 }
 
 fn operation_steps(operation: &Operation) -> Vec<serde_json::Value> {
-    operation
-        .plan
+    value_steps(&operation.plan)
+}
+
+fn rollback_steps(operation: &Operation) -> Vec<serde_json::Value> {
+    value_steps(&operation.rollback_plan)
+}
+
+fn value_steps(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    value
         .get("steps")
         .and_then(serde_json::Value::as_array)
         .cloned()

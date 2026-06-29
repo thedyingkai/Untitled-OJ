@@ -2104,6 +2104,20 @@ fn operation_executor_applies_and_rolls_back_through_store() {
             .iter()
             .any(|record| record.message.contains("rolled back"))
     );
+    let rollback_logs = store.operation_logs("op-apply-1");
+    assert!(
+        rollback_logs
+            .iter()
+            .any(|record| record.message.contains("prior operation logs")),
+        "rollback should record that prior operation logs were loaded"
+    );
+    assert!(
+        rollback_logs
+            .iter()
+            .any(|record| record.step_id == "rollback:step-1"
+                && record.message.contains("rollback step")),
+        "rollback should write step logs from rollback_plan"
+    );
 }
 
 #[test]
