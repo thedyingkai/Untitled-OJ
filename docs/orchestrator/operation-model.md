@@ -46,7 +46,7 @@ ExternalEndpointDriver
 
 GUI/TUI 通过 `OperationWorkbenchContext` 和 `OperationWorkbenchSession` 使用同一套状态机。GUI/TUI 可以生成 plan、confirm、apply、rollback，并查看 result、error 和 operation logs；不能绕过 core 自行执行动作。
 
-当 `ORCHESTRATOR_DATABASE_URL` 存在时，`OperationWorkbenchContext` 会使用 `PgOrchestratorStore` 执行 apply/rollback，并把 Operation 状态、step log、result、rollback 和相关核心对象写入独立 Orchestrator DB。没有该变量时，工作台保持 `MemoryOrchestratorStore` 本地演示模式。
+当 `ORCHESTRATOR_DATABASE_URL` 存在时，`OperationWorkbenchContext` 会使用 `PgOrchestratorStore` 持久化工作台生成的 plan、confirm、apply 和 rollback。生成或更新 plan 时写入 `PLANNED` Operation；confirm 后写入 `AWAITING_CONFIRMATION` 和 `confirmed_at`；apply/rollback 继续由 `OperationExecutor` 写入 lock、step log、result、error 和最终状态。没有该变量时，工作台保持 `MemoryOrchestratorStore` 本地演示模式。
 
 日志读取只围绕 `LogView` 和 `OperationLogRecord`。core 提供按 `service_id`、`endpoint`、`operation_id`、`source_id` 过滤的查询能力，并要求 `LogView.path` 使用 service-scoped、operation-scoped 或 endpoint-scoped 策略；它不是任意文件浏览器，也不读取未登记路径。
 

@@ -728,9 +728,17 @@ fn optional_time_text(row: &Row, index: usize) -> String {
     row.get::<usize, Option<String>>(index).unwrap_or_default()
 }
 
-fn db_time_text(value: &str) -> String {
-    if value.contains('T') || value.contains('-') {
-        value.to_string()
+pub(crate) fn db_time_text(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else if matches!(
+        trimmed,
+        "confirmed" | "started" | "finished" | "failed" | "rolled_back"
+    ) {
+        "now".to_string()
+    } else if trimmed.contains('T') || trimmed.contains('-') {
+        trimmed.to_string()
     } else {
         String::new()
     }

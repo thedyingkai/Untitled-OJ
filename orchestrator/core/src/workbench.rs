@@ -46,7 +46,7 @@ impl OperationWorkbenchContext {
     }
 
     pub fn build_session(&self, action: &str) -> Result<OperationWorkbenchSession> {
-        Ok(new_operation_workbench_session(
+        self.persist_planned_session(new_operation_workbench_session(
             self.build_workbench(action)?,
         ))
     }
@@ -63,7 +63,7 @@ impl OperationWorkbenchContext {
             &self.endpoints,
             self.topology.as_ref(),
         )?;
-        Ok(new_operation_workbench_session(workbench))
+        self.persist_planned_session(new_operation_workbench_session(workbench))
     }
 
     pub fn update_field(
@@ -72,7 +72,7 @@ impl OperationWorkbenchContext {
         field: &str,
         value: impl Into<String>,
     ) -> Result<OperationWorkbenchSession> {
-        update_operation_workbench_field(
+        let session = update_operation_workbench_field(
             session,
             field,
             value,
@@ -81,7 +81,8 @@ impl OperationWorkbenchContext {
             &self.sets,
             &self.endpoints,
             self.topology.as_ref(),
-        )
+        )?;
+        self.persist_planned_session(session)
     }
 
     pub fn suggested_field_values(&self, field: &FormFieldSchema) -> Vec<String> {
@@ -158,7 +159,8 @@ impl OperationWorkbenchContext {
         &self,
         session: &OperationWorkbenchSession,
     ) -> Result<OperationWorkbenchSession> {
-        confirm_operation_workbench_session(session)
+        let confirmed = confirm_operation_workbench_session(session)?;
+        self.persist_confirmed_session(confirmed)
     }
 
     pub fn apply(&self, session: &OperationWorkbenchSession) -> Result<OperationWorkbenchSession> {
@@ -224,6 +226,26 @@ impl OperationWorkbenchContext {
         let mut store = PgOrchestratorStore::from_env()?;
         seed_session_store(&mut store, self, session)?;
         Ok(store)
+    }
+
+    fn persist_planned_session(
+        &self,
+        session: OperationWorkbenchSession,
+    ) -> Result<OperationWorkbenchSession> {
+        if matches!(self.store_mode, WorkbenchStoreMode::PersistentFromEnv) {
+            self.persistent_session_store(&session)?;
+        }
+        Ok(session)
+    }
+
+    fn persist_confirmed_session(
+        &self,
+        session: OperationWorkbenchSession,
+    ) -> Result<OperationWorkbenchSession> {
+        if matches!(self.store_mode, WorkbenchStoreMode::PersistentFromEnv) {
+            self.persistent_session_store(&session)?;
+        }
+        Ok(session)
     }
 }
 
@@ -453,7 +475,7 @@ fn rollback_operation_workbench_session_with_store(
     Ok(next)
 }
 
-fn seed_session_store(
+pub(crate) fn seed_session_store(
     store: &mut impl OrchestratorStore,
     context: &OperationWorkbenchContext,
     session: &OperationWorkbenchSession,

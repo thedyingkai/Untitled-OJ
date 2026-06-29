@@ -34,7 +34,7 @@ diagnostic_reports
 
 `PgOrchestratorStore` 位于 `orchestrator/core/src/database.rs`，只从 `ORCHESTRATOR_DATABASE_URL` 连接 Orchestrator DB，并把 Store 行为映射到上面的正式表。它不读取 `OJ_DATABASE_URL`，也不访问 OJ migration 创建的业务表。
 
-GUI/TUI 的 `OperationWorkbenchContext` 会根据 `ORCHESTRATOR_DATABASE_URL` 选择 Store。未设置时使用 `MemoryOrchestratorStore` 做无数据库演示；设置后，工作台 apply/rollback 使用 `PgOrchestratorStore` 持久化当前 Operation、operation logs、result、rollback 和相关核心对象。GUI/TUI 仍不直接写数据库，只通过 core Store trait。
+GUI/TUI 的 `OperationWorkbenchContext` 会根据 `ORCHESTRATOR_DATABASE_URL` 选择 Store。未设置时使用 `MemoryOrchestratorStore` 做无数据库演示；设置后，工作台 plan/confirm/apply/rollback 使用 `PgOrchestratorStore` 持久化当前 Operation、operation logs、result、rollback 和相关核心对象。GUI/TUI 仍不直接写数据库，只通过 core Store trait。
 
 PostgreSQL Store 集成测试位于 `orchestrator/core/tests/pg_store_integration.rs`。普通 `cargo test` 只编译该测试；需要真实数据库时，先对独立 Orchestrator DB 应用 `deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`，再运行：
 
@@ -63,6 +63,8 @@ rolled_back_at
 ```
 
 Operation log 使用 `orchestrator_operation_logs`，按 `operation_id` 和 `step_id` 记录执行过程，结构化数据写入 `data`。
+
+core 内部的 `confirmed`、`started`、`finished`、`failed`、`rolled_back` 状态 marker 在写入 PostgreSQL 时映射为数据库侧 `now`，因此 `confirmed_at`、`started_at`、`finished_at`、`rolled_back_at` 会落成真实时间戳；`session` 这类非持久锁 marker 仍走数据库默认过期策略。
 
 Operation lock 使用 `orchestrator_operation_locks`，字段为 `lock_key`、`operation_id`、`owner`、`expires_at`、`created_at`。锁表名称保持完整前缀，不使用泛名 `operation_locks`。
 

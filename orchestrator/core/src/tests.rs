@@ -1199,6 +1199,47 @@ fn operation_workbench_context_selects_persistent_store_from_env() {
 }
 
 #[test]
+fn operation_workbench_session_seed_persists_planned_and_confirmed_state() {
+    let root = repo_root();
+    let context = load_operation_workbench_context(&root)
+        .expect("workbench context")
+        .with_memory_store();
+    let session = context
+        .build_session("service.install")
+        .expect("service install session");
+    let mut store = MemoryOrchestratorStore::new();
+
+    crate::workbench::seed_session_store(&mut store, &context, &session)
+        .expect("seed planned session");
+    let planned = store
+        .operation(&session.current_operation.operation_id)
+        .expect("planned operation should be persisted");
+    assert_eq!(planned.status, OperationStatus::Planned);
+    assert!(!planned.operation_id.is_empty());
+    assert!(!planned.action.is_empty());
+    assert!(
+        planned
+            .plan
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|steps| !steps.is_empty()),
+        "planned operation should persist executable plan steps"
+    );
+
+    let confirmed = context.confirm(&session).expect("confirm session");
+    crate::workbench::seed_session_store(&mut store, &context, &confirmed)
+        .expect("seed confirmed session");
+    let confirmed_operation = store
+        .operation(&confirmed.current_operation.operation_id)
+        .expect("confirmed operation should be persisted");
+    assert_eq!(
+        confirmed_operation.status,
+        OperationStatus::AwaitingConfirmation
+    );
+    assert!(!confirmed_operation.confirmed_at.is_empty());
+}
+
+#[test]
 fn shared_schemas_cover_gui_tui_contract() {
     let root = repo_root();
     let schemas = load_shared_schemas(&root).expect("shared schemas should load");
@@ -2661,6 +2702,26 @@ fn pg_orchestrator_lock_statement_accepts_session_style_locks() {
     assert!(
         lock_statement.sql.contains("INTERVAL '5 minutes'"),
         "session-style operation locks should not be cast directly as timestamps"
+    );
+}
+
+#[test]
+fn pg_orchestrator_store_maps_operation_state_markers_to_db_time() {
+    for marker in ["confirmed", "started", "finished", "failed", "rolled_back"] {
+        assert_eq!(
+            crate::database::db_time_text(marker),
+            "now",
+            "{marker} should become a database-side timestamp"
+        );
+    }
+    assert_eq!(
+        crate::database::db_time_text("session"),
+        "",
+        "session-style lock expiry should still use the DB fallback interval"
+    );
+    assert_eq!(
+        crate::database::db_time_text("2026-06-29T00:00:00Z"),
+        "2026-06-29T00:00:00Z"
     );
 }
 
