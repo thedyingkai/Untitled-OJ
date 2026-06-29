@@ -2,12 +2,13 @@ use anyhow::Result;
 use clap::Parser;
 use eframe::egui;
 use orchestrator_core::{
-    OperationWorkbenchContext, OperationWorkbenchSession, OperationWorkbenchView, OrchestratorView,
-    OrchestratorViewPage, endpoint_hosts, load_operation_workbench_context, load_orchestrator_view,
+    ActionRequest, OperationWorkbenchContext, OperationWorkbenchSession, OperationWorkbenchView,
+    OrchestratorActionConsole, OrchestratorView, OrchestratorViewPage, endpoint_hosts,
     merge_operation_workbench_session_into_view,
 };
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "ojos-orchestrator-gui")]
@@ -19,8 +20,8 @@ struct Cli {
 }
 
 struct GuiApp {
-    repo_root: PathBuf,
     page: OrchestratorViewPage,
+    console: OrchestratorActionConsole,
     context: OperationWorkbenchContext,
     session: OperationWorkbenchSession,
     view: OrchestratorView,
@@ -29,22 +30,22 @@ struct GuiApp {
 
 impl GuiApp {
     fn new(repo_root: PathBuf) -> Result<Self> {
-        let context = load_operation_workbench_context(&repo_root)?;
-        Self::from_context(repo_root, context)
+        let console = OrchestratorActionConsole::load(repo_root)?;
+        Self::from_console(console)
     }
 
     #[cfg(test)]
     fn new_memory(repo_root: PathBuf) -> Result<Self> {
-        let context = load_operation_workbench_context(&repo_root)?.with_memory_store();
-        Self::from_context(repo_root, context)
+        Self::new(repo_root)
     }
 
-    fn from_context(repo_root: PathBuf, context: OperationWorkbenchContext) -> Result<Self> {
+    fn from_console(console: OrchestratorActionConsole) -> Result<Self> {
+        let context = console.context()?;
         let session = context.build_session("service.install")?;
-        let view = load_orchestrator_view(&repo_root)?;
+        let view = console.view()?;
         Ok(Self {
-            repo_root,
             page: OrchestratorViewPage::Overview,
+            console,
             context,
             session,
             view,
@@ -53,10 +54,7 @@ impl GuiApp {
     }
 
     fn refresh(&mut self) {
-        match (
-            load_operation_workbench_context(&self.repo_root),
-            load_orchestrator_view(&self.repo_root),
-        ) {
+        match (self.console.context(), self.console.view()) {
             (Ok(context), Ok(view)) => {
                 let action = self.session.workbench.selected_action.clone();
                 match context
@@ -106,34 +104,57 @@ impl GuiApp {
     }
 
     fn confirm_session(&mut self) {
-        match self.context.confirm(&self.session) {
-            Ok(session) => {
-                self.set_session(session);
-                self.last_error = None;
-            }
-            Err(err) => {
-                self.last_error = Some(err.to_string());
-            }
-        }
+        self.dispatch_current("operation.confirm");
     }
 
     fn apply_session(&mut self) {
-        match self.context.apply(&self.session) {
-            Ok(session) => {
-                self.set_session(session);
-                self.last_error = None;
-            }
-            Err(err) => {
-                self.last_error = Some(err.to_string());
-            }
-        }
+        let action = self.session.workbench.selected_action.clone();
+        self.dispatch_current(&action);
     }
 
     fn rollback_session(&mut self) {
-        match self.context.rollback(&self.session) {
-            Ok(session) => {
-                self.set_session(session);
-                self.last_error = None;
+        self.dispatch_current("operation.rollback");
+    }
+
+    fn dispatch_current(&mut self, action: &str) {
+        let request = if action == "operation.confirm"
+            || action == "operation.apply"
+            || action == "operation.rollback"
+        {
+            ActionRequest::new(
+                format!("{}-console", action.replace('.', "-")),
+                action,
+                [
+                    (
+                        "operation_id".to_string(),
+                        self.session.current_operation.operation_id.clone(),
+                    ),
+                    ("confirm".to_string(), "true".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            )
+        } else {
+            let mut request = self.session.workbench.request.clone();
+            request.operation_id = self.session.current_operation.operation_id.clone();
+            if self.session.workbench.preview.requires_confirmation {
+                request
+                    .fields
+                    .insert("confirm".to_string(), "true".to_string());
+            }
+            request
+        };
+
+        match self.console.dispatch(request) {
+            Ok(result) => {
+                let message = format!(
+                    "{} {}: {}",
+                    result.capability_status.label(),
+                    result.status,
+                    result.message
+                );
+                self.refresh();
+                self.last_error = Some(message);
             }
             Err(err) => {
                 self.last_error = Some(err.to_string());
@@ -405,7 +426,7 @@ fn draw_operation_workbench(
         if ui.button("确认").clicked() {
             app.confirm_session();
         }
-        if ui.button("执行").clicked() {
+        if ui.button("执行 Action").clicked() {
             app.apply_session();
         }
         if ui.button("回滚").clicked() {
@@ -503,6 +524,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let repo_root = fs::canonicalize(&cli.repo_root).unwrap_or(cli.repo_root);
     let app = GuiApp::new(repo_root)?;
+    let gui_font = load_required_gui_font()?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 760.0]),
         ..Default::default()
@@ -510,9 +532,72 @@ fn main() -> Result<()> {
     eframe::run_native(
         "OJOS Orchestrator",
         options,
-        Box::new(|_cc| Ok(Box::new(app))),
+        Box::new(move |cc| {
+            cc.egui_ctx
+                .set_fonts(gui_font_definitions(gui_font.clone()));
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|err| anyhow::anyhow!(err.to_string()))
+}
+
+#[derive(Clone, Debug)]
+struct LoadedGuiFont {
+    name: String,
+    bytes: Vec<u8>,
+}
+
+fn load_required_gui_font() -> Result<LoadedGuiFont> {
+    for path in gui_font_candidates() {
+        if path.is_file() {
+            return Ok(LoadedGuiFont {
+                name: path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("ojos-cjk-font")
+                    .to_string(),
+                bytes: fs::read(&path)?,
+            });
+        }
+    }
+    anyhow::bail!("未找到可用于 GUI 的中文字体；请安装 Noto Sans CJK、微软雅黑、黑体或宋体后重试")
+}
+
+fn gui_font_definitions(font: LoadedGuiFont) -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    let font_key = format!("ojos-cjk-{}", font.name);
+    fonts.font_data.insert(
+        font_key.clone(),
+        Arc::new(egui::FontData::from_owned(font.bytes)),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .insert(0, font_key.clone());
+    }
+    fonts
+}
+
+fn gui_font_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = std::env::var_os("OJOS_ORCHESTRATOR_GUI_FONT") {
+        paths.push(PathBuf::from(path));
+    }
+    paths.extend([
+        PathBuf::from(r"C:\Windows\Fonts\NotoSansSC-VF.ttf"),
+        PathBuf::from(r"C:\Windows\Fonts\msyh.ttc"),
+        PathBuf::from(r"C:\Windows\Fonts\simhei.ttf"),
+        PathBuf::from(r"C:\Windows\Fonts\simsun.ttc"),
+        PathBuf::from("/System/Library/Fonts/PingFang.ttc"),
+        PathBuf::from("/System/Library/Fonts/STHeiti Light.ttc"),
+        PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+        PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansSC-Regular.otf"),
+        PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+    ]);
+    paths
 }
 
 fn configure_utf8_console() {
@@ -586,49 +671,159 @@ mod tests {
     }
 
     #[test]
-    fn gui_workbench_uses_core_session_for_updates_and_apply() {
+    fn gui_exposes_dispatcher_backed_actions() {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|path| path.parent())
             .expect("repo root")
             .to_path_buf();
         let mut app = GuiApp::new_memory(repo_root).expect("GUI app should load");
-        app.update_field("service_id", "problem-api".to_string());
+        app.select_action("endpoint.register");
+        app.update_field("endpoint", "127.0.0.1:19001".to_string());
+        app.update_field("service_id", "gateway".to_string());
+        app.update_field("protocol", "http".to_string());
         assert_eq!(
-            app.session.workbench.request.field("service_id"),
-            Some("problem-api")
+            app.session.workbench.request.field("endpoint"),
+            Some("127.0.0.1:19001")
         );
-        assert_eq!(app.session.workbench.preview.target_id, "problem-api");
-        app.confirm_session();
         app.apply_session();
-        assert_eq!(app.session.result_status, "SUCCEEDED");
         assert!(
             app.view
-                .operations
+                .endpoints
                 .iter()
-                .any(|operation| operation.operation_id
-                    == app.session.current_operation.operation_id
-                    && operation.status == "SUCCEEDED"
-                    && operation.log_count == app.session.logs.len()),
-            "GUI view should reflect the current core-backed operation session"
+                .any(|endpoint| endpoint.endpoint == "127.0.0.1:19001"),
+            "GUI action console should write Endpoint into Store-backed view"
         );
         assert!(
             app.view
                 .logs
                 .iter()
-                .any(|log| log.operation_id == app.session.current_operation.operation_id),
-            "GUI LogView should include current operation logs"
+                .any(|log| log.operation_id == "preview-endpoint-register"),
+            "GUI action console should expose operation logs"
         );
-        app.rollback_session();
-        assert_eq!(app.session.result_status, "ROLLED_BACK");
+
+        app.select_action("service.start");
+        app.apply_session();
         assert!(
-            app.view
-                .operations
-                .iter()
-                .any(|operation| operation.operation_id
-                    == app.session.current_operation.operation_id
-                    && operation.status == "ROLLED_BACK"),
-            "GUI view should reflect rollback state"
+            app.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("UNSUPPORTED")),
+            "GUI must not report unsupported lifecycle actions as success"
         );
+    }
+
+    #[test]
+    fn gui_fonts_force_cjk_fallback_for_all_text_styles() {
+        let fonts = gui_font_definitions(LoadedGuiFont {
+            name: "test-cjk.ttf".to_string(),
+            bytes: vec![0],
+        });
+        let proportional = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .expect("proportional family");
+        let monospace = fonts
+            .families
+            .get(&egui::FontFamily::Monospace)
+            .expect("monospace family");
+        assert_eq!(
+            proportional.first(),
+            Some(&"ojos-cjk-test-cjk.ttf".to_string())
+        );
+        assert_eq!(
+            monospace.first(),
+            Some(&"ojos-cjk-test-cjk.ttf".to_string())
+        );
+        assert!(fonts.font_data.contains_key("ojos-cjk-test-cjk.ttf"));
+    }
+
+    #[test]
+    fn gui_font_candidates_cover_windows_cjk_fonts() {
+        let candidates = gui_font_candidates();
+        let names = candidates
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            names.contains(&"NotoSansSC-VF.ttf")
+                && names.contains(&"msyh.ttc")
+                && names.contains(&"simhei.ttf")
+                && names.contains(&"simsun.ttc")
+        );
+    }
+
+    #[test]
+    fn gui_source_keeps_utf8_chinese_text_without_mojibake() {
+        let source =
+            std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+                .expect("GUI source should be readable as UTF-8");
+        assert!(
+            source.contains("原生 GUI 入口")
+                && source.contains("核心对象总览")
+                && source.contains("未找到可用于 GUI 的中文字体"),
+            "GUI user-facing text must remain readable UTF-8 Chinese"
+        );
+        assert_no_mojibake(&source);
+    }
+
+    fn assert_no_mojibake(source: &str) {
+        for marker in mojibake_markers() {
+            assert!(
+                !source.contains(&marker),
+                "GUI source contains mojibake marker {marker}"
+            );
+        }
+    }
+
+    fn mojibake_markers() -> Vec<String> {
+        [
+            &[0xfffd][..],
+            &[0x00ef, 0x00bf, 0x00bd],
+            &[0x00c3],
+            &[0x00c2],
+            &[0x00e2, 0x20ac],
+            &[0x00e2, 0x20ac, 0x2122],
+            &[0x00e2, 0x20ac, 0x0153],
+            &[0x00e2, 0x20ac, 0x009d],
+            &[0x00e4, 0x00b8],
+            &[0x9358, 0x71ba],
+            &[0x7035, 0x7845],
+            &[0x935a, 0x5d87],
+            &[0x9417, 0x581f],
+            &[0x7eeb, 0x8bf2],
+            &[0x9357, 0x5fda],
+            &[0x93c6, 0x64ae],
+            &[0x93c9, 0x30e6],
+            &[0x7481, 0x3088],
+            &[0x9418, 0x8235],
+            &[0x690b, 0x5ea8],
+            &[0x59af, 0x2033],
+            &[0x701b, 0x6941],
+            &[0x68f0, 0x52ee],
+            &[0x7ead, 0xe1bf],
+            &[0x7f01, 0x64b4],
+            &[0x95bf, 0x6b12],
+            &[0x93c3, 0x30e5],
+            &[0x93bd, 0x6a3f],
+            &[0x5bf0, 0x546e],
+            &[0x95c7, 0x20ac],
+            &[0x741b, 0x3125],
+            &[0x8930, 0x64b3],
+            &[0x5a11, 0x581f],
+            &[0x6d63, 0x5d87],
+            &[0x95ab, 0x20ac],
+            &[0x9352, 0x950b],
+            &[0x93b5, 0x0446],
+            &[0x9365, 0x70b4],
+            &[0x9286],
+        ]
+        .into_iter()
+        .map(|codes| {
+            codes
+                .iter()
+                .filter_map(|code| char::from_u32(*code))
+                .collect::<String>()
+        })
+        .collect()
     }
 }

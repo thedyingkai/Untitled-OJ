@@ -1,4 +1,6 @@
 use crate::{Endpoint, Link, LogView, OrchestratorError, Result, validate_endpoint_id};
+#[cfg(target_os = "windows")]
+use encoding_rs::GBK;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -248,8 +250,12 @@ fn safe_executable(value: &str) -> Result<String> {
 }
 
 fn driver_output_message(output: &std::process::Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = decode_driver_output_bytes(&output.stdout)
+        .trim()
+        .to_string();
+    let stderr = decode_driver_output_bytes(&output.stderr)
+        .trim()
+        .to_string();
     if output.status.success() {
         if stdout.is_empty() {
             "fixed docker compose command succeeded".to_string()
@@ -260,5 +266,21 @@ fn driver_output_message(output: &std::process::Output) -> String {
         format!("fixed docker compose command exited with {}", output.status)
     } else {
         stderr
+    }
+}
+
+pub(crate) fn decode_driver_output_bytes(bytes: &[u8]) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return text.to_string();
+        }
+        let (decoded, _, _) = GBK.decode(bytes);
+        decoded.into_owned()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        String::from_utf8_lossy(bytes).to_string()
     }
 }

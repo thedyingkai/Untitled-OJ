@@ -176,11 +176,11 @@ pub fn plan_action_request(
             set_apply_operation(&request.operation_id, set)
         }
         "endpoint.register" => {
-            let endpoint = endpoint_from_request(request, true)?;
+            let endpoint = endpoint_from_request(request, true, endpoints)?;
             endpoint_register_operation(&request.operation_id, &endpoint)
         }
         "endpoint.update" => {
-            let endpoint = endpoint_from_request(request, false)?;
+            let endpoint = endpoint_from_request(request, false, endpoints)?;
             endpoint_update_operation(&request.operation_id, &endpoint)
         }
         "endpoint.delete" => {
@@ -328,26 +328,48 @@ fn find_set<'a>(sets: &'a [ServiceSet], set_id: &str) -> Result<&'a ServiceSet> 
         .ok_or_else(|| OrchestratorError::Dependency(format!("missing Set {}", set_id)))
 }
 
-fn endpoint_from_request(request: &ActionRequest, require_service_id: bool) -> Result<Endpoint> {
+fn endpoint_from_request(
+    request: &ActionRequest,
+    require_service_id: bool,
+    endpoints: &[Endpoint],
+) -> Result<Endpoint> {
     let endpoint = request.require_field("endpoint")?;
     validate_endpoint_id(endpoint)?;
+    let current = endpoints.iter().find(|item| item.endpoint == endpoint);
     let service_id = if require_service_id {
         request.require_field("service_id")?.to_string()
     } else {
         request
             .field("service_id")
+            .or_else(|| current.map(|item| item.service_id.as_str()))
             .unwrap_or("unknown-service")
             .to_string()
     };
     Ok(Endpoint {
         endpoint: endpoint.to_string(),
         service_id,
-        protocol: request.field("protocol").unwrap_or("http").to_string(),
-        health_path: request.field("health_path").unwrap_or("").to_string(),
+        protocol: request
+            .field("protocol")
+            .or_else(|| current.map(|item| item.protocol.as_str()))
+            .unwrap_or("http")
+            .to_string(),
+        health_path: request
+            .field("health_path")
+            .or_else(|| current.map(|item| item.health_path.as_str()))
+            .unwrap_or("")
+            .to_string(),
         health: "unknown".to_string(),
         reachable: false,
-        display_name: request.field("display_name").unwrap_or("").to_string(),
-        note: request.field("note").unwrap_or("").to_string(),
+        display_name: request
+            .field("display_name")
+            .or_else(|| current.map(|item| item.display_name.as_str()))
+            .unwrap_or("")
+            .to_string(),
+        note: request
+            .field("note")
+            .or_else(|| current.map(|item| item.note.as_str()))
+            .unwrap_or("")
+            .to_string(),
         config: Value::Null,
         created_at: String::new(),
         updated_at: String::new(),

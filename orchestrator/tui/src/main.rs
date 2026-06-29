@@ -6,8 +6,8 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use orchestrator_core::{
-    OperationWorkbenchContext, OperationWorkbenchSession, OperationWorkbenchView, OrchestratorView,
-    OrchestratorViewPage, endpoint_hosts, load_operation_workbench_context, load_orchestrator_view,
+    ActionRequest, OperationWorkbenchContext, OperationWorkbenchSession, OperationWorkbenchView,
+    OrchestratorActionConsole, OrchestratorView, OrchestratorViewPage, endpoint_hosts,
     merge_operation_workbench_session_into_view,
 };
 use ratatui::Terminal;
@@ -31,8 +31,8 @@ struct Cli {
 }
 
 struct App {
-    repo_root: PathBuf,
     page: OrchestratorViewPage,
+    console: OrchestratorActionConsole,
     context: OperationWorkbenchContext,
     session: OperationWorkbenchSession,
     selected_field_index: usize,
@@ -42,22 +42,22 @@ struct App {
 
 impl App {
     fn new(repo_root: PathBuf) -> Result<Self> {
-        let context = load_operation_workbench_context(&repo_root)?;
-        Self::from_context(repo_root, context)
+        let console = OrchestratorActionConsole::load(repo_root)?;
+        Self::from_console(console)
     }
 
     #[cfg(test)]
     fn new_memory(repo_root: PathBuf) -> Result<Self> {
-        let context = load_operation_workbench_context(&repo_root)?.with_memory_store();
-        Self::from_context(repo_root, context)
+        Self::new(repo_root)
     }
 
-    fn from_context(repo_root: PathBuf, context: OperationWorkbenchContext) -> Result<Self> {
+    fn from_console(console: OrchestratorActionConsole) -> Result<Self> {
+        let context = console.context()?;
         let session = context.build_session("service.install")?;
-        let view = load_orchestrator_view(&repo_root)?;
+        let view = console.view()?;
         Ok(Self {
-            repo_root,
             page: OrchestratorViewPage::Overview,
+            console,
             context,
             session,
             selected_field_index: 0,
@@ -67,7 +67,7 @@ impl App {
     }
 
     fn refresh(&mut self) -> Result<()> {
-        let context = load_operation_workbench_context(&self.repo_root)?;
+        let context = self.console.context()?;
         let action = self.session.workbench.selected_action.clone();
         let session = context
             .build_session_from_request(&self.session.workbench.request)
@@ -75,7 +75,7 @@ impl App {
             .or_else(|_| context.build_session("service.install"))?;
         self.context = context;
         self.session = session;
-        self.view = load_orchestrator_view(&self.repo_root)?;
+        self.view = self.console.view()?;
         self.last_message = "已刷新".to_string();
         Ok(())
     }
@@ -99,6 +99,20 @@ impl App {
 
     fn previous_action(&mut self) {
         self.shift_action(-1);
+    }
+
+    #[cfg(test)]
+    fn select_action(&mut self, action: &str) {
+        match self.context.build_session(action) {
+            Ok(session) => {
+                self.set_session(session);
+                self.selected_field_index = 0;
+                self.last_message = format!("已选择 {action}");
+            }
+            Err(err) => {
+                self.last_message = err.to_string();
+            }
+        }
     }
 
     fn shift_action(&mut self, delta: isize) {
@@ -158,35 +172,74 @@ impl App {
         }
     }
 
-    fn confirm_session(&mut self) {
-        match self.context.confirm(&self.session) {
+    #[cfg(test)]
+    fn update_field(&mut self, field: &str, value: String) {
+        match self.context.update_field(&self.session, field, value) {
             Ok(session) => {
                 self.set_session(session);
-                self.last_message = "Operation 已确认".to_string();
+                self.last_message = format!("已更新字段 {field}");
             }
             Err(err) => {
                 self.last_message = err.to_string();
             }
         }
+    }
+
+    fn confirm_session(&mut self) {
+        self.dispatch_current("operation.confirm");
     }
 
     fn apply_session(&mut self) {
-        match self.context.apply(&self.session) {
-            Ok(session) => {
-                self.set_session(session);
-                self.last_message = "Operation 已执行".to_string();
-            }
-            Err(err) => {
-                self.last_message = err.to_string();
-            }
-        }
+        let action = self.session.workbench.selected_action.clone();
+        self.dispatch_current(&action);
     }
 
     fn rollback_session(&mut self) {
-        match self.context.rollback(&self.session) {
-            Ok(session) => {
-                self.set_session(session);
-                self.last_message = "Operation 已回滚".to_string();
+        self.dispatch_current("operation.rollback");
+    }
+
+    fn dispatch_current(&mut self, action: &str) {
+        let request = if action == "operation.confirm"
+            || action == "operation.apply"
+            || action == "operation.rollback"
+        {
+            ActionRequest::new(
+                format!("{}-console", action.replace('.', "-")),
+                action,
+                [
+                    (
+                        "operation_id".to_string(),
+                        self.session.current_operation.operation_id.clone(),
+                    ),
+                    ("confirm".to_string(), "true".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            )
+        } else {
+            let mut request = self.session.workbench.request.clone();
+            request.operation_id = self.session.current_operation.operation_id.clone();
+            if self.session.workbench.preview.requires_confirmation {
+                request
+                    .fields
+                    .insert("confirm".to_string(), "true".to_string());
+            }
+            request
+        };
+
+        match self.console.dispatch(request) {
+            Ok(result) => {
+                let message = format!(
+                    "{} {}: {}",
+                    result.capability_status.label(),
+                    result.status,
+                    result.message
+                );
+                if let Err(err) = self.refresh() {
+                    self.last_message = err.to_string();
+                } else {
+                    self.last_message = message;
+                }
             }
             Err(err) => {
                 self.last_message = err.to_string();
@@ -789,7 +842,7 @@ mod tests {
         assert!(!app.view.sets.is_empty());
         assert!(!app.view.endpoints.is_empty());
         assert!(!app.view.links.is_empty());
-        assert!(!app.view.operations.is_empty());
+        assert!(app.view.schemas.action_count() > 0);
         assert!(
             {
                 let workbench = OperationWorkbenchView::from_session(&app.session);
@@ -805,12 +858,12 @@ mod tests {
             },
             "TUI should load the same shared operation workbench as GUI"
         );
-        assert!(!app.view.logs.is_empty());
-        assert!(!app.view.diagnostics.is_empty());
+        assert!(app.view.logs.is_empty());
+        assert!(app.view.diagnostics.is_empty());
     }
 
     #[test]
-    fn tui_workbench_uses_core_session_for_action_field_and_apply() {
+    fn tui_exposes_dispatcher_backed_actions() {
         let mut app = App::new_memory(repo_root()).expect("TUI app should load");
         app.next_action();
         assert_ne!(app.session.workbench.selected_action, "");
@@ -825,36 +878,105 @@ mod tests {
         assert!(app.session.workbench.request.field("service_id").is_some());
 
         app = App::new_memory(repo_root()).expect("TUI app should reload");
-        app.confirm_session();
+        app.select_action("endpoint.register");
+        app.update_field("endpoint", "127.0.0.1:19002".to_string());
+        app.update_field("service_id", "gateway".to_string());
+        app.update_field("protocol", "http".to_string());
         app.apply_session();
-        assert_eq!(app.session.result_status, "SUCCEEDED");
         assert!(
             app.view
-                .operations
+                .endpoints
                 .iter()
-                .any(|operation| operation.operation_id
-                    == app.session.current_operation.operation_id
-                    && operation.status == "SUCCEEDED"
-                    && operation.log_count == app.session.logs.len()),
-            "TUI view should reflect the current core-backed operation session"
+                .any(|endpoint| endpoint.endpoint == "127.0.0.1:19002"),
+            "TUI action console should write Endpoint into Store-backed view"
         );
         assert!(
             app.view
                 .logs
                 .iter()
-                .any(|log| log.operation_id == app.session.current_operation.operation_id),
-            "TUI LogView should include current operation logs"
+                .any(|log| log.operation_id == "preview-endpoint-register"),
+            "TUI LogView should include dispatcher operation logs"
         );
-        app.rollback_session();
-        assert_eq!(app.session.result_status, "ROLLED_BACK");
+        app.select_action("service.start");
+        app.apply_session();
         assert!(
-            app.view
-                .operations
-                .iter()
-                .any(|operation| operation.operation_id
-                    == app.session.current_operation.operation_id
-                    && operation.status == "ROLLED_BACK"),
-            "TUI view should reflect rollback state"
+            app.last_message.contains("UNSUPPORTED"),
+            "TUI must not report unsupported lifecycle actions as success"
         );
+    }
+
+    #[test]
+    fn tui_source_keeps_utf8_chinese_text_without_mojibake() {
+        let source =
+            std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+                .expect("TUI source should be readable as UTF-8");
+        assert!(
+            source.contains("原生 TUI")
+                && source.contains("核心对象总览")
+                && source.contains("q/Esc 退出"),
+            "TUI user-facing text must remain readable UTF-8 Chinese"
+        );
+        assert_no_mojibake(&source);
+    }
+
+    fn assert_no_mojibake(source: &str) {
+        for marker in mojibake_markers() {
+            assert!(
+                !source.contains(&marker),
+                "TUI source contains mojibake marker {marker}"
+            );
+        }
+    }
+
+    fn mojibake_markers() -> Vec<String> {
+        [
+            &[0xfffd][..],
+            &[0x00ef, 0x00bf, 0x00bd],
+            &[0x00c3],
+            &[0x00c2],
+            &[0x00e2, 0x20ac],
+            &[0x00e2, 0x20ac, 0x2122],
+            &[0x00e2, 0x20ac, 0x0153],
+            &[0x00e2, 0x20ac, 0x009d],
+            &[0x00e4, 0x00b8],
+            &[0x9358, 0x71ba],
+            &[0x7035, 0x7845],
+            &[0x935a, 0x5d87],
+            &[0x9417, 0x581f],
+            &[0x7eeb, 0x8bf2],
+            &[0x9357, 0x5fda],
+            &[0x93c6, 0x64ae],
+            &[0x93c9, 0x30e6],
+            &[0x7481, 0x3088],
+            &[0x9418, 0x8235],
+            &[0x690b, 0x5ea8],
+            &[0x59af, 0x2033],
+            &[0x701b, 0x6941],
+            &[0x68f0, 0x52ee],
+            &[0x7ead, 0xe1bf],
+            &[0x7f01, 0x64b4],
+            &[0x95bf, 0x6b12],
+            &[0x93c3, 0x30e5],
+            &[0x93bd, 0x6a3f],
+            &[0x5bf0, 0x546e],
+            &[0x95c7, 0x20ac],
+            &[0x741b, 0x3125],
+            &[0x8930, 0x64b3],
+            &[0x5a11, 0x581f],
+            &[0x6d63, 0x5d87],
+            &[0x95ab, 0x20ac],
+            &[0x9352, 0x950b],
+            &[0x93b5, 0x0446],
+            &[0x9365, 0x70b4],
+            &[0x9286],
+        ]
+        .into_iter()
+        .map(|codes| {
+            codes
+                .iter()
+                .filter_map(|code| char::from_u32(*code))
+                .collect::<String>()
+        })
+        .collect()
     }
 }

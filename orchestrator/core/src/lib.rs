@@ -1,5 +1,6 @@
 mod action;
 mod database;
+mod dispatcher;
 mod executor;
 mod health;
 mod model;
@@ -20,6 +21,10 @@ pub use database::{
     DatabaseAccessReport, DatabaseSchemaReport, DatabaseStatement, DatabaseWrite,
     DatabaseWritePlan, ORCHESTRATOR_DATABASE_STATEMENTS, ORCHESTRATOR_TABLES, PgOrchestratorStore,
     inspect_database_access, inspect_orchestrator_schema, plan_database_writes,
+};
+pub use dispatcher::{
+    ActionCapabilityStatus, ActionDispatchResult, ActionMatrixEntry, OrchestratorActionConsole,
+    OrchestratorActionDispatcher, action_matrix, capability_for_action, default_console_request,
 };
 pub use executor::{
     DockerComposeDriver, DriverRequest, DriverResult, ExecutionDriver, ExternalEndpointDriver,

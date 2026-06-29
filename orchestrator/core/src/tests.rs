@@ -2787,6 +2787,469 @@ fn operation_executor_mutates_core_store_objects() {
     assert_eq!(store.diagnostic_reports().len(), 1);
 }
 
+fn dispatcher_store_with_services() -> MemoryOrchestratorStore {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    gateway.name = "Gateway".to_string();
+    let mut auth = valid_service();
+    auth.id = "auth".to_string();
+    auth.name = "Auth".to_string();
+    let mut problem_api = valid_service();
+    problem_api.id = "problem-api".to_string();
+    problem_api.name = "Problem API".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store.put_service(auth).expect("put auth");
+    store.put_service(problem_api).expect("put problem api");
+    store
+}
+
+fn request(action: &str, operation_id: &str, fields: &[(&str, &str)]) -> ActionRequest {
+    ActionRequest::new(
+        operation_id,
+        action,
+        fields
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect(),
+    )
+}
+
+#[test]
+fn action_dispatcher_routes_schema_actions() {
+    let root = repo_root();
+    let schemas = load_shared_schemas(&root).expect("schemas");
+    let catalog = validate_action_catalog(&schemas).expect("catalog");
+    let matrix = action_matrix();
+    assert_eq!(matrix.len(), catalog.len());
+    for action in schemas.actions {
+        assert!(
+            matrix.iter().any(|entry| entry.action_id == action
+                && entry.gui_entry
+                && entry.tui_entry
+                && !entry.action_id.contains("machine")),
+            "missing matrix entry for {action}"
+        );
+    }
+}
+
+#[test]
+fn action_result_marks_unsupported_without_success() {
+    let mut store = dispatcher_store_with_services();
+    let result = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "service.start",
+            "op-unsupported-start",
+            &[("service_id", "gateway")],
+        ))
+        .expect("unsupported result");
+    assert_eq!(
+        result.capability_status,
+        ActionCapabilityStatus::Unsupported
+    );
+    assert_eq!(result.status, "UNSUPPORTED");
+    assert!(!result.message.contains("成功"));
+    let operation = store
+        .operation("op-unsupported-start")
+        .expect("stored unsupported operation");
+    assert_eq!(operation.status, OperationStatus::Failed);
+    assert!(
+        store
+            .operation_logs("op-unsupported-start")
+            .iter()
+            .any(|record| {
+                record.level == "warn" && record.message.contains("尚未接入真实执行器")
+            })
+    );
+}
+
+#[test]
+fn unsupported_catalog_actions_never_enter_fake_success_path() {
+    let mut store = dispatcher_store_with_services();
+    let result = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "deployment.create",
+            "op-unsupported-deployment",
+            &[
+                ("name", "default-topology"),
+                ("root_endpoint", "127.0.0.1:8080"),
+                ("confirm", "true"),
+            ],
+        ))
+        .expect("unsupported deployment result");
+    assert_eq!(
+        result.capability_status,
+        ActionCapabilityStatus::Unsupported
+    );
+    assert_eq!(result.status, "UNSUPPORTED");
+    assert!(result.message.contains("已阻止假成功路径"));
+    let operation = store
+        .operation("op-unsupported-deployment")
+        .expect("stored unsupported operation");
+    assert_eq!(operation.status, OperationStatus::Failed);
+    assert_eq!(
+        operation
+            .result
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("UNSUPPORTED")
+    );
+    assert!(
+        store
+            .operation_logs("op-unsupported-deployment")
+            .iter()
+            .any(|record| record.level == "warn" && record.message.contains("已阻止假成功路径")),
+        "unsupported catalog action should be recorded as a warning log"
+    );
+}
+
+#[test]
+fn endpoint_register_update_delete_and_health_write_store() {
+    let mut store = dispatcher_store_with_services();
+    let mut dispatcher =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe);
+    let registered = dispatcher
+        .dispatch(request(
+            "endpoint.register",
+            "op-endpoint-register-console",
+            &[
+                ("endpoint", "127.0.0.1:8080"),
+                ("service_id", "gateway"),
+                ("protocol", "http"),
+                ("health_path", "/health"),
+                ("display_name", "Local Gateway"),
+                ("note", "本机 Gateway"),
+            ],
+        ))
+        .expect("endpoint register");
+    assert_eq!(
+        registered.capability_status,
+        ActionCapabilityStatus::StoreBacked
+    );
+    assert!(
+        registered
+            .changed_objects
+            .contains(&"Endpoint:127.0.0.1:8080".to_string())
+    );
+    assert!(store.endpoint("127.0.0.1:8080").is_some());
+
+    let updated =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "endpoint.update",
+                "op-endpoint-update-console",
+                &[
+                    ("endpoint", "127.0.0.1:8080"),
+                    ("protocol", "tcp"),
+                    ("health_path", "/ready"),
+                    ("display_name", "Gateway TCP"),
+                    ("note", "更新后的 Endpoint"),
+                    ("confirm", "true"),
+                ],
+            ))
+            .expect("endpoint update");
+    assert_eq!(
+        updated.capability_status,
+        ActionCapabilityStatus::StoreBacked
+    );
+    assert_eq!(
+        store
+            .endpoint("127.0.0.1:8080")
+            .expect("updated endpoint")
+            .protocol,
+        "tcp"
+    );
+
+    let health = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "endpoint.health.check",
+            "op-endpoint-health-console",
+            &[("endpoint", "127.0.0.1:8080")],
+        ))
+        .expect("endpoint health");
+    assert_eq!(health.capability_status, ActionCapabilityStatus::Real);
+    assert_eq!(
+        store
+            .endpoint("127.0.0.1:8080")
+            .expect("health endpoint")
+            .health,
+        "unreachable"
+    );
+
+    let deleted =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "endpoint.delete",
+                "op-endpoint-delete-console",
+                &[("endpoint", "127.0.0.1:8080"), ("confirm", "true")],
+            ))
+            .expect("endpoint delete");
+    assert_eq!(
+        deleted.capability_status,
+        ActionCapabilityStatus::StoreBacked
+    );
+    assert!(store.endpoint("127.0.0.1:8080").is_none());
+}
+
+#[test]
+fn link_create_update_delete_and_health_write_store() {
+    let mut store = dispatcher_store_with_services();
+    for (endpoint, service_id, reachable) in [
+        ("127.0.0.1:8080", "gateway", true),
+        ("127.0.0.1:8001", "auth", true),
+    ] {
+        store
+            .put_endpoint(Endpoint {
+                endpoint: endpoint.to_string(),
+                service_id: service_id.to_string(),
+                protocol: "http".to_string(),
+                health_path: "/health".to_string(),
+                health: if reachable { "healthy" } else { "unknown" }.to_string(),
+                reachable,
+                display_name: service_id.to_string(),
+                note: String::new(),
+                config: serde_json::json!({}),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .expect("put endpoint");
+    }
+
+    let created =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "link.create",
+                "op-link-create-console",
+                &[
+                    ("source_endpoint", "127.0.0.1:8080"),
+                    ("target_endpoint", "127.0.0.1:8001"),
+                    ("protocol", "http"),
+                    ("auth_mode", "internal"),
+                    ("scope", "gateway-to-auth"),
+                    ("confirm", "true"),
+                ],
+            ))
+            .expect("link create");
+    assert_eq!(
+        created.capability_status,
+        ActionCapabilityStatus::StoreBacked
+    );
+    assert!(
+        store
+            .get_link("127.0.0.1:8080", "127.0.0.1:8001")
+            .expect("get link")
+            .is_some()
+    );
+
+    OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "link.update",
+            "op-link-update-console",
+            &[
+                ("source_endpoint", "127.0.0.1:8080"),
+                ("target_endpoint", "127.0.0.1:8001"),
+                ("protocol", "http"),
+                ("auth_mode", "none"),
+                ("scope", ""),
+                ("confirm", "true"),
+            ],
+        ))
+        .expect("link update");
+    assert_eq!(
+        store
+            .get_link("127.0.0.1:8080", "127.0.0.1:8001")
+            .expect("get link")
+            .expect("link")
+            .auth_mode,
+        "none"
+    );
+
+    let health = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "link.health.check",
+            "op-link-health-console",
+            &[
+                ("source_endpoint", "127.0.0.1:8080"),
+                ("target_endpoint", "127.0.0.1:8001"),
+            ],
+        ))
+        .expect("link health");
+    assert_eq!(health.capability_status, ActionCapabilityStatus::Real);
+    assert_eq!(
+        store
+            .get_link("127.0.0.1:8080", "127.0.0.1:8001")
+            .expect("get link")
+            .expect("link")
+            .health,
+        "degraded",
+        "empty scope/auth policy should not be reported as fake healthy"
+    );
+
+    OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "link.delete",
+            "op-link-delete-console",
+            &[
+                ("source_endpoint", "127.0.0.1:8080"),
+                ("target_endpoint", "127.0.0.1:8001"),
+                ("confirm", "true"),
+            ],
+        ))
+        .expect("link delete");
+    assert!(
+        store
+            .get_link("127.0.0.1:8080", "127.0.0.1:8001")
+            .expect("get link")
+            .is_none()
+    );
+}
+
+#[test]
+fn set_expand_apply_and_diagnostic_report_are_console_actions() {
+    let root = repo_root();
+    let mut store = dispatcher_store_with_services();
+    let set = validate_service_set_file(&root, Path::new("sets/single-node-oj.yaml")).expect("set");
+    for service in &set.services {
+        let path = Path::new("services")
+            .join(service.id())
+            .join("service.yaml");
+        let manifest = validate_service_manifest_file(&root, &path).expect("service manifest");
+        store.put_service(manifest).expect("put set service");
+    }
+    store.put_set(set).expect("put set");
+    let expanded =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "set.expand",
+                "op-set-expand-console",
+                &[("set_id", "single-node-oj")],
+            ))
+            .expect("set expand");
+    assert_eq!(expanded.capability_status, ActionCapabilityStatus::Readonly);
+    assert_eq!(expanded.status, "READONLY");
+
+    let applied =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "set.apply",
+                "op-set-apply-console",
+                &[("set_id", "single-node-oj"), ("confirm", "true")],
+            ))
+            .expect("set apply");
+    assert_eq!(
+        applied.capability_status,
+        ActionCapabilityStatus::StoreBacked
+    );
+    assert!(!store.endpoints().is_empty());
+    assert!(
+        store
+            .operation_logs("op-set-apply-console")
+            .iter()
+            .any(|record| record.message.contains("operation set.apply")
+                && record.message.contains("succeeded"))
+    );
+
+    let diagnostic =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "diagnostics.run",
+                "op-diagnostics-run-console",
+                &[("target_type", "Topology"), ("target_id", "current")],
+            ))
+            .expect("diagnostics run");
+    assert_eq!(
+        diagnostic.capability_status,
+        ActionCapabilityStatus::StoreBacked
+    );
+    assert_eq!(store.diagnostic_reports().len(), 1);
+}
+
+#[test]
+fn operation_plan_confirm_apply_rollback_and_logs_are_visible() {
+    let mut store = dispatcher_store_with_services();
+    let planned =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "endpoint.register",
+                "op-operation-lifecycle-console",
+                &[
+                    ("endpoint", "127.0.0.1:18080"),
+                    ("service_id", "gateway"),
+                    ("protocol", "http"),
+                    ("health_path", "/health"),
+                ],
+            ))
+            .expect("endpoint register");
+    assert_eq!(planned.status, "SUCCEEDED");
+
+    let confirm_result =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "operation.confirm",
+                "op-confirm-console",
+                &[("operation_id", "op-operation-lifecycle-console")],
+            ));
+    assert!(
+        confirm_result.is_err(),
+        "already applied operation should not be confirmable again"
+    );
+
+    let logs = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "operation.logs.view",
+            "op-logs-console",
+            &[("operation_id", "op-operation-lifecycle-console")],
+        ))
+        .expect("operation logs");
+    assert_eq!(logs.capability_status, ActionCapabilityStatus::Readonly);
+    assert!(!logs.logs.is_empty());
+
+    let rollback =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "operation.rollback",
+                "op-rollback-console",
+                &[
+                    ("operation_id", "op-operation-lifecycle-console"),
+                    ("confirm", "true"),
+                ],
+            ))
+            .expect("rollback");
+    assert_eq!(rollback.status, "ROLLED_BACK");
+    assert!(store.endpoint("127.0.0.1:18080").is_none());
+}
+
+#[test]
+fn action_console_keeps_memory_store_changes_visible_after_refresh() {
+    let root = repo_root();
+    let mut console = OrchestratorActionConsole::load(root).expect("console");
+    console
+        .dispatch_with_static_probe(request(
+            "endpoint.register",
+            "op-console-endpoint",
+            &[
+                ("endpoint", "127.0.0.1:19000"),
+                ("service_id", "gateway"),
+                ("protocol", "http"),
+            ],
+        ))
+        .expect("console dispatch");
+    let view = console.view().expect("view");
+    assert!(
+        view.endpoints
+            .iter()
+            .any(|endpoint| endpoint.endpoint == "127.0.0.1:19000"),
+        "Memory fallback must keep GUI/TUI action results visible for the session"
+    );
+    let context = console.context().expect("context");
+    assert!(
+        context
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.endpoint == "127.0.0.1:19000")
+    );
+}
+
 #[test]
 fn orchestrator_database_migration_contains_only_formal_tables() {
     let root = repo_root();
@@ -3365,6 +3828,24 @@ fn docker_compose_driver_runs_only_when_explicitly_enabled() {
         missing_binary
             .to_string()
             .contains("docker compose fixed command failed to start")
+    );
+}
+
+#[test]
+fn driver_output_decoder_preserves_utf8_text() {
+    assert_eq!(
+        crate::executor::decode_driver_output_bytes("服务已启动".as_bytes()),
+        "服务已启动"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_driver_output_decoder_reads_gbk_text() {
+    let (bytes, _, _) = encoding_rs::GBK.encode("服务已启动");
+    assert_eq!(
+        crate::executor::decode_driver_output_bytes(bytes.as_ref()),
+        "服务已启动"
     );
 }
 
