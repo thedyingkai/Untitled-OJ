@@ -2988,9 +2988,58 @@ fn memory_store_lock_and_step_logs_are_persisted_by_executor() {
         logs.iter().any(|record| !record.step_id.is_empty()),
         "apply should persist step logs"
     );
+    let driver_log = logs
+        .iter()
+        .find(|record| record.step_id == "driver:service.restart")
+        .expect("service lifecycle should persist driver result log");
+    assert_eq!(
+        driver_log
+            .data
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("PLANNED")
+    );
+    assert_eq!(
+        driver_log
+            .data
+            .get("command")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(serde_json::Value::as_str),
+        Some("docker")
+    );
     assert_eq!(
         store.operation("op-lock-log").map(|item| &item.status),
         Some(&OperationStatus::Succeeded)
+    );
+}
+
+#[test]
+fn local_process_lifecycle_failure_is_persisted_by_executor() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut service = valid_service();
+    service.id = "web-shell".to_string();
+    service.runtime.mode = RuntimeMode::LocalProcess;
+    service.runtime.driver = "node".to_string();
+    store.put_service(service).expect("put service");
+    let operation =
+        service_lifecycle_operation("op-local-start", "service.start", "web-shell").unwrap();
+    store.put_operation(operation).expect("put operation");
+
+    let failed = OperationExecutor::new(&mut store)
+        .apply("op-local-start")
+        .expect_err("local process lifecycle should remain unsupported");
+    assert!(failed.to_string().contains("supervisor binding"));
+    let stored = store.operation("op-local-start").expect("stored operation");
+    assert_eq!(stored.status, OperationStatus::Failed);
+    assert!(stored.error_message.contains("supervisor binding"));
+    assert!(
+        store
+            .operation_logs("op-local-start")
+            .iter()
+            .any(|record| record.level == "error"
+                && record.message.contains("operation service.start failed")),
+        "unsupported lifecycle should be visible in operation logs"
     );
 }
 

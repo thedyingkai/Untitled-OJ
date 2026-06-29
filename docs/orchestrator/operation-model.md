@@ -44,6 +44,8 @@ ExternalEndpointDriver
 
 `ExternalEndpointDriver` 只管理既有 Endpoint 与 Link 的 metadata、health、logs、reachability 和诊断导出，不引入额外运行实例抽象，也不控制 Service 生命周期。
 
+`OperationExecutor` 在 Service 生命周期 Operation 中根据 Service 的 `runtime.mode` 选择固定 driver，并把 `DriverResult` 写入 `orchestrator_operation_logs`。当前 container Service 走 `DockerComposeDriver` 的计划模式；local-process 生命周期动作仍返回 Unsupported 并落入 `FAILED` Operation；external Service 不执行生命周期控制。
+
 GUI/TUI 通过 `OperationWorkbenchContext` 和 `OperationWorkbenchSession` 使用同一套状态机。GUI/TUI 可以生成 plan、confirm、apply、rollback，并查看 result、error 和 operation logs；不能绕过 core 自行执行动作。
 
 当 `ORCHESTRATOR_DATABASE_URL` 存在时，`OperationWorkbenchContext` 会使用 `PgOrchestratorStore` 持久化工作台生成的 plan、confirm、apply 和 rollback。生成或更新 plan 时写入 `PLANNED` Operation；confirm 后写入 `AWAITING_CONFIRMATION` 和 `confirmed_at`；apply/rollback 继续由 `OperationExecutor` 写入 lock、step log、result、error 和最终状态。没有该变量时，工作台保持 `MemoryOrchestratorStore` 本地演示模式。

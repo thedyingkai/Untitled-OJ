@@ -1,9 +1,10 @@
 use crate::{
-    DiagnosticReport, Endpoint, Link, LogView, Operation, OperationLock, OperationLogRecord,
-    OperationStatus, OrchestratorError, Result, ServiceManifest, ServiceSet, Topology,
-    TopologySnapshot, build_diagnostic_report, build_topology, operation_log_record,
-    operation_step_log_record, start_operation, succeed_operation, validate_endpoint,
-    validate_link, validate_log_view, validate_topology,
+    DiagnosticReport, DockerComposeDriver, DriverRequest, DriverResult, Endpoint, ExecutionDriver,
+    ExternalEndpointDriver, Link, LocalProcessDriver, LogView, Operation, OperationLock,
+    OperationLogRecord, OperationStatus, OrchestratorError, Result, RuntimeMode, ServiceManifest,
+    ServiceSet, Topology, TopologySnapshot, build_diagnostic_report, build_topology,
+    operation_log_record, operation_step_log_record, start_operation, succeed_operation,
+    validate_endpoint, validate_link, validate_log_view, validate_topology,
 };
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
@@ -748,11 +749,21 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S> {
             }
             "service.enable" | "service.disable" | "service.start" | "service.stop"
             | "service.restart" => {
-                ensure_service_exists(self.store, operation.target_id.as_str())?;
+                let service = ensure_service_exists(self.store, operation.target_id.as_str())?;
+                let driver_result = execute_service_driver_action(&service, operation)?;
+                self.store.append_operation_log(driver_result_log_record(
+                    &operation.operation_id,
+                    &driver_result,
+                ))?;
                 changed.push(changed_object("Service", &operation.target_id));
             }
             "service.delete" => {
-                ensure_service_exists(self.store, operation.target_id.as_str())?;
+                let service = ensure_service_exists(self.store, operation.target_id.as_str())?;
+                let driver_result = execute_service_driver_action(&service, operation)?;
+                self.store.append_operation_log(driver_result_log_record(
+                    &operation.operation_id,
+                    &driver_result,
+                ))?;
                 self.store.delete_service(&operation.target_id)?;
                 changed.push(changed_object("Service", &operation.target_id));
             }
@@ -1132,14 +1143,56 @@ fn log_view_from_operation(operation: &Operation) -> Option<LogView> {
     })
 }
 
-fn ensure_service_exists<S: OrchestratorStore>(store: &S, service_id: &str) -> Result<()> {
-    if store.get_service(service_id)?.is_some() {
-        Ok(())
-    } else {
-        Err(OrchestratorError::Dependency(format!(
-            "service {service_id} not found"
-        )))
+fn ensure_service_exists<S: OrchestratorStore>(
+    store: &S,
+    service_id: &str,
+) -> Result<ServiceManifest> {
+    store
+        .get_service(service_id)?
+        .ok_or_else(|| OrchestratorError::Dependency(format!("service {service_id} not found")))
+}
+
+fn execute_service_driver_action(
+    service: &ServiceManifest,
+    operation: &Operation,
+) -> Result<DriverResult> {
+    let request = DriverRequest {
+        action: operation.action.clone(),
+        service_id: service.id.clone(),
+        endpoint: operation
+            .request
+            .get("endpoint")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        link: None,
+        log_source: None,
+    };
+    match service.runtime.mode {
+        RuntimeMode::Container => {
+            DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml").execute(&request)
+        }
+        RuntimeMode::LocalProcess => LocalProcessDriver::new().execute(&request),
+        RuntimeMode::External => ExternalEndpointDriver.execute(&request),
     }
+}
+
+fn driver_result_log_record(operation_id: &str, result: &DriverResult) -> OperationLogRecord {
+    operation_step_log_record(
+        operation_id,
+        format!("driver:{}", result.action),
+        "info",
+        format!(
+            "driver action {} returned {}: {}",
+            result.action, result.status, result.message
+        ),
+        serde_json::json!({
+            "action": result.action,
+            "status": result.status,
+            "message": result.message,
+            "command": result.command,
+        }),
+    )
 }
 
 fn operation_steps(operation: &Operation) -> Vec<serde_json::Value> {
