@@ -2927,11 +2927,33 @@ fn orchestrator_view_can_load_from_store_state() {
     let operation =
         service_health_check_operation("op-store-view", "gateway", Some("127.0.0.1:8080"))
             .expect("operation");
+    let operation = start_operation(&operation)
+        .and_then(|operation| fail_operation(&operation, "health check failed"))
+        .expect("failed operation");
     store.put_operation(operation).expect("operation");
+    store
+        .append_operation_log(operation_step_log_record(
+            "op-store-view",
+            "probe_service_health",
+            "error",
+            "health check failed",
+            serde_json::json!({"endpoint": "127.0.0.1:8080"}),
+        ))
+        .expect("operation log");
     let view = load_orchestrator_view_from_store(schemas, &store).expect("store view");
     assert_eq!(view.services.len(), 1);
     assert_eq!(view.endpoints[0].endpoint, "127.0.0.1:8080");
     assert_eq!(view.operations[0].action, "service.health.check");
+    assert_eq!(view.operations[0].operation_id, "op-store-view");
+    assert_eq!(view.operations[0].status, "FAILED");
+    assert_eq!(view.operations[0].error, "health check failed");
+    assert!(
+        view.logs
+            .iter()
+            .any(|log| log.operation_id == "op-store-view"
+                && log.level == "error"
+                && log.message == "health check failed")
+    );
 }
 
 #[test]

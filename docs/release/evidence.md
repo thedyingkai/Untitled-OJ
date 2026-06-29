@@ -38,6 +38,7 @@ docs/release/
 - Reconcile tick：`orchestrator/core/src/reconciler.rs`
 - GUI/TUI 共享视图：`orchestrator/core/src/view.rs`
 - GUI/TUI 共享工作台：`orchestrator/core/src/workbench.rs`，未设置 `ORCHESTRATOR_DATABASE_URL` 时使用 Memory store，设置后 plan/confirm/apply/rollback 走 `PgOrchestratorStore`
+- GUI/TUI Operation/LogView 观测：`orchestrator/core/src/view.rs` 从 Store 读取 Operation 与 OperationLog，GUI/TUI 展示 `operation_id`、状态、结果、错误与日志消息
 - Orchestrator migration：`deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`
 
 ## 当前限制

@@ -303,8 +303,10 @@ fn draw_operations(ui: &mut egui::Ui, app: &mut GuiApp) {
                 ui,
                 &[
                     "选择",
+                    "Operation",
                     "Action",
                     "对象",
+                    "状态",
                     "风险",
                     "模式",
                     "Plan",
@@ -312,6 +314,9 @@ fn draw_operations(ui: &mut egui::Ui, app: &mut GuiApp) {
                     "预览目标",
                     "预览步骤",
                     "需确认",
+                    "结果",
+                    "错误",
+                    "日志",
                     "摘要",
                 ],
             );
@@ -319,8 +324,10 @@ fn draw_operations(ui: &mut egui::Ui, app: &mut GuiApp) {
                 if ui.button("选用").clicked() {
                     app.select_action(&operation.action);
                 }
+                ui.monospace(&operation.operation_id);
                 ui.monospace(&operation.action);
                 ui.label(&operation.target);
+                ui.label(&operation.status);
                 ui.label(&operation.risk);
                 ui.label(&operation.mode);
                 ui.label(&operation.plan_required);
@@ -328,6 +335,9 @@ fn draw_operations(ui: &mut egui::Ui, app: &mut GuiApp) {
                 ui.label(&operation.preview_target);
                 ui.label(&operation.preview_steps);
                 ui.label(&operation.preview_confirmation);
+                ui.label(&operation.result);
+                ui.label(&operation.error);
+                ui.label(operation.log_count.to_string());
                 ui.label(&operation.summary);
                 ui.end_row();
             }
@@ -435,11 +445,25 @@ fn draw_topology(ui: &mut egui::Ui, view: &OrchestratorView) {
 fn draw_logs(ui: &mut egui::Ui, view: &OrchestratorView) {
     ui.heading("LogView");
     egui::Grid::new("logs_grid").striped(true).show(ui, |ui| {
-        header(ui, &["Source", "Service", "Endpoint", "位置"]);
+        header(
+            ui,
+            &[
+                "Source",
+                "Service",
+                "Endpoint",
+                "Operation",
+                "级别",
+                "消息",
+                "位置",
+            ],
+        );
         for log in &view.logs {
             ui.label(&log.source_id);
             ui.label(&log.service_id);
             ui.monospace(&log.endpoint);
+            ui.monospace(&log.operation_id);
+            ui.label(&log.level);
+            ui.label(&log.message);
             ui.label(&log.path);
             ui.end_row();
         }

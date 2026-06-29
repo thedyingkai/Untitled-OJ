@@ -1,10 +1,10 @@
 use crate::{
-    Endpoint, Link, Operation, OrchestratorError, OrchestratorStore, PgOrchestratorStore, Result,
-    ServiceManifest, ServiceSet, SharedSchemas, Topology, build_operation_workbench,
-    build_topology, default_action_request, expand_set, load_shared_schemas,
-    new_operation_workbench_session, plan_action_preview, run_operation_workbench_flow,
-    validate_action_catalog, validate_endpoint_id, validate_service_manifest_file,
-    validate_service_set_file,
+    Endpoint, Link, Operation, OperationLogRecord, OrchestratorError, OrchestratorStore,
+    PgOrchestratorStore, Result, ServiceManifest, ServiceSet, SharedSchemas, Topology,
+    build_operation_workbench, build_topology, default_action_request, expand_set,
+    load_shared_schemas, new_operation_workbench_session, plan_action_preview,
+    run_operation_workbench_flow, validate_action_catalog, validate_endpoint_id,
+    validate_service_manifest_file, validate_service_set_file,
 };
 use crate::{OperationWorkbench, OperationWorkbenchSession};
 use serde::{Deserialize, Serialize};
@@ -74,8 +74,10 @@ pub struct LinkViewRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationViewRow {
+    pub operation_id: String,
     pub action: String,
     pub target: String,
+    pub status: String,
     pub risk: String,
     pub plan_required: String,
     pub mode: String,
@@ -83,6 +85,9 @@ pub struct OperationViewRow {
     pub preview_target: String,
     pub preview_steps: String,
     pub preview_confirmation: String,
+    pub result: String,
+    pub error: String,
+    pub log_count: usize,
     pub summary: String,
 }
 
@@ -116,6 +121,9 @@ pub struct LogViewRow {
     pub source_id: String,
     pub service_id: String,
     pub endpoint: String,
+    pub operation_id: String,
+    pub level: String,
+    pub message: String,
     pub path: String,
 }
 
@@ -228,6 +236,7 @@ pub fn load_orchestrator_view_from_store<S: OrchestratorStore>(
     let links = store.links()?;
     let operations = store.operations()?;
     let logs = store.log_views()?;
+    let operation_logs = operation_log_rows(store, &operations)?;
     let diagnostics = store.diagnostic_reports()?;
     Ok(OrchestratorView {
         schemas,
@@ -237,7 +246,11 @@ pub fn load_orchestrator_view_from_store<S: OrchestratorStore>(
         links: links.iter().map(link_model_row).collect(),
         operations: operation_store_rows(&operations),
         operation_workbench: None,
-        logs: logs.iter().map(log_model_row).collect(),
+        logs: logs
+            .iter()
+            .map(log_model_row)
+            .chain(operation_logs)
+            .collect(),
         diagnostics: diagnostics.iter().map(diagnostic_model_row).collect(),
         warnings: Vec::new(),
     })
@@ -585,8 +598,13 @@ fn operation_rows(
                     plan_action_preview(&request, &manifest_values, sets, endpoints, topology).ok()
                 });
                 OperationViewRow {
+                    operation_id: preview
+                        .as_ref()
+                        .map(|item| item.operation_id.clone())
+                        .unwrap_or_default(),
                     action: descriptor.action.to_string(),
                     target: descriptor.target_type.to_string(),
+                    status: "CATALOG".to_string(),
                     risk: descriptor.risk_label().to_string(),
                     plan_required: descriptor.plan_requirement().to_string(),
                     mode: descriptor.mode_label().to_string(),
@@ -609,13 +627,18 @@ fn operation_rows(
                         .as_ref()
                         .map(|item| enabled_text(item.requires_confirmation))
                         .unwrap_or_else(|| "待输入".to_string()),
+                    result: String::new(),
+                    error: String::new(),
+                    log_count: 0,
                     summary: descriptor.summary.to_string(),
                 }
             })
             .collect(),
         Err(err) => vec![OperationViewRow {
+            operation_id: String::new(),
             action: "action.catalog.invalid".to_string(),
             target: "DiagnosticReport".to_string(),
+            status: "FAILED".to_string(),
             risk: "高".to_string(),
             plan_required: "必须修复".to_string(),
             mode: "阻塞".to_string(),
@@ -623,6 +646,9 @@ fn operation_rows(
             preview_target: String::new(),
             preview_steps: String::new(),
             preview_confirmation: String::new(),
+            result: String::new(),
+            error: err.to_string(),
+            log_count: 0,
             summary: err.to_string(),
         }],
     }
@@ -632,8 +658,10 @@ fn operation_store_rows(operations: &[Operation]) -> Vec<OperationViewRow> {
     operations
         .iter()
         .map(|operation| OperationViewRow {
+            operation_id: operation.operation_id.clone(),
             action: operation.action.clone(),
             target: operation.target_type.clone(),
+            status: operation_status_text(&operation.status),
             risk: String::new(),
             plan_required: operation_status_text(&operation.status),
             mode: "store".to_string(),
@@ -650,7 +678,10 @@ fn operation_store_rows(operations: &[Operation]) -> Vec<OperationViewRow> {
                 .is_empty()
                 .then_some("no".to_string())
                 .unwrap_or_else(|| "yes".to_string()),
-            summary: operation.error_message.clone(),
+            result: operation_result_summary(operation),
+            error: operation.error_message.clone(),
+            log_count: 0,
+            summary: operation_summary(operation),
         })
         .collect()
 }
@@ -660,7 +691,39 @@ fn log_model_row(log: &crate::LogView) -> LogViewRow {
         source_id: log.source_id.clone(),
         service_id: log.service_id.clone(),
         endpoint: log.endpoint.clone(),
+        operation_id: log.operation_id.clone(),
+        level: "source".to_string(),
+        message: log.display_name.clone(),
         path: log.path.clone(),
+    }
+}
+
+fn operation_log_rows<S: OrchestratorStore>(
+    store: &S,
+    operations: &[Operation],
+) -> Result<Vec<LogViewRow>> {
+    let mut rows = Vec::new();
+    for operation in operations {
+        for record in store.operation_logs(&operation.operation_id)? {
+            rows.push(operation_log_row(operation, &record));
+        }
+    }
+    Ok(rows)
+}
+
+fn operation_log_row(operation: &Operation, record: &OperationLogRecord) -> LogViewRow {
+    LogViewRow {
+        source_id: format!("operation:{}", operation.operation_id),
+        service_id: operation.target_id.clone(),
+        endpoint: String::new(),
+        operation_id: record.operation_id.clone(),
+        level: record.level.clone(),
+        message: record.message.clone(),
+        path: if record.step_id.is_empty() {
+            "operation".to_string()
+        } else {
+            format!("step:{}", record.step_id)
+        },
     }
 }
 
@@ -787,6 +850,9 @@ fn log_rows(manifests: &[(ServiceManifest, PathBuf)]) -> Vec<LogViewRow> {
             source_id: format!("{}:health", manifest.id),
             service_id: manifest.id.clone(),
             endpoint: endpoint_from_service(manifest),
+            operation_id: String::new(),
+            level: "source".to_string(),
+            message: manifest.name.clone(),
             path: if manifest.endpoint.health_path.is_empty() {
                 "metadata".to_string()
             } else {
@@ -915,6 +981,33 @@ fn operation_status_text(status: &crate::OperationStatus) -> String {
         crate::OperationStatus::Expired => "EXPIRED",
     }
     .to_string()
+}
+
+fn operation_result_summary(operation: &Operation) -> String {
+    operation
+        .result
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            if operation.result.is_null() {
+                None
+            } else {
+                Some("result".to_string())
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn operation_summary(operation: &Operation) -> String {
+    if !operation.error_message.is_empty() {
+        return operation.error_message.clone();
+    }
+    let result = operation_result_summary(operation);
+    if !result.is_empty() {
+        return result;
+    }
+    format!("{} {}", operation.target_type, operation.target_id)
 }
 
 pub fn ensure_view_is_loaded(view: &OrchestratorView) -> Result<()> {

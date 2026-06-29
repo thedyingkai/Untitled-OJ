@@ -505,14 +505,19 @@ fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
 
     let rows = app.view.operations.iter().map(|operation| {
         Row::new(vec![
+            Cell::from(operation.operation_id.clone()),
             Cell::from(operation.action.clone()),
             Cell::from(operation.target.clone()),
+            Cell::from(operation.status.clone()),
             Cell::from(operation.risk.clone()),
             Cell::from(operation.mode.clone()),
             Cell::from(operation.plan_required.clone()),
             Cell::from(operation.fields.clone()),
             Cell::from(operation.preview_target.clone()),
             Cell::from(operation.preview_confirmation.clone()),
+            Cell::from(operation.result.clone()),
+            Cell::from(operation.error.clone()),
+            Cell::from(operation.log_count.to_string()),
             Cell::from(operation.summary.clone()),
             Cell::from(operation.preview_steps.clone()),
         ])
@@ -521,7 +526,9 @@ fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         Table::new(
             rows,
             [
+                Constraint::Length(24),
                 Constraint::Length(28),
+                Constraint::Length(16),
                 Constraint::Length(16),
                 Constraint::Length(6),
                 Constraint::Length(12),
@@ -529,20 +536,28 @@ fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 Constraint::Length(20),
                 Constraint::Length(18),
                 Constraint::Length(8),
+                Constraint::Length(10),
+                Constraint::Length(18),
+                Constraint::Length(6),
                 Constraint::Length(18),
                 Constraint::Min(24),
             ],
         )
         .header(
             Row::new(vec![
+                "Operation",
                 "Action",
                 "对象",
+                "状态",
                 "风险",
                 "模式",
                 "Plan",
                 "字段",
                 "预览目标",
                 "确认",
+                "结果",
+                "错误",
+                "日志",
                 "摘要",
                 "预览步骤",
             ])
@@ -654,6 +669,9 @@ fn draw_logs(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             Cell::from(log.source_id.clone()),
             Cell::from(log.service_id.clone()),
             Cell::from(log.endpoint.clone()),
+            Cell::from(log.operation_id.clone()),
+            Cell::from(log.level.clone()),
+            Cell::from(log.message.clone()),
             Cell::from(log.path.clone()),
         ])
     });
@@ -664,12 +682,23 @@ fn draw_logs(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 Constraint::Length(24),
                 Constraint::Length(18),
                 Constraint::Length(17),
+                Constraint::Length(24),
+                Constraint::Length(8),
+                Constraint::Min(24),
                 Constraint::Min(16),
             ],
         )
         .header(
-            Row::new(vec!["Source", "Service", "Endpoint", "位置"])
-                .style(Style::default().fg(Color::Yellow)),
+            Row::new(vec![
+                "Source",
+                "Service",
+                "Endpoint",
+                "Operation",
+                "级别",
+                "消息",
+                "位置",
+            ])
+            .style(Style::default().fg(Color::Yellow)),
         )
         .block(Block::default().borders(Borders::ALL).title("LogView")),
         area,
