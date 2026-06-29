@@ -53,8 +53,8 @@ pub use schema::{
 pub use service::{
     EndpointDecl, RuntimeMode, ServiceHealthDecl, ServiceManifest, ServiceProvides,
     ServiceRequires, ServiceRuntimeDecl, ServiceSecurityDecl, ServiceSet, ServiceSetEndpoint,
-    ServiceSetLink, ServiceSetService, ServiceSetServiceSpec, ServiceUiDecl, SetExpandResult,
-    SourceDecl, endpoint_delete_operation, endpoint_health_check_operation,
+    ServiceSetLink, ServiceSetOperations, ServiceSetService, ServiceSetServiceSpec, ServiceUiDecl,
+    SetExpandResult, SourceDecl, endpoint_delete_operation, endpoint_health_check_operation,
     endpoint_register_operation, endpoint_update_operation, expand_set, link_create_operation,
     link_delete_operation, link_health_check_operation, link_update_operation,
     service_health_check_operation, service_install_operation, service_lifecycle_operation,

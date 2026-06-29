@@ -28,6 +28,7 @@ docs/release/
 - Store trait：`orchestrator/core/src/store.rs`
 - Memory Store：`MemoryOrchestratorStore`，用于测试、本地开发和无数据库演示
 - Pg Store：`PgOrchestratorStore`，位于 `orchestrator/core/src/database.rs`，使用 `ORCHESTRATOR_DATABASE_URL`
+- Pg Store ignored integration：`orchestrator/core/tests/pg_store_integration.rs`
 - Operation 状态机：`orchestrator/core/src/model.rs`
 - Operation executor：`orchestrator/core/src/store.rs`
 - Executor drivers：`orchestrator/core/src/executor.rs`

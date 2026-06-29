@@ -34,6 +34,15 @@ diagnostic_reports
 
 `PgOrchestratorStore` 位于 `orchestrator/core/src/database.rs`，只从 `ORCHESTRATOR_DATABASE_URL` 连接 Orchestrator DB，并把 Store 行为映射到上面的正式表。它不读取 `OJ_DATABASE_URL`，也不访问 OJ migration 创建的业务表。
 
+PostgreSQL Store 集成测试位于 `orchestrator/core/tests/pg_store_integration.rs`。普通 `cargo test` 只编译该测试；需要真实数据库时，先对独立 Orchestrator DB 应用 `deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`，再运行：
+
+```powershell
+$env:ORCHESTRATOR_DATABASE_URL="postgres://postgres:ojos-orchestrator-local@localhost:5432/ojos_orchestrator?sslmode=disable"
+cargo test -p orchestrator-core --test pg_store_integration -- --ignored
+```
+
+该测试会通过 `PgOrchestratorStore` 写入并读回 Service、Set、Endpoint、Link、Operation、OperationLog、TopologySnapshot、LogView 和 DiagnosticReport，用来证明 Store 映射不是只停留在 schema 扫描。
+
 Operation 持久化字段包括：
 
 ```text
