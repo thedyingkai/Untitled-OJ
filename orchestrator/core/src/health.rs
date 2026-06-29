@@ -1,8 +1,8 @@
 use crate::{Endpoint, Link, OrchestratorError, Result, validate_endpoint_id};
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
+use ureq::Agent;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EndpointHealthResult {
@@ -43,8 +43,8 @@ impl TcpEndpointProbe {
 impl EndpointProbe for TcpEndpointProbe {
     fn probe(&self, endpoint: &Endpoint) -> Result<EndpointHealthResult> {
         validate_endpoint_id(&endpoint.endpoint)?;
-        if endpoint.protocol == "http" {
-            return self.probe_http(endpoint);
+        if matches!(endpoint.protocol.as_str(), "http" | "https") {
+            return self.probe_http_endpoint(endpoint);
         }
         self.probe_tcp(endpoint, format!("{} tcp reachable", endpoint.protocol))
     }
@@ -90,93 +90,44 @@ impl TcpEndpointProbe {
         }
     }
 
-    fn probe_http(&self, endpoint: &Endpoint) -> Result<EndpointHealthResult> {
+    fn probe_http_endpoint(&self, endpoint: &Endpoint) -> Result<EndpointHealthResult> {
         let start = Instant::now();
-        let mut addrs = endpoint.endpoint.to_socket_addrs().map_err(|err| {
-            OrchestratorError::Dependency(format!(
-                "endpoint {} cannot resolve: {err}",
-                endpoint.endpoint
-            ))
-        })?;
-        let Some(addr) = addrs.next() else {
-            return Ok(EndpointHealthResult {
-                endpoint: endpoint.endpoint.clone(),
-                health: "unreachable".to_string(),
-                reachable: false,
-                latency_ms: None,
-                message: "endpoint has no socket address".to_string(),
-            });
-        };
-
-        let path = normalized_health_path(&endpoint.health_path);
-        let mut stream = match TcpStream::connect_timeout(&addr, self.timeout) {
-            Ok(stream) => stream,
-            Err(err) => {
-                return Ok(EndpointHealthResult {
-                    endpoint: endpoint.endpoint.clone(),
-                    health: "unreachable".to_string(),
-                    reachable: false,
-                    latency_ms: None,
-                    message: err.to_string(),
-                });
+        let url = endpoint_health_url(endpoint)?;
+        let agent: Agent = Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
+            .build()
+            .into();
+        match agent.get(&url).call() {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let latency_ms = Some(start.elapsed().as_millis().min(u128::from(u32::MAX)) as u32);
+                if (200..=399).contains(&status) {
+                    Ok(EndpointHealthResult {
+                        endpoint: endpoint.endpoint.clone(),
+                        health: "healthy".to_string(),
+                        reachable: true,
+                        latency_ms,
+                        message: format!("{} {status}", endpoint.protocol),
+                    })
+                } else {
+                    Ok(EndpointHealthResult {
+                        endpoint: endpoint.endpoint.clone(),
+                        health: "degraded".to_string(),
+                        reachable: true,
+                        latency_ms,
+                        message: format!("{} {status}", endpoint.protocol),
+                    })
+                }
             }
-        };
-        stream
-            .set_read_timeout(Some(self.timeout))
-            .map_err(|err| OrchestratorError::Dependency(format!("set read timeout: {err}")))?;
-        stream
-            .set_write_timeout(Some(self.timeout))
-            .map_err(|err| OrchestratorError::Dependency(format!("set write timeout: {err}")))?;
-
-        let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: ojos-orchestrator-health\r\n\r\n",
-            endpoint.endpoint
-        );
-        if let Err(err) = stream.write_all(request.as_bytes()) {
-            return Ok(EndpointHealthResult {
+            Err(err) => Ok(EndpointHealthResult {
                 endpoint: endpoint.endpoint.clone(),
                 health: "unreachable".to_string(),
                 reachable: false,
                 latency_ms: None,
-                message: err.to_string(),
-            });
-        }
-
-        let mut response = String::new();
-        if let Err(err) = stream.read_to_string(&mut response) {
-            return Ok(EndpointHealthResult {
-                endpoint: endpoint.endpoint.clone(),
-                health: "unreachable".to_string(),
-                reachable: false,
-                latency_ms: None,
-                message: err.to_string(),
-            });
-        }
-        let _ = stream.shutdown(Shutdown::Both);
-
-        let status = http_status_code(&response);
-        let latency_ms = Some(start.elapsed().as_millis().min(u128::from(u32::MAX)) as u32);
-        match status {
-            Some(code @ 200..=399) => Ok(EndpointHealthResult {
-                endpoint: endpoint.endpoint.clone(),
-                health: "healthy".to_string(),
-                reachable: true,
-                latency_ms,
-                message: format!("http {code}"),
-            }),
-            Some(code) => Ok(EndpointHealthResult {
-                endpoint: endpoint.endpoint.clone(),
-                health: "degraded".to_string(),
-                reachable: true,
-                latency_ms,
-                message: format!("http {code}"),
-            }),
-            None => Ok(EndpointHealthResult {
-                endpoint: endpoint.endpoint.clone(),
-                health: "degraded".to_string(),
-                reachable: true,
-                latency_ms,
-                message: "http response did not include a status line".to_string(),
+                message: format!("{} request failed: {err}", endpoint.protocol),
             }),
         }
     }
@@ -312,14 +263,20 @@ fn normalized_health_path(value: &str) -> String {
     }
 }
 
-fn http_status_code(response: &str) -> Option<u16> {
-    response
-        .lines()
-        .next()?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
+fn endpoint_health_url(endpoint: &Endpoint) -> Result<String> {
+    let scheme = match endpoint.protocol.as_str() {
+        "http" | "https" => endpoint.protocol.as_str(),
+        value => {
+            return Err(OrchestratorError::Dependency(format!(
+                "endpoint protocol {value} cannot build http health url"
+            )));
+        }
+    };
+    Ok(format!(
+        "{scheme}://{}{}",
+        endpoint.endpoint,
+        normalized_health_path(&endpoint.health_path)
+    ))
 }
 
 fn protocol_family(value: &str) -> &str {

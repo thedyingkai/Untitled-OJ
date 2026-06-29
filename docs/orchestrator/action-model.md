@@ -43,9 +43,9 @@ READONLY     只读计算或查看，不改变 Service/Endpoint/Link/Topology
 | set.expand | 是 | 是 | 否 | 是 | 否 | READONLY | `set_expand_apply_and_diagnostic_report_are_console_actions` |
 | set.apply | 是 | 是 | 是 | 是 | 是 | STORE_BACKED | `set_expand_apply_and_diagnostic_report_are_console_actions` |
 | endpoint.register/update/delete | 是 | 是 | 是 | 是 | 是 | STORE_BACKED | `endpoint_register_update_delete_and_health_write_store` |
-| endpoint.health.check | 是 | 是 | 是 | 是 | 是 | REAL | `endpoint_register_update_delete_and_health_write_store` |
+| endpoint.health.check | 是 | 是 | 是 | 是 | 是 | REAL | `endpoint_http_health_updates_store`、`endpoint_tcp_health_updates_store`、`endpoint_unreachable_is_recorded` |
 | link.create/update/delete | 是 | 是 | 是 | 是 | 是 | STORE_BACKED | `link_create_update_delete_and_health_write_store` |
-| link.health.check | 是 | 是 | 是 | 是 | 是 | REAL | `link_create_update_delete_and_health_write_store` |
+| link.health.check | 是 | 是 | 是 | 是 | 是 | REAL | `link_health_requires_existing_endpoints`、`link_health_uses_target_reachability` |
 | operation.plan/confirm/apply/rollback | 是 | 是 | 是 | 是 | 是 | STORE_BACKED | `operation_plan_confirm_apply_rollback_and_logs_are_visible` |
 | operation.logs.view | 是 | 是 | 否 | 否 | 否 | READONLY | `operation_plan_confirm_apply_rollback_and_logs_are_visible` |
 | diagnostics.run/export | 是 | 是 | 是 | 是 | 是 | STORE_BACKED | `set_expand_apply_and_diagnostic_report_are_console_actions` |

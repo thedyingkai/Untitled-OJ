@@ -4376,6 +4376,141 @@ fn operation_executor_persists_link_health_from_target_probe() {
 }
 
 #[test]
+fn endpoint_http_health_updates_store() {
+    let endpoint = local_http_endpoint(
+        "/health",
+        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
+    );
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store.put_endpoint(endpoint.clone()).expect("put endpoint");
+    let operation = endpoint_health_check_operation("op-http-health", &endpoint.endpoint)
+        .expect("endpoint health operation");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_endpoint_probe(
+        &mut store,
+        TcpEndpointProbe::new(Duration::from_secs(2)),
+    )
+    .apply("op-http-health")
+    .expect("apply http health operation");
+    let stored = store
+        .endpoint(&endpoint.endpoint)
+        .expect("endpoint should be stored");
+    assert_eq!(stored.health, "healthy");
+    assert!(stored.reachable);
+    assert!(
+        store
+            .operation_logs("op-http-health")
+            .iter()
+            .any(
+                |record| record.step_id == format!("health:endpoint:{}", endpoint.endpoint)
+                    && record
+                        .data
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("http 204")
+            ),
+        "http health_path check should be logged"
+    );
+}
+
+#[test]
+fn endpoint_tcp_health_updates_store() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local tcp listener");
+    let endpoint_id = listener.local_addr().expect("local addr").to_string();
+    thread::spawn(move || {
+        let _ = listener.accept();
+    });
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: endpoint_id.clone(),
+            service_id: "gateway".to_string(),
+            protocol: "tcp".to_string(),
+            health_path: String::new(),
+            health: "unknown".to_string(),
+            reachable: false,
+            display_name: "Local TCP".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+    let operation = endpoint_health_check_operation("op-tcp-health", &endpoint_id)
+        .expect("endpoint health operation");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_endpoint_probe(
+        &mut store,
+        TcpEndpointProbe::new(Duration::from_secs(2)),
+    )
+    .apply("op-tcp-health")
+    .expect("apply tcp health operation");
+    let stored = store
+        .endpoint(&endpoint_id)
+        .expect("endpoint should be stored");
+    assert_eq!(stored.health, "healthy");
+    assert!(stored.reachable);
+}
+
+#[test]
+fn endpoint_unreachable_is_recorded() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:9".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "tcp".to_string(),
+            health_path: String::new(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: "Closed TCP".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+    let operation = endpoint_health_check_operation("op-unreachable-health", "127.0.0.1:9")
+        .expect("endpoint health operation");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_endpoint_probe(
+        &mut store,
+        TcpEndpointProbe::new(Duration::from_millis(200)),
+    )
+    .apply("op-unreachable-health")
+    .expect("apply unreachable health operation");
+    let stored = store
+        .endpoint("127.0.0.1:9")
+        .expect("endpoint should be stored");
+    assert_eq!(stored.health, "unreachable");
+    assert!(!stored.reachable);
+    assert!(
+        store
+            .operation_logs("op-unreachable-health")
+            .iter()
+            .any(|record| record.level == "warn"
+                && record
+                    .data
+                    .get("reachable")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)),
+        "unreachable health should be recorded as warn log"
+    );
+}
+
+#[test]
 fn tcp_probe_checks_http_health_path_status() {
     let endpoint = local_http_endpoint(
         "/health",
@@ -4401,6 +4536,180 @@ fn tcp_probe_marks_http_non_success_status_as_degraded() {
     assert_eq!(result.health, "degraded");
     assert!(result.reachable);
     assert_eq!(result.message, "http 500");
+}
+
+#[test]
+fn link_health_requires_existing_endpoints() {
+    let source = Endpoint {
+        endpoint: "127.0.0.1:18100".to_string(),
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "healthy".to_string(),
+        reachable: true,
+        display_name: "Gateway".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let link = Link {
+        source_endpoint: source.endpoint.clone(),
+        target_endpoint: "127.0.0.1:18101".to_string(),
+        protocol: "http".to_string(),
+        auth_mode: "internal".to_string(),
+        scope: "api".to_string(),
+        health: "unknown".to_string(),
+        latency_ms: None,
+        config_ref: String::new(),
+        secret_ref: String::new(),
+        policy: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let target_health = EndpointHealthResult {
+        endpoint: link.target_endpoint.clone(),
+        health: "unreachable".to_string(),
+        reachable: false,
+        latency_ms: None,
+        message: "target missing".to_string(),
+    };
+    let missing_target = check_link_health(&link, std::slice::from_ref(&source), &target_health)
+        .expect("link health");
+    assert_eq!(missing_target.health, "blocked");
+    assert_eq!(missing_target.message, "target endpoint is missing");
+
+    let missing_source = check_link_health(&link, &[], &target_health).expect("link health");
+    assert_eq!(missing_source.health, "blocked");
+    assert_eq!(missing_source.message, "source endpoint is missing");
+}
+
+#[test]
+fn link_health_uses_target_reachability() {
+    let source = Endpoint {
+        endpoint: "127.0.0.1:18110".to_string(),
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "healthy".to_string(),
+        reachable: true,
+        display_name: "Gateway".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let target = Endpoint {
+        endpoint: "127.0.0.1:18111".to_string(),
+        service_id: "problem-api".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "unreachable".to_string(),
+        reachable: false,
+        display_name: "Problem API".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let link = Link {
+        source_endpoint: source.endpoint.clone(),
+        target_endpoint: target.endpoint.clone(),
+        protocol: "http".to_string(),
+        auth_mode: "internal".to_string(),
+        scope: "api".to_string(),
+        health: "unknown".to_string(),
+        latency_ms: None,
+        config_ref: String::new(),
+        secret_ref: String::new(),
+        policy: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let target_health = EndpointHealthResult {
+        endpoint: target.endpoint.clone(),
+        health: "unreachable".to_string(),
+        reachable: false,
+        latency_ms: None,
+        message: "connection refused".to_string(),
+    };
+    let result = check_link_health(&link, &[source, target], &target_health).expect("link health");
+    assert_eq!(result.health, "unreachable");
+    assert_eq!(result.message, "target endpoint is unreachable");
+}
+
+#[test]
+fn topology_reflects_endpoint_link_health() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    let mut problem_api = valid_service();
+    problem_api.id = "problem-api".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store.put_service(problem_api).expect("put problem api");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:18120".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put source");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:18121".to_string(),
+            service_id: "problem-api".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "unreachable".to_string(),
+            reachable: false,
+            display_name: "Problem API".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put target");
+    store
+        .put_link(Link {
+            source_endpoint: "127.0.0.1:18120".to_string(),
+            target_endpoint: "127.0.0.1:18121".to_string(),
+            protocol: "http".to_string(),
+            auth_mode: "internal".to_string(),
+            scope: "api".to_string(),
+            health: "unreachable".to_string(),
+            latency_ms: None,
+            config_ref: String::new(),
+            secret_ref: String::new(),
+            policy: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put link");
+    let topology = store.build_topology_view().expect("topology");
+    assert_eq!(
+        topology
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint == "127.0.0.1:18121")
+            .map(|endpoint| (endpoint.health.as_str(), endpoint.reachable)),
+        Some(("unreachable", false))
+    );
+    assert_eq!(
+        topology
+            .links
+            .iter()
+            .find(|link| link.target_endpoint == "127.0.0.1:18121")
+            .map(|link| link.health.as_str()),
+        Some("unreachable")
+    );
 }
 
 #[test]

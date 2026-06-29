@@ -34,7 +34,8 @@ docs/release/
 - Store-backed Operation 生命周期直接证据：`operation_plan_is_persisted_in_store`、`operation_confirm_updates_store`、`operation_apply_writes_status_and_logs`、`operation_apply_failure_writes_error_message`、`operation_rollback_updates_store`、`operation_logs_can_be_reopened`、`workbench_uses_store_backed_operation_lifecycle`、`operation_lock_prevents_parallel_apply`
 - Executor drivers：`orchestrator/core/src/executor.rs`
 - Endpoint/Link health：`orchestrator/core/src/health.rs`
-- HTTP health_path 检查测试：`tcp_probe_checks_http_health_path_status`
+- Endpoint health 真实探测：HTTP/HTTPS 请求 `health_path`，TCP/Postgres/Redis 使用 TCP connect；覆盖测试为 `endpoint_http_health_updates_store`、`endpoint_tcp_health_updates_store`、`endpoint_unreachable_is_recorded`、`tcp_probe_checks_http_health_path_status`、`tcp_probe_marks_http_non_success_status_as_degraded`
+- Link health 写回与 Topology 展示：覆盖测试为 `link_health_requires_existing_endpoints`、`link_health_uses_target_reachability`、`operation_executor_persists_link_health_from_target_probe`、`topology_reflects_endpoint_link_health`
 - LogView 查询与 DiagnosticReport 导出：`orchestrator/core/src/observability.rs`
 - `operation.logs.view` 与 `diagnostics.export` 执行证据：`orchestrator/core/src/store.rs` 会创建 operation-scoped LogView、写入导出元数据 OperationLog；覆盖测试为 `operation_executor_materializes_operation_log_view_and_diagnostic_export`
 - Reconcile tick / loop：`orchestrator/core/src/reconciler.rs`，`run_reconcile_tick` 执行单次刷新，`run_reconcile_loop` 提供可停止的 bounded loop 原语；覆盖测试为 `reconcile_loop_runs_bounded_ticks_and_can_stop`
