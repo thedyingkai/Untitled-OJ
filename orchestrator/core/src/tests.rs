@@ -2947,6 +2947,7 @@ fn orchestrator_view_can_load_from_store_state() {
     assert_eq!(view.operations[0].operation_id, "op-store-view");
     assert_eq!(view.operations[0].status, "FAILED");
     assert_eq!(view.operations[0].error, "health check failed");
+    assert_eq!(view.operations[0].log_count, 1);
     assert!(
         view.logs
             .iter()

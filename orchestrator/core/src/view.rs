@@ -8,7 +8,7 @@ use crate::{
 };
 use crate::{OperationWorkbench, OperationWorkbenchSession};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -237,6 +237,7 @@ pub fn load_orchestrator_view_from_store<S: OrchestratorStore>(
     let operations = store.operations()?;
     let logs = store.log_views()?;
     let operation_logs = operation_log_rows(store, &operations)?;
+    let operation_log_counts = operation_log_counts(&operation_logs);
     let diagnostics = store.diagnostic_reports()?;
     Ok(OrchestratorView {
         schemas,
@@ -244,7 +245,7 @@ pub fn load_orchestrator_view_from_store<S: OrchestratorStore>(
         sets: set_rows(&sets),
         endpoints: endpoints.iter().map(endpoint_model_row).collect(),
         links: links.iter().map(link_model_row).collect(),
-        operations: operation_store_rows(&operations),
+        operations: operation_store_rows(&operations, &operation_log_counts),
         operation_workbench: None,
         logs: logs
             .iter()
@@ -654,7 +655,10 @@ fn operation_rows(
     }
 }
 
-fn operation_store_rows(operations: &[Operation]) -> Vec<OperationViewRow> {
+fn operation_store_rows(
+    operations: &[Operation],
+    log_counts: &HashMap<String, usize>,
+) -> Vec<OperationViewRow> {
     operations
         .iter()
         .map(|operation| OperationViewRow {
@@ -680,7 +684,10 @@ fn operation_store_rows(operations: &[Operation]) -> Vec<OperationViewRow> {
                 .unwrap_or_else(|| "yes".to_string()),
             result: operation_result_summary(operation),
             error: operation.error_message.clone(),
-            log_count: 0,
+            log_count: log_counts
+                .get(&operation.operation_id)
+                .copied()
+                .unwrap_or_default(),
             summary: operation_summary(operation),
         })
         .collect()
@@ -725,6 +732,16 @@ fn operation_log_row(operation: &Operation, record: &OperationLogRecord) -> LogV
             format!("step:{}", record.step_id)
         },
     }
+}
+
+fn operation_log_counts(logs: &[LogViewRow]) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for log in logs {
+        if !log.operation_id.is_empty() {
+            *counts.entry(log.operation_id.clone()).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 fn diagnostic_model_row(report: &crate::DiagnosticReport) -> DiagnosticViewRow {
