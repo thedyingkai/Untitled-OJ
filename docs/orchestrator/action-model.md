@@ -36,7 +36,7 @@ READONLY     只读计算或查看，不改变 Service/Endpoint/Link/Topology
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | service.validate | 是 | 是 | 否 | 是 | 否 | READONLY | `action_dispatcher_routes_schema_actions` |
 | service.install | 是 | 是 | 是 | 是 | 是 | STORE_BACKED | `OperationExecutor` 写 Service |
-| service.start/stop/restart/enable/disable/delete | 是 | 是 | 只写失败 Operation/log | 是 | 否 | UNSUPPORTED | `action_result_marks_unsupported_without_success` |
+| service.start/stop/restart/enable/disable/delete | 是 | 是 | 是 | 是 | 显式开启固定 driver 后执行 | STORE_BACKED / 受限 REAL | `service_start_uses_driver`、`service_stop_uses_driver`、`service_restart_uses_driver`、`service_lifecycle_failure_is_recorded`、`service_lifecycle_unsupported_is_not_success` |
 | service.logs.view | 是 | 是 | 是 | 是 | 是 | STORE_BACKED | `operation_executor_materializes_operation_log_view_and_diagnostic_export` |
 | service.health.check | 是 | 是 | 是 | 是 | 是 | STORE_BACKED | `operation_executor_persists_probed_endpoint_health` |
 | set.validate | 是 | 是 | 否 | 是 | 否 | READONLY | `set_expand_apply_and_diagnostic_report_are_console_actions` |
@@ -64,4 +64,4 @@ ExternalEndpointDriver
 
 这些 driver 只接受固定 action。任意 shell、任意脚本路径、用户输入命令和远程 root shell 都不属于 Action 模型。
 
-DockerComposeDriver 只构造固定参数数组：`service.install/enable` 使用 `docker compose up -d <service>`，`service.start` 使用 `start`，`service.stop/disable` 使用 `stop`，`service.restart` 使用 `restart`，`service.logs.view` 使用 `logs`，`service.health.check` 使用 `ps`。LocalProcessDriver 在没有安全 supervisor 绑定前只允许只读 health/logs；ExternalEndpointDriver 只处理 Endpoint、Link、logs 和 diagnostics 的元数据动作，不启动或停止 Service。
+DockerComposeDriver 只构造固定参数数组：`service.install/enable` 使用 `docker compose up -d <service>`，`service.start` 使用 `start`，`service.stop/disable` 使用 `stop`，`service.restart` 使用 `restart`，`service.logs.view` 使用 `logs`，`service.health.check` 使用 `ps`。默认 OperationExecutor 只记录固定命令计划并阻止假成功；只有 `operation.apply` 显式传入 `execute_service_driver=true`，或 core 调用 `with_service_driver_execution_enabled()` 时才会运行固定命令。LocalProcessDriver 在没有安全 supervisor 绑定前只允许只读 health/logs；ExternalEndpointDriver 只处理 Endpoint、Link、logs 和 diagnostics 的元数据动作，不启动或停止 Service。

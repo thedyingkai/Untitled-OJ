@@ -310,6 +310,9 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe + Clone> OrchestratorActionDispa
         let operation_id = request.require_field("operation_id")?;
         let mut executor =
             OperationExecutor::with_endpoint_probe(self.store, self.endpoint_probe.clone());
+        if request.field("execute_service_driver") == Some("true") {
+            executor = executor.with_service_driver_execution_enabled();
+        }
         match executor.apply(operation_id) {
             Ok(operation) => self.result_for_operation(
                 &operation,

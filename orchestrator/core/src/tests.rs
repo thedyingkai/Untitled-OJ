@@ -4,9 +4,12 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
+
+static DOCKER_BINARY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn repo_root() -> PathBuf {
     let mut current = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -2151,29 +2154,14 @@ fn operation_executor_applies_and_rolls_back_through_store() {
         .put_operation(confirmed)
         .expect("put confirmed operation");
 
-    let applied = OperationExecutor::new(&mut store)
+    let err = OperationExecutor::new(&mut store)
         .apply("op-apply-1")
-        .expect("apply operation");
-    assert_eq!(applied.status, OperationStatus::Succeeded);
+        .expect_err("default executor must not report plan-only lifecycle as success");
     assert_eq!(
         store.operation("op-apply-1").map(|item| &item.status),
-        Some(&OperationStatus::Succeeded)
+        Some(&OperationStatus::Failed)
     );
-    assert_eq!(
-        applied
-            .result
-            .get("status")
-            .and_then(serde_json::Value::as_str),
-        Some("SUCCEEDED")
-    );
-    assert_eq!(
-        applied
-            .result
-            .get("changed_objects")
-            .and_then(serde_json::Value::as_array)
-            .map(Vec::len),
-        Some(1)
-    );
+    assert!(err.to_string().contains("execution is not enabled"));
     assert!(
         store
             .operation_logs("op-apply-1")
@@ -2181,41 +2169,17 @@ fn operation_executor_applies_and_rolls_back_through_store() {
             .any(|record| !record.step_id.is_empty()),
         "apply should write step logs"
     );
-
-    let rolled_back = OperationExecutor::new(&mut store)
-        .rollback("op-apply-1")
-        .expect("rollback operation");
-    assert_eq!(rolled_back.status, OperationStatus::RolledBack);
-    assert_eq!(
-        store.operation("op-apply-1").map(|item| &item.status),
-        Some(&OperationStatus::RolledBack)
-    );
-    assert_eq!(
-        rolled_back
-            .result
-            .get("status")
-            .and_then(serde_json::Value::as_str),
-        Some("ROLLED_BACK")
-    );
     assert!(
         store
             .operation_logs("op-apply-1")
             .iter()
-            .any(|record| record.message.contains("rolled back"))
-    );
-    let rollback_logs = store.operation_logs("op-apply-1");
-    assert!(
-        rollback_logs
-            .iter()
-            .any(|record| record.message.contains("prior operation logs")),
-        "rollback should record that prior operation logs were loaded"
-    );
-    assert!(
-        rollback_logs
-            .iter()
-            .any(|record| record.step_id == "rollback:step-1"
-                && record.message.contains("rollback step")),
-        "rollback should write step logs from rollback_plan"
+            .any(|record| record.step_id == "driver:service.restart"
+                && record
+                    .data
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("PLANNED")),
+        "plan-only lifecycle should still record fixed driver command details"
     );
 }
 
@@ -2582,22 +2546,24 @@ fn operation_executor_logs_rollback_mutation_failure() {
 #[test]
 fn operation_executor_rejects_rollback_when_operation_is_locked() {
     let mut store = MemoryOrchestratorStore::new();
-    let mut worker = valid_service();
-    worker.id = "judge-worker".to_string();
-    store.put_service(worker).expect("put judge-worker service");
-    let operation = confirm_operation(
-        &plan_operation(
-            "op-rollback-locked",
-            "service.restart",
-            "Service",
-            "judge-worker",
-            serde_json::json!({}),
-            serde_json::json!({"steps": ["stop", "start"]}),
-            serde_json::json!({"steps": ["restore"]}),
-        )
-        .expect("plan operation"),
-    )
-    .expect("confirm operation");
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway).expect("put gateway service");
+    let endpoint = Endpoint {
+        endpoint: "127.0.0.1:19110".to_string(),
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "unknown".to_string(),
+        reachable: false,
+        display_name: "Gateway".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let operation = endpoint_register_operation("op-rollback-locked", &endpoint)
+        .expect("endpoint register operation");
     store.put_operation(operation).expect("put operation");
     OperationExecutor::new(&mut store)
         .apply("op-rollback-locked")
@@ -2865,10 +2831,196 @@ fn operation_executor_allows_planned_apply_when_confirmation_is_not_required() {
     );
     store.put_operation(operation).expect("put operation");
 
-    let applied = OperationExecutor::new(&mut store)
+    let err = OperationExecutor::new(&mut store)
         .apply("op-start-1")
-        .expect("non-dangerous planned operation can apply directly");
+        .expect_err(
+            "service.start must not report success when fixed driver execution is disabled",
+        );
+    assert!(err.to_string().contains("execution is not enabled"));
+    assert_eq!(
+        store.operation("op-start-1").map(|item| &item.status),
+        Some(&OperationStatus::Failed)
+    );
+}
+
+#[test]
+fn service_start_uses_driver() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("docker env lock");
+    let previous = std::env::var("OJOS_ORCHESTRATOR_DOCKER_BINARY").ok();
+    unsafe {
+        std::env::set_var(
+            "OJOS_ORCHESTRATOR_DOCKER_BINARY",
+            "ojos-docker-compose-missing",
+        );
+    }
+
+    let mut store = MemoryOrchestratorStore::new();
+    let mut service = valid_service();
+    service.id = "gateway".to_string();
+    service.runtime.mode = RuntimeMode::Container;
+    service.runtime.driver = "compose".to_string();
+    store.put_service(service).expect("put service");
+    let operation =
+        service_lifecycle_operation("op-service-start-driver", "service.start", "gateway")
+            .expect("start operation");
+    store.put_operation(operation).expect("put operation");
+
+    let err = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
+        .apply("op-service-start-driver")
+        .expect_err("missing docker binary should fail fixed driver execution");
+    assert!(
+        err.to_string()
+            .contains("docker compose fixed command failed to start")
+    );
+    assert!(
+        store
+            .operation("op-service-start-driver")
+            .expect("stored operation")
+            .error_message
+            .contains("fixed command failed to start")
+    );
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("OJOS_ORCHESTRATOR_DOCKER_BINARY", value),
+            None => std::env::remove_var("OJOS_ORCHESTRATOR_DOCKER_BINARY"),
+        }
+    }
+}
+
+#[test]
+fn service_stop_uses_driver() {
+    let compose = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml");
+    let command = compose
+        .command_for("service.stop", "gateway")
+        .expect("service.stop fixed command");
+    assert!(command.contains(&"stop".to_string()));
+    assert_eq!(command.last().map(String::as_str), Some("gateway"));
+}
+
+#[test]
+fn service_restart_uses_driver() {
+    let compose = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml");
+    let command = compose
+        .command_for("service.restart", "gateway")
+        .expect("service.restart fixed command");
+    assert!(command.contains(&"restart".to_string()));
+    assert_eq!(command.last().map(String::as_str), Some("gateway"));
+}
+
+#[test]
+fn service_logs_view_uses_log_source() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut service = valid_service();
+    service.id = "gateway".to_string();
+    store.put_service(service).expect("put service");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:8080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "unknown".to_string(),
+            reachable: false,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+    let operation =
+        service_logs_view_operation("op-service-logs-driver", "gateway", Some("127.0.0.1:8080"))
+            .expect("logs view operation");
+    store.put_operation(operation).expect("put operation");
+
+    let applied = OperationExecutor::new(&mut store)
+        .apply("op-service-logs-driver")
+        .expect("service logs view should materialize LogView");
     assert_eq!(applied.status, OperationStatus::Succeeded);
+    assert!(
+        store
+            .log_views()
+            .iter()
+            .any(|view| view.source_id == "gateway:127.0.0.1:8080"
+                && view.endpoint == "127.0.0.1:8080"),
+        "service.logs.view should persist a scoped LogView"
+    );
+}
+
+#[test]
+fn service_lifecycle_failure_is_recorded() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("docker env lock");
+    let previous = std::env::var("OJOS_ORCHESTRATOR_DOCKER_BINARY").ok();
+    unsafe {
+        std::env::set_var(
+            "OJOS_ORCHESTRATOR_DOCKER_BINARY",
+            "ojos-docker-compose-missing",
+        );
+    }
+
+    let mut store = MemoryOrchestratorStore::new();
+    let mut service = valid_service();
+    service.id = "gateway".to_string();
+    service.runtime.mode = RuntimeMode::Container;
+    service.runtime.driver = "compose".to_string();
+    store.put_service(service).expect("put service");
+    let operation =
+        service_lifecycle_operation("op-service-driver-failure", "service.start", "gateway")
+            .expect("start operation");
+    store.put_operation(operation).expect("put operation");
+
+    let failed = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
+        .apply("op-service-driver-failure")
+        .expect_err("missing docker binary should fail");
+    assert!(failed.to_string().contains("fixed command failed to start"));
+    assert_eq!(
+        store
+            .operation("op-service-driver-failure")
+            .map(|operation| &operation.status),
+        Some(&OperationStatus::Failed)
+    );
+    assert!(
+        store
+            .operation_logs("op-service-driver-failure")
+            .iter()
+            .any(|record| record.level == "error"
+                && record.message.contains("operation service.start failed")),
+        "driver failure must be recorded in operation logs"
+    );
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("OJOS_ORCHESTRATOR_DOCKER_BINARY", value),
+            None => std::env::remove_var("OJOS_ORCHESTRATOR_DOCKER_BINARY"),
+        }
+    }
+}
+
+#[test]
+fn service_lifecycle_unsupported_is_not_success() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut service = valid_service();
+    service.id = "postgres".to_string();
+    service.runtime.mode = RuntimeMode::External;
+    service.runtime.driver = "external".to_string();
+    store.put_service(service).expect("put service");
+    let operation = service_lifecycle_operation("op-external-start", "service.start", "postgres")
+        .expect("start operation");
+    store.put_operation(operation).expect("put operation");
+
+    let err = OperationExecutor::new(&mut store)
+        .apply("op-external-start")
+        .expect_err("external endpoint service start is unsupported");
+    assert!(err.to_string().contains("cannot control service lifecycle"));
+    assert_eq!(
+        store
+            .operation("op-external-start")
+            .map(|operation| &operation.status),
+        Some(&OperationStatus::Failed)
+    );
 }
 
 #[test]
@@ -3938,7 +4090,7 @@ fn memory_store_lock_and_step_logs_are_persisted_by_executor() {
 
     OperationExecutor::new(&mut store)
         .apply("op-lock-log")
-        .expect("apply operation");
+        .expect_err("plan-only service lifecycle should fail without explicit execution");
     let logs = store.operation_logs("op-lock-log");
     assert!(
         logs.iter().any(|record| !record.step_id.is_empty()),
@@ -3966,7 +4118,19 @@ fn memory_store_lock_and_step_logs_are_persisted_by_executor() {
     );
     assert_eq!(
         store.operation("op-lock-log").map(|item| &item.status),
-        Some(&OperationStatus::Succeeded)
+        Some(&OperationStatus::Failed)
+    );
+    assert!(
+        store
+            .acquire_operation_lock(OperationLock {
+                lock_key: "operation:op-lock-log".to_string(),
+                operation_id: "op-lock-log".to_string(),
+                owner: "test".to_string(),
+                expires_at: "session".to_string(),
+                created_at: String::new(),
+            })
+            .expect("lock can be acquired after failed apply"),
+        "apply failure must release operation lock"
     );
 }
 

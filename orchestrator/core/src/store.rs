@@ -543,6 +543,7 @@ impl OrchestratorStore for MemoryOrchestratorStore {
 pub struct OperationExecutor<'a, S: OrchestratorStore, P: EndpointProbe = StaticEndpointProbe> {
     store: &'a mut S,
     endpoint_probe: P,
+    service_driver_execution_enabled: bool,
 }
 
 impl<'a, S: OrchestratorStore> OperationExecutor<'a, S, StaticEndpointProbe> {
@@ -550,6 +551,7 @@ impl<'a, S: OrchestratorStore> OperationExecutor<'a, S, StaticEndpointProbe> {
         Self {
             store,
             endpoint_probe: StaticEndpointProbe,
+            service_driver_execution_enabled: false,
         }
     }
 }
@@ -559,7 +561,13 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
         Self {
             store,
             endpoint_probe,
+            service_driver_execution_enabled: false,
         }
+    }
+
+    pub fn with_service_driver_execution_enabled(mut self) -> Self {
+        self.service_driver_execution_enabled = true;
+        self
     }
 
     pub fn apply(&mut self, operation_id: &str) -> Result<Operation> {
@@ -769,20 +777,30 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
             "service.enable" | "service.disable" | "service.start" | "service.stop"
             | "service.restart" => {
                 let service = ensure_service_exists(self.store, operation.target_id.as_str())?;
-                let driver_result = execute_service_driver_action(&service, operation)?;
+                let driver_result = execute_service_driver_action(
+                    &service,
+                    operation,
+                    self.service_driver_execution_enabled,
+                )?;
                 self.store.append_operation_log(driver_result_log_record(
                     &operation.operation_id,
                     &driver_result,
                 ))?;
+                ensure_driver_result_succeeded(&driver_result)?;
                 changed.push(changed_object("Service", &operation.target_id));
             }
             "service.delete" => {
                 let service = ensure_service_exists(self.store, operation.target_id.as_str())?;
-                let driver_result = execute_service_driver_action(&service, operation)?;
+                let driver_result = execute_service_driver_action(
+                    &service,
+                    operation,
+                    self.service_driver_execution_enabled,
+                )?;
                 self.store.append_operation_log(driver_result_log_record(
                     &operation.operation_id,
                     &driver_result,
                 ))?;
+                ensure_driver_result_succeeded(&driver_result)?;
                 self.store.delete_service(&operation.target_id)?;
                 changed.push(changed_object("Service", &operation.target_id));
             }
@@ -1345,6 +1363,7 @@ fn ensure_service_exists<S: OrchestratorStore>(
 fn execute_service_driver_action(
     service: &ServiceManifest,
     operation: &Operation,
+    execute_fixed_commands: bool,
 ) -> Result<DriverResult> {
     let request = DriverRequest {
         action: operation.action.clone(),
@@ -1360,10 +1379,37 @@ fn execute_service_driver_action(
     };
     match service.runtime.mode {
         RuntimeMode::Container => {
-            DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml").execute(&request)
+            let driver = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml");
+            if execute_fixed_commands {
+                driver.with_execution_enabled().execute(&request)
+            } else {
+                driver.execute(&request)
+            }
         }
         RuntimeMode::LocalProcess => LocalProcessDriver::new().execute(&request),
         RuntimeMode::External => ExternalEndpointDriver.execute(&request),
+    }
+}
+
+fn ensure_driver_result_succeeded(result: &DriverResult) -> Result<()> {
+    match result.status.as_str() {
+        "SUCCEEDED" => Ok(()),
+        "PLANNED" => Err(OrchestratorError::Blocked(format!(
+            "driver action {} built a fixed command but execution is not enabled",
+            result.action
+        ))),
+        "SUPPORTED" => Err(OrchestratorError::Blocked(format!(
+            "driver action {} is metadata-only and has no lifecycle effect",
+            result.action
+        ))),
+        "FAILED" => Err(OrchestratorError::Dependency(format!(
+            "driver action {} failed: {}",
+            result.action, result.message
+        ))),
+        other => Err(OrchestratorError::Dependency(format!(
+            "driver action {} returned unsupported status {other}",
+            result.action
+        ))),
     }
 }
 

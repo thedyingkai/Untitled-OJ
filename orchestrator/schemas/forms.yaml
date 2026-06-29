@@ -152,6 +152,7 @@ forms:
     fields:
       - { name: operation_id, type: string, required: true }
       - { name: confirm, type: boolean, required: true }
+      - { name: execute_service_driver, type: boolean }
   operation.cancel:
     fields:
       - { name: operation_id, type: string, required: true }

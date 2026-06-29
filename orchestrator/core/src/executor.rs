@@ -48,11 +48,18 @@ impl LocalProcessDriver {
 impl DockerComposeDriver {
     pub fn new(project_dir: impl Into<PathBuf>, compose_file: impl Into<PathBuf>) -> Self {
         Self {
-            docker_binary: "docker".to_string(),
+            docker_binary: Self::docker_binary_from_env(),
             project_dir: project_dir.into(),
             compose_file: compose_file.into(),
             run_commands: false,
         }
+    }
+
+    pub fn docker_binary_from_env() -> String {
+        std::env::var("OJOS_ORCHESTRATOR_DOCKER_BINARY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "docker".to_string())
     }
 
     pub fn with_execution_enabled(mut self) -> Self {
