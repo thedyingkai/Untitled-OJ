@@ -1,11 +1,12 @@
 use crate::{
     ActionDescriptor, ActionPlanMode, Endpoint, Link, Operation, OrchestratorError, Result,
-    ServiceManifest, ServiceSet, Topology, action_descriptor, endpoint_delete_operation,
-    endpoint_health_check_operation, endpoint_register_operation, endpoint_update_operation,
-    link_create_operation, link_delete_operation, link_health_check_operation,
-    link_update_operation, plan_operation, service_health_check_operation,
-    service_install_operation, service_lifecycle_operation, service_logs_view_operation,
-    set_apply_operation, topology_apply_operation, validate_endpoint_id,
+    ServiceManifest, ServiceSet, Topology, action_descriptor, diagnostics_export_operation,
+    endpoint_delete_operation, endpoint_health_check_operation, endpoint_register_operation,
+    endpoint_update_operation, link_create_operation, link_delete_operation,
+    link_health_check_operation, link_update_operation, operation_logs_view_operation,
+    plan_operation, service_health_check_operation, service_install_operation,
+    service_lifecycle_operation, service_logs_view_operation, set_apply_operation,
+    topology_apply_operation, validate_endpoint_id,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -213,6 +214,15 @@ pub fn plan_action_request(
             })?;
             topology_apply_operation(&request.operation_id, topology)
         }
+        "operation.logs.view" => operation_logs_view_operation(
+            &request.operation_id,
+            request.require_field("operation_id")?,
+        ),
+        "diagnostics.export" => diagnostics_export_operation(
+            &request.operation_id,
+            request.require_field("report_id")?,
+            request.field("format").unwrap_or("json"),
+        ),
         _ => generic_action_operation(request, descriptor),
     }
 }

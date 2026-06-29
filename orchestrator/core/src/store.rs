@@ -4,9 +4,9 @@ use crate::{
     LinkHealthResult, LocalProcessDriver, LogView, Operation, OperationLock, OperationLogRecord,
     OperationStatus, OrchestratorError, Result, RuntimeMode, ServiceManifest, ServiceSet,
     StaticEndpointProbe, Topology, TopologySnapshot, build_diagnostic_report, build_topology,
-    check_endpoint_health_with_probe, check_link_health, operation_log_record,
-    operation_step_log_record, start_operation, succeed_operation, validate_endpoint,
-    validate_link, validate_log_view, validate_topology,
+    check_endpoint_health_with_probe, check_link_health, export_diagnostic_report,
+    operation_log_record, operation_step_log_record, start_operation, succeed_operation,
+    validate_endpoint, validate_link, validate_log_view, validate_topology,
 };
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
@@ -785,6 +785,10 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
             "service.logs.view" => {
                 if let Some(log_view) = log_view_from_operation(operation) {
                     self.store.put_log_view(log_view.clone())?;
+                    self.store.append_operation_log(log_view_log_record(
+                        &operation.operation_id,
+                        &log_view,
+                    ))?;
                     changed.push(changed_object("LogView", &log_view.source_id));
                 }
             }
@@ -919,6 +923,78 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
                 report.operation_id = operation.operation_id.clone();
                 self.store.put_diagnostic_report(report.clone())?;
                 changed.push(changed_object("DiagnosticReport", &report.report_id));
+            }
+            "operation.logs.view" => {
+                let target_operation_id = operation
+                    .request
+                    .get("operation_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(operation.target_id.as_str());
+                let target_operation =
+                    self.store
+                        .get_operation(target_operation_id)?
+                        .ok_or_else(|| {
+                            OrchestratorError::Dependency(format!(
+                                "operation {target_operation_id} not found"
+                            ))
+                        })?;
+                let target_logs = self.store.list_operation_logs(target_operation_id)?;
+                let endpoints = self.store.list_endpoints()?;
+                let log_view = operation_log_view_from_target(&target_operation, &endpoints)?;
+                self.store.put_log_view(log_view.clone())?;
+                self.store.append_operation_log(operation_step_log_record(
+                    &operation.operation_id,
+                    "operation.logs.view",
+                    "info",
+                    format!(
+                        "operation {} logs view opened with {} records",
+                        target_operation_id,
+                        target_logs.len()
+                    ),
+                    serde_json::json!({
+                        "operation_id": target_operation_id,
+                        "log_count": target_logs.len(),
+                        "source_id": log_view.source_id,
+                    }),
+                ))?;
+                changed.push(changed_object("LogView", &log_view.source_id));
+            }
+            "diagnostics.export" => {
+                let report_id = operation
+                    .request
+                    .get("report_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(operation.target_id.as_str());
+                let format = operation
+                    .request
+                    .get("format")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("json");
+                let report = match self.store.get_diagnostic_report(report_id)? {
+                    Some(report) => report,
+                    None => {
+                        let mut report = build_diagnostic_report(self.store, report_id)?;
+                        report.operation_id = operation.operation_id.clone();
+                        self.store.put_diagnostic_report(report.clone())?;
+                        report
+                    }
+                };
+                let export = export_diagnostic_report(&report, format)?;
+                self.store.append_operation_log(operation_step_log_record(
+                    &operation.operation_id,
+                    "diagnostics.export",
+                    "info",
+                    format!(
+                        "diagnostic report {} exported as {}",
+                        export.report_id, export.format
+                    ),
+                    serde_json::json!({
+                        "report_id": export.report_id,
+                        "format": export.format,
+                        "content_bytes": export.content.len(),
+                    }),
+                ))?;
+                changed.push(changed_object("DiagnosticReport", report_id));
             }
             _ => {
                 changed.push(changed_object(&operation.target_type, &operation.target_id));
@@ -1207,6 +1283,46 @@ fn log_view_from_operation(operation: &Operation) -> Option<LogView> {
     })
 }
 
+fn operation_log_view_from_target(
+    operation: &Operation,
+    endpoints: &[Endpoint],
+) -> Result<LogView> {
+    let requested_endpoint = operation
+        .request
+        .get("endpoint")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty());
+    let endpoint = requested_endpoint
+        .and_then(|value| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.endpoint == value)
+                .map(|endpoint| endpoint.endpoint.clone())
+        })
+        .or_else(|| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.service_id == operation.target_id)
+                .map(|endpoint| endpoint.endpoint.clone())
+        })
+        .or_else(|| endpoints.first().map(|endpoint| endpoint.endpoint.clone()))
+        .ok_or_else(|| {
+            OrchestratorError::Dependency(
+                "operation log view requires at least one registered endpoint".to_string(),
+            )
+        })?;
+    Ok(LogView {
+        source_id: format!("operation:{}", operation.operation_id),
+        service_id: operation.target_id.clone(),
+        endpoint,
+        operation_id: operation.operation_id.clone(),
+        path: "/operations/logs".to_string(),
+        driver: "external-endpoint".to_string(),
+        read_policy: "operation-scoped".to_string(),
+        display_name: format!("{} logs", operation.operation_id),
+    })
+}
+
 fn ensure_service_exists<S: OrchestratorStore>(
     store: &S,
     service_id: &str,
@@ -1255,6 +1371,22 @@ fn driver_result_log_record(operation_id: &str, result: &DriverResult) -> Operat
             "status": result.status,
             "message": result.message,
             "command": result.command,
+        }),
+    )
+}
+
+fn log_view_log_record(operation_id: &str, log_view: &LogView) -> OperationLogRecord {
+    operation_step_log_record(
+        operation_id,
+        format!("log-view:{}", log_view.source_id),
+        "info",
+        format!("log view {} opened", log_view.source_id),
+        serde_json::json!({
+            "source_id": log_view.source_id,
+            "service_id": log_view.service_id,
+            "endpoint": log_view.endpoint,
+            "operation_id": log_view.operation_id,
+            "read_policy": log_view.read_policy,
         }),
     )
 }

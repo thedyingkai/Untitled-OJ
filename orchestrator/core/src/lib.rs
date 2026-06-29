@@ -54,13 +54,14 @@ pub use service::{
     EndpointDecl, RuntimeMode, ServiceHealthDecl, ServiceManifest, ServiceProvides,
     ServiceRequires, ServiceRuntimeDecl, ServiceSecurityDecl, ServiceSet, ServiceSetEndpoint,
     ServiceSetLink, ServiceSetOperations, ServiceSetService, ServiceSetServiceSpec, ServiceUiDecl,
-    SetExpandResult, SourceDecl, endpoint_delete_operation, endpoint_health_check_operation,
-    endpoint_register_operation, endpoint_update_operation, expand_set, link_create_operation,
-    link_delete_operation, link_health_check_operation, link_update_operation,
-    service_health_check_operation, service_install_operation, service_lifecycle_operation,
-    service_logs_view_operation, set_apply_operation, topology_apply_operation,
-    validate_endpoint_id, validate_service_manifest, validate_service_manifest_file,
-    validate_service_set, validate_service_set_file, validate_service_set_references,
+    SetExpandResult, SourceDecl, diagnostics_export_operation, endpoint_delete_operation,
+    endpoint_health_check_operation, endpoint_register_operation, endpoint_update_operation,
+    expand_set, link_create_operation, link_delete_operation, link_health_check_operation,
+    link_update_operation, operation_logs_view_operation, service_health_check_operation,
+    service_install_operation, service_lifecycle_operation, service_logs_view_operation,
+    set_apply_operation, topology_apply_operation, validate_endpoint_id, validate_service_manifest,
+    validate_service_manifest_file, validate_service_set, validate_service_set_file,
+    validate_service_set_references,
 };
 pub use store::{MemoryOrchestratorStore, OperationExecutor, OrchestratorStore};
 pub use view::{

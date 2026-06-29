@@ -1023,6 +1023,72 @@ pub fn service_logs_view_operation(
     )
 }
 
+pub fn operation_logs_view_operation(
+    operation_id: impl Into<String>,
+    target_operation_id: impl AsRef<str>,
+) -> Result<Operation> {
+    let target_operation_id = target_operation_id.as_ref().trim();
+    ensure(!target_operation_id.is_empty(), "operation_id is required")?;
+    plan_operation(
+        operation_id,
+        "operation.logs.view",
+        "LogView",
+        target_operation_id,
+        serde_json::json!({
+            "operation_id": target_operation_id,
+        }),
+        serde_json::json!({
+            "steps": [
+                {
+                    "action": "open_operation_log_view",
+                    "target": target_operation_id
+                }
+            ],
+            "requires_confirmation": false
+        }),
+        serde_json::json!({
+            "steps": []
+        }),
+    )
+}
+
+pub fn diagnostics_export_operation(
+    operation_id: impl Into<String>,
+    report_id: impl AsRef<str>,
+    format: impl AsRef<str>,
+) -> Result<Operation> {
+    let report_id = report_id.as_ref().trim();
+    let format = format.as_ref().trim();
+    ensure(!report_id.is_empty(), "report_id is required")?;
+    ensure(
+        matches!(format, "json" | "markdown"),
+        "diagnostic export format must be json or markdown",
+    )?;
+    plan_operation(
+        operation_id,
+        "diagnostics.export",
+        "DiagnosticReport",
+        report_id,
+        serde_json::json!({
+            "report_id": report_id,
+            "format": format,
+        }),
+        serde_json::json!({
+            "steps": [
+                {
+                    "action": "export_diagnostic_report",
+                    "target": report_id,
+                    "format": format
+                }
+            ],
+            "requires_confirmation": false
+        }),
+        serde_json::json!({
+            "steps": []
+        }),
+    )
+}
+
 pub fn topology_apply_operation(
     operation_id: impl Into<String>,
     topology: &Topology,

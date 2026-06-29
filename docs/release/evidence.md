@@ -35,6 +35,7 @@ docs/release/
 - Endpoint/Link health：`orchestrator/core/src/health.rs`
 - HTTP health_path 检查测试：`tcp_probe_checks_http_health_path_status`
 - LogView 查询与 DiagnosticReport 导出：`orchestrator/core/src/observability.rs`
+- `operation.logs.view` 与 `diagnostics.export` 执行证据：`orchestrator/core/src/store.rs` 会创建 operation-scoped LogView、写入导出元数据 OperationLog；覆盖测试为 `operation_executor_materializes_operation_log_view_and_diagnostic_export`
 - Reconcile tick：`orchestrator/core/src/reconciler.rs`
 - GUI/TUI 共享视图：`orchestrator/core/src/view.rs`
 - GUI/TUI 共享工作台：`orchestrator/core/src/workbench.rs`，未设置 `ORCHESTRATOR_DATABASE_URL` 时使用 Memory store，设置后 plan/confirm/apply/rollback 走 `PgOrchestratorStore`

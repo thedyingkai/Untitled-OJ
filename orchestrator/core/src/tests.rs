@@ -501,6 +501,15 @@ fn core_plans_service_set_endpoint_link_and_topology_operations() {
         service_logs_view_operation("op-service-logs", "judge-api", Some("192.168.1.10:8082"))
             .expect("service logs operation");
     assert_eq!(service_logs.action, "service.logs.view");
+    let operation_logs = operation_logs_view_operation("op-operation-logs", "op-service-logs")
+        .expect("operation logs operation");
+    assert_eq!(operation_logs.action, "operation.logs.view");
+    assert_eq!(operation_logs.target_id, "op-service-logs");
+    let diagnostics_export =
+        diagnostics_export_operation("op-diag-export", "diag-sample", "markdown")
+            .expect("diagnostics export operation");
+    assert_eq!(diagnostics_export.action, "diagnostics.export");
+    assert_eq!(diagnostics_export.target_id, "diag-sample");
 
     let topology = build_topology(
         "192.168.1.10:8080".to_string(),
@@ -2394,6 +2403,106 @@ fn log_query_reads_only_scoped_sources_and_operation_logs() {
         })
         .is_err(),
         "LogView endpoint identity must remain IP:Port"
+    );
+}
+
+#[test]
+fn operation_executor_materializes_operation_log_view_and_diagnostic_export() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut gateway = valid_service();
+    gateway.id = "gateway".to_string();
+    store.put_service(gateway).expect("put gateway");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: "127.0.0.1:8080".to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+    let source_operation =
+        service_logs_view_operation("op-source-logs", "gateway", Some("127.0.0.1:8080"))
+            .expect("source log operation");
+    store
+        .put_operation(source_operation.clone())
+        .expect("put source operation");
+    store
+        .append_operation_log(operation_step_log_record(
+            "op-source-logs",
+            "collect",
+            "info",
+            "source operation log",
+            serde_json::json!({"service_id": "gateway"}),
+        ))
+        .expect("append source log");
+
+    let view_operation = operation_logs_view_operation("op-open-source-logs", "op-source-logs")
+        .expect("operation logs view operation");
+    store
+        .put_operation(view_operation)
+        .expect("put log view operation");
+    let applied = OperationExecutor::new(&mut store)
+        .apply("op-open-source-logs")
+        .expect("apply operation log view");
+    assert_eq!(applied.status, OperationStatus::Succeeded);
+    let log_view = store
+        .log_views()
+        .into_iter()
+        .find(|view| view.source_id == "operation:op-source-logs")
+        .expect("operation-scoped log view");
+    assert_eq!(log_view.endpoint, "127.0.0.1:8080");
+    assert_eq!(log_view.read_policy, "operation-scoped");
+    assert!(
+        store
+            .operation_logs("op-open-source-logs")
+            .iter()
+            .any(|record| record.step_id == "operation.logs.view"
+                && record
+                    .data
+                    .get("log_count")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(1)),
+        "operation.logs.view should record the number of visible operation logs"
+    );
+
+    let report =
+        build_diagnostic_report(&store, "diag-observable").expect("build diagnostic report");
+    store
+        .put_diagnostic_report(report)
+        .expect("put diagnostic report");
+    let export_operation =
+        diagnostics_export_operation("op-export-diag", "diag-observable", "json")
+            .expect("diagnostics export operation");
+    store
+        .put_operation(export_operation)
+        .expect("put export operation");
+    let exported = OperationExecutor::new(&mut store)
+        .apply("op-export-diag")
+        .expect("apply diagnostic export");
+    assert_eq!(exported.status, OperationStatus::Succeeded);
+    assert!(
+        store
+            .operation_logs("op-export-diag")
+            .iter()
+            .any(|record| record.step_id == "diagnostics.export"
+                && record
+                    .data
+                    .get("format")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("json")
+                && record
+                    .data
+                    .get("content_bytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|value| value > 0)),
+        "diagnostics.export should record export metadata without storing arbitrary files"
     );
 }
 
