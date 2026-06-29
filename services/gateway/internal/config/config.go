@@ -8,15 +8,15 @@ import "github.com/zeromicro/go-zero/rest"
 type Config struct {
 	rest.RestConf
 
-	Database     DatabaseConfig
-	Redis        RedisConfig
-	Jaeger       JaegerConfig
-	Jwt          JwtConfig
-	Storage      StorageConfig
-	Proxy        ProxyConfig
-	Runtime      RuntimeConfig
-	InternalAuth InternalAuthConfig
-	RootRuntime  RootRuntimeConfig
+	Database      DatabaseConfig
+	Redis         RedisConfig
+	Jaeger        JaegerConfig
+	Jwt           JwtConfig
+	Storage       StorageConfig
+	Proxy         ProxyConfig
+	ServiceStatus ServiceStatusConfig
+	InternalAuth  InternalAuthConfig
+	Orchestrator  OrchestratorConfig
 }
 
 type DatabaseConfig struct {
@@ -60,9 +60,8 @@ type ProxyTrustedServiceConfig struct {
 	HealthCheckID string `json:",optional"`
 }
 
-type RuntimeConfig struct {
+type ServiceStatusConfig struct {
 	ComposeServices []string `json:",optional"`
-	ApplyEnabled    bool     `json:",optional"`
 }
 
 type InternalAuthConfig struct {
@@ -74,7 +73,7 @@ type InternalAuthConfig struct {
 	NonceTTLSeconds         int64 `json:",optional"`
 }
 
-type RootRuntimeConfig struct {
+type OrchestratorConfig struct {
 	Endpoint      string
 	InternalToken string
 }

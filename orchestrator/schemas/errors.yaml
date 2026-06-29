@@ -1,0 +1,15 @@
+schema_version: 1
+product: OJOS Orchestrator
+error:
+  required_fields:
+    - code
+    - message
+    - severity
+    - details
+    - redacted
+  redaction:
+    forbidden_plaintext:
+      - token
+      - secret
+      - password
+      - private_key

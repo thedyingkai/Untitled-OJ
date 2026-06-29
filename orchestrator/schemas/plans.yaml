@@ -1,0 +1,20 @@
+schema_version: 1
+product: OJOS Orchestrator
+plan:
+  required_fields:
+    - operation_id
+    - action
+    - target_type
+    - target_id
+    - steps
+    - risk_level
+    - rollback_available
+  states:
+    - PLANNED
+    - AWAITING_CONFIRMATION
+    - RUNNING
+    - SUCCEEDED
+    - FAILED
+    - ROLLED_BACK
+    - CANCELLED
+    - EXPIRED

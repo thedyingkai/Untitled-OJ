@@ -114,7 +114,7 @@ onMounted(() => void load())
           </RouterLink>
           <RouterLink to="/admin/services" class="quick-card">
             <strong>Service 中心</strong>
-            <span>查看 Service Registry、service.yaml、组件和拓扑。</span>
+            <span>查看 Orchestrator Snapshot、service.yaml、组件和拓扑。</span>
           </RouterLink>
           <RouterLink to="/admin/permissions" class="quick-card">
             <strong>权限</strong>

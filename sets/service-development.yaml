@@ -1,27 +1,57 @@
 schema_version: 1
 id: service-development
 name: Service 开发
-description: 面向 Service SDK、契约校验和本地集成开发的组合。
+description: 面向 Service 作者的最小开发组合，用于校验 service.yaml、Endpoint、Link 和基础依赖。
+scenario:
+  type: development
+  recommended_for:
+    - Service 开发
+    - 契约校验
+    - 本地联调
 services:
-  - gateway
-  - web-shell
-  - problem-api
-  - judge-api
-  - postgres
-  - storage
+  - id: postgres
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: redis
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: storage
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: auth
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: gateway
+    required: true
+    count: 1
+    placement: { host: root }
+    config:
+      rate_limit_per_minute: 1200
+default_endpoints:
+  - { service: gateway, port: 8080, protocol: http, expose: true }
+  - { service: auth, port: 8081, protocol: http, expose: false }
+  - { service: postgres, port: 5432, protocol: postgres, expose: false }
+  - { service: redis, port: 6379, protocol: redis, expose: false }
+  - { service: storage, port: 9000, protocol: http, expose: false }
 default_links:
-  - from: gateway
-    to: problem-api
-    protocol: http
-  - from: gateway
-    to: judge-api
-    protocol: http
-  - from: problem-api
-    to: postgres
-    protocol: postgres
-  - from: judge-api
-    to: storage
-    protocol: http
-recommended_for:
-  - Service 契约开发
-  - 本地联调
+  - { from: gateway, to: auth, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: auth, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: auth, to: redis, protocol: redis, auth_mode: internal, scope: cache, required: true }
+policies:
+  placement: { local_development: true }
+  security: { secret_ref_only: true }
+  network: { link_required: true }
+  health: { allow_optional_service_absence: true }
+operations:
+  install_order: [postgres, redis, storage, auth, gateway]
+  start_order: [postgres, redis, storage, auth, gateway]
+  stop_order: [gateway, auth, storage, redis, postgres]
+notes: 开发中的 Service 通过 Orchestrator 导入和校验，构建产物不是核心对象。

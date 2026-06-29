@@ -170,7 +170,7 @@ func (i *packageInspector) validateManifest(manifest ProblemManifest) {
 	if !oneOf(manifest.Type, "traditional", "interactive", "communication", "output_only", "heuristic") {
 		i.addError("invalid_type", "problem.yaml type is invalid", "problem.yaml")
 	}
-	if !oneOf(manifest.Visibility, "private", "public", "contest_only") {
+	if !oneOf(manifest.Visibility, "private", "public") {
 		i.addError("invalid_visibility", "problem.yaml visibility is invalid", "problem.yaml")
 	}
 	if !oneOf(manifest.Status, "draft", "ready", "published", "archived") {

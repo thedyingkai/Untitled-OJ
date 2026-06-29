@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/serviceruntime"
+	"ojos-gateway/internal/orchestrator/servicestatus"
+	orchestratorsnapshot "ojos-gateway/internal/orchestrator/snapshot"
 	"ojos-gateway/internal/proxy"
-	"ojos-gateway/internal/serviceregistry"
 	"ojos-shared/security/internalauth"
 	sharedperm "ojos-shared/security/permission"
 
@@ -37,11 +37,12 @@ type ServiceContext struct {
 	Redis  *redis.Client
 	Tracer *sdktrace.TracerProvider
 
-	Proxy             http.HandlerFunc
-	RuntimeProxy      *proxy.RuntimeProxy
-	RuntimeDriver     serviceruntime.RuntimeDriver
-	RouteTableOptions serviceruntime.RouteTableOptions
-	InternalSigner    *internalauth.Signer
+	Proxy               http.HandlerFunc
+	ServiceProxy        *proxy.ServiceProxy
+	ServiceStatusDriver servicestatus.ServiceStatusDriver
+	RouteTableOptions   servicestatus.RouteTableOptions
+	InternalSigner      *internalauth.Signer
+	Orchestrator        *orchestratorsnapshot.Client
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
@@ -87,55 +88,50 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		internalSigner = internalauth.NewSigner(internalKeyManager)
 	}
 
-	repo := serviceregistry.NewRepository(db)
-	if err := serviceregistry.BootstrapBuiltin(ctx, repo); err != nil {
-		log.Fatalf("bootstrap service registry failed: %v", err)
-	}
-
-	runtimeProxy, err := proxy.NewRuntimeProxy(c.Proxy.Routes, c.Proxy.TrustedServices, c.Jwt.Secret, internalSigner, zlog)
+	serviceProxy, err := proxy.NewServiceProxy(c.Proxy.Routes, c.Proxy.TrustedServices, c.Jwt.Secret, internalSigner, zlog)
 	if err != nil {
 		log.Fatalf("init proxy failed: %v", err)
 	}
-	runtimeProxy.SetAdminChecker(func(ctx context.Context, userID int64) (bool, error) {
+	serviceProxy.SetAdminChecker(func(ctx context.Context, userID int64) (bool, error) {
 		return sharedperm.HasUserPermission(ctx, db, userID, "system.admin", sharedperm.SystemScope())
 	})
 	routeTableOptions := routeTableOptionsFromConfig(c.Proxy)
-	runtimeDriver := serviceruntime.NewComposeDriver(routeTableOptions.TrustedServices, c.Runtime.ComposeServices...)
-	if c.Runtime.ApplyEnabled {
-		zlog.Warn("runtime apply is configured but remains disabled in L2 foundation")
-	}
-	if snapshot, err := serviceruntime.BuildSnapshot(ctx, repo); err == nil {
-		if services, serviceErr := runtimeDriver.ListServices(ctx, snapshot); serviceErr == nil {
-			snapshot.Services = filterRuntimeServicesByKind(services, false)
-			snapshot.Workers = filterRuntimeServicesByKind(services, true)
-			routeTableOptions.ServiceStates = serviceruntime.RuntimeServiceStates(snapshot.Services)
+	serviceStatusDriver := servicestatus.NewComposeDriver(routeTableOptions.TrustedServices, c.ServiceStatus.ComposeServices...)
+	orchestratorClient := orchestratorsnapshot.NewClient(c.Orchestrator.Endpoint, c.Orchestrator.InternalToken)
+	var snapshot servicestatus.Snapshot
+	if err := orchestratorClient.DecodeOrchestratorSnapshot(ctx, false, &snapshot); err == nil {
+		if services, serviceErr := serviceStatusDriver.ListServices(ctx, snapshot); serviceErr == nil {
+			snapshot.Services = filterServiceStatusesByKind(services, false)
+			snapshot.Workers = filterServiceStatusesByKind(services, true)
+			routeTableOptions.ServiceStatuses = servicestatus.ServiceStatusesByID(snapshot.Services)
 		}
-		runtimeProxy.SetRouteTable(serviceruntime.BuildRouteTableWithOptions(snapshot, routeTableOptions))
+		serviceProxy.SetRouteTable(servicestatus.BuildRouteTableWithOptions(snapshot, routeTableOptions))
 	} else {
-		zlog.Warn("initial runtime route table build failed", zap.Error(err))
+		zlog.Warn("orchestrator service snapshot is unavailable; gateway starts degraded", zap.Error(err))
 	}
 
 	return &ServiceContext{
-		Config:            c,
-		Logger:            zlog,
-		DB:                db,
-		Redis:             redisClient,
-		Tracer:            tp,
-		Proxy:             runtimeProxy.ServeHTTP,
-		RuntimeProxy:      runtimeProxy,
-		RuntimeDriver:     runtimeDriver,
-		RouteTableOptions: routeTableOptions,
-		InternalSigner:    internalSigner,
+		Config:              c,
+		Logger:              zlog,
+		DB:                  db,
+		Redis:               redisClient,
+		Tracer:              tp,
+		Proxy:               serviceProxy.ServeHTTP,
+		ServiceProxy:        serviceProxy,
+		ServiceStatusDriver: serviceStatusDriver,
+		RouteTableOptions:   routeTableOptions,
+		InternalSigner:      internalSigner,
+		Orchestrator:        orchestratorClient,
 	}
 }
 
-func routeTableOptionsFromConfig(cfg config.ProxyConfig) serviceruntime.RouteTableOptions {
-	trusted := make(map[string]serviceruntime.TrustedService)
+func routeTableOptionsFromConfig(cfg config.ProxyConfig) servicestatus.RouteTableOptions {
+	trusted := make(map[string]servicestatus.TrustedService)
 	for _, item := range cfg.TrustedServices {
 		if strings.TrimSpace(item.ServiceID) == "" {
 			continue
 		}
-		trusted[item.ServiceID] = serviceruntime.TrustedService{
+		trusted[item.ServiceID] = servicestatus.TrustedService{
 			ServiceID:     item.ServiceID,
 			UpstreamBase:  item.Target,
 			StripPrefix:   item.StripPrefix,
@@ -151,20 +147,20 @@ func routeTableOptionsFromConfig(cfg config.ProxyConfig) serviceruntime.RouteTab
 		if _, ok := trusted[serviceID]; ok {
 			continue
 		}
-		trusted[serviceID] = serviceruntime.TrustedService{
+		trusted[serviceID] = servicestatus.TrustedService{
 			ServiceID:     serviceID,
 			UpstreamBase:  route.Target,
 			StripPrefix:   route.StripPrefix,
 			HealthCheckID: serviceID + "-health",
 		}
 	}
-	return serviceruntime.RouteTableOptions{
+	return servicestatus.RouteTableOptions{
 		TrustedServices: trusted,
 	}
 }
 
-func filterRuntimeServicesByKind(items []serviceruntime.RuntimeService, workers bool) []serviceruntime.RuntimeService {
-	out := make([]serviceruntime.RuntimeService, 0, len(items))
+func filterServiceStatusesByKind(items []servicestatus.ServiceStatus, workers bool) []servicestatus.ServiceStatus {
+	out := make([]servicestatus.ServiceStatus, 0, len(items))
 	for _, item := range items {
 		if (item.Kind == "worker") == workers {
 			out = append(out, item)
@@ -174,7 +170,7 @@ func filterRuntimeServicesByKind(items []serviceruntime.RuntimeService, workers 
 }
 
 func applyEnvOverrides(c *config.Config) {
-	if value := firstEnv("DATABASE_URL", "POSTGRES_DSN"); value != "" {
+	if value := firstEnv("DATABASE_URL", "OJ_DATABASE_URL"); value != "" {
 		c.Database.Url = value
 	}
 	if value := strings.TrimSpace(os.Getenv("REDIS_URL")); value != "" {
@@ -186,11 +182,11 @@ func applyEnvOverrides(c *config.Config) {
 	if value := strings.TrimSpace(os.Getenv("JWT_SECRET")); value != "" {
 		c.Jwt.Secret = value
 	}
-	if value := strings.TrimSpace(os.Getenv("ROOT_RUNTIME_MANAGER_ENDPOINT")); value != "" {
-		c.RootRuntime.Endpoint = value
+	if value := strings.TrimSpace(os.Getenv("ORCHESTRATOR_ENDPOINT")); value != "" {
+		c.Orchestrator.Endpoint = value
 	}
-	if value := strings.TrimSpace(os.Getenv("ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN")); value != "" {
-		c.RootRuntime.InternalToken = value
+	if value := strings.TrimSpace(os.Getenv("ORCHESTRATOR_INTERNAL_TOKEN")); value != "" {
+		c.Orchestrator.InternalToken = value
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEMS_ROOT")); value != "" {
 		c.Storage.ProblemsRoot = value

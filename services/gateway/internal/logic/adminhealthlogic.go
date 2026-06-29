@@ -11,8 +11,6 @@ import (
 	"time"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/serviceruntime"
-	"ojos-gateway/internal/serviceregistry"
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
 
@@ -51,8 +49,8 @@ func (l *AdminHealthLogic) AdminHealth(authHeader string) (*types.AdminHealthRes
 			components = append(components, l.checkHTTP(route))
 		}
 	}
-	if strings.TrimSpace(l.svcCtx.Config.RootRuntime.Endpoint) != "" {
-		components = append(components, l.checkInstaller())
+	if strings.TrimSpace(l.svcCtx.Config.Orchestrator.Endpoint) != "" {
+		components = append(components, l.checkOrchestrator())
 	}
 	components = append(components, l.runtimeHealthChecks()...)
 
@@ -138,28 +136,31 @@ func (l *AdminHealthLogic) checkHTTP(route config.ProxyRouteConfig) types.Health
 	return component(name, start, err)
 }
 
-func (l *AdminHealthLogic) checkInstaller() types.HealthComponent {
+func (l *AdminHealthLogic) checkOrchestrator() types.HealthComponent {
 	start := time.Now()
 	client := http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(strings.TrimRight(l.svcCtx.Config.RootRuntime.Endpoint, "/") + "/health")
+	resp, err := client.Get(strings.TrimRight(l.svcCtx.Config.Orchestrator.Endpoint, "/") + "/health")
 	if err == nil && resp != nil {
 		_ = resp.Body.Close()
 		if resp.StatusCode >= 400 {
 			err = errors.New(resp.Status)
 		}
 	}
-	return component("root-runtime-manager", start, err)
+	return component("ojos-orchestrator", start, err)
 }
 
 func (l *AdminHealthLogic) runtimeHealthChecks() []types.HealthComponent {
-	if l.svcCtx == nil || l.svcCtx.DB == nil {
+	if l.svcCtx == nil || l.svcCtx.Orchestrator == nil || !l.svcCtx.Orchestrator.Configured() {
 		return nil
 	}
-	snapshot, err := serviceruntime.BuildSnapshot(l.ctx, serviceregistry.NewRepository(l.svcCtx.DB))
+	var snapshot struct {
+		HealthChecks []runtimeHealthCheck `json:"health_checks"`
+	}
+	err := l.svcCtx.Orchestrator.DecodeOrchestratorSnapshot(l.ctx, false, &snapshot)
 	if err != nil {
-		c := component("service runtime health registry", time.Now(), nil)
+		c := component("orchestrator health snapshot", time.Now(), nil)
 		c.Status = "warning"
-		c.Message = "runtime health registry unavailable"
+		c.Message = "orchestrator health snapshot unavailable"
 		return []types.HealthComponent{c}
 	}
 	out := make([]types.HealthComponent, 0, len(snapshot.HealthChecks))
@@ -172,7 +173,14 @@ func (l *AdminHealthLogic) runtimeHealthChecks() []types.HealthComponent {
 	return out
 }
 
-func runtimeHealthMessage(check serviceruntime.RuntimeComponent) string {
+type runtimeHealthCheck struct {
+	ServiceID   string          `json:"service_id"`
+	ComponentID string          `json:"component_id"`
+	Type        string          `json:"type"`
+	Config      json.RawMessage `json:"config"`
+}
+
+func runtimeHealthMessage(check runtimeHealthCheck) string {
 	var config struct {
 		Type     string `json:"type"`
 		Optional bool   `json:"optional"`

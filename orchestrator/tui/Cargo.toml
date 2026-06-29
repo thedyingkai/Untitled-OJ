@@ -1,0 +1,11 @@
+[package]
+name = "ojos-orchestrator-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+orchestrator-core.workspace = true
+ratatui.workspace = true

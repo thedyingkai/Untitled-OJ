@@ -40,7 +40,7 @@ func normalizeVisibility(value string) (string, error) {
 	}
 
 	switch value {
-	case "private", "public", "contest_only":
+	case "private", "public":
 		return value, nil
 	default:
 		return "", fmt.Errorf("invalid visibility: %s", value)

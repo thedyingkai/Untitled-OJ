@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/serviceruntime"
 	"ojos-gateway/internal/svc"
 )
 
@@ -123,11 +122,10 @@ func TestCheckHTTPMarksJudgeHealth404AsError(t *testing.T) {
 }
 
 func TestRuntimeHealthMessageMarksMetadataRegistration(t *testing.T) {
-	got := runtimeHealthMessage(serviceruntime.RuntimeComponent{
+	got := runtimeHealthMessage(runtimeHealthCheck{
 		ServiceID:   "ojos.demo-service",
 		ComponentID: "demo-health",
 		Type:        "health_check",
-		Status:      "DISABLED",
 		Config:      []byte(`{"type":"metadata","optional":true}`),
 	})
 	if !strings.Contains(got, "metadata optional registered") {

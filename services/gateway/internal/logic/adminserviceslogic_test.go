@@ -3,99 +3,106 @@ package logic
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/serviceruntime"
-	"ojos-gateway/internal/serviceregistry"
+	"ojos-gateway/internal/orchestrator/servicestatus"
+	orchestratorsnapshot "ojos-gateway/internal/orchestrator/snapshot"
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
 	sharedjwt "ojos-shared/security/jwt"
 )
 
-type fakeServiceRegistry struct {
-	data serviceregistry.BootstrapData
+type fakeOrchestratorSnapshot struct {
+	data orchestratorsnapshot.SnapshotData
 }
 
-type fakeRuntimeDriver struct {
-	services []serviceruntime.RuntimeService
+type fakeServiceStatusDriver struct {
+	services []servicestatus.ServiceStatus
 }
 
-func (f fakeRuntimeDriver) ListServices(context.Context, serviceruntime.Snapshot) ([]serviceruntime.RuntimeService, error) {
+func testSnapshotData() orchestratorsnapshot.SnapshotData {
+	return orchestratorsnapshot.SnapshotData{
+		Sets: []orchestratorsnapshot.Set{
+			{SetID: "single-node-oj", Name: "单机 OJ", Description: "单机部署组合", SortOrder: 10},
+			{SetID: "distributed-oj", Name: "分布式 OJ", Description: "分布式入口组合", SortOrder: 20},
+		},
+		Services: []orchestratorsnapshot.Service{
+			{ServiceID: "gateway", SetID: "single-node-oj", Name: "Gateway", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "gateway"},
+			{ServiceID: "web-shell", SetID: "single-node-oj", Name: "Web Shell", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "frontend"},
+			{ServiceID: "problem-api", SetID: "single-node-oj", Name: "Problem API", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "backend-api"},
+			{ServiceID: "judge-api", SetID: "single-node-oj", Name: "Judge API", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "backend-api"},
+			{ServiceID: "judge-worker", SetID: "single-node-oj", Name: "Judge Worker", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "backend-worker"},
+			{ServiceID: "postgres", SetID: "single-node-oj", Name: "PostgreSQL", Version: "17.0.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "database"},
+			{ServiceID: "storage", SetID: "single-node-oj", Name: "Storage", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "storage"},
+		},
+		Edges: []orchestratorsnapshot.Edge{
+			{FromServiceID: "gateway", ToServiceID: "problem-api", EdgeType: "link", Required: true},
+			{FromServiceID: "gateway", ToServiceID: "judge-api", EdgeType: "link", Required: true},
+			{FromServiceID: "gateway", ToServiceID: "web-shell", EdgeType: "link", Required: true},
+			{FromServiceID: "judge-worker", ToServiceID: "judge-api", EdgeType: "link", Required: true},
+			{FromServiceID: "judge-api", ToServiceID: "postgres", EdgeType: "link", Required: true},
+			{FromServiceID: "judge-api", ToServiceID: "storage", EdgeType: "link", Required: true},
+		},
+		Components: []orchestratorsnapshot.Component{
+			{ServiceID: "gateway", ComponentID: "gateway-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"endpoint":"127.0.0.1:8080","protocol":"http"}`)},
+			{ServiceID: "gateway", ComponentID: "gateway-health", ComponentType: "health_check", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"type":"http","target":"/health"}`)},
+			{ServiceID: "problem-api", ComponentID: "problem-api-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"endpoint":"127.0.0.1:8083","protocol":"http"}`)},
+			{ServiceID: "problem-api", ComponentID: "problem-api", ComponentType: "backend_service", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"service":"problem-api","trusted_runtime":"compose","compose_service":"problem-api","health_check_id":"problem-api-health","routes":["/api/problem"],"required":true}`)},
+			{ServiceID: "problem-api", ComponentID: "problem-api-health", ComponentType: "health_check", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"type":"http","target":"/health"}`)},
+			{ServiceID: "judge-api", ComponentID: "judge-api-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"endpoint":"127.0.0.1:8082","protocol":"http"}`)},
+			{ServiceID: "judge-api", ComponentID: "judge-api", ComponentType: "backend_service", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"service":"judge-api","trusted_runtime":"compose","compose_service":"judge-api","health_check_id":"judge-api-health","routes":["/api/judge"],"required":true}`)},
+			{ServiceID: "judge-worker", ComponentID: "judge-worker-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"endpoint":"127.0.0.1:9101","protocol":"http"}`)},
+			{ServiceID: "judge-worker", ComponentID: "judge-worker", ComponentType: "worker_service", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"service":"judge-worker","trusted_runtime":"compose","compose_service":"judge-worker","required":true}`)},
+		},
+		Endpoints: []orchestratorsnapshot.Endpoint{
+			{Endpoint: "127.0.0.1:8080", ServiceID: "gateway", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
+			{Endpoint: "127.0.0.1:8083", ServiceID: "problem-api", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
+			{Endpoint: "127.0.0.1:8082", ServiceID: "judge-api", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
+			{Endpoint: "127.0.0.1:9101", ServiceID: "judge-worker", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
+		},
+		Permissions: []orchestratorsnapshot.Permission{
+			{ServiceID: "problem-api", PermissionKey: "problem.read", Description: "读取题目"},
+			{ServiceID: "judge-api", PermissionKey: "judge.submit", Description: "提交评测"},
+		},
+		Menus: []orchestratorsnapshot.Menu{
+			{ServiceID: "web-shell", MenuKey: "problems", Title: "题库", RoutePath: "/problems", Enabled: true},
+			{ServiceID: "web-shell", MenuKey: "submissions", Title: "提交", RoutePath: "/submissions", Enabled: true},
+		},
+		FrontendRoutes: []orchestratorsnapshot.FrontendRoute{
+			{ServiceID: "web-shell", RoutePath: "/problems", RouteName: "problem-list", ComponentKey: "ProblemList", Enabled: true},
+		},
+		GatewayRoutes: []orchestratorsnapshot.GatewayRoute{
+			{ServiceID: "problem-api", Prefix: "/api/problem", TargetService: "problem-api", AuthMode: "required", Enabled: true},
+			{ServiceID: "judge-api", Prefix: "/api/judge", TargetService: "judge-api", AuthMode: "required", Enabled: true},
+		},
+	}
+}
+
+func (f fakeServiceStatusDriver) ListServices(context.Context, servicestatus.Snapshot) ([]servicestatus.ServiceStatus, error) {
 	return f.services, nil
 }
 
-func (f fakeRuntimeDriver) GetServiceState(_ context.Context, _ serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimeService, error) {
+func (f fakeServiceStatusDriver) GetServiceStatus(_ context.Context, _ servicestatus.Snapshot, serviceID string) (servicestatus.ServiceStatus, error) {
 	for _, service := range f.services {
 		if service.ServiceID == serviceID {
 			return service, nil
 		}
 	}
-	return serviceruntime.RuntimeService{}, errors.New("not found: runtime service")
+	return servicestatus.ServiceStatus{}, errors.New("not found: Service Status")
 }
 
-func (f fakeRuntimeDriver) PlanStart(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimePlan, error) {
-	return f.plan(ctx, snapshot, serviceID, "start")
-}
-
-func (f fakeRuntimeDriver) PlanStop(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimePlan, error) {
-	return f.plan(ctx, snapshot, serviceID, "stop")
-}
-
-func (f fakeRuntimeDriver) PlanRestart(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimePlan, error) {
-	return f.plan(ctx, snapshot, serviceID, "restart")
-}
-
-func (f fakeRuntimeDriver) PlanReload(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimePlan, error) {
-	return f.plan(ctx, snapshot, serviceID, "reload")
-}
-
-func (f fakeRuntimeDriver) PlanHealth(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string) (serviceruntime.RuntimePlan, error) {
-	return f.plan(ctx, snapshot, serviceID, "health")
-}
-
-func (f fakeRuntimeDriver) ApplyPlan(context.Context, serviceruntime.RuntimePlan) (serviceruntime.RuntimePlanResult, error) {
-	return serviceruntime.RuntimePlanResult{}, errors.New("not implemented")
-}
-
-func (f fakeRuntimeDriver) plan(ctx context.Context, snapshot serviceruntime.Snapshot, serviceID string, action string) (serviceruntime.RuntimePlan, error) {
-	service, _ := f.GetServiceState(ctx, snapshot, serviceID)
-	plan := serviceruntime.RuntimePlan{
-		PlanID:               fmt.Sprintf("test-%s-%s", action, serviceID),
-		OperationID:          fmt.Sprintf("test-%s-%s-op", action, serviceID),
-		Action:               action,
-		ServiceID:            serviceID,
-		Driver:               "compose",
-		CanApply:             false,
-		ApplyEnabled:         false,
-		RequiresConfirmation: true,
-		AllowedTargets:       []string{service.ComposeService},
-		Affected:             []string{serviceID},
-		Warnings:             []string{"Gateway/Web apply disabled"},
-		CreatedAt:            "2026-01-01T00:00:00Z",
-		ExpiresAt:            "2026-01-01T00:05:00Z",
-	}
-	if service.Lifecycle == serviceruntime.LifecycleMetadata {
-		plan.BlockedBy = append(plan.BlockedBy, "metadata lifecycle cannot "+action)
-		return plan, nil
-	}
-	plan.Commands = []serviceruntime.RuntimePlanCommand{{Kind: "compose", Argv: []string{"docker", "compose", action, service.ComposeService}}}
-	plan.CanApply = true
-	return plan, nil
-}
-
-func (f fakeServiceRegistry) ListServices(context.Context) ([]serviceregistry.Service, error) {
+func (f fakeOrchestratorSnapshot) ListServices(context.Context) ([]orchestratorsnapshot.Service, error) {
 	return f.data.Services, nil
 }
 
-func (f fakeServiceRegistry) ListSets(context.Context) ([]serviceregistry.Set, error) {
+func (f fakeOrchestratorSnapshot) ListSets(context.Context) ([]orchestratorsnapshot.Set, error) {
 	return f.data.Sets, nil
 }
 
-func (f fakeServiceRegistry) Topology(context.Context) (serviceregistry.Topology, error) {
-	return serviceregistry.Topology{
+func (f fakeOrchestratorSnapshot) Topology(context.Context) (orchestratorsnapshot.Topology, error) {
+	return orchestratorsnapshot.Topology{
 		Sets:       f.data.Sets,
 		Nodes:      f.data.Services,
 		Edges:      f.data.Edges,
@@ -103,32 +110,32 @@ func (f fakeServiceRegistry) Topology(context.Context) (serviceregistry.Topology
 	}, nil
 }
 
-func (f fakeServiceRegistry) ListPermissions(context.Context) ([]serviceregistry.Permission, error) {
+func (f fakeOrchestratorSnapshot) ListPermissions(context.Context) ([]orchestratorsnapshot.Permission, error) {
 	return f.data.Permissions, nil
 }
 
-func (f fakeServiceRegistry) ListMenus(context.Context) ([]serviceregistry.Menu, error) {
+func (f fakeOrchestratorSnapshot) ListMenus(context.Context) ([]orchestratorsnapshot.Menu, error) {
 	return f.data.Menus, nil
 }
 
-func (f fakeServiceRegistry) ListFrontendRoutes(context.Context) ([]serviceregistry.FrontendRoute, error) {
+func (f fakeOrchestratorSnapshot) ListFrontendRoutes(context.Context) ([]orchestratorsnapshot.FrontendRoute, error) {
 	return f.data.FrontendRoutes, nil
 }
 
-func (f fakeServiceRegistry) ListGatewayRoutes(context.Context) ([]serviceregistry.GatewayRoute, error) {
+func (f fakeOrchestratorSnapshot) ListGatewayRoutes(context.Context) ([]orchestratorsnapshot.GatewayRoute, error) {
 	return f.data.GatewayRoutes, nil
 }
 
-func (f fakeServiceRegistry) ListComponents(context.Context) ([]serviceregistry.Component, error) {
+func (f fakeOrchestratorSnapshot) ListComponents(context.Context) ([]orchestratorsnapshot.Component, error) {
 	return f.data.Components, nil
 }
 
-func (f fakeServiceRegistry) ListEdges(context.Context) ([]serviceregistry.Edge, error) {
+func (f fakeOrchestratorSnapshot) ListEdges(context.Context) ([]orchestratorsnapshot.Edge, error) {
 	return f.data.Edges, nil
 }
 
-func (f fakeServiceRegistry) Detail(_ context.Context, serviceID string) (serviceregistry.Detail, error) {
-	var detail serviceregistry.Detail
+func (f fakeOrchestratorSnapshot) Detail(_ context.Context, serviceID string) (orchestratorsnapshot.Detail, error) {
+	var detail orchestratorsnapshot.Detail
 	for _, service := range f.data.Services {
 		if service.ServiceID == serviceID {
 			detail.Service = service
@@ -136,7 +143,7 @@ func (f fakeServiceRegistry) Detail(_ context.Context, serviceID string) (servic
 		}
 	}
 	if detail.Service.ServiceID == "" {
-		return serviceregistry.Detail{}, errors.New("service not found")
+		return orchestratorsnapshot.Detail{}, errors.New("service not found")
 	}
 	for _, edge := range f.data.Edges {
 		if edge.FromServiceID == serviceID {
@@ -174,9 +181,9 @@ func (f fakeServiceRegistry) Detail(_ context.Context, serviceID string) (servic
 			detail.GatewayRoutes = append(detail.GatewayRoutes, route)
 		}
 	}
-	for _, installation := range f.data.Installations {
-		if installation.ServiceID == serviceID {
-			detail.Installations = append(detail.Installations, installation)
+	for _, endpoint := range f.data.Endpoints {
+		if endpoint.ServiceID == serviceID {
+			detail.Endpoints = append(detail.Endpoints, endpoint)
 		}
 	}
 	return detail, nil
@@ -207,7 +214,7 @@ func TestListServicesRejectsOrdinaryUser(t *testing.T) {
 	}
 }
 
-func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
+func TestTopologyReturnsBuiltinSnapshotData(t *testing.T) {
 	ctx := context.Background()
 	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
 	if err != nil {
@@ -221,7 +228,7 @@ func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
 				Jwt: config.JwtConfig{Secret: "test-secret"},
 			},
 		},
-		repo: fakeServiceRegistry{data: serviceregistry.BuiltinData()},
+		repo: fakeOrchestratorSnapshot{data: testSnapshotData()},
 	}
 
 	resp, err := logic.Topology("Bearer " + token)
@@ -240,11 +247,11 @@ func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
 	if len(resp.Components) == 0 {
 		t.Fatalf("topology components should be non-empty")
 	}
-	if !hasSet(resp.Sets, "single-node-oj") || !hasSet(resp.Sets, "distributed-root") {
-		t.Fatalf("topology should include runtime and single-node-oj sets: %#v", resp.Sets)
+	if !hasSet(resp.Sets, "single-node-oj") || !hasSet(resp.Sets, "distributed-oj") {
+		t.Fatalf("topology should include distributed-oj and single-node-oj sets: %#v", resp.Sets)
 	}
-	if !hasNode(resp.ServiceNodes, "judge-api") {
-		t.Fatalf("topology should include judge-api node")
+	if !hasNode(resp.ServiceDefinitions, "judge-api") {
+		t.Fatalf("topology should include judge-api service definition")
 	}
 	for _, edge := range [][2]string{
 		{"gateway", "problem-api"},
@@ -262,7 +269,7 @@ func TestTopologyReturnsBuiltinRegistryData(t *testing.T) {
 	}
 }
 
-func TestRuntimeSnapshotReturnsServiceFirstBaseServices(t *testing.T) {
+func TestOrchestratorSnapshotReturnsServiceFirstBaseServices(t *testing.T) {
 	ctx := context.Background()
 	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
 	if err != nil {
@@ -276,41 +283,41 @@ func TestRuntimeSnapshotReturnsServiceFirstBaseServices(t *testing.T) {
 				Jwt: config.JwtConfig{Secret: "test-secret"},
 			},
 		},
-		repo: fakeServiceRegistry{data: serviceregistry.BuiltinData()},
+		repo: fakeOrchestratorSnapshot{data: testSnapshotData()},
 	}
 
-	resp, err := logic.RuntimeSnapshot("Bearer "+token, false)
+	resp, err := logic.OrchestratorSnapshot("Bearer "+token, false)
 	if err != nil {
-		t.Fatalf("runtime snapshot failed: %v", err)
+		t.Fatalf("orchestrator snapshot failed: %v", err)
 	}
-	for _, serviceID := range []string{"root-runtime-manager", "root-runtime-manager", "gateway", "web-shell", "judge-api"} {
-		if !hasNode(resp.ServiceNodes, serviceID) {
-			t.Fatalf("runtime snapshot should include %s", serviceID)
+	for _, serviceID := range []string{"gateway", "web-shell", "problem-api", "judge-api", "judge-worker"} {
+		if !hasNode(resp.ServiceDefinitions, serviceID) {
+			t.Fatalf("orchestrator snapshot should include %s", serviceID)
 		}
 	}
 	if len(resp.Topology.Nodes) == 0 || len(resp.Topology.Edges) == 0 {
-		t.Fatalf("runtime snapshot topology should be non-empty")
+		t.Fatalf("orchestrator snapshot topology should be non-empty")
 	}
-	if len(resp.Topology.ServiceNodes) == 0 || len(resp.Topology.DependencyEdges) == 0 {
-		t.Fatalf("runtime snapshot should expose service graph compatibility fields")
+	if len(resp.Topology.ServiceDefinitions) == 0 || len(resp.Topology.DependencyEdges) == 0 {
+		t.Fatalf("orchestrator snapshot should expose service definition graph fields")
 	}
 	if len(resp.Services) == 0 || len(resp.Workers) == 0 || len(resp.HealthChecks) == 0 {
-		t.Fatalf("runtime snapshot should include services/workers/health checks")
+		t.Fatalf("orchestrator snapshot should include services/workers/health checks")
 	}
 	if len(resp.Components) == 0 {
-		t.Fatalf("runtime snapshot should include full component list")
+		t.Fatalf("orchestrator snapshot should include full component list")
 	}
 }
 
-func TestRuntimeSnapshotIncludeDisabledControlsActiveContributions(t *testing.T) {
+func TestOrchestratorSnapshotIncludeDisabledControlsActiveContributions(t *testing.T) {
 	ctx := context.Background()
 	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	data := serviceregistry.BuiltinData()
-	data.Services = append(data.Services, serviceregistry.Service{
+	data := testSnapshotData()
+	data.Services = append(data.Services, orchestratorsnapshot.Service{
 		ServiceID: "demo-service",
 		SetID:     "demo",
 		Name:      "Demo Service",
@@ -318,12 +325,12 @@ func TestRuntimeSnapshotIncludeDisabledControlsActiveContributions(t *testing.T)
 		Status:    "DISABLED",
 		Kind:      "feature",
 	})
-	data.Permissions = append(data.Permissions, serviceregistry.Permission{
+	data.Permissions = append(data.Permissions, orchestratorsnapshot.Permission{
 		ServiceID:     "demo-service",
 		PermissionKey: "demo.view",
 		Description:   "View demo service metadata.",
 	})
-	data.Menus = append(data.Menus, serviceregistry.Menu{
+	data.Menus = append(data.Menus, orchestratorsnapshot.Menu{
 		ServiceID: "demo-service",
 		MenuKey:   "demo-service",
 		Title:     "Demo Service",
@@ -338,42 +345,42 @@ func TestRuntimeSnapshotIncludeDisabledControlsActiveContributions(t *testing.T)
 				Jwt: config.JwtConfig{Secret: "test-secret"},
 			},
 		},
-		repo: fakeServiceRegistry{data: data},
+		repo: fakeOrchestratorSnapshot{data: data},
 	}
 
-	active, err := logic.RuntimeSnapshot("Bearer "+token, false)
+	active, err := logic.OrchestratorSnapshot("Bearer "+token, false)
 	if err != nil {
-		t.Fatalf("active runtime snapshot failed: %v", err)
+		t.Fatalf("active orchestrator snapshot failed: %v", err)
 	}
-	if hasNode(active.ServiceNodes, "demo-service") || hasPermissionItem(active.Permissions, "demo.view") {
-		t.Fatalf("disabled demo service should not appear in active runtime snapshot")
+	if hasNode(active.ServiceDefinitions, "demo-service") || hasPermissionItem(active.Permissions, "demo.view") {
+		t.Fatalf("disabled demo service should not appear in active orchestrator snapshot")
 	}
 
-	all, err := logic.RuntimeSnapshot("Bearer "+token, true)
+	all, err := logic.OrchestratorSnapshot("Bearer "+token, true)
 	if err != nil {
-		t.Fatalf("include-disabled runtime snapshot failed: %v", err)
+		t.Fatalf("include-disabled orchestrator snapshot failed: %v", err)
 	}
-	if !hasNode(all.ServiceNodes, "demo-service") || !hasPermissionItem(all.Permissions, "demo.view") {
-		t.Fatalf("include-disabled runtime snapshot should expose disabled demo registry entries")
+	if !hasNode(all.ServiceDefinitions, "demo-service") || !hasPermissionItem(all.Permissions, "demo.view") {
+		t.Fatalf("include-disabled orchestrator snapshot should expose disabled demo snapshot entries")
 	}
 }
 
-func TestRuntimeRoutesReturnsRegistryRouteTable(t *testing.T) {
+func TestServiceRoutesReturnsSnapshotRouteTable(t *testing.T) {
 	ctx := context.Background()
 	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	data := serviceregistry.BuiltinData()
-	data.GatewayRoutes = append(data.GatewayRoutes, serviceregistry.GatewayRoute{
+	data := testSnapshotData()
+	data.GatewayRoutes = append(data.GatewayRoutes, orchestratorsnapshot.GatewayRoute{
 		ServiceID:     "demo-service",
 		Prefix:        "/api/demo",
 		TargetService: "demo-api",
 		AuthMode:      "admin",
 		Enabled:       false,
 	})
-	data.Services = append(data.Services, serviceregistry.Service{
+	data.Services = append(data.Services, orchestratorsnapshot.Service{
 		ServiceID: "demo-service",
 		SetID:     "demo",
 		Name:      "Demo Service",
@@ -390,24 +397,21 @@ func TestRuntimeRoutesReturnsRegistryRouteTable(t *testing.T) {
 			},
 			RouteTableOptions: testRouteTableOptions(),
 		},
-		repo: fakeServiceRegistry{data: data},
+		repo: fakeOrchestratorSnapshot{data: data},
 	}
 
-	active, err := logic.RuntimeRoutes("Bearer "+token, false, false, false)
+	active, err := logic.OrchestratorRoutes("Bearer "+token, false, false)
 	if err != nil {
-		t.Fatalf("runtime routes failed: %v", err)
+		t.Fatalf("service routes failed: %v", err)
 	}
-	if hasRuntimeRoute(active.Routes, "/api/demo") {
-		t.Fatalf("disabled demo route should not appear in active runtime route table")
+	if hasServiceRoute(active.Routes, "/api/demo") {
+		t.Fatalf("disabled demo route should not appear in active service route table")
 	}
-	all, err := logic.RuntimeRoutes("Bearer "+token, true, true, false)
+	all, err := logic.OrchestratorRoutes("Bearer "+token, true, false)
 	if err != nil {
-		t.Fatalf("include-disabled runtime routes failed: %v", err)
+		t.Fatalf("include-disabled service routes failed: %v", err)
 	}
-	if !all.Reloaded {
-		t.Fatalf("reload response should be marked reloaded")
-	}
-	if !hasRuntimeRoute(all.Routes, "/api/demo") {
+	if !hasServiceRoute(all.Routes, "/api/demo") {
 		t.Fatalf("include-disabled route table should expose demo metadata route")
 	}
 	for _, route := range all.Routes {
@@ -415,34 +419,34 @@ func TestRuntimeRoutesReturnsRegistryRouteTable(t *testing.T) {
 			t.Fatalf("admin route table should not expose upstream_base by default: %#v", route)
 		}
 	}
-	debug, err := logic.RuntimeRoutes("Bearer "+token, true, false, true)
+	debug, err := logic.OrchestratorRoutes("Bearer "+token, true, true)
 	if err != nil {
-		t.Fatalf("debug runtime routes failed: %v", err)
+		t.Fatalf("debug service routes failed: %v", err)
 	}
-	if !hasRuntimeRouteUpstream(debug.Routes, "/api/demo") {
-		t.Fatalf("debug runtime routes should expose upstream for trusted route")
+	if !hasServiceRouteUpstream(debug.Routes, "/api/demo") {
+		t.Fatalf("debug service routes should expose upstream for trusted route")
 	}
 }
 
-func TestRuntimeServicesAdminAPIUsesRuntimeDriver(t *testing.T) {
+func TestServiceStatusesAdminAPIUsesServiceStatusDriver(t *testing.T) {
 	ctx := context.Background()
 	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	logic := &AdminRuntimeLogic{
+	logic := &AdminServiceStatusLogic{
 		ctx: ctx,
 		svcCtx: &svc.ServiceContext{
 			Config: config.Config{Jwt: config.JwtConfig{Secret: "test-secret"}},
-			RuntimeDriver: fakeRuntimeDriver{services: []serviceruntime.RuntimeService{
+			ServiceStatusDriver: fakeServiceStatusDriver{services: []servicestatus.ServiceStatus{
 				{
 					ServiceID:      "problem-api",
 					OwnerServiceID: "judge-api",
 					Kind:           "http",
-					Lifecycle:      serviceruntime.LifecycleManaged,
+					Lifecycle:      servicestatus.LifecycleManaged,
 					Runtime:        "compose",
 					ComposeService: "problem-api",
-					State:          serviceruntime.ServiceStateRunning,
+					State:          servicestatus.ServiceStatusRunning,
 					Health:         "ok",
 					Routes:         []string{"/api/problem"},
 					Required:       true,
@@ -451,56 +455,42 @@ func TestRuntimeServicesAdminAPIUsesRuntimeDriver(t *testing.T) {
 					ServiceID:      "demo-metadata-service",
 					OwnerServiceID: "demo-service",
 					Kind:           "metadata",
-					Lifecycle:      serviceruntime.LifecycleMetadata,
+					Lifecycle:      servicestatus.LifecycleMetadata,
 					Runtime:        "metadata",
-					State:          serviceruntime.ServiceStateDeclared,
+					State:          servicestatus.ServiceStatusDeclared,
 					Health:         "metadata",
 				},
 				{
 					ServiceID:      "judge-worker",
 					OwnerServiceID: "judge-api",
 					Kind:           "worker",
-					Lifecycle:      serviceruntime.LifecycleManaged,
+					Lifecycle:      servicestatus.LifecycleManaged,
 					Runtime:        "compose",
-					State:          serviceruntime.ServiceStateUnknown,
+					State:          servicestatus.ServiceStatusUnknown,
 					Health:         "unknown",
 				},
 			}},
 		},
-		repo: fakeServiceRegistry{data: serviceregistry.BuiltinData()},
+		repo: fakeOrchestratorSnapshot{data: testSnapshotData()},
 	}
 
 	resp, err := logic.ListServices("Bearer " + token)
 	if err != nil {
-		t.Fatalf("runtime services failed: %v", err)
+		t.Fatalf("Service Status services failed: %v", err)
 	}
 	if len(resp.Services) != 2 || len(resp.Workers) != 1 {
-		t.Fatalf("unexpected runtime service grouping: %#v", resp)
+		t.Fatalf("unexpected Service Status grouping: %#v", resp)
 	}
 	detail, err := logic.ServiceDetail("Bearer "+token, "problem-api")
 	if err != nil {
-		t.Fatalf("runtime service detail failed: %v", err)
+		t.Fatalf("Service Status detail failed: %v", err)
 	}
-	if detail.Service.ServiceId != "problem-api" || detail.Service.State != serviceruntime.ServiceStateRunning {
+	if detail.Service.ServiceId != "problem-api" || detail.Service.State != servicestatus.ServiceStatusRunning {
 		t.Fatalf("unexpected service detail: %#v", detail)
-	}
-	plan, err := logic.PlanRestart("Bearer "+token, "problem-api")
-	if err != nil {
-		t.Fatalf("plan restart failed: %v", err)
-	}
-	if !plan.Plan.CanApply || len(plan.Plan.Commands) != 1 || plan.Plan.Commands[0].Kind != "compose" {
-		t.Fatalf("plan should be operator-applyable compose plan while Gateway apply remains disabled: %#v", plan)
-	}
-	metadataPlan, err := logic.PlanStart("Bearer "+token, "demo-metadata-service")
-	if err != nil {
-		t.Fatalf("metadata plan start failed: %v", err)
-	}
-	if !containsString(metadataPlan.Plan.BlockedBy, "metadata lifecycle cannot start") {
-		t.Fatalf("metadata service should block start: %#v", metadataPlan)
 	}
 }
 
-func TestRuntimeServicesRejectOrdinaryUser(t *testing.T) {
+func TestServiceStatusesRejectOrdinaryUser(t *testing.T) {
 	oldChecker := hasSystemAdminPermission
 	hasSystemAdminPermission = func(context.Context, *svc.ServiceContext, int64) (bool, error) {
 		return false, nil
@@ -513,12 +503,12 @@ func TestRuntimeServicesRejectOrdinaryUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	logic := &AdminRuntimeLogic{
+	logic := &AdminServiceStatusLogic{
 		ctx: context.Background(),
 		svcCtx: &svc.ServiceContext{
 			Config: config.Config{Jwt: config.JwtConfig{Secret: "test-secret"}},
 		},
-		repo: fakeServiceRegistry{data: serviceregistry.BuiltinData()},
+		repo: fakeOrchestratorSnapshot{data: testSnapshotData()},
 	}
 
 	_, err = logic.ListServices("Bearer " + token)
@@ -548,7 +538,7 @@ func hasSet(items []types.ServiceSetItem, setID string) bool {
 	return false
 }
 
-func hasNode(items []types.ServiceNodeItem, serviceID string) bool {
+func hasNode(items []types.ServiceDefinitionItem, serviceID string) bool {
 	for _, item := range items {
 		if item.ServiceId == serviceID {
 			return true
@@ -566,7 +556,7 @@ func hasPermissionItem(items []types.ServicePermissionItem, key string) bool {
 	return false
 }
 
-func hasRuntimeRoute(items []types.ServiceRuntimeRouteItem, prefix string) bool {
+func hasServiceRoute(items []types.OrchestratorRouteItem, prefix string) bool {
 	for _, item := range items {
 		if item.Prefix == prefix {
 			return true
@@ -575,18 +565,9 @@ func hasRuntimeRoute(items []types.ServiceRuntimeRouteItem, prefix string) bool 
 	return false
 }
 
-func hasRuntimeRouteUpstream(items []types.ServiceRuntimeRouteItem, prefix string) bool {
+func hasServiceRouteUpstream(items []types.OrchestratorRouteItem, prefix string) bool {
 	for _, item := range items {
 		if item.Prefix == prefix && item.UpstreamBase != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func containsString(items []string, want string) bool {
-	for _, item := range items {
-		if item == want {
 			return true
 		}
 	}
@@ -611,9 +592,9 @@ func hasComponent(items []types.ServiceComponentItem, serviceID string, componen
 	return false
 }
 
-func testRouteTableOptions() serviceruntime.RouteTableOptions {
-	return serviceruntime.RouteTableOptions{
-		TrustedServices: map[string]serviceruntime.TrustedService{
+func testRouteTableOptions() servicestatus.RouteTableOptions {
+	return servicestatus.RouteTableOptions{
+		TrustedServices: map[string]servicestatus.TrustedService{
 			"demo-api":    {ServiceID: "demo-api", UpstreamBase: "http://demo-api:8080"},
 			"problem-api": {ServiceID: "problem-api", UpstreamBase: "http://problem-api:8083"},
 			"judge-api":   {ServiceID: "judge-api", UpstreamBase: "http://judge-api:8082"},

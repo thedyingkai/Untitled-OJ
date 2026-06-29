@@ -1,0 +1,165 @@
+schema_version: 1
+product: OJOS Orchestrator
+forms:
+  deployment.create:
+    fields:
+      - { name: name, type: string, required: true }
+      - { name: root_endpoint, type: endpoint, required: true }
+      - { name: note, type: text }
+  deployment.open:
+    fields:
+      - { name: deployment_id, type: string, required: true }
+  deployment.diagnose:
+    fields:
+      - { name: deployment_id, type: string }
+
+  service.import:
+    fields:
+      - { name: import_kind, type: enum, values: [local, git, github, release], required: true }
+      - { name: import_ref, type: string, required: true }
+      - { name: service_yaml_path, type: string, required: true }
+  service.validate:
+    fields:
+      - { name: service_id, type: service_id }
+      - { name: service_yaml_path, type: string }
+  service.install:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: endpoint, type: endpoint }
+  service.enable:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+  service.disable:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+  service.start:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+  service.stop:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+  service.restart:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+  service.delete:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: confirm, type: boolean, required: true }
+  service.logs.view:
+    fields:
+      - { name: service_id, type: service_id }
+      - { name: endpoint, type: endpoint }
+  service.health.check:
+    fields:
+      - { name: service_id, type: service_id }
+      - { name: endpoint, type: endpoint }
+
+  set.import:
+    fields:
+      - { name: set_yaml_path, type: string, required: true }
+  set.validate:
+    fields:
+      - { name: set_id, type: set_id }
+      - { name: set_yaml_path, type: string }
+  set.expand:
+    fields:
+      - { name: set_id, type: set_id, required: true }
+  set.apply:
+    fields:
+      - { name: set_id, type: set_id, required: true }
+      - { name: confirm, type: boolean, required: true }
+  set.compare:
+    fields:
+      - { name: left_set_id, type: set_id, required: true }
+      - { name: right_set_id, type: set_id, required: true }
+
+  endpoint.register:
+    fields:
+      - { name: endpoint, type: endpoint, required: true }
+      - { name: service_id, type: service_id, required: true }
+      - { name: protocol, type: enum, values: [http, https, tcp, postgres, redis], required: true }
+      - { name: health_path, type: string }
+      - { name: display_name, type: string }
+      - { name: note, type: text }
+  endpoint.update:
+    fields:
+      - { name: endpoint, type: endpoint, required: true }
+      - { name: protocol, type: enum, values: [http, https, tcp, postgres, redis] }
+      - { name: health_path, type: string }
+      - { name: display_name, type: string }
+      - { name: note, type: text }
+  endpoint.delete:
+    fields:
+      - { name: endpoint, type: endpoint, required: true }
+      - { name: confirm, type: boolean, required: true }
+  endpoint.health.check:
+    fields:
+      - { name: endpoint, type: endpoint, required: true }
+
+  link.create:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+      - { name: protocol, type: enum, values: [http, https, tcp, postgres, redis], required: true }
+      - { name: auth_mode, type: enum, values: [none, internal, service-token, secret-ref] }
+      - { name: secret_ref, type: secret_ref }
+  link.update:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+      - { name: protocol, type: enum, values: [http, https, tcp, postgres, redis] }
+      - { name: auth_mode, type: enum, values: [none, internal, service-token, secret-ref] }
+      - { name: secret_ref, type: secret_ref }
+  link.delete:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+      - { name: confirm, type: boolean, required: true }
+  link.health.check:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+
+  topology.load:
+    fields: []
+  topology.validate:
+    fields: []
+  topology.apply:
+    fields:
+      - { name: topology_snapshot_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  topology.export:
+    fields:
+      - { name: format, type: enum, values: [json, yaml], required: true }
+
+  operation.plan:
+    fields:
+      - { name: action, type: action, required: true }
+      - { name: target_type, type: enum, values: [Service, Set, Endpoint, Link, Operation, Topology, LogView, DiagnosticReport], required: true }
+      - { name: target_id, type: string, required: true }
+  operation.confirm:
+    fields:
+      - { name: operation_id, type: string, required: true }
+  operation.apply:
+    fields:
+      - { name: operation_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  operation.cancel:
+    fields:
+      - { name: operation_id, type: string, required: true }
+  operation.rollback:
+    fields:
+      - { name: operation_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  operation.logs.view:
+    fields:
+      - { name: operation_id, type: string }
+
+  diagnostics.run:
+    fields:
+      - { name: target_type, type: enum, values: [Service, Set, Endpoint, Link, Operation, Topology, LogView, DiagnosticReport] }
+      - { name: target_id, type: string }
+  diagnostics.export:
+    fields:
+      - { name: report_id, type: string, required: true }
+      - { name: format, type: enum, values: [json, yaml], required: true }

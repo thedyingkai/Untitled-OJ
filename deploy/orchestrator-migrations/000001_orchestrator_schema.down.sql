@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS diagnostic_reports;
+DROP TABLE IF EXISTS log_sources;
+DROP TABLE IF EXISTS topology_snapshots;
+DROP TABLE IF EXISTS orchestrator_operation_locks;
+DROP TABLE IF EXISTS orchestrator_operation_logs;
+DROP TABLE IF EXISTS orchestrator_operations;
+DROP TABLE IF EXISTS service_links;
+DROP TABLE IF EXISTS service_endpoints;
+DROP TABLE IF EXISTS services;
+DROP TABLE IF EXISTS service_sets;

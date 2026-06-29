@@ -25,13 +25,12 @@ import type {
   ServiceComponentItem,
   ServiceDetailResponse,
   ServiceEdgeItem,
+  ServiceEndpointItem,
   ServiceFrontendRouteItem,
   ServiceGatewayRouteItem,
-  ServiceInstallationItem,
   ServiceMenuItem,
   ServicePermissionItem,
 } from '../../types/service'
-import { formatDateTime } from '../../utils/format'
 
 const route = useRoute()
 const detail = ref<ServiceDetailResponse | null>(null)
@@ -83,12 +82,13 @@ const gatewayRouteColumns: DataTableColumns<ServiceGatewayRouteItem> = [
   { title: '启用', key: 'enabled', width: 100, render: (row) => (row.enabled ? '是' : '否') },
 ]
 
-const installationColumns: DataTableColumns<ServiceInstallationItem> = [
-  { title: '名称', key: 'name', minWidth: 180 },
-  { title: '版本', key: 'version', width: 110 },
-  { title: '状态', key: 'status', width: 140, render: (row) => h(OjosServiceStatusTag, { status: row.status }) },
-  { title: '启用时间', key: 'enabled_at', width: 180, render: (row) => formatDateTime(row.enabled_at) },
-  { title: '禁用时间', key: 'disabled_at', width: 180, render: (row) => formatDateTime(row.disabled_at) },
+const endpointColumns: DataTableColumns<ServiceEndpointItem> = [
+  { title: 'Endpoint', key: 'endpoint', minWidth: 180 },
+  { title: '协议', key: 'protocol', width: 110 },
+  { title: '健康', key: 'health', width: 140, render: (row) => h(OjosServiceStatusTag, { status: row.health }) },
+  { title: '可达', key: 'reachable', width: 100, render: (row) => (row.reachable ? '是' : '否') },
+  { title: '健康路径', key: 'health_path', minWidth: 140 },
+  { title: '备注', key: 'note', minWidth: 160 },
 ]
 
 async function load(silent = false): Promise<void> {
@@ -112,12 +112,12 @@ onMounted(() => void load())
   <div class="service-detail-page">
     <OjosPageHeader
       :title="serviceId"
-      :description="detail?.service.description || '来自 Service Registry API 的只读 Service 详情。'"
+      :description="detail?.service.description || '来自 Orchestrator Snapshot API 的只读 Service 详情。'"
       eyebrow="Service"
     >
       <template #actions>
         <RouterLink to="/admin/services">
-          <NButton secondary>Service Registry</NButton>
+          <NButton secondary>Orchestrator Snapshot</NButton>
         </RouterLink>
         <RouterLink to="/admin/topology">
           <NButton secondary>Topology</NButton>
@@ -153,7 +153,7 @@ onMounted(() => void load())
           </NDescriptions>
         </OjosSection>
 
-        <OjosSection title="注册表详情">
+        <OjosSection title="只读快照详情">
           <NTabs type="line" animated>
             <NTabPane name="dependencies" tab="依赖">
               <EmptyView v-if="detail.dependencies.length === 0" description="暂无依赖" />
@@ -183,9 +183,9 @@ onMounted(() => void load())
               <EmptyView v-if="detail.gateway_routes.length === 0" description="暂无 Gateway 路由" />
               <NDataTable v-else :columns="gatewayRouteColumns" :data="detail.gateway_routes" :bordered="false" />
             </NTabPane>
-            <NTabPane name="installations" tab="安装状态">
-              <EmptyView v-if="detail.installations.length === 0" description="暂无安装状态" />
-              <NDataTable v-else :columns="installationColumns" :data="detail.installations" :bordered="false" />
+            <NTabPane name="endpoints" tab="Endpoint">
+              <EmptyView v-if="detail.endpoints.length === 0" description="暂无 Endpoint" />
+              <NDataTable v-else :columns="endpointColumns" :data="detail.endpoints" :bordered="false" />
             </NTabPane>
           </NTabs>
         </OjosSection>

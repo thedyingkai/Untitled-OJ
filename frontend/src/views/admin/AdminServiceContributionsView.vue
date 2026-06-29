@@ -3,7 +3,7 @@ import { computed, h, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { NButton, NDataTable, NTag, NTabPane, NTabs, type DataTableColumns } from 'naive-ui'
 
-import { getServiceRuntimeRoutes, getServiceRuntimeSnapshot } from '../../api/services'
+import { getOrchestratorRoutes, getOrchestratorSnapshot } from '../../api/services'
 import { toApiClientError, type ApiClientError } from '../../api/client'
 import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
 import EmptyView from '../../components/common/EmptyView.vue'
@@ -17,31 +17,31 @@ import type {
   ServiceGatewayRouteItem,
   ServiceMenuItem,
   ServicePermissionItem,
-  ServiceRuntimeComponent,
-  ServiceRuntimeManifestItem,
-  ServiceRuntimeRouteItem,
-  ServiceRuntimeRoutesResponse,
-  ServiceRuntimeService,
-  ServiceRuntimeSnapshotResponse,
-  ServiceRuntimeTopologyEdge,
-  ServiceRuntimeTopologyNode,
+  OrchestratorSnapshotItem,
+  OrchestratorRouteItem,
+  OrchestratorRoutesResponse,
+  OrchestratorSnapshotResponse,
+  ServiceStatusComponent,
+  ServiceStatusItem,
+  ServiceTopologyEdge,
+  ServiceTopologyNode,
 } from '../../types/service'
 
-const snapshot = ref<ServiceRuntimeSnapshotResponse | null>(null)
-const routes = ref<ServiceRuntimeRoutesResponse | null>(null)
+const snapshot = ref<OrchestratorSnapshotResponse | null>(null)
+const routes = ref<OrchestratorRoutesResponse | null>(null)
 const loading = ref(true)
 const refreshing = ref(false)
 const error = ref<ApiClientError | null>(null)
 const includeDisabled = ref(false)
 const route = useRoute()
 const selectedServiceId = computed(() => String(route.params.serviceId ?? ''))
-const pageTitle = computed(() => selectedServiceId.value ? 'Service UI 详情' : 'Service UI 总览')
+const pageTitle = computed(() => (selectedServiceId.value ? 'Service UI 详情' : 'Service UI 总览'))
 
 const visiblePermissions = computed(() => filterByService(snapshot.value?.permissions ?? []))
 const visibleMenus = computed(() => filterByService(snapshot.value?.menus ?? []))
 const visibleFrontendRoutes = computed(() => filterByService(snapshot.value?.frontend_routes ?? []))
 const visibleGatewayRoutes = computed(() => filterByService(snapshot.value?.gateway_routes ?? []))
-const visibleRuntimeRoutes = computed(() => filterByService(routes.value?.routes ?? []))
+const visibleServiceRoutes = computed(() => filterByService(routes.value?.routes ?? []))
 const visibleServices = computed(() => filterByService(snapshot.value?.services ?? []))
 const visibleWorkers = computed(() => filterByService(snapshot.value?.workers ?? []))
 const visibleHealthChecks = computed(() => filterByService(snapshot.value?.health_checks ?? []))
@@ -83,17 +83,22 @@ const gatewayRouteColumns: DataTableColumns<ServiceGatewayRouteItem> = [
   { title: '启用', key: 'enabled', width: 100, render: (row) => enabledTag(row.enabled) },
 ]
 
-const runtimeRouteColumns: DataTableColumns<ServiceRuntimeRouteItem> = [
+const serviceRouteColumns: DataTableColumns<OrchestratorRouteItem> = [
   { title: '前缀', key: 'prefix', minWidth: 220 },
   { title: 'Owner Service', key: 'owner_service_id', minWidth: 220 },
   { title: '目标 Service', key: 'service_id', minWidth: 160 },
   { title: '认证', key: 'auth_mode', width: 110 },
   { title: '状态', key: 'status', width: 120, render: (row) => routeStatusTag(row) },
   { title: '代理', key: 'proxy_enabled', width: 100, render: (row) => enabledTag(row.proxy_enabled) },
-  { title: '阻塞 / 警告', key: 'blocked_by', minWidth: 260, render: (row) => [...row.blocked_by, ...row.conflicts, ...row.warnings].join('; ') || '无' },
+  {
+    title: '阻塞 / 告警',
+    key: 'blocked_by',
+    minWidth: 260,
+    render: (row) => [...row.blocked_by, ...row.conflicts, ...row.warnings].join('; ') || '无',
+  },
 ]
 
-const runtimeServiceColumns: DataTableColumns<ServiceRuntimeService> = [
+const serviceStatusColumns: DataTableColumns<ServiceStatusItem> = [
   { title: 'Service', key: 'service_id', minWidth: 200 },
   { title: 'Owner', key: 'owner_service_id', minWidth: 220 },
   { title: '类型', key: 'kind', width: 120 },
@@ -102,10 +107,10 @@ const runtimeServiceColumns: DataTableColumns<ServiceRuntimeService> = [
   { title: '状态', key: 'state', width: 130 },
   { title: '健康', key: 'health', width: 120 },
   { title: '路由', key: 'routes', minWidth: 220, render: (row) => row.routes.join(', ') || '无' },
-  { title: '警告', key: 'warnings', minWidth: 260, render: (row) => [...row.blocked_by, ...row.warnings].join('; ') || '无' },
+  { title: '告警', key: 'warnings', minWidth: 260, render: (row) => [...row.blocked_by, ...row.warnings].join('; ') || '无' },
 ]
 
-const componentColumns: DataTableColumns<ServiceRuntimeComponent> = [
+const componentColumns: DataTableColumns<ServiceStatusComponent> = [
   { title: '组件', key: 'component_id', minWidth: 220 },
   { title: '类型', key: 'type', width: 170 },
   { title: 'Service', key: 'service_id', minWidth: 220 },
@@ -113,7 +118,7 @@ const componentColumns: DataTableColumns<ServiceRuntimeComponent> = [
   { title: '配置', key: 'config', render: (row) => h(OjosJsonViewer, { value: row.config }) },
 ]
 
-const manifestItemColumns: DataTableColumns<ServiceRuntimeManifestItem> = [
+const manifestItemColumns: DataTableColumns<OrchestratorSnapshotItem> = [
   { title: 'ID', key: 'id', minWidth: 220 },
   { title: '类型', key: 'type', width: 160 },
   { title: 'Service', key: 'service_id', minWidth: 220 },
@@ -122,7 +127,7 @@ const manifestItemColumns: DataTableColumns<ServiceRuntimeManifestItem> = [
   { title: '配置', key: 'config', render: (row) => h(OjosJsonViewer, { value: row.config }) },
 ]
 
-const topologyNodeColumns: DataTableColumns<ServiceRuntimeTopologyNode> = [
+const topologyNodeColumns: DataTableColumns<ServiceTopologyNode> = [
   { title: '节点', key: 'id', minWidth: 260 },
   { title: '标签', key: 'label', minWidth: 180 },
   { title: '类型', key: 'type', width: 150 },
@@ -130,7 +135,7 @@ const topologyNodeColumns: DataTableColumns<ServiceRuntimeTopologyNode> = [
   { title: '来源', key: 'source', width: 120 },
 ]
 
-const topologyEdgeColumns: DataTableColumns<ServiceRuntimeTopologyEdge> = [
+const topologyEdgeColumns: DataTableColumns<ServiceTopologyEdge> = [
   { title: '来源', key: 'from', minWidth: 260 },
   { title: '目标', key: 'to', minWidth: 260 },
   { title: '类型', key: 'type', width: 140 },
@@ -144,8 +149,8 @@ async function load(silent = false): Promise<void> {
   error.value = null
   try {
     const [snapshotResp, routesResp] = await Promise.all([
-      getServiceRuntimeSnapshot({ includeDisabled: includeDisabled.value }),
-      getServiceRuntimeRoutes({ includeDisabled: includeDisabled.value }),
+      getOrchestratorSnapshot({ includeDisabled: includeDisabled.value }),
+      getOrchestratorRoutes({ includeDisabled: includeDisabled.value }),
     ])
     snapshot.value = snapshotResp
     routes.value = routesResp
@@ -161,7 +166,7 @@ function enabledTag(enabled: boolean) {
   return h(NTag, { type: enabled ? 'success' : 'default', size: 'small' }, { default: () => (enabled ? '是' : '否') })
 }
 
-function routeStatusTag(row: ServiceRuntimeRouteItem) {
+function routeStatusTag(row: OrchestratorRouteItem) {
   const type = row.status === 'active' ? 'success' : row.status === 'blocked' ? 'error' : 'default'
   return h(NTag, { type, size: 'small' }, { default: () => row.status || 'unknown' })
 }
@@ -171,6 +176,11 @@ function filterByService<T extends { service_id: string }>(items: T[]): T[] {
   return items.filter((item) => item.service_id === selectedServiceId.value)
 }
 
+function toggleIncludeDisabled(): void {
+  includeDisabled.value = !includeDisabled.value
+  void load(true)
+}
+
 onMounted(() => void load())
 </script>
 
@@ -178,11 +188,11 @@ onMounted(() => void load())
   <div class="service-contributions-page">
     <OjosPageHeader
       :title="pageTitle"
-      :description="selectedServiceId ? `${selectedServiceId} 的只读 UI registry 视图。` : '来自 Root Runtime Snapshot 的权限、菜单、路由、健康检查和拓扑视图；Web Shell 不执行 apply。'"
-      eyebrow="只读 Registry"
+      :description="selectedServiceId ? `${selectedServiceId} 的只读 UI snapshot 视图。` : '来自 Orchestrator Snapshot 的权限、菜单、路由、健康检查和拓扑视图，Web Shell 不执行 apply。'"
+      eyebrow="只读快照"
     >
       <template #actions>
-        <NButton secondary :loading="refreshing" @click="includeDisabled = !includeDisabled; load(true)">
+        <NButton secondary :loading="refreshing" @click="toggleIncludeDisabled">
           {{ includeDisabled ? '仅看启用' : '包含禁用' }}
         </NButton>
         <NButton secondary :loading="refreshing" @click="load(true)">刷新</NButton>
@@ -194,22 +204,22 @@ onMounted(() => void load())
       <ApiErrorAlert v-if="error" :error="error" @retry="load()" />
       <template v-else-if="snapshot && routes">
         <div class="contribution-summary">
-          <OjosStatCard label="Services" :value="snapshot.service_nodes.length" tone="primary" />
+          <OjosStatCard label="Services" :value="snapshot.service_definitions.length" tone="primary" />
           <OjosStatCard label="权限" :value="visiblePermissions.length" />
           <OjosStatCard label="菜单" :value="visibleMenus.length" />
           <OjosStatCard label="运行服务" :value="visibleServices.length + visibleWorkers.length" />
-          <OjosStatCard label="Runtime 路由" :value="visibleRuntimeRoutes.length" />
-          <OjosStatCard label="警告" :value="warningCount" tone="warning" />
+          <OjosStatCard label="Service 路由" :value="visibleServiceRoutes.length" />
+          <OjosStatCard label="告警" :value="warningCount" tone="warning" />
         </div>
 
-        <OjosSection title="Runtime Registry">
+        <OjosSection title="Orchestrator Snapshot">
           <NTabs type="line" animated>
             <NTabPane name="permissions" tab="权限">
-              <EmptyView v-if="visiblePermissions.length === 0" description="暂无 Runtime 权限" />
+              <EmptyView v-if="visiblePermissions.length === 0" description="暂无 Service 权限" />
               <NDataTable v-else :columns="permissionColumns" :data="visiblePermissions" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="menus" tab="菜单">
-              <EmptyView v-if="visibleMenus.length === 0" description="暂无 Runtime 菜单" />
+              <EmptyView v-if="visibleMenus.length === 0" description="暂无 Service 菜单" />
               <NDataTable v-else :columns="menuColumns" :data="visibleMenus" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="frontend" tab="前端路由">
@@ -220,13 +230,13 @@ onMounted(() => void load())
               <EmptyView v-if="visibleGatewayRoutes.length === 0" description="暂无 Gateway 路由" />
               <NDataTable v-else :columns="gatewayRouteColumns" :data="visibleGatewayRoutes" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
-            <NTabPane name="runtime-routes" tab="Runtime 路由">
-              <EmptyView v-if="visibleRuntimeRoutes.length === 0" description="暂无 Runtime 路由" />
-              <NDataTable v-else :columns="runtimeRouteColumns" :data="visibleRuntimeRoutes" :pagination="{ pageSize: 12 }" :bordered="false" />
+            <NTabPane name="service-routes" tab="Service 路由">
+              <EmptyView v-if="visibleServiceRoutes.length === 0" description="暂无 Service 路由" />
+              <NDataTable v-else :columns="serviceRouteColumns" :data="visibleServiceRoutes" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
-            <NTabPane name="services" tab="运行服务">
-              <EmptyView v-if="visibleServices.length + visibleWorkers.length === 0" description="暂无运行服务" />
-              <NDataTable v-else :columns="runtimeServiceColumns" :data="[...visibleServices, ...visibleWorkers]" :pagination="{ pageSize: 12 }" :bordered="false" />
+            <NTabPane name="services" tab="服务状态">
+              <EmptyView v-if="visibleServices.length + visibleWorkers.length === 0" description="暂无服务状态" />
+              <NDataTable v-else :columns="serviceStatusColumns" :data="[...visibleServices, ...visibleWorkers]" :pagination="{ pageSize: 12 }" :bordered="false" />
             </NTabPane>
             <NTabPane name="health" tab="健康检查">
               <EmptyView v-if="visibleHealthChecks.length === 0" description="暂无健康检查" />

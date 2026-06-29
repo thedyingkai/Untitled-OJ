@@ -1,0 +1,92 @@
+name: Orchestrator Docker E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_docker_build:
+        description: "是否构建 Docker 镜像"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+jobs:
+  docker-e2e:
+    name: Docker E2E 辅助验证
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 说明边界
+        run: |
+          echo "本 workflow 是工程辅助验证入口，不是唯一验收方法。"
+          echo "本 workflow 不上传 .env、tmp、服务包构建产物、token 或日志。"
+          echo "正式结论仍需人工核对文档、模型、数据库结构、Service/Set 样例和变更报告。"
+
+      - name: Rust 验证
+        run: |
+          cargo fmt --check
+          cargo check
+          cargo test
+          cd services/judge-worker
+          cargo fmt --check
+          cargo check
+          cargo test
+
+      - name: Go 验证
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in services/shared services/auth services/gateway services/problem-api services/judge-api; do
+            (cd "$dir" && go test ./...)
+          done
+
+      - name: Frontend 验证
+        working-directory: frontend
+        run: |
+          npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
+          npm audit --registry=https://registry.npmjs.org --audit-level=high
+          npm run build
+
+      - name: Orchestrator 模型核对
+        run: |
+          cargo test -p orchestrator-core checked_in_service_manifests_validate
+          cargo test -p orchestrator-core checked_in_sets_reference_existing_services
+          cargo test -p orchestrator-core action_registry_contains_required_actions_and_no_forbidden_actions
+          cargo test -p orchestrator-core form_registry_covers_every_action
+          cargo test -p orchestrator-core set_validate_and_expand
+
+      - name: Docker Compose 配置验证
+        env:
+          ORCHESTRATOR_POSTGRES_PASSWORD: static-compose-orchestrator-password
+          ORCHESTRATOR_DATABASE_URL: postgres://postgres:static-compose-orchestrator-password@orchestrator-db:5432/ojos_orchestrator?sslmode=disable
+          POSTGRES_PASSWORD: static-compose-postgres-password
+          OJ_DATABASE_URL: postgres://postgres:static-compose-postgres-password@postgres:5432/ojos?sslmode=disable
+          JWT_SECRET: static-compose-jwt-secret
+          OJOS_WORKER_TOKEN: static-compose-worker-token
+        run: docker compose --env-file .env.example -f deploy/compose/docker-compose.yml config
+
+      - name: Docker 镜像构建
+        if: ${{ inputs.run_docker_build == 'true' }}
+        env:
+          ORCHESTRATOR_POSTGRES_PASSWORD: static-compose-orchestrator-password
+          ORCHESTRATOR_DATABASE_URL: postgres://postgres:static-compose-orchestrator-password@orchestrator-db:5432/ojos_orchestrator?sslmode=disable
+          POSTGRES_PASSWORD: static-compose-postgres-password
+          OJ_DATABASE_URL: postgres://postgres:static-compose-postgres-password@postgres:5432/ojos?sslmode=disable
+          JWT_SECRET: static-compose-jwt-secret
+          OJOS_WORKER_TOKEN: static-compose-worker-token
+        run: docker compose --env-file .env.example -f deploy/compose/docker-compose.yml build gateway auth problem-api judge-api judge-worker

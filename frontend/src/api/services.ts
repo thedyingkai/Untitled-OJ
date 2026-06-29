@@ -1,15 +1,14 @@
-﻿import { apiClient } from './client'
+import { apiClient } from './client'
 import type {
   ListServicesResponse,
   ListServiceSetsResponse,
   ServiceDetailResponse,
-  ServiceRuntimeRoutesResponse,
-  ServiceRuntimeSnapshotResponse,
+  OrchestratorRoutesResponse,
+  OrchestratorSnapshotResponse,
   ServiceTopologyResponse,
-  RuntimeServicePlanResponse,
-  RuntimeServiceResponse,
-  RuntimeOperationsResponse,
-  RuntimeServicesResponse,
+  ServiceStatusItemResponse,
+  ServiceStatusOperationsResponse,
+  ServiceStatusListResponse,
 } from '../types/service'
 
 export function listServices(): Promise<ListServicesResponse> {
@@ -24,57 +23,30 @@ export function getServiceTopology(): Promise<ServiceTopologyResponse> {
   return apiClient.get('/admin/topology')
 }
 
-export function getServiceRuntimeSnapshot(options?: {
+export function getOrchestratorSnapshot(options?: {
   includeDisabled?: boolean
-}): Promise<ServiceRuntimeSnapshotResponse> {
+}): Promise<OrchestratorSnapshotResponse> {
   const query = options?.includeDisabled ? '?include_disabled=true' : ''
-  return apiClient.get(`/admin/runtime/snapshot${query}`)
+  return apiClient.get(`/admin/orchestrator/snapshot${query}`)
 }
 
-export function getServiceRuntimeRoutes(options?: {
+export function getOrchestratorRoutes(options?: {
   includeDisabled?: boolean
-}): Promise<ServiceRuntimeRoutesResponse> {
+}): Promise<OrchestratorRoutesResponse> {
   const query = options?.includeDisabled ? '?include_disabled=true' : ''
-  return apiClient.get(`/admin/runtime/routes${query}`)
+  return apiClient.get(`/admin/orchestrator/routes${query}`)
 }
 
-export function reloadServiceRuntime(options?: {
-  includeDisabled?: boolean
-}): Promise<ServiceRuntimeRoutesResponse> {
-  const query = options?.includeDisabled ? '?include_disabled=true' : ''
-  return apiClient.post(`/admin/runtime/reload${query}`, {})
+export function getServiceStatusList(): Promise<ServiceStatusListResponse> {
+  return apiClient.get('/admin/services/status')
 }
 
-export function getRuntimeServices(): Promise<RuntimeServicesResponse> {
-  return apiClient.get('/admin/runtime/services')
+export function getServiceStatusItem(serviceId: string): Promise<ServiceStatusItemResponse> {
+  return apiClient.get(`/admin/services/status/${encodeURIComponent(serviceId)}`)
 }
 
-export function getRuntimeService(serviceId: string): Promise<RuntimeServiceResponse> {
-  return apiClient.get(`/admin/runtime/services/${encodeURIComponent(serviceId)}`)
-}
-
-export function planRuntimeServiceStart(serviceId: string): Promise<RuntimeServicePlanResponse> {
-  return apiClient.post(`/admin/runtime/services/${encodeURIComponent(serviceId)}/plan-start`, {})
-}
-
-export function planRuntimeServiceStop(serviceId: string): Promise<RuntimeServicePlanResponse> {
-  return apiClient.post(`/admin/runtime/services/${encodeURIComponent(serviceId)}/plan-stop`, {})
-}
-
-export function planRuntimeServiceRestart(serviceId: string): Promise<RuntimeServicePlanResponse> {
-  return apiClient.post(`/admin/runtime/services/${encodeURIComponent(serviceId)}/plan-restart`, {})
-}
-
-export function planRuntimeServiceReload(serviceId: string): Promise<RuntimeServicePlanResponse> {
-  return apiClient.post(`/admin/runtime/services/${encodeURIComponent(serviceId)}/plan-reload`, {})
-}
-
-export function reloadRuntimeServices(): Promise<ServiceRuntimeRoutesResponse> {
-  return apiClient.post('/admin/runtime/reload', {})
-}
-
-export function getRuntimeOperations(): Promise<RuntimeOperationsResponse> {
-  return apiClient.get('/admin/runtime/operations')
+export function getServiceStatusOperations(): Promise<ServiceStatusOperationsResponse> {
+  return apiClient.get('/admin/services/status/operations')
 }
 
 export function getServiceDetail(ServiceId: string): Promise<ServiceDetailResponse> {

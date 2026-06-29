@@ -19,7 +19,7 @@ use crate::result::ResultFile;
 pub struct WorkerLinkConfig {
     pub worker_id: String,
     pub worker_name: String,
-    pub control_plane_url: String,
+    pub judge_api_url: String,
     pub worker_token: String,
     pub max_concurrency: usize,
     pub work_dir: PathBuf,
@@ -35,7 +35,7 @@ impl WorkerLinkConfig {
             std::env::var("HOSTNAME").unwrap_or_else(|_| format!("worker-{}", Uuid::new_v4()))
         });
         let worker_name = env_or("OJOS_WORKER_NAME", || worker_id.clone());
-        let control_plane_url = required_env("OJOS_CONTROL_PLANE_URL")?
+        let judge_api_url = required_env("OJOS_JUDGE_API_URL")?
             .trim_end_matches('/')
             .to_string();
         let worker_token = required_env("OJOS_WORKER_TOKEN")?;
@@ -60,7 +60,7 @@ impl WorkerLinkConfig {
         Ok(Self {
             worker_id,
             worker_name,
-            control_plane_url,
+            judge_api_url,
             worker_token,
             max_concurrency: max_concurrency.max(1),
             work_dir,
@@ -325,10 +325,7 @@ async fn submit_result(
     let path = format!("/judge/worker/tasks/{}/result", task.task_id);
     let resp: WorkerSubmitResultResp = post_json(client, config, &path, &req).await?;
     if !resp.accepted {
-        return Err(anyhow!(
-            "control plane rejected task result: {}",
-            resp.status
-        ));
+        return Err(anyhow!("judge-api rejected task result: {}", resp.status));
     }
     Ok(())
 }
@@ -406,9 +403,9 @@ where
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
-        return Err(anyhow!("control plane returned {}: {}", status, text));
+        return Err(anyhow!("judge-api returned {}: {}", status, text));
     }
-    serde_json::from_str(&text).with_context(|| format!("decode control plane response: {}", text))
+    serde_json::from_str(&text).with_context(|| format!("decode judge-api response: {}", text))
 }
 
 fn absolute_url(config: &WorkerLinkConfig, path: &str) -> String {
@@ -417,7 +414,7 @@ fn absolute_url(config: &WorkerLinkConfig, path: &str) -> String {
     }
     format!(
         "{}/{}",
-        config.control_plane_url.trim_end_matches('/'),
+        config.judge_api_url.trim_end_matches('/'),
         path.trim_start_matches('/')
     )
 }

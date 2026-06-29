@@ -2,40 +2,99 @@ schema_version: 1
 id: judge-api
 name: Judge API
 version: 0.1.0
-kind: backend-http
+kind: backend-api
+description: 提交、任务队列、Worker endpoint 列表、任务分发、结果接收和状态更新服务。
+runtime:
+  mode: container
+  driver: compose
+  root_allowed: true
+  non_root_allowed: false
+  start_policy: automatic
+  restart_policy: on-failure
 endpoint:
   protocol: http
   default_port: 8082
   health_path: /health
-runtime:
-  mode: container
-  root_allowed: true
-  non_root_allowed: false
-config_schema:
-  queue_visibility_timeout_seconds:
-    type: integer
-    default: 60
+  expose: false
+  routes:
+    - /api/judge
+    - /api/judge/worker
 requires:
+  services:
+    - postgres
+    - redis
+    - storage
+    - problem-api
   links:
     - id: postgres
       protocol: postgres
+    - id: redis
+      protocol: redis
     - id: storage
       protocol: http
     - id: problem-api
       protocol: http
+  storage:
+    - storage
+  database:
+    - postgres
+  queue:
+    - redis
+  secrets:
+    - worker-token
 provides:
   capabilities:
     - judge.submit
     - judge.queue
     - judge.dispatch
     - judge.result
-ui:
-  enabled: false
-permissions:
-  - judge.submit
-  - submission.view.own
-  - submission.view.all
+  endpoints:
+    - http
+  routes:
+    - /api/judge
+    - /api/judge/worker
+  workers: []
+  storage_buckets:
+    - submissions
+  events:
+    - submission.status.updated
+config_schema:
+  queue_visibility_timeout_seconds:
+    type: integer
+    default: 60
+resources:
+  cpu: shared
+  memory: 512Mi
+  disk: 256Mi
+  gpu: none
+  network: internal
 security:
   allow_privileged: false
   allow_host_mount: false
   allow_arbitrary_command: false
+  required_secrets:
+    - worker-token
+  sandbox: {}
+  network_policy:
+    egress_links_only: true
+source:
+  type: local
+  ref: services/judge-api
+  build:
+    driver: dockerfile
+    path: services/judge-api/Dockerfile
+  artifact: {}
+ui:
+  enabled: false
+  routes: []
+  menus: []
+  permissions: []
+permissions:
+  - judge.submit
+  - submission.view.own
+  - submission.view.all
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10

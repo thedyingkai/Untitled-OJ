@@ -1,41 +1,90 @@
 schema_version: 1
 id: single-node-oj
 name: 单机 OJ
-description: Root 设备同时运行入口、Web Shell、题库、评测 API、Worker、数据库和存储。
+description: 在一个 host 上运行入口、Web Shell、题库、评测 API、Worker、数据库、缓存和存储。
+scenario:
+  type: single-host
+  recommended_for:
+    - 本地开发
+    - 小型训练
+    - 单机演示
 services:
-  - gateway
-  - web-shell
-  - problem-api
-  - judge-api
-  - judge-worker
-  - postgres
-  - storage
+  - id: postgres
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: redis
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: storage
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: auth
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: problem-api
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: judge-api
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: judge-worker
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: web-shell
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: gateway
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+default_endpoints:
+  - { service: gateway, port: 8080, protocol: http, expose: true }
+  - { service: web-shell, port: 8088, protocol: http, expose: false }
+  - { service: auth, port: 8081, protocol: http, expose: false }
+  - { service: problem-api, port: 8083, protocol: http, expose: false }
+  - { service: judge-api, port: 8082, protocol: http, expose: false }
+  - { service: judge-worker, port: 9101, protocol: http, expose: false }
+  - { service: postgres, port: 5432, protocol: postgres, expose: false }
+  - { service: redis, port: 6379, protocol: redis, expose: false }
+  - { service: storage, port: 9000, protocol: http, expose: false }
 default_links:
-  - from: gateway
-    to: web-shell
-    protocol: http
-  - from: gateway
-    to: problem-api
-    protocol: http
-  - from: gateway
-    to: judge-api
-    protocol: http
-  - from: problem-api
-    to: postgres
-    protocol: postgres
-  - from: judge-api
-    to: postgres
-    protocol: postgres
-  - from: judge-api
-    to: storage
-    protocol: http
-  - from: judge-worker
-    to: judge-api
-    protocol: http
-  - from: judge-worker
-    to: storage
-    protocol: http
-recommended_for:
-  - 本地开发
-  - 小型训练
-  - 单机演示
+  - { from: gateway, to: auth, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: gateway, to: web-shell, protocol: http, auth_mode: internal, scope: ui, required: true }
+  - { from: gateway, to: problem-api, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: gateway, to: judge-api, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: auth, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: auth, to: redis, protocol: redis, auth_mode: internal, scope: cache, required: true }
+  - { from: problem-api, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: problem-api, to: storage, protocol: http, auth_mode: internal, scope: object-storage, required: true }
+  - { from: judge-api, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: judge-api, to: redis, protocol: redis, auth_mode: internal, scope: queue, required: true }
+  - { from: judge-api, to: storage, protocol: http, auth_mode: internal, scope: object-storage, required: true }
+  - { from: judge-worker, to: judge-api, protocol: http, auth_mode: secret-ref, scope: worker, required: true }
+  - { from: judge-worker, to: storage, protocol: http, auth_mode: internal, scope: object-storage, required: true }
+policies:
+  placement: { single_host: true }
+  security: { secret_ref_only: true }
+  network: { link_required: true }
+  health: { require_all_required_services: true }
+operations:
+  install_order: [postgres, redis, storage, auth, problem-api, judge-api, judge-worker, web-shell, gateway]
+  start_order: [postgres, redis, storage, auth, problem-api, judge-api, judge-worker, web-shell, gateway]
+  stop_order: [gateway, web-shell, judge-worker, judge-api, problem-api, auth, storage, redis, postgres]
+notes: Set 只描述推荐部署组合，不包含 OJ 业务逻辑。

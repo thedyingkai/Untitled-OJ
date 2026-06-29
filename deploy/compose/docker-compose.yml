@@ -1,9 +1,23 @@
-﻿services:
+services:
+  orchestrator-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${ORCHESTRATOR_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${ORCHESTRATOR_POSTGRES_PASSWORD:-ojos-orchestrator-local}
+      POSTGRES_DB: ${ORCHESTRATOR_POSTGRES_DB:-ojos_orchestrator}
+    volumes:
+      - orchestrator-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   postgres:
     image: postgres:17
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ojos-local}
       POSTGRES_DB: ${POSTGRES_DB:-ojos}
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -17,22 +31,23 @@
     image: redis:8
     command: [ "redis-server", "--appendonly", "yes" ]
 
-  migrations:
-    image: postgres:17
+  orchestrator-migrations:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      orchestrator-db:
+        condition: service_healthy
+    volumes:
+      - ../orchestrator-migrations:/migrations:ro
+    command: [ "-path", "/migrations", "-database", "${ORCHESTRATOR_DATABASE_URL:-postgres://postgres:ojos-orchestrator-local@orchestrator-db:5432/ojos_orchestrator?sslmode=disable}", "up" ]
+
+  oj-migrations:
+    image: migrate/migrate:v4.18.3
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      POSTGRES_DB: ${POSTGRES_DB:-ojos}
-      MIGRATIONS_DIR: /migrations
     volumes:
-      - ../migrations:/migrations:ro
-      - ./apply-migrations.sh:/apply-migrations.sh:ro
-    entrypoint: [ "/bin/sh", "/apply-migrations.sh" ]
+      - ../oj-migrations:/migrations:ro
+    command: [ "-path", "/migrations", "-database", "${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgres:5432/ojos?sslmode=disable}", "up" ]
 
   jaeger:
     image: jaegertracing/jaeger:2.19.0
@@ -57,18 +72,14 @@
         no_proxy: ${NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      migrations:
+      oj-migrations:
         condition: service_completed_successfully
-      root-runtime-manager:
-        condition: service_started
       problem-api:
         condition: service_started
     environment:
-      DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgres:5432/ojos?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
-      ROOT_RUNTIME_MANAGER_ENDPOINT: ${ROOT_RUNTIME_MANAGER_ENDPOINT:-http://root-runtime-manager:8090}
-      ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN: ${ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN:?ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN is required}
+      JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
@@ -77,46 +88,6 @@
     volumes:
       - ../../storage/problems:/data/ojos/problems:ro
       - ../../storage/submissions:/data/ojos/submissions:ro
-
-  root-runtime-manager:
-    build:
-      context: ../..
-      dockerfile: kernel/installer/service/Dockerfile
-      args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
-        http_proxy: ${HTTP_PROXY:-}
-        https_proxy: ${HTTPS_PROXY:-}
-        no_proxy: ${NO_PROXY:-}
-    depends_on:
-      migrations:
-        condition: service_completed_successfully
-    expose:
-      - "8090"
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    tmpfs:
-      - /tmp
-    environment:
-      DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
-      ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN: ${ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN:?ROOT_RUNTIME_MANAGER_INTERNAL_TOKEN is required}
-      ROOT_RUNTIME_MANAGER_HOST: 0.0.0.0
-      ROOT_RUNTIME_MANAGER_PORT: 8090
-      ROOT_RUNTIME_MANAGER_LOCK_TTL_SECONDS: ${ROOT_RUNTIME_MANAGER_LOCK_TTL_SECONDS:-300}
-      OJOS_REPO_ROOT: /workspace
-      RUST_LOG: info
-    volumes:
-      - ../../services:/workspace/services:ro
-      - ../../sets:/workspace/sets:ro
-    healthcheck:
-      test: [ "CMD", "root-runtime-manager", "--healthcheck" ]
-      interval: 30s
-      timeout: 5s
-      retries: 3
 
   auth:
     build:
@@ -131,7 +102,7 @@
         no_proxy: ${NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      migrations:
+      oj-migrations:
         condition: service_completed_successfully
       redis:
         condition: service_started
@@ -140,8 +111,8 @@
     expose:
       - "8081"
     environment:
-      DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgres:5432/ojos?sslmode=disable}
+      JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
 
   judge-api:
@@ -157,18 +128,18 @@
         no_proxy: ${NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      migrations:
+      oj-migrations:
         condition: service_completed_successfully
       redis:
         condition: service_started
     expose:
       - "8082"
     environment:
-      DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgres:5432/ojos?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
-      OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:?OJOS_WORKER_TOKEN is required}
+      OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
     volumes:
       - ../../storage/submissions:/data/ojos/submissions
       - ../../storage/problems:/data/ojos/problems:ro
@@ -189,28 +160,19 @@
         condition: service_started
     environment:
       LANGUAGES_CONFIG: config/languages.yaml
-      OJOS_CONTROL_PLANE_URL: http://gateway:8080/api
-      OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:?OJOS_WORKER_TOKEN is required}
+      OJOS_JUDGE_API_URL: http://judge-api:8082
+      OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
       OJOS_MAX_CONCURRENCY: 1
       OJOS_WORK_DIR: /var/lib/ojos-worker/work
       OJOS_ARTIFACT_CACHE_DIR: /var/lib/ojos-worker/cache
       OJOS_SUPPORTED_LANGUAGES: cpp17,c11,python3,java17
       OJOS_HEARTBEAT_INTERVAL: 10
       OJOS_TASK_LEASE_TTL: 60
-      OJOS_CGROUP_V2_ROOT: /sys/fs/cgroup
-      OJOS_ALLOW_CGROUP_FALLBACK: ${OJOS_ALLOW_CGROUP_FALLBACK:-false}
+      OJOS_ALLOW_CGROUP_FALLBACK: ${OJOS_ALLOW_CGROUP_FALLBACK:-true}
       OJOS_NSJAIL_NO_PIVOTROOT: ${OJOS_NSJAIL_NO_PIVOTROOT:-false}
       RUST_LOG: info
-    cap_add:
-      - SYS_ADMIN
-      - SYS_CHROOT
-      - SETUID
-      - SETGID
-      - NET_ADMIN
-    cgroup: host
     volumes:
       - worker-data:/var/lib/ojos-worker
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
 
   problem-api:
     build:
@@ -225,7 +187,7 @@
         no_proxy: ${NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      migrations:
+      oj-migrations:
         condition: service_completed_successfully
       redis:
         condition: service_started
@@ -234,7 +196,7 @@
     expose:
       - "8083"
     environment:
-      DATABASE_URL: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgres:5432/ojos?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
@@ -242,5 +204,6 @@
       - ../../storage/problems:/data/ojos/problems
 
 volumes:
+  orchestrator-db-data:
   postgres-data:
   worker-data:

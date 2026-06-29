@@ -1,0 +1,19 @@
+schema_version: 1
+product: OJOS Orchestrator
+result:
+  required_fields:
+    - operation_id
+    - status
+    - started_at
+    - finished_at
+    - changed_objects
+    - topology_snapshot_id
+  changed_object_types:
+    - Service
+    - Set
+    - Endpoint
+    - Link
+    - Operation
+    - Topology
+    - LogView
+    - DiagnosticReport

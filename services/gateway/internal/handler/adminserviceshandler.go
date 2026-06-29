@@ -44,11 +44,11 @@ func adminServiceTopologyHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
-func adminServiceRuntimeSnapshotHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func adminOrchestratorSnapshotHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
 		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
-		resp, err := l.RuntimeSnapshot(r.Header.Get("Authorization"), includeDisabled)
+		resp, err := l.OrchestratorSnapshot(r.Header.Get("Authorization"), includeDisabled)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 		} else {
@@ -57,26 +57,12 @@ func adminServiceRuntimeSnapshotHandler(svcCtx *svc.ServiceContext) http.Handler
 	}
 }
 
-func adminServiceRuntimeRoutesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+func adminOrchestratorRoutesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
 		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
 		includeUpstream := r.URL.Query().Get("debug_upstream") == "true"
-		resp, err := l.RuntimeRoutes(r.Header.Get("Authorization"), includeDisabled, false, includeUpstream)
-		if err != nil {
-			httpx.ErrorCtx(r.Context(), w, err)
-		} else {
-			httpx.OkJsonCtx(r.Context(), w, resp)
-		}
-	}
-}
-
-func adminServiceRuntimeReloadHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
-		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
-		includeUpstream := r.URL.Query().Get("debug_upstream") == "true"
-		resp, err := l.RuntimeRoutes(r.Header.Get("Authorization"), includeDisabled, true, includeUpstream)
+		resp, err := l.OrchestratorRoutes(r.Header.Get("Authorization"), includeDisabled, includeUpstream)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 		} else {
@@ -102,22 +88,5 @@ func adminServiceDetailHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 		} else {
 			httpx.OkJsonCtx(r.Context(), w, resp)
 		}
-	}
-}
-
-func adminServiceDevicesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		l := logic.NewAdminServicesLogic(r.Context(), svcCtx)
-		if _, err := l.ListServices(r.Header.Get("Authorization")); err != nil {
-			httpx.ErrorCtx(r.Context(), w, err)
-			return
-		}
-		httpx.OkJsonCtx(r.Context(), w, map[string]any{
-			"devices": []map[string]any{{
-				"device_id": "root-local",
-				"kind":      "root",
-				"health":    "unknown",
-			}},
-		})
 	}
 }

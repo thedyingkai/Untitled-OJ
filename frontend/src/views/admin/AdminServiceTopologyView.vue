@@ -3,7 +3,7 @@ import { h, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { NButton, NDataTable, NSpace, NTag, NTabPane, NTabs, type DataTableColumns } from 'naive-ui'
 
-import { getServiceRuntimeSnapshot, listServiceSets } from '../../api/services'
+import { getOrchestratorSnapshot, listServiceSets } from '../../api/services'
 import { toApiClientError, type ApiClientError } from '../../api/client'
 import ApiErrorAlert from '../../components/common/ApiErrorAlert.vue'
 import EmptyView from '../../components/common/EmptyView.vue'
@@ -12,13 +12,13 @@ import LoadingView from '../../components/common/LoadingView.vue'
 import PageCard from '../../components/common/PageCard.vue'
 import type {
   ServiceComponentItem,
+  ServiceDefinitionItem,
   ServiceEdgeItem,
-  ServiceNodeItem,
-  ServiceRuntimeComponent,
-  ServiceRuntimeSnapshotResponse,
-  ServiceRuntimeTopologyEdge,
-  ServiceRuntimeTopologyNode,
+  OrchestratorSnapshotResponse,
   ServiceSetItem,
+  ServiceStatusComponent,
+  ServiceTopologyEdge,
+  ServiceTopologyNode,
   ServiceTopologyResponse,
 } from '../../types/service'
 
@@ -34,7 +34,7 @@ const setColumns: DataTableColumns<ServiceSetItem> = [
   { title: '排序', key: 'sort_order', width: 100 },
 ]
 
-const serviceNodeColumns: DataTableColumns<ServiceNodeItem> = [
+const serviceDefinitionColumns: DataTableColumns<ServiceDefinitionItem> = [
   {
     title: 'Service',
     key: 'service_id',
@@ -60,7 +60,7 @@ const dependencyEdgeColumns: DataTableColumns<ServiceEdgeItem> = [
   { title: '必需', key: 'required', width: 100, render: (row) => (row.required ? '是' : '否') },
 ]
 
-const topologyNodeColumns: DataTableColumns<ServiceRuntimeTopologyNode> = [
+const topologyNodeColumns: DataTableColumns<ServiceTopologyNode> = [
   { title: '节点', key: 'id', minWidth: 280 },
   { title: '标签', key: 'label', minWidth: 180 },
   { title: '类型', key: 'type', width: 160 },
@@ -69,7 +69,7 @@ const topologyNodeColumns: DataTableColumns<ServiceRuntimeTopologyNode> = [
   { title: '来源', key: 'source', width: 120 },
 ]
 
-const topologyEdgeColumns: DataTableColumns<ServiceRuntimeTopologyEdge> = [
+const topologyEdgeColumns: DataTableColumns<ServiceTopologyEdge> = [
   { title: '来源', key: 'from', minWidth: 280 },
   { title: '目标', key: 'to', minWidth: 280 },
   { title: '类型', key: 'type', width: 140 },
@@ -85,7 +85,7 @@ const componentColumns: DataTableColumns<ServiceComponentItem> = [
   { title: '配置', key: 'config', render: (row) => h(JsonViewer, { value: row.config }) },
 ]
 
-function runtimeComponentToComponent(item: ServiceRuntimeComponent): ServiceComponentItem {
+function serviceStatusComponentToComponent(item: ServiceStatusComponent): ServiceComponentItem {
   return {
     service_id: item.service_id,
     component_id: item.component_id,
@@ -97,14 +97,14 @@ function runtimeComponentToComponent(item: ServiceRuntimeComponent): ServiceComp
 
 function topologyFromSnapshot(
   sets: ServiceSetItem[],
-  snapshot: ServiceRuntimeSnapshotResponse,
+  snapshot: OrchestratorSnapshotResponse,
 ): ServiceTopologyResponse {
   return {
     sets,
     nodes: snapshot.topology.nodes,
     edges: snapshot.topology.edges,
-    components: snapshot.components.map(runtimeComponentToComponent),
-    service_nodes: snapshot.topology.service_nodes,
+    components: snapshot.components.map(serviceStatusComponentToComponent),
+    service_definitions: snapshot.topology.service_definitions,
     dependency_edges: snapshot.topology.dependency_edges,
   }
 }
@@ -114,7 +114,7 @@ async function load(silent = false): Promise<void> {
   loading.value = !silent
   error.value = null
   try {
-    const [setResp, snapshot] = await Promise.all([listServiceSets(), getServiceRuntimeSnapshot()])
+    const [setResp, snapshot] = await Promise.all([listServiceSets(), getOrchestratorSnapshot()])
     topology.value = topologyFromSnapshot(setResp.sets, snapshot)
   } catch (err) {
     error.value = toApiClientError(err)
@@ -136,7 +136,7 @@ onMounted(() => void load())
   <PageCard title="Service Topology">
     <template #headerExtra>
       <NSpace>
-        <RouterLink to="/admin/services" class="header-link">Service Registry</RouterLink>
+        <RouterLink to="/admin/services" class="header-link">Orchestrator Snapshot</RouterLink>
         <NButton size="small" secondary :loading="refreshing" @click="load(true)">刷新</NButton>
       </NSpace>
     </template>
@@ -149,17 +149,17 @@ onMounted(() => void load())
           <EmptyView v-if="!topology?.sets.length" description="暂无 Set" />
           <NDataTable v-else :columns="setColumns" :data="topology.sets" :pagination="{ pageSize: 10 }" :bordered="false" />
         </NTabPane>
-        <NTabPane name="nodes" tab="Runtime 节点">
-          <EmptyView v-if="!topology?.nodes.length" description="暂无 Runtime 节点" />
+        <NTabPane name="nodes" tab="Service 节点">
+          <EmptyView v-if="!topology?.nodes.length" description="暂无 Service 节点" />
           <NDataTable v-else :columns="topologyNodeColumns" :data="topology.nodes" :pagination="{ pageSize: 10 }" :bordered="false" />
         </NTabPane>
-        <NTabPane name="edges" tab="Runtime Link">
-          <EmptyView v-if="!topology?.edges.length" description="暂无 Runtime Link" />
+        <NTabPane name="edges" tab="Service Link">
+          <EmptyView v-if="!topology?.edges.length" description="暂无 Service Link" />
           <NDataTable v-else :columns="topologyEdgeColumns" :data="topology.edges" :pagination="{ pageSize: 10 }" :bordered="false" />
         </NTabPane>
         <NTabPane name="services" tab="Services">
-          <EmptyView v-if="!topology?.service_nodes.length" description="暂无 Service 节点" />
-          <NDataTable v-else :columns="serviceNodeColumns" :data="topology.service_nodes" :pagination="{ pageSize: 10 }" :bordered="false" />
+          <EmptyView v-if="!topology?.service_definitions.length" description="暂无 Service 定义" />
+          <NDataTable v-else :columns="serviceDefinitionColumns" :data="topology.service_definitions" :pagination="{ pageSize: 10 }" :bordered="false" />
         </NTabPane>
         <NTabPane name="dependencies" tab="依赖">
           <EmptyView v-if="!topology?.dependency_edges.length" description="暂无依赖" />

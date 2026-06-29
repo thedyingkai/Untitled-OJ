@@ -119,7 +119,6 @@ const problemTypeOptions = [
 const visibilityOptions = [
   { label: '私有', value: 'private' },
   { label: '公开', value: 'public' },
-  { label: '仅比赛', value: 'contest_only' },
 ]
 
 const difficultyOptions = [

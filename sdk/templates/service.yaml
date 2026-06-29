@@ -2,26 +2,70 @@ schema_version: 1
 id: example-service
 name: Example Service
 version: 0.1.0
-kind: backend-http
+kind: backend-api
+description: 示例后端 API Service，用于展示正式 service.yaml 契约。
+runtime:
+  mode: container
+  driver: compose
+  root_allowed: true
+  non_root_allowed: true
+  start_policy: manual
+  restart_policy: on-failure
 endpoint:
   protocol: http
   default_port: 9001
   health_path: /health
-runtime:
-  mode: local-process
-  root_allowed: true
-  non_root_allowed: true
+  expose: false
+  routes:
+    - /api/example
 config_schema: {}
 requires:
+  services: []
   links: []
+  storage: []
+  database: []
+  queue: []
+  secrets: []
 provides:
   capabilities:
     - example.service
-ui:
-  enabled: false
-permissions:
-  - example.service
+  endpoints:
+    - http
+  routes:
+    - /api/example
+  workers: []
+  storage_buckets: []
+  events: []
+resources:
+  cpu: shared
+  memory: 128Mi
+  disk: 128Mi
+  gpu: none
+  network: internal
 security:
   allow_privileged: false
   allow_host_mount: false
   allow_arbitrary_command: false
+  required_secrets: []
+  sandbox: {}
+  network_policy:
+    egress_links_only: true
+source:
+  type: local
+  ref: services/example-service
+  build:
+    driver: dockerfile
+    path: services/example-service/Dockerfile
+  artifact: {}
+ui:
+  enabled: false
+  routes: []
+  menus: []
+  permissions: []
+permissions:
+  - example.service
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10

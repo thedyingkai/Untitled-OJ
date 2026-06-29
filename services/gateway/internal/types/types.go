@@ -28,7 +28,7 @@ type ServiceSetItem struct {
 	SortOrder   int    `json:"sort_order"`
 }
 
-type ServiceNodeItem struct {
+type ServiceDefinitionItem struct {
 	ServiceId   string `json:"service_id"`
 	SetId       string `json:"set_id"`
 	Name        string `json:"name"`
@@ -55,14 +55,16 @@ type ServiceComponentItem struct {
 	Config        any    `json:"config"`
 }
 
-type ServiceInstallationItem struct {
-	ServiceId  string `json:"service_id"`
-	Name       string `json:"name"`
-	Version    string `json:"version"`
-	Status     string `json:"status"`
-	Manifest   any    `json:"manifest"`
-	EnabledAt  string `json:"enabled_at,omitempty"`
-	DisabledAt string `json:"disabled_at,omitempty"`
+type ServiceEndpointItem struct {
+	Endpoint    string `json:"endpoint"`
+	ServiceId   string `json:"service_id"`
+	Protocol    string `json:"protocol"`
+	HealthPath  string `json:"health_path"`
+	Health      string `json:"health"`
+	Reachable   bool   `json:"reachable"`
+	DisplayName string `json:"display_name"`
+	Note        string `json:"note"`
+	Config      any    `json:"config"`
 }
 
 type ServicePermissionItem struct {
@@ -101,7 +103,7 @@ type ServiceGatewayRouteItem struct {
 }
 
 type ListServicesResp struct {
-	Services []ServiceNodeItem `json:"services"`
+	Services []ServiceDefinitionItem `json:"services"`
 }
 
 type ListServiceSetsResp struct {
@@ -109,34 +111,34 @@ type ListServiceSetsResp struct {
 }
 
 type ServiceTopologyResp struct {
-	Sets            []ServiceSetItem             `json:"sets"`
-	Nodes           []ServiceRuntimeTopologyNode `json:"nodes"`
-	Edges           []ServiceRuntimeTopologyEdge `json:"edges"`
-	Components      []ServiceComponentItem       `json:"components"`
-	ServiceNodes    []ServiceNodeItem            `json:"service_nodes"`
-	DependencyEdges []ServiceEdgeItem            `json:"dependency_edges"`
+	Sets               []ServiceSetItem        `json:"sets"`
+	Nodes              []ServiceTopologyNode   `json:"nodes"`
+	Edges              []ServiceTopologyEdge   `json:"edges"`
+	Components         []ServiceComponentItem  `json:"components"`
+	ServiceDefinitions []ServiceDefinitionItem `json:"service_definitions"`
+	DependencyEdges    []ServiceEdgeItem       `json:"dependency_edges"`
 }
 
-type ServiceRuntimeSnapshotResp struct {
-	Version        string                       `json:"version"`
-	GeneratedAt    string                       `json:"generated_at"`
-	ServiceNodes   []ServiceNodeItem            `json:"service_nodes"`
-	Permissions    []ServicePermissionItem      `json:"permissions"`
-	Roles          []ServiceRuntimeManifestItem `json:"roles"`
-	Menus          []ServiceMenuItem            `json:"menus"`
-	FrontendRoutes []ServiceFrontendRouteItem   `json:"frontend_routes"`
-	GatewayRoutes  []ServiceGatewayRouteItem    `json:"gateway_routes"`
-	Components     []ServiceRuntimeComponent    `json:"components"`
-	Services       []ServiceRuntimeService      `json:"services"`
-	Workers        []ServiceRuntimeService      `json:"workers"`
-	StorageBuckets []ServiceRuntimeManifestItem `json:"storage_buckets"`
-	HealthChecks   []ServiceRuntimeComponent    `json:"health_checks"`
-	Operations     []ServiceRuntimeManifestItem `json:"operations"`
-	Topology       ServiceRuntimeTopology       `json:"topology"`
-	Warnings       []string                     `json:"warnings"`
+type OrchestratorSnapshotResp struct {
+	Version            string                     `json:"version"`
+	GeneratedAt        string                     `json:"generated_at"`
+	ServiceDefinitions []ServiceDefinitionItem    `json:"service_definitions"`
+	Permissions        []ServicePermissionItem    `json:"permissions"`
+	Roles              []OrchestratorSnapshotItem `json:"roles"`
+	Menus              []ServiceMenuItem          `json:"menus"`
+	FrontendRoutes     []ServiceFrontendRouteItem `json:"frontend_routes"`
+	GatewayRoutes      []ServiceGatewayRouteItem  `json:"gateway_routes"`
+	Components         []ServiceStatusComponent   `json:"components"`
+	Services           []ServiceStatusItem        `json:"services"`
+	Workers            []ServiceStatusItem        `json:"workers"`
+	StorageBuckets     []OrchestratorSnapshotItem `json:"storage_buckets"`
+	HealthChecks       []ServiceStatusComponent   `json:"health_checks"`
+	Operations         []OrchestratorSnapshotItem `json:"operations"`
+	Topology           ServiceTopologyGraph       `json:"topology"`
+	Warnings           []string                   `json:"warnings"`
 }
 
-type ServiceRuntimeComponent struct {
+type ServiceStatusComponent struct {
 	ServiceId   string `json:"service_id"`
 	ComponentId string `json:"component_id"`
 	Type        string `json:"type"`
@@ -144,7 +146,7 @@ type ServiceRuntimeComponent struct {
 	Config      any    `json:"config"`
 }
 
-type ServiceRuntimeService struct {
+type ServiceStatusItem struct {
 	OwnerServiceId string   `json:"owner_service_id"`
 	ServiceId      string   `json:"service_id"`
 	Name           string   `json:"name"`
@@ -162,7 +164,7 @@ type ServiceRuntimeService struct {
 	Warnings       []string `json:"warnings"`
 }
 
-type ServiceRuntimeManifestItem struct {
+type OrchestratorSnapshotItem struct {
 	ServiceId string `json:"service_id"`
 	Id        string `json:"id"`
 	Type      string `json:"type"`
@@ -171,14 +173,14 @@ type ServiceRuntimeManifestItem struct {
 	Config    any    `json:"config"`
 }
 
-type ServiceRuntimeTopology struct {
-	Nodes           []ServiceRuntimeTopologyNode `json:"nodes"`
-	Edges           []ServiceRuntimeTopologyEdge `json:"edges"`
-	ServiceNodes    []ServiceNodeItem            `json:"service_nodes"`
-	DependencyEdges []ServiceEdgeItem            `json:"dependency_edges"`
+type ServiceTopologyGraph struct {
+	Nodes              []ServiceTopologyNode   `json:"nodes"`
+	Edges              []ServiceTopologyEdge   `json:"edges"`
+	ServiceDefinitions []ServiceDefinitionItem `json:"service_definitions"`
+	DependencyEdges    []ServiceEdgeItem       `json:"dependency_edges"`
 }
 
-type ServiceRuntimeTopologyNode struct {
+type ServiceTopologyNode struct {
 	Id        string `json:"id"`
 	ServiceId string `json:"service_id"`
 	Label     string `json:"label"`
@@ -188,7 +190,7 @@ type ServiceRuntimeTopologyNode struct {
 	Config    any    `json:"config"`
 }
 
-type ServiceRuntimeTopologyEdge struct {
+type ServiceTopologyEdge struct {
 	Id        string `json:"id"`
 	ServiceId string `json:"service_id"`
 	From      string `json:"from"`
@@ -198,7 +200,7 @@ type ServiceRuntimeTopologyEdge struct {
 	Source    string `json:"source"`
 }
 
-type ServiceRuntimeRouteItem struct {
+type OrchestratorRouteItem struct {
 	RouteId        string   `json:"route_id"`
 	OwnerServiceId string   `json:"owner_service_id"`
 	Prefix         string   `json:"prefix"`
@@ -215,60 +217,31 @@ type ServiceRuntimeRouteItem struct {
 	HealthCheckId  string   `json:"health_check_id,omitempty"`
 	CreatedFrom    string   `json:"created_from"`
 	Status         string   `json:"status"`
-	ServiceState   string   `json:"service_state,omitempty"`
+	ServiceStatus  string   `json:"service_status,omitempty"`
 	ServiceHealth  string   `json:"service_health,omitempty"`
 	Conflicts      []string `json:"conflicts"`
 	Warnings       []string `json:"warnings"`
 	BlockedBy      []string `json:"blocked_by"`
 }
 
-type ServiceRuntimeRoutesResp struct {
-	Version     string                    `json:"version"`
-	GeneratedAt string                    `json:"generated_at"`
-	Routes      []ServiceRuntimeRouteItem `json:"routes"`
-	Warnings    []string                  `json:"warnings"`
-	CanProxy    bool                      `json:"can_proxy"`
-	Reloaded    bool                      `json:"reloaded,omitempty"`
+type OrchestratorRoutesResp struct {
+	Version     string                  `json:"version"`
+	GeneratedAt string                  `json:"generated_at"`
+	Routes      []OrchestratorRouteItem `json:"routes"`
+	Warnings    []string                `json:"warnings"`
+	CanProxy    bool                    `json:"can_proxy"`
 }
 
-type RuntimeServicesResp struct {
-	Services []ServiceRuntimeService `json:"services"`
-	Workers  []ServiceRuntimeService `json:"workers"`
+type ServiceStatusListResp struct {
+	Services []ServiceStatusItem `json:"services"`
+	Workers  []ServiceStatusItem `json:"workers"`
 }
 
-type RuntimeServiceResp struct {
-	Service ServiceRuntimeService `json:"service"`
+type ServiceStatusItemResp struct {
+	Service ServiceStatusItem `json:"service"`
 }
 
-type RuntimeServicePlanResp struct {
-	Plan RuntimePlanItem `json:"plan"`
-}
-
-type RuntimePlanItem struct {
-	PlanId               string               `json:"plan_id"`
-	OperationId          string               `json:"operation_id"`
-	Action               string               `json:"action"`
-	ServiceId            string               `json:"service_id"`
-	Driver               string               `json:"driver"`
-	CanApply             bool                 `json:"can_apply"`
-	ApplyEnabled         bool                 `json:"apply_enabled"`
-	RequiresConfirmation bool                 `json:"requires_confirmation"`
-	DryRun               bool                 `json:"dry_run"`
-	AllowedTargets       []string             `json:"allowed_targets"`
-	Commands             []RuntimePlanCommand `json:"commands"`
-	Affected             []string             `json:"affected"`
-	BlockedBy            []string             `json:"blocked_by"`
-	Warnings             []string             `json:"warnings"`
-	CreatedAt            string               `json:"created_at"`
-	ExpiresAt            string               `json:"expires_at"`
-}
-
-type RuntimePlanCommand struct {
-	Kind string   `json:"kind"`
-	Argv []string `json:"argv"`
-}
-
-type RuntimeOperationItem struct {
+type ServiceStatusOperationItem struct {
 	OperationId   string `json:"operation_id"`
 	ServiceId     string `json:"service_id"`
 	Action        string `json:"action"`
@@ -282,17 +255,12 @@ type RuntimeOperationItem struct {
 	UpdatedAt     string `json:"updated_at"`
 }
 
-type RuntimeOperationsResp struct {
-	Operations []RuntimeOperationItem `json:"operations"`
-}
-
-type RuntimeApplyDisabledResp struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+type ServiceStatusOperationsResp struct {
+	Operations []ServiceStatusOperationItem `json:"operations"`
 }
 
 type ServiceDetailResp struct {
-	Service        ServiceNodeItem            `json:"service"`
+	Service        ServiceDefinitionItem      `json:"service"`
 	Dependencies   []ServiceEdgeItem          `json:"dependencies"`
 	Dependents     []ServiceEdgeItem          `json:"dependents"`
 	Components     []ServiceComponentItem     `json:"components"`
@@ -300,6 +268,6 @@ type ServiceDetailResp struct {
 	Menus          []ServiceMenuItem          `json:"menus"`
 	FrontendRoutes []ServiceFrontendRouteItem `json:"frontend_routes"`
 	GatewayRoutes  []ServiceGatewayRouteItem  `json:"gateway_routes"`
-	Installations  []ServiceInstallationItem  `json:"installations"`
+	Endpoints      []ServiceEndpointItem      `json:"endpoints"`
 	HealthChecks   []ServiceComponentItem     `json:"health_checks"`
 }

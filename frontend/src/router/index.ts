@@ -1,4 +1,4 @@
-import type { RouteRecordRaw } from 'vue-router'
+﻿import type { RouteRecordRaw } from 'vue-router'
 import { createRouter, createWebHistory } from 'vue-router'
 
 import { useAuthStore } from '../stores/auth'
@@ -35,21 +35,71 @@ const routes: RouteRecordRaw[] = [
     redirect: '/dashboard',
     meta: { requiresAuth: true },
     children: [
-      { path: 'dashboard', name: 'dashboard', component: () => import('../views/dashboard/DashboardView.vue'), meta: { title: '总览', requiresAuth: true } },
-      { path: 'me', name: 'me', component: () => import('../views/profile/MeView.vue'), meta: { title: '账号', requiresAuth: true } },
-      { path: 'problems', name: 'problems', component: () => import('../views/problem/ProblemListView.vue'), meta: { title: '题目', requiresAuth: true } },
+      {
+        path: 'dashboard',
+        name: 'dashboard',
+        component: () => import('../views/dashboard/DashboardView.vue'),
+        meta: { title: '总览', requiresAuth: true },
+      },
+      {
+        path: 'me',
+        name: 'me',
+        component: () => import('../views/profile/MeView.vue'),
+        meta: { title: '账号', requiresAuth: true },
+      },
+      {
+        path: 'problems',
+        name: 'problems',
+        component: () => import('../views/problem/ProblemListView.vue'),
+        meta: { title: '题目', requiresAuth: true },
+      },
       {
         path: 'problems/new',
         name: 'problem-create',
         component: () => import('../views/problem/ProblemCreateView.vue'),
-        meta: { title: '新建题目', requiresAuth: true, roles: adminRoles, permissions: ['problem.create', 'system.admin'] },
+        meta: {
+          title: '新建题目',
+          requiresAuth: true,
+          roles: adminRoles,
+          permissions: ['problem.create', 'system.admin'],
+        },
       },
-      { path: 'problems/:id/edit', name: 'problem-edit', component: () => import('../views/problem/ProblemEditView.vue'), meta: { title: '编辑题目', requiresAuth: true } },
-      { path: 'problems/:id/package', name: 'problem-package', component: () => import('../views/problem/ProblemPackageView.vue'), meta: { title: '题目数据包', requiresAuth: true } },
-      { path: 'problems/:id/submit', name: 'problem-submit', component: () => import('../views/judge/ProblemSubmitView.vue'), meta: { title: '提交代码', requiresAuth: true } },
-      { path: 'problems/:id', name: 'problem-detail', component: () => import('../views/problem/ProblemDetailView.vue'), meta: { title: '题目详情', requiresAuth: true } },
-      { path: 'submissions', name: 'submissions', component: () => import('../views/judge/SubmissionsListView.vue'), meta: { title: '提交记录', requiresAuth: true } },
-      { path: 'submissions/:id', name: 'submission-detail', component: () => import('../views/judge/SubmissionDetailView.vue'), meta: { title: '提交详情', requiresAuth: true } },
+      {
+        path: 'problems/:id/edit',
+        name: 'problem-edit',
+        component: () => import('../views/problem/ProblemEditView.vue'),
+        meta: { title: '编辑题目', requiresAuth: true },
+      },
+      {
+        path: 'problems/:id/package',
+        name: 'problem-package',
+        component: () => import('../views/problem/ProblemPackageView.vue'),
+        meta: { title: '题目数据包', requiresAuth: true },
+      },
+      {
+        path: 'problems/:id/submit',
+        name: 'problem-submit',
+        component: () => import('../views/judge/ProblemSubmitView.vue'),
+        meta: { title: '提交代码', requiresAuth: true },
+      },
+      {
+        path: 'problems/:id',
+        name: 'problem-detail',
+        component: () => import('../views/problem/ProblemDetailView.vue'),
+        meta: { title: '题目详情', requiresAuth: true },
+      },
+      {
+        path: 'submissions',
+        name: 'submissions',
+        component: () => import('../views/judge/SubmissionsListView.vue'),
+        meta: { title: '提交记录', requiresAuth: true },
+      },
+      {
+        path: 'submissions/:id',
+        name: 'submission-detail',
+        component: () => import('../views/judge/SubmissionDetailView.vue'),
+        meta: { title: '提交详情', requiresAuth: true },
+      },
       {
         path: 'admin/health',
         name: 'admin-health',
@@ -69,22 +119,27 @@ const routes: RouteRecordRaw[] = [
         meta: { title: 'Services', requiresAuth: true, roles: adminRoles, permissions: adminPermissions },
       },
       {
+        path: 'admin/services/status',
+        name: 'admin-service-status-services',
+        component: () => import('../views/admin/AdminServiceStatusView.vue'),
+        meta: { title: 'Service 状态', requiresAuth: true, roles: adminRoles, permissions: adminPermissions },
+      },
+      {
+        path: 'admin/services/status/:serviceId',
+        name: 'admin-service-status-detail',
+        component: () => import('../views/admin/AdminServiceStatusView.vue'),
+        meta: {
+          title: 'Service 状态详情',
+          requiresAuth: true,
+          roles: adminRoles,
+          permissions: adminPermissions,
+        },
+      },
+      {
         path: 'admin/services/:id',
         name: 'admin-service-detail',
         component: () => import('../views/admin/AdminServiceDetailView.vue'),
         meta: { title: 'Service 详情', requiresAuth: true, roles: adminRoles, permissions: adminPermissions },
-      },
-      {
-        path: 'admin/runtime/services',
-        name: 'admin-runtime-services',
-        component: () => import('../views/admin/AdminRuntimeServicesView.vue'),
-        meta: { title: 'Runtime 服务', requiresAuth: true, roles: adminRoles, permissions: adminPermissions },
-      },
-      {
-        path: 'admin/runtime/services/:serviceId',
-        name: 'admin-runtime-service-detail',
-        component: () => import('../views/admin/AdminRuntimeServicesView.vue'),
-        meta: { title: 'Runtime 服务详情', requiresAuth: true, roles: adminRoles, permissions: adminPermissions },
       },
       {
         path: 'admin/topology',
@@ -96,13 +151,18 @@ const routes: RouteRecordRaw[] = [
         path: 'admin/services/contributions',
         name: 'admin-service-contributions',
         component: () => import('../views/admin/AdminServiceContributionsView.vue'),
-        meta: { title: 'Service UI Registry', requiresAuth: true, roles: adminRoles, permissions: adminPermissions },
+        meta: { title: 'Service UI Snapshot', requiresAuth: true, roles: adminRoles, permissions: adminPermissions },
       },
       {
         path: 'admin/services/contributions/:serviceId',
         name: 'admin-service-contribution-detail',
         component: () => import('../views/admin/AdminServiceContributionsView.vue'),
-        meta: { title: 'Service UI Registry 详情', requiresAuth: true, roles: adminRoles, permissions: adminPermissions },
+        meta: {
+          title: 'Service UI Snapshot 详情',
+          requiresAuth: true,
+          roles: adminRoles,
+          permissions: adminPermissions,
+        },
       },
       {
         path: 'admin/users',
@@ -130,9 +190,24 @@ const routes: RouteRecordRaw[] = [
       },
     ],
   },
-  { path: '/403', name: 'forbidden', component: () => import('../views/errors/ForbiddenView.vue'), meta: { title: '无权访问' } },
-  { path: '/500', name: 'server-error', component: () => import('../views/errors/ServerErrorView.vue'), meta: { title: '服务错误' } },
-  { path: '/:pathMatch(.*)*', name: 'not-found', component: () => import('../views/errors/NotFoundView.vue'), meta: { title: '页面不存在' } },
+  {
+    path: '/403',
+    name: 'forbidden',
+    component: () => import('../views/errors/ForbiddenView.vue'),
+    meta: { title: '无权访问' },
+  },
+  {
+    path: '/500',
+    name: 'server-error',
+    component: () => import('../views/errors/ServerErrorView.vue'),
+    meta: { title: '服务错误' },
+  },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'not-found',
+    component: () => import('../views/errors/NotFoundView.vue'),
+    meta: { title: '页面不存在' },
+  },
 ]
 
 export const router = createRouter({

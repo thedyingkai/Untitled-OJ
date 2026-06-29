@@ -179,7 +179,6 @@ onMounted(() => {
               :options="[
                 { label: '公开', value: 'public' },
                 { label: '私有', value: 'private' },
-                { label: '仅比赛', value: 'contest_only' },
               ]"
             />
           </NFormItemGi>

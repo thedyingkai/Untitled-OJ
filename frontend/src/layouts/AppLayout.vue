@@ -15,7 +15,7 @@ import {
   type MenuOption,
 } from 'naive-ui'
 
-import { getServiceRuntimeSnapshot } from '../api/services'
+import { getOrchestratorSnapshot } from '../api/services'
 import { useAuthStore } from '../stores/auth'
 import type { ServiceMenuItem } from '../types/service'
 
@@ -23,15 +23,15 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const collapsed = ref(false)
-const runtimeMenus = ref<ServiceMenuItem[]>([])
+const serviceMenus = ref<ServiceMenuItem[]>([])
 
 const canUseAdmin = computed(
   () => auth.hasAnyRole(['super_admin', 'admin']) || auth.hasAnyPermission(['system.admin']),
 )
 
 const menuOptions = computed<MenuOption[]>(() => {
-  const primaryMenus = runtimeMenuOptions(
-    runtimeMenus.value.filter((item) => !item.route_path.startsWith('/admin')),
+  const primaryMenus = serviceMenuOptions(
+    serviceMenus.value.filter((item) => !item.route_path.startsWith('/admin')),
   )
   const options: MenuOption[] = [
     menuLink('/dashboard', '总览'),
@@ -47,8 +47,8 @@ const menuOptions = computed<MenuOption[]>(() => {
       label: '管理',
       children: [
         menuLink('/admin/health', '健康'),
-        ...runtimeMenuOptions(runtimeMenus.value.filter((item) => item.route_path.startsWith('/admin'))),
-        menuLink('/admin/runtime/services', 'Runtime 服务'),
+        ...serviceMenuOptions(serviceMenus.value.filter((item) => item.route_path.startsWith('/admin'))),
+        menuLink('/admin/services/status', 'Service 状态'),
         menuLink('/admin/topology', 'Topology 只读'),
         menuLink('/admin/services/contributions', 'Service UI'),
         menuLink('/admin/users', '用户'),
@@ -64,7 +64,7 @@ const menuOptions = computed<MenuOption[]>(() => {
 const selectedKey = computed(() => {
   if (route.path.startsWith('/admin/topology')) return '/admin/topology'
   if (route.path.startsWith('/admin/services/contributions')) return '/admin/services/contributions'
-  if (route.path.startsWith('/admin/runtime/services')) return '/admin/runtime/services'
+  if (route.path.startsWith('/admin/services/status')) return '/admin/services/status'
   if (route.path.startsWith('/problems')) return '/problems'
   if (route.path.startsWith('/submissions')) return '/submissions'
   return route.path
@@ -82,7 +82,7 @@ function menuLink(path: string, label: string): MenuOption {
   }
 }
 
-function runtimeMenuOptions(items: ServiceMenuItem[]): MenuOption[] {
+function serviceMenuOptions(items: ServiceMenuItem[]): MenuOption[] {
   const seen = new Set<string>()
   return items
     .filter((item) => item.enabled)
@@ -107,16 +107,16 @@ function canUseMenu(item: ServiceMenuItem): boolean {
   return auth.hasAnyPermission([item.required_permission, 'system.admin'])
 }
 
-async function loadRuntimeMenus(): Promise<void> {
+async function loadServiceMenus(): Promise<void> {
   if (!canUseAdmin.value && !auth.isAuthenticated) {
-    runtimeMenus.value = []
+    serviceMenus.value = []
     return
   }
   try {
-    const snapshot = await getServiceRuntimeSnapshot()
-    runtimeMenus.value = snapshot.menus
+    const snapshot = await getOrchestratorSnapshot()
+    serviceMenus.value = snapshot.menus
   } catch {
-    runtimeMenus.value = []
+    serviceMenus.value = []
   }
 }
 
@@ -127,10 +127,10 @@ function logout(): void {
 
 watch(
   () => [auth.isAuthenticated, auth.permissions.join(','), auth.roles.join(',')],
-  () => void loadRuntimeMenus(),
+  () => void loadServiceMenus(),
 )
 
-onMounted(() => void loadRuntimeMenus())
+onMounted(() => void loadServiceMenus())
 </script>
 
 <template>
@@ -147,11 +147,11 @@ onMounted(() => void loadRuntimeMenus())
         <div class="brand-mark">OJ</div>
         <div class="brand-copy">
           <strong>OJOS</strong>
-          <span>Service Runtime</span>
+          <span>Web Shell</span>
         </div>
       </div>
       <NMenu :options="menuOptions" :value="selectedKey" :default-expanded-keys="expandedKeys" />
-      <div class="sider-footer">安装、热插拔和全局拓扑变更请使用 Root Installer GUI/TUI/CLI</div>
+      <div class="sider-footer">安装、连接、启停和拓扑变更由 OJOS Orchestrator GUI/TUI 处理。</div>
     </NLayoutSider>
 
     <NLayout class="app-main">

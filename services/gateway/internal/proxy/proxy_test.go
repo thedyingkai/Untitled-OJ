@@ -9,13 +9,13 @@ import (
 	"testing"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/serviceruntime"
+	"ojos-gateway/internal/orchestrator/servicestatus"
 	sharedjwt "ojos-shared/security/jwt"
 
 	"go.uber.org/zap"
 )
 
-func TestRuntimeProxyUsesTrustedServiceAndStripsAuthorization(t *testing.T) {
+func TestServiceProxyUsesTrustedServiceAndStripsAuthorization(t *testing.T) {
 	var gotAuth string
 	var gotConnection string
 	var gotPath string
@@ -30,13 +30,13 @@ func TestRuntimeProxyUsesTrustedServiceAndStripsAuthorization(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	rp := newTestRuntimeProxy(t, []config.ProxyTrustedServiceConfig{{
+	rp := newTestServiceProxy(t, []config.ProxyTrustedServiceConfig{{
 		ServiceID:   "demo-api",
 		Target:      upstream.URL,
 		StripPrefix: "/api",
 	}})
-	rp.SetRouteTable(serviceruntime.RouteTable{
-		Routes: []serviceruntime.RuntimeRoute{{
+	rp.SetRouteTable(servicestatus.RouteTable{
+		Routes: []servicestatus.ServiceRoute{{
 			RouteID:        "demo:/api/demo",
 			OwnerServiceID: "demo",
 			Prefix:         "/api/demo",
@@ -70,7 +70,7 @@ func TestRuntimeProxyUsesTrustedServiceAndStripsAuthorization(t *testing.T) {
 	}
 }
 
-func TestRuntimeProxyAuthModes(t *testing.T) {
+func TestServiceProxyAuthModes(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -93,13 +93,13 @@ func TestRuntimeProxyAuthModes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rp := newTestRuntimeProxy(t, []config.ProxyTrustedServiceConfig{{
+			rp := newTestServiceProxy(t, []config.ProxyTrustedServiceConfig{{
 				ServiceID:   "demo-api",
 				Target:      upstream.URL,
 				StripPrefix: "/api",
 			}})
-			rp.SetRouteTable(serviceruntime.RouteTable{
-				Routes: []serviceruntime.RuntimeRoute{{
+			rp.SetRouteTable(servicestatus.RouteTable{
+				Routes: []servicestatus.ServiceRoute{{
 					RouteID:        "demo:/api/demo",
 					OwnerServiceID: "demo",
 					Prefix:         "/api/demo",
@@ -125,13 +125,13 @@ func TestRuntimeProxyAuthModes(t *testing.T) {
 	}
 }
 
-func TestRuntimeProxyAdminAuthCanUsePermissionChecker(t *testing.T) {
+func TestServiceProxyAdminAuthCanUsePermissionChecker(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer upstream.Close()
 
-	rp := newTestRuntimeProxy(t, []config.ProxyTrustedServiceConfig{{
+	rp := newTestServiceProxy(t, []config.ProxyTrustedServiceConfig{{
 		ServiceID:   "admin-api",
 		Target:      upstream.URL,
 		StripPrefix: "/api",
@@ -139,8 +139,8 @@ func TestRuntimeProxyAdminAuthCanUsePermissionChecker(t *testing.T) {
 	rp.SetAdminChecker(func(ctx context.Context, userID int64) (bool, error) {
 		return userID == 42, nil
 	})
-	rp.SetRouteTable(serviceruntime.RouteTable{
-		Routes: []serviceruntime.RuntimeRoute{{
+	rp.SetRouteTable(servicestatus.RouteTable{
+		Routes: []servicestatus.ServiceRoute{{
 			RouteID:      "demo:/api/admin-demo",
 			Prefix:       "/api/admin-demo",
 			ServiceID:    "admin-api",
@@ -161,7 +161,7 @@ func TestRuntimeProxyAdminAuthCanUsePermissionChecker(t *testing.T) {
 	}
 }
 
-func TestRuntimeProxyRejectsUnknownServiceAndPrefersStaticRoute(t *testing.T) {
+func TestServiceProxyRejectsUnknownServiceAndPrefersStaticRoute(t *testing.T) {
 	staticUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("static"))
 	}))
@@ -171,7 +171,7 @@ func TestRuntimeProxyRejectsUnknownServiceAndPrefersStaticRoute(t *testing.T) {
 	}))
 	defer dynamicUpstream.Close()
 
-	rp, err := NewRuntimeProxy([]config.ProxyRouteConfig{{
+	rp, err := NewServiceProxy([]config.ProxyRouteConfig{{
 		Prefix:      "/api/auth",
 		Target:      staticUpstream.URL,
 		StripPrefix: "/api",
@@ -184,8 +184,8 @@ func TestRuntimeProxyRejectsUnknownServiceAndPrefersStaticRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rp.SetRouteTable(serviceruntime.RouteTable{
-		Routes: []serviceruntime.RuntimeRoute{
+	rp.SetRouteTable(servicestatus.RouteTable{
+		Routes: []servicestatus.ServiceRoute{
 			{RouteID: "demo:/api/auth", Prefix: "/api/auth", ServiceID: "demo-api", AuthMode: "public", Enabled: true, ProxyEnabled: true, Status: "active"},
 			{RouteID: "bad:/api/bad", Prefix: "/api/bad", ServiceID: "missing", AuthMode: "public", Enabled: true, ProxyEnabled: true, Status: "active"},
 		},
@@ -205,13 +205,13 @@ func TestRuntimeProxyRejectsUnknownServiceAndPrefersStaticRoute(t *testing.T) {
 	}
 }
 
-func TestRuntimeProxyUnavailableRuntimeRouteReturnsStableError(t *testing.T) {
+func TestServiceProxyUnavailableServiceRouteReturnsStableError(t *testing.T) {
 	staticUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("static"))
 	}))
 	defer staticUpstream.Close()
 
-	rp, err := NewRuntimeProxy([]config.ProxyRouteConfig{{
+	rp, err := NewServiceProxy([]config.ProxyRouteConfig{{
 		Prefix:      "/api/problem",
 		Target:      staticUpstream.URL,
 		StripPrefix: "/api",
@@ -224,17 +224,17 @@ func TestRuntimeProxyUnavailableRuntimeRouteReturnsStableError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rp.SetRouteTable(serviceruntime.RouteTable{
-		Routes: []serviceruntime.RuntimeRoute{{
-			RouteID:      "ojos.judge-core:/api/problem",
-			Prefix:       "/api/problem",
-			ServiceID:    "problem-api",
-			AuthMode:     "user",
-			Enabled:      true,
-			ProxyEnabled: false,
-			Status:       "unavailable",
-			ServiceState: serviceruntime.ServiceStateStopped,
-			BlockedBy:    []string{"service not running"},
+	rp.SetRouteTable(servicestatus.RouteTable{
+		Routes: []servicestatus.ServiceRoute{{
+			RouteID:       "ojos.judge-core:/api/problem",
+			Prefix:        "/api/problem",
+			ServiceID:     "problem-api",
+			AuthMode:      "user",
+			Enabled:       true,
+			ProxyEnabled:  false,
+			Status:        "unavailable",
+			ServiceStatus: servicestatus.ServiceStatusStopped,
+			BlockedBy:     []string{"service not running"},
 		}},
 	})
 
@@ -247,15 +247,15 @@ func TestRuntimeProxyUnavailableRuntimeRouteReturnsStableError(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "runtime service unavailable") {
-		t.Fatalf("expected stable runtime unavailable error, got %s", rr.Body.String())
+	if !strings.Contains(rr.Body.String(), "service unavailable") {
+		t.Fatalf("expected stable service unavailable error, got %s", rr.Body.String())
 	}
 }
 
-func TestRuntimeProxyReloadAtomicallyReplacesTable(t *testing.T) {
-	reader := fakeRuntimeReader{table: serviceruntime.RouteTable{
+func TestServiceProxyReloadAtomicallyReplacesTable(t *testing.T) {
+	reader := fakeServiceRouteReader{table: servicestatus.RouteTable{
 		Version: "2",
-		Routes: []serviceruntime.RuntimeRoute{{
+		Routes: []servicestatus.ServiceRoute{{
 			RouteID:      "demo:/api/demo",
 			Prefix:       "/api/demo",
 			ServiceID:    "demo-api",
@@ -266,7 +266,7 @@ func TestRuntimeProxyReloadAtomicallyReplacesTable(t *testing.T) {
 		}},
 		CanProxy: true,
 	}}
-	rp := newTestRuntimeProxy(t, []config.ProxyTrustedServiceConfig{{
+	rp := newTestServiceProxy(t, []config.ProxyTrustedServiceConfig{{
 		ServiceID: "demo-api",
 		Target:    "http://demo-api:8080",
 	}})
@@ -279,19 +279,19 @@ func TestRuntimeProxyReloadAtomicallyReplacesTable(t *testing.T) {
 	}
 }
 
-type fakeRuntimeReader struct {
-	table serviceruntime.RouteTable
+type fakeServiceRouteReader struct {
+	table servicestatus.RouteTable
 }
 
-func (f fakeRuntimeReader) RuntimeRouteTable(context.Context) (serviceruntime.RouteTable, error) {
+func (f fakeServiceRouteReader) ServiceRouteTable(context.Context) (servicestatus.RouteTable, error) {
 	return f.table, nil
 }
 
 const testSecret = "test-secret"
 
-func newTestRuntimeProxy(t *testing.T, trusted []config.ProxyTrustedServiceConfig) *RuntimeProxy {
+func newTestServiceProxy(t *testing.T, trusted []config.ProxyTrustedServiceConfig) *ServiceProxy {
 	t.Helper()
-	rp, err := NewRuntimeProxy(nil, trusted, testSecret, nil, zap.NewNop())
+	rp, err := NewServiceProxy(nil, trusted, testSecret, nil, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}

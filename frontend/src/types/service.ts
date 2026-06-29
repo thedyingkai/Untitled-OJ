@@ -14,7 +14,7 @@ export interface ServiceSetItem {
   sort_order: number
 }
 
-export interface ServiceNodeItem {
+export interface ServiceDefinitionItem {
   service_id: string
   set_id: string
   name: string
@@ -76,18 +76,20 @@ export interface ServiceGatewayRouteItem {
   enabled: boolean
 }
 
-export interface ServiceInstallationItem {
+export interface ServiceEndpointItem {
+  endpoint: string
   service_id: string
-  name: string
-  version: string
-  status: string
-  manifest: unknown
-  enabled_at?: string
-  disabled_at?: string
+  protocol: string
+  health_path: string
+  health: string
+  reachable: boolean
+  display_name: string
+  note: string
+  config: unknown
 }
 
 export interface ListServicesResponse {
-  services: ServiceNodeItem[]
+  services: ServiceDefinitionItem[]
 }
 
 export interface ListServiceSetsResponse {
@@ -96,14 +98,14 @@ export interface ListServiceSetsResponse {
 
 export interface ServiceTopologyResponse {
   sets: ServiceSetItem[]
-  nodes: ServiceRuntimeTopologyNode[]
-  edges: ServiceRuntimeTopologyEdge[]
+  nodes: ServiceTopologyNode[]
+  edges: ServiceTopologyEdge[]
   components: ServiceComponentItem[]
-  service_nodes: ServiceNodeItem[]
+  service_definitions: ServiceDefinitionItem[]
   dependency_edges: ServiceEdgeItem[]
 }
 
-export interface ServiceRuntimeComponent {
+export interface ServiceStatusComponent {
   service_id: string
   component_id: string
   type: string
@@ -111,7 +113,7 @@ export interface ServiceRuntimeComponent {
   config: unknown
 }
 
-export interface ServiceRuntimeService {
+export interface ServiceStatusItem {
   owner_service_id: string
   service_id: string
   name: string
@@ -129,14 +131,14 @@ export interface ServiceRuntimeService {
   warnings: string[]
 }
 
-export interface ServiceRuntimeTopology {
-  nodes: ServiceRuntimeTopologyNode[]
-  edges: ServiceRuntimeTopologyEdge[]
-  service_nodes: ServiceNodeItem[]
+export interface ServiceTopologyGraph {
+  nodes: ServiceTopologyNode[]
+  edges: ServiceTopologyEdge[]
+  service_definitions: ServiceDefinitionItem[]
   dependency_edges: ServiceEdgeItem[]
 }
 
-export interface ServiceRuntimeManifestItem {
+export interface OrchestratorSnapshotItem {
   service_id: string
   id: string
   type: string
@@ -145,7 +147,7 @@ export interface ServiceRuntimeManifestItem {
   config: unknown
 }
 
-export interface ServiceRuntimeTopologyNode {
+export interface ServiceTopologyNode {
   id: string
   service_id: string
   label: string
@@ -155,7 +157,7 @@ export interface ServiceRuntimeTopologyNode {
   config: unknown
 }
 
-export interface ServiceRuntimeTopologyEdge {
+export interface ServiceTopologyEdge {
   id: string
   service_id: string
   from: string
@@ -165,26 +167,26 @@ export interface ServiceRuntimeTopologyEdge {
   source: string
 }
 
-export interface ServiceRuntimeSnapshotResponse {
+export interface OrchestratorSnapshotResponse {
   version: string
   generated_at: string
-  service_nodes: ServiceNodeItem[]
+  service_definitions: ServiceDefinitionItem[]
   permissions: ServicePermissionItem[]
-  roles: ServiceRuntimeManifestItem[]
+  roles: OrchestratorSnapshotItem[]
   menus: ServiceMenuItem[]
   frontend_routes: ServiceFrontendRouteItem[]
   gateway_routes: ServiceGatewayRouteItem[]
-  components: ServiceRuntimeComponent[]
-  services: ServiceRuntimeService[]
-  workers: ServiceRuntimeService[]
-  storage_buckets: ServiceRuntimeManifestItem[]
-  health_checks: ServiceRuntimeComponent[]
-  operations: ServiceRuntimeManifestItem[]
-  topology: ServiceRuntimeTopology
+  components: ServiceStatusComponent[]
+  services: ServiceStatusItem[]
+  workers: ServiceStatusItem[]
+  storage_buckets: OrchestratorSnapshotItem[]
+  health_checks: ServiceStatusComponent[]
+  operations: OrchestratorSnapshotItem[]
+  topology: ServiceTopologyGraph
   warnings: string[]
 }
 
-export interface ServiceRuntimeRouteItem {
+export interface OrchestratorRouteItem {
   route_id: string
   owner_service_id: string
   prefix: string
@@ -201,60 +203,31 @@ export interface ServiceRuntimeRouteItem {
   health_check_id?: string
   created_from: string
   status: string
-  service_state?: string
+  service_status?: string
   service_health?: string
   conflicts: string[]
   warnings: string[]
   blocked_by: string[]
 }
 
-export interface ServiceRuntimeRoutesResponse {
+export interface OrchestratorRoutesResponse {
   version: string
   generated_at: string
-  routes: ServiceRuntimeRouteItem[]
+  routes: OrchestratorRouteItem[]
   warnings: string[]
   can_proxy: boolean
-  reloaded?: boolean
 }
 
-export interface RuntimeServicesResponse {
-  services: ServiceRuntimeService[]
-  workers: ServiceRuntimeService[]
+export interface ServiceStatusListResponse {
+  services: ServiceStatusItem[]
+  workers: ServiceStatusItem[]
 }
 
-export interface RuntimeServiceResponse {
-  service: ServiceRuntimeService
+export interface ServiceStatusItemResponse {
+  service: ServiceStatusItem
 }
 
-export interface RuntimePlanCommand {
-  kind: string
-  argv: string[]
-}
-
-export interface RuntimePlanItem {
-  plan_id: string
-  operation_id: string
-  action: string
-  service_id: string
-  driver: string
-  can_apply: boolean
-  apply_enabled: boolean
-  requires_confirmation: boolean
-  dry_run: boolean
-  allowed_targets: string[]
-  commands: RuntimePlanCommand[]
-  affected: string[]
-  blocked_by: string[]
-  warnings: string[]
-  created_at: string
-  expires_at: string
-}
-
-export interface RuntimeServicePlanResponse {
-  plan: RuntimePlanItem
-}
-
-export interface RuntimeOperationItem {
+export interface ServiceStatusOperationItem {
   operation_id: string
   service_id: string
   action: string
@@ -268,12 +241,12 @@ export interface RuntimeOperationItem {
   updated_at: string
 }
 
-export interface RuntimeOperationsResponse {
-  operations: RuntimeOperationItem[]
+export interface ServiceStatusOperationsResponse {
+  operations: ServiceStatusOperationItem[]
 }
 
 export interface ServiceDetailResponse {
-  service: ServiceNodeItem
+  service: ServiceDefinitionItem
   dependencies: ServiceEdgeItem[]
   dependents: ServiceEdgeItem[]
   components: ServiceComponentItem[]
@@ -281,6 +254,6 @@ export interface ServiceDetailResponse {
   menus: ServiceMenuItem[]
   frontend_routes: ServiceFrontendRouteItem[]
   gateway_routes: ServiceGatewayRouteItem[]
-  installations: ServiceInstallationItem[]
+  endpoints: ServiceEndpointItem[]
   health_checks: ServiceComponentItem[]
 }

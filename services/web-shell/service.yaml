@@ -2,33 +2,81 @@ schema_version: 1
 id: web-shell
 name: Web Shell
 version: 0.1.0
-kind: root-web-ui
+kind: frontend
+description: OJ 网站前后台业务 UI Service，不承担 Orchestrator 控制面职责。
+runtime:
+  mode: local-process
+  driver: node
+  root_allowed: true
+  non_root_allowed: false
+  start_policy: manual
+  restart_policy: on-failure
 endpoint:
   protocol: http
   default_port: 8088
   health_path: /health
-runtime:
-  mode: local-process
-  root_allowed: true
-  non_root_allowed: false
-config_schema:
-  ui_registry_ref:
-    type: string
-    default: root-runtime-ui-registry
+  expose: true
+  routes:
+    - /
 requires:
+  services:
+    - gateway
   links:
     - id: gateway
       protocol: http
+  storage: []
+  database: []
+  queue: []
+  secrets: []
 provides:
   capabilities:
     - web-shell.ui
-    - web-shell.runtime-readonly
-ui:
-  enabled: true
-  menu_scope: root-generated
-permissions:
-  - web-shell.read
+    - oj.business-ui
+  endpoints:
+    - http
+  routes:
+    - /
+  workers: []
+  storage_buckets: []
+  events: []
+config_schema:
+  ui_snapshot_ref:
+    type: string
+    default: orchestrator-ui-snapshot
+resources:
+  cpu: shared
+  memory: 256Mi
+  disk: 128Mi
+  gpu: none
+  network: gateway-only
 security:
   allow_privileged: false
   allow_host_mount: false
   allow_arbitrary_command: false
+  required_secrets: []
+  sandbox: {}
+  network_policy:
+    gateway_only: true
+source:
+  type: local
+  ref: frontend
+  build:
+    driver: npm
+    target: production
+  artifact: {}
+ui:
+  enabled: true
+  routes:
+    - /
+  menus:
+    - problems
+    - submissions
+  permissions:
+    - web-shell.read
+permissions:
+  - web-shell.read
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10

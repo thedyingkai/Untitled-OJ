@@ -12,9 +12,9 @@ import OjosPageHeader from '../../components/oj/OjosPageHeader.vue'
 import OjosSection from '../../components/oj/OjosSection.vue'
 import OjosServiceStatusTag from '../../components/oj/OjosServiceStatusTag.vue'
 import OjosStatCard from '../../components/oj/OjosStatCard.vue'
-import type { ServiceNodeItem, ServiceSetItem } from '../../types/service'
+import type { ServiceDefinitionItem, ServiceSetItem } from '../../types/service'
 
-const services = ref<ServiceNodeItem[]>([])
+const services = ref<ServiceDefinitionItem[]>([])
 const sets = ref<ServiceSetItem[]>([])
 const loading = ref(true)
 const refreshing = ref(false)
@@ -47,7 +47,7 @@ const filteredServices = computed(() => {
   })
 })
 
-const columns = computed<DataTableColumns<ServiceNodeItem>>(() => [
+const columns = computed<DataTableColumns<ServiceDefinitionItem>>(() => [
   {
     title: 'Service',
     key: 'service_id',
@@ -90,7 +90,7 @@ onMounted(() => void load())
   <div class="services-page">
     <OjosPageHeader
       title="Service 状态"
-      description="Web Shell 仅展示 Root Runtime 生成的 Service 注册表和运行状态；安装、删除、热插拔与 Link 配置由 Root Installer / Runtime Manager 完成。"
+      description="Web Shell 仅展示 Orchestrator 生成的 Service 只读快照和运行状态；安装、删除、热插拔与 Link 配置由 OJOS Orchestrator GUI/TUI 完成。"
       eyebrow="只读视图"
     >
       <template #actions>
@@ -111,7 +111,7 @@ onMounted(() => void load())
           <OjosStatCard label="当前可见" :value="filteredServices.length" />
         </div>
 
-        <OjosSection title="Service Registry">
+        <OjosSection title="Orchestrator Snapshot">
           <NSpace class="service-filters">
             <NInput v-model:value="keyword" clearable placeholder="搜索 Service ID、名称或说明" style="min-width: 280px" />
             <NSelect v-model:value="setFilter" :options="setOptions" clearable placeholder="按 Set 过滤" style="width: 240px" />

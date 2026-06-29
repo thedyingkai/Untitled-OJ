@@ -1,0 +1,87 @@
+schema_version: 1
+id: auth
+name: Auth
+version: 0.1.0
+kind: backend-api
+description: 登录、JWT、角色权限和审计基础服务。
+runtime:
+  mode: container
+  driver: compose
+  root_allowed: true
+  non_root_allowed: false
+  start_policy: automatic
+  restart_policy: on-failure
+endpoint:
+  protocol: http
+  default_port: 8081
+  health_path: /health
+  expose: false
+  routes:
+    - /api/auth
+requires:
+  services:
+    - postgres
+    - redis
+  links:
+    - id: postgres
+      protocol: postgres
+    - id: redis
+      protocol: redis
+  storage: []
+  database:
+    - postgres
+  queue:
+    - redis
+  secrets:
+    - jwt-secret
+provides:
+  capabilities:
+    - auth.login
+    - auth.permission
+    - auth.audit
+  endpoints:
+    - http
+  routes:
+    - /api/auth
+  workers: []
+  storage_buckets: []
+  events: []
+config_schema:
+  jwt_issuer:
+    type: string
+    default: ojos-auth
+resources:
+  cpu: shared
+  memory: 256Mi
+  disk: 128Mi
+  gpu: none
+  network: internal
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false
+  required_secrets:
+    - jwt-secret
+  sandbox: {}
+  network_policy:
+    egress_links_only: true
+source:
+  type: local
+  ref: services/auth
+  build:
+    driver: dockerfile
+    path: services/auth/Dockerfile
+  artifact: {}
+ui:
+  enabled: false
+  routes: []
+  menus: []
+  permissions: []
+permissions:
+  - auth.admin
+  - system.admin
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10

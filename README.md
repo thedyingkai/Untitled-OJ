@@ -1,64 +1,76 @@
-# OJOS
+# OJOS Orchestrator
 
-OJOS 是一个 Installer-first 的分布式 OJ Service Runtime，由唯一 Root Installer / Runtime Manager 维护全局状态，并以 Service、Set、Endpoint、Link、Device、Topology 为核心对象。
+OJOS Orchestrator（OJOS 编排器）是面向 OJOS 服务体系的服务编排产品。它负责导入、校验、规划、安装、连接、启停、观测和诊断 Service。
 
-## 项目定位
+它不是 OJ 网站后台，也不实现题库、提交、比赛、用户、公告、训练、Clarification、打印或滚榜。这些能力都属于具体 Service；编排器只处理 Service 之间的安装计划、连接关系、运行状态和拓扑视图。
 
-OJOS 不以 Web Shell、Gateway 或旧 Module-first 模型作为系统根。Root Installer / Runtime Manager 是控制面；Service 是最小安装、运行、启停、热插拔和连接单位。
+## 核心对象
 
-核心对象：
+正式核心对象只有：
 
-- Service：最小功能单元，例如 gateway、web-shell、problem-api、judge-api、judge-worker、storage、postgres。
-- Set：推荐安装集合，不是运行对象。
-- Endpoint：运行中 Service 的 `IP:Port`。
-- Link：`source endpoint -> target endpoint` 的连接关系。
-- Device：Root 或 Non-root 设备。
-- Topology：Device、Service、Endpoint、Link、Set、Health 和 Operation 的关系视图。
+- Service：最小可安装、可启停、可连接、可观测的功能单元。
+- Set：推荐部署组合，只描述组成和默认关系，不作为运行时对象。
+- Endpoint：运行中 Service 的唯一连接身份，格式固定为 `IP:Port`。
+- Link：`source endpoint -> target endpoint` 的通信授权关系。
+- Operation：需要计划、确认、执行、记录和回滚的编排动作。
+- Topology：Service、Set、Endpoint、Link、Operation、LogView、DiagnosticReport 的关系视图。
+- LogView：按 Service、Endpoint 或 Endpoint host/IP 聚合的日志视图。
+- DiagnosticReport：部署和运行诊断结果。
 
-## 基础服务
+## 正式入口
 
-- Gateway：外部 HTTP 入口、鉴权、权限校验、路由转发、统一错误、审计和基础限流。
-- Web Shell：Root 侧可热插拔 Web UI，只展示题库、提交、评测结果、普通管理和只读 Runtime 状态。
-- Problem API：题库、题目详情、题目包、数据文件索引和题目权限。
-- Judge API：提交、任务队列、Worker endpoint 列表、任务分发、结果接收和状态更新。
-- Judge Worker：Root 或 Non-root 上的独立评测服务，内部管理并发和 sandbox slots。
-- Storage / PostgreSQL：即使使用外部实例，也作为可连接 Service 出现在 Runtime、Endpoint、Link 和 Topology 中。
+正式入口只有 Orchestrator GUI 和 Orchestrator TUI。两者使用同一套 `orchestrator/core` 和 `orchestrator/schemas`，能力必须一致，差别只能是交互形态。
 
-## 部署入口
+Web Shell 是被编排的业务 Service，不是编排器入口。Gateway 是业务流量入口 Service，不是控制面。
 
-单机部署使用 `sets/single-node-oj.yaml`：
+## 数据库边界
 
-```powershell
-docker compose --env-file .env -f deploy\compose\docker-compose.yml up -d --build
+Orchestrator 使用独立数据库：
+
+```text
+ORCHESTRATOR_DATABASE_URL
 ```
 
-分布式评测中，Root 设备使用 `sets/distributed-root.yaml`；评测机使用 `sets/judge-worker-node.yaml`，只运行 Non-root Device Agent 和 judge-worker，不运行 Web Shell 或 Root Installer GUI。
+OJ 业务服务使用独立业务数据库：
 
-## 命令入口
-
-```powershell
-cargo run -p ojosctl -- service discover
-cargo run -p ojosctl -- service validate services\judge-worker\service.yaml
-cargo run -p ojosctl -- set expand sets\single-node-oj.yaml
-cargo run -p ojosctl -- endpoint validate 192.168.1.10:8082
-cargo run -p ojosctl -- link plan-create 192.168.1.21:9101 192.168.1.10:8082
+```text
+OJ_DATABASE_URL
 ```
 
-旧 Module-first 设计已删除，不再作为正式运行模型、CLI、API、DB 初始化链路或包格式。
+Orchestrator 不写 OJ 业务表；OJ 业务服务也不能直接写 Orchestrator 表。
 
-## 当前完成能力
+## 基础 Service
 
-- `service.yaml` 契约和基础 Service 描述已建立。
-- Set 预设已建立。
-- Endpoint / Link / Topology 命令级计划能力已建立。
-- Root Runtime Manager 数据表与 service-first API 已建立。
-- Web Shell 已调整为只读 Runtime / Topology / Service 状态视图，不作为 Installer。
+当前基础 Service 包括：
 
-## 未完成边界
+```text
+gateway
+web-shell
+auth
+problem-api
+judge-api
+judge-worker
+postgres
+redis
+storage
+```
 
-- Native GUI 目录和边界已建立，完整 GUI 交互仍需后续实现。
-- Non-root Device Agent 远程执行通道仍需后续实现。
+每个 Service 必须提供 `service.yaml`。`service.yaml` 是唯一正式 Service 契约。
 
-## 文档索引
+## 文档
 
-入口文档见 [docs/DOCS_INDEX.md](docs/DOCS_INDEX.md)，状态说明见 [docs/DOCS_STATUS.md](docs/DOCS_STATUS.md)。
+正式文档位于 `docs/`：
+
+- [Service 规范](docs/spec/service-spec.md)
+- [Set 规范](docs/spec/set-spec.md)
+- [Endpoint / Link 规范](docs/spec/endpoint-link-spec.md)
+- [Orchestrator 需求](docs/orchestrator/requirements.md)
+- [Orchestrator 边界](docs/orchestrator/boundary.md)
+- [Action 模型](docs/orchestrator/action-model.md)
+- [GUI / TUI 等价性](docs/orchestrator/gui-tui-parity.md)
+- [Topology 模型](docs/orchestrator/topology-model.md)
+- [Operation 模型](docs/orchestrator/operation-model.md)
+- [Orchestrator 数据库](docs/orchestrator/database.md)
+- [可核对证据](docs/release/evidence.md)
+
+历史文档位于 `docs-temp/`，不作为当前正式架构依据。

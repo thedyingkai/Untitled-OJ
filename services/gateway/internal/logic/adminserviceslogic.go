@@ -3,43 +3,55 @@ package logic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
-	"ojos-gateway/internal/kernel/serviceruntime"
-	"ojos-gateway/internal/serviceregistry"
+	"ojos-gateway/internal/orchestrator/servicestatus"
+	orchestratorsnapshot "ojos-gateway/internal/orchestrator/snapshot"
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
 
+func errOrchestratorUnavailable() error {
+	return errors.New("orchestrator snapshot is unavailable")
+}
+
 type AdminServicesLogic struct {
 	logx.Logger
 	ctx    context.Context
 	svcCtx *svc.ServiceContext
-	repo   serviceRegistryReader
+	repo   orchestratorSnapshotReader
 }
 
-type serviceRegistryReader interface {
-	ListServices(context.Context) ([]serviceregistry.Service, error)
-	ListSets(context.Context) ([]serviceregistry.Set, error)
-	Topology(context.Context) (serviceregistry.Topology, error)
-	Detail(context.Context, string) (serviceregistry.Detail, error)
-	serviceruntime.RegistryReader
+type orchestratorSnapshotReader interface {
+	ListServices(context.Context) ([]orchestratorsnapshot.Service, error)
+	ListSets(context.Context) ([]orchestratorsnapshot.Set, error)
+	Topology(context.Context) (orchestratorsnapshot.Topology, error)
+	Detail(context.Context, string) (orchestratorsnapshot.Detail, error)
+	servicestatus.SnapshotReader
 }
 
 func NewAdminServicesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *AdminServicesLogic {
+	repo := orchestratorSnapshotReader(nil)
+	if svcCtx != nil {
+		repo = svcCtx.Orchestrator
+	}
 	return &AdminServicesLogic{
 		Logger: logx.WithContext(ctx),
 		ctx:    ctx,
 		svcCtx: svcCtx,
-		repo:   serviceregistry.NewRepository(svcCtx.DB),
+		repo:   repo,
 	}
 }
 
 func (l *AdminServicesLogic) ListServices(authHeader string) (*types.ListServicesResp, error) {
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
+	}
+	if l.repo == nil {
+		return nil, errOrchestratorUnavailable()
 	}
 	services, err := l.repo.ListServices(l.ctx)
 	if err != nil {
@@ -52,6 +64,9 @@ func (l *AdminServicesLogic) ListSets(authHeader string) (*types.ListServiceSets
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
 	}
+	if l.repo == nil {
+		return nil, errOrchestratorUnavailable()
+	}
 	sets, err := l.repo.ListSets(l.ctx)
 	if err != nil {
 		return nil, err
@@ -63,93 +78,111 @@ func (l *AdminServicesLogic) Topology(authHeader string) (*types.ServiceTopology
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
 	}
+	if l.repo == nil {
+		return nil, errOrchestratorUnavailable()
+	}
 	sets, err := l.repo.ListSets(l.ctx)
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := serviceruntime.BuildSnapshot(l.ctx, l.repo)
+	snapshot, err := servicestatus.BuildSnapshot(l.ctx, l.repo)
 	if err != nil {
 		return nil, err
 	}
-	l.enrichRuntimeSnapshot(&snapshot)
-	components := runtimeAsComponentItems(snapshot.Components)
+	l.enrichOrchestratorSnapshot(&snapshot)
+	components := serviceComponentsAsItems(snapshot.Components)
 	return &types.ServiceTopologyResp{
-		Sets:            setItems(sets),
-		Nodes:           runtimeTopologyNodeItems(snapshot.Topology.Nodes),
-		Edges:           runtimeTopologyEdgeItems(snapshot.Topology.Edges),
-		Components:      components,
-		ServiceNodes:    serviceItems(snapshot.Topology.ServiceNodes, false),
-		DependencyEdges: edgeItems(snapshot.Topology.DependencyEdges),
+		Sets:               setItems(sets),
+		Nodes:              serviceTopologyNodeItems(snapshot.Topology.Nodes),
+		Edges:              serviceTopologyEdgeItems(snapshot.Topology.Edges),
+		Components:         components,
+		ServiceDefinitions: serviceItems(snapshot.Topology.ServiceDefinitions, false),
+		DependencyEdges:    edgeItems(snapshot.Topology.DependencyEdges),
 	}, nil
 }
 
-func (l *AdminServicesLogic) RuntimeSnapshot(authHeader string, includeDisabled bool) (*types.ServiceRuntimeSnapshotResp, error) {
+func (l *AdminServicesLogic) OrchestratorSnapshot(authHeader string, includeDisabled bool) (*types.OrchestratorSnapshotResp, error) {
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
 	}
-	snapshot, err := serviceruntime.BuildSnapshotWithOptions(l.ctx, l.repo, serviceruntime.BuildOptions{
-		IncludeDisabled: includeDisabled,
-	})
-	if err != nil {
-		return nil, err
+	if l.repo == nil {
+		return nil, errOrchestratorUnavailable()
 	}
-	l.enrichRuntimeSnapshot(&snapshot)
-	return runtimeSnapshotResp(snapshot), nil
-}
-
-func (l *AdminServicesLogic) RuntimeRouteTable(ctx context.Context) (serviceruntime.RouteTable, error) {
-	snapshot, err := serviceruntime.BuildSnapshot(ctx, l.repo)
-	if err != nil {
-		return serviceruntime.RouteTable{}, err
-	}
-	l.enrichRuntimeSnapshot(&snapshot)
-	options := l.svcCtx.RouteTableOptions
-	options.ServiceStates = serviceruntime.RuntimeServiceStates(snapshot.Services)
-	return serviceruntime.BuildRouteTableWithOptions(snapshot, options), nil
-}
-
-func (l *AdminServicesLogic) RuntimeRoutes(authHeader string, includeDisabled bool, reloaded bool, includeUpstream bool) (*types.ServiceRuntimeRoutesResp, error) {
-	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
-		return nil, err
-	}
-	if reloaded && l.svcCtx.RuntimeProxy != nil {
-		activeTable, err := l.RuntimeRouteTable(l.ctx)
-		if err != nil {
+	if client, ok := l.repo.(*orchestratorsnapshot.Client); ok {
+		var snapshot servicestatus.Snapshot
+		if err := client.DecodeOrchestratorSnapshot(l.ctx, includeDisabled, &snapshot); err != nil {
 			return nil, err
 		}
-		l.svcCtx.RuntimeProxy.SetRouteTable(activeTable)
+		l.enrichOrchestratorSnapshot(&snapshot)
+		return orchestratorSnapshotResp(snapshot), nil
 	}
-	snapshot, err := serviceruntime.BuildSnapshotWithOptions(l.ctx, l.repo, serviceruntime.BuildOptions{
+	snapshot, err := servicestatus.BuildSnapshotWithOptions(l.ctx, l.repo, servicestatus.BuildOptions{
 		IncludeDisabled: includeDisabled,
 	})
 	if err != nil {
 		return nil, err
 	}
-	l.enrichRuntimeSnapshot(&snapshot)
-	tableOptions := l.svcCtx.RouteTableOptions
-	tableOptions.IncludeDisabledRoutes = includeDisabled
-	tableOptions.ServiceStates = serviceruntime.RuntimeServiceStates(snapshot.Services)
-	table := serviceruntime.BuildRouteTableWithOptions(snapshot, tableOptions)
-	resp := runtimeRoutesResp(table, includeUpstream)
-	resp.Reloaded = reloaded
-	return resp, nil
+	l.enrichOrchestratorSnapshot(&snapshot)
+	return orchestratorSnapshotResp(snapshot), nil
 }
 
-func (l *AdminServicesLogic) enrichRuntimeSnapshot(snapshot *serviceruntime.Snapshot) {
+func (l *AdminServicesLogic) ServiceRouteTable(ctx context.Context) (servicestatus.RouteTable, error) {
+	if l.repo == nil {
+		return servicestatus.RouteTable{}, errOrchestratorUnavailable()
+	}
+	snapshot, err := servicestatus.BuildSnapshot(ctx, l.repo)
+	if err != nil {
+		return servicestatus.RouteTable{}, err
+	}
+	l.enrichOrchestratorSnapshot(&snapshot)
+	options := l.svcCtx.RouteTableOptions
+	options.ServiceStatuses = servicestatus.ServiceStatusesByID(snapshot.Services)
+	return servicestatus.BuildRouteTableWithOptions(snapshot, options), nil
+}
+
+func (l *AdminServicesLogic) OrchestratorRoutes(authHeader string, includeDisabled bool, includeUpstream bool) (*types.OrchestratorRoutesResp, error) {
+	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
+		return nil, err
+	}
+	if l.repo == nil {
+		return nil, errOrchestratorUnavailable()
+	}
+	if client, ok := l.repo.(*orchestratorsnapshot.Client); ok {
+		var table servicestatus.RouteTable
+		if err := client.DecodeOrchestratorRoutes(l.ctx, includeDisabled, includeUpstream, &table); err != nil {
+			return nil, err
+		}
+		return orchestratorRoutesResp(table, includeUpstream), nil
+	}
+	snapshot, err := servicestatus.BuildSnapshotWithOptions(l.ctx, l.repo, servicestatus.BuildOptions{
+		IncludeDisabled: includeDisabled,
+	})
+	if err != nil {
+		return nil, err
+	}
+	l.enrichOrchestratorSnapshot(&snapshot)
+	tableOptions := l.svcCtx.RouteTableOptions
+	tableOptions.IncludeDisabledRoutes = includeDisabled
+	tableOptions.ServiceStatuses = servicestatus.ServiceStatusesByID(snapshot.Services)
+	table := servicestatus.BuildRouteTableWithOptions(snapshot, tableOptions)
+	return orchestratorRoutesResp(table, includeUpstream), nil
+}
+
+func (l *AdminServicesLogic) enrichOrchestratorSnapshot(snapshot *servicestatus.Snapshot) {
 	if l == nil || l.svcCtx == nil || snapshot == nil {
 		return
 	}
-	driver := l.svcCtx.RuntimeDriver
+	driver := l.svcCtx.ServiceStatusDriver
 	if driver == nil {
 		return
 	}
 	services, err := driver.ListServices(l.ctx, *snapshot)
 	if err != nil {
-		snapshot.Warnings = append(snapshot.Warnings, "runtime services unavailable")
+		snapshot.Warnings = append(snapshot.Warnings, "Service Status unavailable")
 		return
 	}
-	workers := make([]serviceruntime.RuntimeService, 0, len(services))
-	realServices := make([]serviceruntime.RuntimeService, 0, len(services))
+	workers := make([]servicestatus.ServiceStatus, 0, len(services))
+	realServices := make([]servicestatus.ServiceStatus, 0, len(services))
 	for _, service := range services {
 		if service.Kind == "worker" {
 			workers = append(workers, service)
@@ -159,12 +192,15 @@ func (l *AdminServicesLogic) enrichRuntimeSnapshot(snapshot *serviceruntime.Snap
 	}
 	snapshot.Services = realServices
 	snapshot.Workers = workers
-	snapshot.Topology.Nodes, snapshot.Topology.Edges = serviceruntime.RebuildRuntimeTopology(*snapshot)
+	snapshot.Topology.Nodes, snapshot.Topology.Edges = servicestatus.RebuildServiceTopology(*snapshot)
 }
 
 func (l *AdminServicesLogic) Detail(authHeader string, serviceID string) (*types.ServiceDetailResp, error) {
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
+	}
+	if l.repo == nil {
+		return nil, errOrchestratorUnavailable()
 	}
 	detail, err := l.repo.Detail(l.ctx, strings.TrimSpace(serviceID))
 	if err != nil {
@@ -179,12 +215,12 @@ func (l *AdminServicesLogic) Detail(authHeader string, serviceID string) (*types
 		Menus:          menuItems(detail.Menus),
 		FrontendRoutes: frontendRouteItems(detail.FrontendRoutes),
 		GatewayRoutes:  gatewayRouteItems(detail.GatewayRoutes),
-		Installations:  installationItems(detail.Installations),
+		Endpoints:      endpointItems(detail.Endpoints),
 		HealthChecks:   componentItems(detail.HealthChecks),
 	}, nil
 }
 
-func setItems(items []serviceregistry.Set) []types.ServiceSetItem {
+func setItems(items []orchestratorsnapshot.Set) []types.ServiceSetItem {
 	result := make([]types.ServiceSetItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, types.ServiceSetItem{
@@ -197,16 +233,16 @@ func setItems(items []serviceregistry.Set) []types.ServiceSetItem {
 	return result
 }
 
-func serviceItems(items []serviceregistry.Service, includeManifest bool) []types.ServiceNodeItem {
-	result := make([]types.ServiceNodeItem, 0, len(items))
+func serviceItems(items []orchestratorsnapshot.Service, includeManifest bool) []types.ServiceDefinitionItem {
+	result := make([]types.ServiceDefinitionItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, serviceItem(item, includeManifest))
 	}
 	return result
 }
 
-func serviceItem(item serviceregistry.Service, includeManifest bool) types.ServiceNodeItem {
-	out := types.ServiceNodeItem{
+func serviceItem(item orchestratorsnapshot.Service, includeManifest bool) types.ServiceDefinitionItem {
+	out := types.ServiceDefinitionItem{
 		ServiceId:   item.ServiceID,
 		SetId:       item.SetID,
 		Name:        item.Name,
@@ -221,7 +257,7 @@ func serviceItem(item serviceregistry.Service, includeManifest bool) types.Servi
 	return out
 }
 
-func edgeItems(items []serviceregistry.Edge) []types.ServiceEdgeItem {
+func edgeItems(items []orchestratorsnapshot.Edge) []types.ServiceEdgeItem {
 	result := make([]types.ServiceEdgeItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, types.ServiceEdgeItem{
@@ -235,7 +271,7 @@ func edgeItems(items []serviceregistry.Edge) []types.ServiceEdgeItem {
 	return result
 }
 
-func componentItems(items []serviceregistry.Component) []types.ServiceComponentItem {
+func componentItems(items []orchestratorsnapshot.Component) []types.ServiceComponentItem {
 	result := make([]types.ServiceComponentItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, types.ServiceComponentItem{
@@ -249,10 +285,10 @@ func componentItems(items []serviceregistry.Component) []types.ServiceComponentI
 	return result
 }
 
-func runtimeComponentItems(items []serviceruntime.RuntimeComponent) []types.ServiceRuntimeComponent {
-	result := make([]types.ServiceRuntimeComponent, 0, len(items))
+func serviceComponentItems(items []servicestatus.ServiceComponent) []types.ServiceStatusComponent {
+	result := make([]types.ServiceStatusComponent, 0, len(items))
 	for _, item := range items {
-		result = append(result, types.ServiceRuntimeComponent{
+		result = append(result, types.ServiceStatusComponent{
 			ServiceId:   item.ServiceID,
 			ComponentId: item.ComponentID,
 			Type:        item.Type,
@@ -263,16 +299,16 @@ func runtimeComponentItems(items []serviceruntime.RuntimeComponent) []types.Serv
 	return result
 }
 
-func runtimeServiceItems(items []serviceruntime.RuntimeService) []types.ServiceRuntimeService {
-	result := make([]types.ServiceRuntimeService, 0, len(items))
+func ServiceStatusItems(items []servicestatus.ServiceStatus) []types.ServiceStatusItem {
+	result := make([]types.ServiceStatusItem, 0, len(items))
 	for _, item := range items {
-		result = append(result, runtimeServiceItem(item))
+		result = append(result, ServiceStatusItem(item))
 	}
 	return result
 }
 
-func runtimeServiceItem(item serviceruntime.RuntimeService) types.ServiceRuntimeService {
-	return types.ServiceRuntimeService{
+func ServiceStatusItem(item servicestatus.ServiceStatus) types.ServiceStatusItem {
+	return types.ServiceStatusItem{
 		OwnerServiceId: item.OwnerServiceID,
 		ServiceId:      item.ServiceID,
 		Name:           item.Name,
@@ -291,10 +327,10 @@ func runtimeServiceItem(item serviceruntime.RuntimeService) types.ServiceRuntime
 	}
 }
 
-func runtimeManifestItems(items []serviceruntime.RuntimeManifestItem) []types.ServiceRuntimeManifestItem {
-	result := make([]types.ServiceRuntimeManifestItem, 0, len(items))
+func serviceManifestItems(items []servicestatus.ServiceManifestItem) []types.OrchestratorSnapshotItem {
+	result := make([]types.OrchestratorSnapshotItem, 0, len(items))
 	for _, item := range items {
-		result = append(result, types.ServiceRuntimeManifestItem{
+		result = append(result, types.OrchestratorSnapshotItem{
 			ServiceId: item.ServiceID,
 			Id:        item.ID,
 			Type:      item.Type,
@@ -306,10 +342,10 @@ func runtimeManifestItems(items []serviceruntime.RuntimeManifestItem) []types.Se
 	return result
 }
 
-func runtimeTopologyNodeItems(items []serviceruntime.RuntimeTopologyNode) []types.ServiceRuntimeTopologyNode {
-	result := make([]types.ServiceRuntimeTopologyNode, 0, len(items))
+func serviceTopologyNodeItems(items []servicestatus.ServiceTopologyNode) []types.ServiceTopologyNode {
+	result := make([]types.ServiceTopologyNode, 0, len(items))
 	for _, item := range items {
-		result = append(result, types.ServiceRuntimeTopologyNode{
+		result = append(result, types.ServiceTopologyNode{
 			Id:        item.ID,
 			ServiceId: item.ServiceID,
 			Label:     item.Label,
@@ -322,10 +358,10 @@ func runtimeTopologyNodeItems(items []serviceruntime.RuntimeTopologyNode) []type
 	return result
 }
 
-func runtimeTopologyEdgeItems(items []serviceruntime.RuntimeTopologyEdge) []types.ServiceRuntimeTopologyEdge {
-	result := make([]types.ServiceRuntimeTopologyEdge, 0, len(items))
+func serviceTopologyEdgeItems(items []servicestatus.ServiceTopologyEdge) []types.ServiceTopologyEdge {
+	result := make([]types.ServiceTopologyEdge, 0, len(items))
 	for _, item := range items {
-		result = append(result, types.ServiceRuntimeTopologyEdge{
+		result = append(result, types.ServiceTopologyEdge{
 			Id:        item.ID,
 			ServiceId: item.ServiceID,
 			From:      item.From,
@@ -338,7 +374,7 @@ func runtimeTopologyEdgeItems(items []serviceruntime.RuntimeTopologyEdge) []type
 	return result
 }
 
-func runtimeAsComponentItems(items []serviceruntime.RuntimeComponent) []types.ServiceComponentItem {
+func serviceComponentsAsItems(items []servicestatus.ServiceComponent) []types.ServiceComponentItem {
 	result := make([]types.ServiceComponentItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, types.ServiceComponentItem{
@@ -352,40 +388,40 @@ func runtimeAsComponentItems(items []serviceruntime.RuntimeComponent) []types.Se
 	return result
 }
 
-func runtimeSnapshotResp(snapshot serviceruntime.Snapshot) *types.ServiceRuntimeSnapshotResp {
-	return &types.ServiceRuntimeSnapshotResp{
-		Version:        snapshot.Version,
-		GeneratedAt:    snapshot.GeneratedAt,
-		ServiceNodes:   serviceItems(snapshot.ServiceNodes, false),
-		Permissions:    permissionItems(snapshot.Permissions),
-		Roles:          runtimeManifestItems(snapshot.Roles),
-		Menus:          menuItems(snapshot.Menus),
-		FrontendRoutes: frontendRouteItems(snapshot.FrontendRoutes),
-		GatewayRoutes:  gatewayRouteItems(snapshot.GatewayRoutes),
-		Components:     runtimeComponentItems(snapshot.Components),
-		Services:       runtimeServiceItems(snapshot.Services),
-		Workers:        runtimeServiceItems(snapshot.Workers),
-		StorageBuckets: runtimeManifestItems(snapshot.StorageBuckets),
-		HealthChecks:   runtimeComponentItems(snapshot.HealthChecks),
-		Operations:     runtimeManifestItems(snapshot.Operations),
-		Topology: types.ServiceRuntimeTopology{
-			Nodes:           runtimeTopologyNodeItems(snapshot.Topology.Nodes),
-			Edges:           runtimeTopologyEdgeItems(snapshot.Topology.Edges),
-			ServiceNodes:    serviceItems(snapshot.Topology.ServiceNodes, false),
-			DependencyEdges: edgeItems(snapshot.Topology.DependencyEdges),
+func orchestratorSnapshotResp(snapshot servicestatus.Snapshot) *types.OrchestratorSnapshotResp {
+	return &types.OrchestratorSnapshotResp{
+		Version:            snapshot.Version,
+		GeneratedAt:        snapshot.GeneratedAt,
+		ServiceDefinitions: serviceItems(snapshot.ServiceDefinitions, false),
+		Permissions:        permissionItems(snapshot.Permissions),
+		Roles:              serviceManifestItems(snapshot.Roles),
+		Menus:              menuItems(snapshot.Menus),
+		FrontendRoutes:     frontendRouteItems(snapshot.FrontendRoutes),
+		GatewayRoutes:      gatewayRouteItems(snapshot.GatewayRoutes),
+		Components:         serviceComponentItems(snapshot.Components),
+		Services:           ServiceStatusItems(snapshot.Services),
+		Workers:            ServiceStatusItems(snapshot.Workers),
+		StorageBuckets:     serviceManifestItems(snapshot.StorageBuckets),
+		HealthChecks:       serviceComponentItems(snapshot.HealthChecks),
+		Operations:         serviceManifestItems(snapshot.Operations),
+		Topology: types.ServiceTopologyGraph{
+			Nodes:              serviceTopologyNodeItems(snapshot.Topology.Nodes),
+			Edges:              serviceTopologyEdgeItems(snapshot.Topology.Edges),
+			ServiceDefinitions: serviceItems(snapshot.Topology.ServiceDefinitions, false),
+			DependencyEdges:    edgeItems(snapshot.Topology.DependencyEdges),
 		},
 		Warnings: snapshot.Warnings,
 	}
 }
 
-func runtimeRoutesResp(table serviceruntime.RouteTable, includeUpstream bool) *types.ServiceRuntimeRoutesResp {
-	routes := make([]types.ServiceRuntimeRouteItem, 0, len(table.Routes))
+func orchestratorRoutesResp(table servicestatus.RouteTable, includeUpstream bool) *types.OrchestratorRoutesResp {
+	routes := make([]types.OrchestratorRouteItem, 0, len(table.Routes))
 	for _, route := range table.Routes {
 		upstream := ""
 		if includeUpstream {
 			upstream = route.UpstreamBase
 		}
-		routes = append(routes, types.ServiceRuntimeRouteItem{
+		routes = append(routes, types.OrchestratorRouteItem{
 			RouteId:        route.RouteID,
 			OwnerServiceId: route.OwnerServiceID,
 			Prefix:         route.Prefix,
@@ -402,14 +438,14 @@ func runtimeRoutesResp(table serviceruntime.RouteTable, includeUpstream bool) *t
 			HealthCheckId:  route.HealthCheckID,
 			CreatedFrom:    route.CreatedFrom,
 			Status:         route.Status,
-			ServiceState:   route.ServiceState,
+			ServiceStatus:  route.ServiceStatus,
 			ServiceHealth:  route.ServiceHealth,
 			Conflicts:      route.Conflicts,
 			Warnings:       route.Warnings,
 			BlockedBy:      route.BlockedBy,
 		})
 	}
-	return &types.ServiceRuntimeRoutesResp{
+	return &types.OrchestratorRoutesResp{
 		Version:     table.Version,
 		GeneratedAt: table.GeneratedAt,
 		Routes:      routes,
@@ -418,7 +454,7 @@ func runtimeRoutesResp(table serviceruntime.RouteTable, includeUpstream bool) *t
 	}
 }
 
-func permissionItems(items []serviceregistry.Permission) []types.ServicePermissionItem {
+func permissionItems(items []orchestratorsnapshot.Permission) []types.ServicePermissionItem {
 	result := make([]types.ServicePermissionItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, types.ServicePermissionItem{
@@ -430,7 +466,7 @@ func permissionItems(items []serviceregistry.Permission) []types.ServicePermissi
 	return result
 }
 
-func menuItems(items []serviceregistry.Menu) []types.ServiceMenuItem {
+func menuItems(items []orchestratorsnapshot.Menu) []types.ServiceMenuItem {
 	result := make([]types.ServiceMenuItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, types.ServiceMenuItem{
@@ -448,7 +484,7 @@ func menuItems(items []serviceregistry.Menu) []types.ServiceMenuItem {
 	return result
 }
 
-func frontendRouteItems(items []serviceregistry.FrontendRoute) []types.ServiceFrontendRouteItem {
+func frontendRouteItems(items []orchestratorsnapshot.FrontendRoute) []types.ServiceFrontendRouteItem {
 	result := make([]types.ServiceFrontendRouteItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, types.ServiceFrontendRouteItem{
@@ -463,7 +499,7 @@ func frontendRouteItems(items []serviceregistry.FrontendRoute) []types.ServiceFr
 	return result
 }
 
-func gatewayRouteItems(items []serviceregistry.GatewayRoute) []types.ServiceGatewayRouteItem {
+func gatewayRouteItems(items []orchestratorsnapshot.GatewayRoute) []types.ServiceGatewayRouteItem {
 	result := make([]types.ServiceGatewayRouteItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, types.ServiceGatewayRouteItem{
@@ -477,17 +513,19 @@ func gatewayRouteItems(items []serviceregistry.GatewayRoute) []types.ServiceGate
 	return result
 }
 
-func installationItems(items []serviceregistry.Installation) []types.ServiceInstallationItem {
-	result := make([]types.ServiceInstallationItem, 0, len(items))
+func endpointItems(items []orchestratorsnapshot.Endpoint) []types.ServiceEndpointItem {
+	result := make([]types.ServiceEndpointItem, 0, len(items))
 	for _, item := range items {
-		result = append(result, types.ServiceInstallationItem{
-			ServiceId:  item.ServiceID,
-			Name:       item.Name,
-			Version:    item.Version,
-			Status:     item.Status,
-			Manifest:   rawJSON(item.Manifest),
-			EnabledAt:  item.EnabledAt,
-			DisabledAt: item.DisabledAt,
+		result = append(result, types.ServiceEndpointItem{
+			Endpoint:    item.Endpoint,
+			ServiceId:   item.ServiceID,
+			Protocol:    item.Protocol,
+			HealthPath:  item.HealthPath,
+			Health:      item.Health,
+			Reachable:   item.Reachable,
+			DisplayName: item.DisplayName,
+			Note:        item.Note,
+			Config:      rawJSON(item.Config),
 		})
 	}
 	return result

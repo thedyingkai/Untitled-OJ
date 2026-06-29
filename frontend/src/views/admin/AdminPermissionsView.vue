@@ -1,10 +1,20 @@
 <script setup lang="ts">
 import { h, onMounted, reactive, ref } from 'vue'
-import { NButton, NForm, NFormItem, NInputNumber, NSelect, NTabPane, NTabs, useMessage, type DataTableColumns } from 'naive-ui'
+import {
+  NButton,
+  NForm,
+  NFormItem,
+  NInputNumber,
+  NSelect,
+  NTabPane,
+  NTabs,
+  useMessage,
+  type DataTableColumns,
+} from 'naive-ui'
 
 import { addProblemRole, listAdminRoles, listAuditLogs, removeProblemRole } from '../../api/authAdmin'
 import { toApiClientError, type ApiClientError } from '../../api/client'
-import { getServiceRuntimeSnapshot } from '../../api/services'
+import { getOrchestratorSnapshot } from '../../api/services'
 import LoadingView from '../../components/common/LoadingView.vue'
 import TimeText from '../../components/common/TimeText.vue'
 import OjosDataTable from '../../components/oj/OjosDataTable.vue'
@@ -45,7 +55,11 @@ const roleColumns: DataTableColumns<RoleItem> = [
 ]
 
 const permissionColumns: DataTableColumns<ServicePermissionItem> = [
-  { title: '权限', key: 'permission_key', render: (row) => h(OjosPermissionTag, { permission: row.permission_key }) },
+  {
+    title: '权限',
+    key: 'permission_key',
+    render: (row) => h(OjosPermissionTag, { permission: row.permission_key }),
+  },
   { title: 'Service', key: 'service_id' },
   { title: '说明', key: 'description' },
 ]
@@ -64,13 +78,13 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [roleResp, runtimeResp, auditResp] = await Promise.all([
+    const [roleResp, snapshotResp, auditResp] = await Promise.all([
       listAdminRoles(),
-      getServiceRuntimeSnapshot(),
+      getOrchestratorSnapshot(),
       listAuditLogs(),
     ])
     roles.value = roleResp
-    permissions.value = runtimeResp.permissions
+    permissions.value = snapshotResp.permissions
     auditLogs.value = auditResp
   } catch (err) {
     error.value = toApiClientError(err)
@@ -113,7 +127,7 @@ onMounted(() => void load())
   <div class="admin-permissions-page">
     <OjosPageHeader
       title="权限"
-      description="查看角色、Service 权限点、题目作用域授权和审计历史。"
+      description="查看角色、Service 权限点、题目作用域授权和审计记录。"
       eyebrow="管理"
     >
       <template #actions>

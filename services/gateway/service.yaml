@@ -2,20 +2,27 @@ schema_version: 1
 id: gateway
 name: Gateway
 version: 0.1.0
-kind: edge-http
+kind: gateway
+description: 外部 HTTP 入口，负责认证、权限、审计、限流和基于 routing snapshot 的业务流量代理。
+runtime:
+  mode: container
+  driver: compose
+  root_allowed: true
+  non_root_allowed: false
+  start_policy: automatic
+  restart_policy: on-failure
 endpoint:
   protocol: http
   default_port: 8080
   health_path: /health
-runtime:
-  mode: container
-  root_allowed: true
-  non_root_allowed: false
-config_schema:
-  rate_limit_per_minute:
-    type: integer
-    default: 600
+  expose: true
+  routes:
+    - /api
 requires:
+  services:
+    - auth
+    - problem-api
+    - judge-api
   links:
     - id: auth
       protocol: http
@@ -23,16 +30,61 @@ requires:
       protocol: http
     - id: judge-api
       protocol: http
+  storage: []
+  database: []
+  queue: []
+  secrets:
+    - jwt-secret
 provides:
   capabilities:
     - gateway.http
     - gateway.auth
     - gateway.audit
-ui:
-  enabled: false
-permissions:
-  - gateway.read
+    - gateway.rate-limit
+  endpoints:
+    - http
+  routes:
+    - /api/auth
+    - /api/problem
+    - /api/judge
+  workers: []
+  storage_buckets: []
+  events: []
+config_schema:
+  rate_limit_per_minute:
+    type: integer
+    default: 600
+resources:
+  cpu: shared
+  memory: 256Mi
+  disk: 128Mi
+  gpu: none
+  network: ingress
 security:
   allow_privileged: false
   allow_host_mount: false
   allow_arbitrary_command: false
+  required_secrets:
+    - jwt-secret
+  sandbox: {}
+  network_policy:
+    egress_links_only: true
+source:
+  type: local
+  ref: services/gateway
+  build:
+    driver: dockerfile
+    path: services/gateway/Dockerfile
+  artifact: {}
+ui:
+  enabled: false
+  routes: []
+  menus: []
+  permissions: []
+permissions:
+  - gateway.read
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10

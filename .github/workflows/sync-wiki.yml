@@ -35,45 +35,27 @@ jobs:
           mkdir -p .wiki-src
           cp -R docs/. .wiki-src/
 
-          cp docs/DOCS_INDEX.md .wiki-src/Home.md
+          cp README.md .wiki-src/Home.md
 
           cat > .wiki-src/_Sidebar.md <<'EOF'
           # OJOS Wiki
 
           - [首页](Home)
-          - [文档索引](DOCS_INDEX)
-          - [文档状态](DOCS_STATUS)
+          - [Service 规范](spec/service-spec)
+          - [Set 规范](spec/set-spec)
+          - [Endpoint / Link](spec/endpoint-link-spec)
 
-          ## 架构
-          - [Service-first 架构](architecture/service-first-architecture)
-          - [Root Runtime Manager](architecture/root-runtime-manager)
-          - [Service / Endpoint / Link](architecture/service-endpoint-link-model)
-          - [Set 模型](architecture/set-model)
-          - [Device 模型](architecture/device-model)
-          - [Topology 模型](architecture/topology-model)
+          ## Orchestrator
+          - [需求](orchestrator/requirements)
+          - [边界](orchestrator/boundary)
+          - [Action Model](orchestrator/action-model)
+          - [GUI / TUI 等价性](orchestrator/gui-tui-parity)
+          - [Topology](orchestrator/topology-model)
+          - [Operation](orchestrator/operation-model)
+          - [数据库](orchestrator/database)
 
-          ## Service
-          - [service.yaml 契约](services/service-yaml-contract)
-          - [基础服务](services/base-services)
-          - [Gateway Service](services/gateway-service)
-          - [Web Shell Service](services/web-shell-service)
-          - [Judge Worker Service](services/judge-worker-service)
-
-          ## Runtime
-          - [Endpoint Manager](runtime/endpoint-manager)
-          - [Link Manager](runtime/link-manager)
-          - [Topology Manager](runtime/topology-manager)
-          - [Non-root Agent](runtime/non-root-agent)
-          - [Service Registry](runtime/service-registry)
-
-          ## Installer
-          - [CLI](installer/cli)
-          - [Native GUI](installer/native-gui)
-          - [Terminal TUI](installer/terminal-tui)
-
-          ## Release
-          - [Service-first Gate](release/service-first-rebase-gate)
-          - [Service-first Acceptance](release/service-first-acceptance)
+          ## 历史区
+          旧文档保存在仓库的 docs-temp/，不作为正式 Wiki 来源。
           EOF
 
       - name: Push mirror to wiki

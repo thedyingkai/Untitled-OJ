@@ -3,28 +3,70 @@ id: postgres
 name: PostgreSQL
 version: 17.0.0
 kind: database
+description: OJ 业务数据库 Service，可由外部 PostgreSQL endpoint 承载。
+runtime:
+  mode: external
+  driver: external
+  root_allowed: true
+  non_root_allowed: false
+  start_policy: external
+  restart_policy: external
 endpoint:
   protocol: postgres
   default_port: 5432
   health_path: ""
-runtime:
-  mode: external
-  root_allowed: true
-  non_root_allowed: false
+  expose: false
+  routes: []
+requires:
+  services: []
+  links: []
+  storage: []
+  database: []
+  queue: []
+  secrets:
+    - postgres-password
+provides:
+  capabilities:
+    - database.postgres
+  endpoints:
+    - postgres
+  routes: []
+  workers: []
+  storage_buckets: []
+  events: []
 config_schema:
   database:
     type: string
     default: ojos
-requires:
-  links: []
-provides:
-  capabilities:
-    - database.postgres
-ui:
-  enabled: false
-permissions:
-  - postgres.connect
+resources:
+  cpu: shared
+  memory: 1Gi
+  disk: 16Gi
+  gpu: none
+  network: internal
 security:
   allow_privileged: false
   allow_host_mount: false
   allow_arbitrary_command: false
+  required_secrets:
+    - postgres-password
+  sandbox: {}
+  network_policy:
+    internal_only: true
+source:
+  type: external
+  ref: postgres:17
+  build: {}
+  artifact: {}
+ui:
+  enabled: false
+  routes: []
+  menus: []
+  permissions: []
+permissions:
+  - postgres.connect
+health:
+  checks:
+    - tcp
+  timeout_seconds: 3
+  interval_seconds: 10

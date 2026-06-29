@@ -89,7 +89,8 @@ dist-ssr
 
 # OJOS packages and release artifacts
 *.ojosmod
-*.ojos-service
+*.ojossvc
+*.service.tar.zst
 
 # Python caches
 __pycache__/

@@ -1,5 +1,5 @@
 # Web Shell Service
 
-Web Shell 是 Root 侧可热插拔 UI Service。它读取 Root Runtime Manager 生成的 UI registry，通过 Gateway 访问后端 Service。
+Web Shell 是 OJ 网站业务 UI Service，不是 OJOS Orchestrator。
 
-Web Shell 不安装、删除、热插拔 Service，不配置 Link，不控制 Non-root Device。
+它可以展示题库、提交、评测结果和普通业务管理视图。它不安装 Service，不管理 Endpoint/Link，不修改 Topology，不执行 Operation，也不充当编排控制面。

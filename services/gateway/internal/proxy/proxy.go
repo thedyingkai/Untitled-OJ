@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"ojos-gateway/internal/config"
-	"ojos-gateway/internal/kernel/serviceruntime"
+	"ojos-gateway/internal/orchestrator/servicestatus"
 	"ojos-shared/security/internalauth"
 
 	sharedjwt "ojos-shared/security/jwt"
@@ -47,11 +47,11 @@ type routeProxy struct {
 	target        *url.URL
 }
 
-type RuntimeReader interface {
-	RuntimeRouteTable(context.Context) (serviceruntime.RouteTable, error)
+type ServiceRouteReader interface {
+	ServiceRouteTable(context.Context) (servicestatus.RouteTable, error)
 }
 
-type RuntimeProxy struct {
+type ServiceProxy struct {
 	jwtSecret      string
 	internalSigner *internalauth.Signer
 	adminChecker   AdminChecker
@@ -78,20 +78,20 @@ func NewConfigProxy(
 	internalSigner *internalauth.Signer,
 	log *zap.Logger,
 ) (http.HandlerFunc, error) {
-	runtimeProxy, err := NewRuntimeProxy(routes, trustedServices, jwtSecret, internalSigner, log)
+	serviceProxy, err := NewServiceProxy(routes, trustedServices, jwtSecret, internalSigner, log)
 	if err != nil {
 		return nil, err
 	}
-	return runtimeProxy.ServeHTTP, nil
+	return serviceProxy.ServeHTTP, nil
 }
 
-func NewRuntimeProxy(
+func NewServiceProxy(
 	routes []config.ProxyRouteConfig,
 	trustedServices []config.ProxyTrustedServiceConfig,
 	jwtSecret string,
 	internalSigner *internalauth.Signer,
 	log *zap.Logger,
-) (*RuntimeProxy, error) {
+) (*ServiceProxy, error) {
 	compiled := make([]routeProxy, 0, len(routes))
 	trusted, err := compileTrustedServices(routes, trustedServices)
 	if err != nil {
@@ -142,35 +142,35 @@ func NewRuntimeProxy(
 		return len(compiled[i].prefix) > len(compiled[j].prefix)
 	})
 
-	runtimeProxy := &RuntimeProxy{
+	serviceProxy := &ServiceProxy{
 		jwtSecret:      jwtSecret,
 		internalSigner: internalSigner,
 		log:            log,
 		staticRoutes:   compiled,
 		trusted:        trusted,
 	}
-	runtimeProxy.table.Store(serviceruntime.RouteTable{Version: "0"})
-	return runtimeProxy, nil
+	serviceProxy.table.Store(servicestatus.RouteTable{Version: "0"})
+	return serviceProxy, nil
 }
 
-func (p *RuntimeProxy) SetAdminChecker(checker AdminChecker) {
+func (p *ServiceProxy) SetAdminChecker(checker AdminChecker) {
 	p.adminChecker = checker
 }
 
-func (p *RuntimeProxy) Reload(ctx context.Context, reader RuntimeReader) (serviceruntime.RouteTable, error) {
-	table, err := reader.RuntimeRouteTable(ctx)
+func (p *ServiceProxy) Reload(ctx context.Context, reader ServiceRouteReader) (servicestatus.RouteTable, error) {
+	table, err := reader.ServiceRouteTable(ctx)
 	if err != nil {
-		return serviceruntime.RouteTable{}, err
+		return servicestatus.RouteTable{}, err
 	}
 	p.SetRouteTable(table)
 	return table, nil
 }
 
-func (p *RuntimeProxy) SetRouteTable(table serviceruntime.RouteTable) {
+func (p *ServiceProxy) SetRouteTable(table servicestatus.RouteTable) {
 	p.table.Store(table)
 }
 
-func (p *RuntimeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (p *ServiceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, route := range p.staticRoutes {
 		if isCoreStaticProxyPrefix(route.prefix) && matchPrefix(r.URL.Path, route.prefix) {
 			p.serveRoute(w, r, route)
@@ -178,15 +178,15 @@ func (p *RuntimeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if route, ok := p.matchRuntimeRoute(r.URL.Path); ok {
+	if route, ok := p.matchServiceRoute(r.URL.Path); ok {
 		p.serveRoute(w, r, route)
 		return
 	}
-	if blocked, ok := p.matchBlockedRuntimeRoute(r.URL.Path); ok {
+	if blocked, ok := p.matchBlockedServiceRoute(r.URL.Path); ok {
 		if _, ok := p.authenticateRequest(w, r, blocked.authMode); !ok {
 			return
 		}
-		writeJSONError(w, http.StatusServiceUnavailable, 50301, "runtime service unavailable: "+blocked.serviceID)
+		writeJSONError(w, http.StatusServiceUnavailable, 50301, "service unavailable: "+blocked.serviceID)
 		return
 	}
 
@@ -200,9 +200,9 @@ func (p *RuntimeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (p *RuntimeProxy) matchBlockedRuntimeRoute(path string) (routeProxy, bool) {
+func (p *ServiceProxy) matchBlockedServiceRoute(path string) (routeProxy, bool) {
 	value := p.table.Load()
-	table, _ := value.(serviceruntime.RouteTable)
+	table, _ := value.(servicestatus.RouteTable)
 	for _, route := range table.Routes {
 		if route.ProxyEnabled || !route.Enabled || !matchPrefix(path, route.Prefix) {
 			continue
@@ -214,9 +214,9 @@ func (p *RuntimeProxy) matchBlockedRuntimeRoute(path string) (routeProxy, bool) 
 	return routeProxy{}, false
 }
 
-func (p *RuntimeProxy) matchRuntimeRoute(path string) (routeProxy, bool) {
+func (p *ServiceProxy) matchServiceRoute(path string) (routeProxy, bool) {
 	value := p.table.Load()
-	table, _ := value.(serviceruntime.RouteTable)
+	table, _ := value.(servicestatus.RouteTable)
 	for _, route := range table.Routes {
 		if !route.ProxyEnabled || !matchPrefix(path, route.Prefix) {
 			continue
@@ -255,7 +255,7 @@ func containsString(items []string, want string) bool {
 	return false
 }
 
-func (p *RuntimeProxy) serveRoute(w http.ResponseWriter, r *http.Request, route routeProxy) {
+func (p *ServiceProxy) serveRoute(w http.ResponseWriter, r *http.Request, route routeProxy) {
 	claims, ok := p.authenticateRequest(w, r, route.authMode)
 	if !ok {
 		return
@@ -269,12 +269,12 @@ func (p *RuntimeProxy) serveRoute(w http.ResponseWriter, r *http.Request, route 
 	route.proxy.ServeHTTP(w, r)
 }
 
-func (p *RuntimeProxy) authenticateRequest(
+func (p *ServiceProxy) authenticateRequest(
 	w http.ResponseWriter,
 	r *http.Request,
 	authMode string,
 ) (*sharedjwt.Claims, bool) {
-	authMode = normalizeRuntimeAuthMode(authMode)
+	authMode = normalizeServiceAuthMode(authMode)
 	if authMode == authModePublic {
 		return nil, true
 	}
@@ -342,7 +342,7 @@ func claimsFromContext(ctx context.Context) (*sharedjwt.Claims, bool) {
 }
 
 func normalizeAuthMode(mode string) (string, error) {
-	mode = normalizeRuntimeAuthMode(mode)
+	mode = normalizeServiceAuthMode(mode)
 	switch mode {
 	case authModePublic, authModeOptional, authModeUser, authModeAdmin, authModeWorker, authModeInternal:
 		return mode, nil
@@ -351,7 +351,7 @@ func normalizeAuthMode(mode string) (string, error) {
 	}
 }
 
-func normalizeRuntimeAuthMode(mode string) string {
+func normalizeServiceAuthMode(mode string) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
 	case "", authModeNone, "public":
@@ -516,7 +516,7 @@ func newReverseProxy(
 
 			pr.Out.Header.Set("X-Forwarded-Prefix", routePrefix)
 			pr.Out.Header.Set("X-Gateway", "ojos-gateway")
-			pr.Out.Header.Set("X-OJOS-Gateway-Proxy", "runtime")
+			pr.Out.Header.Set("X-OJOS-Gateway-Proxy", "service-routing")
 
 			if internalSigner != nil {
 				if err := internalSigner.SignRequest(pr.Out.Context(), pr.Out); err != nil {

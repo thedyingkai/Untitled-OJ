@@ -1,0 +1,73 @@
+schema_version: 1
+id: redis
+name: Redis
+version: 8.0.0
+kind: cache
+description: OJ 业务缓存、队列信号和 nonce 存储 Service。
+runtime:
+  mode: external
+  driver: external
+  root_allowed: true
+  non_root_allowed: false
+  start_policy: external
+  restart_policy: external
+endpoint:
+  protocol: redis
+  default_port: 6379
+  health_path: ""
+  expose: false
+  routes: []
+requires:
+  services: []
+  links: []
+  storage: []
+  database: []
+  queue: []
+  secrets: []
+provides:
+  capabilities:
+    - cache.redis
+    - queue.signal
+    - internal-auth.nonce
+  endpoints:
+    - redis
+  routes: []
+  workers: []
+  storage_buckets: []
+  events:
+    - signal.published
+config_schema:
+  database:
+    type: integer
+    default: 0
+resources:
+  cpu: shared
+  memory: 256Mi
+  disk: 1Gi
+  gpu: none
+  network: internal
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false
+  required_secrets: []
+  sandbox: {}
+  network_policy:
+    internal_only: true
+source:
+  type: external
+  ref: redis:8
+  build: {}
+  artifact: {}
+ui:
+  enabled: false
+  routes: []
+  menus: []
+  permissions: []
+permissions:
+  - redis.connect
+health:
+  checks:
+    - tcp
+  timeout_seconds: 3
+  interval_seconds: 10

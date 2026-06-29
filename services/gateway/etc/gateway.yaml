@@ -56,15 +56,13 @@ Proxy:
       StripPrefix: /api
       AuthMode: required
 
-Runtime:
+ServiceStatus:
   ComposeServices:
     - auth
     - gateway
-    - root-runtime-manager
     - problem-api
     - judge-api
     - judge-worker
-  ApplyEnabled: false
 
 InternalAuth:
   Enabled: true
@@ -74,6 +72,6 @@ InternalAuth:
   TimestampSkewSeconds: 60
   NonceTTLSeconds: 120
 
-RootRuntime:
-  Endpoint: http://root-runtime-manager:8090
+Orchestrator:
+  Endpoint: ""
   InternalToken: ""

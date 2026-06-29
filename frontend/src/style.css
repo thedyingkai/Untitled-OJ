@@ -634,7 +634,6 @@ pre {
 .status-service-installing,
 .status-service-upgrading,
 .problem-ready,
-.visibility-contest,
 .language-tag {
   --n-color: #eef5ff;
   --n-text-color: var(--info);

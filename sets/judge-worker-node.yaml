@@ -1,14 +1,33 @@
 schema_version: 1
 id: judge-worker-node
-name: 评测节点
-description: Non-root 设备只部署 judge-worker，由 Root 下发 endpoint 和 link 配置。
+name: 评测 Worker 节点
+description: 在受限运行环境中只部署 judge-worker，并连接既有 judge-api 与 storage Endpoint。
+scenario:
+  type: worker-only
+  recommended_for:
+    - 独立评测主机
+    - 扩展评测并发
 services:
-  - judge-worker
+  - id: judge-worker
+    required: true
+    count: 1
+    placement: { host: worker }
+    config:
+      max_parallel_jobs: 16
+      sandbox_slots: 16
+default_endpoints:
+  - { service: judge-worker, port: 9101, protocol: http, expose: false }
 default_links: []
-non_root_only: true
-required_root_links:
-  - judge-api
-  - storage
-recommended_for:
-  - 独立评测机
-  - 横向扩容
+policies:
+  placement: { worker_only: true }
+  security: { secret_ref_only: true, web_shell_forbidden: true }
+  network:
+    required_external_links:
+      - judge-worker -> judge-api
+      - judge-worker -> storage
+  health: { require_all_required_services: true }
+operations:
+  install_order: [judge-worker]
+  start_order: [judge-worker]
+  stop_order: [judge-worker]
+notes: 本 Set 不包含 web-shell、gateway、数据库或 OJ 业务页面。

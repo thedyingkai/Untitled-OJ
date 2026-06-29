@@ -234,10 +234,7 @@ fn validate_manifest(manifest: &ProblemManifest) -> Result<()> {
         ));
     }
 
-    if !matches!(
-        manifest.visibility.as_str(),
-        "public" | "private" | "contest_only"
-    ) {
+    if !matches!(manifest.visibility.as_str(), "public" | "private") {
         return Err(anyhow!(
             "unsupported problem visibility: {}",
             manifest.visibility

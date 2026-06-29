@@ -77,7 +77,6 @@ const difficultyMeta: Record<string, StatusMeta> = {
 const visibilityMeta: Record<string, StatusMeta> = {
   public: meta('公开', 'success', 'visibility-public', '所有登录用户可见。'),
   private: meta('私有', 'warning', 'visibility-private', '仅授权用户可见。'),
-  contest_only: meta('比赛内', 'info', 'visibility-contest', '仅在比赛作用域内可见。'),
 }
 
 const problemStatusMeta: Record<string, StatusMeta> = {

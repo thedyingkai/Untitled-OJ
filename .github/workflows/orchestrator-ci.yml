@@ -1,0 +1,82 @@
+name: Orchestrator CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-test:
+    name: Go tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+      - name: Test Go services
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in services/shared services/auth services/gateway services/problem-api services/judge-api; do
+            (cd "$dir" && go test ./...)
+          done
+
+  rust-test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test Orchestrator workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo check
+          cargo test
+      - name: Test judge worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd services/judge-worker
+          cargo fmt --check
+          cargo check
+          cargo test
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
+          npm audit --registry=https://registry.npmjs.org --audit-level=high
+          npm run build
+
+  orchestrator-model-checks:
+    name: Orchestrator model checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run Orchestrator model checks
+        run: |
+          cargo test -p orchestrator-core checked_in_service_manifests_validate
+          cargo test -p orchestrator-core checked_in_sets_reference_existing_services
+          cargo test -p orchestrator-core action_registry_contains_required_actions_and_no_forbidden_actions
+          cargo test -p orchestrator-core form_registry_covers_every_action
+          cargo test -p orchestrator-core service_install_operation_uses_operation_model
+          cargo test -p orchestrator-core set_validate_and_expand

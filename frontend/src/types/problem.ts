@@ -1,4 +1,4 @@
-export type ProblemVisibility = 'private' | 'public' | 'contest_only'
+export type ProblemVisibility = 'private' | 'public'
 export type ProblemStatus = 'draft' | 'ready' | 'published' | 'archived'
 export type ProblemDifficulty = 'easy' | 'medium' | 'hard'
 export type ProblemType =
