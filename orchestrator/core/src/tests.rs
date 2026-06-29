@@ -2159,15 +2159,39 @@ fn log_query_reads_only_scoped_sources_and_operation_logs() {
                 .expect("service log operation"),
         )
         .expect("put operation");
+    let mut middle_log = operation_step_log_record(
+        "op-log-query",
+        "step-middle",
+        "info",
+        "middle service log collected",
+        serde_json::json!({"service_id": "gateway"}),
+    );
+    middle_log.created_at = "2026-01-01T12:00:00Z".to_string();
     store
-        .append_operation_log(operation_step_log_record(
-            "op-log-query",
-            "step-1",
-            "info",
-            "service log collected",
-            serde_json::json!({"service_id": "gateway"}),
-        ))
+        .append_operation_log(middle_log)
         .expect("append operation log");
+    let mut newer_log = operation_step_log_record(
+        "op-log-query",
+        "step-new",
+        "info",
+        "newer service log collected",
+        serde_json::json!({"service_id": "gateway"}),
+    );
+    newer_log.created_at = "2026-01-02T00:00:00Z".to_string();
+    store
+        .append_operation_log(newer_log)
+        .expect("append newer operation log");
+    let mut older_log = operation_step_log_record(
+        "op-log-query",
+        "step-older",
+        "info",
+        "oldest service log collected",
+        serde_json::json!({"service_id": "gateway"}),
+    );
+    older_log.created_at = "2026-01-01T00:00:00Z".to_string();
+    store
+        .append_operation_log(older_log)
+        .expect("append older operation log");
 
     let result = query_logs(
         &store,
@@ -2180,8 +2204,10 @@ fn log_query_reads_only_scoped_sources_and_operation_logs() {
     )
     .expect("query logs");
     assert_eq!(result.sources.len(), 1);
-    assert_eq!(result.operation_logs.len(), 1);
-    assert_eq!(result.operation_logs[0].step_id, "step-1");
+    assert_eq!(result.operation_logs.len(), 3);
+    assert_eq!(result.operation_logs[0].step_id, "step-new");
+    assert_eq!(result.operation_logs[1].step_id, "step-middle");
+    assert_eq!(result.operation_logs[2].step_id, "step-older");
 
     assert!(
         store

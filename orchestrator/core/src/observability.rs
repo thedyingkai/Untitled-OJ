@@ -34,11 +34,12 @@ pub fn query_logs<S: OrchestratorStore>(store: &S, query: &LogQuery) -> Result<L
         .collect::<Vec<_>>();
     sources.sort_by(|left, right| left.source_id.cmp(&right.source_id));
 
-    let operation_logs = if let Some(operation_id) = query.operation_id.as_deref() {
+    let mut operation_logs = if let Some(operation_id) = query.operation_id.as_deref() {
         store.list_operation_logs(operation_id)?
     } else {
         Vec::new()
     };
+    sort_recent_operation_logs(&mut operation_logs);
 
     Ok(LogQueryResult {
         sources,
@@ -223,15 +224,19 @@ fn recent_operation_logs<S: OrchestratorStore>(
     for operation in &topology.operations {
         logs.extend(store.list_operation_logs(&operation.operation_id)?);
     }
-    logs.sort_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left.operation_id.cmp(&right.operation_id))
-            .then_with(|| left.step_id.cmp(&right.step_id))
-    });
-    logs.reverse();
+    sort_recent_operation_logs(&mut logs);
     logs.truncate(limit);
     Ok(logs)
+}
+
+fn sort_recent_operation_logs(logs: &mut [OperationLogRecord]) {
+    logs.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.operation_id.cmp(&left.operation_id))
+            .then_with(|| right.step_id.cmp(&left.step_id))
+    });
 }
 
 fn diagnostic_findings(
