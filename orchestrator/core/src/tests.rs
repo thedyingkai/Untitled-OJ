@@ -1,7 +1,11 @@
 use crate::*;
 use std::collections::HashSet;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn repo_root() -> PathBuf {
@@ -2752,6 +2756,34 @@ fn endpoint_and_link_health_checks_return_formal_statuses() {
 }
 
 #[test]
+fn tcp_probe_checks_http_health_path_status() {
+    let endpoint = local_http_endpoint(
+        "/health",
+        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
+    );
+    let result =
+        check_endpoint_health_with_probe(&endpoint, &TcpEndpointProbe::new(Duration::from_secs(2)))
+            .expect("http health check");
+    assert_eq!(result.health, "healthy");
+    assert!(result.reachable);
+    assert_eq!(result.message, "http 204");
+}
+
+#[test]
+fn tcp_probe_marks_http_non_success_status_as_degraded() {
+    let endpoint = local_http_endpoint(
+        "health",
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+    );
+    let result =
+        check_endpoint_health_with_probe(&endpoint, &TcpEndpointProbe::new(Duration::from_secs(2)))
+            .expect("http health check");
+    assert_eq!(result.health, "degraded");
+    assert!(result.reachable);
+    assert_eq!(result.message, "http 500");
+}
+
+#[test]
 fn orchestrator_view_can_load_from_store_state() {
     let root = repo_root();
     let schemas = load_shared_schemas(&root).expect("schemas");
@@ -3084,4 +3116,31 @@ fn reconcile_tick_snapshot_uses_refreshed_store_state() {
             .map(|link| link.health.as_str()),
         Some("healthy")
     );
+}
+
+fn local_http_endpoint(health_path: &str, response: &'static str) -> Endpoint {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local http listener");
+    let endpoint = listener.local_addr().expect("local addr").to_string();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept health request");
+        let mut buffer = [0_u8; 1024];
+        let _ = stream.read(&mut buffer);
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
+    });
+
+    Endpoint {
+        endpoint,
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: health_path.to_string(),
+        health: "unknown".to_string(),
+        reachable: false,
+        display_name: "Local HTTP".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
 }

@@ -32,6 +32,7 @@ docs/release/
 - Operation executor：`orchestrator/core/src/store.rs`
 - Executor drivers：`orchestrator/core/src/executor.rs`
 - Endpoint/Link health：`orchestrator/core/src/health.rs`
+- HTTP health_path 检查测试：`tcp_probe_checks_http_health_path_status`
 - LogView 查询与 DiagnosticReport 导出：`orchestrator/core/src/observability.rs`
 - Reconcile tick：`orchestrator/core/src/reconciler.rs`
 - GUI/TUI 共享视图：`orchestrator/core/src/view.rs`
