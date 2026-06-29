@@ -359,7 +359,7 @@ fn load_service_manifests(
         }
         match validate_service_manifest_file(repo_root, &rel) {
             Ok(manifest) => rows.push((manifest, rel)),
-            Err(err) => warnings.push(format!("{}: {}", slash_path(&rel), err)),
+            Err(err) => warnings.push(format!("{}: {}", slash_path(&rel)?, err)),
         }
     }
     Ok(rows)
@@ -380,7 +380,7 @@ fn load_sets(repo_root: &Path, warnings: &mut Vec<String>) -> Result<Vec<Service
         let rel = Path::new("sets").join(entry.file_name());
         match validate_service_set_file(repo_root, &rel) {
             Ok(set) => sets.push(set),
-            Err(err) => warnings.push(format!("{}: {}", slash_path(&rel), err)),
+            Err(err) => warnings.push(format!("{}: {}", slash_path(&rel)?, err)),
         }
     }
     sets.sort_by(|left, right| left.id.cmp(&right.id));
@@ -1009,8 +1009,11 @@ fn endpoint_from_set_endpoint(endpoint: &crate::ServiceSetEndpoint) -> String {
     format!("0.0.0.0:{}", endpoint.port)
 }
 
-fn slash_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+fn slash_path(path: &Path) -> Result<String> {
+    Ok(path
+        .to_str()
+        .ok_or_else(|| OrchestratorError::UnsafePath("view path must be UTF-8".to_string()))?
+        .replace('\\', "/"))
 }
 
 fn empty_to_default<'a>(value: &'a str, default: &'a str) -> &'a str {

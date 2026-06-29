@@ -1272,7 +1272,9 @@ fn reject_path_components(path: &Path) -> Result<()> {
                 ));
             }
             Component::Normal(value) => {
-                let text = value.to_string_lossy();
+                let text = value.to_str().ok_or_else(|| {
+                    OrchestratorError::UnsafePath("path segment must be UTF-8".to_string())
+                })?;
                 if banned.iter().any(|item| text.eq_ignore_ascii_case(item)) {
                     return Err(OrchestratorError::UnsafePath(format!(
                         "banned path segment {}",

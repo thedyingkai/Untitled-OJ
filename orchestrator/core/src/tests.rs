@@ -103,7 +103,8 @@ fn collect_relative_files(root: &Path, dir: &Path, files: &mut Vec<String>) {
             let rel = path
                 .strip_prefix(root)
                 .expect("file should stay below root")
-                .to_string_lossy()
+                .to_str()
+                .expect("file path should be valid UTF-8")
                 .replace('\\', "/");
             files.push(rel);
         }
@@ -3678,14 +3679,20 @@ fn oj_migrations_do_not_create_orchestrator_tables() {
             assert!(
                 !lowered.contains(item),
                 "{} must not create or write orchestrator table pattern {item}",
-                entry.file_name().to_string_lossy()
+                entry
+                    .file_name()
+                    .to_str()
+                    .expect("migration file name should be UTF-8")
             );
         }
         for item in forbidden_permission_patterns {
             assert!(
                 !lowered.contains(item),
                 "{} must not seed orchestrator or launcher permission {item}",
-                entry.file_name().to_string_lossy()
+                entry
+                    .file_name()
+                    .to_str()
+                    .expect("migration file name should be UTF-8")
             );
         }
     }
@@ -4133,6 +4140,51 @@ fn driver_output_decoder_rejects_non_utf8_text() {
     let err = crate::executor::decode_driver_output_bytes(&[0xff, 0xfe, 0xfd])
         .expect_err("driver output must be valid UTF-8");
     assert!(err.to_string().contains("driver output is not UTF-8"));
+}
+
+#[test]
+fn orchestrator_code_forbids_lossy_text_decoding() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut offenders = Vec::new();
+    collect_lossy_decoding_markers(&root, &root, &mut offenders);
+    assert!(
+        offenders.is_empty(),
+        "orchestrator user-visible text must be strict UTF-8, found lossy decoding in {offenders:?}"
+    );
+}
+
+fn collect_lossy_decoding_markers(root: &Path, dir: &Path, offenders: &mut Vec<String>) {
+    for entry in fs::read_dir(dir).expect("read orchestrator source directory") {
+        let entry = entry.expect("source entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_lossy_decoding_markers(root, &path, offenders);
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("source file must be UTF-8");
+        let forbidden_markers = [
+            ["from_utf8_", "lossy"].concat(),
+            ["to_string_", "lossy"].concat(),
+            ["encoding", "_rs"].concat(),
+            ["G", "BK"].concat(),
+            ["ch", "cp"].concat(),
+        ];
+        if forbidden_markers
+            .iter()
+            .any(|marker| source.contains(marker))
+        {
+            offenders.push(
+                path.strip_prefix(&root)
+                    .expect("source file should stay below root")
+                    .to_str()
+                    .expect("source path must be UTF-8")
+                    .replace('\\', "/"),
+            );
+        }
+    }
 }
 
 #[test]

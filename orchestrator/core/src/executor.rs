@@ -223,7 +223,10 @@ fn unsupported<T>(action: &str, reason: &str) -> Result<T> {
 }
 
 fn safe_path(path: &Path) -> Result<String> {
-    let text = path.to_string_lossy().replace('\\', "/");
+    let text = path
+        .to_str()
+        .ok_or_else(|| OrchestratorError::UnsafePath("driver path must be UTF-8".to_string()))?
+        .replace('\\', "/");
     if text.contains('\n') || text.contains('\r') || text.trim().is_empty() {
         return Err(OrchestratorError::UnsafePath(
             "driver path is not safe".to_string(),
