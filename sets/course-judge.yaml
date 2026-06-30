@@ -8,7 +8,7 @@ scenario:
     - 课程作业
     - 班级训练
 services:
-  - id: postgres
+  - id: postgresql
     required: true
     count: 1
     placement: { host: root }
@@ -18,17 +18,27 @@ services:
     count: 1
     placement: { host: root }
     config: {}
-  - id: storage
+  - id: storage-service
     required: true
     count: 1
     placement: { host: root }
     config: {}
-  - id: auth
+  - id: minio
     required: true
     count: 1
     placement: { host: root }
     config: {}
-  - id: problem-api
+  - id: auth-service
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: user-service
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: problem-service
     required: true
     count: 1
     placement: { host: root }
@@ -46,11 +56,6 @@ services:
     config:
       max_parallel_jobs: 8
       sandbox_slots: 8
-  - id: web-shell
-    required: true
-    count: 1
-    placement: { host: root }
-    config: {}
   - id: gateway
     required: true
     count: 1
@@ -58,35 +63,42 @@ services:
     config: {}
 default_endpoints:
   - { service: gateway, port: 8080, protocol: http, expose: true }
-  - { service: web-shell, port: 8088, protocol: http, expose: false }
-  - { service: auth, port: 8081, protocol: http, expose: false }
-  - { service: problem-api, port: 8083, protocol: http, expose: false }
+  - { service: auth-service, port: 8081, protocol: http, expose: false }
+  - { service: user-service, port: 8084, protocol: http, expose: false }
+  - { service: problem-service, port: 8083, protocol: http, expose: false }
   - { service: judge-api, port: 8082, protocol: http, expose: false }
   - { service: judge-worker, port: 9101, protocol: http, expose: false }
-  - { service: postgres, port: 5432, protocol: postgres, expose: false }
+  - { service: postgresql, port: 5432, protocol: postgres, expose: false }
   - { service: redis, port: 6379, protocol: redis, expose: false }
-  - { service: storage, port: 9000, protocol: http, expose: false }
+  - { service: storage-service, port: 8085, protocol: http, expose: false }
+  - { service: minio, port: 9000, protocol: http, expose: false }
 default_links:
-  - { from: gateway, to: auth, protocol: http, auth_mode: internal, scope: api, required: true }
-  - { from: gateway, to: web-shell, protocol: http, auth_mode: internal, scope: ui, required: true }
-  - { from: gateway, to: problem-api, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: gateway, to: auth-service, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: gateway, to: user-service, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: gateway, to: problem-service, protocol: http, auth_mode: internal, scope: api, required: true }
   - { from: gateway, to: judge-api, protocol: http, auth_mode: internal, scope: api, required: true }
-  - { from: auth, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
-  - { from: auth, to: redis, protocol: redis, auth_mode: internal, scope: cache, required: true }
-  - { from: problem-api, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
-  - { from: problem-api, to: storage, protocol: http, auth_mode: internal, scope: object-storage, required: true }
-  - { from: judge-api, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: auth-service, to: postgresql, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: auth-service, to: redis, protocol: redis, auth_mode: internal, scope: cache, required: true }
+  - { from: user-service, to: auth-service, protocol: http, auth_mode: internal, scope: auth, required: true }
+  - { from: user-service, to: postgresql, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: user-service, to: storage-service, protocol: http, auth_mode: internal, scope: object-storage, required: true }
+  - { from: storage-service, to: minio, protocol: http, auth_mode: secret-ref, scope: object-storage-backend, required: true }
+  - { from: problem-service, to: postgresql, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: problem-service, to: storage-service, protocol: http, auth_mode: internal, scope: object-storage, required: true }
+  - { from: judge-api, to: problem-service, protocol: http, auth_mode: internal, scope: problem-catalog, required: true }
+  - { from: judge-api, to: postgresql, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
   - { from: judge-api, to: redis, protocol: redis, auth_mode: internal, scope: queue, required: true }
-  - { from: judge-api, to: storage, protocol: http, auth_mode: internal, scope: object-storage, required: true }
+  - { from: judge-api, to: storage-service, protocol: http, auth_mode: internal, scope: object-storage, required: true }
   - { from: judge-worker, to: judge-api, protocol: http, auth_mode: secret-ref, scope: worker, required: true }
-  - { from: judge-worker, to: storage, protocol: http, auth_mode: internal, scope: object-storage, required: true }
+  - { from: judge-worker, to: redis, protocol: redis, auth_mode: internal, scope: queue, required: true }
+  - { from: judge-worker, to: storage-service, protocol: http, auth_mode: internal, scope: object-storage, required: true }
 policies:
   placement: { single_host_preferred: true }
   security: { secret_ref_only: true }
   network: { link_required: true }
   health: { require_all_required_services: true }
 operations:
-  install_order: [postgres, redis, storage, auth, problem-api, judge-api, judge-worker, web-shell, gateway]
-  start_order: [postgres, redis, storage, auth, problem-api, judge-api, judge-worker, web-shell, gateway]
-  stop_order: [gateway, web-shell, judge-worker, judge-api, problem-api, auth, storage, redis, postgres]
+  install_order: [postgresql, redis, minio, storage-service, auth-service, user-service, problem-service, judge-api, judge-worker, gateway]
+  start_order: [postgresql, redis, minio, storage-service, auth-service, user-service, problem-service, judge-api, judge-worker, gateway]
+  stop_order: [gateway, judge-worker, judge-api, problem-service, user-service, auth-service, storage-service, minio, redis, postgresql]
 notes: 课程、作业和训练能力由对应 Service 提供，Set 不定义 OJ 业务对象。

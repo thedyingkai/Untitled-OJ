@@ -2,8 +2,8 @@
 
 | 范围 | 验证脚本或命令 | 当前要求 | 失败处理 | 是否阻塞下一阶段 |
 | --- | --- | --- | --- | --- |
-| Auth | `scripts/e2e-api.ps1`、`services/auth` Go tests | 必须通过 | 修复登录、JWT、角色、权限检查 | 是 |
-| Problem API | `scripts/e2e-api.ps1`、`services/problem-api` Go tests | 必须通过 | 检查题库 CRUD、packagefs 和错误响应 | 是 |
+| Auth | `scripts/e2e-api.ps1`、`services/auth-service` Go tests | 必须通过 | 修复登录、JWT、角色、权限检查 | 是 |
+| Problem API | `scripts/e2e-api.ps1`、`services/problem-service` Go tests | 必须通过 | 检查题库 CRUD、packagefs 和错误响应 | 是 |
 | Judge API | `scripts/e2e-api.ps1`、`services/judge-api` Go tests | 必须通过 | 检查提交、Worker Link、队列和结果 | 是 |
 | Judge Worker | `services/judge-worker` Rust tests | 必须通过 | 修复题目包加载、运行时或回传逻辑 | 是 |
 | Installer Core/Service/CLI | Rust root tests、`verify-static`、CLI smoke | 必须通过 | 修复 manifest、package、plan、operation history | 是 |

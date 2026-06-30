@@ -1,10 +1,11 @@
-﻿# Topology 模型
+# Topology Model
 
-Topology 展示 Orchestrator 当前理解的关系图。节点和关系只来自：
+Topology is the Orchestrator view of currently known services and runtime connectivity.
+
+It is built from:
 
 ```text
 Service
-Set
 Endpoint
 Link
 Operation
@@ -12,19 +13,17 @@ LogView
 DiagnosticReport
 ```
 
-Endpoint 是运行时服务实例身份，格式固定为 `IP:Port`，并直接绑定 `service_id`。Link 固定为：
+Local deployment templates may seed preview endpoints and links when no persistent store is configured, but templates are not formal topology objects.
+
+Endpoint identity is `ip:port:service-name`. Link identity is endpoint-to-endpoint:
 
 ```text
 source endpoint -> target endpoint
 ```
 
-Topology 不通过额外的主机、设备或安装实例模型包装运行实例。
+`GET /topology` is rebuilt from the current store. It must reflect Endpoint and Link changes written through action dispatch. The daemon must not return stale startup context in place of the store-backed topology.
 
-Topology snapshot 存入 `topology_snapshots`，字段为 `snapshot_id`、`topology`、`created_at`。`topology` JSON 中包含 Service、Set、Endpoint、Link、Operation、LogView、DiagnosticReport 的关系。
-
-读取 Topology 时优先反映当前 Store。`GET /topology` 会从 Store 中的 Service、Set、Endpoint、Link、Operation、LogView 和 DiagnosticReport 重新构建，而不是返回 daemon 启动时 context 或仓库静态快照。Memory Store 和 Pg Store 在有当前 Endpoint 时都走当前 Store 构建；只有 Store 中没有 Endpoint 时，才回落到已有 snapshot 或返回缺少 Endpoint 的错误。
-
-Endpoint health 可显示：
+Endpoint health values are:
 
 ```text
 healthy
@@ -34,13 +33,9 @@ unreachable
 unknown
 ```
 
-Link health 同样使用这些状态，并可附带 `latency_ms`。Topology 修改必须通过 Operation plan、confirm 和 apply 完成。
+Link health is derived from source endpoint, target endpoint, target reachability, protocol family, auth mode, scope, and optional latency.
 
-GUI/TUI 中的 Endpoint/Link 操作通过 Action Dispatcher 写 Store。`endpoint.register/update/delete` 与 `link.create/update/delete` 会产生 Operation 和 OperationLog；`endpoint.health.check` 与 `link.health.check` 会执行真实探测或基于已登记 Endpoint 状态检查，并把 health 写回 Store。HTTP/HTTPS Endpoint 会请求 `health_path`，2xx/3xx 记为 `healthy`，其他 HTTP 状态记为 `degraded`，连接、TLS、解析或超时失败记为 `unreachable`。TCP、Postgres 和 Redis Endpoint 先做 TCP connect 检查。Link health 会检查 source endpoint、target endpoint、target reachability、protocol family、auth_mode 和 scope。Topology 视图只反映 Store 中已经登记的 Endpoint、Link、Operation、LogView 和 DiagnosticReport。
-
-DiagnosticReport 从 Topology 和 Store 中的 Operation log 生成可导出摘要。Topology 中只展示已登记的 LogView 和 DiagnosticReport，不提供任意路径读取或远程 shell。
-
-当前覆盖证据：
+Relevant evidence:
 
 ```text
 daemon_topology_reflects_endpoint_link_mutations

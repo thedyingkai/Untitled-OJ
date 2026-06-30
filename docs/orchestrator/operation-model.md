@@ -1,19 +1,10 @@
-﻿# Operation 模型
+# Operation Model
 
-Operation 是 Orchestrator 对核心对象执行变更或观测动作的审计单元。Operation 只作用于：
+Operation is the audit unit for orchestration changes and observations.
 
-```text
-Service
-Set
-Endpoint
-Link
-Operation
-Topology
-LogView
-DiagnosticReport
-```
+Operations target formal objects such as service releases, services, endpoints, links, topology, log views, and diagnostic reports. Deployment templates are not operation targets.
 
-状态机为：
+The state machine is:
 
 ```text
 PLANNED
@@ -26,11 +17,11 @@ CANCELLED
 EXPIRED
 ```
 
-创建 plan 时会持久化 `operation_id`、`action`、`plan`、`status`、`created_at` 和 `updated_at`。内存 Store 使用 `planned`、`confirmed`、`started`、`finished`、`failed`、`rolled_back` 等确定性 marker 方便 GUI/TUI 和测试核对；PostgreSQL Store 会把这些 marker 映射为数据库侧 `NOW()` 时间戳。确认后写入 `confirmed_at`。apply 时先获取 `orchestrator_operation_locks`，再进入 `RUNNING`，按 plan step 写入 `orchestrator_operation_logs`，成功后写入 `result` 并进入 `SUCCEEDED`，失败后写入 `error_message` 并进入 `FAILED`。apply 完成后释放对应 lock。
+Planning persists `operation_id`, `action`, `target_type`, `target_id`, `plan`, `status`, `created_at`, and `updated_at`. Confirming writes `AWAITING_CONFIRMATION`. Applying obtains an operation lock, enters `RUNNING`, writes step logs, then writes result or error state. Rollback marks the original operation as `ROLLED_BACK` and writes rollback logs.
 
-rollback 会读取原 Operation 的 plan、result 和 logs，先记录已读取的历史日志数量，再把 `rollback_plan.steps` 写入 `orchestrator_operation_logs`，最后在原 Operation 上写入 `ROLLED_BACK` 与 `rolled_back_at`。当前选择是在原 Operation 上标记回滚，而不是创建新的 rollback Operation。
+Executors only support fixed actions. Arbitrary shell, arbitrary script paths, user-provided command strings, and remote root shells are outside the model.
 
-Executor 只支持固定 action，不执行任意 shell、任意脚本路径、用户输入命令或远程 root shell。当前固定 driver 为：
+Current fixed drivers are:
 
 ```text
 LocalProcessDriver
@@ -38,39 +29,4 @@ DockerComposeDriver
 ExternalEndpointDriver
 ```
 
-`LocalProcessDriver` 当前只允许健康检查和日志查看这类读动作；start/stop/restart 返回明确 Unsupported，直到接入安全 supervisor。
-
-`DockerComposeDriver` 只构造固定 `docker compose` 子命令，如 `up -d`、`stop`、`restart`、`rm`、`logs`、`ps`，不恢复 scripts。默认模式只返回计划好的固定命令；显式启用执行模式后，core 通过参数数组调用固定 `docker compose` 命令，并把进程退出状态映射为 `SUCCEEDED` 或 `FAILED`。它仍不接受任意 shell、任意脚本路径或用户输入命令。
-
-`ExternalEndpointDriver` 只管理既有 Endpoint 与 Link 的 metadata、health、logs、reachability 和诊断导出，不引入额外运行实例抽象，也不控制 Service 生命周期。
-
-`OperationExecutor` 在 Service 生命周期 Operation 中根据 Service 的 `runtime.mode` 选择固定 driver，并把 `DriverResult` 写入 `orchestrator_operation_logs`。当前 container Service 走 `DockerComposeDriver` 的计划模式；local-process 生命周期动作仍返回 Unsupported 并落入 `FAILED` Operation；external Service 不执行生命周期控制。
-
-GUI/TUI 通过 `OperationWorkbenchContext` 和 `OperationWorkbenchSession` 使用同一套状态机。GUI/TUI 可以生成 plan、confirm、apply、rollback，并查看 result、error、operation logs、`created_at` 和 `updated_at`；不能绕过 core 自行执行动作。
-
-daemon 也使用同一套状态机。`POST /operations/plan`、`POST /operations/{operation_id}/confirm`、`POST /operations/{operation_id}/apply`、`POST /operations/{operation_id}/rollback` 都转换为 `ActionRequest` 后交给 dispatcher；`GET /operations/{operation_id}` 和 `GET /operations/{operation_id}/logs` 只读取当前 Store 中的 Operation 与 OperationLogRecord。
-
-直接覆盖 Target B 生命周期的测试为：
-
-```text
-operation_plan_is_persisted_in_store
-operation_confirm_updates_store
-operation_apply_writes_status_and_logs
-operation_apply_failure_writes_error_message
-operation_rollback_updates_store
-operation_logs_can_be_reopened
-workbench_uses_store_backed_operation_lifecycle
-operation_lock_prevents_parallel_apply
-daemon_operation_routes_expose_operation_state_and_logs
-daemon_operation_rollback_route_dispatches_action
-```
-
-`OrchestratorActionDispatcher` 是 GUI/TUI 的正式 action 执行入口。它会把表单字段转换为 `ActionRequest`，写入 `PLANNED` Operation，按 action 要求确认，然后调用 `OperationExecutor`。未接真实执行器的 action 会落为 `UNSUPPORTED`，写入失败 Operation 和 warning log，不能显示成功。
-
-当 `ORCHESTRATOR_DATABASE_URL` 存在时，`OperationWorkbenchContext` 会使用 `PgOrchestratorStore` 持久化工作台生成的 plan、confirm、apply 和 rollback。生成或更新 plan 时写入 `PLANNED` Operation；confirm 后写入 `AWAITING_CONFIRMATION` 和 `confirmed_at`；apply/rollback 继续由 `OperationExecutor` 写入 lock、step log、result、error 和最终状态。没有该变量时，工作台和 daemon 保持 `MemoryOrchestratorStore` 本地演示模式。
-
-日志读取只围绕 `LogView` 和 `OperationLogRecord`。core 提供按 `service_id`、`endpoint`、`operation_id`、`source_id` 过滤的查询能力，并要求 `LogView.path` 使用 service-scoped、operation-scoped 或 endpoint-scoped 策略；它不是任意文件浏览器，也不读取未登记路径。
-
-DiagnosticReport 可以从当前 Store 构建，内容包含 Service、Endpoint、Link、Operation 摘要、失败 Operation、不健康 Endpoint/Link、近期 Operation log、数据库 schema 检查、禁用概念扫描摘要、action matrix 和 unsupported capabilities。当前支持 JSON 和 Markdown 导出。
-
-`run_reconcile_tick` 是当前长期运行能力的核心原语。它执行单次 tick：过期未确认 Operation、刷新 Endpoint/Link health、保存 Topology snapshot，并生成 DiagnosticReport。`run_reconcile_loop` 在同一 Store 路径上提供可停止、可设定 tick 数和间隔的循环原语，供 GUI、TUI 或后续常驻进程调用；本轮仍不宣称已经具备完整生产 daemon、远程部署 agent 或跨主机发布能力。
+GUI, TUI, and daemon use the same dispatcher and store-backed operation state machine. They cannot bypass core to mutate state or run actions.

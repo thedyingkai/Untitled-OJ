@@ -1,7 +1,7 @@
 schema_version: 1
 id: distributed-oj
 name: 分布式 OJ
-description: 将入口、Web Shell、业务 API、数据库、缓存和存储纳入编排器管理，评测 Worker 通过独立 Set 加入。
+description: 将入口、业务 API、数据库、缓存和存储纳入编排器管理，评测 Worker 通过独立 Set 加入。
 scenario:
   type: distributed-root
   recommended_for:
@@ -9,7 +9,7 @@ scenario:
     - 校内训练
     - 中型评测环境
 services:
-  - id: postgres
+  - id: postgresql
     required: true
     count: 1
     placement: { host: root }
@@ -19,27 +19,32 @@ services:
     count: 1
     placement: { host: root }
     config: {}
-  - id: storage
+  - id: storage-service
     required: true
     count: 1
     placement: { host: root }
     config: {}
-  - id: auth
+  - id: minio
     required: true
     count: 1
     placement: { host: root }
     config: {}
-  - id: problem-api
+  - id: auth-service
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: user-service
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: problem-service
     required: true
     count: 1
     placement: { host: root }
     config: {}
   - id: judge-api
-    required: true
-    count: 1
-    placement: { host: root }
-    config: {}
-  - id: web-shell
     required: true
     count: 1
     placement: { host: root }
@@ -51,25 +56,31 @@ services:
     config: {}
 default_endpoints:
   - { service: gateway, port: 8080, protocol: http, expose: true }
-  - { service: web-shell, port: 8088, protocol: http, expose: false }
-  - { service: auth, port: 8081, protocol: http, expose: false }
-  - { service: problem-api, port: 8083, protocol: http, expose: false }
+  - { service: auth-service, port: 8081, protocol: http, expose: false }
+  - { service: user-service, port: 8084, protocol: http, expose: false }
+  - { service: problem-service, port: 8083, protocol: http, expose: false }
   - { service: judge-api, port: 8082, protocol: http, expose: false }
-  - { service: postgres, port: 5432, protocol: postgres, expose: false }
+  - { service: postgresql, port: 5432, protocol: postgres, expose: false }
   - { service: redis, port: 6379, protocol: redis, expose: false }
-  - { service: storage, port: 9000, protocol: http, expose: false }
+  - { service: storage-service, port: 8085, protocol: http, expose: false }
+  - { service: minio, port: 9000, protocol: http, expose: false }
 default_links:
-  - { from: gateway, to: auth, protocol: http, auth_mode: internal, scope: api, required: true }
-  - { from: gateway, to: web-shell, protocol: http, auth_mode: internal, scope: ui, required: true }
-  - { from: gateway, to: problem-api, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: gateway, to: auth-service, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: gateway, to: user-service, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: gateway, to: problem-service, protocol: http, auth_mode: internal, scope: api, required: true }
   - { from: gateway, to: judge-api, protocol: http, auth_mode: internal, scope: api, required: true }
-  - { from: auth, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
-  - { from: auth, to: redis, protocol: redis, auth_mode: internal, scope: cache, required: true }
-  - { from: problem-api, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
-  - { from: problem-api, to: storage, protocol: http, auth_mode: internal, scope: object-storage, required: true }
-  - { from: judge-api, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: auth-service, to: postgresql, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: auth-service, to: redis, protocol: redis, auth_mode: internal, scope: cache, required: true }
+  - { from: user-service, to: auth-service, protocol: http, auth_mode: internal, scope: auth, required: true }
+  - { from: user-service, to: postgresql, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: user-service, to: storage-service, protocol: http, auth_mode: internal, scope: object-storage, required: true }
+  - { from: storage-service, to: minio, protocol: http, auth_mode: secret-ref, scope: object-storage-backend, required: true }
+  - { from: problem-service, to: postgresql, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: problem-service, to: storage-service, protocol: http, auth_mode: internal, scope: object-storage, required: true }
+  - { from: judge-api, to: problem-service, protocol: http, auth_mode: internal, scope: problem-catalog, required: true }
+  - { from: judge-api, to: postgresql, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
   - { from: judge-api, to: redis, protocol: redis, auth_mode: internal, scope: queue, required: true }
-  - { from: judge-api, to: storage, protocol: http, auth_mode: internal, scope: object-storage, required: true }
+  - { from: judge-api, to: storage-service, protocol: http, auth_mode: internal, scope: object-storage, required: true }
 policies:
   placement: { root_services_together: true }
   security: { secret_ref_only: true }
@@ -77,10 +88,10 @@ policies:
     worker_links_created_by_endpoint: true
     required_external_links:
       - judge-worker -> judge-api
-      - judge-worker -> storage
+      - judge-worker -> storage-service
   health: { require_all_required_services: true }
 operations:
-  install_order: [postgres, redis, storage, auth, problem-api, judge-api, web-shell, gateway]
-  start_order: [postgres, redis, storage, auth, problem-api, judge-api, web-shell, gateway]
-  stop_order: [gateway, web-shell, judge-api, problem-api, auth, storage, redis, postgres]
+  install_order: [postgresql, redis, minio, storage-service, auth-service, user-service, problem-service, judge-api, gateway]
+  start_order: [postgresql, redis, minio, storage-service, auth-service, user-service, problem-service, judge-api, gateway]
+  stop_order: [gateway, judge-api, problem-service, user-service, auth-service, storage-service, minio, redis, postgresql]
 notes: 评测 Worker 通过 judge-worker-node Set 加入；跨 host 连接在运行时由 Endpoint 和 Link 表达。

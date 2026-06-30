@@ -10,7 +10,7 @@
 
 ## 2. 适用范围
 
-适用于维护 `services/auth`、前端 auth store、router guard 和权限调试页面的开发者。
+适用于维护 `services/auth-service`、前端 auth store、router guard 和权限调试页面的开发者。
 
 ## 3. 当前实现
 

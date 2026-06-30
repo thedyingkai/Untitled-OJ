@@ -36,7 +36,7 @@ powershell -NoProfile -File scripts\verify-static.ps1
 
 完整模式需要 Docker daemon，因为会执行镜像构建。
 
-脚本目前按仓库的多语言结构执行检查：Go 服务是多个独立 module，因此脚本会分别进入 `services/shared`、`services/auth`、`services/gateway`、`services/problem-api`、`services/judge-api` 执行构建和测试；Rust 检查在 `services/judge-worker` 内执行；前端构建在 `frontend` 内执行。不要把根目录 `go test ./...` 当作当前仓库的唯一验收命令，因为根目录不是 Go module。
+脚本目前按仓库的多语言结构执行检查：Go 服务是多个独立 module，因此脚本会分别进入 `platform/shared/go`、`services/auth-service`、`services/gateway`、`services/problem-service`、`services/judge-api` 执行构建和测试；Rust 检查在 `services/judge-worker` 内执行；前端构建在 `frontend` 内执行。不要把根目录 `go test ./...` 当作当前仓库的唯一验收命令，因为根目录不是 Go module。
 
 ## 6. 配置说明
 

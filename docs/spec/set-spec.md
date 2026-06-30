@@ -1,8 +1,11 @@
-# Set 规范
+# Deployment Template Spec
 
-Set 是推荐部署组合，不是运行时对象，不提供业务 API，也不包含 OJ 业务逻辑。Set 只描述需要哪些 Service、默认 Endpoint、默认 Link、安装顺序、启动顺序和部署策略。
+Deployment Template is a read-only local deployment helper. It is not a runtime
+object, database table, formal action layer, or business API. It only describes
+recommended services, default endpoints, default links, install order, start
+order, and placement policy.
 
-## set.yaml
+## template.yaml
 
 ```yaml
 schema_version: 1
@@ -49,11 +52,9 @@ operations:
 notes:
 ```
 
-Set 不使用额外主机对象、设备对象、安装实例对象或包对象。部署位置通过 `placement` 策略和 Endpoint 的 `IP:Port` 表达。
+## Current Local Templates
 
-## 正式 Set
-
-当前只保留五个正式 Set：
+The repository keeps five local templates:
 
 ```text
 single-node-oj
@@ -63,4 +64,17 @@ course-judge
 service-development
 ```
 
-Set 引用的 Service 必须能在 `services/*/service.yaml` 中找到。`default_endpoints` 和 `default_links` 只能引用本 Set 内的 Service。跨 host 连接由 Orchestrator 在运行时根据 Endpoint 创建真实 Link。
+Deployment Template does not introduce host objects, device objects, install
+instance objects, package objects, or service-set persistence. Placement is
+expressed by `placement` policy and runtime Endpoint identity
+`ip:port:service-name`.
+
+Every referenced Service must exist under `services/*/service.yaml`.
+`default_endpoints` and `default_links` may only reference services listed in
+the same local template. If a required link target is provided by another
+template or by an external endpoint, the template must declare that in
+`policies.network.required_external_links`.
+
+At runtime, Orchestrator creates real Links from concrete Endpoints. A
+`service-name[*]` value is always derived by querying running Endpoints with the
+same service name; it is not loaded from a template and is not persisted.

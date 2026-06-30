@@ -19,8 +19,8 @@ Control Plane 包含：
 | 服务 | 路径 | 作用 |
 | --- | --- | --- |
 | `gateway` | `services/gateway` | 唯一公开 API 入口、JWT 校验、内部 HMAC 签名 |
-| `auth` | `services/auth` | 登录、注册、当前用户、角色权限管理 |
-| `problem-api` | `services/problem-api` | 题目 CRUD、题目包校验、题目可见性控制 |
+| `auth` | `services/auth-service` | 登录、注册、当前用户、角色权限管理 |
+| `problem-api` | `services/problem-service` | 题目 CRUD、题目包校验、题目可见性控制 |
 | `judge-api` | `services/judge-api` | 提交、结果、Worker Link、评测集群管理 |
 | `frontend` | `frontend` | Vue 3 用户和管理界面 |
 | PostgreSQL | compose service | 用户、题目、提交、task lease 的事实源 |

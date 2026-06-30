@@ -9,7 +9,7 @@ scenario:
     - 契约校验
     - 本地联调
 services:
-  - id: postgres
+  - id: postgresql
     required: true
     count: 1
     placement: { host: root }
@@ -19,12 +19,17 @@ services:
     count: 1
     placement: { host: root }
     config: {}
-  - id: storage
+  - id: storage-service
     required: true
     count: 1
     placement: { host: root }
     config: {}
-  - id: auth
+  - id: minio
+    required: true
+    count: 1
+    placement: { host: root }
+    config: {}
+  - id: auth-service
     required: true
     count: 1
     placement: { host: root }
@@ -37,21 +42,28 @@ services:
       rate_limit_per_minute: 1200
 default_endpoints:
   - { service: gateway, port: 8080, protocol: http, expose: true }
-  - { service: auth, port: 8081, protocol: http, expose: false }
-  - { service: postgres, port: 5432, protocol: postgres, expose: false }
+  - { service: auth-service, port: 8081, protocol: http, expose: false }
+  - { service: postgresql, port: 5432, protocol: postgres, expose: false }
   - { service: redis, port: 6379, protocol: redis, expose: false }
-  - { service: storage, port: 9000, protocol: http, expose: false }
+  - { service: storage-service, port: 8085, protocol: http, expose: false }
+  - { service: minio, port: 9000, protocol: http, expose: false }
 default_links:
-  - { from: gateway, to: auth, protocol: http, auth_mode: internal, scope: api, required: true }
-  - { from: auth, to: postgres, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
-  - { from: auth, to: redis, protocol: redis, auth_mode: internal, scope: cache, required: true }
+  - { from: gateway, to: auth-service, protocol: http, auth_mode: internal, scope: api, required: true }
+  - { from: auth-service, to: postgresql, protocol: postgres, auth_mode: secret-ref, scope: database, required: true }
+  - { from: auth-service, to: redis, protocol: redis, auth_mode: internal, scope: cache, required: true }
+  - { from: storage-service, to: minio, protocol: http, auth_mode: secret-ref, scope: object-storage-backend, required: true }
 policies:
   placement: { local_development: true }
   security: { secret_ref_only: true }
-  network: { link_required: true }
+  network:
+    link_required: true
+    required_external_links:
+      - gateway -> user-service
+      - gateway -> problem-service
+      - gateway -> judge-api
   health: { allow_optional_service_absence: true }
 operations:
-  install_order: [postgres, redis, storage, auth, gateway]
-  start_order: [postgres, redis, storage, auth, gateway]
-  stop_order: [gateway, auth, storage, redis, postgres]
+  install_order: [postgresql, redis, minio, storage-service, auth-service, gateway]
+  start_order: [postgresql, redis, minio, storage-service, auth-service, gateway]
+  stop_order: [gateway, auth-service, storage-service, minio, redis, postgresql]
 notes: 开发中的 Service 通过 Orchestrator 导入和校验，构建产物不是核心对象。

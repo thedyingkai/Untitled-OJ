@@ -10,7 +10,7 @@
 
 ## 2. 适用范围
 
-适用于维护 `services/gateway`、`services/auth`、`services/problem-api`、`services/judge-api` 和 `services/shared/security/internalauth` 的开发者。
+适用于维护 `services/gateway`、`services/auth-service`、`services/problem-service`、`services/judge-api` 和 `platform/shared/go/security/internalauth` 的开发者。
 
 ## 3. 当前实现
 

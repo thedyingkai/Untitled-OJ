@@ -18,11 +18,11 @@
 | --- | --- | --- | --- | --- | --- |
 | Frontend | `frontend` | `frontend/src/main.ts` | `frontend/.env.example` | Web 静态资源 | 用户与管理员界面 |
 | Gateway | `services/gateway` | `services/gateway/gateway.go` | `services/gateway/etc/gateway.yaml` | public | API 入口、JWT 校验、代理、内部 HMAC 签名、Module Registry v0 只读 admin API |
-| Auth | `services/auth` | `services/auth/auth.go` | `services/auth/etc/auth.yaml` | internal | 登录、注册、当前用户、权限管理 |
-| Problem API | `services/problem-api` | `services/problem-api/problemapi.go` | `services/problem-api/etc/problemapi.yaml` | internal | 题目元信息、CRUD、题目包校验 |
+| Auth | `services/auth-service` | `services/auth-service/auth.go` | `services/auth-service/etc/auth.yaml` | internal | 登录、注册、当前用户、权限管理 |
+| Problem API | `services/problem-service` | `services/problem-service/problemapi.go` | `services/problem-service/etc/problemapi.yaml` | internal | 题目元信息、CRUD、题目包校验 |
 | Judge API | `services/judge-api` | `services/judge-api/judgeapi.go` | `services/judge-api/etc/judgeapi.yaml` | internal / worker-only via Gateway | 提交、结果、Worker Link、评测管理 |
 | Judge Worker | `services/judge-worker` | `services/judge-worker/src/main.rs` | `services/judge-worker/config/languages.yaml` | worker node outbound | 编译、运行、checker、上传结果 |
-| Shared | `services/shared` | Go packages | 无独立进程 | library | JWT、权限、HMAC、日志、数据库公共工具 |
+| Shared | `platform/shared/go` | Go packages | 无独立进程 | library | JWT、权限、HMAC、日志、数据库公共工具 |
 | PostgreSQL | compose service | - | `.env` / compose | internal | 数据事实源 |
 | Redis | compose service | - | `.env` / compose | internal | signal history、nonce、缓存 |
 | Storage | `storage/` 或配置路径 | - | 服务配置 | internal | 题目包、源码、结果 artifact |

@@ -19,10 +19,10 @@
 - [基础 Service](services/base-services.md)
 - [Gateway Service](services/gateway-service.md)
 - [Web Shell Service](services/web-shell-service.md)
-- [Problem API Service](services/problem-api-service.md)
+- [Problem API Service](services/problem-service-service.md)
 - [Judge API Service](services/judge-api-service.md)
 - [Judge Worker Service](services/judge-worker-service.md)
-- [Storage / PostgreSQL Service](services/storage-postgres-service.md)
+- [Storage / PostgreSQL Service](services/storage-service-postgres-service.md)
 
 ## Runtime
 

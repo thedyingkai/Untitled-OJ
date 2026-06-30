@@ -10,17 +10,17 @@
 
 ## 2. 适用范围
 
-适用于维护 `services/gateway`、`services/auth`、`services/problem-api`、`services/judge-api` 和 `services/shared` 的开发者。
+适用于维护 `services/gateway`、`services/auth-service`、`services/problem-service`、`services/judge-api` 和 `platform/shared/go` 的开发者。
 
 ## 3. 当前实现
 
 后端服务：
 
 - `services/gateway`：公开入口、JWT 校验、内部 HMAC 签名。
-- `services/auth`：登录、注册、当前用户、权限管理。
-- `services/problem-api`：题目 CRUD 和题目包校验。
+- `services/auth-service`：登录、注册、当前用户、权限管理。
+- `services/problem-service`：题目 CRUD 和题目包校验。
 - `services/judge-api`：提交、结果、Worker Link、admin judge。
-- `services/shared`：JWT、权限、HMAC、日志和数据库公共工具。
+- `platform/shared/go`：JWT、权限、HMAC、日志和数据库公共工具。
 
 ## 4. 目标设计
 

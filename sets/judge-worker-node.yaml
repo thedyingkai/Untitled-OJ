@@ -1,7 +1,7 @@
 schema_version: 1
 id: judge-worker-node
 name: 评测 Worker 节点
-description: 在受限运行环境中只部署 judge-worker，并连接既有 judge-api 与 storage Endpoint。
+description: 在受限运行环境中只部署 judge-worker，并连接既有 judge-api 与 storage-service Endpoint。
 scenario:
   type: worker-only
   recommended_for:
@@ -20,14 +20,15 @@ default_endpoints:
 default_links: []
 policies:
   placement: { worker_only: true }
-  security: { secret_ref_only: true, web_shell_forbidden: true }
+  security: { secret_ref_only: true }
   network:
     required_external_links:
       - judge-worker -> judge-api
-      - judge-worker -> storage
+      - judge-worker -> redis
+      - judge-worker -> storage-service
   health: { require_all_required_services: true }
 operations:
   install_order: [judge-worker]
   start_order: [judge-worker]
   stop_order: [judge-worker]
-notes: 本 Set 不包含 web-shell、gateway、数据库或 OJ 业务页面。
+notes: 本 Set 不包含 gateway、数据库或 OJ 业务页面。

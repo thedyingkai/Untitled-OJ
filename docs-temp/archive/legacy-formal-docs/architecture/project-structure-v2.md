@@ -60,8 +60,8 @@ docs/
 
 ```text
 services/gateway
-services/auth
-services/problem-api
+services/auth-service
+services/problem-service
 services/judge-api
 services/judge-worker
 frontend

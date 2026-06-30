@@ -10,7 +10,7 @@ OJOS Orchestrator（OJOS 编排器）是面向 OJOS 服务体系的服务编排�
 
 - Service：最小可安装、可启停、可连接、可观测的功能单元。
 - Set：推荐部署组合，只描述组成和默认关系，不作为运行时对象。
-- Endpoint：运行中 Service 的唯一连接身份，格式固定为 `IP:Port`。
+- Endpoint：运行中 Service 的唯一连接身份，格式固定为 `ip:port:service-name`。
 - Link：`source endpoint -> target endpoint` 的通信授权关系。
 - Operation：需要计划、确认、执行、记录和回滚的编排动作。
 - Topology：Service、Set、Endpoint、Link、Operation、LogView、DiagnosticReport 的关系视图。
@@ -19,9 +19,9 @@ OJOS Orchestrator（OJOS 编排器）是面向 OJOS 服务体系的服务编排�
 
 ## 正式入口
 
-正式入口只有 Orchestrator GUI 和 Orchestrator TUI。两者使用同一套 `orchestrator/core` 和 `orchestrator/schemas`，能力必须一致，差别只能是交互形态。
+正式入口包括 Orchestrator GUI、Orchestrator TUI 和 Orchestrator daemon。三者使用同一套 `services/orchestrator/core` 和 `platform/schemas/orchestrator`，能力必须一致，差别只能是交互形态或传输形态。
 
-Web Shell 是被编排的业务 Service，不是编排器入口。Gateway 是业务流量入口 Service，不是控制面。
+Gateway 是业务流量入口 Service，不是控制面。Gateway frontend 是 OJ 业务 UI，不是 Orchestrator 入口。
 
 ## 数据库边界
 
@@ -45,17 +45,20 @@ Orchestrator 不写 OJ 业务表；OJ 业务服务也不能直接写 Orchestrato
 
 ```text
 gateway
-web-shell
-auth
-problem-api
+auth-service
+problem-service
+user-service
 judge-api
 judge-worker
-postgres
+postgresql
 redis
-storage
+storage-service
+minio
+jaeger
+orchestrator
 ```
 
-每个 Service 必须提供 `service.yaml`。`service.yaml` 是唯一正式 Service 契约。
+每个 Service 必须提供 `service.yaml` 和相邻 `release.yaml`。`service.yaml` 是正式 Service 身份契约；`release.yaml` 是发布/导入契约，并且 route、version、backend protocol/port 必须与 `service.yaml` 对齐。
 
 ## 文档
 

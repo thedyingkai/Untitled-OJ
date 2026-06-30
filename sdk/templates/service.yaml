@@ -29,8 +29,6 @@ requires:
 provides:
   capabilities:
     - example.service
-  endpoints:
-    - http
   routes:
     - /api/example
   workers: []

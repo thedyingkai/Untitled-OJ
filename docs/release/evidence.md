@@ -1,76 +1,52 @@
-﻿# 可核对证据
+# Verifiable Evidence
 
-本文件记录当前 OJOS Orchestrator 的可核对证据。
+This file records the current OJOS Orchestrator evidence set.
 
-正式实现入口：
-
-```text
-orchestrator/core/
-orchestrator/gui/
-orchestrator/tui/
-orchestrator/schemas/
-```
-
-正式文档入口：
+Formal implementation entry points:
 
 ```text
-docs/spec/
-docs/orchestrator/
-docs/architecture/
-docs/services/
-docs/release/
+services/orchestrator/core/
+services/orchestrator/backend/
+manager/gui/
+manager/tui/
+platform/schemas/orchestrator/
 ```
 
-`docs-temp/` 是历史文档隔离区，不作为当前正式架构依据。
+`docs-temp/` is historical material and is not current architecture evidence.
 
-## 当前已实现证据
+## Implemented Evidence
 
-- Store trait：`orchestrator/core/src/store.rs`
-- Memory Store：`MemoryOrchestratorStore`，用于测试、本地开发和无数据库演示
-- Pg Store：`PgOrchestratorStore`，位于 `orchestrator/core/src/database.rs`，使用 `ORCHESTRATOR_DATABASE_URL`
-- Pg Store ignored integration：`orchestrator/core/tests/pg_store_integration.rs`
-- Operation 状态机：`orchestrator/core/src/model.rs`
-- Operation executor：`orchestrator/core/src/store.rs`，apply/rollback 都通过 Store 写入 OperationLog；Service 生命周期会记录固定 `DriverResult`；rollback 会记录历史日志读取和 `rollback_plan.steps`
-- Store-backed Operation 生命周期直接证据：`operation_plan_is_persisted_in_store`、`operation_confirm_updates_store`、`operation_apply_writes_status_and_logs`、`operation_apply_failure_writes_error_message`、`operation_rollback_updates_store`、`operation_logs_can_be_reopened`、`workbench_uses_store_backed_operation_lifecycle`、`operation_lock_prevents_parallel_apply`
-- Executor drivers：`orchestrator/core/src/executor.rs`，覆盖测试为 `executor_rejects_arbitrary_shell`、`docker_compose_driver_builds_allowed_commands`、`docker_compose_driver_rejects_unknown_action`、`local_process_driver_reports_unsupported_safely`、`external_endpoint_driver_does_not_start_services`、`unsupported_driver_action_writes_operation_log`
-- Service lifecycle 最小执行：默认路径阻止 Docker Compose plan-only 假成功；显式开启固定 driver 执行后会运行固定命令并把失败写入 Operation。覆盖测试为 `service_start_uses_driver`、`service_stop_uses_driver`、`service_restart_uses_driver`、`service_logs_view_uses_log_source`、`service_lifecycle_failure_is_recorded`、`service_lifecycle_unsupported_is_not_success`
-- Endpoint/Link health：`orchestrator/core/src/health.rs`
-- Endpoint health 真实探测：HTTP/HTTPS 请求 `health_path`，TCP/Postgres/Redis 使用 TCP connect；覆盖测试为 `endpoint_http_health_updates_store`、`endpoint_tcp_health_updates_store`、`endpoint_unreachable_is_recorded`、`tcp_probe_checks_http_health_path_status`、`tcp_probe_marks_http_non_success_status_as_degraded`
-- Link health 写回与 Topology 展示：覆盖测试为 `link_health_requires_existing_endpoints`、`link_health_uses_target_reachability`、`operation_executor_persists_link_health_from_target_probe`、`topology_reflects_endpoint_link_health`
-- LogView 查询与 DiagnosticReport 导出：`orchestrator/core/src/observability.rs`
-- `operation.logs.view` 与 `diagnostics.export` 执行证据：`orchestrator/core/src/store.rs` 会创建 operation-scoped LogView、写入导出元数据 OperationLog；覆盖测试为 `operation_executor_materializes_operation_log_view_and_diagnostic_export`
-- Reconcile tick / loop：`orchestrator/core/src/reconciler.rs`，`run_reconcile_tick` 执行单次刷新，`run_reconcile_loop` 提供可停止的 bounded loop 原语；覆盖测试为 `reconcile_loop_runs_bounded_ticks_and_can_stop`
-- GUI/TUI 共享视图：`orchestrator/core/src/view.rs`
-- GUI/TUI 共享工作台：`orchestrator/core/src/workbench.rs`，未设置 `ORCHESTRATOR_DATABASE_URL` 时使用 Memory store，设置后通过 `load_operation_workbench_context_from_store` 读取 Store 中的 Service、Set、Endpoint、Link、Topology，并让 plan/confirm/apply/rollback 走 `PgOrchestratorStore`；覆盖测试为 `operation_workbench_context_can_load_from_store_state`
-- GUI/TUI Action Console：`orchestrator/core/src/dispatcher.rs`，GUI/TUI 只提交 `ActionRequest`，dispatcher 返回 `REAL`、`STORE_BACKED`、`UNSUPPORTED` 或 `READONLY`；覆盖测试为 `action_dispatcher_routes_schema_actions`、`endpoint_register_update_delete_and_health_write_store`、`link_create_update_delete_and_health_write_store`、`set_expand_apply_and_diagnostic_report_are_console_actions`、`operation_plan_confirm_apply_rollback_and_logs_are_visible`
-- GUI/TUI 操作入口：`gui_exposes_dispatcher_backed_actions`、`tui_exposes_dispatcher_backed_actions`
-- GUI 字体与编码证据：`gui_fonts_force_required_cjk_font_for_all_text_styles` 强制 GUI 加载可覆盖中文的字体，`orchestrator_code_forbids_lossy_text_decoding` 禁止 Orchestrator 源码引入 GBK、ANSI、`encoding_rs`、`chcp` 或 lossy 解码路径
-- GUI/TUI Operation/LogView 观测：`orchestrator/core/src/view.rs` 从 Store 读取 Operation 与 OperationLog，GUI/TUI 展示 `operation_id`、状态、结果、错误、日志数量、日志消息、`created_at` 和 `updated_at`
-- Endpoint / Link 表单证据：`orchestrator/schemas/forms.yaml` 覆盖 Endpoint 的 `config` 和 Link 的 `scope`、`config_ref`、`secret_ref`、`policy`；`orchestrator/core/src/planner.rs` 会解析 JSON 字段并写入 Store，覆盖测试为 `endpoint_register_update_delete_and_health_write_store`、`link_create_update_delete_and_health_write_store`
-- DiagnosticReport 能力矩阵与发布证据：`build_diagnostic_report` 写入 services、sets、endpoints、links、operations、failed operations、unhealthy endpoints、unhealthy links、recent operation logs、database schema check、action matrix、unsupported capabilities 和 forbidden concept scan summary；`export_diagnostic_report` 支持 JSON 与 Markdown。覆盖测试为 `diagnostic_report_json_exports_observable_summary`、`diagnostic_report_builds_from_store_and_exports_json_and_markdown`
-- Orchestrator daemon action API：`orchestrator/daemon` 提供 `GET /health`、Service/Set/Endpoint/Link/Operation/Topology/DiagnosticReport API；`POST /actions`、Endpoint/Link health、Set expand/apply、Operation plan/confirm/apply/rollback/logs、DiagnosticReport run/read/export 都转换为 core `ActionRequest` 并交给 `OrchestratorActionConsole` / `OrchestratorActionDispatcher`
-- daemon Topology 刷新证据：`GET /topology` 从当前 Store 重新 build，能反映 `POST /endpoints` 和 `POST /links` 产生的 Endpoint/Link；覆盖测试为 `daemon_topology_reflects_endpoint_link_mutations`、`topology_is_rebuilt_from_store_after_actions`
-- daemon action route 覆盖测试：`daemon_health_reports_orchestrator_api_status`、`daemon_endpoint_routes_use_core_dispatcher`、`daemon_endpoint_health_route_dispatches_action`、`daemon_link_health_route_dispatches_action`、`daemon_set_expand_route_dispatches_action`、`daemon_set_apply_route_creates_operation`、`daemon_operation_routes_expose_operation_state_and_logs`、`daemon_operation_rollback_route_dispatches_action`、`daemon_diagnostic_route_uses_core_diagnostic_report`、`daemon_diagnostics_export_routes_work`、`daemon_decodes_http_requests_as_strict_utf8`
-- GUI 直接操作入口：Endpoint register/update/delete/health、Link create/update/delete/health、Set expand/apply、Operation confirm/apply/rollback/logs、DiagnosticReport run/export；覆盖测试为 `gui_endpoint_actions_are_directly_available`、`gui_link_actions_are_directly_available`、`gui_set_apply_is_directly_available`、`gui_diagnostics_export_is_directly_available`、`gui_action_feedback_shows_capability_status`
-- TUI 直接操作入口：`e/E/x/h` Endpoint、`l/L/X/H` Link、`s/S` Set、`c/a/u/o` Operation、`d/D` Diagnostics；覆盖测试为 `tui_endpoint_action_menu_exists`、`tui_link_action_menu_exists`、`tui_set_action_menu_exists`、`tui_diagnostics_action_exists`、`tui_action_feedback_shows_capability_status`
-- Orchestrator migration：`deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql`
+- Store abstraction: `services/orchestrator/core/src/store.rs`
+- Persistent store: `PgOrchestratorStore` in `services/orchestrator/core/src/database.rs`, using `ORCHESTRATOR_DATABASE_URL`
+- Ignored PostgreSQL integration: `services/orchestrator/core/tests/pg_store_integration.rs`
+- Persistent entrypoint honesty: `orchestrator_entrypoints_require_reachable_persistent_store_when_database_url_is_set`
+- Operation state machine and executor: `services/orchestrator/core/src/model.rs` and `services/orchestrator/core/src/store.rs`
+- Fixed driver safety: `docker_compose_driver_rejects_unknown_action`, `external_endpoint_driver_does_not_start_services`, `unsupported_driver_action_writes_operation_log`
+- Endpoint identity: `endpoint_requires_ip_port_service_name`, `topology_uses_endpoint_identity_without_machine_or_installation`
+- Endpoint and link CRUD/health: `endpoint_create_update_delete_and_health_write_store`, `link_create_update_delete_and_health_write_store`, `endpoint_http_health_updates_store`, `endpoint_tcp_health_updates_store`, `endpoint_unreachable_is_recorded`
+- Action catalog and CRUD layer coverage: `action_registry_contains_required_actions_and_no_forbidden_actions`, `core_action_catalog_covers_registry_and_core_objects`, `form_registry_covers_every_action`
+- Service-set demotion: `set_expand_apply_are_not_formal_console_actions`, plus database tests proving `service_sets` is not persisted
+- GUI/TUI dispatcher entry: `gui_exposes_dispatcher_backed_actions`, `tui_exposes_dispatcher_backed_actions`
+- GUI/TUI direct actions: `gui_endpoint_actions_are_directly_available`, `gui_link_actions_are_directly_available`, `gui_diagnostics_export_is_directly_available`, `tui_endpoint_action_menu_exists`, `tui_link_action_menu_exists`, `tui_diagnostics_action_exists`
+- Daemon routes: `daemon_endpoint_routes_use_core_dispatcher`, `daemon_endpoint_health_route_dispatches_action`, `daemon_link_health_route_dispatches_action`, `daemon_set_expand_route_is_gone`, `daemon_set_apply_route_is_gone`, `daemon_operation_routes_expose_operation_state_and_logs`, `daemon_operation_rollback_route_dispatches_action`, `daemon_diagnostic_route_uses_core_diagnostic_report`, `daemon_diagnostics_export_routes_work`
+- Topology refresh: `daemon_topology_reflects_endpoint_link_mutations`, `topology_is_rebuilt_from_store_after_actions`, `topology_reflects_endpoint_link_health`
+- UTF-8 source safety: `gui_source_keeps_utf8_chinese_text_without_mojibake`, `tui_source_keeps_utf8_chinese_text_without_mojibake`, `daemon_decodes_http_requests_as_strict_utf8`
 
-## 当前限制
+## Current Limits
 
-- Action Console 中的 Service 生命周期动作仍返回 `UNSUPPORTED`，不显示假成功。
-- LocalProcessDriver 尚未接入安全 supervisor，因此生命周期动作不能作为真实启动/停止入口。
-- DockerComposeDriver 只保留固定 driver 能力；Action Console 当前不把它暴露为默认成功路径。显式执行模式实际成功仍取决于本机 Docker/Compose 环境。
-- Orchestrator daemon 当前是最小 HTTP API 入口；远程部署 agent、跨主机发布系统和生产级运维外壳尚未实现。
+- Service lifecycle actions are cataloged but remain `UNSUPPORTED` through the action console until a safe execution binding exists.
+- LocalProcessDriver is not a production supervisor.
+- DockerComposeDriver only accepts fixed command shapes.
+- Remote deployment agent and cross-host rollout are not complete production surfaces.
 
-## 最近本地验证
+## Recent Local Verification
 
 ```powershell
-cargo fmt --check
-cargo check -p orchestrator-core -p ojos-orchestrator-gui -p ojos-orchestrator-tui -p ojos-orchestrator-daemon
-cargo test -p orchestrator-core
-cargo test -p ojos-orchestrator-gui
-cargo test -p ojos-orchestrator-tui
-cargo test -p ojos-orchestrator-daemon
+cargo test -p orchestrator-core action -- --nocapture
+cargo test -p orchestrator-core endpoint -- --nocapture
+cargo test -p orchestrator-core database -- --nocapture
+cargo test -p ojos-orchestrator-daemon -- --nocapture
+cargo test -p ojos-orchestrator-gui -- --nocapture
+cargo test -p ojos-orchestrator-tui -- --nocapture
+git diff --check
 ```
-
-结果：通过。Go 与 Frontend 本轮未触及，未重跑。

@@ -28,7 +28,7 @@ Judge Core 覆盖 submit、task claim、artifact download、judge run、result u
 
 | 能力 | 当前路径 | 未来模块声明 |
 | --- | --- | --- |
-| 题目浏览和管理 | `services/problem-api`、`frontend/src/views/problem` | Problem capability |
+| 题目浏览和管理 | `services/problem-service`、`frontend/src/views/problem` | Problem capability |
 | 提交和结果 | `services/judge-api`、`frontend/src/views/judge` | Submission/Result capability |
 | worker 协议 | `services/judge-api/internal/handler/worker*`、`services/judge-worker/src/worker_link.rs` | Worker Link capability |
 | 评测执行 | `services/judge-worker/src` | Judge runtime service |

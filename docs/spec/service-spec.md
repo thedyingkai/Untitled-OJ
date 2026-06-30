@@ -4,7 +4,7 @@ Service 是 OJOS Orchestrator 可导入、可校验、可计划、可启停、�
 
 ## service.yaml
 
-`service.yaml` 是唯一正式 Service 契约。核心字段如下：
+`service.yaml` 是正式 Service 身份契约。它定义 Service ID、Endpoint、requires/provides、权限、运行边界和来源描述；相邻的 `release.yaml` 是发布/导入契约。核心字段如下：
 
 ```yaml
 schema_version: 1
@@ -106,7 +106,7 @@ agent
 
 `service.yaml` 不允许任意 `command`、脚本、hook、`privileged`、`cap_add`、host mount 或明文 secret。secret 只能通过 `requires.secrets`、`security.required_secrets` 或 Link 的 `secret_ref` 表达。
 
-Endpoint 只能声明 `default_port`；运行时实际 `IP:Port` 由 Orchestrator 绑定。Link 只能声明连接需求；真实 Link 由 Orchestrator 根据 Endpoint 创建。
+Endpoint 只能声明 `default_port`；运行时实际 `ip:port:service-name` 由 Orchestrator 绑定。Link 只能声明连接需求；真实 Link 由 Orchestrator 根据 Endpoint 创建。
 
 ## 基础 Service
 
@@ -114,14 +114,17 @@ Endpoint 只能声明 `default_port`；运行时实际 `IP:Port` 由 Orchestrato
 
 ```text
 gateway
-web-shell
-auth
-problem-api
+auth-service
+problem-service
+user-service
 judge-api
 judge-worker
-postgres
+postgresql
 redis
-storage
+storage-service
+minio
+jaeger
+orchestrator
 ```
 
-每个 Service 必须提供 `service.yaml`，并通过 `orchestrator/core` 的契约校验。
+每个 Service 必须提供 `service.yaml` 和同目录 `release.yaml`，并通过 `services/orchestrator/core` 的契约校验。`release.yaml` 的 `service_name`、`version`、backend protocol/port 必须与 `service.yaml` 对齐；HTTP route 必须覆盖 `service.yaml` 中声明的 `endpoint.routes` 和 `provides.routes`。

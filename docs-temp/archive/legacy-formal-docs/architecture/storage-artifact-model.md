@@ -10,7 +10,7 @@
 
 ## 2. 适用范围
 
-本文档适用于维护 `services/problem-api`、`services/judge-api`、`services/judge-worker`、部署 storage、排查 artifact 下载失败和做路径泄露审计的开发者。
+本文档适用于维护 `services/problem-service`、`services/judge-api`、`services/judge-worker`、部署 storage、排查 artifact 下载失败和做路径泄露审计的开发者。
 
 ## 3. 当前实现
 

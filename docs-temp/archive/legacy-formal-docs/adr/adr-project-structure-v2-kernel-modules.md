@@ -140,4 +140,4 @@ v0.1.0 目标是冻结 L0、L1 与 L2 foundation，不宣称完整模块热插�
 - 顶层 `tools/ojosctl` wrapper 可在未来增加，但当前 CLI source 属于 Kernel Installer。
 - `services/gateway/internal/moduleregistry` 是兼容路径，未来可向 `kernel/module-registry` 演进。
 - `frontend` 是兼容路径，未来可向 `apps/web-shell` 演进。
-- `services/problem-api`、`services/judge-api` 和 `services/judge-worker` 是 Judge Core 当前实现路径，未来可向 `modules/judge-core` 内部实现路径演进。
+- `services/problem-service`、`services/judge-api` 和 `services/judge-worker` 是 Judge Core 当前实现路径，未来可向 `modules/judge-core` 内部实现路径演进。

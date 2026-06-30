@@ -10,7 +10,7 @@
 
 ## 2. 适用范围
 
-适用于维护 `services/problem-api`、题目列表/详情/编辑页面、题目包管理页面和题目包 validator 的开发者。
+适用于维护 `services/problem-service`、题目列表/详情/编辑页面、题目包管理页面和题目包 validator 的开发者。
 
 ## 3. 当前实现
 
