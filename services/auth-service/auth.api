@@ -1,0 +1,224 @@
+syntax = "v1"
+
+info (
+	title:   "OJOS Auth API"
+	desc:    "OJOS authentication service"
+	author:  "thedyingkai"
+	version: "v1"
+)
+
+type HealthData {
+	Service string `json:"service"`
+	Status  string `json:"status"`
+}
+
+type HealthResp {
+	Code int        `json:"code"`
+	Msg  string     `json:"msg"`
+	Data HealthData `json:"data"`
+}
+
+type RegisterReq {
+	Username string `json:"username"`
+	Email    string `json:"email,optional"`
+	Password string `json:"password"`
+}
+
+type RegisterData {
+	UserId   int64  `json:"user_id"`
+	Username string `json:"username"`
+}
+
+type RegisterResp {
+	Code int          `json:"code"`
+	Msg  string       `json:"msg"`
+	Data RegisterData `json:"data,optional"`
+}
+
+type LoginReq {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type LoginData {
+	Token       string   `json:"token"`
+	UserId      int64    `json:"user_id"`
+	Username    string   `json:"username"`
+	Roles       []string `json:"roles"`
+	Permissions []string `json:"permissions"`
+}
+
+type LoginResp {
+	Code int       `json:"code"`
+	Msg  string    `json:"msg"`
+	Data LoginData `json:"data,optional"`
+}
+
+type ProfileData {
+	UserId      int64    `json:"user_id"`
+	Username    string   `json:"username"`
+	Roles       []string `json:"roles"`
+	Permissions []string `json:"permissions"`
+}
+
+type ProfileResp {
+	Code int         `json:"code"`
+	Msg  string      `json:"msg"`
+	Data ProfileData `json:"data,optional"`
+}
+
+type UserItem {
+	UserId    int64    `json:"user_id"`
+	Username  string   `json:"username"`
+	Email     string   `json:"email,optional"`
+	Roles     []string `json:"roles"`
+	CreatedAt string   `json:"created_at"`
+}
+
+type ListUsersResp {
+	Code int        `json:"code"`
+	Msg  string     `json:"msg"`
+	Data []UserItem `json:"data"`
+}
+
+type RoleItem {
+	Id          int64  `json:"id"`
+	Name        string `json:"name"`
+	ServiceCode string `json:"service_code"`
+	Description string `json:"description"`
+	IsSystem    bool   `json:"is_system"`
+}
+
+type ListRolesResp {
+	Code int        `json:"code"`
+	Msg  string     `json:"msg"`
+	Data []RoleItem `json:"data"`
+}
+
+type PermissionItem {
+	Code        string `json:"code"`
+	ServiceCode string `json:"service_code"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type ListPermissionsResp {
+	Code int              `json:"code"`
+	Msg  string           `json:"msg"`
+	Data []PermissionItem `json:"data"`
+}
+
+type UserRoleReq {
+	UserId int64  `json:"user_id"`
+	Role   string `json:"role"`
+}
+
+type ProblemRoleReq {
+	UserId    int64  `json:"user_id"`
+	ProblemId int64  `json:"problem_id"`
+	Role      string `json:"role"`
+}
+
+type PermissionCheckReq {
+	UserId     int64  `json:"user_id"`
+	Permission string `json:"permission"`
+	ScopeType  string `json:"scope_type,optional"`
+	ScopeId    int64  `json:"scope_id,optional"`
+}
+
+type PermissionCheckData {
+	Allowed bool `json:"allowed"`
+}
+
+type PermissionCheckResp {
+	Code int                 `json:"code"`
+	Msg  string              `json:"msg"`
+	Data PermissionCheckData `json:"data"`
+}
+
+type AuditLogItem {
+	Id             int64  `json:"id"`
+	ActorType      string `json:"actor_type"`
+	ActorId        int64  `json:"actor_id"`
+	Action         string `json:"action"`
+	TargetType     string `json:"target_type"`
+	TargetId       int64  `json:"target_id"`
+	PermissionCode string `json:"permission_code"`
+	RoleName       string `json:"role_name"`
+	ScopeType      string `json:"scope_type"`
+	ScopeId        int64  `json:"scope_id"`
+	Effect         string `json:"effect"`
+	CreatedAt      string `json:"created_at"`
+}
+
+type ListAuditLogsResp {
+	Code int            `json:"code"`
+	Msg  string         `json:"msg"`
+	Data []AuditLogItem `json:"data"`
+}
+
+type ActionData {
+	Ok bool `json:"ok"`
+}
+
+type AdminActionResp {
+	Code int        `json:"code"`
+	Msg  string     `json:"msg"`
+	Data ActionData `json:"data"`
+}
+
+service auth {
+	@handler health
+	get /health returns (HealthResp)
+}
+
+@server (
+	prefix: /auth
+)
+service auth {
+	@handler register
+	post /register (RegisterReq) returns (RegisterResp)
+
+	@handler login
+	post /login (LoginReq) returns (LoginResp)
+}
+
+@server (
+	prefix:     /auth
+	middleware: AuthMiddleware
+)
+service auth {
+	@handler profile
+	get /profile returns (ProfileResp)
+
+	@handler me
+	get /me returns (ProfileResp)
+
+	@handler listUsers
+	get /admin/users returns (ListUsersResp)
+
+	@handler listRoles
+	get /admin/roles returns (ListRolesResp)
+
+	@handler listPermissions
+	get /admin/permissions returns (ListPermissionsResp)
+
+	@handler addUserRole
+	post /admin/users/roles (UserRoleReq) returns (AdminActionResp)
+
+	@handler removeUserRole
+	delete /admin/users/roles (UserRoleReq) returns (AdminActionResp)
+
+	@handler addProblemRole
+	post /admin/problems/roles (ProblemRoleReq) returns (AdminActionResp)
+
+	@handler removeProblemRole
+	delete /admin/problems/roles (ProblemRoleReq) returns (AdminActionResp)
+
+	@handler permissionCheck
+	post /admin/permission-check (PermissionCheckReq) returns (PermissionCheckResp)
+
+	@handler listAuditLogs
+	get /admin/audit-logs returns (ListAuditLogsResp)
+}
+

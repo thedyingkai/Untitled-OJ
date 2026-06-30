@@ -217,7 +217,7 @@ func TestServiceProxyUnavailableServiceRouteReturnsStableError(t *testing.T) {
 		StripPrefix: "/api",
 		AuthMode:    "required",
 	}}, []config.ProxyTrustedServiceConfig{{
-		ServiceID:   "problem-api",
+		ServiceID:   "problem-service",
 		Target:      staticUpstream.URL,
 		StripPrefix: "/api",
 	}}, testSecret, nil, zap.NewNop())
@@ -228,7 +228,7 @@ func TestServiceProxyUnavailableServiceRouteReturnsStableError(t *testing.T) {
 		Routes: []servicestatus.ServiceRoute{{
 			RouteID:       "ojos.judge-core:/api/problem",
 			Prefix:        "/api/problem",
-			ServiceID:     "problem-api",
+			ServiceID:     "problem-service",
 			AuthMode:      "user",
 			Enabled:       true,
 			ProxyEnabled:  false,

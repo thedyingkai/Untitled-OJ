@@ -1,0 +1,36 @@
+schema_version: 1
+service_name: redis
+version: 8.0.0
+description: Release contract for redis.
+service_type: cache
+source:
+  kind: url
+  url: docker://redis:8
+  checksum: ""
+runtime:
+  kind: external
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: false
+  route_prefix: ""
+  remote_entry: ""
+  menu_items: []
+backend:
+  protocol: redis
+  port: 6379
+  health_path: ""
+migrations: []
+permissions:
+  - redis.connect
+routes: []
+redis: []
+storage: []
+dependencies: []
+config_schema: {}
+secrets: []
+observability:
+  metrics: true
+  jaeger: true
+

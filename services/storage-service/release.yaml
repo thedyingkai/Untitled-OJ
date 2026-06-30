@@ -1,0 +1,44 @@
+schema_version: 1
+service_name: storage-service
+version: 0.1.0
+description: Release contract for storage-service.
+service_type: storage
+source:
+  kind: local
+  url: local://services/storage-service
+  checksum: ""
+runtime:
+  kind: image
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: false
+  route_prefix: ""
+  remote_entry: ""
+  menu_items: []
+backend:
+  protocol: http
+  port: 8085
+  health_path: /health
+migrations: []
+permissions:
+  - storage.object.read
+  - storage.object.write
+routes: []
+redis: []
+storage:
+  - object_type: problem-package
+    bucket: problems
+  - object_type: submission-code
+    bucket: submissions
+  - object_type: judge-artifact
+    bucket: judge-artifacts
+dependencies:
+  - minio
+config_schema: {}
+secrets: []
+observability:
+  metrics: true
+  jaeger: true
+

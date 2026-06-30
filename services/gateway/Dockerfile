@@ -12,16 +12,16 @@ ENV GOPROXY=${GOPROXY}
 
 WORKDIR /app
 
-COPY gateway/go.mod gateway/go.sum ./gateway/
-COPY shared/go.mod shared/go.sum ./shared/
+COPY services/gateway/go.mod services/gateway/go.sum ./gateway/
+COPY platform/shared/go/go.mod platform/shared/go/go.sum ./platform/shared/go/
 
 WORKDIR /app/gateway
 RUN go mod download
 
 WORKDIR /app
 
-COPY gateway ./gateway
-COPY shared ./shared
+COPY services/gateway ./gateway
+COPY platform/shared/go ./platform/shared/go
 
 WORKDIR /app/gateway
 

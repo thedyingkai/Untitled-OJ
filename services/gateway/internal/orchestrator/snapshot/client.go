@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -68,12 +69,20 @@ func (c *Client) DecodeOrchestratorRoutes(ctx context.Context, includeDisabled b
 	}, out)
 }
 
-func (c *Client) ListSets(ctx context.Context) ([]Set, error) {
-	snapshot, err := c.topology(ctx)
+func (c *Client) ListEndpoints(ctx context.Context) ([]Endpoint, error) {
+	snapshot, err := c.snapshotData(ctx, true)
 	if err != nil {
 		return nil, err
 	}
-	return snapshot.Sets, nil
+	return snapshot.Endpoints, nil
+}
+
+func (c *Client) ListEndpointGroups(ctx context.Context) ([]EndpointGroup, error) {
+	endpoints, err := c.ListEndpoints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return EndpointGroups(endpoints), nil
 }
 
 func (c *Client) ListServices(ctx context.Context) ([]Service, error) {
@@ -138,10 +147,10 @@ func (c *Client) Topology(ctx context.Context) (Topology, error) {
 		return Topology{}, err
 	}
 	return Topology{
-		Sets:       []Set{},
-		Nodes:      snapshot.ServiceDefinitions,
-		Edges:      snapshot.Topology.DependencyEdges,
-		Components: snapshot.Components,
+		EndpointGroups: EndpointGroups(snapshot.Endpoints),
+		Nodes:          snapshot.ServiceDefinitions,
+		Edges:          snapshot.Topology.DependencyEdges,
+		Components:     snapshot.Components,
 	}, nil
 }
 
@@ -220,24 +229,41 @@ func (c *Client) ServiceOperationDetail(ctx context.Context, operationID string)
 	return result, nil
 }
 
-func (c *Client) topology(ctx context.Context) (struct {
-	Sets []Set `json:"sets"`
-}, error) {
-	var result struct {
-		Sets []Set `json:"sets"`
-	}
-	if err := c.get(ctx, "/internal/topology", nil, &result); err != nil {
-		return result, err
-	}
-	return result, nil
-}
-
 func (c *Client) snapshotData(ctx context.Context, includeDisabled bool) (OrchestratorSnapshotData, error) {
 	var snapshot OrchestratorSnapshotData
 	if err := c.DecodeOrchestratorSnapshot(ctx, includeDisabled, &snapshot); err != nil {
 		return OrchestratorSnapshotData{}, err
 	}
 	return snapshot, nil
+}
+
+func EndpointGroups(endpoints []Endpoint) []EndpointGroup {
+	byService := make(map[string][]string)
+	for _, endpoint := range endpoints {
+		serviceName := strings.TrimSpace(endpoint.ServiceID)
+		value := strings.TrimSpace(endpoint.Endpoint)
+		if serviceName == "" || value == "" {
+			continue
+		}
+		byService[serviceName] = append(byService[serviceName], value)
+	}
+	names := make([]string, 0, len(byService))
+	for name := range byService {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	groups := make([]EndpointGroup, 0, len(names))
+	for _, name := range names {
+		items := byService[name]
+		sort.Strings(items)
+		groups = append(groups, EndpointGroup{
+			ServiceName:   name,
+			Selector:      name + "[*]",
+			EndpointCount: len(items),
+			Endpoints:     items,
+		})
+	}
+	return groups
 }
 
 func (c *Client) get(ctx context.Context, path string, query url.Values, out any) error {

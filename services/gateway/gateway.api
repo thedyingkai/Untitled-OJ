@@ -11,8 +11,336 @@ type HealthResp {
 	Status string `json:"status"`
 }
 
+type HealthComponent {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Latency int64  `json:"latency_ms"`
+	Message string `json:"message,optional"`
+}
+
+type AdminHealthResp {
+	Status            string            `json:"status"`
+	Components        []HealthComponent `json:"components"`
+	WorkerOnlineCount int64             `json:"worker_online_count"`
+	QueuePending      int64             `json:"queue_pending"`
+	InternalAuth      string            `json:"internal_auth"`
+}
+
+type PathIdReq {
+	Id string `path:"id"`
+}
+
+type AdminAuthReq {
+	Authorization string `header:"Authorization,optional"`
+}
+
+type AdminSnapshotReq {
+	Authorization   string `header:"Authorization,optional"`
+	IncludeDisabled bool   `form:"include_disabled,optional"`
+}
+
+type AdminRoutesReq {
+	Authorization   string `header:"Authorization,optional"`
+	IncludeDisabled bool   `form:"include_disabled,optional"`
+	DebugUpstream   bool   `form:"debug_upstream,optional"`
+}
+
+type AdminPathIdReq {
+	Id            string `path:"id"`
+	Authorization string `header:"Authorization,optional"`
+}
+
+type ServiceDefinitionItem {
+	ServiceId   string      `json:"service_id"`
+	Name        string      `json:"name"`
+	Version     string      `json:"version"`
+	Status      string      `json:"status"`
+	Kind        string      `json:"kind"`
+	Description string      `json:"description"`
+	Manifest    interface{} `json:"manifest,omitempty"`
+}
+
+type EndpointGroupItem {
+	ServiceName   string   `json:"service_name"`
+	Selector      string   `json:"selector"`
+	EndpointCount int      `json:"endpoint_count"`
+	Endpoints     []string `json:"endpoints"`
+}
+
+type ServiceEdgeItem {
+	FromServiceId     string `json:"from_service_id"`
+	ToServiceId       string `json:"to_service_id"`
+	EdgeType          string `json:"edge_type"`
+	VersionConstraint string `json:"version_constraint"`
+	Required          bool   `json:"required"`
+}
+
+type ServiceComponentItem {
+	ServiceId     string      `json:"service_id"`
+	ComponentId   string      `json:"component_id"`
+	ComponentType string      `json:"component_type"`
+	Status        string      `json:"status"`
+	Config        interface{} `json:"config"`
+}
+
+type ServiceEndpointItem {
+	Endpoint    string      `json:"endpoint"`
+	ServiceId   string      `json:"service_id"`
+	Protocol    string      `json:"protocol"`
+	HealthPath  string      `json:"health_path"`
+	Health      string      `json:"health"`
+	Reachable   bool        `json:"reachable"`
+	DisplayName string      `json:"display_name"`
+	Note        string      `json:"note"`
+	Config      interface{} `json:"config"`
+}
+
+type ServicePermissionItem {
+	ServiceId     string `json:"service_id"`
+	PermissionKey string `json:"permission_key"`
+	Description   string `json:"description"`
+}
+
+type ServiceMenuItem {
+	ServiceId          string `json:"service_id"`
+	MenuKey            string `json:"menu_key"`
+	Title              string `json:"title"`
+	RoutePath          string `json:"route_path"`
+	Icon               string `json:"icon"`
+	ParentKey          string `json:"parent_key"`
+	SortOrder          int    `json:"sort_order"`
+	RequiredPermission string `json:"required_permission"`
+	Enabled            bool   `json:"enabled"`
+}
+
+type ServiceFrontendRouteItem {
+	ServiceId          string `json:"service_id"`
+	RoutePath          string `json:"route_path"`
+	RouteName          string `json:"route_name"`
+	ComponentKey       string `json:"component_key"`
+	RequiredPermission string `json:"required_permission"`
+	Enabled            bool   `json:"enabled"`
+}
+
+type ServiceGatewayRouteItem {
+	ServiceId     string `json:"service_id"`
+	Prefix        string `json:"prefix"`
+	TargetService string `json:"target_service"`
+	AuthMode      string `json:"auth_mode"`
+	Enabled       bool   `json:"enabled"`
+}
+
+type ListServicesResp {
+	Services []ServiceDefinitionItem `json:"services"`
+}
+
+type ListEndpointGroupsResp {
+	EndpointGroups []EndpointGroupItem `json:"endpoint_groups"`
+}
+
+type ServiceTopologyResp {
+	EndpointGroups     []EndpointGroupItem     `json:"endpoint_groups"`
+	Nodes              []ServiceTopologyNode   `json:"nodes"`
+	Edges              []ServiceTopologyEdge   `json:"edges"`
+	Components         []ServiceComponentItem  `json:"components"`
+	ServiceDefinitions []ServiceDefinitionItem `json:"service_definitions"`
+	DependencyEdges    []ServiceEdgeItem       `json:"dependency_edges"`
+}
+
+type OrchestratorSnapshotResp {
+	Version            string                     `json:"version"`
+	GeneratedAt        string                     `json:"generated_at"`
+	ServiceDefinitions []ServiceDefinitionItem    `json:"service_definitions"`
+	Permissions        []ServicePermissionItem    `json:"permissions"`
+	Roles              []OrchestratorSnapshotItem `json:"roles"`
+	Menus              []ServiceMenuItem          `json:"menus"`
+	FrontendRoutes     []ServiceFrontendRouteItem `json:"frontend_routes"`
+	GatewayRoutes      []ServiceGatewayRouteItem  `json:"gateway_routes"`
+	Components         []ServiceStatusComponent   `json:"components"`
+	Services           []ServiceStatusItem        `json:"services"`
+	Workers            []ServiceStatusItem        `json:"workers"`
+	StorageBuckets     []OrchestratorSnapshotItem `json:"storage_buckets"`
+	HealthChecks       []ServiceStatusComponent   `json:"health_checks"`
+	Operations         []OrchestratorSnapshotItem `json:"operations"`
+	Topology           ServiceTopologyGraph       `json:"topology"`
+	Warnings           []string                   `json:"warnings"`
+}
+
+type ServiceStatusComponent {
+	ServiceId   string      `json:"service_id"`
+	ComponentId string      `json:"component_id"`
+	Type        string      `json:"type"`
+	Status      string      `json:"status"`
+	Config      interface{} `json:"config"`
+}
+
+type ServiceStatusItem {
+	OwnerServiceId string   `json:"owner_service_id"`
+	ServiceId      string   `json:"service_id"`
+	Name           string   `json:"name"`
+	Kind           string   `json:"kind"`
+	Lifecycle      string   `json:"lifecycle"`
+	Runtime        string   `json:"runtime"`
+	ComposeService string   `json:"compose_service,omitempty"`
+	State          string   `json:"state"`
+	Health         string   `json:"health"`
+	Required       bool     `json:"required"`
+	Routes         []string `json:"routes"`
+	HealthCheckId  string   `json:"health_check_id,omitempty"`
+	Status         string   `json:"status"`
+	BlockedBy      []string `json:"blocked_by"`
+	Warnings       []string `json:"warnings"`
+}
+
+type OrchestratorSnapshotItem {
+	ServiceId string      `json:"service_id"`
+	Id        string      `json:"id"`
+	Type      string      `json:"type"`
+	Status    string      `json:"status"`
+	Enabled   bool        `json:"enabled"`
+	Config    interface{} `json:"config"`
+}
+
+type ServiceTopologyGraph {
+	Nodes              []ServiceTopologyNode   `json:"nodes"`
+	Edges              []ServiceTopologyEdge   `json:"edges"`
+	ServiceDefinitions []ServiceDefinitionItem `json:"service_definitions"`
+	DependencyEdges    []ServiceEdgeItem       `json:"dependency_edges"`
+}
+
+type ServiceTopologyNode {
+	Id        string      `json:"id"`
+	ServiceId string      `json:"service_id"`
+	Label     string      `json:"label"`
+	Type      string      `json:"type"`
+	Status    string      `json:"status"`
+	Source    string      `json:"source"`
+	Config    interface{} `json:"config"`
+}
+
+type ServiceTopologyEdge {
+	Id        string `json:"id"`
+	ServiceId string `json:"service_id"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Type      string `json:"type"`
+	Required  bool   `json:"required"`
+	Source    string `json:"source"`
+}
+
+type OrchestratorRouteItem {
+	RouteId        string   `json:"route_id"`
+	OwnerServiceId string   `json:"owner_service_id"`
+	Prefix         string   `json:"prefix"`
+	ServiceId      string   `json:"service_id"`
+	TargetService  string   `json:"target_service"`
+	UpstreamBase   string   `json:"upstream_base,omitempty"`
+	AuthMode       string   `json:"auth_mode"`
+	Methods        []string `json:"methods"`
+	Enabled        bool     `json:"enabled"`
+	ProxyEnabled   bool     `json:"proxy_enabled"`
+	Priority       int      `json:"priority"`
+	StripPrefix    string   `json:"strip_prefix,omitempty"`
+	RewritePrefix  string   `json:"rewrite_prefix,omitempty"`
+	HealthCheckId  string   `json:"health_check_id,omitempty"`
+	CreatedFrom    string   `json:"created_from"`
+	Status         string   `json:"status"`
+	ServiceStatus  string   `json:"service_status,omitempty"`
+	ServiceHealth  string   `json:"service_health,omitempty"`
+	Conflicts      []string `json:"conflicts"`
+	Warnings       []string `json:"warnings"`
+	BlockedBy      []string `json:"blocked_by"`
+}
+
+type OrchestratorRoutesResp {
+	Version     string                  `json:"version"`
+	GeneratedAt string                  `json:"generated_at"`
+	Routes      []OrchestratorRouteItem `json:"routes"`
+	Warnings    []string                `json:"warnings"`
+	CanProxy    bool                    `json:"can_proxy"`
+}
+
+type ServiceStatusListResp {
+	Services []ServiceStatusItem `json:"services"`
+	Workers  []ServiceStatusItem `json:"workers"`
+}
+
+type ServiceStatusItemResp {
+	Service ServiceStatusItem `json:"service"`
+}
+
+type ServiceStatusOperationItem {
+	OperationId   string      `json:"operation_id"`
+	ServiceId     string      `json:"service_id"`
+	Action        string      `json:"action"`
+	Status        string      `json:"status"`
+	ActorUsername string      `json:"actor_username"`
+	Request       interface{} `json:"request"`
+	Plan          interface{} `json:"plan"`
+	Result        interface{} `json:"result"`
+	ErrorMessage  string      `json:"error_message"`
+	CreatedAt     string      `json:"created_at"`
+	UpdatedAt     string      `json:"updated_at"`
+}
+
+type ServiceStatusOperationsResp {
+	Operations []ServiceStatusOperationItem `json:"operations"`
+}
+
+type ServiceDetailResp {
+	Service        ServiceDefinitionItem      `json:"service"`
+	Dependencies   []ServiceEdgeItem          `json:"dependencies"`
+	Dependents     []ServiceEdgeItem          `json:"dependents"`
+	Components     []ServiceComponentItem     `json:"components"`
+	Permissions    []ServicePermissionItem    `json:"permissions"`
+	Menus          []ServiceMenuItem          `json:"menus"`
+	FrontendRoutes []ServiceFrontendRouteItem `json:"frontend_routes"`
+	GatewayRoutes  []ServiceGatewayRouteItem  `json:"gateway_routes"`
+	Endpoints      []ServiceEndpointItem      `json:"endpoints"`
+	HealthChecks   []ServiceComponentItem     `json:"health_checks"`
+}
+
 service gateway {
 	@handler health
 	get /health returns (HealthResp)
+
+	@handler adminHealth
+	get /api/admin/health (AdminAuthReq) returns (AdminHealthResp)
+
+	@handler adminServices
+	get /api/admin/services (AdminAuthReq) returns (ListServicesResp)
+
+	@handler adminEndpointGroups
+	get /api/admin/endpoint-groups (AdminAuthReq) returns (ListEndpointGroupsResp)
+
+	@handler adminServiceTopology
+	get /api/admin/topology (AdminAuthReq) returns (ServiceTopologyResp)
+
+	@handler adminOrchestratorSnapshot
+	get /api/admin/orchestrator/snapshot (AdminSnapshotReq) returns (OrchestratorSnapshotResp)
+
+	@handler adminOrchestratorRoutes
+	get /api/admin/orchestrator/routes (AdminRoutesReq) returns (OrchestratorRoutesResp)
+}
+
+service gateway {
+	@handler adminServiceStatusServices
+	get /api/admin/services/status (AdminAuthReq) returns (ServiceStatusListResp)
+
+	@handler adminServiceStatusOperations
+	get /api/admin/services/status/operations (AdminAuthReq) returns (ServiceStatusOperationsResp)
+
+	@handler adminServiceStatusOperationDetail
+	get /api/admin/services/status/operations/:id (AdminPathIdReq) returns (ServiceStatusOperationsResp)
+}
+
+service gateway {
+	@handler adminServiceStatusServiceDetail
+	get /api/admin/services/status/:id (AdminPathIdReq) returns (ServiceStatusItemResp)
+}
+
+service gateway {
+	@handler adminServiceDetail
+	get /api/admin/services/:id (AdminPathIdReq) returns (ServiceDetailResp)
 }
 

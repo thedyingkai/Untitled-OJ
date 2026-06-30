@@ -1,0 +1,36 @@
+// Code scaffolded by goctl. Safe to edit.
+// goctl 1.10.1
+
+package logic
+
+import (
+	"context"
+	"net/http"
+
+	"ojos-judge-api/internal/svc"
+	"ojos-judge-api/internal/types"
+
+	"github.com/zeromicro/go-zero/core/logx"
+)
+
+type WorkerArtifactSubmissionSourceLogic struct {
+	logx.Logger
+	ctx    context.Context
+	svcCtx *svc.ServiceContext
+}
+
+func NewWorkerArtifactSubmissionSourceLogic(ctx context.Context, svcCtx *svc.ServiceContext) *WorkerArtifactSubmissionSourceLogic {
+	return &WorkerArtifactSubmissionSourceLogic{
+		Logger: logx.WithContext(ctx),
+		ctx:    ctx,
+		svcCtx: svcCtx,
+	}
+}
+
+func (l *WorkerArtifactSubmissionSourceLogic) WorkerArtifactSubmissionSource(req *types.WorkerArtifactSourceReq) error {
+	return nil
+}
+
+func (l *WorkerArtifactSubmissionSourceLogic) Serve(w http.ResponseWriter, r *http.Request, req *types.WorkerArtifactSourceReq) error {
+	return ServeWorkerSubmissionSource(l.ctx, l.svcCtx, w, r, req)
+}

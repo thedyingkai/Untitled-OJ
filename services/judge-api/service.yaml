@@ -21,23 +21,23 @@ endpoint:
     - /api/judge/worker
 requires:
   services:
-    - postgres
+    - postgresql
     - redis
-    - storage
-    - problem-api
+    - storage-service
+    - problem-service
   links:
-    - id: postgres
+    - id: postgresql
       protocol: postgres
     - id: redis
       protocol: redis
-    - id: storage
+    - id: storage-service
       protocol: http
-    - id: problem-api
+    - id: problem-service
       protocol: http
   storage:
-    - storage
+    - storage-service
   database:
-    - postgres
+    - postgresql
   queue:
     - redis
   secrets:
@@ -48,8 +48,6 @@ provides:
     - judge.queue
     - judge.dispatch
     - judge.result
-  endpoints:
-    - http
   routes:
     - /api/judge
     - /api/judge/worker
@@ -85,10 +83,13 @@ source:
     path: services/judge-api/Dockerfile
   artifact: {}
 ui:
-  enabled: false
-  routes: []
-  menus: []
-  permissions: []
+  enabled: true
+  routes:
+    - /submissions
+  menus:
+    - submissions
+  permissions:
+    - submission.view.own
 permissions:
   - judge.submit
   - submission.view.own

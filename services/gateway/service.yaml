@@ -20,13 +20,16 @@ endpoint:
     - /api
 requires:
   services:
-    - auth
-    - problem-api
+    - auth-service
+    - user-service
+    - problem-service
     - judge-api
   links:
-    - id: auth
+    - id: auth-service
       protocol: http
-    - id: problem-api
+    - id: user-service
+      protocol: http
+    - id: problem-service
       protocol: http
     - id: judge-api
       protocol: http
@@ -41,10 +44,9 @@ provides:
     - gateway.auth
     - gateway.audit
     - gateway.rate-limit
-  endpoints:
-    - http
   routes:
     - /api/auth
+    - /api/users
     - /api/problem
     - /api/judge
   workers: []
@@ -77,9 +79,12 @@ source:
     path: services/gateway/Dockerfile
   artifact: {}
 ui:
-  enabled: false
-  routes: []
-  menus: []
+  enabled: true
+  routes:
+    - /
+  menus:
+    - problems
+    - submissions
   permissions: []
 permissions:
   - gateway.read

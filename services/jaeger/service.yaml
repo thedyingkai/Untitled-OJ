@@ -1,0 +1,68 @@
+schema_version: 1
+id: jaeger
+name: Jaeger
+version: 2.19.0
+kind: external
+description: Distributed tracing service for all OJOS services.
+runtime:
+  mode: external
+  driver: external
+  root_allowed: true
+  non_root_allowed: false
+  start_policy: external
+  restart_policy: external
+endpoint:
+  protocol: http
+  default_port: 16686
+  health_path: /
+  expose: false
+  routes: []
+requires:
+  services: []
+  links: []
+  storage: []
+  database: []
+  queue: []
+  secrets: []
+provides:
+  capabilities:
+    - tracing.jaeger
+  routes: []
+  workers: []
+  storage_buckets: []
+  events: []
+config_schema:
+  otlp_grpc_port:
+    type: integer
+    default: 4317
+resources:
+  cpu: shared
+  memory: 256Mi
+  disk: 1Gi
+  gpu: none
+  network: internal
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false
+  required_secrets: []
+  sandbox: {}
+  network_policy:
+    internal_only: true
+source:
+  type: external
+  ref: jaegertracing/jaeger:2.19.0
+  build: {}
+  artifact: {}
+ui:
+  enabled: false
+  routes: []
+  menus: []
+  permissions: []
+permissions:
+  - tracing.read
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10

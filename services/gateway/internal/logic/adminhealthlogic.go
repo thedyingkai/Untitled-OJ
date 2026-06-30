@@ -31,7 +31,11 @@ func NewAdminHealthLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Admin
 	}
 }
 
-func (l *AdminHealthLogic) AdminHealth(authHeader string) (*types.AdminHealthResp, error) {
+func (l *AdminHealthLogic) AdminHealth(req *types.AdminAuthReq) (*types.AdminHealthResp, error) {
+	return l.adminHealth(req.Authorization)
+}
+
+func (l *AdminHealthLogic) adminHealth(authHeader string) (*types.AdminHealthResp, error) {
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
 	}

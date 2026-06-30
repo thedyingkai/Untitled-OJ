@@ -121,13 +121,13 @@ func TestBuildSnapshotParsesManifestServicesAndWorkers(t *testing.T) {
 			Manifest: rawManifest(map[string]any{
 				"provides": map[string]any{
 					"services": []map[string]any{{
-						"id":              "problem-api",
-						"name":            "Problem API",
+						"id":              "problem-service",
+						"name":            "Problem Service",
 						"kind":            "http",
 						"lifecycle":       "managed",
 						"trusted_runtime": "compose",
-						"compose_service": "problem-api",
-						"health_check_id": "problem-api-health",
+						"compose_service": "problem-service",
+						"health_check_id": "problem-service-health",
 						"routes":          []string{"/api/problem"},
 						"required":        true,
 					}},
@@ -147,7 +147,7 @@ func TestBuildSnapshotParsesManifestServicesAndWorkers(t *testing.T) {
 		gatewayRoutes: []orchestratorsnapshot.GatewayRoute{{
 			ServiceID:     "judge-api",
 			Prefix:        "/api/problem",
-			TargetService: "problem-api",
+			TargetService: "problem-service",
 			AuthMode:      "user",
 			Enabled:       true,
 		}},
@@ -161,10 +161,10 @@ func TestBuildSnapshotParsesManifestServicesAndWorkers(t *testing.T) {
 		t.Fatalf("expected one manifest service, got %#v", snapshot.Services)
 	}
 	service := snapshot.Services[0]
-	if service.ServiceID != "problem-api" || service.Lifecycle != LifecycleManaged || service.Runtime != "compose" {
+	if service.ServiceID != "problem-service" || service.Lifecycle != LifecycleManaged || service.Runtime != "compose" {
 		t.Fatalf("unexpected service contract: %#v", service)
 	}
-	if !contains(service.Routes, "/api/problem") || service.HealthCheckID != "problem-api-health" || !service.Required {
+	if !contains(service.Routes, "/api/problem") || service.HealthCheckID != "problem-service-health" || !service.Required {
 		t.Fatalf("service routes/health/required not populated: %#v", service)
 	}
 	if len(snapshot.Workers) != 1 || snapshot.Workers[0].ServiceID != "judge-worker" {
@@ -294,17 +294,17 @@ func TestBuildRouteTableBindsServiceHealth(t *testing.T) {
 		GatewayRoutes: []orchestratorsnapshot.GatewayRoute{{
 			ServiceID:     "judge-api",
 			Prefix:        "/api/problem",
-			TargetService: "problem-api",
+			TargetService: "problem-service",
 			AuthMode:      "user",
 			Enabled:       true,
 		}},
 	}, RouteTableOptions{
 		TrustedServices: map[string]TrustedService{
-			"problem-api": {ServiceID: "problem-api", UpstreamBase: "http://problem-api:8080"},
+			"problem-service": {ServiceID: "problem-service", UpstreamBase: "http://problem-service:8080"},
 		},
 		ServiceStatuses: map[string]ServiceStatus{
-			"problem-api": {
-				ServiceID: "problem-api",
+			"problem-service": {
+				ServiceID: "problem-service",
 				State:     ServiceStatusStopped,
 				Health:    "error",
 			},
@@ -334,12 +334,12 @@ func TestComposeDriverPlansOnlyAllowedManagedServices(t *testing.T) {
 	snapshot := Snapshot{
 		Services: []ServiceStatus{
 			{
-				ServiceID:      "problem-api",
+				ServiceID:      "problem-service",
 				OwnerServiceID: "judge-api",
 				Kind:           "http",
 				Lifecycle:      LifecycleManaged,
 				Runtime:        "compose",
-				ComposeService: "problem-api",
+				ComposeService: "problem-service",
 				Required:       true,
 			},
 			{
@@ -368,15 +368,15 @@ func TestComposeDriverPlansOnlyAllowedManagedServices(t *testing.T) {
 		}},
 	}
 	driver := NewComposeDriver(map[string]TrustedService{
-		"problem-api": {ServiceID: "problem-api", UpstreamBase: healthServer.URL},
-	}, "problem-api", "judge-worker")
+		"problem-service": {ServiceID: "problem-service", UpstreamBase: healthServer.URL},
+	}, "problem-service", "judge-worker")
 
 	services, err := driver.ListServices(context.Background(), snapshot)
 	if err != nil {
 		t.Fatalf("ListServices failed: %v", err)
 	}
-	if serviceStatusOf(services, "problem-api") != ServiceStatusRunning {
-		t.Fatalf("problem-api should be running when health returns 204: %#v", services)
+	if serviceStatusOf(services, "problem-service") != ServiceStatusRunning {
+		t.Fatalf("problem-service should be running when health returns 204: %#v", services)
 	}
 	if serviceStatusOf(services, "judge-worker") != ServiceStatusUnknown {
 		t.Fatalf("judge-worker should be unknown without HTTP health endpoint: %#v", services)

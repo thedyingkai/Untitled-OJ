@@ -37,7 +37,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY judge-worker ./judge-worker
+COPY services/judge-worker ./judge-worker
 
 WORKDIR /app/judge-worker
 

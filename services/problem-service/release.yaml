@@ -1,0 +1,49 @@
+schema_version: 1
+service_name: problem-service
+version: 0.1.0
+description: Release contract for problem-service.
+service_type: backend-api
+source:
+  kind: local
+  url: local://services/problem-service
+  checksum: ""
+runtime:
+  kind: image
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: true
+  route_prefix: "/problems"
+  remote_entry: "/assets/problem-service/remoteEntry.js"
+  menu_items: []
+backend:
+  protocol: http
+  port: 8083
+  health_path: /health
+migrations: []
+permissions:
+  - problem.view
+  - problem.create
+  - problem.edit
+  - problem.delete
+  - problem.manage.data
+routes:
+  - path: /api/problem/**
+    method: ANY
+    target_type: endpoint-group
+    target: problem-service[*]
+    permission: public
+redis: []
+storage:
+  - object_type: problem-package
+    bucket: problems
+dependencies:
+  - postgresql
+  - storage-service
+config_schema: {}
+secrets: []
+observability:
+  metrics: true
+  jaeger: true
+

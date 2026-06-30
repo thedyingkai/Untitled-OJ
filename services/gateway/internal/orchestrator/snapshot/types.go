@@ -16,16 +16,15 @@ const (
 	KindAgent         = "agent"
 )
 
-type Set struct {
-	SetID       string `json:"set_id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	SortOrder   int    `json:"sort_order"`
+type EndpointGroup struct {
+	ServiceName   string   `json:"service_name"`
+	Selector      string   `json:"selector"`
+	EndpointCount int      `json:"endpoint_count"`
+	Endpoints     []string `json:"endpoints"`
 }
 
 type Service struct {
 	ServiceID   string          `json:"service_id"`
-	SetID       string          `json:"set_id"`
 	Name        string          `json:"name"`
 	Version     string          `json:"version"`
 	Status      string          `json:"status"`
@@ -121,14 +120,15 @@ type Migration struct {
 }
 
 type Topology struct {
-	Sets       []Set       `json:"sets"`
-	Nodes      []Service   `json:"nodes"`
-	Edges      []Edge      `json:"edges"`
-	Components []Component `json:"components"`
+	EndpointGroups []EndpointGroup `json:"endpoint_groups"`
+	Nodes          []Service       `json:"nodes"`
+	Edges          []Edge          `json:"edges"`
+	Components     []Component     `json:"components"`
 }
 
 type OrchestratorSnapshotData struct {
 	ServiceDefinitions []Service       `json:"service_definitions"`
+	Endpoints          []Endpoint      `json:"endpoints"`
 	Permissions        []Permission    `json:"permissions"`
 	Menus              []Menu          `json:"menus"`
 	FrontendRoutes     []FrontendRoute `json:"frontend_routes"`
@@ -156,7 +156,6 @@ type Detail struct {
 }
 
 type SnapshotData struct {
-	Sets           []Set
 	Services       []Service
 	Edges          []Edge
 	Components     []Component

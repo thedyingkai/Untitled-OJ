@@ -1,0 +1,48 @@
+schema_version: 1
+service_name: user-service
+version: 0.1.0
+description: Release contract for user-service.
+service_type: backend-api
+source:
+  kind: local
+  url: local://services/user-service
+  checksum: ""
+runtime:
+  kind: image
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: true
+  route_prefix: "/me"
+  remote_entry: "/assets/user-service/remoteEntry.js"
+  menu_items: []
+backend:
+  protocol: http
+  port: 8084
+  health_path: /health
+migrations: []
+permissions:
+  - user.profile.read.self
+  - user.profile.update.self
+  - user.stats.read
+routes:
+  - path: /api/users/**
+    method: ANY
+    target_type: endpoint-group
+    target: user-service[*]
+    permission: public
+redis: []
+storage:
+  - object_type: avatar
+    bucket: avatars
+dependencies:
+  - auth-service
+  - postgresql
+  - storage-service
+config_schema: {}
+secrets: []
+observability:
+  metrics: true
+  jaeger: true
+

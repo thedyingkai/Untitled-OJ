@@ -27,7 +27,7 @@ type AdminServicesLogic struct {
 
 type orchestratorSnapshotReader interface {
 	ListServices(context.Context) ([]orchestratorsnapshot.Service, error)
-	ListSets(context.Context) ([]orchestratorsnapshot.Set, error)
+	ListEndpointGroups(context.Context) ([]orchestratorsnapshot.EndpointGroup, error)
 	Topology(context.Context) (orchestratorsnapshot.Topology, error)
 	Detail(context.Context, string) (orchestratorsnapshot.Detail, error)
 	servicestatus.SnapshotReader
@@ -46,6 +46,10 @@ func NewAdminServicesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Adm
 	}
 }
 
+func (l *AdminServicesLogic) AdminServices(req *types.AdminAuthReq) (*types.ListServicesResp, error) {
+	return l.ListServices(req.Authorization)
+}
+
 func (l *AdminServicesLogic) ListServices(authHeader string) (*types.ListServicesResp, error) {
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
@@ -60,18 +64,18 @@ func (l *AdminServicesLogic) ListServices(authHeader string) (*types.ListService
 	return &types.ListServicesResp{Services: serviceItems(services, false)}, nil
 }
 
-func (l *AdminServicesLogic) ListSets(authHeader string) (*types.ListServiceSetsResp, error) {
+func (l *AdminServicesLogic) ListEndpointGroups(authHeader string) (*types.ListEndpointGroupsResp, error) {
 	if err := requireAdmin(l.ctx, l.svcCtx, authHeader); err != nil {
 		return nil, err
 	}
 	if l.repo == nil {
 		return nil, errOrchestratorUnavailable()
 	}
-	sets, err := l.repo.ListSets(l.ctx)
+	groups, err := l.repo.ListEndpointGroups(l.ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &types.ListServiceSetsResp{Sets: setItems(sets)}, nil
+	return &types.ListEndpointGroupsResp{EndpointGroups: endpointGroupItems(groups)}, nil
 }
 
 func (l *AdminServicesLogic) Topology(authHeader string) (*types.ServiceTopologyResp, error) {
@@ -81,7 +85,7 @@ func (l *AdminServicesLogic) Topology(authHeader string) (*types.ServiceTopology
 	if l.repo == nil {
 		return nil, errOrchestratorUnavailable()
 	}
-	sets, err := l.repo.ListSets(l.ctx)
+	groups, err := l.repo.ListEndpointGroups(l.ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +96,7 @@ func (l *AdminServicesLogic) Topology(authHeader string) (*types.ServiceTopology
 	l.enrichOrchestratorSnapshot(&snapshot)
 	components := serviceComponentsAsItems(snapshot.Components)
 	return &types.ServiceTopologyResp{
-		Sets:               setItems(sets),
+		EndpointGroups:     endpointGroupItems(groups),
 		Nodes:              serviceTopologyNodeItems(snapshot.Topology.Nodes),
 		Edges:              serviceTopologyEdgeItems(snapshot.Topology.Edges),
 		Components:         components,
@@ -220,14 +224,14 @@ func (l *AdminServicesLogic) Detail(authHeader string, serviceID string) (*types
 	}, nil
 }
 
-func setItems(items []orchestratorsnapshot.Set) []types.ServiceSetItem {
-	result := make([]types.ServiceSetItem, 0, len(items))
+func endpointGroupItems(items []orchestratorsnapshot.EndpointGroup) []types.EndpointGroupItem {
+	result := make([]types.EndpointGroupItem, 0, len(items))
 	for _, item := range items {
-		result = append(result, types.ServiceSetItem{
-			SetId:       item.SetID,
-			Name:        item.Name,
-			Description: item.Description,
-			SortOrder:   item.SortOrder,
+		result = append(result, types.EndpointGroupItem{
+			ServiceName:   item.ServiceName,
+			Selector:      item.Selector,
+			EndpointCount: item.EndpointCount,
+			Endpoints:     item.Endpoints,
 		})
 	}
 	return result
@@ -244,7 +248,6 @@ func serviceItems(items []orchestratorsnapshot.Service, includeManifest bool) []
 func serviceItem(item orchestratorsnapshot.Service, includeManifest bool) types.ServiceDefinitionItem {
 	out := types.ServiceDefinitionItem{
 		ServiceId:   item.ServiceID,
-		SetId:       item.SetID,
 		Name:        item.Name,
 		Version:     item.Version,
 		Status:      item.Status,

@@ -1,0 +1,45 @@
+schema_version: 1
+service_name: judge-worker
+version: 0.1.0
+description: Release contract for judge-worker.
+service_type: backend-worker
+source:
+  kind: local
+  url: local://services/judge-worker
+  checksum: ""
+runtime:
+  kind: image
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: false
+  route_prefix: ""
+  remote_entry: ""
+  menu_items: []
+backend:
+  protocol: http
+  port: 9101
+  health_path: /health
+migrations: []
+permissions:
+  - judge.worker
+routes: []
+redis:
+  - name: redis
+    kind: consumer-group
+    usage: judge task workers
+storage:
+  - object_type: judge-artifact
+    bucket: judge-artifacts
+dependencies:
+  - judge-api
+  - redis
+  - storage-service
+config_schema: {}
+secrets:
+  - worker-token
+observability:
+  metrics: true
+  jaeger: true
+

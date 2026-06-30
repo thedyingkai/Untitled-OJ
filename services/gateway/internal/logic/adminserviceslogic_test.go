@@ -24,58 +24,62 @@ type fakeServiceStatusDriver struct {
 
 func testSnapshotData() orchestratorsnapshot.SnapshotData {
 	return orchestratorsnapshot.SnapshotData{
-		Sets: []orchestratorsnapshot.Set{
-			{SetID: "single-node-oj", Name: "单机 OJ", Description: "单机部署组合", SortOrder: 10},
-			{SetID: "distributed-oj", Name: "分布式 OJ", Description: "分布式入口组合", SortOrder: 20},
-		},
 		Services: []orchestratorsnapshot.Service{
-			{ServiceID: "gateway", SetID: "single-node-oj", Name: "Gateway", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "gateway"},
-			{ServiceID: "web-shell", SetID: "single-node-oj", Name: "Web Shell", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "frontend"},
-			{ServiceID: "problem-api", SetID: "single-node-oj", Name: "Problem API", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "backend-api"},
-			{ServiceID: "judge-api", SetID: "single-node-oj", Name: "Judge API", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "backend-api"},
-			{ServiceID: "judge-worker", SetID: "single-node-oj", Name: "Judge Worker", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "backend-worker"},
-			{ServiceID: "postgres", SetID: "single-node-oj", Name: "PostgreSQL", Version: "17.0.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "database"},
-			{ServiceID: "storage", SetID: "single-node-oj", Name: "Storage", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "storage"},
+			{ServiceID: "gateway", Name: "Gateway", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "gateway"},
+			{ServiceID: "auth-service", Name: "Auth Service", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "backend-api"},
+			{ServiceID: "problem-service", Name: "Problem Service", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "backend-api"},
+			{ServiceID: "judge-api", Name: "Judge API", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "backend-api"},
+			{ServiceID: "judge-worker", Name: "Judge Worker", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "backend-worker"},
+			{ServiceID: "postgresql", Name: "PostgreSQL", Version: "17.0.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "database"},
+			{ServiceID: "redis", Name: "Redis", Version: "8.0.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "cache"},
+			{ServiceID: "storage-service", Name: "Storage Service", Version: "0.1.0", Status: orchestratorsnapshot.StatusEnabled, Kind: "storage"},
 		},
 		Edges: []orchestratorsnapshot.Edge{
-			{FromServiceID: "gateway", ToServiceID: "problem-api", EdgeType: "link", Required: true},
+			{FromServiceID: "gateway", ToServiceID: "auth-service", EdgeType: "link", Required: true},
+			{FromServiceID: "gateway", ToServiceID: "problem-service", EdgeType: "link", Required: true},
 			{FromServiceID: "gateway", ToServiceID: "judge-api", EdgeType: "link", Required: true},
-			{FromServiceID: "gateway", ToServiceID: "web-shell", EdgeType: "link", Required: true},
+			{FromServiceID: "auth-service", ToServiceID: "postgresql", EdgeType: "link", Required: true},
+			{FromServiceID: "auth-service", ToServiceID: "redis", EdgeType: "link", Required: true},
+			{FromServiceID: "problem-service", ToServiceID: "postgresql", EdgeType: "link", Required: true},
+			{FromServiceID: "problem-service", ToServiceID: "storage-service", EdgeType: "link", Required: true},
 			{FromServiceID: "judge-worker", ToServiceID: "judge-api", EdgeType: "link", Required: true},
-			{FromServiceID: "judge-api", ToServiceID: "postgres", EdgeType: "link", Required: true},
-			{FromServiceID: "judge-api", ToServiceID: "storage", EdgeType: "link", Required: true},
+			{FromServiceID: "judge-api", ToServiceID: "postgresql", EdgeType: "link", Required: true},
+			{FromServiceID: "judge-api", ToServiceID: "redis", EdgeType: "link", Required: true},
+			{FromServiceID: "judge-api", ToServiceID: "storage-service", EdgeType: "link", Required: true},
 		},
 		Components: []orchestratorsnapshot.Component{
-			{ServiceID: "gateway", ComponentID: "gateway-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"endpoint":"127.0.0.1:8080","protocol":"http"}`)},
+			{ServiceID: "gateway", ComponentID: "gateway-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"socket_addr":"127.0.0.1:8080","protocol":"http"}`)},
 			{ServiceID: "gateway", ComponentID: "gateway-health", ComponentType: "health_check", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"type":"http","target":"/health"}`)},
-			{ServiceID: "problem-api", ComponentID: "problem-api-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"endpoint":"127.0.0.1:8083","protocol":"http"}`)},
-			{ServiceID: "problem-api", ComponentID: "problem-api", ComponentType: "backend_service", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"service":"problem-api","trusted_runtime":"compose","compose_service":"problem-api","health_check_id":"problem-api-health","routes":["/api/problem"],"required":true}`)},
-			{ServiceID: "problem-api", ComponentID: "problem-api-health", ComponentType: "health_check", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"type":"http","target":"/health"}`)},
-			{ServiceID: "judge-api", ComponentID: "judge-api-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"endpoint":"127.0.0.1:8082","protocol":"http"}`)},
+			{ServiceID: "problem-service", ComponentID: "problem-service-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"socket_addr":"127.0.0.1:8083","protocol":"http"}`)},
+			{ServiceID: "problem-service", ComponentID: "problem-service", ComponentType: "backend_service", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"service":"problem-service","trusted_runtime":"compose","compose_service":"problem-service","health_check_id":"problem-service-health","routes":["/api/problem"],"required":true}`)},
+			{ServiceID: "problem-service", ComponentID: "problem-service-health", ComponentType: "health_check", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"type":"http","target":"/health"}`)},
+			{ServiceID: "judge-api", ComponentID: "judge-api-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"socket_addr":"127.0.0.1:8082","protocol":"http"}`)},
 			{ServiceID: "judge-api", ComponentID: "judge-api", ComponentType: "backend_service", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"service":"judge-api","trusted_runtime":"compose","compose_service":"judge-api","health_check_id":"judge-api-health","routes":["/api/judge"],"required":true}`)},
-			{ServiceID: "judge-worker", ComponentID: "judge-worker-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"endpoint":"127.0.0.1:9101","protocol":"http"}`)},
+			{ServiceID: "judge-worker", ComponentID: "judge-worker-endpoint", ComponentType: "endpoint", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"socket_addr":"127.0.0.1:9101","protocol":"http"}`)},
 			{ServiceID: "judge-worker", ComponentID: "judge-worker", ComponentType: "worker_service", Status: orchestratorsnapshot.StatusEnabled, Config: []byte(`{"service":"judge-worker","trusted_runtime":"compose","compose_service":"judge-worker","required":true}`)},
 		},
 		Endpoints: []orchestratorsnapshot.Endpoint{
-			{Endpoint: "127.0.0.1:8080", ServiceID: "gateway", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
-			{Endpoint: "127.0.0.1:8083", ServiceID: "problem-api", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
-			{Endpoint: "127.0.0.1:8082", ServiceID: "judge-api", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
-			{Endpoint: "127.0.0.1:9101", ServiceID: "judge-worker", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
+			{Endpoint: "127.0.0.1:8080:gateway", ServiceID: "gateway", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
+			{Endpoint: "127.0.0.1:8083:problem-service", ServiceID: "problem-service", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
+			{Endpoint: "127.0.0.1:8082:judge-api", ServiceID: "judge-api", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
+			{Endpoint: "127.0.0.1:9101:judge-worker", ServiceID: "judge-worker", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
+			{Endpoint: "127.0.0.2:9101:judge-worker", ServiceID: "judge-worker", Protocol: "http", HealthPath: "/health", Health: "ok", Reachable: true},
 		},
 		Permissions: []orchestratorsnapshot.Permission{
-			{ServiceID: "problem-api", PermissionKey: "problem.read", Description: "读取题目"},
+			{ServiceID: "problem-service", PermissionKey: "problem.read", Description: "读取题目"},
 			{ServiceID: "judge-api", PermissionKey: "judge.submit", Description: "提交评测"},
 		},
 		Menus: []orchestratorsnapshot.Menu{
-			{ServiceID: "web-shell", MenuKey: "problems", Title: "题库", RoutePath: "/problems", Enabled: true},
-			{ServiceID: "web-shell", MenuKey: "submissions", Title: "提交", RoutePath: "/submissions", Enabled: true},
+			{ServiceID: "gateway", MenuKey: "problems", Title: "题库", RoutePath: "/problems", Enabled: true},
+			{ServiceID: "gateway", MenuKey: "submissions", Title: "提交", RoutePath: "/submissions", Enabled: true},
 		},
 		FrontendRoutes: []orchestratorsnapshot.FrontendRoute{
-			{ServiceID: "web-shell", RoutePath: "/problems", RouteName: "problem-list", ComponentKey: "ProblemList", Enabled: true},
+			{ServiceID: "gateway", RoutePath: "/problems", RouteName: "problem-list", ComponentKey: "ProblemList", Enabled: true},
 		},
 		GatewayRoutes: []orchestratorsnapshot.GatewayRoute{
-			{ServiceID: "problem-api", Prefix: "/api/problem", TargetService: "problem-api", AuthMode: "required", Enabled: true},
-			{ServiceID: "judge-api", Prefix: "/api/judge", TargetService: "judge-api", AuthMode: "required", Enabled: true},
+			{ServiceID: "gateway", Prefix: "/api/auth", TargetService: "auth-service", AuthMode: "optional", Enabled: true},
+			{ServiceID: "gateway", Prefix: "/api/problem", TargetService: "problem-service", AuthMode: "required", Enabled: true},
+			{ServiceID: "gateway", Prefix: "/api/judge", TargetService: "judge-api", AuthMode: "required", Enabled: true},
 		},
 	}
 }
@@ -97,16 +101,16 @@ func (f fakeOrchestratorSnapshot) ListServices(context.Context) ([]orchestrators
 	return f.data.Services, nil
 }
 
-func (f fakeOrchestratorSnapshot) ListSets(context.Context) ([]orchestratorsnapshot.Set, error) {
-	return f.data.Sets, nil
+func (f fakeOrchestratorSnapshot) ListEndpointGroups(context.Context) ([]orchestratorsnapshot.EndpointGroup, error) {
+	return orchestratorsnapshot.EndpointGroups(f.data.Endpoints), nil
 }
 
 func (f fakeOrchestratorSnapshot) Topology(context.Context) (orchestratorsnapshot.Topology, error) {
 	return orchestratorsnapshot.Topology{
-		Sets:       f.data.Sets,
-		Nodes:      f.data.Services,
-		Edges:      f.data.Edges,
-		Components: f.data.Components,
+		EndpointGroups: orchestratorsnapshot.EndpointGroups(f.data.Endpoints),
+		Nodes:          f.data.Services,
+		Edges:          f.data.Edges,
+		Components:     f.data.Components,
 	}, nil
 }
 
@@ -235,8 +239,8 @@ func TestTopologyReturnsBuiltinSnapshotData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("topology failed: %v", err)
 	}
-	if len(resp.Sets) == 0 {
-		t.Fatalf("topology sets should be non-empty")
+	if len(resp.EndpointGroups) == 0 {
+		t.Fatalf("topology endpoint groups should be non-empty")
 	}
 	if len(resp.Nodes) == 0 {
 		t.Fatalf("topology nodes should be non-empty")
@@ -247,14 +251,14 @@ func TestTopologyReturnsBuiltinSnapshotData(t *testing.T) {
 	if len(resp.Components) == 0 {
 		t.Fatalf("topology components should be non-empty")
 	}
-	if !hasSet(resp.Sets, "single-node-oj") || !hasSet(resp.Sets, "distributed-oj") {
-		t.Fatalf("topology should include distributed-oj and single-node-oj sets: %#v", resp.Sets)
+	if !hasEndpointGroup(resp.EndpointGroups, "judge-worker", 2) {
+		t.Fatalf("topology should include derived judge-worker endpoint group: %#v", resp.EndpointGroups)
 	}
 	if !hasNode(resp.ServiceDefinitions, "judge-api") {
 		t.Fatalf("topology should include judge-api service definition")
 	}
 	for _, edge := range [][2]string{
-		{"gateway", "problem-api"},
+		{"gateway", "problem-service"},
 		{"gateway", "judge-api"},
 		{"judge-worker", "judge-api"},
 	} {
@@ -262,8 +266,8 @@ func TestTopologyReturnsBuiltinSnapshotData(t *testing.T) {
 			t.Fatalf("topology should include edge %s -> %s", edge[0], edge[1])
 		}
 	}
-	for _, componentID := range []string{"problem-api-endpoint", "problem-api-health"} {
-		if !hasComponent(resp.Components, "problem-api", componentID) {
+	for _, componentID := range []string{"problem-service-endpoint", "problem-service-health"} {
+		if !hasComponent(resp.Components, "problem-service", componentID) {
 			t.Fatalf("topology should include component %s", componentID)
 		}
 	}
@@ -290,7 +294,7 @@ func TestOrchestratorSnapshotReturnsServiceFirstBaseServices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("orchestrator snapshot failed: %v", err)
 	}
-	for _, serviceID := range []string{"gateway", "web-shell", "problem-api", "judge-api", "judge-worker"} {
+	for _, serviceID := range []string{"gateway", "auth-service", "problem-service", "judge-api", "judge-worker", "postgresql", "redis", "storage-service"} {
 		if !hasNode(resp.ServiceDefinitions, serviceID) {
 			t.Fatalf("orchestrator snapshot should include %s", serviceID)
 		}
@@ -319,7 +323,6 @@ func TestOrchestratorSnapshotIncludeDisabledControlsActiveContributions(t *testi
 	data := testSnapshotData()
 	data.Services = append(data.Services, orchestratorsnapshot.Service{
 		ServiceID: "demo-service",
-		SetID:     "demo",
 		Name:      "Demo Service",
 		Version:   "0.1.0",
 		Status:    "DISABLED",
@@ -382,7 +385,6 @@ func TestServiceRoutesReturnsSnapshotRouteTable(t *testing.T) {
 	})
 	data.Services = append(data.Services, orchestratorsnapshot.Service{
 		ServiceID: "demo-service",
-		SetID:     "demo",
 		Name:      "Demo Service",
 		Version:   "0.1.0",
 		Status:    "DISABLED",
@@ -440,12 +442,12 @@ func TestServiceStatusesAdminAPIUsesServiceStatusDriver(t *testing.T) {
 			Config: config.Config{Jwt: config.JwtConfig{Secret: "test-secret"}},
 			ServiceStatusDriver: fakeServiceStatusDriver{services: []servicestatus.ServiceStatus{
 				{
-					ServiceID:      "problem-api",
+					ServiceID:      "problem-service",
 					OwnerServiceID: "judge-api",
 					Kind:           "http",
 					Lifecycle:      servicestatus.LifecycleManaged,
 					Runtime:        "compose",
-					ComposeService: "problem-api",
+					ComposeService: "problem-service",
 					State:          servicestatus.ServiceStatusRunning,
 					Health:         "ok",
 					Routes:         []string{"/api/problem"},
@@ -481,11 +483,11 @@ func TestServiceStatusesAdminAPIUsesServiceStatusDriver(t *testing.T) {
 	if len(resp.Services) != 2 || len(resp.Workers) != 1 {
 		t.Fatalf("unexpected Service Status grouping: %#v", resp)
 	}
-	detail, err := logic.ServiceDetail("Bearer "+token, "problem-api")
+	detail, err := logic.ServiceDetail("Bearer "+token, "problem-service")
 	if err != nil {
 		t.Fatalf("Service Status detail failed: %v", err)
 	}
-	if detail.Service.ServiceId != "problem-api" || detail.Service.State != servicestatus.ServiceStatusRunning {
+	if detail.Service.ServiceId != "problem-service" || detail.Service.State != servicestatus.ServiceStatusRunning {
 		t.Fatalf("unexpected service detail: %#v", detail)
 	}
 }
@@ -529,9 +531,9 @@ func TestIsAdminRole(t *testing.T) {
 	}
 }
 
-func hasSet(items []types.ServiceSetItem, setID string) bool {
+func hasEndpointGroup(items []types.EndpointGroupItem, serviceName string, endpointCount int) bool {
 	for _, item := range items {
-		if item.SetId == setID {
+		if item.ServiceName == serviceName && item.EndpointCount == endpointCount && item.Selector == serviceName+"[*]" {
 			return true
 		}
 	}
@@ -595,9 +597,10 @@ func hasComponent(items []types.ServiceComponentItem, serviceID string, componen
 func testRouteTableOptions() servicestatus.RouteTableOptions {
 	return servicestatus.RouteTableOptions{
 		TrustedServices: map[string]servicestatus.TrustedService{
-			"demo-api":    {ServiceID: "demo-api", UpstreamBase: "http://demo-api:8080"},
-			"problem-api": {ServiceID: "problem-api", UpstreamBase: "http://problem-api:8083"},
-			"judge-api":   {ServiceID: "judge-api", UpstreamBase: "http://judge-api:8082"},
+			"auth-service":    {ServiceID: "auth-service", UpstreamBase: "http://auth-service:8081"},
+			"demo-api":        {ServiceID: "demo-api", UpstreamBase: "http://demo-api:8080"},
+			"problem-service": {ServiceID: "problem-service", UpstreamBase: "http://problem-service:8083"},
+			"judge-api":       {ServiceID: "judge-api", UpstreamBase: "http://judge-api:8082"},
 		},
 	}
 }

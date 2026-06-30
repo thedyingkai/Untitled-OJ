@@ -1,0 +1,20 @@
+Name: problem-service
+Host: 0.0.0.0
+Port: 8083
+
+Database:
+  Url: ""
+
+Redis:
+  Url: ""
+
+Jaeger:
+  Endpoint: ojos-jaeger:4317
+
+Storage:
+  ProblemsRoot: /data/ojos/problems
+
+InternalAuth:
+  Enabled: true
+  TimestampSkewSeconds: 60
+  NonceTTLSeconds: 120

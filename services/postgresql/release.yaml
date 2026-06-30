@@ -1,0 +1,37 @@
+schema_version: 1
+service_name: postgresql
+version: 17.0.0
+description: Release contract for postgresql.
+service_type: database
+source:
+  kind: url
+  url: docker://postgres:17
+  checksum: ""
+runtime:
+  kind: external
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: false
+  route_prefix: ""
+  remote_entry: ""
+  menu_items: []
+backend:
+  protocol: postgres
+  port: 5432
+  health_path: ""
+migrations: []
+permissions:
+  - postgresql.connect
+routes: []
+redis: []
+storage: []
+dependencies: []
+config_schema: {}
+secrets:
+  - postgres-password
+observability:
+  metrics: true
+  jaeger: true
+

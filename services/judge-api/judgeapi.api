@@ -402,3 +402,4 @@ service judgeapi {
 	@handler workerArtifactProblemPackage
 	get /worker/artifacts/problems/:id/package (WorkerArtifactProblemPackageReq)
 }
+

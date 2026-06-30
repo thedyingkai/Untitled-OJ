@@ -1,0 +1,91 @@
+schema_version: 1
+id: user-service
+name: User Service
+version: 0.1.0
+kind: backend-api
+description: User profile, avatar, public page, preferences, and statistics service.
+runtime:
+  mode: container
+  driver: compose
+  root_allowed: true
+  non_root_allowed: false
+  start_policy: automatic
+  restart_policy: on-failure
+endpoint:
+  protocol: http
+  default_port: 8084
+  health_path: /health
+  expose: false
+  routes:
+    - /api/users
+requires:
+  services:
+    - auth-service
+    - postgresql
+    - storage-service
+  links:
+    - id: auth-service
+      protocol: http
+    - id: postgresql
+      protocol: postgres
+    - id: storage-service
+      protocol: http
+  storage:
+    - storage-service
+  database:
+    - postgresql
+  queue: []
+  secrets: []
+provides:
+  capabilities:
+    - user.profile
+    - user.stats
+  routes:
+    - /api/users
+  workers: []
+  storage_buckets:
+    - avatars
+  events:
+    - user.profile.updated
+config_schema:
+  avatar_object_type:
+    type: string
+    default: avatar
+resources:
+  cpu: shared
+  memory: 256Mi
+  disk: 128Mi
+  gpu: none
+  network: internal
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false
+  required_secrets: []
+  sandbox: {}
+  network_policy:
+    egress_links_only: true
+source:
+  type: local
+  ref: services/user-service
+  build:
+    driver: dockerfile
+    path: services/user-service/Dockerfile
+  artifact: {}
+ui:
+  enabled: true
+  routes:
+    - /me
+  menus:
+    - profile
+  permissions:
+    - user.profile.read.self
+permissions:
+  - user.profile.read.self
+  - user.profile.update.self
+  - user.stats.read
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10

@@ -14,7 +14,7 @@ func TestAdminServiceTopologyRoutePrecedesDetailRoute(t *testing.T) {
 	}
 	source := string(data)
 
-	sets := strings.Index(source, `"/api/admin/sets"`)
+	endpointGroups := strings.Index(source, `"/api/admin/endpoint-groups"`)
 	topology := strings.Index(source, `"/api/admin/topology"`)
 	serviceSnapshot := strings.Index(source, `"/api/admin/orchestrator/snapshot"`)
 	routeTableRoutes := strings.Index(source, `"/api/admin/orchestrator/routes"`)
@@ -22,8 +22,8 @@ func TestAdminServiceTopologyRoutePrecedesDetailRoute(t *testing.T) {
 	statusOperations := strings.Index(source, `"/api/admin/services/status/operations"`)
 	statusDetail := strings.Index(source, `"/api/admin/services/status/:id"`)
 	detail := strings.Index(source, `"/api/admin/services/:id"`)
-	if sets < 0 {
-		t.Fatalf("sets route not found")
+	if endpointGroups < 0 {
+		t.Fatalf("endpoint groups route not found")
 	}
 	if topology < 0 {
 		t.Fatalf("topology route not found")
@@ -55,8 +55,8 @@ func TestAdminServiceTopologyRoutePrecedesDetailRoute(t *testing.T) {
 	if routeTableRoutes > detail {
 		t.Fatalf("service route table routes must be registered before service detail route")
 	}
-	if sets > detail {
-		t.Fatalf("sets route must be registered before service detail route")
+	if endpointGroups > detail {
+		t.Fatalf("endpoint groups route must be registered before service detail route")
 	}
 	if status > detail {
 		t.Fatalf("service status route must be registered before service detail route")
@@ -105,8 +105,8 @@ func parseRouteMethods(source string) []routeMethod {
 func isOrchestratorAdminRoute(path string) bool {
 	return path == "/api/admin/services" ||
 		strings.HasPrefix(path, "/api/admin/services/") ||
-		path == "/api/admin/sets" ||
-		strings.HasPrefix(path, "/api/admin/sets/") ||
+		path == "/api/admin/endpoint-groups" ||
+		strings.HasPrefix(path, "/api/admin/endpoint-groups/") ||
 		path == "/api/admin/topology" ||
 		strings.HasPrefix(path, "/api/admin/topology/") ||
 		path == "/api/admin/orchestrator" ||

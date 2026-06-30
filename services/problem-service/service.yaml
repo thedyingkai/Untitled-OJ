@@ -1,0 +1,90 @@
+schema_version: 1
+id: problem-service
+name: Problem Service
+version: 0.1.0
+kind: backend-api
+description: 题库、题目详情、题目包、数据文件索引和题目权限服务。
+runtime:
+  mode: container
+  driver: compose
+  root_allowed: true
+  non_root_allowed: false
+  start_policy: automatic
+  restart_policy: on-failure
+endpoint:
+  protocol: http
+  default_port: 8083
+  health_path: /health
+  expose: false
+  routes:
+    - /api/problem
+requires:
+  services:
+    - postgresql
+    - storage-service
+  links:
+    - id: postgresql
+      protocol: postgres
+    - id: storage-service
+      protocol: http
+  storage:
+    - storage-service
+  database:
+    - postgresql
+  queue: []
+  secrets: []
+provides:
+  capabilities:
+    - problem.catalog
+    - problem.package
+    - problem.permission
+  routes:
+    - /api/problem
+  workers: []
+  storage_buckets:
+    - problems
+  events: []
+config_schema:
+  package_root:
+    type: string
+    default: storage://problems
+resources:
+  cpu: shared
+  memory: 256Mi
+  disk: 256Mi
+  gpu: none
+  network: internal
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false
+  required_secrets: []
+  sandbox: {}
+  network_policy:
+    egress_links_only: true
+source:
+  type: local
+  ref: services/problem-service
+  build:
+    driver: dockerfile
+    path: services/problem-service/Dockerfile
+  artifact: {}
+ui:
+  enabled: true
+  routes:
+    - /problems
+  menus:
+    - problems
+  permissions:
+    - problem.view
+permissions:
+  - problem.view
+  - problem.create
+  - problem.edit
+  - problem.delete
+  - problem.manage.data
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10

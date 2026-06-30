@@ -20,15 +20,20 @@ Storage:
 
 Proxy:
   TrustedServices:
-    - ServiceID: auth
-      Target: http://auth:8081
+    - ServiceID: auth-service
+      Target: http://auth-service:8081
       StripPrefix: /api
-      HealthCheckID: auth-health
+      HealthCheckID: auth-service-health
 
-    - ServiceID: problem-api
-      Target: http://problem-api:8083
+    - ServiceID: problem-service
+      Target: http://problem-service:8083
       StripPrefix: /api
-      HealthCheckID: problem-api-health
+      HealthCheckID: problem-service-health
+
+    - ServiceID: user-service
+      Target: http://user-service:8084
+      StripPrefix: /api
+      HealthCheckID: user-service-health
 
     - ServiceID: judge-api
       Target: http://judge-api:8082
@@ -37,7 +42,7 @@ Proxy:
 
   Routes:
     - Prefix: /api/auth
-      Target: http://auth:8081
+      Target: http://auth-service:8081
       StripPrefix: /api
       AuthMode: optional
 
@@ -52,15 +57,22 @@ Proxy:
       AuthMode: required
 
     - Prefix: /api/problem
-      Target: http://problem-api:8083
+      Target: http://problem-service:8083
+      StripPrefix: /api
+      AuthMode: required
+
+    - Prefix: /api/users
+      Target: http://user-service:8084
       StripPrefix: /api
       AuthMode: required
 
 ServiceStatus:
   ComposeServices:
-    - auth
+    - auth-service
+    - user-service
+    - storage-service
     - gateway
-    - problem-api
+    - problem-service
     - judge-api
     - judge-worker
 

@@ -1,0 +1,46 @@
+schema_version: 1
+service_name: gateway
+version: 0.1.0
+description: Release contract for gateway.
+service_type: gateway
+source:
+  kind: local
+  url: local://services/gateway
+  checksum: ""
+runtime:
+  kind: image
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: true
+  route_prefix: "/"
+  remote_entry: "/assets/gateway/remoteEntry.js"
+  menu_items: []
+backend:
+  protocol: http
+  port: 8080
+  health_path: /health
+migrations: []
+permissions:
+  - gateway.read
+routes:
+  - path: /api/**
+    method: ANY
+    target_type: endpoint-group
+    target: gateway[*]
+    permission: public
+redis: []
+storage: []
+dependencies:
+  - auth-service
+  - user-service
+  - problem-service
+  - judge-api
+config_schema: {}
+secrets:
+  - jwt-secret
+observability:
+  metrics: true
+  jaeger: true
+

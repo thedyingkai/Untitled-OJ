@@ -29,8 +29,6 @@ provides:
     - cache.redis
     - queue.signal
     - internal-auth.nonce
-  endpoints:
-    - redis
   routes: []
   workers: []
   storage_buckets: []

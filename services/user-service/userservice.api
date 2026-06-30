@@ -1,0 +1,75 @@
+syntax = "v1"
+
+info (
+	title:   "OJOS User Service API"
+	desc:    "User profile, preferences, avatars, and statistics API"
+	author:  "thedyingkai"
+	version: "v1"
+)
+
+type HealthResp {
+	Status  string `json:"status"`
+	Service string `json:"service"`
+}
+
+type ProfileReq {
+	UserId string `path:"user_id"`
+}
+
+type ProfilePatchReq {
+	UserId       string            `path:"user_id"`
+	DisplayName  string            `json:"display_name,optional"`
+	Bio          string            `json:"bio,optional"`
+	AvatarObject string            `json:"avatar_object,optional"`
+	Preferences  map[string]string `json:"preferences,optional"`
+}
+
+type ProfileResp {
+	UserId       string            `json:"user_id"`
+	DisplayName  string            `json:"display_name"`
+	Bio          string            `json:"bio"`
+	AvatarObject string            `json:"avatar_object"`
+	Preferences  map[string]string `json:"preferences"`
+	Stats        UserStats         `json:"stats"`
+	CreatedAt    string            `json:"created_at"`
+	UpdatedAt    string            `json:"updated_at"`
+}
+
+type UserStats {
+	SolvedProblems int `json:"solved_problems"`
+	Submissions    int `json:"submissions"`
+	Accepted       int `json:"accepted"`
+}
+
+type PreferencesResp {
+	Preferences map[string]string `json:"preferences"`
+}
+
+service userservice {
+	@handler health
+	get /health returns (HealthResp)
+}
+
+@server (
+	prefix: /api/users
+)
+service userservice {
+	@handler getMe
+	get /me returns (ProfileResp)
+
+	@handler getProfile
+	get /:user_id/profile (ProfileReq) returns (ProfileResp)
+
+	@handler updateProfile
+	patch /:user_id/profile (ProfilePatchReq) returns (ProfileResp)
+
+	@handler getStats
+	get /:user_id/stats (ProfileReq) returns (UserStats)
+
+	@handler getPreferences
+	get /:user_id/preferences (ProfileReq) returns (PreferencesResp)
+
+	@handler updatePreferences
+	patch /:user_id/preferences (ProfilePatchReq) returns (ProfileResp)
+}
+

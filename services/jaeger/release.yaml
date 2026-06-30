@@ -1,0 +1,36 @@
+schema_version: 1
+service_name: jaeger
+version: 2.19.0
+description: Release contract for jaeger.
+service_type: external
+source:
+  kind: url
+  url: docker://jaegertracing/jaeger:2.19.0
+  checksum: ""
+runtime:
+  kind: external
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: false
+  route_prefix: ""
+  remote_entry: ""
+  menu_items: []
+backend:
+  protocol: http
+  port: 16686
+  health_path: /
+migrations: []
+permissions:
+  - tracing.read
+routes: []
+redis: []
+storage: []
+dependencies: []
+config_schema: {}
+secrets: []
+observability:
+  metrics: true
+  jaeger: true
+

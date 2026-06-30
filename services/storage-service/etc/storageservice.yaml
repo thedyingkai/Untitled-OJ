@@ -1,0 +1,11 @@
+Name: storage-service
+Host: 0.0.0.0
+Port: 8085
+
+Storage:
+  Root: /data/ojos/storage
+  Buckets:
+    - problems
+    - submissions
+    - judge-artifacts
+    - avatars

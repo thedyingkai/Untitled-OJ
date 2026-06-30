@@ -1,0 +1,81 @@
+schema_version: 1
+id: storage-service
+name: Storage Service
+version: 0.1.0
+kind: storage
+description: 对象存储或外部存储 Endpoint，用于 problems、submissions 和 judge-artifacts。
+runtime:
+  mode: container
+  driver: compose
+  root_allowed: true
+  non_root_allowed: true
+  start_policy: automatic
+  restart_policy: on-failure
+endpoint:
+  protocol: http
+  default_port: 8085
+  health_path: /health
+  expose: false
+  routes: []
+requires:
+  services:
+    - minio
+  links:
+    - id: minio
+      protocol: http
+  storage: []
+  database: []
+  queue: []
+  secrets: []
+provides:
+  capabilities:
+    - storage.object
+    - storage.artifact
+  routes: []
+  workers: []
+  storage_buckets:
+    - problems
+    - submissions
+    - judge-artifacts
+  events: []
+config_schema:
+  buckets:
+    type: array
+    default:
+      - problems
+      - submissions
+      - judge-artifacts
+resources:
+  cpu: shared
+  memory: 512Mi
+  disk: 32Gi
+  gpu: none
+  network: internal
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false
+  required_secrets: []
+  sandbox: {}
+  network_policy:
+    internal_only: true
+source:
+  type: local
+  ref: services/storage-service
+  build:
+    driver: dockerfile
+    path: services/storage-service/Dockerfile
+  artifact: {}
+ui:
+  enabled: false
+  routes: []
+  menus: []
+  permissions: []
+permissions:
+  - storage.object.read
+  - storage.object.write
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10

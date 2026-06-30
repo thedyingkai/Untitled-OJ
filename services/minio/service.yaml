@@ -1,0 +1,74 @@
+schema_version: 1
+id: minio
+name: MinIO
+version: 0.1.0
+kind: storage
+description: Object storage backend used by storage-service in the first phase.
+runtime:
+  mode: external
+  driver: external
+  root_allowed: true
+  non_root_allowed: false
+  start_policy: external
+  restart_policy: external
+endpoint:
+  protocol: http
+  default_port: 9000
+  health_path: /minio/health/live
+  expose: false
+  routes: []
+requires:
+  services: []
+  links: []
+  storage: []
+  database: []
+  queue: []
+  secrets:
+    - minio-root-user
+    - minio-root-password
+provides:
+  capabilities:
+    - object-store.minio
+  routes: []
+  workers: []
+  storage_buckets:
+    - ojos
+  events: []
+config_schema:
+  bucket:
+    type: string
+    default: ojos
+resources:
+  cpu: shared
+  memory: 512Mi
+  disk: 32Gi
+  gpu: none
+  network: internal
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false
+  required_secrets:
+    - minio-root-user
+    - minio-root-password
+  sandbox: {}
+  network_policy:
+    internal_only: true
+source:
+  type: external
+  ref: minio/minio:latest
+  build: {}
+  artifact: {}
+ui:
+  enabled: false
+  routes: []
+  menus: []
+  permissions: []
+permissions:
+  - minio.object.read
+  - minio.object.write
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10

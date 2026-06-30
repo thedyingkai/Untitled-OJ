@@ -1,0 +1,58 @@
+schema_version: 1
+service_name: judge-api
+version: 0.1.0
+description: Release contract for judge-api.
+service_type: backend-api
+source:
+  kind: local
+  url: local://services/judge-api
+  checksum: ""
+runtime:
+  kind: image
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: true
+  route_prefix: "/submissions"
+  remote_entry: "/assets/judge-api/remoteEntry.js"
+  menu_items: []
+backend:
+  protocol: http
+  port: 8082
+  health_path: /health
+migrations: []
+permissions:
+  - judge.submit
+  - submission.view.own
+  - submission.view.all
+routes:
+  - path: /api/judge/**
+    method: ANY
+    target_type: endpoint-group
+    target: judge-api[*]
+    permission: public
+  - path: /api/judge/worker/**
+    method: ANY
+    target_type: endpoint-group
+    target: judge-api[*]
+    permission: public
+redis:
+  - name: redis
+    kind: stream
+    usage: judge task queue
+storage:
+  - object_type: submission-code
+    bucket: submissions
+dependencies:
+  - postgresql
+  - redis
+  - storage-service
+  - problem-service
+config_schema: {}
+secrets:
+  - worker-token
+observability:
+  metrics: true
+  jaeger: true
+

@@ -1,0 +1,48 @@
+schema_version: 1
+service_name: auth-service
+version: 0.1.0
+description: Release contract for auth-service.
+service_type: backend-api
+source:
+  kind: local
+  url: local://services/auth-service
+  checksum: ""
+runtime:
+  kind: image
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: true
+  route_prefix: "/login"
+  remote_entry: "/assets/auth-service/remoteEntry.js"
+  menu_items: []
+backend:
+  protocol: http
+  port: 8081
+  health_path: /health
+migrations: []
+permissions:
+  - auth.admin
+  - system.admin
+routes:
+  - path: /api/auth/**
+    method: ANY
+    target_type: endpoint-group
+    target: auth-service[*]
+    permission: public
+redis:
+  - name: redis
+    kind: stream
+    usage: auth audit queue
+storage: []
+dependencies:
+  - postgresql
+  - redis
+config_schema: {}
+secrets:
+  - jwt-secret
+observability:
+  metrics: true
+  jaeger: true
+

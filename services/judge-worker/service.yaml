@@ -20,23 +20,25 @@ endpoint:
 requires:
   services:
     - judge-api
-    - storage
+    - redis
+    - storage-service
   links:
     - id: judge-api
       protocol: http
-    - id: storage
+    - id: redis
+      protocol: redis
+    - id: storage-service
       protocol: http
   storage:
-    - storage
+    - storage-service
   database: []
-  queue: []
+  queue:
+    - redis
   secrets:
     - worker-token
 provides:
   capabilities:
     - judge.worker
-  endpoints:
-    - http
   routes: []
   workers:
     - judge-worker

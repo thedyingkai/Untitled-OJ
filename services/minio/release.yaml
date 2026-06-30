@@ -1,0 +1,41 @@
+schema_version: 1
+service_name: minio
+version: 0.1.0
+description: Release contract for minio.
+service_type: storage
+source:
+  kind: url
+  url: docker://minio/minio:latest
+  checksum: ""
+runtime:
+  kind: external
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: false
+  route_prefix: ""
+  remote_entry: ""
+  menu_items: []
+backend:
+  protocol: http
+  port: 9000
+  health_path: /minio/health/live
+migrations: []
+permissions:
+  - minio.object.read
+  - minio.object.write
+routes: []
+redis: []
+storage:
+  - object_type: object-store
+    bucket: ojos
+dependencies: []
+config_schema: {}
+secrets:
+  - minio-root-user
+  - minio-root-password
+observability:
+  metrics: true
+  jaeger: true
+
