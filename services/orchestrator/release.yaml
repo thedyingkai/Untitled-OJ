@@ -1,0 +1,40 @@
+schema_version: 1
+service_name: orchestrator
+version: 0.1.0
+description: Release contract for orchestrator.
+service_type: agent
+source:
+  kind: github-release
+  url: github://ojos/orchestrator/releases/latest
+  checksum: ""
+runtime:
+  kind: binary
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: true
+  route_prefix: "/manager"
+  remote_entry: "/assets/orchestrator/remoteEntry.js"
+  menu_items: []
+backend:
+  protocol: http
+  port: 8090
+  health_path: /health
+migrations: []
+permissions:
+  - orchestrator.service.install
+  - orchestrator.link.manage
+  - orchestrator.root.manage
+routes: []
+redis: []
+storage: []
+dependencies:
+  - postgresql
+config_schema: {}
+secrets:
+  - orchestrator-root-token
+observability:
+  metrics: true
+  jaeger: true
+

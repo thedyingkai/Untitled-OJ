@@ -13,14 +13,14 @@ services:
       timeout: 5s
       retries: 10
 
-  postgres:
+  postgresql:
     image: postgres:17
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ojos-local}
       POSTGRES_DB: ${POSTGRES_DB:-ojos}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgresql-data:/var/lib/postgresql/data
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U postgres" ]
       interval: 5s
@@ -43,11 +43,11 @@ services:
   oj-migrations:
     image: migrate/migrate:v4.18.3
     depends_on:
-      postgres:
+      postgresql:
         condition: service_healthy
     volumes:
       - ../oj-migrations:/migrations:ro
-    command: [ "-path", "/migrations", "-database", "${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgres:5432/ojos?sslmode=disable}", "up" ]
+    command: [ "-path", "/migrations", "-database", "${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgresql:5432/ojos?sslmode=disable}", "up" ]
 
   jaeger:
     image: jaegertracing/jaeger:2.19.0
@@ -59,10 +59,22 @@ services:
       - "127.0.0.1:4318:4318"
       - "127.0.0.1:14268:14268"
 
+  minio:
+    image: minio/minio:latest
+    command: [ "server", "/data", "--console-address", ":9001" ]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-ojos-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-ojos-minio-local}
+    expose:
+      - "9000"
+      - "9001"
+    volumes:
+      - minio-data:/data
+
   gateway:
     build:
-      context: ../../services
-      dockerfile: gateway/Dockerfile
+      context: ../..
+      dockerfile: services/gateway/Dockerfile
       args:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
@@ -74,10 +86,20 @@ services:
     depends_on:
       oj-migrations:
         condition: service_completed_successfully
-      problem-api:
+      auth-service:
+        condition: service_started
+      user-service:
+        condition: service_started
+      problem-service:
+        condition: service_started
+      judge-api:
+        condition: service_started
+      redis:
+        condition: service_started
+      jaeger:
         condition: service_started
     environment:
-      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgres:5432/ojos?sslmode=disable}
+      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgresql:5432/ojos?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
@@ -89,10 +111,10 @@ services:
       - ../../storage/problems:/data/ojos/problems:ro
       - ../../storage/submissions:/data/ojos/submissions:ro
 
-  auth:
+  auth-service:
     build:
-      context: ../../services
-      dockerfile: auth/Dockerfile
+      context: ../..
+      dockerfile: services/auth-service/Dockerfile
       args:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
@@ -111,14 +133,64 @@ services:
     expose:
       - "8081"
     environment:
-      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgres:5432/ojos?sslmode=disable}
+      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgresql:5432/ojos?sslmode=disable}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
 
+  user-service:
+    build:
+      context: ../..
+      dockerfile: services/user-service/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${HTTP_PROXY:-}
+        https_proxy: ${HTTPS_PROXY:-}
+        no_proxy: ${NO_PROXY:-}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    depends_on:
+      oj-migrations:
+        condition: service_completed_successfully
+      auth-service:
+        condition: service_started
+      storage-service:
+        condition: service_started
+    expose:
+      - "8084"
+    environment:
+      OJOS_USER_DATA_DIR: /data/ojos/users
+    volumes:
+      - user-data:/data/ojos/users
+
+  storage-service:
+    build:
+      context: ../..
+      dockerfile: services/storage-service/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${HTTP_PROXY:-}
+        https_proxy: ${HTTPS_PROXY:-}
+        no_proxy: ${NO_PROXY:-}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    expose:
+      - "8085"
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      OJOS_STORAGE_ROOT: /data/ojos/storage
+      OJOS_MINIO_ENDPOINT: http://minio:9000
+      OJOS_STORAGE_BUCKETS: problems,submissions,judge-artifacts,avatars
+    volumes:
+      - storage-service-data:/data/ojos/storage
+
   judge-api:
     build:
-      context: ../../services
-      dockerfile: judge-api/Dockerfile
+      context: ../..
+      dockerfile: services/judge-api/Dockerfile
       args:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
@@ -132,22 +204,29 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_started
+      storage-service:
+        condition: service_started
+      problem-service:
+        condition: service_started
+      jaeger:
+        condition: service_started
     expose:
       - "8082"
     environment:
-      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgres:5432/ojos?sslmode=disable}
+      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgresql:5432/ojos?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
       OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
+      OJOS_STORAGE_SERVICE_URL: http://storage-service:8085
     volumes:
       - ../../storage/submissions:/data/ojos/submissions
       - ../../storage/problems:/data/ojos/problems:ro
 
   judge-worker:
     build:
-      context: ../../services
-      dockerfile: judge-worker/Dockerfile
+      context: ../..
+      dockerfile: services/judge-worker/Dockerfile
       args:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
@@ -156,11 +235,18 @@ services:
         https_proxy: ${HTTPS_PROXY:-}
         no_proxy: ${NO_PROXY:-}
     depends_on:
-      gateway:
+      judge-api:
+        condition: service_started
+      problem-service:
+        condition: service_started
+      redis:
+        condition: service_started
+      storage-service:
         condition: service_started
     environment:
       LANGUAGES_CONFIG: config/languages.yaml
       OJOS_JUDGE_API_URL: http://judge-api:8082
+      OJOS_STORAGE_SERVICE_URL: http://storage-service:8085
       OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
       OJOS_MAX_CONCURRENCY: 1
       OJOS_WORK_DIR: /var/lib/ojos-worker/work
@@ -174,10 +260,10 @@ services:
     volumes:
       - worker-data:/var/lib/ojos-worker
 
-  problem-api:
+  problem-service:
     build:
-      context: ../../services
-      dockerfile: problem-api/Dockerfile
+      context: ../..
+      dockerfile: services/problem-service/Dockerfile
       args:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
@@ -191,19 +277,25 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_started
+      storage-service:
+        condition: service_started
       jaeger:
         condition: service_started
     expose:
       - "8083"
     environment:
-      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgres:5432/ojos?sslmode=disable}
+      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgresql:5432/ojos?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
+      OJOS_STORAGE_SERVICE_URL: http://storage-service:8085
     volumes:
       - ../../storage/problems:/data/ojos/problems
 
 volumes:
   orchestrator-db-data:
-  postgres-data:
+  postgresql-data:
+  minio-data:
+  user-data:
+  storage-service-data:
   worker-data:

@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "orchestrator/core",
-    "orchestrator/daemon",
-    "orchestrator/gui",
-    "orchestrator/tui",
+    "services/orchestrator/core",
+    "services/orchestrator/backend",
+    "manager/gui",
+    "manager/tui",
 ]
 exclude = [
     "services/judge-worker",
@@ -18,7 +18,7 @@ version = "0.1.0"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 eframe = "0.31"
-orchestrator-core = { path = "orchestrator/core" }
+orchestrator-core = { path = "services/orchestrator/core" }
 regex = "1"
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

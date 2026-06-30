@@ -1,13 +1,154 @@
-CREATE TABLE IF NOT EXISTS service_sets (
-    set_id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    version TEXT NOT NULL DEFAULT '',
-    description TEXT NOT NULL DEFAULT '',
-    sort_order INT NOT NULL DEFAULT 100,
+CREATE TABLE IF NOT EXISTS service_releases (
+    service_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    release_url TEXT NOT NULL DEFAULT '',
     manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+    checksum TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(service_name, version)
+);
+
+CREATE TABLE IF NOT EXISTS host_services (
+    host_ip TEXT NOT NULL,
+    service_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'unknown',
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    labels JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(host_ip, service_name)
+);
+
+CREATE TABLE IF NOT EXISTS service_endpoints (
+    endpoint TEXT NOT NULL,
+    service_id TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    port INT NOT NULL,
+    service_name TEXT NOT NULL,
+    host_ip TEXT NOT NULL,
+    port_name TEXT NOT NULL DEFAULT 'default',
+    protocol TEXT NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'cluster',
+    status TEXT NOT NULL DEFAULT 'unknown',
+    health_path TEXT NOT NULL DEFAULT '',
+    reachable BOOLEAN NOT NULL DEFAULT FALSE,
+    display_name TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(ip, port, service_name),
+    UNIQUE(endpoint),
+    UNIQUE(host_ip, service_name),
+    UNIQUE(host_ip, service_name, port_name),
+    CONSTRAINT service_endpoints_port_positive CHECK (port > 0),
+    CONSTRAINT service_endpoints_identity_shape CHECK (endpoint = ip || ':' || port::TEXT || ':' || service_name),
+    CONSTRAINT service_endpoints_service_id_matches_identity CHECK (service_id = service_name)
+);
+
+CREATE TABLE IF NOT EXISTS service_links (
+    source_endpoint TEXT NOT NULL,
+    target_endpoint TEXT NOT NULL,
+    from_ip TEXT NOT NULL,
+    from_port INT NOT NULL,
+    from_service_name TEXT NOT NULL,
+    to_type TEXT NOT NULL,
+    to_ip TEXT,
+    to_port INT,
+    to_service_name TEXT NOT NULL,
+    to_selector JSONB NOT NULL DEFAULT '{}'::jsonb,
+    protocol TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    auth_mode TEXT NOT NULL DEFAULT 'internal',
+    scope TEXT NOT NULL DEFAULT '',
+    health TEXT NOT NULL DEFAULT 'unknown',
+    latency_ms INT,
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    config_ref TEXT NOT NULL DEFAULT '',
+    secret_ref TEXT NOT NULL DEFAULT '',
+    policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(source_endpoint, target_endpoint),
+    CONSTRAINT service_links_to_type CHECK (to_type IN ('endpoint', 'endpoint-group'))
+);
+
+CREATE TABLE IF NOT EXISTS service_routes (
+    path TEXT NOT NULL,
+    method TEXT NOT NULL DEFAULT '*',
+    target_type TEXT NOT NULL,
+    target_service_name TEXT NOT NULL,
+    target_selector JSONB NOT NULL DEFAULT '{}'::jsonb,
+    target_ip TEXT,
+    target_port INT,
+    permission TEXT NOT NULL DEFAULT '',
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(path, method),
+    CONSTRAINT service_routes_target_type CHECK (target_type IN ('endpoint', 'endpoint-group', 'frontend'))
+);
+
+CREATE TABLE IF NOT EXISTS service_migration_records (
+    service_name TEXT NOT NULL,
+    migration_version TEXT NOT NULL,
+    checksum TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    applied_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(service_name, migration_version)
+);
+
+CREATE TABLE IF NOT EXISTS service_permission_records (
+    service_name TEXT NOT NULL,
+    permission_key TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'release',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(service_name, permission_key)
+);
+
+CREATE TABLE IF NOT EXISTS service_frontend_entries (
+    service_name TEXT PRIMARY KEY,
+    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    route_prefix TEXT NOT NULL DEFAULT '',
+    remote_entry TEXT NOT NULL DEFAULT '',
+    menu_items JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS service_redis_resources (
+    service_name TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    usage TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(service_name, name)
+);
+
+CREATE TABLE IF NOT EXISTS service_storage_resources (
+    service_name TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    bucket TEXT NOT NULL,
+    path_prefix TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(service_name, object_type, bucket)
+);
+
+CREATE TABLE IF NOT EXISTS rendered_service_configs (
+    service_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(service_name, version)
+);
+
 
 CREATE TABLE IF NOT EXISTS services (
     service_id TEXT PRIMARY KEY,
@@ -19,36 +160,6 @@ CREATE TABLE IF NOT EXISTS services (
     health TEXT NOT NULL DEFAULT 'unknown',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS service_endpoints (
-    endpoint TEXT PRIMARY KEY,
-    service_id TEXT NOT NULL,
-    protocol TEXT NOT NULL,
-    health_path TEXT NOT NULL DEFAULT '',
-    health TEXT NOT NULL DEFAULT 'unknown',
-    reachable BOOLEAN NOT NULL DEFAULT FALSE,
-    display_name TEXT NOT NULL DEFAULT '',
-    note TEXT NOT NULL DEFAULT '',
-    config JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS service_links (
-    source_endpoint TEXT NOT NULL,
-    target_endpoint TEXT NOT NULL,
-    protocol TEXT NOT NULL,
-    auth_mode TEXT NOT NULL DEFAULT 'internal',
-    scope TEXT NOT NULL DEFAULT '',
-    health TEXT NOT NULL DEFAULT 'unknown',
-    latency_ms INT,
-    config_ref TEXT NOT NULL DEFAULT '',
-    secret_ref TEXT NOT NULL DEFAULT '',
-    policy JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY(source_endpoint, target_endpoint)
 );
 
 CREATE TABLE IF NOT EXISTS orchestrator_operations (
@@ -120,9 +231,16 @@ CREATE TABLE IF NOT EXISTS diagnostic_reports (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_service_endpoints_service ON service_endpoints(service_id);
-CREATE INDEX IF NOT EXISTS idx_service_links_source ON service_links(source_endpoint);
-CREATE INDEX IF NOT EXISTS idx_service_links_target ON service_links(target_endpoint);
+CREATE INDEX IF NOT EXISTS idx_service_endpoints_service ON service_endpoints(service_name);
+CREATE INDEX IF NOT EXISTS idx_service_endpoints_service_id ON service_endpoints(service_id);
+CREATE INDEX IF NOT EXISTS idx_service_endpoints_host ON service_endpoints(host_ip);
+CREATE INDEX IF NOT EXISTS idx_service_links_source ON service_links(from_ip, from_port, from_service_name);
+CREATE INDEX IF NOT EXISTS idx_service_links_target ON service_links(to_type, to_service_name);
+CREATE INDEX IF NOT EXISTS idx_service_routes_target ON service_routes(target_type, target_service_name);
+CREATE INDEX IF NOT EXISTS idx_service_migration_records_status ON service_migration_records(status);
+CREATE INDEX IF NOT EXISTS idx_service_permission_records_permission ON service_permission_records(permission_key);
+CREATE INDEX IF NOT EXISTS idx_service_redis_resources_kind ON service_redis_resources(kind);
+CREATE INDEX IF NOT EXISTS idx_service_storage_resources_bucket ON service_storage_resources(bucket);
 CREATE INDEX IF NOT EXISTS idx_orchestrator_operations_target
     ON orchestrator_operations(target_type, target_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orchestrator_operation_locks_expires

@@ -1,0 +1,513 @@
+schema_version: 1
+product: OJOS Orchestrator
+forms:
+  release.create:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: release_url, type: string }
+      - { name: service_yaml_path, type: string }
+  release.list:
+    fields:
+      - { name: service_id, type: service_id }
+  release.get:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: version, type: string }
+  release.update:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: release_url, type: string }
+      - { name: service_yaml_path, type: string }
+  release.delete:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: version, type: string }
+      - { name: confirm, type: boolean, required: true }
+  release.validate:
+    fields:
+      - { name: service_id, type: service_id }
+      - { name: service_yaml_path, type: string }
+  release.install:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: host_ip, type: string }
+      - { name: endpoint, type: endpoint }
+      - { name: confirm, type: boolean, required: true }
+  release.rollback:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: version, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+
+  host.create:
+    fields:
+      - { name: host_ip, type: string, required: true }
+      - { name: labels, type: json }
+  host.list:
+    fields: []
+  host.get:
+    fields:
+      - { name: host_ip, type: string, required: true }
+  host.update:
+    fields:
+      - { name: host_ip, type: string, required: true }
+      - { name: labels, type: json }
+  host.delete:
+    fields:
+      - { name: host_ip, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  host.health.check:
+    fields:
+      - { name: host_ip, type: string, required: true }
+
+  service.create:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: host_ip, type: string }
+      - { name: version, type: string }
+  service.list:
+    fields:
+      - { name: host_ip, type: string }
+  service.get:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: host_ip, type: string }
+  service.update:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: host_ip, type: string }
+      - { name: config, type: json }
+  service.delete:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: host_ip, type: string }
+      - { name: confirm, type: boolean, required: true }
+  service.start:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: host_ip, type: string }
+  service.stop:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: host_ip, type: string }
+      - { name: confirm, type: boolean, required: true }
+  service.restart:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: host_ip, type: string }
+      - { name: confirm, type: boolean, required: true }
+  service.enable:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: host_ip, type: string }
+      - { name: confirm, type: boolean, required: true }
+  service.disable:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: host_ip, type: string }
+      - { name: confirm, type: boolean, required: true }
+  service.health.check:
+    fields:
+      - { name: service_id, type: service_id }
+      - { name: endpoint, type: endpoint }
+
+  endpoint.create:
+    fields:
+      - { name: endpoint, type: endpoint, required: true }
+      - { name: service_id, type: service_id, required: true }
+      - { name: protocol, type: enum, values: [http, https, tcp, postgres, redis], required: true }
+      - { name: health_path, type: string }
+      - { name: display_name, type: string }
+      - { name: note, type: text }
+      - { name: config, type: json }
+  endpoint.list:
+    fields:
+      - { name: service_id, type: service_id }
+      - { name: host_ip, type: string }
+  endpoint.get:
+    fields:
+      - { name: endpoint, type: endpoint, required: true }
+  endpoint.update:
+    fields:
+      - { name: endpoint, type: endpoint, required: true }
+      - { name: protocol, type: enum, values: [http, https, tcp, postgres, redis] }
+      - { name: health_path, type: string }
+      - { name: display_name, type: string }
+      - { name: note, type: text }
+      - { name: config, type: json }
+  endpoint.delete:
+    fields:
+      - { name: endpoint, type: endpoint, required: true }
+      - { name: confirm, type: boolean, required: true }
+  endpoint.health.check:
+    fields:
+      - { name: endpoint, type: endpoint, required: true }
+
+  link.create:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+      - { name: protocol, type: enum, values: [http, https, tcp, postgres, redis], required: true }
+      - { name: auth_mode, type: enum, values: [none, internal, service-token, secret-ref] }
+      - { name: scope, type: string }
+      - { name: config_ref, type: string }
+      - { name: secret_ref, type: secret_ref }
+      - { name: policy, type: json }
+  link.list:
+    fields:
+      - { name: endpoint, type: endpoint }
+      - { name: service_id, type: service_id }
+  link.get:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+  link.update:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+      - { name: protocol, type: enum, values: [http, https, tcp, postgres, redis] }
+      - { name: auth_mode, type: enum, values: [none, internal, service-token, secret-ref] }
+      - { name: scope, type: string }
+      - { name: config_ref, type: string }
+      - { name: secret_ref, type: secret_ref }
+      - { name: policy, type: json }
+  link.delete:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+      - { name: confirm, type: boolean, required: true }
+  link.health.check:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+
+  route.create:
+    fields:
+      - { name: route_id, type: string, required: true }
+      - { name: service_id, type: service_id, required: true }
+      - { name: path, type: string, required: true }
+      - { name: target, type: string, required: true }
+  route.list:
+    fields:
+      - { name: service_id, type: service_id }
+  route.get:
+    fields:
+      - { name: route_id, type: string, required: true }
+  route.update:
+    fields:
+      - { name: route_id, type: string, required: true }
+      - { name: path, type: string }
+      - { name: target, type: string }
+  route.delete:
+    fields:
+      - { name: route_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  route.validate:
+    fields:
+      - { name: service_id, type: service_id }
+  route.apply:
+    fields:
+      - { name: gateway_endpoint, type: endpoint }
+      - { name: confirm, type: boolean, required: true }
+
+  frontend.create:
+    fields:
+      - { name: frontend_id, type: string, required: true }
+      - { name: service_id, type: service_id, required: true }
+      - { name: route_prefix, type: string, required: true }
+  frontend.list:
+    fields:
+      - { name: service_id, type: service_id }
+  frontend.get:
+    fields:
+      - { name: frontend_id, type: string, required: true }
+  frontend.update:
+    fields:
+      - { name: frontend_id, type: string, required: true }
+      - { name: route_prefix, type: string }
+  frontend.delete:
+    fields:
+      - { name: frontend_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  frontend.validate:
+    fields:
+      - { name: service_id, type: service_id }
+  frontend.publish:
+    fields:
+      - { name: gateway_endpoint, type: endpoint }
+      - { name: confirm, type: boolean, required: true }
+
+  migration.create:
+    fields:
+      - { name: migration_id, type: string, required: true }
+      - { name: service_id, type: service_id, required: true }
+      - { name: version, type: string, required: true }
+  migration.list:
+    fields:
+      - { name: service_id, type: service_id }
+  migration.get:
+    fields:
+      - { name: migration_id, type: string, required: true }
+  migration.update:
+    fields:
+      - { name: migration_id, type: string, required: true }
+      - { name: checksum, type: string }
+  migration.delete:
+    fields:
+      - { name: migration_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  migration.validate:
+    fields:
+      - { name: service_id, type: service_id }
+      - { name: migration_id, type: string }
+  migration.apply:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: migration_id, type: string }
+      - { name: confirm, type: boolean, required: true }
+  migration.rollback:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: migration_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+
+  permission.create:
+    fields:
+      - { name: permission_id, type: string, required: true }
+      - { name: service_id, type: service_id, required: true }
+  permission.list:
+    fields:
+      - { name: service_id, type: service_id }
+  permission.get:
+    fields:
+      - { name: permission_id, type: string, required: true }
+  permission.update:
+    fields:
+      - { name: permission_id, type: string, required: true }
+      - { name: description, type: text }
+  permission.delete:
+    fields:
+      - { name: permission_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  permission.validate:
+    fields:
+      - { name: service_id, type: service_id }
+  permission.sync:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: confirm, type: boolean, required: true }
+
+  redis.create:
+    fields:
+      - { name: resource_id, type: string, required: true }
+      - { name: service_id, type: service_id, required: true }
+  redis.list:
+    fields:
+      - { name: service_id, type: service_id }
+  redis.get:
+    fields:
+      - { name: resource_id, type: string, required: true }
+  redis.update:
+    fields:
+      - { name: resource_id, type: string, required: true }
+      - { name: config, type: json }
+  redis.delete:
+    fields:
+      - { name: resource_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  redis.validate:
+    fields:
+      - { name: service_id, type: service_id }
+  redis.apply:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: confirm, type: boolean, required: true }
+
+  storage.create:
+    fields:
+      - { name: resource_id, type: string, required: true }
+      - { name: service_id, type: service_id, required: true }
+  storage.list:
+    fields:
+      - { name: service_id, type: service_id }
+  storage.get:
+    fields:
+      - { name: resource_id, type: string, required: true }
+  storage.update:
+    fields:
+      - { name: resource_id, type: string, required: true }
+      - { name: config, type: json }
+  storage.delete:
+    fields:
+      - { name: resource_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  storage.validate:
+    fields:
+      - { name: service_id, type: service_id }
+  storage.apply:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+      - { name: confirm, type: boolean, required: true }
+
+  config.create:
+    fields:
+      - { name: config_id, type: string, required: true }
+      - { name: service_id, type: service_id, required: true }
+      - { name: config, type: json }
+  config.list:
+    fields:
+      - { name: service_id, type: service_id }
+  config.get:
+    fields:
+      - { name: config_id, type: string, required: true }
+  config.update:
+    fields:
+      - { name: config_id, type: string, required: true }
+      - { name: config, type: json }
+  config.delete:
+    fields:
+      - { name: config_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  config.render:
+    fields:
+      - { name: service_id, type: service_id, required: true }
+  config.validate:
+    fields:
+      - { name: config_id, type: string }
+      - { name: service_id, type: service_id }
+
+  secret.create:
+    fields:
+      - { name: secret_id, type: secret_ref, required: true }
+      - { name: service_id, type: service_id }
+      - { name: confirm, type: boolean, required: true }
+  secret.list:
+    fields:
+      - { name: service_id, type: service_id }
+  secret.get:
+    fields:
+      - { name: secret_id, type: secret_ref, required: true }
+  secret.update:
+    fields:
+      - { name: secret_id, type: secret_ref, required: true }
+      - { name: confirm, type: boolean, required: true }
+  secret.delete:
+    fields:
+      - { name: secret_id, type: secret_ref, required: true }
+      - { name: confirm, type: boolean, required: true }
+  secret.distribute:
+    fields:
+      - { name: secret_id, type: secret_ref, required: true }
+      - { name: endpoint, type: endpoint, required: true }
+      - { name: confirm, type: boolean, required: true }
+
+  topology.create:
+    fields:
+      - { name: root_endpoint, type: endpoint, required: true }
+      - { name: confirm, type: boolean, required: true }
+  topology.list:
+    fields: []
+  topology.get:
+    fields:
+      - { name: topology_snapshot_id, type: string }
+  topology.update:
+    fields:
+      - { name: topology_snapshot_id, type: string, required: true }
+      - { name: note, type: text }
+      - { name: confirm, type: boolean, required: true }
+  topology.delete:
+    fields:
+      - { name: topology_snapshot_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  topology.validate:
+    fields:
+      - { name: topology_snapshot_id, type: string }
+  topology.apply:
+    fields:
+      - { name: topology_snapshot_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  topology.export:
+    fields:
+      - { name: format, type: enum, values: [json, yaml], required: true }
+
+  operation.create:
+    fields:
+      - { name: action, type: action, required: true }
+      - { name: target_type, type: enum, values: [ServiceRelease, Host, Service, Endpoint, Link, Route, FrontendEntry, Migration, Permission, RedisResource, StorageResource, Config, Secret, Topology, Operation, LogView, DiagnosticReport], required: true }
+      - { name: target_id, type: string, required: true }
+  operation.list:
+    fields: []
+  operation.get:
+    fields:
+      - { name: operation_id, type: string, required: true }
+  operation.update:
+    fields:
+      - { name: operation_id, type: string, required: true }
+      - { name: note, type: text }
+  operation.delete:
+    fields:
+      - { name: operation_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  operation.confirm:
+    fields:
+      - { name: operation_id, type: string, required: true }
+  operation.apply:
+    fields:
+      - { name: operation_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+      - { name: execute_service_driver, type: boolean }
+  operation.cancel:
+    fields:
+      - { name: operation_id, type: string, required: true }
+  operation.rollback:
+    fields:
+      - { name: operation_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+
+  log.create:
+    fields:
+      - { name: source_id, type: string, required: true }
+      - { name: service_id, type: service_id }
+      - { name: endpoint, type: endpoint }
+  log.list:
+    fields:
+      - { name: service_id, type: service_id }
+      - { name: operation_id, type: string }
+  log.get:
+    fields:
+      - { name: source_id, type: string, required: true }
+      - { name: operation_id, type: string }
+  log.update:
+    fields:
+      - { name: source_id, type: string, required: true }
+      - { name: display_name, type: string }
+  log.delete:
+    fields:
+      - { name: source_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  log.query:
+    fields:
+      - { name: operation_id, type: string }
+      - { name: source_id, type: string }
+
+  diagnostic.create:
+    fields:
+      - { name: target_type, type: enum, values: [ServiceRelease, Host, Service, Endpoint, Link, Route, FrontendEntry, Migration, Permission, RedisResource, StorageResource, Config, Secret, Topology, Operation, LogView, DiagnosticReport] }
+      - { name: target_id, type: string }
+  diagnostic.list:
+    fields: []
+  diagnostic.get:
+    fields:
+      - { name: report_id, type: string, required: true }
+  diagnostic.update:
+    fields:
+      - { name: report_id, type: string, required: true }
+      - { name: summary, type: text }
+  diagnostic.delete:
+    fields:
+      - { name: report_id, type: string, required: true }
+      - { name: confirm, type: boolean, required: true }
+  diagnostic.export:
+    fields:
+      - { name: report_id, type: string, required: true }
+      - { name: format, type: enum, values: [json, markdown], required: true }

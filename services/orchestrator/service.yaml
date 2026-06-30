@@ -1,0 +1,84 @@
+schema_version: 1
+id: orchestrator
+name: Orchestrator
+version: 0.1.0
+kind: agent
+description: Single orchestrator program that can run as root, node, or standalone.
+runtime:
+  mode: local-process
+  driver: local-process
+  root_allowed: true
+  non_root_allowed: true
+  start_policy: manual
+  restart_policy: on-failure
+endpoint:
+  protocol: http
+  default_port: 8090
+  health_path: /health
+  expose: false
+  routes: []
+requires:
+  services:
+    - postgresql
+  links:
+    - id: postgresql
+      protocol: postgres
+  storage: []
+  database:
+    - postgresql
+  queue: []
+  secrets:
+    - orchestrator-root-token
+provides:
+  capabilities:
+    - orchestrator.root
+    - orchestrator.node
+    - orchestrator.standalone
+  routes: []
+  workers: []
+  storage_buckets: []
+  events:
+    - topology.changed
+config_schema:
+  runtime_mode:
+    type: string
+    default: standalone
+resources:
+  cpu: shared
+  memory: 256Mi
+  disk: 512Mi
+  gpu: none
+  network: control
+security:
+  allow_privileged: false
+  allow_host_mount: false
+  allow_arbitrary_command: false
+  required_secrets:
+    - orchestrator-root-token
+  sandbox: {}
+  network_policy:
+    control_plane_only: true
+source:
+  type: release
+  ref: github://ojos/orchestrator/releases/latest
+  build: {}
+  artifact:
+    binary: ojos-orchestrator
+ui:
+  enabled: true
+  menu_scope: manager
+  routes:
+    - /manager
+  menus:
+    - topology
+  permissions:
+    - orchestrator.service.install
+permissions:
+  - orchestrator.service.install
+  - orchestrator.link.manage
+  - orchestrator.root.manage
+health:
+  checks:
+    - http
+  timeout_seconds: 3
+  interval_seconds: 10
