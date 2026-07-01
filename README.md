@@ -31,13 +31,16 @@ Orchestrator 使用独立数据库：
 ORCHESTRATOR_DATABASE_URL
 ```
 
-OJ 业务服务使用独立业务数据库：
+OJ 业务服务使用各自的服务级数据库：
 
 ```text
-OJ_DATABASE_URL
+AUTH_DATABASE_URL
+PROBLEM_DATABASE_URL
+JUDGE_DATABASE_URL
+USER_DATABASE_URL
 ```
 
-Orchestrator 不写 OJ 业务表；OJ 业务服务也不能直接写 Orchestrator 表。
+Orchestrator 不写 service-owned 业务表；OJ 业务服务也不能直接写 Orchestrator 表。
 
 ## 基础 Service
 

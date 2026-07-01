@@ -1,0 +1,9 @@
+DROP INDEX IF EXISTS idx_submissions_cancelled_at;
+DROP INDEX IF EXISTS idx_submissions_judged_at;
+DROP INDEX IF EXISTS idx_submissions_code_sha256;
+DROP INDEX IF EXISTS idx_submissions_user_status;
+DROP INDEX IF EXISTS idx_submissions_problem_status;
+DROP INDEX IF EXISTS idx_submissions_status;
+DROP INDEX IF EXISTS idx_submissions_user_id;
+DROP INDEX IF EXISTS idx_submissions_problem_id;
+DROP TABLE IF EXISTS submissions;

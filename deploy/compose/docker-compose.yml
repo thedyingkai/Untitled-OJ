@@ -13,14 +13,56 @@ services:
       timeout: 5s
       retries: 10
 
-  postgresql:
+  auth-db:
     image: postgres:17
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ojos-local}
-      POSTGRES_DB: ${POSTGRES_DB:-ojos}
+      POSTGRES_USER: ${AUTH_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${AUTH_POSTGRES_PASSWORD:-ojos-auth-local}
+      POSTGRES_DB: ${AUTH_POSTGRES_DB:-ojos_auth}
     volumes:
-      - postgresql-data:/var/lib/postgresql/data
+      - auth-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  problem-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${PROBLEM_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${PROBLEM_POSTGRES_PASSWORD:-ojos-problem-local}
+      POSTGRES_DB: ${PROBLEM_POSTGRES_DB:-ojos_problem}
+    volumes:
+      - problem-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  judge-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${JUDGE_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${JUDGE_POSTGRES_PASSWORD:-ojos-judge-local}
+      POSTGRES_DB: ${JUDGE_POSTGRES_DB:-ojos_judge}
+    volumes:
+      - judge-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  user-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${USER_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${USER_POSTGRES_PASSWORD:-ojos-user-local}
+      POSTGRES_DB: ${USER_POSTGRES_DB:-ojos_user}
+    volumes:
+      - user-db-data:/var/lib/postgresql/data
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U postgres" ]
       interval: 5s
@@ -37,17 +79,44 @@ services:
       orchestrator-db:
         condition: service_healthy
     volumes:
-      - ../orchestrator-migrations:/migrations:ro
+      - ../../services/orchestrator/migrations:/migrations:ro
     command: [ "-path", "/migrations", "-database", "${ORCHESTRATOR_DATABASE_URL:-postgres://postgres:ojos-orchestrator-local@orchestrator-db:5432/ojos_orchestrator?sslmode=disable}", "up" ]
 
-  oj-migrations:
+  auth-service-migrations:
     image: migrate/migrate:v4.18.3
     depends_on:
-      postgresql:
+      auth-db:
         condition: service_healthy
     volumes:
-      - ../oj-migrations:/migrations:ro
-    command: [ "-path", "/migrations", "-database", "${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgresql:5432/ojos?sslmode=disable}", "up" ]
+      - ../../services/auth-service/migrations:/migrations:ro
+    command: [ "-path", "/migrations", "-database", "${AUTH_DATABASE_URL:-postgres://postgres:ojos-auth-local@auth-db:5432/ojos_auth?sslmode=disable}", "up" ]
+
+  problem-service-migrations:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      problem-db:
+        condition: service_healthy
+    volumes:
+      - ../../services/problem-service/migrations:/migrations:ro
+    command: [ "-path", "/migrations", "-database", "${PROBLEM_DATABASE_URL:-postgres://postgres:ojos-problem-local@problem-db:5432/ojos_problem?sslmode=disable}", "up" ]
+
+  judge-api-migrations:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      judge-db:
+        condition: service_healthy
+    volumes:
+      - ../../services/judge-api/migrations:/migrations:ro
+    command: [ "-path", "/migrations", "-database", "${JUDGE_DATABASE_URL:-postgres://postgres:ojos-judge-local@judge-db:5432/ojos_judge?sslmode=disable}", "up" ]
+
+  user-service-migrations:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      user-db:
+        condition: service_healthy
+    volumes:
+      - ../../services/user-service/migrations:/migrations:ro
+    command: [ "-path", "/migrations", "-database", "${USER_DATABASE_URL:-postgres://postgres:ojos-user-local@user-db:5432/ojos_user?sslmode=disable}", "up" ]
 
   jaeger:
     image: jaegertracing/jaeger:2.19.0
@@ -84,8 +153,6 @@ services:
         no_proxy: ${NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      oj-migrations:
-        condition: service_completed_successfully
       auth-service:
         condition: service_started
       user-service:
@@ -99,10 +166,10 @@ services:
       jaeger:
         condition: service_started
     environment:
-      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgresql:5432/ojos?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
+      AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
     ports:
@@ -124,7 +191,7 @@ services:
         no_proxy: ${NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      oj-migrations:
+      auth-service-migrations:
         condition: service_completed_successfully
       redis:
         condition: service_started
@@ -133,7 +200,7 @@ services:
     expose:
       - "8081"
     environment:
-      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgresql:5432/ojos?sslmode=disable}
+      DATABASE_URL: ${AUTH_DATABASE_URL:-postgres://postgres:ojos-auth-local@auth-db:5432/ojos_auth?sslmode=disable}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
 
@@ -150,7 +217,7 @@ services:
         no_proxy: ${NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      oj-migrations:
+      user-service-migrations:
         condition: service_completed_successfully
       auth-service:
         condition: service_started
@@ -159,9 +226,7 @@ services:
     expose:
       - "8084"
     environment:
-      OJOS_USER_DATA_DIR: /data/ojos/users
-    volumes:
-      - user-data:/data/ojos/users
+      DATABASE_URL: ${USER_DATABASE_URL:-postgres://postgres:ojos-user-local@user-db:5432/ojos_user?sslmode=disable}
 
   storage-service:
     build:
@@ -200,7 +265,7 @@ services:
         no_proxy: ${NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      oj-migrations:
+      judge-api-migrations:
         condition: service_completed_successfully
       redis:
         condition: service_started
@@ -213,7 +278,7 @@ services:
     expose:
       - "8082"
     environment:
-      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgresql:5432/ojos?sslmode=disable}
+      DATABASE_URL: ${JUDGE_DATABASE_URL:-postgres://postgres:ojos-judge-local@judge-db:5432/ojos_judge?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
@@ -273,7 +338,7 @@ services:
         no_proxy: ${NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      oj-migrations:
+      problem-service-migrations:
         condition: service_completed_successfully
       redis:
         condition: service_started
@@ -284,7 +349,7 @@ services:
     expose:
       - "8083"
     environment:
-      DATABASE_URL: ${OJ_DATABASE_URL:-postgres://postgres:ojos-local@postgresql:5432/ojos?sslmode=disable}
+      DATABASE_URL: ${PROBLEM_DATABASE_URL:-postgres://postgres:ojos-problem-local@problem-db:5432/ojos_problem?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
@@ -294,8 +359,10 @@ services:
 
 volumes:
   orchestrator-db-data:
-  postgresql-data:
+  auth-db-data:
+  problem-db-data:
+  judge-db-data:
+  user-db-data:
   minio-data:
-  user-data:
   storage-service-data:
   worker-data:

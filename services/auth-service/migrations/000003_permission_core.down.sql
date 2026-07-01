@@ -1,4 +1,4 @@
-﻿DROP TABLE IF EXISTS permission_audit_logs;
+DROP TABLE IF EXISTS permission_audit_logs;
 DROP TABLE IF EXISTS resource_edges;
 DROP TABLE IF EXISTS permission_assignments;
 DROP TABLE IF EXISTS role_bindings;

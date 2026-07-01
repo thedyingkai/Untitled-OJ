@@ -149,6 +149,63 @@ CREATE TABLE IF NOT EXISTS rendered_service_configs (
     PRIMARY KEY(service_name, version)
 );
 
+CREATE TABLE IF NOT EXISTS nodes (
+    node_id TEXT PRIMARY KEY,
+    host_ip TEXT NOT NULL UNIQUE,
+    parent_node_id TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL,
+    labels JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT nodes_role CHECK (role IN ('root', 'node', 'standalone')),
+    CONSTRAINT nodes_root_parent CHECK (
+        (role = 'root' AND parent_node_id = '')
+        OR role <> 'root'
+    ),
+    CONSTRAINT nodes_standalone_parent CHECK (
+        (role = 'standalone' AND parent_node_id = '')
+        OR role <> 'standalone'
+    ),
+    CONSTRAINT nodes_parent_not_self CHECK (parent_node_id = '' OR parent_node_id <> node_id)
+);
+
+CREATE TABLE IF NOT EXISTS service_api_surfaces (
+    service_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    api_id TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    port_name TEXT NOT NULL,
+    path_prefix TEXT NOT NULL DEFAULT '',
+    methods JSONB NOT NULL DEFAULT '[]'::jsonb,
+    visibility TEXT NOT NULL,
+    auth_mode TEXT NOT NULL,
+    permission TEXT NOT NULL DEFAULT 'public',
+    stability TEXT NOT NULL,
+    api_version TEXT NOT NULL,
+    rate_limit TEXT NOT NULL DEFAULT '',
+    timeout TEXT NOT NULL DEFAULT '',
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(service_name, version, api_id),
+    CONSTRAINT service_api_surfaces_visibility CHECK (visibility IN ('private', 'same-node', 'children', 'descendants', 'ancestors', 'global', 'explicit')),
+    CONSTRAINT service_api_surfaces_auth CHECK (auth_mode IN ('public', 'user', 'service', 'internal')),
+    CONSTRAINT service_api_surfaces_stability CHECK (stability IN ('stable', 'experimental', 'deprecated'))
+);
+
+CREATE TABLE IF NOT EXISTS deployed_service_apis (
+    host_ip TEXT NOT NULL,
+    service_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    api_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(host_ip, service_name, api_id, endpoint)
+);
+
 
 CREATE TABLE IF NOT EXISTS services (
     service_id TEXT PRIMARY KEY,
@@ -241,6 +298,10 @@ CREATE INDEX IF NOT EXISTS idx_service_migration_records_status ON service_migra
 CREATE INDEX IF NOT EXISTS idx_service_permission_records_permission ON service_permission_records(permission_key);
 CREATE INDEX IF NOT EXISTS idx_service_redis_resources_kind ON service_redis_resources(kind);
 CREATE INDEX IF NOT EXISTS idx_service_storage_resources_bucket ON service_storage_resources(bucket);
+CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_node_id);
+CREATE INDEX IF NOT EXISTS idx_service_api_surfaces_api ON service_api_surfaces(api_id);
+CREATE INDEX IF NOT EXISTS idx_deployed_service_apis_host ON deployed_service_apis(host_ip);
+CREATE INDEX IF NOT EXISTS idx_deployed_service_apis_status ON deployed_service_apis(status);
 CREATE INDEX IF NOT EXISTS idx_orchestrator_operations_target
     ON orchestrator_operations(target_type, target_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orchestrator_operation_locks_expires
