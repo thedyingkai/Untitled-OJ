@@ -3,9 +3,15 @@ Host: 0.0.0.0
 Port: 8085
 
 Storage:
+  Backend: local
   Root: /data/ojos/storage
   Buckets:
     - problems
     - submissions
     - judge-artifacts
     - avatars
+  MinIO:
+    Endpoint: minio:9000
+    AccessKey: ojos
+    SecretKey: ojos-local-dev
+    UseSSL: false

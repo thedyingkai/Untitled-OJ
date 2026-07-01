@@ -30,6 +30,6 @@ func (l *HealthLogic) Health() (resp *types.HealthResp, err error) {
 	return &types.HealthResp{
 		Status:  "ok",
 		Service: "storage-service",
-		Backend: "local",
+		Backend: l.svcCtx.ObjectStore.Backend(),
 	}, nil
 }

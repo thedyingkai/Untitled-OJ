@@ -248,9 +248,13 @@ services:
       minio:
         condition: service_started
     environment:
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
       OJOS_STORAGE_ROOT: /data/ojos/storage
-      OJOS_MINIO_ENDPOINT: http://minio:9000
       OJOS_STORAGE_BUCKETS: problems,submissions,judge-artifacts,avatars
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-ojos-minio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-ojos-minio-local}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
     volumes:
       - storage-service-data:/data/ojos/storage
 

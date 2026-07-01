@@ -10,11 +10,21 @@ import (
 
 type ServiceContext struct {
 	Config      config.Config
-	ObjectStore *store.ObjectStore
+	ObjectStore store.ObjectStorage
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
-	objectStore, err := store.NewObjectStore(c.Storage.Root, c.Storage.Buckets)
+	objectStore, err := store.NewObjectStorage(store.Options{
+		Backend: c.Storage.Backend,
+		Root:    c.Storage.Root,
+		Buckets: c.Storage.Buckets,
+		MinIO: store.MinIOOptions{
+			Endpoint:  c.Storage.MinIO.Endpoint,
+			AccessKey: c.Storage.MinIO.AccessKey,
+			SecretKey: c.Storage.MinIO.SecretKey,
+			UseSSL:    c.Storage.MinIO.UseSSL,
+		},
+	})
 	if err != nil {
 		panic(err)
 	}

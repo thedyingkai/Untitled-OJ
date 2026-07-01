@@ -82,7 +82,21 @@ storage:
     bucket: judge-artifacts
 dependencies:
   - minio
-config_schema: {}
+config_schema:
+  STORAGE_BACKEND:
+    type: enum
+    values: [local, minio]
+    default: local
+  MINIO_ENDPOINT:
+    type: string
+    default: minio:9000
+  MINIO_ACCESS_KEY:
+    type: secret
+  MINIO_SECRET_KEY:
+    type: secret
+  MINIO_USE_SSL:
+    type: boolean
+    default: false
 secrets: []
 observability:
   metrics: true

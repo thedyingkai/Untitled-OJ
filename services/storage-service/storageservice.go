@@ -37,11 +37,29 @@ func main() {
 }
 
 func applyEnvOverrides(c *config.Config) {
+	if value := strings.TrimSpace(os.Getenv("STORAGE_BACKEND")); value != "" {
+		c.Storage.Backend = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_BACKEND")); value != "" {
+		c.Storage.Backend = value
+	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_ROOT")); value != "" {
 		c.Storage.Root = value
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_BUCKETS")); value != "" {
 		c.Storage.Buckets = splitCSV(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("MINIO_ENDPOINT")); value != "" {
+		c.Storage.MinIO.Endpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MINIO_ACCESS_KEY")); value != "" {
+		c.Storage.MinIO.AccessKey = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MINIO_SECRET_KEY")); value != "" {
+		c.Storage.MinIO.SecretKey = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MINIO_USE_SSL")); value != "" {
+		c.Storage.MinIO.UseSSL = parseBool(value)
 	}
 }
 
@@ -54,4 +72,13 @@ func splitCSV(value string) []string {
 		}
 	}
 	return out
+}
+
+func parseBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

@@ -12,6 +12,15 @@ type Config struct {
 }
 
 type StorageConfig struct {
+	Backend string
 	Root    string
 	Buckets []string
+	MinIO   MinIOConfig
+}
+
+type MinIOConfig struct {
+	Endpoint  string
+	AccessKey string
+	SecretKey string
+	UseSSL    bool
 }

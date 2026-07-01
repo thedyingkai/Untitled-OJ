@@ -29,6 +29,41 @@ type ObjectStore struct {
 
 var safeBucket = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,62}$`)
 
+type ObjectStorage interface {
+	Backend() string
+	BucketNames() []string
+	EnsureBucket(bucket string) (bool, error)
+	Put(bucket, key, contentType string, body io.Reader) (types.ObjectMetadata, error)
+	Serve(w http.ResponseWriter, r *http.Request, bucket, key string) error
+	Delete(bucket, key string) error
+	Metadata(bucket, key string) (types.ObjectMetadata, error)
+}
+
+type Options struct {
+	Backend string
+	Root    string
+	Buckets []string
+	MinIO   MinIOOptions
+}
+
+type MinIOOptions struct {
+	Endpoint  string
+	AccessKey string
+	SecretKey string
+	UseSSL    bool
+}
+
+func NewObjectStorage(options Options) (ObjectStorage, error) {
+	switch strings.ToLower(strings.TrimSpace(options.Backend)) {
+	case "", "local":
+		return NewObjectStore(options.Root, options.Buckets)
+	case "minio":
+		return NewMinIOObjectStore(options.MinIO, options.Buckets)
+	default:
+		return nil, fmt.Errorf("unsupported storage backend %q", options.Backend)
+	}
+}
+
 func NewObjectStore(root string, buckets []string) (*ObjectStore, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
@@ -49,6 +84,10 @@ func NewObjectStore(root string, buckets []string) (*ObjectStore, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func (s *ObjectStore) Backend() string {
+	return "local"
 }
 
 func (s *ObjectStore) BucketNames() []string {
