@@ -36,3 +36,20 @@ func TestDeleteServicePermissionsRevokesByServiceCode(t *testing.T) {
 		t.Fatalf("DeleteServicePermissions must revoke service-owned permissions by service_code")
 	}
 }
+
+func TestServiceCallerPermissionChecksRegisteredPermissionCode(t *testing.T) {
+	data, err := os.ReadFile("admin_repository.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"func (r *AdminRepository) ServiceCallerCanUsePermission",
+		"FROM permissions",
+		"WHERE code = $1",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("ServiceCallerCanUsePermission must query registered permission declarations; missing %q", want)
+		}
+	}
+}

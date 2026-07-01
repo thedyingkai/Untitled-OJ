@@ -8,9 +8,10 @@ import "github.com/zeromicro/go-zero/rest"
 type Config struct {
 	rest.RestConf
 
-	Database DatabaseConfig
-	Jaeger   JaegerConfig
-	Jwt      JwtConfig
+	Database     DatabaseConfig
+	Jaeger       JaegerConfig
+	Jwt          JwtConfig
+	InternalAuth InternalAuthConfig
 }
 
 type DatabaseConfig struct {
@@ -24,4 +25,8 @@ type JaegerConfig struct {
 type JwtConfig struct {
 	Secret      string
 	ExpireHours int
+}
+
+type InternalAuthConfig struct {
+	Token string `json:",optional"`
 }

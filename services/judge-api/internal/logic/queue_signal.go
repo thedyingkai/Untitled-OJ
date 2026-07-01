@@ -13,8 +13,9 @@ import (
 )
 
 const judgeSubmissionStreamMaxLen int64 = 10000
-const judgeResultStream = "ojos:judge:results"
-const judgeConsumerGroup = "judge-workers"
+const judgeSubmissionStream = "ojos:judge:task"
+const judgeResultStream = "ojos:judge:result"
+const judgeConsumerGroup = "judge-worker"
 
 func publishJudgeSignal(
 	ctx context.Context,

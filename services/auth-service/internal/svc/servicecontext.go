@@ -77,7 +77,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		AdminRepo:   adminRepo,
 		AuthService: authService,
 
-		AuthMiddleware: authmw.NewAuthMiddleware(c.Jwt.Secret).Handle,
+		AuthMiddleware: authmw.NewAuthMiddleware(c.Jwt.Secret, c.InternalAuth.Token).Handle,
 	}
 }
 
@@ -90,6 +90,9 @@ func applyEnvOverrides(c *config.Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("JWT_SECRET")); value != "" {
 		c.Jwt.Secret = value
+	}
+	if value := strings.TrimSpace(os.Getenv("AUTH_INTERNAL_TOKEN")); value != "" {
+		c.InternalAuth.Token = value
 	}
 }
 

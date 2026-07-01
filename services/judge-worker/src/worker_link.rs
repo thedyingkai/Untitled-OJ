@@ -33,6 +33,9 @@ pub struct WorkerLinkConfig {
     pub internal_gateway_url: Option<String>,
     pub storage_api_get: String,
     pub storage_api_put: String,
+    pub service_token: Option<String>,
+    pub caller_node_id: Option<String>,
+    pub runner_mode: String,
 }
 
 impl WorkerLinkConfig {
@@ -66,11 +69,9 @@ impl WorkerLinkConfig {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let redis_task_stream = env_or("OJOS_JUDGE_TASK_STREAM", || {
-            "ojos:judge:submissions".to_string()
-        });
+        let redis_task_stream = env_or("OJOS_JUDGE_TASK_STREAM", || "ojos:judge:task".to_string());
         let redis_consumer_group =
-            env_or("OJOS_JUDGE_CONSUMER_GROUP", || "judge-workers".to_string());
+            env_or("OJOS_JUDGE_CONSUMER_GROUP", || "judge-worker".to_string());
         let internal_gateway_url = std::env::var("OJOS_INTERNAL_GATEWAY_URL")
             .ok()
             .map(|value| value.trim().trim_end_matches('/').to_string())
@@ -81,6 +82,15 @@ impl WorkerLinkConfig {
         let storage_api_put = env_or("OJOS_STORAGE_OBJECT_PUT_API_ID", || {
             "storage.object.put".to_string()
         });
+        let service_token = std::env::var("OJOS_SERVICE_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let caller_node_id = std::env::var("OJOS_CALLER_NODE_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let runner_mode = env_or("OJOS_RUNNER_MODE", || "nsjail".to_string());
 
         Ok(Self {
             worker_id,
@@ -99,6 +109,9 @@ impl WorkerLinkConfig {
             internal_gateway_url,
             storage_api_get,
             storage_api_put,
+            service_token,
+            caller_node_id,
+            runner_mode,
         })
     }
 }
@@ -241,15 +254,19 @@ async fn execute_task(
         .await;
     });
 
-    let result = judge_artifacts(
-        languages,
-        task.submission_id,
-        &task.language,
-        &source_path,
-        &package_dir,
-        &result_dir,
-    )
-    .await;
+    let result = if config.runner_mode == "fake" {
+        fake_judge_artifacts(task.submission_id, &result_dir).await
+    } else {
+        judge_artifacts(
+            languages,
+            task.submission_id,
+            &task.language,
+            &source_path,
+            &package_dir,
+            &result_dir,
+        )
+        .await
+    };
 
     let _ = heartbeat_stop.0.send(true);
     let _ = heartbeat_handle.await;
@@ -264,6 +281,40 @@ async fn execute_task(
 
     let _ = fs::remove_dir_all(&task_dir).await;
     Ok(())
+}
+
+async fn fake_judge_artifacts(submission_id: i64, result_dir: &Path) -> Result<ResultFile> {
+    let case_dir = result_dir.join("cases").join("001");
+    fs::create_dir_all(&case_dir).await?;
+    let stdout_path = case_dir.join("stdout.txt");
+    let stderr_path = case_dir.join("stderr.txt");
+    let checker_log_path = case_dir.join("checker.log");
+    fs::write(&stdout_path, "ok\n").await?;
+    fs::write(&stderr_path, "").await?;
+    fs::write(&checker_log_path, "fake runner accepted\n").await?;
+
+    let result = ResultFile {
+        submission_id,
+        status: "ACCEPTED".to_string(),
+        score: 100,
+        time_ms: 1,
+        memory_kb: 1024,
+        message: "accepted by fake runner".to_string(),
+        cases: vec![crate::result::ResultCase {
+            case_no: 1,
+            status: "ACCEPTED".to_string(),
+            score: 100,
+            time_ms: 1,
+            memory_kb: 1024,
+            stdout_path: stdout_path.to_string_lossy().to_string(),
+            stderr_path: stderr_path.to_string_lossy().to_string(),
+            checker_log_path: checker_log_path.to_string_lossy().to_string(),
+            message: "accepted".to_string(),
+        }],
+    };
+    let text = serde_json::to_string_pretty(&result)?;
+    fs::write(result_dir.join("result.json"), text).await?;
+    Ok(result)
 }
 
 async fn register_worker(client: &Client, config: &WorkerLinkConfig) -> Result<()> {
@@ -651,12 +702,21 @@ async fn download_artifact(
     target: &Path,
 ) -> Result<()> {
     let url = absolute_url(config, &artifact.url);
-    let mut resp = client
+    let mut request = client
         .get(url)
-        .header("X-OJOS-Worker-Token", &config.worker_token)
-        .send()
-        .await?
-        .error_for_status()?;
+        .header("X-OJOS-Worker-Token", &config.worker_token);
+    if artifact.url.starts_with("/internal/apis/") {
+        request = request.header("X-OJOS-Caller-Service", "judge-worker");
+        if let Some(node_id) = &config.caller_node_id {
+            request = request
+                .header("X-OJOS-Node-Id", node_id)
+                .header("X-OJOS-Caller-Node-Id", node_id);
+        }
+        if let Some(token) = &config.service_token {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+    }
+    let mut resp = request.send().await?.error_for_status()?;
 
     let mut file = fs::File::create(target).await?;
     let mut hasher = Sha256::new();
@@ -705,6 +765,15 @@ where
 fn absolute_url(config: &WorkerLinkConfig, path: &str) -> String {
     if path.starts_with("http://") || path.starts_with("https://") {
         return path.to_string();
+    }
+    if path.starts_with("/internal/apis/") {
+        if let Some(gateway_url) = &config.internal_gateway_url {
+            return format!(
+                "{}/{}",
+                gateway_url.trim_end_matches('/'),
+                path.trim_start_matches('/')
+            );
+        }
     }
     format!(
         "{}/{}",
@@ -927,7 +996,7 @@ mod tests {
     #[test]
     fn redis_stream_task_events_extracts_ids_and_task_metadata_from_xreadgroup_response() {
         let value = redis::Value::Array(vec![redis::Value::Array(vec![
-            redis::Value::BulkString(b"ojos:judge:submissions".to_vec()),
+            redis::Value::BulkString(b"ojos:judge:task".to_vec()),
             redis::Value::Array(vec![
                 redis::Value::Array(vec![
                     redis::Value::BulkString(b"1720000000000-0".to_vec()),
@@ -1038,11 +1107,14 @@ mod tests {
             heartbeat_interval: Duration::from_secs(10),
             task_lease_ttl: Duration::from_secs(45),
             redis_url: None,
-            redis_task_stream: "ojos:judge:submissions".to_string(),
-            redis_consumer_group: "judge-workers".to_string(),
+            redis_task_stream: "ojos:judge:task".to_string(),
+            redis_consumer_group: "judge-worker".to_string(),
             internal_gateway_url: None,
             storage_api_get: "storage.object.get".to_string(),
             storage_api_put: "storage.object.put".to_string(),
+            service_token: None,
+            caller_node_id: None,
+            runner_mode: "nsjail".to_string(),
         };
         let client = Client::builder()
             .timeout(Duration::from_secs(5))
@@ -1181,6 +1253,102 @@ mod tests {
         let _ = fs::remove_dir_all(&config.artifact_cache_dir).await;
     }
 
+    #[tokio::test]
+    async fn worker_downloads_storage_source_through_internal_gateway_identity() {
+        let artifact_body = b"int main() { return 0; }\n".to_vec();
+        let artifact_sha256 = format!("{:x}", Sha256::digest(&artifact_body));
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let endpoint = start_gateway_artifact_server(captured.clone(), artifact_body.clone());
+        let config = WorkerLinkConfig {
+            worker_id: "127.0.0.2_19000_judge-worker".to_string(),
+            worker_name: "worker".to_string(),
+            judge_api_url: "http://judge-api:8082".to_string(),
+            worker_token: "worker-token".to_string(),
+            max_concurrency: 1,
+            work_dir: std::env::temp_dir().join(format!("ojos-worker-test-{}", Uuid::new_v4())),
+            artifact_cache_dir: std::env::temp_dir()
+                .join(format!("ojos-worker-cache-test-{}", Uuid::new_v4())),
+            supported_languages: vec!["cpp17".to_string()],
+            heartbeat_interval: Duration::from_secs(10),
+            task_lease_ttl: Duration::from_secs(45),
+            redis_url: None,
+            redis_task_stream: "ojos:judge:task".to_string(),
+            redis_consumer_group: "judge-worker".to_string(),
+            internal_gateway_url: Some(endpoint),
+            storage_api_get: "storage.object.get".to_string(),
+            storage_api_put: "storage.object.put".to_string(),
+            service_token: Some("internal-token".to_string()),
+            caller_node_id: Some("child-node".to_string()),
+            runner_mode: "fake".to_string(),
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .no_proxy()
+            .build()
+            .expect("worker http client");
+        let target = config.work_dir.join("source.cpp");
+        fs::create_dir_all(target.parent().unwrap())
+            .await
+            .expect("target parent");
+
+        download_artifact(
+            &client,
+            &config,
+            &WorkerArtifactRef {
+                url: "/internal/apis/storage.object.get/submissions/42-source-main.cpp".to_string(),
+                sha256: artifact_sha256,
+                size_bytes: artifact_body.len() as i64,
+            },
+            &target,
+        )
+        .await
+        .expect("download via gateway");
+
+        let requests = captured.lock().expect("captured requests").clone();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].path,
+            "/internal/apis/storage.object.get/submissions/42-source-main.cpp"
+        );
+        assert_eq!(
+            requests[0].header("x-ojos-caller-service"),
+            Some("judge-worker")
+        );
+        assert_eq!(requests[0].header("x-ojos-node-id"), Some("child-node"));
+        assert_eq!(
+            requests[0].header("authorization"),
+            Some("Bearer internal-token")
+        );
+        assert_eq!(
+            requests[0].header("x-ojos-worker-token"),
+            Some("worker-token")
+        );
+
+        let downloaded = fs::read(&target).await.expect("read downloaded source");
+        assert_eq!(downloaded, artifact_body);
+        let _ = fs::remove_dir_all(&config.work_dir).await;
+        let _ = fs::remove_dir_all(&config.artifact_cache_dir).await;
+    }
+
+    #[tokio::test]
+    async fn fake_runner_produces_accepted_result_artifacts() {
+        let result_dir = std::env::temp_dir().join(format!("ojos-fake-runner-{}", Uuid::new_v4()));
+        let result = fake_judge_artifacts(99, &result_dir)
+            .await
+            .expect("fake runner result");
+
+        assert_eq!(result.submission_id, 99);
+        assert_eq!(result.status, "ACCEPTED");
+        assert_eq!(result.score, 100);
+        assert_eq!(result.cases.len(), 1);
+        assert!(result_dir.join("result.json").exists());
+        let stdout = fs::read_to_string(&result.cases[0].stdout_path)
+            .await
+            .expect("fake stdout");
+        assert_eq!(stdout, "ok\n");
+        let _ = fs::remove_dir_all(&result_dir).await;
+    }
+
     #[derive(Clone, Debug)]
     struct CapturedRequest {
         path: String,
@@ -1213,6 +1381,27 @@ mod tests {
                     .write_all(&body)
                     .expect("write worker contract response");
             }
+        });
+        format!("http://{}", addr)
+    }
+
+    fn start_gateway_artifact_server(
+        captured: Arc<Mutex<Vec<CapturedRequest>>>,
+        artifact_body: Vec<u8>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind gateway artifact server");
+        let addr = listener.local_addr().expect("gateway artifact addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept gateway request");
+            let request = read_http_request(&mut stream);
+            captured.lock().expect("captured requests").push(request);
+            stream
+                .write_all(&http_response(
+                    "200 OK",
+                    "text/plain; charset=utf-8",
+                    &artifact_body,
+                ))
+                .expect("write gateway response");
         });
         format!("http://{}", addr)
     }

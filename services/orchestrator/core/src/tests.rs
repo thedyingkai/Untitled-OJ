@@ -61,9 +61,9 @@ impl RedisResourceProvisioner for RecordingRedisResourceProvisioner {
                 .map(|resource| RedisProvisionedResource {
                     name: resource.name.clone(),
                     kind: resource.kind.clone(),
-                    stream: "ojos:judge:submissions".to_string(),
+                    stream: "ojos:judge:task".to_string(),
                     consumer_group: if resource.kind == "consumer-group" {
-                        "judge-workers".to_string()
+                        "judge-worker".to_string()
                     } else {
                         String::new()
                     },
@@ -3843,7 +3843,7 @@ fn release_install_provisions_redis_resources_with_runtime_provisioner() {
                     items.iter().any(|item| {
                         item.get("consumer_group")
                             .and_then(serde_json::Value::as_str)
-                            == Some("judge-workers")
+                            == Some("judge-worker")
                     })
                 })
     }));
@@ -3901,13 +3901,13 @@ fn tcp_redis_provisioner_creates_judge_stream_and_consumer_group() {
     handle.join().expect("redis listener thread");
 
     assert_eq!(result.status, "created");
-    assert_eq!(result.provisioned[0].stream, "ojos:judge:submissions");
-    assert_eq!(result.provisioned[0].consumer_group, "judge-workers");
+    assert_eq!(result.provisioned[0].stream, "ojos:judge:task");
+    assert_eq!(result.provisioned[0].consumer_group, "judge-worker");
     let command = captured.lock().expect("captured redis command").join("\n");
     assert!(command.contains("XGROUP"));
     assert!(command.contains("CREATE"));
-    assert!(command.contains("ojos:judge:submissions"));
-    assert!(command.contains("judge-workers"));
+    assert!(command.contains("ojos:judge:task"));
+    assert!(command.contains("judge-worker"));
     assert!(command.contains("MKSTREAM"));
 }
 

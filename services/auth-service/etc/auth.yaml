@@ -11,3 +11,6 @@ Jaeger:
 Jwt:
   Secret: ""
   ExpireHours: 24
+
+InternalAuth:
+  Token: ""

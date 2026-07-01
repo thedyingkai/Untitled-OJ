@@ -257,11 +257,11 @@ func TestServiceProxyChecksDynamicRoutePermission(t *testing.T) {
 	defer upstream.Close()
 
 	rp := newTestServiceProxy(t, nil)
-	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, userID int64, permission string) (bool, error) {
+	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, caller PermissionCheckCaller, permission string) (bool, error) {
 		if authHeader == "" {
 			t.Fatalf("permission checker should receive Authorization header")
 		}
-		return userID == 42 && permission == "demo.read", nil
+		return caller.Type == "user" && caller.UserID == 42 && permission == "demo.read", nil
 	})
 	rp.SetRouteTable(servicestatus.RouteTable{
 		Routes: []servicestatus.ServiceRoute{{
@@ -292,7 +292,7 @@ func TestServiceProxyChecksDynamicRoutePermission(t *testing.T) {
 		t.Fatalf("permission checker should allow route, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
-	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, userID int64, permission string) (bool, error) {
+	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, caller PermissionCheckCaller, permission string) (bool, error) {
 		if authHeader == "" {
 			t.Fatalf("permission checker should receive Authorization header")
 		}
@@ -519,7 +519,7 @@ func TestServiceProxyInternalAPIResolverChecksPermissions(t *testing.T) {
 	route.AuthMode = "user"
 	route.RequiredPermission = "storage.object.read"
 	rp.SetRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{route}, CanProxy: true})
-	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, userID int64, permission string) (bool, error) {
+	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, caller PermissionCheckCaller, permission string) (bool, error) {
 		return false, nil
 	})
 
@@ -530,6 +530,62 @@ func TestServiceProxyInternalAPIResolverChecksPermissions(t *testing.T) {
 	rp.ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("permission denied should be 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestServiceProxyInternalAPIResolverUsesServiceCallerIdentity(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-OJOS-Caller-Service") != "judge-worker" {
+			t.Fatalf("caller service header should be forwarded to provider: %#v", r.Header)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	route := ancestorStorageRoute("storage.object.get", http.MethodGet, upstream.URL, true)
+	route.AuthMode = "service"
+	route.RequiredPermission = "storage.object.read"
+	rp.SetRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{route}, CanProxy: true})
+	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, caller PermissionCheckCaller, permission string) (bool, error) {
+		if authHeader != "Bearer internal-token" {
+			t.Fatalf("service permission check should receive bearer token, got %q", authHeader)
+		}
+		if caller.Type != "service" ||
+			caller.Service != "judge-worker" ||
+			caller.NodeID != "child-node" ||
+			caller.APIID != "storage.object.get" ||
+			permission != "storage.object.read" {
+			t.Fatalf("unexpected service caller permission request: caller=%#v permission=%s", caller, permission)
+		}
+		return true, nil
+	})
+
+	missing := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/internal/apis/storage.object.get/submissions/a.cpp", nil)
+	req.Header.Set("X-OJOS-Node-Id", "child-node")
+	rp.ServeHTTP(missing, req)
+	if missing.Code != http.StatusUnauthorized {
+		t.Fatalf("missing service token should be 401, got %d body=%s", missing.Code, missing.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/internal/apis/storage.object.get/submissions/a.cpp", nil)
+	req.Header.Set("X-OJOS-Node-Id", "child-node")
+	req.Header.Set("Authorization", "Bearer internal-token")
+	missingService := httptest.NewRecorder()
+	rp.ServeHTTP(missingService, req)
+	if missingService.Code != http.StatusUnauthorized {
+		t.Fatalf("missing caller service should be 401, got %d body=%s", missingService.Code, missingService.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/internal/apis/storage.object.get/submissions/a.cpp", nil)
+	req.Header.Set("X-OJOS-Node-Id", "child-node")
+	req.Header.Set("X-OJOS-Caller-Service", "judge-worker")
+	req.Header.Set("Authorization", "Bearer internal-token")
+	allowed := httptest.NewRecorder()
+	rp.ServeHTTP(allowed, req)
+	if allowed.Code != http.StatusNoContent {
+		t.Fatalf("service caller should be allowed, got %d body=%s", allowed.Code, allowed.Body.String())
 	}
 }
 

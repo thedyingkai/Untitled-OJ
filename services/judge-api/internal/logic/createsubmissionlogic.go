@@ -164,8 +164,6 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 	}, nil
 }
 
-const judgeSubmissionStream = "ojos:judge:submissions"
-
 func (l *CreateSubmissionLogic) publishSubmissionCreated(submissionID int64) error {
 	return publishJudgeTaskEvent(l.ctx, l.svcCtx, "submission.created", "judge-api-service", submissionID)
 }

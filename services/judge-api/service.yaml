@@ -23,19 +23,15 @@ requires:
   services:
     - postgresql
     - redis
-    - storage-service
     - problem-service
   links:
     - id: postgresql
       protocol: postgres
     - id: redis
       protocol: redis
-    - id: storage-service
-      protocol: http
     - id: problem-service
       protocol: http
-  storage:
-    - storage-service
+  storage: []
   database:
     - postgresql
   queue:

@@ -5868,9 +5868,9 @@ fn service_redis_resources_from_release(
 
 fn redis_stream_name(resource: &ServiceRedisResource) -> String {
     if resource.service_name == "judge-api" && resource.name == "redis" {
-        "ojos:judge:submissions".to_string()
+        "ojos:judge:task".to_string()
     } else if resource.service_name == "judge-worker" && resource.name == "redis" {
-        "ojos:judge:submissions".to_string()
+        "ojos:judge:task".to_string()
     } else {
         format!(
             "ojos:{}:{}",
@@ -5882,7 +5882,7 @@ fn redis_stream_name(resource: &ServiceRedisResource) -> String {
 
 fn redis_consumer_group_name(resource: &ServiceRedisResource) -> String {
     if resource.service_name == "judge-worker" && resource.name == "redis" {
-        "judge-workers".to_string()
+        "judge-worker".to_string()
     } else {
         format!(
             "{}-{}",

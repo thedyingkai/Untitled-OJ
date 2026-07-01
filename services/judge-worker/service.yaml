@@ -21,16 +21,12 @@ requires:
   services:
     - judge-api
     - redis
-    - storage-service
   links:
     - id: judge-api
       protocol: http
     - id: redis
       protocol: redis
-    - id: storage-service
-      protocol: http
-  storage:
-    - storage-service
+  storage: []
   database: []
   queue:
     - redis

@@ -17,12 +17,14 @@ type contextKey string
 const ClaimsContextKey contextKey = "auth_claims"
 
 type AuthMiddleware struct {
-	secret string
+	secret        string
+	internalToken string
 }
 
-func NewAuthMiddleware(secret string) *AuthMiddleware {
+func NewAuthMiddleware(secret string, internalToken string) *AuthMiddleware {
 	return &AuthMiddleware{
-		secret: secret,
+		secret:        secret,
+		internalToken: strings.TrimSpace(internalToken),
 	}
 }
 
@@ -43,6 +45,17 @@ func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 		tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 		if tokenString == "" {
 			writeAuthError(w, 40103, "empty token")
+			return
+		}
+
+		if m.internalToken != "" && tokenString == m.internalToken {
+			claims := &token.Claims{
+				UserID:   0,
+				Username: "internal-service",
+				Roles:    []string{"internal"},
+			}
+			ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
+			next(w, r.WithContext(ctx))
 			return
 		}
 

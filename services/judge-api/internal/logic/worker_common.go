@@ -205,6 +205,9 @@ func artifactRefForSubmissionSource(
 	if meta.ContentType != "" {
 		contentType = meta.ContentType
 	}
+	if strings.TrimSpace(svcCtx.Config.Storage.InternalGatewayEndpoint) != "" {
+		urlPath = "/internal/apis/" + firstNonEmpty(svcCtx.Config.Storage.GetApiID, "storage.object.get") + "/" + bucket + "/" + key
+	}
 	return types.WorkerArtifactRef{
 		Url:         urlPath,
 		Sha256:      meta.SHA256,

@@ -169,6 +169,7 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
+      AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
       AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
@@ -202,6 +203,7 @@ services:
     environment:
       DATABASE_URL: ${AUTH_DATABASE_URL:-postgres://postgres:ojos-auth-local@auth-db:5432/ojos_auth?sslmode=disable}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
+      AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
 
   user-service:
@@ -283,7 +285,13 @@ services:
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
       OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
-      OJOS_STORAGE_SERVICE_URL: http://storage-service:8085
+      OJOS_INTERNAL_GATEWAY_ENDPOINT: http://gateway:8080
+      OJOS_STORAGE_OBJECT_GET_API_ID: storage.object.get
+      OJOS_STORAGE_OBJECT_PUT_API_ID: storage.object.put
+      OJOS_STORAGE_OBJECT_HEAD_API_ID: storage.object.head
+      OJOS_SERVICE_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_CALLER_SERVICE: judge-api
+      OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
     volumes:
       - ../../storage/submissions:/data/ojos/submissions
       - ../../storage/problems:/data/ojos/problems:ro
@@ -311,8 +319,16 @@ services:
     environment:
       LANGUAGES_CONFIG: config/languages.yaml
       OJOS_JUDGE_API_URL: http://judge-api:8082
-      OJOS_STORAGE_SERVICE_URL: http://storage-service:8085
+      OJOS_INTERNAL_GATEWAY_URL: http://gateway:8080
+      OJOS_STORAGE_OBJECT_GET_API_ID: storage.object.get
+      OJOS_STORAGE_OBJECT_PUT_API_ID: storage.object.put
+      OJOS_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      OJOS_JUDGE_TASK_STREAM: ojos:judge:task
+      OJOS_JUDGE_CONSUMER_GROUP: judge-worker
+      OJOS_RUNNER_MODE: ${OJOS_RUNNER_MODE:-fake}
       OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
+      OJOS_SERVICE_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
       OJOS_MAX_CONCURRENCY: 1
       OJOS_WORK_DIR: /var/lib/ojos-worker/work
       OJOS_ARTIFACT_CACHE_DIR: /var/lib/ojos-worker/cache

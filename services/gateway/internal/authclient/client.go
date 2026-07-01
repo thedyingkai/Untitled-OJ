@@ -17,10 +17,14 @@ type Client struct {
 }
 
 type permissionCheckRequest struct {
-	UserID     int64  `json:"user_id"`
-	Permission string `json:"permission"`
-	ScopeType  string `json:"scope_type,omitempty"`
-	ScopeID    int64  `json:"scope_id,omitempty"`
+	UserID        int64  `json:"user_id,omitempty"`
+	Permission    string `json:"permission"`
+	ScopeType     string `json:"scope_type,omitempty"`
+	ScopeID       int64  `json:"scope_id,omitempty"`
+	CallerType    string `json:"caller_type,omitempty"`
+	CallerService string `json:"caller_service,omitempty"`
+	CallerNodeID  string `json:"caller_node_id,omitempty"`
+	APIID         string `json:"api_id,omitempty"`
 }
 
 type permissionCheckResponse struct {
@@ -44,20 +48,32 @@ func (c *Client) Configured() bool {
 	return c != nil && c.baseURL != ""
 }
 
-func (c *Client) HasSystemPermission(ctx context.Context, authHeader string, userID int64, permission string) (bool, error) {
+type PermissionCaller struct {
+	Type    string
+	UserID  int64
+	Service string
+	NodeID  string
+	APIID   string
+}
+
+func (c *Client) HasSystemPermission(ctx context.Context, authHeader string, caller PermissionCaller, permission string) (bool, error) {
 	if !c.Configured() {
 		return false, errors.New("auth-service permission client is not configured")
 	}
 	permission = strings.TrimSpace(permission)
-	if userID <= 0 || permission == "" {
+	if strings.TrimSpace(caller.Type) == "" || permission == "" {
 		return false, nil
 	}
 
 	body, err := json.Marshal(permissionCheckRequest{
-		UserID:     userID,
-		Permission: permission,
-		ScopeType:  "system",
-		ScopeID:    0,
+		UserID:        caller.UserID,
+		Permission:    permission,
+		ScopeType:     "system",
+		ScopeID:       0,
+		CallerType:    caller.Type,
+		CallerService: caller.Service,
+		CallerNodeID:  caller.NodeID,
+		APIID:         caller.APIID,
 	})
 	if err != nil {
 		return false, err

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ func TestCreateSubmissionRouteStoresSourceAndPublishesTask(t *testing.T) {
 		t.Fatalf("submission source was not stored in storage-service")
 	}
 
-	entries, err := redisClient.XRange(ctx, "ojos:judge:submissions", "-", "+").Result()
+	entries, err := redisClient.XRange(ctx, "ojos:judge:task", "-", "+").Result()
 	if err != nil {
 		t.Fatalf("read judge submission stream: %v", err)
 	}
@@ -112,12 +113,12 @@ func TestCreateSubmissionRouteStoresSourceAndPublishesTask(t *testing.T) {
 	if values["type"] != "submission.created" || values["task_id"] != "sub-42" || values["submission_id"] != "42" {
 		t.Fatalf("unexpected judge task stream values: %#v", values)
 	}
-	groups, err := redisClient.XInfoGroups(ctx, "ojos:judge:submissions").Result()
+	groups, err := redisClient.XInfoGroups(ctx, "ojos:judge:task").Result()
 	if err != nil {
 		t.Fatalf("read judge task consumer group: %v", err)
 	}
-	if len(groups) != 1 || groups[0].Name != "judge-workers" {
-		t.Fatalf("expected judge-workers consumer group, got %#v", groups)
+	if len(groups) != 1 || groups[0].Name != "judge-worker" {
+		t.Fatalf("expected judge-worker consumer group, got %#v", groups)
 	}
 	if got, want := permissions.calls, []string{"7:judge.submit:system:0"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected permission calls: got %#v want %#v", got, want)
@@ -126,7 +127,7 @@ func TestCreateSubmissionRouteStoresSourceAndPublishesTask(t *testing.T) {
 
 func TestJudgeSubmissionWorkerHTTPRuntimeLoop(t *testing.T) {
 	ctx := context.Background()
-	storageEndpoint, objects, stopStorage := startJudgeWorkerStorageServer(t)
+	storageEndpoint, objects, stopStorage := startJudgeInternalGatewayStorageServer(t)
 	defer stopStorage()
 
 	redisServer := miniredis.RunT(t)
@@ -189,9 +190,9 @@ func TestJudgeSubmissionWorkerHTTPRuntimeLoop(t *testing.T) {
 	}
 
 	streams, err := redisClient.XReadGroup(ctx, &redis.XReadGroupArgs{
-		Group:    "judge-workers",
+		Group:    "judge-worker",
 		Consumer: "worker-a",
-		Streams:  []string{"ojos:judge:submissions", ">"},
+		Streams:  []string{"ojos:judge:task", ">"},
 		Count:    1,
 		Block:    time.Second,
 	}).Result()
@@ -229,7 +230,10 @@ func TestJudgeSubmissionWorkerHTTPRuntimeLoop(t *testing.T) {
 		t.Fatalf("unexpected claimed task: %#v", claimed)
 	}
 
-	source := getWithWorkerToken(t, endpoint+claimed.Source.Url, "secret-worker-token")
+	if !strings.HasPrefix(claimed.Source.Url, "/internal/apis/storage.object.get/") {
+		t.Fatalf("worker source should use internal gateway resolver url, got %q", claimed.Source.Url)
+	}
+	source := getWithServiceIdentity(t, storageEndpoint+claimed.Source.Url, "judge-worker", "child-node", "internal-token")
 	defer source.Body.Close()
 	sourceBody, err := io.ReadAll(source.Body)
 	if err != nil {
@@ -283,12 +287,12 @@ func TestJudgeSubmissionWorkerHTTPRuntimeLoop(t *testing.T) {
 		t.Fatalf("worker result was not persisted through repo: %#v", repo)
 	}
 	if _, ok := objects.get("77-source-main.cpp"); !ok {
-		t.Fatalf("submission source object was not stored")
+		t.Fatalf("submission source object was not stored through internal gateway")
 	}
 	if _, ok := objects.get("77-result.json"); !ok {
 		t.Fatalf("worker result object was not stored")
 	}
-	resultEntries, err := redisClient.XRange(ctx, "ojos:judge:results", "-", "+").Result()
+	resultEntries, err := redisClient.XRange(ctx, "ojos:judge:result", "-", "+").Result()
 	if err != nil {
 		t.Fatalf("read judge result stream: %v", err)
 	}
@@ -374,9 +378,12 @@ func startJudgeRuntimeHTTPServer(
 	RegisterHandlers(server, &svc.ServiceContext{
 		Config: config.Config{
 			Storage: config.StorageConfig{
-				SubmissionsRoot: t.TempDir(),
-				ServiceEndpoint: storageEndpoint,
-				Bucket:          "submissions",
+				SubmissionsRoot:         t.TempDir(),
+				InternalGatewayEndpoint: storageEndpoint,
+				Bucket:                  "submissions",
+				CallerService:           "judge-api",
+				CallerNodeID:            "child-node",
+				ServiceToken:            "internal-token",
 			},
 			WorkerAuth: config.WorkerAuthConfig{Token: workerToken, LeaseTTLSeconds: 45},
 		},

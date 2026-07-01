@@ -27,6 +27,9 @@ type storageClient struct {
 	getApiID        string
 	putApiID        string
 	headApiID       string
+	callerService   string
+	callerNodeID    string
+	serviceToken    string
 	client          *http.Client
 }
 
@@ -46,6 +49,7 @@ type storedSubmissionSource struct {
 }
 
 func storageEnabled(c config.StorageConfig) bool {
+	// ServiceEndpoint is a legacy fallback; internal gateway + api_id is the default path.
 	return strings.TrimSpace(c.ServiceEndpoint) != "" || strings.TrimSpace(c.InternalGatewayEndpoint) != ""
 }
 
@@ -216,6 +220,9 @@ func newStorageClient(config config.StorageConfig) storageClient {
 		getApiID:        firstNonEmpty(config.GetApiID, "storage.object.get"),
 		putApiID:        firstNonEmpty(config.PutApiID, "storage.object.put"),
 		headApiID:       firstNonEmpty(config.HeadApiID, "storage.object.head"),
+		callerService:   firstNonEmpty(config.CallerService, "judge-api"),
+		callerNodeID:    strings.TrimSpace(config.CallerNodeID),
+		serviceToken:    strings.TrimSpace(config.ServiceToken),
 		client: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -237,6 +244,7 @@ func (c storageClient) putObject(
 		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
+	c.addInternalGatewayHeaders(req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -268,6 +276,7 @@ func (c storageClient) getObject(
 	if err != nil {
 		return nil, nil, err
 	}
+	c.addInternalGatewayHeaders(req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, nil, err
@@ -291,6 +300,7 @@ func (c storageClient) getMetadata(
 	if err != nil {
 		return nil, err
 	}
+	c.addInternalGatewayHeaders(req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -315,6 +325,7 @@ func (c storageClient) headObject(
 	if err != nil {
 		return nil, err
 	}
+	c.addInternalGatewayHeaders(req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -362,6 +373,22 @@ func (c storageClient) apiURL(apiID string, bucket string, key string) string {
 
 func (c storageClient) baseEndpoint() string {
 	return firstNonEmpty(c.internalGateway, c.endpoint)
+}
+
+func (c storageClient) addInternalGatewayHeaders(req *http.Request) {
+	if c.internalGateway == "" {
+		return
+	}
+	if c.callerService != "" {
+		req.Header.Set("X-OJOS-Caller-Service", c.callerService)
+	}
+	if c.callerNodeID != "" {
+		req.Header.Set("X-OJOS-Node-Id", c.callerNodeID)
+		req.Header.Set("X-OJOS-Caller-Node-Id", c.callerNodeID)
+	}
+	if c.serviceToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	}
 }
 
 func firstNonEmpty(values ...string) string {

@@ -13,12 +13,16 @@ Jaeger:
 
 Storage:
   SubmissionsRoot: /data/ojos/submissions
+  # Legacy compatibility only. Default runtime path is InternalGatewayEndpoint + api_id.
   ServiceEndpoint: ""
-  InternalGatewayEndpoint: ""
+  InternalGatewayEndpoint: "http://gateway:8080"
   GetApiID: storage.object.get
   PutApiID: storage.object.put
   HeadApiID: storage.object.head
   Bucket: submissions
+  CallerService: judge-api
+  CallerNodeID: ""
+  ServiceToken: ""
 
 Submission:
   MaxCodeBytes: 262144

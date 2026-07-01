@@ -33,6 +33,7 @@ const (
 	authModeAdmin    = "admin"
 	authModeWorker   = "worker"
 	authModeInternal = "internal"
+	authModeService  = "service"
 
 	internalAPIPrefix = "/internal/apis"
 )
@@ -73,7 +74,15 @@ type ServiceProxy struct {
 
 type AdminChecker func(context.Context, string, int64) (bool, error)
 
-type PermissionChecker func(context.Context, string, int64, string) (bool, error)
+type PermissionCheckCaller struct {
+	Type    string
+	UserID  int64
+	Service string
+	NodeID  string
+	APIID   string
+}
+
+type PermissionChecker func(context.Context, string, PermissionCheckCaller, string) (bool, error)
 
 type trustedService struct {
 	serviceID     string
@@ -208,7 +217,7 @@ func (p *ServiceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if blocked, ok := p.matchBlockedServiceRoute(r.URL.Path); ok {
-		if _, ok := p.authenticateRequest(w, r, blocked.authMode); !ok {
+		if _, _, ok := p.authenticateRequest(w, r, blocked.authMode, blocked); !ok {
 			return
 		}
 		writeJSONError(w, http.StatusServiceUnavailable, 50301, "service unavailable: "+blocked.serviceID)
@@ -398,12 +407,12 @@ func (p *ServiceProxy) serveRoute(w http.ResponseWriter, r *http.Request, route 
 	if route.requiredPermission != "" && normalizeServiceAuthMode(authMode) == authModePublic {
 		authMode = authModeUser
 	}
-	claims, ok := p.authenticateRequest(w, r, authMode)
+	caller, claims, ok := p.authenticateRequest(w, r, authMode, route)
 	if !ok {
 		return
 	}
 
-	if !p.authorizeRequiredPermission(w, r, claims, route.requiredPermission) {
+	if !p.authorizeRequiredPermission(w, r, caller, route.requiredPermission) {
 		return
 	}
 
@@ -418,14 +427,14 @@ func (p *ServiceProxy) serveRoute(w http.ResponseWriter, r *http.Request, route 
 func (p *ServiceProxy) authorizeRequiredPermission(
 	w http.ResponseWriter,
 	r *http.Request,
-	claims *sharedjwt.Claims,
+	caller PermissionCheckCaller,
 	requiredPermission string,
 ) bool {
 	requiredPermission = normalizeRequiredPermission(requiredPermission)
 	if requiredPermission == "" {
 		return true
 	}
-	if claims == nil {
+	if caller.Type == "" {
 		writeJSONError(w, http.StatusUnauthorized, 40105, "missing authorization claims")
 		return false
 	}
@@ -436,7 +445,7 @@ func (p *ServiceProxy) authorizeRequiredPermission(
 	ok, err := p.permissionChecker(
 		r.Context(),
 		strings.TrimSpace(r.Header.Get("Authorization")),
-		claims.UserID,
+		caller,
 		requiredPermission,
 	)
 	if err != nil {
@@ -454,51 +463,73 @@ func (p *ServiceProxy) authenticateRequest(
 	w http.ResponseWriter,
 	r *http.Request,
 	authMode string,
-) (*sharedjwt.Claims, bool) {
+	route routeProxy,
+) (PermissionCheckCaller, *sharedjwt.Claims, bool) {
 	authMode = normalizeServiceAuthMode(authMode)
 	if authMode == authModePublic {
-		return nil, true
+		return PermissionCheckCaller{}, nil, true
 	}
 	if authMode == authModeInternal {
 		writeJSONError(w, http.StatusForbidden, 40303, "internal route is not public")
-		return nil, false
+		return PermissionCheckCaller{}, nil, false
 	}
 	if authMode == authModeWorker {
 		writeJSONError(w, http.StatusForbidden, 40304, "worker route is not available through dynamic proxy")
-		return nil, false
+		return PermissionCheckCaller{}, nil, false
 	}
 
 	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 	if authHeader == "" {
 		if authMode == authModeOptional {
-			return nil, true
+			return PermissionCheckCaller{}, nil, true
 		}
 
 		writeJSONError(w, http.StatusUnauthorized, 40101, "missing authorization header")
-		return nil, false
+		return PermissionCheckCaller{}, nil, false
+	}
+
+	if authMode == authModeService {
+		callerService := strings.TrimSpace(r.Header.Get("X-OJOS-Caller-Service"))
+		if callerService == "" {
+			writeJSONError(w, http.StatusUnauthorized, 40106, "caller service is required")
+			return PermissionCheckCaller{}, nil, false
+		}
+		return PermissionCheckCaller{
+			Type:    authModeService,
+			Service: callerService,
+			NodeID:  strings.TrimSpace(r.Header.Get("X-OJOS-Node-Id")),
+			APIID:   route.apiID,
+		}, nil, true
 	}
 
 	parts := strings.Fields(authHeader)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		writeJSONError(w, http.StatusUnauthorized, 40102, "invalid authorization header")
-		return nil, false
+		return PermissionCheckCaller{}, nil, false
 	}
 
 	tokenString := strings.TrimSpace(parts[1])
 	if tokenString == "" {
 		writeJSONError(w, http.StatusUnauthorized, 40103, "empty token")
-		return nil, false
+		return PermissionCheckCaller{}, nil, false
 	}
 
 	claims, err := sharedjwt.Parse(p.jwtSecret, tokenString)
 	if err != nil {
 		writeJSONError(w, http.StatusUnauthorized, 40104, "invalid or expired token")
-		return nil, false
+		return PermissionCheckCaller{}, nil, false
+	}
+	caller := PermissionCheckCaller{
+		Type:   authModeUser,
+		UserID: claims.UserID,
+		NodeID: strings.TrimSpace(r.Header.Get("X-OJOS-Node-Id")),
+		APIID:  route.apiID,
 	}
 
 	if authMode == authModeAdmin {
 		if isAdminRole(claims.Roles) {
-			return claims, true
+			caller.Type = authModeAdmin
+			return caller, claims, true
 		}
 		if p.adminChecker != nil {
 			ok, err := p.adminChecker(
@@ -508,17 +539,18 @@ func (p *ServiceProxy) authenticateRequest(
 			)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, 50001, "authorization check failed")
-				return nil, false
+				return PermissionCheckCaller{}, nil, false
 			}
 			if ok {
-				return claims, true
+				caller.Type = authModeAdmin
+				return caller, claims, true
 			}
 		}
 		writeJSONError(w, http.StatusForbidden, 40301, "forbidden")
-		return nil, false
+		return PermissionCheckCaller{}, nil, false
 	}
 
-	return claims, true
+	return caller, claims, true
 }
 
 func claimsFromContext(ctx context.Context) (*sharedjwt.Claims, bool) {
@@ -529,7 +561,7 @@ func claimsFromContext(ctx context.Context) (*sharedjwt.Claims, bool) {
 func normalizeAuthMode(mode string) (string, error) {
 	mode = normalizeServiceAuthMode(mode)
 	switch mode {
-	case authModePublic, authModeOptional, authModeUser, authModeAdmin, authModeWorker, authModeInternal:
+	case authModePublic, authModeOptional, authModeUser, authModeAdmin, authModeWorker, authModeInternal, authModeService:
 		return mode, nil
 	default:
 		return "", fmt.Errorf("unsupported auth mode: %s", mode)
@@ -551,6 +583,8 @@ func normalizeServiceAuthMode(mode string) string {
 		return authModeWorker
 	case "internal":
 		return authModeInternal
+	case "service":
+		return authModeService
 	default:
 		return mode
 	}

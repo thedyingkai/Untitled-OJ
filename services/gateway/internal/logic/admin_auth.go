@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"ojos-gateway/internal/authclient"
 	"ojos-gateway/internal/svc"
 	sharedjwt "ojos-shared/security/jwt"
 )
@@ -42,7 +43,10 @@ var hasSystemAdminPermission = func(ctx context.Context, svcCtx *svc.ServiceCont
 	if svcCtx == nil || svcCtx.AuthClient == nil {
 		return false, errors.New("auth-service permission client is not configured")
 	}
-	return svcCtx.AuthClient.HasSystemPermission(ctx, authHeader, userID, "system.admin")
+	return svcCtx.AuthClient.HasSystemPermission(ctx, authHeader, authclient.PermissionCaller{
+		Type:   "user",
+		UserID: userID,
+	}, "system.admin")
 }
 
 func parseBearerClaims(svcCtx *svc.ServiceContext, authHeader string) (*sharedjwt.Claims, error) {

@@ -38,6 +38,9 @@ type StorageConfig struct {
 	PutApiID                string `json:",optional"`
 	HeadApiID               string `json:",optional"`
 	Bucket                  string `json:",optional"`
+	CallerService           string `json:",optional"`
+	CallerNodeID            string `json:",optional"`
+	ServiceToken            string `json:",optional"`
 }
 
 type SubmissionConfig struct {

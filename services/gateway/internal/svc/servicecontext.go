@@ -76,8 +76,14 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		log.Fatalf("init proxy failed: %v", err)
 	}
 	serviceProxy.SetNodeID(c.Orchestrator.NodeID)
-	serviceProxy.SetPermissionChecker(func(ctx context.Context, authHeader string, userID int64, permissionCode string) (bool, error) {
-		return authClient.HasSystemPermission(ctx, authHeader, userID, permissionCode)
+	serviceProxy.SetPermissionChecker(func(ctx context.Context, authHeader string, caller proxy.PermissionCheckCaller, permissionCode string) (bool, error) {
+		return authClient.HasSystemPermission(ctx, authHeader, authclient.PermissionCaller{
+			Type:    caller.Type,
+			UserID:  caller.UserID,
+			Service: caller.Service,
+			NodeID:  caller.NodeID,
+			APIID:   caller.APIID,
+		}, permissionCode)
 	})
 	routeTableOptions := routeTableOptionsFromConfig(c.Proxy)
 	serviceStatusDriver := servicestatus.NewComposeDriver(routeTableOptions.TrustedServices, c.ServiceStatus.ComposeServices...)

@@ -87,10 +87,14 @@ type PermissionCheckData struct {
 }
 
 type PermissionCheckReq struct {
-	UserId     int64  `json:"user_id"`
-	Permission string `json:"permission"`
-	ScopeType  string `json:"scope_type,optional"`
-	ScopeId    int64  `json:"scope_id,optional"`
+	UserId        int64  `json:"user_id,optional"`
+	Permission    string `json:"permission"`
+	ScopeType     string `json:"scope_type,optional"`
+	ScopeId       int64  `json:"scope_id,optional"`
+	CallerType    string `json:"caller_type,optional"`
+	CallerService string `json:"caller_service,optional"`
+	CallerNodeId  string `json:"caller_node_id,optional"`
+	ApiId         string `json:"api_id,optional"`
 }
 
 type PermissionCheckResp struct {

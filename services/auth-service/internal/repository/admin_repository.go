@@ -255,6 +255,23 @@ WHERE service_code = $1
 	return tag.RowsAffected(), nil
 }
 
+func (r *AdminRepository) ServiceCallerCanUsePermission(ctx context.Context, serviceCode string, permissionCode string) (bool, error) {
+	serviceCode = strings.TrimSpace(serviceCode)
+	permissionCode = strings.TrimSpace(permissionCode)
+	if serviceCode == "" || permissionCode == "" {
+		return false, nil
+	}
+	var ok bool
+	err := r.db.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM permissions
+    WHERE code = $1
+)
+`, permissionCode).Scan(&ok)
+	return ok, err
+}
+
 func (r *AdminRepository) UserEffectivePermissions(ctx context.Context, userID int64, scopeType string, scopeID int64) ([]string, error) {
 	if userID <= 0 {
 		return nil, errors.New("user_id is required")

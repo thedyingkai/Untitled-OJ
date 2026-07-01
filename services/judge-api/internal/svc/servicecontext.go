@@ -215,6 +215,15 @@ func applyEnvOverrides(c *config.Config) {
 	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_SUBMISSIONS_BUCKET")); value != "" {
 		c.Storage.Bucket = value
 	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_CALLER_SERVICE")); value != "" {
+		c.Storage.CallerService = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_CALLER_NODE_ID")); value != "" {
+		c.Storage.CallerNodeID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_SERVICE_TOKEN")); value != "" {
+		c.Storage.ServiceToken = value
+	}
 }
 
 func firstEnv(keys ...string) string {

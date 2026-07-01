@@ -72,9 +72,15 @@ func TestStoreSubmissionSourceUsesStorageService(t *testing.T) {
 func TestStorageClientCanUseInternalGatewayAPIIDs(t *testing.T) {
 	var paths []string
 	var methods []string
+	var authHeaders []string
+	var callerServices []string
+	var callerNodes []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		methods = append(methods, r.Method)
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		callerServices = append(callerServices, r.Header.Get("X-OJOS-Caller-Service"))
+		callerNodes = append(callerNodes, r.Header.Get("X-OJOS-Node-Id"))
 		switch r.Method {
 		case http.MethodPut:
 			body, err := io.ReadAll(r.Body)
@@ -106,6 +112,9 @@ func TestStorageClientCanUseInternalGatewayAPIIDs(t *testing.T) {
 		PutApiID:                "storage.object.put",
 		GetApiID:                "storage.object.get",
 		HeadApiID:               "storage.object.head",
+		CallerService:           "judge-api",
+		CallerNodeID:            "child-node",
+		ServiceToken:            "internal-token",
 	})
 	if _, err := client.putObject(context.Background(), "submissions", "42-source-main.cpp", "text/plain; charset=utf-8", strings.NewReader("stored code")); err != nil {
 		t.Fatalf("putObject returned error: %v", err)
@@ -137,6 +146,13 @@ func TestStorageClientCanUseInternalGatewayAPIIDs(t *testing.T) {
 	}
 	if strings.Join(paths, ",") != strings.Join(wantPaths, ",") {
 		t.Fatalf("unexpected resolver paths %#v", paths)
+	}
+	for i := range methods {
+		if authHeaders[i] != "Bearer internal-token" ||
+			callerServices[i] != "judge-api" ||
+			callerNodes[i] != "child-node" {
+			t.Fatalf("internal gateway request %d missing service identity headers: auth=%q service=%q node=%q", i, authHeaders[i], callerServices[i], callerNodes[i])
+		}
 	}
 }
 

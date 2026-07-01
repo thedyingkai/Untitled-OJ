@@ -88,7 +88,6 @@ storage:
 dependencies:
   - postgresql
   - redis
-  - storage-service
   - problem-service
 config_schema: {}
 secrets:

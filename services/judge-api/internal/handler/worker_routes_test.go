@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -232,7 +233,7 @@ func TestWorkerRoutesRequireTokenAndRunClaimResultFlow(t *testing.T) {
 	if _, ok := objects.get("88-result.json"); !ok {
 		t.Fatalf("worker result should write result.json to storage-service")
 	}
-	entries, err := redisClient.XRange(ctx, "ojos:judge:results", "-", "+").Result()
+	entries, err := redisClient.XRange(ctx, "ojos:judge:result", "-", "+").Result()
 	if err != nil {
 		t.Fatalf("read result stream: %v", err)
 	}
@@ -283,7 +284,7 @@ func TestWorkerFailRoutePublishesTerminalResultEvent(t *testing.T) {
 		t.Fatalf("failure should update repo, got status=%q message=%q", repo.failedStatus, repo.failedMessage)
 	}
 
-	entries, err := redisClient.XRange(context.Background(), "ojos:judge:results", "-", "+").Result()
+	entries, err := redisClient.XRange(context.Background(), "ojos:judge:result", "-", "+").Result()
 	if err != nil {
 		t.Fatalf("read result stream: %v", err)
 	}
@@ -388,6 +389,22 @@ func getWithWorkerToken(t *testing.T, url string, token string) *http.Response {
 	return resp
 }
 
+func getWithServiceIdentity(t *testing.T, url string, callerService string, nodeID string, token string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build service get request: %v", err)
+	}
+	req.Header.Set("X-OJOS-Caller-Service", callerService)
+	req.Header.Set("X-OJOS-Node-Id", nodeID)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("service get %s: %v", url, err)
+	}
+	return resp
+}
+
 func writeWorkerArtifacts(t *testing.T) (string, string) {
 	t.Helper()
 	tmp := t.TempDir()
@@ -469,6 +486,55 @@ func startJudgeWorkerStorageServer(t *testing.T) (string, *storageObjectMap, fun
 	return server.URL, objects, server.Close
 }
 
+func startJudgeInternalGatewayStorageServer(t *testing.T) (string, *storageObjectMap, func()) {
+	t.Helper()
+	objects := &storageObjectMap{objects: map[string][]byte{}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-OJOS-Caller-Service") == "" {
+			t.Fatalf("internal gateway request missing caller service: %#v", r.Header)
+		}
+		key := internalGatewayStorageRouteKey(t, r.URL.Path)
+		switch r.Method {
+		case http.MethodPut:
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			objects.put(key, body)
+			sum := sha256.Sum256(body)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"bucket":       "submissions",
+				"key":          key,
+				"size_bytes":   int64(len(body)),
+				"sha256":       hex.EncodeToString(sum[:]),
+				"content_type": r.Header.Get("Content-Type"),
+			})
+		case http.MethodHead:
+			body, ok := objects.get(key)
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			sum := sha256.Sum256(body)
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("X-OJOS-Object-Sha256", hex.EncodeToString(sum[:]))
+		case http.MethodGet:
+			body, ok := objects.get(key)
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			sum := sha256.Sum256(body)
+			w.Header().Set("X-OJOS-Object-Sha256", hex.EncodeToString(sum[:]))
+			_, _ = w.Write(body)
+		default:
+			t.Fatalf("unexpected internal gateway request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	return server.URL, objects, server.Close
+}
+
 func storageRouteKey(t *testing.T, path string) string {
 	t.Helper()
 	for _, prefix := range []string{"/api/storage/objects/submissions/", "/api/storage/metadata/submissions/"} {
@@ -477,6 +543,21 @@ func storageRouteKey(t *testing.T, path string) string {
 		}
 	}
 	t.Fatalf("unexpected storage path %s", path)
+	return ""
+}
+
+func internalGatewayStorageRouteKey(t *testing.T, path string) string {
+	t.Helper()
+	for _, prefix := range []string{
+		"/internal/apis/storage.object.put/submissions/",
+		"/internal/apis/storage.object.get/submissions/",
+		"/internal/apis/storage.object.head/submissions/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return strings.TrimPrefix(path, prefix)
+		}
+	}
+	t.Fatalf("unexpected internal gateway storage path %s", path)
 	return ""
 }
 

@@ -29,11 +29,8 @@ func NewUserPermissionCheckLogic(ctx context.Context, svcCtx *svc.ServiceContext
 
 func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionCheckReq) (*types.PermissionCheckResp, error) {
 	claims, ok := middleware.ClaimsFromContext(l.ctx)
-	if !ok || claims == nil || claims.UserID <= 0 {
+	if !ok || claims == nil {
 		return nil, errors.New("unauthorized")
-	}
-	if req.UserId != 0 && req.UserId != claims.UserID {
-		return nil, errors.New("cannot check another user's permission")
 	}
 	if strings.TrimSpace(req.Permission) == "" {
 		return nil, errors.New("permission is required")
@@ -41,6 +38,37 @@ func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionChec
 	scopeType := strings.TrimSpace(req.ScopeType)
 	if scopeType == "" {
 		scopeType = "system"
+	}
+
+	callerType := strings.ToLower(strings.TrimSpace(req.CallerType))
+	if callerType == "" {
+		callerType = "user"
+	}
+	if callerType == "service" || callerType == "internal" {
+		callerService := strings.TrimSpace(req.CallerService)
+		if callerService == "" {
+			return nil, errors.New("caller_service is required")
+		}
+		allowed, err := l.svcCtx.AdminRepo.ServiceCallerCanUsePermission(
+			l.ctx,
+			callerService,
+			strings.TrimSpace(req.Permission),
+		)
+		if err != nil {
+			return nil, err
+		}
+		return &types.PermissionCheckResp{
+			Code: 0,
+			Msg:  "success",
+			Data: types.PermissionCheckData{Allowed: allowed},
+		}, nil
+	}
+
+	if claims.UserID <= 0 {
+		return nil, errors.New("unauthorized")
+	}
+	if req.UserId != 0 && req.UserId != claims.UserID {
+		return nil, errors.New("cannot check another user's permission")
 	}
 	allowed, err := permission.HasUserPermission(
 		l.ctx,
