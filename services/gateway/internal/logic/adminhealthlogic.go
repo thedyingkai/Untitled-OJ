@@ -42,10 +42,8 @@ func (l *AdminHealthLogic) adminHealth(authHeader string) (*types.AdminHealthRes
 
 	components := []types.HealthComponent{
 		component("gateway", time.Now(), nil),
-		l.checkPostgres(),
 		l.checkRedis(),
 		l.checkArtifactStorage(),
-		l.checkInternalAuthKey(),
 	}
 
 	for _, route := range l.svcCtx.Config.Proxy.Routes {
@@ -58,8 +56,8 @@ func (l *AdminHealthLogic) adminHealth(authHeader string) (*types.AdminHealthRes
 	}
 	components = append(components, l.runtimeHealthChecks()...)
 
-	workerOnline := l.workerOnlineCount()
-	queuePending := l.queuePendingCount()
+	workerOnline, queuePending, judgeAdminComponents := l.judgeAdminStatus(authHeader)
+	components = append(components, judgeAdminComponents...)
 	components = append(components, l.checkWorkers(workerOnline))
 	components = append(components, l.checkQueue(queuePending))
 
@@ -80,12 +78,6 @@ func (l *AdminHealthLogic) adminHealth(authHeader string) (*types.AdminHealthRes
 	}, nil
 }
 
-func (l *AdminHealthLogic) checkPostgres() types.HealthComponent {
-	start := time.Now()
-	err := l.svcCtx.DB.Ping(l.ctx)
-	return component("postgres", start, err)
-}
-
 func (l *AdminHealthLogic) checkRedis() types.HealthComponent {
 	start := time.Now()
 	err := l.svcCtx.Redis.Ping(l.ctx).Err()
@@ -99,31 +91,6 @@ func (l *AdminHealthLogic) checkArtifactStorage() types.HealthComponent {
 		err = checkDirReadable(l.svcCtx.Config.Storage.SubmissionsRoot, "submissions artifact root")
 	}
 	return component("artifact storage", start, err)
-}
-
-func (l *AdminHealthLogic) checkInternalAuthKey() types.HealthComponent {
-	start := time.Now()
-	if !l.svcCtx.Config.InternalAuth.Enabled {
-		c := component("internal auth key", start, nil)
-		c.Message = "disabled"
-		return c
-	}
-
-	var active int64
-	err := l.svcCtx.DB.QueryRow(l.ctx, `
-SELECT COUNT(*)
-FROM internal_auth_keys
-WHERE not_before <= NOW()
-  AND verify_until >= NOW()
-`).Scan(&active)
-	if err == nil && active == 0 {
-		err = errors.New("no active internal auth verification key")
-	}
-	c := component("internal auth key", start, err)
-	if err == nil {
-		c.Message = "active"
-	}
-	return c
 }
 
 func (l *AdminHealthLogic) checkHTTP(route config.ProxyRouteConfig) types.HealthComponent {
@@ -205,31 +172,6 @@ func runtimeHealthMessage(check runtimeHealthCheck) string {
 	return checkType + " " + optional + " registered"
 }
 
-func (l *AdminHealthLogic) workerOnlineCount() int64 {
-	var count int64
-	if err := l.svcCtx.DB.QueryRow(l.ctx, `
-SELECT COUNT(*)
-FROM judge_workers
-WHERE status IN ('ONLINE', 'DRAINING')
-  AND last_seen > NOW() - interval '120 seconds'
-`).Scan(&count); err != nil {
-		return -1
-	}
-	return count
-}
-
-func (l *AdminHealthLogic) queuePendingCount() int64 {
-	var count int64
-	if err := l.svcCtx.DB.QueryRow(l.ctx, `
-SELECT COUNT(*)
-FROM judge_tasks
-WHERE status = 'PENDING'
-`).Scan(&count); err != nil {
-		return -1
-	}
-	return count
-}
-
 func (l *AdminHealthLogic) checkWorkers(count int64) types.HealthComponent {
 	start := time.Now()
 	var err error
@@ -241,6 +183,86 @@ func (l *AdminHealthLogic) checkWorkers(count int64) types.HealthComponent {
 		c.Message = "online=" + strconv.FormatInt(count, 10)
 	}
 	return c
+}
+
+func (l *AdminHealthLogic) judgeAdminStatus(authHeader string) (int64, int64, []types.HealthComponent) {
+	judgeBase := l.routeTarget("/api/judge")
+	if judgeBase == "" {
+		c := component("judge admin api", time.Now(), errors.New("judge route target is not configured"))
+		return -1, -1, []types.HealthComponent{c}
+	}
+
+	workers, workersComponent := l.fetchJudgeWorkers(judgeBase, authHeader)
+	queuePending, queueComponent := l.fetchJudgeQueuePending(judgeBase, authHeader)
+	return workers, queuePending, []types.HealthComponent{workersComponent, queueComponent}
+}
+
+func (l *AdminHealthLogic) routeTarget(prefix string) string {
+	if l == nil || l.svcCtx == nil {
+		return ""
+	}
+	for _, route := range l.svcCtx.Config.Proxy.Routes {
+		if route.Prefix == prefix {
+			return strings.TrimRight(strings.TrimSpace(route.Target), "/")
+		}
+	}
+	return ""
+}
+
+func (l *AdminHealthLogic) fetchJudgeWorkers(baseURL string, authHeader string) (int64, types.HealthComponent) {
+	start := time.Now()
+	var payload struct {
+		Workers []struct {
+			Status string `json:"status"`
+		} `json:"workers"`
+	}
+	err := l.fetchJudgeAdminJSON(baseURL, "/judge/admin/workers", authHeader, &payload)
+	if err != nil {
+		return -1, component("judge workers api", start, err)
+	}
+	var online int64
+	for _, worker := range payload.Workers {
+		if worker.Status == "ONLINE" || worker.Status == "DRAINING" {
+			online++
+		}
+	}
+	c := component("judge workers api", start, nil)
+	c.Message = "online=" + strconv.FormatInt(online, 10)
+	return online, c
+}
+
+func (l *AdminHealthLogic) fetchJudgeQueuePending(baseURL string, authHeader string) (int64, types.HealthComponent) {
+	start := time.Now()
+	var payload struct {
+		Pending int64 `json:"pending"`
+	}
+	err := l.fetchJudgeAdminJSON(baseURL, "/judge/admin/queue", authHeader, &payload)
+	if err != nil {
+		return -1, component("judge queue api", start, err)
+	}
+	c := component("judge queue api", start, nil)
+	c.Message = "pending=" + strconv.FormatInt(payload.Pending, 10)
+	return payload.Pending, c
+}
+
+func (l *AdminHealthLogic) fetchJudgeAdminJSON(baseURL string, path string, authHeader string, out any) error {
+	client := http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequestWithContext(l.ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+path, nil)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(authHeader) != "" {
+		req.Header.Set("Authorization", strings.TrimSpace(authHeader))
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return errors.New(resp.Status)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 func (l *AdminHealthLogic) checkQueue(pending int64) types.HealthComponent {

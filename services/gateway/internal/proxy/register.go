@@ -60,6 +60,15 @@ func RegisterRoutes(
 	}
 
 	dynamicPaths := []string{
+		"/internal/apis/:api",
+		"/internal/apis/:api/:p1",
+		"/internal/apis/:api/:p1/:p2",
+		"/internal/apis/:api/:p1/:p2/:p3",
+		"/internal/apis/:api/:p1/:p2/:p3/:p4",
+		"/internal/apis/:api/:p1/:p2/:p3/:p4/:p5",
+		"/internal/apis/:api/:p1/:p2/:p3/:p4/:p5/:p6",
+		"/internal/apis/:api/:p1/:p2/:p3/:p4/:p5/:p6/:p7",
+		"/internal/apis/:api/:p1/:p2/:p3/:p4/:p5/:p6/:p7/:p8",
 		"/api/:p1",
 		"/api/:p1/:p2",
 		"/api/:p1/:p2/:p3",

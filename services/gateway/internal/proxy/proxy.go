@@ -33,18 +33,26 @@ const (
 	authModeAdmin    = "admin"
 	authModeWorker   = "worker"
 	authModeInternal = "internal"
+
+	internalAPIPrefix = "/internal/apis"
 )
 
 type claimsContextKey struct{}
 
 type routeProxy struct {
-	prefix        string
-	serviceID     string
-	authMode      string
-	stripPrefix   string
-	rewritePrefix string
-	proxy         *httputil.ReverseProxy
-	target        *url.URL
+	prefix             string
+	apiID              string
+	callerNodeID       string
+	providerNodeID     string
+	providerService    string
+	providerEndpoint   string
+	serviceID          string
+	authMode           string
+	requiredPermission string
+	stripPrefix        string
+	rewritePrefix      string
+	proxy              *httputil.ReverseProxy
+	target             *url.URL
 }
 
 type ServiceRouteReader interface {
@@ -52,16 +60,20 @@ type ServiceRouteReader interface {
 }
 
 type ServiceProxy struct {
-	jwtSecret      string
-	internalSigner *internalauth.Signer
-	adminChecker   AdminChecker
-	log            *zap.Logger
-	staticRoutes   []routeProxy
-	trusted        map[string]trustedService
-	table          atomic.Value
+	jwtSecret         string
+	internalSigner    *internalauth.Signer
+	adminChecker      AdminChecker
+	permissionChecker PermissionChecker
+	log               *zap.Logger
+	staticRoutes      []routeProxy
+	trusted           map[string]trustedService
+	nodeID            string
+	table             atomic.Value
 }
 
-type AdminChecker func(context.Context, int64) (bool, error)
+type AdminChecker func(context.Context, string, int64) (bool, error)
+
+type PermissionChecker func(context.Context, string, int64, string) (bool, error)
 
 type trustedService struct {
 	serviceID     string
@@ -157,6 +169,14 @@ func (p *ServiceProxy) SetAdminChecker(checker AdminChecker) {
 	p.adminChecker = checker
 }
 
+func (p *ServiceProxy) SetPermissionChecker(checker PermissionChecker) {
+	p.permissionChecker = checker
+}
+
+func (p *ServiceProxy) SetNodeID(nodeID string) {
+	p.nodeID = strings.TrimSpace(nodeID)
+}
+
 func (p *ServiceProxy) Reload(ctx context.Context, reader ServiceRouteReader) (servicestatus.RouteTable, error) {
 	table, err := reader.ServiceRouteTable(ctx)
 	if err != nil {
@@ -176,6 +196,11 @@ func (p *ServiceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.serveRoute(w, r, route)
 			return
 		}
+	}
+
+	if matchPrefix(r.URL.Path, internalAPIPrefix) {
+		p.serveInternalAPI(w, r)
+		return
 	}
 
 	if route, ok := p.matchServiceRoute(r.URL.Path); ok {
@@ -221,29 +246,142 @@ func (p *ServiceProxy) matchServiceRoute(path string) (routeProxy, bool) {
 		if !route.ProxyEnabled || !matchPrefix(path, route.Prefix) {
 			continue
 		}
-		service, ok := p.trusted[route.ServiceID]
+		target, stripPrefix, rewritePrefix, ok := p.routeTarget(route)
 		if !ok {
 			continue
 		}
 		return routeProxy{
-			prefix:        route.Prefix,
-			serviceID:     route.ServiceID,
-			authMode:      route.AuthMode,
-			stripPrefix:   firstNonEmpty(route.StripPrefix, service.stripPrefix),
-			rewritePrefix: firstNonEmpty(route.RewritePrefix, service.rewritePrefix),
+			prefix:             route.Prefix,
+			serviceID:          route.ServiceID,
+			authMode:           route.AuthMode,
+			requiredPermission: normalizeRequiredPermission(route.RequiredPermission),
+			stripPrefix:        stripPrefix,
+			rewritePrefix:      rewritePrefix,
 			proxy: newReverseProxy(
-				service.target,
+				target,
 				route.Prefix,
-				firstNonEmpty(route.StripPrefix, service.stripPrefix),
-				firstNonEmpty(route.RewritePrefix, service.rewritePrefix),
+				stripPrefix,
+				rewritePrefix,
 				false,
 				p.internalSigner,
 				p.log,
 			),
-			target: service.target,
+			target: target,
 		}, true
 	}
 	return routeProxy{}, false
+}
+
+func (p *ServiceProxy) serveInternalAPI(w http.ResponseWriter, r *http.Request) {
+	apiID, _, ok := internalAPIRequest(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	callerNodeID := strings.TrimSpace(r.Header.Get("X-OJOS-Node-Id"))
+	if callerNodeID == "" {
+		callerNodeID = p.nodeID
+	}
+	if callerNodeID == "" {
+		writeJSONError(w, http.StatusBadRequest, 40001, "caller node id is required")
+		return
+	}
+
+	route, found, unavailable := p.matchInternalAPIRoute(apiID, r.Method)
+	if unavailable {
+		writeJSONError(w, http.StatusServiceUnavailable, 50302, "api route not available: "+apiID)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	route.callerNodeID = callerNodeID
+	r = cloneRequestWithResolverHeaders(r, route)
+	p.serveRoute(w, r, route)
+}
+
+func (p *ServiceProxy) matchInternalAPIRoute(apiID string, method string) (routeProxy, bool, bool) {
+	value := p.table.Load()
+	table, _ := value.(servicestatus.RouteTable)
+	hasUnavailable := false
+	for _, route := range table.Routes {
+		if strings.TrimSpace(route.ApiID) != apiID {
+			continue
+		}
+		if !methodAllowed(method, route.Methods) {
+			continue
+		}
+		if !route.ProxyEnabled {
+			hasUnavailable = true
+			continue
+		}
+		target, ok := routeUpstreamBaseTarget(route)
+		if !ok {
+			hasUnavailable = true
+			continue
+		}
+		providerService := firstNonEmpty(route.ProviderService, route.ServiceID, route.TargetService)
+		providerEndpoint := strings.TrimSpace(route.ProviderEndpoint)
+		return routeProxy{
+			prefix:             cleanPrefix(route.Prefix),
+			apiID:              apiID,
+			providerNodeID:     strings.TrimSpace(route.ProviderNodeID),
+			providerService:    providerService,
+			providerEndpoint:   providerEndpoint,
+			serviceID:          firstNonEmpty(route.ServiceID, providerService),
+			authMode:           route.AuthMode,
+			requiredPermission: normalizeRequiredPermission(route.RequiredPermission),
+			stripPrefix:        internalAPIPrefix + "/" + apiID,
+			rewritePrefix:      cleanPrefix(route.Prefix),
+			proxy: newReverseProxy(
+				target,
+				internalAPIPrefix+"/"+apiID,
+				internalAPIPrefix+"/"+apiID,
+				cleanPrefix(route.Prefix),
+				false,
+				p.internalSigner,
+				p.log,
+			),
+			target: target,
+		}, true, false
+	}
+	return routeProxy{}, false, hasUnavailable
+}
+
+func cloneRequestWithResolverHeaders(r *http.Request, route routeProxy) *http.Request {
+	cloned := r.Clone(r.Context())
+	cloned.Header = r.Header.Clone()
+	cloned.Header.Set("X-OJOS-Node-Id", route.callerNodeID)
+	cloned.Header.Set("X-OJOS-Resolved-Provider-Node-Id", route.providerNodeID)
+	cloned.Header.Set("X-OJOS-Resolved-Provider-Service", route.providerService)
+	cloned.Header.Set("X-OJOS-Resolved-Provider-Endpoint", route.providerEndpoint)
+	return cloned
+}
+
+func routeUpstreamBaseTarget(route servicestatus.ServiceRoute) (*url.URL, bool) {
+	target, err := url.Parse(strings.TrimSpace(route.UpstreamBase))
+	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
+		return nil, false
+	}
+	return target, true
+}
+
+func (p *ServiceProxy) routeTarget(route servicestatus.ServiceRoute) (*url.URL, string, string, bool) {
+	if strings.TrimSpace(route.UpstreamBase) != "" {
+		target, err := url.Parse(strings.TrimSpace(route.UpstreamBase))
+		if err == nil && (target.Scheme == "http" || target.Scheme == "https") && target.Host != "" {
+			return target, cleanPrefix(route.StripPrefix), cleanPrefix(route.RewritePrefix), true
+		}
+	}
+	service, ok := p.trusted[route.ServiceID]
+	if !ok {
+		return nil, "", "", false
+	}
+	return service.target,
+		firstNonEmpty(route.StripPrefix, service.stripPrefix),
+		firstNonEmpty(route.RewritePrefix, service.rewritePrefix),
+		true
 }
 
 func containsString(items []string, want string) bool {
@@ -256,8 +394,16 @@ func containsString(items []string, want string) bool {
 }
 
 func (p *ServiceProxy) serveRoute(w http.ResponseWriter, r *http.Request, route routeProxy) {
-	claims, ok := p.authenticateRequest(w, r, route.authMode)
+	authMode := route.authMode
+	if route.requiredPermission != "" && normalizeServiceAuthMode(authMode) == authModePublic {
+		authMode = authModeUser
+	}
+	claims, ok := p.authenticateRequest(w, r, authMode)
 	if !ok {
+		return
+	}
+
+	if !p.authorizeRequiredPermission(w, r, claims, route.requiredPermission) {
 		return
 	}
 
@@ -267,6 +413,41 @@ func (p *ServiceProxy) serveRoute(w http.ResponseWriter, r *http.Request, route 
 	}
 
 	route.proxy.ServeHTTP(w, r)
+}
+
+func (p *ServiceProxy) authorizeRequiredPermission(
+	w http.ResponseWriter,
+	r *http.Request,
+	claims *sharedjwt.Claims,
+	requiredPermission string,
+) bool {
+	requiredPermission = normalizeRequiredPermission(requiredPermission)
+	if requiredPermission == "" {
+		return true
+	}
+	if claims == nil {
+		writeJSONError(w, http.StatusUnauthorized, 40105, "missing authorization claims")
+		return false
+	}
+	if p.permissionChecker == nil {
+		writeJSONError(w, http.StatusInternalServerError, 50002, "permission check unavailable")
+		return false
+	}
+	ok, err := p.permissionChecker(
+		r.Context(),
+		strings.TrimSpace(r.Header.Get("Authorization")),
+		claims.UserID,
+		requiredPermission,
+	)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, 50003, "permission check failed")
+		return false
+	}
+	if !ok {
+		writeJSONError(w, http.StatusForbidden, 40305, "permission denied")
+		return false
+	}
+	return true
 }
 
 func (p *ServiceProxy) authenticateRequest(
@@ -320,7 +501,11 @@ func (p *ServiceProxy) authenticateRequest(
 			return claims, true
 		}
 		if p.adminChecker != nil {
-			ok, err := p.adminChecker(r.Context(), claims.UserID)
+			ok, err := p.adminChecker(
+				r.Context(),
+				strings.TrimSpace(r.Header.Get("Authorization")),
+				claims.UserID,
+			)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, 50001, "authorization check failed")
 				return nil, false
@@ -371,6 +556,14 @@ func normalizeServiceAuthMode(mode string) string {
 	}
 }
 
+func normalizeRequiredPermission(permission string) string {
+	permission = strings.TrimSpace(permission)
+	if strings.EqualFold(permission, "public") {
+		return ""
+	}
+	return permission
+}
+
 func writeJSONError(w http.ResponseWriter, httpStatus int, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(httpStatus)
@@ -397,6 +590,40 @@ func cleanPrefix(prefix string) string {
 	}
 
 	return prefix
+}
+
+func internalAPIRequest(path string) (string, string, bool) {
+	if !matchPrefix(path, internalAPIPrefix) {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(path, internalAPIPrefix)
+	rest = strings.TrimPrefix(rest, "/")
+	if rest == "" {
+		return "", "", false
+	}
+	apiID, tail, _ := strings.Cut(rest, "/")
+	apiID = strings.TrimSpace(apiID)
+	if apiID == "" {
+		return "", "", false
+	}
+	return apiID, "/" + tail, true
+}
+
+func methodAllowed(method string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	method = strings.ToUpper(strings.TrimSpace(method))
+	for _, item := range allowed {
+		item = strings.ToUpper(strings.TrimSpace(item))
+		if item == method || item == "ANY" || item == "*" {
+			return true
+		}
+		if method == http.MethodHead && item == http.MethodGet {
+			return true
+		}
+	}
+	return false
 }
 
 func compileTrustedServices(
@@ -517,6 +744,24 @@ func newReverseProxy(
 			pr.Out.Header.Set("X-Forwarded-Prefix", routePrefix)
 			pr.Out.Header.Set("X-Gateway", "ojos-gateway")
 			pr.Out.Header.Set("X-OJOS-Gateway-Proxy", "service-routing")
+			if apiID, _, ok := internalAPIRequest(originalPath); ok {
+				pr.Out.Header.Set("X-OJOS-Api-Id", apiID)
+				if callerNodeID := strings.TrimSpace(pr.In.Header.Get("X-OJOS-Node-Id")); callerNodeID != "" {
+					pr.Out.Header.Set("X-OJOS-Caller-Node-Id", callerNodeID)
+				}
+				if providerNodeID := strings.TrimSpace(pr.In.Header.Get("X-OJOS-Resolved-Provider-Node-Id")); providerNodeID != "" {
+					pr.Out.Header.Set("X-OJOS-Provider-Node-Id", providerNodeID)
+				}
+				if providerService := strings.TrimSpace(pr.In.Header.Get("X-OJOS-Resolved-Provider-Service")); providerService != "" {
+					pr.Out.Header.Set("X-OJOS-Provider-Service", providerService)
+				}
+				if providerEndpoint := strings.TrimSpace(pr.In.Header.Get("X-OJOS-Resolved-Provider-Endpoint")); providerEndpoint != "" {
+					pr.Out.Header.Set("X-OJOS-Provider-Endpoint", providerEndpoint)
+				}
+				pr.Out.Header.Del("X-OJOS-Resolved-Provider-Node-Id")
+				pr.Out.Header.Del("X-OJOS-Resolved-Provider-Service")
+				pr.Out.Header.Del("X-OJOS-Resolved-Provider-Endpoint")
+			}
 
 			if internalSigner != nil {
 				if err := internalSigner.SignRequest(pr.Out.Context(), pr.Out); err != nil {

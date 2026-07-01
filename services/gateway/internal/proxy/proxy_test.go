@@ -1,11 +1,16 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"ojos-gateway/internal/config"
@@ -136,7 +141,10 @@ func TestServiceProxyAdminAuthCanUsePermissionChecker(t *testing.T) {
 		Target:      upstream.URL,
 		StripPrefix: "/api",
 	}})
-	rp.SetAdminChecker(func(ctx context.Context, userID int64) (bool, error) {
+	rp.SetAdminChecker(func(ctx context.Context, authHeader string, userID int64) (bool, error) {
+		if authHeader == "" {
+			t.Fatalf("admin checker should receive Authorization header")
+		}
 		return userID == 42, nil
 	})
 	rp.SetRouteTable(servicestatus.RouteTable{
@@ -202,6 +210,100 @@ func TestServiceProxyRejectsUnknownServiceAndPrefersStaticRoute(t *testing.T) {
 	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/bad/ping", nil))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("unknown service route should not proxy, got %d", rr.Code)
+	}
+}
+
+func TestServiceProxyUsesRouteTableUpstreamWithoutStaticTrustedService(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte("dynamic-upstream"))
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	rp.SetRouteTable(servicestatus.RouteTable{
+		Routes: []servicestatus.ServiceRoute{{
+			RouteID:      "demo:/api/demo",
+			Prefix:       "/api/demo",
+			ServiceID:    "demo-api",
+			UpstreamBase: upstream.URL,
+			AuthMode:     "public",
+			Enabled:      true,
+			ProxyEnabled: true,
+			Status:       "active",
+			StripPrefix:  "/api",
+		}},
+		CanProxy: true,
+	})
+
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/demo/ping", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != "dynamic-upstream" {
+		t.Fatalf("expected dynamic upstream response, got %q", rr.Body.String())
+	}
+	if gotPath != "/demo/ping" {
+		t.Fatalf("unexpected upstream path: %s", gotPath)
+	}
+}
+
+func TestServiceProxyChecksDynamicRoutePermission(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, userID int64, permission string) (bool, error) {
+		if authHeader == "" {
+			t.Fatalf("permission checker should receive Authorization header")
+		}
+		return userID == 42 && permission == "demo.read", nil
+	})
+	rp.SetRouteTable(servicestatus.RouteTable{
+		Routes: []servicestatus.ServiceRoute{{
+			RouteID:            "demo:/api/demo",
+			Prefix:             "/api/demo",
+			ServiceID:          "demo-api",
+			UpstreamBase:       upstream.URL,
+			AuthMode:           "public",
+			RequiredPermission: "demo.read",
+			Enabled:            true,
+			ProxyEnabled:       true,
+			Status:             "active",
+		}},
+		CanProxy: true,
+	})
+
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/demo/ping", nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("permission-protected route should require token, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/demo/ping", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken(t, []string{"user"}))
+	rp.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("permission checker should allow route, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, userID int64, permission string) (bool, error) {
+		if authHeader == "" {
+			t.Fatalf("permission checker should receive Authorization header")
+		}
+		return false, nil
+	})
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/demo/ping", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken(t, []string{"user"}))
+	rp.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("permission checker should reject route, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -276,6 +378,252 @@ func TestServiceProxyReloadAtomicallyReplacesTable(t *testing.T) {
 	}
 	if table.Version != "2" {
 		t.Fatalf("unexpected table version %s", table.Version)
+	}
+}
+
+func TestServiceProxyInternalAPIResolverCallsAncestorStorageByAPIID(t *testing.T) {
+	objects := map[string][]byte{}
+	headers := map[string]http.Header{}
+	var mu sync.Mutex
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/storage/objects/submissions/") {
+			t.Fatalf("unexpected storage path %s", r.URL.Path)
+		}
+		key := strings.TrimPrefix(r.URL.Path, "/api/storage/objects/submissions/")
+		mu.Lock()
+		headers[r.Method+" "+key] = r.Header.Clone()
+		mu.Unlock()
+		switch r.Method {
+		case http.MethodPut:
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			objects[key] = body
+			mu.Unlock()
+			sum := sha256.Sum256(body)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"bucket":       "submissions",
+				"key":          key,
+				"size_bytes":   len(body),
+				"sha256":       hex.EncodeToString(sum[:]),
+				"content_type": r.Header.Get("Content-Type"),
+			})
+		case http.MethodGet:
+			mu.Lock()
+			body, ok := objects[key]
+			mu.Unlock()
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(body)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	rp.SetRouteTable(servicestatus.RouteTable{
+		Routes: []servicestatus.ServiceRoute{
+			ancestorStorageRoute("storage.object.put", http.MethodPut, upstream.URL, true),
+			ancestorStorageRoute("storage.object.get", http.MethodGet, upstream.URL, true),
+		},
+		CanProxy: true,
+	})
+
+	putReq := httptest.NewRequest(
+		http.MethodPut,
+		"/internal/apis/storage.object.put/submissions/42-source-main.cpp",
+		bytes.NewBufferString("int main(){}"),
+	)
+	putReq.Header.Set("X-OJOS-Node-Id", "child-node")
+	putReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	putResp := httptest.NewRecorder()
+	rp.ServeHTTP(putResp, putReq)
+	if putResp.Code != http.StatusOK {
+		t.Fatalf("expected put 200, got %d body=%s", putResp.Code, putResp.Body.String())
+	}
+
+	getReq := httptest.NewRequest(
+		http.MethodGet,
+		"/internal/apis/storage.object.get/submissions/42-source-main.cpp",
+		nil,
+	)
+	getReq.Header.Set("X-OJOS-Node-Id", "child-node")
+	getResp := httptest.NewRecorder()
+	rp.ServeHTTP(getResp, getReq)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("expected get 200, got %d body=%s", getResp.Code, getResp.Body.String())
+	}
+	if getResp.Body.String() != "int main(){}" {
+		t.Fatalf("unexpected storage body %q", getResp.Body.String())
+	}
+
+	gotHeaders := headers["PUT 42-source-main.cpp"]
+	if gotHeaders.Get("X-OJOS-Api-Id") != "storage.object.put" ||
+		gotHeaders.Get("X-OJOS-Caller-Node-Id") != "child-node" ||
+		gotHeaders.Get("X-OJOS-Provider-Node-Id") != "root-node" ||
+		gotHeaders.Get("X-OJOS-Provider-Service") != "storage-service" ||
+		gotHeaders.Get("X-OJOS-Provider-Endpoint") != "127.0.0.1:8085:storage-service" {
+		t.Fatalf("missing resolver trace headers: %#v", gotHeaders)
+	}
+	if gotHeaders.Get("X-OJOS-Resolved-Provider-Endpoint") != "" {
+		t.Fatalf("internal resolver metadata leaked upstream")
+	}
+}
+
+func TestServiceProxyInternalAPIResolverRejectsUnavailableAndInvisibleRoutes(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	rp.SetNodeID("child-node")
+	rp.SetRouteTable(servicestatus.RouteTable{
+		Routes: []servicestatus.ServiceRoute{
+			ancestorStorageRoute("storage.object.get", http.MethodGet, upstream.URL, false),
+		},
+	})
+
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/internal/apis/storage.sibling.get/submissions/a.cpp", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("sibling/non-visible api should be 404, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/internal/apis/storage.private.admin/submissions/a.cpp", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("private/non-visible api should be 404, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/internal/apis/storage.object.get/submissions/a.cpp", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stopped provider should be 503, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestServiceProxyInternalAPIResolverChecksPermissions(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	route := ancestorStorageRoute("storage.object.get", http.MethodGet, upstream.URL, true)
+	route.AuthMode = "user"
+	route.RequiredPermission = "storage.object.read"
+	rp.SetRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{route}, CanProxy: true})
+	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, userID int64, permission string) (bool, error) {
+		return false, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/apis/storage.object.get/submissions/a.cpp", nil)
+	req.Header.Set("X-OJOS-Node-Id", "child-node")
+	req.Header.Set("Authorization", "Bearer "+testToken(t, []string{"user"}))
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("permission denied should be 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestServiceProxyInternalAPIResolverAllowsPublicWithoutToken(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	route := ancestorStorageRoute("storage.object.get", http.MethodGet, upstream.URL, true)
+	route.AuthMode = "public"
+	route.RequiredPermission = "public"
+	rp.SetRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{route}, CanProxy: true})
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/apis/storage.object.get/submissions/a.cpp", nil)
+	req.Header.Set("X-OJOS-Node-Id", "child-node")
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("public api should not need token, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestServiceProxyReloadMakesNewInternalAPIAvailable(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	rp.SetNodeID("child-node")
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/apis/storage.object.get/submissions/a.cpp", nil)
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("api should be unavailable before reload, got %d", rr.Code)
+	}
+
+	_, err := rp.Reload(context.Background(), fakeServiceRouteReader{table: servicestatus.RouteTable{
+		Routes: []servicestatus.ServiceRoute{
+			ancestorStorageRoute("storage.object.get", http.MethodGet, upstream.URL, true),
+		},
+		CanProxy: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/internal/apis/storage.object.get/submissions/a.cpp", nil)
+	rr = httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("api should be available after reload, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func ancestorStorageRoute(apiID string, method string, upstream string, running bool) servicestatus.ServiceRoute {
+	status := "active"
+	serviceStatus := servicestatus.ServiceStatusRunning
+	proxyEnabled := true
+	var blocked []string
+	if !running {
+		status = "unavailable"
+		serviceStatus = servicestatus.ServiceStatusStopped
+		proxyEnabled = false
+		blocked = []string{"service not running"}
+	}
+	return servicestatus.ServiceRoute{
+		RouteID:            "storage-service:" + apiID,
+		ApiID:              apiID,
+		NodeID:             "child-node",
+		ProviderNodeID:     "root-node",
+		ProviderHostIP:     "127.0.0.1",
+		ProviderService:    "storage-service",
+		ProviderEndpoint:   "127.0.0.1:8085:storage-service",
+		VisibilitySource:   "ancestor-descendants",
+		Distance:           1,
+		OwnerServiceID:     "storage-service",
+		Prefix:             "/api/storage/objects",
+		ServiceID:          "storage-service",
+		TargetService:      "storage-service",
+		UpstreamBase:       upstream,
+		AuthMode:           "public",
+		RequiredPermission: "public",
+		Methods:            []string{method},
+		Enabled:            true,
+		ProxyEnabled:       proxyEnabled,
+		Priority:           len("/api/storage/objects"),
+		CreatedFrom:        "orchestrator_effective_api_view",
+		Status:             status,
+		ServiceStatus:      serviceStatus,
+		BlockedBy:          blocked,
 	}
 }
 

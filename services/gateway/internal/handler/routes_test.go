@@ -81,6 +81,9 @@ func TestOrchestratorAdminRoutesAreReadOnly(t *testing.T) {
 		if !isOrchestratorAdminRoute(route.path) {
 			continue
 		}
+		if route.path == "/api/admin/orchestrator/routes/reload" && route.method == "MethodPost" {
+			continue
+		}
 		if route.method != "MethodGet" && route.method != "MethodOptions" {
 			t.Fatalf("orchestrator admin route %s must be read-only, got http.%s", route.path, route.method)
 		}

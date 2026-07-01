@@ -266,6 +266,36 @@ func TestBuildRouteTableBlocksReservedPrefixAndUnknownService(t *testing.T) {
 	}
 }
 
+func TestBuildRouteTableCarriesPermissionAndDynamicUpstream(t *testing.T) {
+	table := BuildRouteTableWithOptions(Snapshot{
+		Version: "1",
+		GatewayRoutes: []orchestratorsnapshot.GatewayRoute{{
+			ApiID:              "storage.object.get",
+			ServiceID:          "demo",
+			Prefix:             "/api/demo",
+			TargetService:      "demo-api",
+			UpstreamBase:       "http://127.0.0.1:19090",
+			AuthMode:           "public",
+			RequiredPermission: "demo.read",
+			Enabled:            true,
+		}},
+	}, RouteTableOptions{})
+
+	if len(table.Routes) != 1 {
+		t.Fatalf("expected one route, got %d", len(table.Routes))
+	}
+	route := table.Routes[0]
+	if !route.ProxyEnabled || route.UpstreamBase != "http://127.0.0.1:19090" {
+		t.Fatalf("dynamic upstream route should be proxy-enabled: %#v", route)
+	}
+	if route.RequiredPermission != "demo.read" {
+		t.Fatalf("required permission should be retained: %#v", route)
+	}
+	if route.ApiID != "storage.object.get" {
+		t.Fatalf("api_id should be retained: %#v", route)
+	}
+}
+
 func TestBuildRouteTableBlocksDuplicatePrefix(t *testing.T) {
 	table := BuildRouteTableWithOptions(Snapshot{
 		Version: "1",

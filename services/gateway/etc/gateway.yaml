@@ -87,3 +87,7 @@ InternalAuth:
 Orchestrator:
   Endpoint: ""
   InternalToken: ""
+  NodeID: ""
+
+AuthService:
+  Endpoint: http://auth-service:8081

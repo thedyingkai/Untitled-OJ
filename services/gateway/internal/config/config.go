@@ -17,6 +17,7 @@ type Config struct {
 	ServiceStatus ServiceStatusConfig
 	InternalAuth  InternalAuthConfig
 	Orchestrator  OrchestratorConfig
+	AuthService   AuthServiceConfig
 }
 
 type DatabaseConfig struct {
@@ -76,4 +77,9 @@ type InternalAuthConfig struct {
 type OrchestratorConfig struct {
 	Endpoint      string
 	InternalToken string
+	NodeID        string `json:",optional"`
+}
+
+type AuthServiceConfig struct {
+	Endpoint string
 }

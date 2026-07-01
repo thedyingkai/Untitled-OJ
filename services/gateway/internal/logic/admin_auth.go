@@ -7,7 +7,6 @@ import (
 
 	"ojos-gateway/internal/svc"
 	sharedjwt "ojos-shared/security/jwt"
-	sharedperm "ojos-shared/security/permission"
 )
 
 func requireAdmin(ctx context.Context, svcCtx *svc.ServiceContext, authHeader string) error {
@@ -29,7 +28,7 @@ func requireAdminClaims(ctx context.Context, svcCtx *svc.ServiceContext, authHea
 	if isAdminRole(claims.Roles) {
 		return adminClaims{UserID: claims.UserID, Username: claims.Username, Roles: claims.Roles}, nil
 	}
-	ok, err := hasSystemAdminPermission(ctx, svcCtx, claims.UserID)
+	ok, err := hasSystemAdminPermission(ctx, svcCtx, authHeader, claims.UserID)
 	if err != nil {
 		return adminClaims{}, err
 	}
@@ -39,14 +38,11 @@ func requireAdminClaims(ctx context.Context, svcCtx *svc.ServiceContext, authHea
 	return adminClaims{UserID: claims.UserID, Username: claims.Username, Roles: claims.Roles}, nil
 }
 
-var hasSystemAdminPermission = func(ctx context.Context, svcCtx *svc.ServiceContext, userID int64) (bool, error) {
-	return sharedperm.HasUserPermission(
-		ctx,
-		svcCtx.DB,
-		userID,
-		"system.admin",
-		sharedperm.SystemScope(),
-	)
+var hasSystemAdminPermission = func(ctx context.Context, svcCtx *svc.ServiceContext, authHeader string, userID int64) (bool, error) {
+	if svcCtx == nil || svcCtx.AuthClient == nil {
+		return false, errors.New("auth-service permission client is not configured")
+	}
+	return svcCtx.AuthClient.HasSystemPermission(ctx, authHeader, userID, "system.admin")
 }
 
 func parseBearerClaims(svcCtx *svc.ServiceContext, authHeader string) (*sharedjwt.Claims, error) {

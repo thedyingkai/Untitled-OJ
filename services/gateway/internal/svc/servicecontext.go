@@ -10,20 +10,17 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
+	"ojos-gateway/internal/authclient"
 	"ojos-gateway/internal/config"
 	"ojos-gateway/internal/orchestrator/servicestatus"
 	orchestratorsnapshot "ojos-gateway/internal/orchestrator/snapshot"
 	"ojos-gateway/internal/proxy"
 	"ojos-shared/security/internalauth"
-	sharedperm "ojos-shared/security/permission"
 
-	"ojos-shared/database"
 	sharedlogger "ojos-shared/logger"
 	"ojos-shared/tracing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.uber.org/zap"
@@ -33,7 +30,6 @@ type ServiceContext struct {
 	Config config.Config
 
 	Logger *zap.Logger
-	DB     *pgxpool.Pool
 	Redis  *redis.Client
 	Tracer *sdktrace.TracerProvider
 
@@ -43,6 +39,7 @@ type ServiceContext struct {
 	RouteTableOptions   servicestatus.RouteTableOptions
 	InternalSigner      *internalauth.Signer
 	Orchestrator        *orchestratorsnapshot.Client
+	AuthClient          *authclient.Client
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
@@ -59,11 +56,6 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		log.Fatalf("init tracing failed: %v", err)
 	}
 
-	db, err := database.NewPostgresPoolByURL(ctx, c.Database.Url)
-	if err != nil {
-		log.Fatalf("connect postgres failed: %v", err)
-	}
-
 	redisOptions, err := redis.ParseURL(c.Redis.Url)
 	if err != nil {
 		log.Fatalf("parse redis url failed: %v", err)
@@ -73,33 +65,32 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		log.Fatalf("ping redis failed: %v", err)
 	}
 
-	internalAuthCfg := internalauth.Config{
-		Enabled:          c.InternalAuth.Enabled,
-		RotationInterval: time.Duration(c.InternalAuth.RotationIntervalSeconds) * time.Second,
-		VerifyGrace:      time.Duration(c.InternalAuth.VerifyGraceSeconds) * time.Second,
-		RotateBefore:     time.Duration(c.InternalAuth.RotateBeforeSeconds) * time.Second,
-		TimestampSkew:    time.Duration(c.InternalAuth.TimestampSkewSeconds) * time.Second,
-		NonceTTL:         time.Duration(c.InternalAuth.NonceTTLSeconds) * time.Second,
-	}
-
 	var internalSigner *internalauth.Signer
 	if c.InternalAuth.Enabled {
-		internalKeyManager := internalauth.NewKeyManager(db, internalAuthCfg)
-		internalSigner = internalauth.NewSigner(internalKeyManager)
+		zlog.Warn("gateway internal request signing is disabled until internal auth keys are provided by a service-owned API")
 	}
 
+	authClient := authclient.New(c.AuthService.Endpoint)
 	serviceProxy, err := proxy.NewServiceProxy(c.Proxy.Routes, c.Proxy.TrustedServices, c.Jwt.Secret, internalSigner, zlog)
 	if err != nil {
 		log.Fatalf("init proxy failed: %v", err)
 	}
-	serviceProxy.SetAdminChecker(func(ctx context.Context, userID int64) (bool, error) {
-		return sharedperm.HasUserPermission(ctx, db, userID, "system.admin", sharedperm.SystemScope())
+	serviceProxy.SetNodeID(c.Orchestrator.NodeID)
+	serviceProxy.SetPermissionChecker(func(ctx context.Context, authHeader string, userID int64, permissionCode string) (bool, error) {
+		return authClient.HasSystemPermission(ctx, authHeader, userID, permissionCode)
 	})
 	routeTableOptions := routeTableOptionsFromConfig(c.Proxy)
 	serviceStatusDriver := servicestatus.NewComposeDriver(routeTableOptions.TrustedServices, c.ServiceStatus.ComposeServices...)
 	orchestratorClient := orchestratorsnapshot.NewClient(c.Orchestrator.Endpoint, c.Orchestrator.InternalToken)
 	var snapshot servicestatus.Snapshot
-	if err := orchestratorClient.DecodeOrchestratorSnapshot(ctx, false, &snapshot); err == nil {
+	if strings.TrimSpace(c.Orchestrator.NodeID) != "" {
+		var table servicestatus.RouteTable
+		if err := orchestratorClient.DecodeNodeOrchestratorRoutes(ctx, c.Orchestrator.NodeID, true, &table); err == nil {
+			serviceProxy.SetRouteTable(table)
+		} else {
+			zlog.Warn("orchestrator node effective route table is unavailable; gateway starts degraded", zap.Error(err))
+		}
+	} else if err := orchestratorClient.DecodeOrchestratorSnapshot(ctx, false, &snapshot); err == nil {
 		if services, serviceErr := serviceStatusDriver.ListServices(ctx, snapshot); serviceErr == nil {
 			snapshot.Services = filterServiceStatusesByKind(services, false)
 			snapshot.Workers = filterServiceStatusesByKind(services, true)
@@ -113,7 +104,6 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	return &ServiceContext{
 		Config:              c,
 		Logger:              zlog,
-		DB:                  db,
 		Redis:               redisClient,
 		Tracer:              tp,
 		Proxy:               serviceProxy.ServeHTTP,
@@ -122,6 +112,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		RouteTableOptions:   routeTableOptions,
 		InternalSigner:      internalSigner,
 		Orchestrator:        orchestratorClient,
+		AuthClient:          authClient,
 	}
 }
 
@@ -170,9 +161,6 @@ func filterServiceStatusesByKind(items []servicestatus.ServiceStatus, workers bo
 }
 
 func applyEnvOverrides(c *config.Config) {
-	if value := firstEnv("DATABASE_URL", "OJ_DATABASE_URL"); value != "" {
-		c.Database.Url = value
-	}
 	if value := strings.TrimSpace(os.Getenv("REDIS_URL")); value != "" {
 		c.Redis.Url = value
 	}
@@ -187,6 +175,12 @@ func applyEnvOverrides(c *config.Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("ORCHESTRATOR_INTERNAL_TOKEN")); value != "" {
 		c.Orchestrator.InternalToken = value
+	}
+	if value := strings.TrimSpace(os.Getenv("ORCHESTRATOR_NODE_ID")); value != "" {
+		c.Orchestrator.NodeID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("AUTH_SERVICE_ENDPOINT")); value != "" {
+		c.AuthService.Endpoint = value
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEMS_ROOT")); value != "" {
 		c.Storage.ProblemsRoot = value
@@ -214,10 +208,6 @@ func inferServiceID(target string) string {
 }
 
 func (s *ServiceContext) Close(ctx context.Context) {
-	if s.DB != nil {
-		s.DB.Close()
-	}
-
 	if s.Redis != nil {
 		_ = s.Redis.Close()
 	}

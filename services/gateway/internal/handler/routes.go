@@ -30,6 +30,11 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Handler: adminOrchestratorRoutesHandler(serverCtx),
 			},
 			{
+				Method:  http.MethodPost,
+				Path:    "/api/admin/orchestrator/routes/reload",
+				Handler: adminOrchestratorRoutesReloadHandler(serverCtx),
+			},
+			{
 				Method:  http.MethodGet,
 				Path:    "/api/admin/orchestrator/snapshot",
 				Handler: adminOrchestratorSnapshotHandler(serverCtx),

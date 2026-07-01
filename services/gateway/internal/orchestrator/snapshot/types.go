@@ -105,11 +105,24 @@ type FrontendRoute struct {
 }
 
 type GatewayRoute struct {
-	ServiceID     string `json:"service_id"`
-	Prefix        string `json:"prefix"`
-	TargetService string `json:"target_service"`
-	AuthMode      string `json:"auth_mode"`
-	Enabled       bool   `json:"enabled"`
+	ApiID              string `json:"api_id,omitempty"`
+	NodeID             string `json:"node_id,omitempty"`
+	ProviderNodeID     string `json:"provider_node_id,omitempty"`
+	ProviderHostIP     string `json:"provider_host_ip,omitempty"`
+	ProviderService    string `json:"provider_service_name,omitempty"`
+	ProviderEndpoint   string `json:"provider_endpoint,omitempty"`
+	VisibilitySource   string `json:"visibility_source,omitempty"`
+	Distance           int    `json:"distance,omitempty"`
+	ServiceID          string `json:"service_id"`
+	Prefix             string `json:"prefix"`
+	TargetService      string `json:"target_service"`
+	UpstreamBase       string `json:"upstream_base,omitempty"`
+	AuthMode           string `json:"auth_mode"`
+	RequiredPermission string `json:"required_permission,omitempty"`
+	StripPrefix        string `json:"strip_prefix,omitempty"`
+	RewritePrefix      string `json:"rewrite_prefix,omitempty"`
+	HealthCheckID      string `json:"health_check_id,omitempty"`
+	Enabled            bool   `json:"enabled"`
 }
 
 type Migration struct {

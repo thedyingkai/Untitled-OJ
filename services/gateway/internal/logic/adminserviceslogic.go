@@ -134,6 +134,16 @@ func (l *AdminServicesLogic) ServiceRouteTable(ctx context.Context) (servicestat
 	if l.repo == nil {
 		return servicestatus.RouteTable{}, errOrchestratorUnavailable()
 	}
+	if client, ok := l.repo.(*orchestratorsnapshot.Client); ok && l.svcCtx != nil {
+		nodeID := strings.TrimSpace(l.svcCtx.Config.Orchestrator.NodeID)
+		if nodeID != "" {
+			var table servicestatus.RouteTable
+			if err := client.DecodeNodeOrchestratorRoutes(ctx, nodeID, true, &table); err != nil {
+				return servicestatus.RouteTable{}, err
+			}
+			return table, nil
+		}
+	}
 	snapshot, err := servicestatus.BuildSnapshot(ctx, l.repo)
 	if err != nil {
 		return servicestatus.RouteTable{}, err
@@ -153,7 +163,17 @@ func (l *AdminServicesLogic) OrchestratorRoutes(authHeader string, includeDisabl
 	}
 	if client, ok := l.repo.(*orchestratorsnapshot.Client); ok {
 		var table servicestatus.RouteTable
-		if err := client.DecodeOrchestratorRoutes(l.ctx, includeDisabled, includeUpstream, &table); err != nil {
+		nodeID := ""
+		if l.svcCtx != nil {
+			nodeID = strings.TrimSpace(l.svcCtx.Config.Orchestrator.NodeID)
+		}
+		var err error
+		if nodeID != "" {
+			err = client.DecodeNodeOrchestratorRoutes(l.ctx, nodeID, includeUpstream, &table)
+		} else {
+			err = client.DecodeOrchestratorRoutes(l.ctx, includeDisabled, includeUpstream, &table)
+		}
+		if err != nil {
 			return nil, err
 		}
 		return orchestratorRoutesResp(table, includeUpstream), nil
@@ -425,27 +445,36 @@ func orchestratorRoutesResp(table servicestatus.RouteTable, includeUpstream bool
 			upstream = route.UpstreamBase
 		}
 		routes = append(routes, types.OrchestratorRouteItem{
-			RouteId:        route.RouteID,
-			OwnerServiceId: route.OwnerServiceID,
-			Prefix:         route.Prefix,
-			ServiceId:      route.ServiceID,
-			TargetService:  route.TargetService,
-			UpstreamBase:   upstream,
-			AuthMode:       route.AuthMode,
-			Methods:        route.Methods,
-			Enabled:        route.Enabled,
-			ProxyEnabled:   route.ProxyEnabled,
-			Priority:       route.Priority,
-			StripPrefix:    route.StripPrefix,
-			RewritePrefix:  route.RewritePrefix,
-			HealthCheckId:  route.HealthCheckID,
-			CreatedFrom:    route.CreatedFrom,
-			Status:         route.Status,
-			ServiceStatus:  route.ServiceStatus,
-			ServiceHealth:  route.ServiceHealth,
-			Conflicts:      route.Conflicts,
-			Warnings:       route.Warnings,
-			BlockedBy:      route.BlockedBy,
+			RouteId:            route.RouteID,
+			ApiId:              route.ApiID,
+			NodeId:             route.NodeID,
+			ProviderNodeId:     route.ProviderNodeID,
+			ProviderHostIp:     route.ProviderHostIP,
+			ProviderService:    route.ProviderService,
+			ProviderEndpoint:   route.ProviderEndpoint,
+			VisibilitySource:   route.VisibilitySource,
+			Distance:           route.Distance,
+			OwnerServiceId:     route.OwnerServiceID,
+			Prefix:             route.Prefix,
+			ServiceId:          route.ServiceID,
+			TargetService:      route.TargetService,
+			UpstreamBase:       upstream,
+			AuthMode:           route.AuthMode,
+			RequiredPermission: route.RequiredPermission,
+			Methods:            route.Methods,
+			Enabled:            route.Enabled,
+			ProxyEnabled:       route.ProxyEnabled,
+			Priority:           route.Priority,
+			StripPrefix:        route.StripPrefix,
+			RewritePrefix:      route.RewritePrefix,
+			HealthCheckId:      route.HealthCheckID,
+			CreatedFrom:        route.CreatedFrom,
+			Status:             route.Status,
+			ServiceStatus:      route.ServiceStatus,
+			ServiceHealth:      route.ServiceHealth,
+			Conflicts:          route.Conflicts,
+			Warnings:           route.Warnings,
+			BlockedBy:          route.BlockedBy,
 		})
 	}
 	return &types.OrchestratorRoutesResp{
@@ -506,11 +535,13 @@ func gatewayRouteItems(items []orchestratorsnapshot.GatewayRoute) []types.Servic
 	result := make([]types.ServiceGatewayRouteItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, types.ServiceGatewayRouteItem{
-			ServiceId:     item.ServiceID,
-			Prefix:        item.Prefix,
-			TargetService: item.TargetService,
-			AuthMode:      item.AuthMode,
-			Enabled:       item.Enabled,
+			ServiceId:          item.ServiceID,
+			Prefix:             item.Prefix,
+			TargetService:      item.TargetService,
+			UpstreamBase:       item.UpstreamBase,
+			AuthMode:           item.AuthMode,
+			RequiredPermission: item.RequiredPermission,
+			Enabled:            item.Enabled,
 		})
 	}
 	return result

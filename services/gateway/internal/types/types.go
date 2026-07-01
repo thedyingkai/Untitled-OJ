@@ -58,27 +58,36 @@ type ListServicesResp struct {
 }
 
 type OrchestratorRouteItem struct {
-	RouteId        string   `json:"route_id"`
-	OwnerServiceId string   `json:"owner_service_id"`
-	Prefix         string   `json:"prefix"`
-	ServiceId      string   `json:"service_id"`
-	TargetService  string   `json:"target_service"`
-	UpstreamBase   string   `json:"upstream_base,omitempty"`
-	AuthMode       string   `json:"auth_mode"`
-	Methods        []string `json:"methods"`
-	Enabled        bool     `json:"enabled"`
-	ProxyEnabled   bool     `json:"proxy_enabled"`
-	Priority       int      `json:"priority"`
-	StripPrefix    string   `json:"strip_prefix,omitempty"`
-	RewritePrefix  string   `json:"rewrite_prefix,omitempty"`
-	HealthCheckId  string   `json:"health_check_id,omitempty"`
-	CreatedFrom    string   `json:"created_from"`
-	Status         string   `json:"status"`
-	ServiceStatus  string   `json:"service_status,omitempty"`
-	ServiceHealth  string   `json:"service_health,omitempty"`
-	Conflicts      []string `json:"conflicts"`
-	Warnings       []string `json:"warnings"`
-	BlockedBy      []string `json:"blocked_by"`
+	RouteId            string   `json:"route_id"`
+	ApiId              string   `json:"api_id,omitempty"`
+	NodeId             string   `json:"node_id,omitempty"`
+	ProviderNodeId     string   `json:"provider_node_id,omitempty"`
+	ProviderHostIp     string   `json:"provider_host_ip,omitempty"`
+	ProviderService    string   `json:"provider_service_name,omitempty"`
+	ProviderEndpoint   string   `json:"provider_endpoint,omitempty"`
+	VisibilitySource   string   `json:"visibility_source,omitempty"`
+	Distance           int      `json:"distance,omitempty"`
+	OwnerServiceId     string   `json:"owner_service_id"`
+	Prefix             string   `json:"prefix"`
+	ServiceId          string   `json:"service_id"`
+	TargetService      string   `json:"target_service"`
+	UpstreamBase       string   `json:"upstream_base,omitempty"`
+	AuthMode           string   `json:"auth_mode"`
+	RequiredPermission string   `json:"required_permission,omitempty"`
+	Methods            []string `json:"methods"`
+	Enabled            bool     `json:"enabled"`
+	ProxyEnabled       bool     `json:"proxy_enabled"`
+	Priority           int      `json:"priority"`
+	StripPrefix        string   `json:"strip_prefix,omitempty"`
+	RewritePrefix      string   `json:"rewrite_prefix,omitempty"`
+	HealthCheckId      string   `json:"health_check_id,omitempty"`
+	CreatedFrom        string   `json:"created_from"`
+	Status             string   `json:"status"`
+	ServiceStatus      string   `json:"service_status,omitempty"`
+	ServiceHealth      string   `json:"service_health,omitempty"`
+	Conflicts          []string `json:"conflicts"`
+	Warnings           []string `json:"warnings"`
+	BlockedBy          []string `json:"blocked_by"`
 }
 
 type OrchestratorRoutesResp struct {
@@ -87,6 +96,20 @@ type OrchestratorRoutesResp struct {
 	Routes      []OrchestratorRouteItem `json:"routes"`
 	Warnings    []string                `json:"warnings"`
 	CanProxy    bool                    `json:"can_proxy"`
+}
+
+type AdminRoutesReloadReq struct {
+	Authorization string `header:"Authorization,optional"`
+	OperationId   string `json:"operation_id,optional"`
+	ServiceName   string `json:"service_name,optional"`
+}
+
+type OrchestratorRoutesReloadResp struct {
+	Status      string `json:"status"`
+	Message     string `json:"message"`
+	OperationId string `json:"operation_id,omitempty"`
+	ServiceName string `json:"service_name,omitempty"`
+	RouteCount  int    `json:"route_count"`
 }
 
 type OrchestratorSnapshotItem struct {
@@ -182,11 +205,13 @@ type ServiceFrontendRouteItem struct {
 }
 
 type ServiceGatewayRouteItem struct {
-	ServiceId     string `json:"service_id"`
-	Prefix        string `json:"prefix"`
-	TargetService string `json:"target_service"`
-	AuthMode      string `json:"auth_mode"`
-	Enabled       bool   `json:"enabled"`
+	ServiceId          string `json:"service_id"`
+	Prefix             string `json:"prefix"`
+	TargetService      string `json:"target_service"`
+	UpstreamBase       string `json:"upstream_base,omitempty"`
+	AuthMode           string `json:"auth_mode"`
+	RequiredPermission string `json:"required_permission,omitempty"`
+	Enabled            bool   `json:"enabled"`
 }
 
 type ServiceMenuItem struct {

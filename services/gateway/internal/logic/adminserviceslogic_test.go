@@ -3,15 +3,20 @@ package logic
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"ojos-gateway/internal/config"
 	"ojos-gateway/internal/orchestrator/servicestatus"
 	orchestratorsnapshot "ojos-gateway/internal/orchestrator/snapshot"
+	"ojos-gateway/internal/proxy"
 	"ojos-gateway/internal/svc"
 	"ojos-gateway/internal/types"
 	sharedjwt "ojos-shared/security/jwt"
+
+	"go.uber.org/zap"
 )
 
 type fakeOrchestratorSnapshot struct {
@@ -195,7 +200,7 @@ func (f fakeOrchestratorSnapshot) Detail(_ context.Context, serviceID string) (o
 
 func TestListServicesRejectsOrdinaryUser(t *testing.T) {
 	oldChecker := hasSystemAdminPermission
-	hasSystemAdminPermission = func(context.Context, *svc.ServiceContext, int64) (bool, error) {
+	hasSystemAdminPermission = func(context.Context, *svc.ServiceContext, string, int64) (bool, error) {
 		return false, nil
 	}
 	defer func() {
@@ -430,6 +435,70 @@ func TestServiceRoutesReturnsSnapshotRouteTable(t *testing.T) {
 	}
 }
 
+func TestOrchestratorRoutesReloadUpdatesGatewayProxyTable(t *testing.T) {
+	ctx := context.Background()
+	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := testSnapshotData()
+	data.GatewayRoutes = append(data.GatewayRoutes, orchestratorsnapshot.GatewayRoute{
+		ServiceID:     "demo-service",
+		Prefix:        "/api/demo",
+		TargetService: "demo-api",
+		AuthMode:      "public",
+		Enabled:       true,
+	})
+	data.Services = append(data.Services, orchestratorsnapshot.Service{
+		ServiceID: "demo-service",
+		Name:      "Demo Service",
+		Version:   "0.1.0",
+		Status:    orchestratorsnapshot.StatusEnabled,
+		Kind:      "feature",
+	})
+	serviceProxy, err := proxy.NewServiceProxy(nil, nil, "test-secret", nil, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	logic := &AdminOrchestratorRoutesReloadLogic{
+		ctx: ctx,
+		svcCtx: &svc.ServiceContext{
+			Config: config.Config{
+				Jwt: config.JwtConfig{Secret: "test-secret"},
+			},
+			ServiceProxy: serviceProxy,
+			RouteTableOptions: servicestatus.RouteTableOptions{
+				TrustedServices: map[string]servicestatus.TrustedService{
+					"demo-api": {ServiceID: "demo-api", UpstreamBase: "http://127.0.0.1:1"},
+				},
+			},
+		},
+	}
+	logic.routeReader = &AdminServicesLogic{
+		ctx:    ctx,
+		svcCtx: logic.svcCtx,
+		repo:   fakeOrchestratorSnapshot{data: data},
+	}
+
+	resp, err := logic.AdminOrchestratorRoutesReload(&types.AdminRoutesReloadReq{
+		Authorization: "Bearer " + token,
+		OperationId:   "op-release-gateway-publish",
+		ServiceName:   "demo-service",
+	})
+	if err != nil {
+		t.Fatalf("route reload failed: %v", err)
+	}
+	if resp.Status != "reloaded" || resp.RouteCount == 0 {
+		t.Fatalf("unexpected reload response: %#v", resp)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/demo/hello", nil)
+	serviceProxy.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("expected proxy to use reloaded route table and hit demo upstream, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestServiceStatusesAdminAPIUsesServiceStatusDriver(t *testing.T) {
 	ctx := context.Background()
 	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
@@ -494,7 +563,7 @@ func TestServiceStatusesAdminAPIUsesServiceStatusDriver(t *testing.T) {
 
 func TestServiceStatusesRejectOrdinaryUser(t *testing.T) {
 	oldChecker := hasSystemAdminPermission
-	hasSystemAdminPermission = func(context.Context, *svc.ServiceContext, int64) (bool, error) {
+	hasSystemAdminPermission = func(context.Context, *svc.ServiceContext, string, int64) (bool, error) {
 		return false, nil
 	}
 	defer func() {

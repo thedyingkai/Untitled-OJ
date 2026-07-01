@@ -69,6 +69,16 @@ func (c *Client) DecodeOrchestratorRoutes(ctx context.Context, includeDisabled b
 	}, out)
 }
 
+func (c *Client) DecodeNodeOrchestratorRoutes(ctx context.Context, nodeID string, includeUpstream bool, out any) error {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return errors.New("node id is required")
+	}
+	return c.get(ctx, "/internal/orchestrator/nodes/"+url.PathEscape(nodeID)+"/routes", url.Values{
+		"include_upstream": []string{boolString(includeUpstream)},
+	}, out)
+}
+
 func (c *Client) ListEndpoints(ctx context.Context) ([]Endpoint, error) {
 	snapshot, err := c.snapshotData(ctx, true)
 	if err != nil {
@@ -287,17 +297,21 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 	if resp.StatusCode >= http.StatusBadRequest {
 		return fmt.Errorf("orchestrator %s returned %s", path, resp.Status)
 	}
-	var wrapped envelope[json.RawMessage]
-	if err := json.NewDecoder(resp.Body).Decode(&wrapped); err != nil {
+	var raw json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return err
 	}
-	if wrapped.Code != 0 {
-		return fmt.Errorf("orchestrator %s failed: %s", path, wrapped.Msg)
+	var wrapped envelope[json.RawMessage]
+	if err := json.Unmarshal(raw, &wrapped); err == nil && (wrapped.Code != 0 || len(wrapped.Data) > 0 || wrapped.Msg != "") {
+		if wrapped.Code != 0 {
+			return fmt.Errorf("orchestrator %s failed: %s", path, wrapped.Msg)
+		}
+		if len(wrapped.Data) == 0 {
+			return nil
+		}
+		return json.Unmarshal(wrapped.Data, out)
 	}
-	if len(wrapped.Data) == 0 {
-		return nil
-	}
-	return json.Unmarshal(wrapped.Data, out)
+	return json.Unmarshal(raw, out)
 }
 
 func boolString(value bool) string {

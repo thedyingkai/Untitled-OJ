@@ -26,11 +26,18 @@ export interface JudgeTaskItem {
 
 export interface QueueStatus {
   stream_length: number
+  result_stream_length: number
   pending_count: number
   consumer_group: string
+  consumer_count: number
+  consumer_lag: number
   last_id?: string
+  result_last_id?: string
   trim_strategy?: string
   pending_oldest_idle_ms?: number
+  pending_lowest_id?: string
+  pending_highest_id?: string
+  redis_status?: string
   scheduled: number
   pending: number
   judging: number
