@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command as StdCommand, Stdio};
 use std::time::{Duration, Instant};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -37,6 +37,16 @@ pub enum SandboxStatus {
     MemoryLimitExceeded,
     OutputLimitExceeded,
     RuntimeError,
+}
+
+pub fn nsjail_available() -> bool {
+    StdCommand::new("nsjail")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 pub async fn compile_in_sandbox(
@@ -663,4 +673,69 @@ pub async fn write_text(path: &Path, content: &str) -> Result<()> {
     let mut file = fs::File::create(path).await?;
     file.write_all(content.as_bytes()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn nsjail_availability_probe_is_safe() {
+        let _ = nsjail_available();
+    }
+
+    #[tokio::test]
+    async fn nsjail_echo_smoke_when_available() {
+        if !cfg!(target_os = "linux") {
+            eprintln!("skipping nsjail echo smoke: nsjail runner requires Linux");
+            return;
+        }
+        if !nsjail_available() {
+            eprintln!("skipping nsjail echo smoke: nsjail binary is unavailable");
+            return;
+        }
+        if !Path::new("/bin/echo").exists() {
+            eprintln!("skipping nsjail echo smoke: /bin/echo is unavailable");
+            return;
+        }
+
+        let work_dir = std::env::temp_dir().join(format!(
+            "ojos-nsjail-smoke-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&work_dir)
+            .await
+            .expect("create nsjail smoke work dir");
+
+        let output = match run_nsjail_shell(
+            &work_dir,
+            "/bin/echo OK",
+            None,
+            None,
+            None,
+            1000,
+            64,
+            16,
+            1024 * 1024,
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(err) if err.to_string().contains("cgroup") => {
+                eprintln!("skipping nsjail echo smoke: {err}");
+                let _ = fs::remove_dir_all(&work_dir).await;
+                return;
+            }
+            Err(err) => panic!("nsjail echo smoke failed: {err}"),
+        };
+
+        assert_eq!(output.status, SandboxStatus::Ok);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "OK\n");
+        let _ = fs::remove_dir_all(&work_dir).await;
+    }
 }
