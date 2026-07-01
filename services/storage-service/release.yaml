@@ -25,7 +25,49 @@ migrations: []
 permissions:
   - storage.object.read
   - storage.object.write
+  - storage.object.delete
 routes: []
+apis:
+  - api_id: storage.object.put
+    protocol: http
+    port_name: http
+    path_prefix: /api/storage/objects
+    methods: [PUT, POST]
+    visibility: descendants
+    auth_mode: service
+    permission: storage.object.write
+    version: v1
+    stability: stable
+  - api_id: storage.object.get
+    protocol: http
+    port_name: http
+    path_prefix: /api/storage/objects
+    methods: [GET]
+    visibility: descendants
+    auth_mode: service
+    permission: storage.object.read
+    version: v1
+    stability: stable
+  - api_id: storage.object.head
+    protocol: http
+    port_name: http
+    path_prefix: /api/storage/objects
+    methods: [HEAD]
+    visibility: descendants
+    auth_mode: service
+    permission: storage.object.read
+    version: v1
+    stability: stable
+  - api_id: storage.object.delete
+    protocol: http
+    port_name: http
+    path_prefix: /api/storage/objects
+    methods: [DELETE]
+    visibility: descendants
+    auth_mode: service
+    permission: storage.object.delete
+    version: v1
+    stability: stable
 redis: []
 storage:
   - object_type: problem-package

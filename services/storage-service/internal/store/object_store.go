@@ -52,12 +52,33 @@ func NewObjectStore(root string, buckets []string) (*ObjectStore, error) {
 }
 
 func (s *ObjectStore) BucketNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	names := make([]string, 0, len(s.buckets))
 	for bucket := range s.buckets {
 		names = append(names, bucket)
 	}
 	sort.Strings(names)
 	return names
+}
+
+func (s *ObjectStore) EnsureBucket(bucket string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := validateBucket(bucket); err != nil {
+		return false, err
+	}
+	_, existed := s.buckets[bucket]
+	s.buckets[bucket] = struct{}{}
+	if err := os.MkdirAll(s.bucketDir(bucket), 0o755); err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(s.metaBucketDir(bucket), 0o755); err != nil {
+		return false, err
+	}
+	return !existed, nil
 }
 
 func (s *ObjectStore) Put(bucket, key, contentType string, body io.Reader) (types.ObjectMetadata, error) {

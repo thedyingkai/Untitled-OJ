@@ -10,10 +10,20 @@ info (
 type HealthResp {
 	Status  string `json:"status"`
 	Service string `json:"service"`
+	Backend string `json:"backend"`
 }
 
 type BucketsResp {
 	Buckets []string `json:"buckets"`
+}
+
+type BucketReq {
+	Bucket string `path:"bucket"`
+}
+
+type BucketResp {
+	Bucket  string `json:"bucket"`
+	Created bool   `json:"created"`
 }
 
 type ObjectReq {
@@ -46,6 +56,9 @@ service storageservice {
 	@handler listBuckets
 	get /buckets returns (BucketsResp)
 
+	@handler ensureBucket
+	put /buckets/:bucket (BucketReq) returns (BucketResp)
+
 	@handler putObject
 	put /objects/:bucket/:key (ObjectReq) returns (ObjectMetadata)
 
@@ -61,4 +74,3 @@ service storageservice {
 	@handler getMetadata
 	get /metadata/:bucket/:key (ObjectReq) returns (ObjectMetadata)
 }
-

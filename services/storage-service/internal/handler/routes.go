@@ -30,6 +30,11 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Handler: listBucketsHandler(serverCtx),
 			},
 			{
+				Method:  http.MethodPut,
+				Path:    "/buckets/:bucket",
+				Handler: ensureBucketHandler(serverCtx),
+			},
+			{
 				Method:  http.MethodGet,
 				Path:    "/metadata/:bucket/:key",
 				Handler: getMetadataHandler(serverCtx),

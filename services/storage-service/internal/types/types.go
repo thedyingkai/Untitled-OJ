@@ -7,6 +7,15 @@ type BucketsResp struct {
 	Buckets []string `json:"buckets"`
 }
 
+type BucketReq struct {
+	Bucket string `path:"bucket"`
+}
+
+type BucketResp struct {
+	Bucket  string `json:"bucket"`
+	Created bool   `json:"created"`
+}
+
 type DeleteObjectResp struct {
 	Deleted bool `json:"deleted"`
 }
@@ -14,6 +23,7 @@ type DeleteObjectResp struct {
 type HealthResp struct {
 	Status  string `json:"status"`
 	Service string `json:"service"`
+	Backend string `json:"backend"`
 }
 
 type ObjectMetadata struct {
