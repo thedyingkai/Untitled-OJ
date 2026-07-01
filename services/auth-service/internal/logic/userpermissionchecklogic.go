@@ -49,6 +49,21 @@ func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionChec
 		if callerService == "" {
 			return nil, errors.New("caller_service is required")
 		}
+		if l.svcCtx.SmokeAuth != nil {
+			return &types.PermissionCheckResp{
+				Code: 0,
+				Msg:  "success",
+				Data: types.PermissionCheckData{
+					Allowed: l.svcCtx.SmokeAuth.ServiceCallerCanUsePermission(
+						callerService,
+						strings.TrimSpace(req.Permission),
+					),
+				},
+			}, nil
+		}
+		if l.svcCtx.AdminRepo == nil {
+			return nil, errors.New("admin repository is unavailable")
+		}
 		allowed, err := l.svcCtx.AdminRepo.ServiceCallerCanUsePermission(
 			l.ctx,
 			callerService,
@@ -66,6 +81,9 @@ func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionChec
 
 	if claims.UserID <= 0 {
 		return nil, errors.New("unauthorized")
+	}
+	if l.svcCtx.DB == nil {
+		return nil, errors.New("database is unavailable")
 	}
 	if req.UserId != 0 && req.UserId != claims.UserID {
 		return nil, errors.New("cannot check another user's permission")

@@ -42,18 +42,21 @@ const (
 )
 
 type smokeConfig struct {
-	repoRoot      string
-	workRoot      string
-	redisURL      string
-	orchestrator  endpoint
-	storage       endpoint
-	gateway       endpoint
-	judgeAPI      endpoint
-	timeout       time.Duration
-	cleanStreams  bool
-	lastTaskID    string
-	lastResultID  string
-	authStubCalls *authCallRecorder
+	repoRoot         string
+	workRoot         string
+	redisURL         string
+	controlPlaneMode string
+	authMode         string
+	orchestrator     endpoint
+	auth             endpoint
+	storage          endpoint
+	gateway          endpoint
+	judgeAPI         endpoint
+	timeout          time.Duration
+	cleanStreams     bool
+	lastTaskID       string
+	lastResultID     string
+	authStubCalls    *authCallRecorder
 }
 
 type endpoint struct {
@@ -81,6 +84,8 @@ func (e stepError) Unwrap() error {
 func main() {
 	var (
 		redisURL     = flag.String("redis", envDefault("OJOS_REAL_REDIS_URL", envDefault("REDIS_URL", "redis://127.0.0.1:6379/0")), "Redis URL for live smoke")
+		controlPlane = flag.String("control-plane", envDefault("OJOS_SMOKE_CONTROL_PLANE", "stub"), "control plane mode: stub or real")
+		authMode     = flag.String("auth", envDefault("OJOS_SMOKE_AUTH", "stub"), "auth mode: stub or real")
 		workRoot     = flag.String("work-root", "", "smoke workspace; defaults to <repo>/.smoke/judge-local")
 		timeout      = flag.Duration("timeout", 90*time.Second, "overall smoke timeout")
 		cleanStreams = flag.Bool("clean-streams", true, "delete judge task/result stream keys before the smoke")
@@ -95,22 +100,37 @@ func main() {
 	if strings.TrimSpace(*workRoot) == "" {
 		*workRoot = filepath.Join(repoRoot, ".smoke", "judge-local")
 	}
-	orchestratorEndpoint, storageEndpoint, gatewayEndpoint, judgeAPIEndpoint, err := allocateSmokeEndpoints()
+	orchestratorEndpoint, authEndpoint, storageEndpoint, gatewayEndpoint, judgeAPIEndpoint, err := allocateSmokeEndpoints()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[FAIL] allocate smoke ports\nreason: %v\n", err)
 		os.Exit(1)
 	}
 	cfg := smokeConfig{
-		repoRoot:      repoRoot,
-		workRoot:      *workRoot,
-		redisURL:      normalizeRedisURL(*redisURL),
-		orchestrator:  orchestratorEndpoint,
-		storage:       storageEndpoint,
-		gateway:       gatewayEndpoint,
-		judgeAPI:      judgeAPIEndpoint,
-		timeout:       *timeout,
-		cleanStreams:  *cleanStreams,
-		authStubCalls: newAuthCallRecorder(),
+		repoRoot:         repoRoot,
+		workRoot:         *workRoot,
+		redisURL:         normalizeRedisURL(*redisURL),
+		controlPlaneMode: normalizeSmokeMode(*controlPlane),
+		authMode:         normalizeSmokeMode(*authMode),
+		orchestrator:     orchestratorEndpoint,
+		auth:             authEndpoint,
+		storage:          storageEndpoint,
+		gateway:          gatewayEndpoint,
+		judgeAPI:         judgeAPIEndpoint,
+		timeout:          *timeout,
+		cleanStreams:     *cleanStreams,
+		authStubCalls:    newAuthCallRecorder(),
+	}
+	if cfg.controlPlaneMode != cfg.authMode {
+		fmt.Fprintf(os.Stderr, "[FAIL] smoke mode\nreason: mixed control-plane/auth modes are not supported; use both stub or both real\n")
+		os.Exit(1)
+	}
+	if cfg.controlPlaneMode != "stub" && cfg.controlPlaneMode != "real" {
+		fmt.Fprintf(os.Stderr, "[FAIL] smoke mode\nreason: unsupported control-plane mode %q\n", cfg.controlPlaneMode)
+		os.Exit(1)
+	}
+	if cfg.authMode != "stub" && cfg.authMode != "real" {
+		fmt.Fprintf(os.Stderr, "[FAIL] smoke mode\nreason: unsupported auth mode %q\n", cfg.authMode)
+		os.Exit(1)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
@@ -148,16 +168,6 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("redis connected")
 
-	stub, err := startOrchestratorAuthStub(cfg)
-	if err != nil {
-		return fail("orchestrator/auth stub health", err)
-	}
-	defer shutdownHTTPServer(stub)
-	if err := waitHealth(ctx, cfg.orchestrator.baseURL()+"/health"); err != nil {
-		return fail("orchestrator/auth stub health", err)
-	}
-	ok("orchestrator/auth stub health")
-
 	processes := make([]*childProcess, 0, 4)
 	defer func() {
 		for i := len(processes) - 1; i >= 0; i-- {
@@ -165,6 +175,47 @@ func run(ctx context.Context, cfg smokeConfig) error {
 		}
 		_ = cleanupStaleSmokeProcesses(cfg.workRoot)
 	}()
+
+	var stub *http.Server
+	if cfg.controlPlaneMode == "stub" || cfg.authMode == "stub" {
+		var err error
+		stub, err = startOrchestratorAuthStub(cfg)
+		if err != nil {
+			return fail("orchestrator/auth stub health", err)
+		}
+		defer shutdownHTTPServer(stub)
+		if err := waitHealth(ctx, cfg.orchestrator.baseURL()+"/health"); err != nil {
+			return fail("orchestrator/auth stub health", err)
+		}
+		ok("orchestrator/auth stub health")
+	}
+
+	if cfg.controlPlaneMode == "real" {
+		orchestratorProc, err := startRealOrchestrator(ctx, cfg)
+		if err != nil {
+			return fail("orchestrator real backend started", err)
+		}
+		processes = append(processes, orchestratorProc)
+		if err := waitProcessHealth(ctx, orchestratorProc, cfg.orchestrator.baseURL()+"/health"); err != nil {
+			return fail("orchestrator real backend started", err)
+		}
+		ok("orchestrator real backend started")
+	}
+
+	if cfg.authMode == "real" {
+		authProc, err := startRealAuthService(ctx, cfg)
+		if err != nil {
+			return fail("auth-service real server started", err)
+		}
+		processes = append(processes, authProc)
+		if err := waitProcessHealth(ctx, authProc, cfg.auth.baseURL()+"/health"); err != nil {
+			return fail("auth-service real server started", err)
+		}
+		ok("auth-service real server started")
+		if err := verifyRealAuth(ctx, cfg); err != nil {
+			return err
+		}
+	}
 
 	storageCfg, err := writeStorageConfig(cfg)
 	if err != nil {
@@ -185,6 +236,12 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("storage-service health")
 
+	if cfg.controlPlaneMode == "real" {
+		if err := seedRealOrchestrator(ctx, cfg); err != nil {
+			return err
+		}
+	}
+
 	gatewayCfg, err := writeGatewayConfig(cfg)
 	if err != nil {
 		return fail("gateway config", err)
@@ -194,16 +251,7 @@ func run(ctx context.Context, cfg smokeConfig) error {
 		dir:     filepath.Join(cfg.repoRoot, "services", "gateway"),
 		logPath: filepath.Join(cfg.workRoot, "logs", "gateway.log"),
 		args:    []string{"go", "run", ".", "-f", gatewayCfg},
-		env: map[string]string{
-			"NO_PROXY":    "127.0.0.1,localhost",
-			"no_proxy":    "127.0.0.1,localhost",
-			"HTTP_PROXY":  "",
-			"HTTPS_PROXY": "",
-			"ALL_PROXY":   "",
-			"http_proxy":  "",
-			"https_proxy": "",
-			"all_proxy":   "",
-		},
+		env:     noProxyEnv(nil),
 	})
 	if err != nil {
 		return fail("gateway start", err)
@@ -213,6 +261,11 @@ func run(ctx context.Context, cfg smokeConfig) error {
 		return fail("gateway health", err)
 	}
 	ok("gateway health")
+	if cfg.authMode == "real" {
+		if err := verifyGatewayAuthBoundaries(ctx, cfg); err != nil {
+			return err
+		}
+	}
 
 	judgeProc, err := startProcess(ctx, processSpec{
 		name:    "judge-api",
@@ -228,16 +281,7 @@ func run(ctx context.Context, cfg smokeConfig) error {
 			"-caller-node-id", childNodeID,
 			"-submissions-root", filepath.Join(cfg.workRoot, "submissions"),
 		},
-		env: map[string]string{
-			"NO_PROXY":    "127.0.0.1,localhost",
-			"no_proxy":    "127.0.0.1,localhost",
-			"HTTP_PROXY":  "",
-			"HTTPS_PROXY": "",
-			"ALL_PROXY":   "",
-			"http_proxy":  "",
-			"https_proxy": "",
-			"all_proxy":   "",
-		},
+		env: noProxyEnv(nil),
 	})
 	if err != nil {
 		return fail("judge-api start", err)
@@ -318,8 +362,13 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("result query returned Finished/Accepted")
 
-	if !cfg.authStubCalls.HasCaller(judgeAPIService) || !cfg.authStubCalls.HasCaller(workerService) {
+	if cfg.authMode == "stub" && (!cfg.authStubCalls.HasCaller(judgeAPIService) || !cfg.authStubCalls.HasCaller(workerService)) {
 		return fail("service identity observed", fmt.Errorf("auth stub calls: %v", cfg.authStubCalls.Snapshot()))
+	}
+	if cfg.authMode == "real" {
+		if err := waitLogContains(ctx, filepath.Join(cfg.workRoot, "logs", "auth-service.log"), "POST /auth/permission-check"); err != nil {
+			return fail("service identity observed", err)
+		}
 	}
 	ok("service identity observed: judge-api and judge-worker")
 
@@ -329,41 +378,260 @@ func run(ctx context.Context, cfg smokeConfig) error {
 }
 
 func startWorker(ctx context.Context, cfg smokeConfig) (*childProcess, error) {
+	env := noProxyEnv(map[string]string{
+		"LANGUAGES_CONFIG":               filepath.Join(cfg.repoRoot, "services", "judge-worker", "config", "languages.yaml"),
+		"OJOS_JUDGE_API_URL":             cfg.judgeAPI.baseURL(),
+		"OJOS_WORKER_TOKEN":              workerToken,
+		"OJOS_WORKER_ID":                 workerEndpointID,
+		"OJOS_WORKER_NAME":               "smoke-judge-worker",
+		"OJOS_MAX_CONCURRENCY":           "1",
+		"OJOS_WORK_DIR":                  filepath.Join(cfg.workRoot, "worker-work"),
+		"OJOS_ARTIFACT_CACHE_DIR":        filepath.Join(cfg.workRoot, "worker-cache"),
+		"OJOS_SUPPORTED_LANGUAGES":       "cpp17",
+		"OJOS_REDIS_URL":                 cfg.redisURL,
+		"OJOS_JUDGE_TASK_STREAM":         taskStream,
+		"OJOS_JUDGE_CONSUMER_GROUP":      consumerGroup,
+		"OJOS_INTERNAL_GATEWAY_URL":      cfg.gateway.baseURL(),
+		"OJOS_STORAGE_OBJECT_GET_API_ID": "storage.object.get",
+		"OJOS_STORAGE_OBJECT_PUT_API_ID": "storage.object.put",
+		"OJOS_SERVICE_TOKEN":             serviceToken,
+		"OJOS_CALLER_NODE_ID":            childNodeID,
+		"OJOS_RUNNER_MODE":               "fake",
+		"OJOS_WORKER_SMOKE_ONCE":         "1",
+	})
 	return startProcess(ctx, processSpec{
 		name:    "judge-worker",
 		dir:     filepath.Join(cfg.repoRoot, "services", "judge-worker"),
 		logPath: filepath.Join(cfg.workRoot, "logs", "judge-worker.log"),
 		args:    []string{"cargo", "run", "--quiet"},
-		env: map[string]string{
-			"LANGUAGES_CONFIG":               filepath.Join(cfg.repoRoot, "services", "judge-worker", "config", "languages.yaml"),
-			"OJOS_JUDGE_API_URL":             cfg.judgeAPI.baseURL(),
-			"OJOS_WORKER_TOKEN":              workerToken,
-			"OJOS_WORKER_ID":                 workerEndpointID,
-			"OJOS_WORKER_NAME":               "smoke-judge-worker",
-			"OJOS_MAX_CONCURRENCY":           "1",
-			"OJOS_WORK_DIR":                  filepath.Join(cfg.workRoot, "worker-work"),
-			"OJOS_ARTIFACT_CACHE_DIR":        filepath.Join(cfg.workRoot, "worker-cache"),
-			"OJOS_SUPPORTED_LANGUAGES":       "cpp17",
-			"OJOS_REDIS_URL":                 cfg.redisURL,
-			"OJOS_JUDGE_TASK_STREAM":         taskStream,
-			"OJOS_JUDGE_CONSUMER_GROUP":      consumerGroup,
-			"OJOS_INTERNAL_GATEWAY_URL":      cfg.gateway.baseURL(),
-			"OJOS_STORAGE_OBJECT_GET_API_ID": "storage.object.get",
-			"OJOS_STORAGE_OBJECT_PUT_API_ID": "storage.object.put",
-			"OJOS_SERVICE_TOKEN":             serviceToken,
-			"OJOS_CALLER_NODE_ID":            childNodeID,
-			"OJOS_RUNNER_MODE":               "fake",
-			"OJOS_WORKER_SMOKE_ONCE":         "1",
-			"NO_PROXY":                       "127.0.0.1,localhost",
-			"no_proxy":                       "127.0.0.1,localhost",
-			"HTTP_PROXY":                     "",
-			"HTTPS_PROXY":                    "",
-			"ALL_PROXY":                      "",
-			"http_proxy":                     "",
-			"https_proxy":                    "",
-			"all_proxy":                      "",
-		},
+		env:     env,
 	})
+}
+
+func startRealOrchestrator(ctx context.Context, cfg smokeConfig) (*childProcess, error) {
+	return startProcess(ctx, processSpec{
+		name:    "orchestrator",
+		dir:     filepath.Join(cfg.repoRoot, "services", "orchestrator", "backend"),
+		logPath: filepath.Join(cfg.workRoot, "logs", "orchestrator.log"),
+		args: []string{
+			"cargo", "run", "--quiet", "--",
+			"--repo-root", cfg.repoRoot,
+			"--bind", fmt.Sprintf("%s:%d", cfg.orchestrator.host, cfg.orchestrator.port),
+		},
+		env: noProxyEnv(map[string]string{
+			"OJOS_SMOKE_MODE": "1",
+		}),
+	})
+}
+
+func startRealAuthService(ctx context.Context, cfg smokeConfig) (*childProcess, error) {
+	authCfg, err := writeAuthConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return startProcess(ctx, processSpec{
+		name:    "auth-service",
+		dir:     filepath.Join(cfg.repoRoot, "services", "auth-service"),
+		logPath: filepath.Join(cfg.workRoot, "logs", "auth-service.log"),
+		args:    []string{"go", "run", ".", "-f", authCfg},
+		env: noProxyEnv(map[string]string{
+			"OJOS_SMOKE_MODE":     "1",
+			"AUTH_INTERNAL_TOKEN": serviceToken,
+		}),
+	})
+}
+
+func seedRealOrchestrator(ctx context.Context, cfg smokeConfig) error {
+	endpointID := fmt.Sprintf("%s:%d:%s", cfg.storage.host, cfg.storage.port, storageService)
+	body := map[string]any{
+		"root_node_id":         rootNodeID,
+		"root_host_ip":         cfg.storage.host,
+		"child_node_id":        childNodeID,
+		"child_host_ip":        "127.0.0.2",
+		"storage_service_name": storageService,
+		"storage_version":      "0.1.0",
+		"storage_endpoint":     endpointID,
+		"storage_protocol":     "http",
+	}
+	var resp struct {
+		Status        string               `json:"status"`
+		NodeID        string               `json:"node_id"`
+		EffectiveAPIs []effectiveAPIRecord `json:"effective_apis"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.orchestrator.baseURL()+"/internal/smoke/seed-control-plane", body, map[string]string{}, &resp); err != nil {
+		return fail("node tree seeded", err)
+	}
+	if resp.NodeID != childNodeID {
+		return fail("node tree seeded", fmt.Errorf("unexpected seeded node %q", resp.NodeID))
+	}
+	ok("node tree seeded")
+	for _, want := range []string{"storage.object.put", "storage.object.get", "storage.object.head"} {
+		if !effectiveAPIContains(resp.EffectiveAPIs, want, endpointID) {
+			return fail("storage API surface registered", fmt.Errorf("missing effective API %s endpoint=%s", want, endpointID))
+		}
+	}
+	ok("storage API surface registered")
+	if err := verifyRealOrchestratorRoutes(ctx, cfg, endpointID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyRealOrchestratorRoutes(ctx context.Context, cfg smokeConfig, endpointID string) error {
+	var table routeTableResponse
+	target := cfg.orchestrator.baseURL() + "/internal/orchestrator/nodes/" + childNodeID + "/routes?include_upstream=true"
+	if err := doJSONWithHeaders(ctx, http.MethodGet, target, nil, map[string]string{}, &table); err != nil {
+		return fail("child effective routes loaded from real orchestrator", err)
+	}
+	for _, want := range []string{"storage.object.put", "storage.object.get", "storage.object.head"} {
+		route := findRoute(table.Routes, want)
+		if route == nil {
+			return fail("child effective routes loaded from real orchestrator", fmt.Errorf("missing route %s", want))
+		}
+		if route.ProviderNodeID != rootNodeID || route.ProviderEndpoint != endpointID || route.UpstreamBase != cfg.storage.baseURL() {
+			return fail("child effective routes loaded from real orchestrator", fmt.Errorf("route %s resolved to provider=%s endpoint=%s upstream=%s", want, route.ProviderNodeID, route.ProviderEndpoint, route.UpstreamBase))
+		}
+	}
+	ok("child effective routes loaded from real orchestrator")
+	return nil
+}
+
+func verifyRealAuth(ctx context.Context, cfg smokeConfig) error {
+	allowed, status, err := permissionCheck(ctx, cfg.auth.baseURL(), serviceToken, judgeAPIService, "storage.object.put", "storage.object.write")
+	if err != nil {
+		return fail("permission-check allowed service caller", err)
+	}
+	if status != http.StatusOK || !allowed {
+		return fail("permission-check allowed service caller", fmt.Errorf("status=%d allowed=%v", status, allowed))
+	}
+	ok("permission-check allowed service caller")
+
+	_, status, err = permissionCheck(ctx, cfg.auth.baseURL(), "", judgeAPIService, "storage.object.put", "storage.object.write")
+	if err != nil {
+		return fail("permission-check rejected missing token", err)
+	}
+	if status != http.StatusUnauthorized {
+		return fail("permission-check rejected missing token", fmt.Errorf("expected 401, got %d", status))
+	}
+	ok("permission-check rejected missing token")
+
+	allowed, status, err = permissionCheck(ctx, cfg.auth.baseURL(), serviceToken, judgeAPIService, "storage.object.delete", "storage.object.delete")
+	if err != nil {
+		return fail("permission-check denied missing permission", err)
+	}
+	if status != http.StatusOK || allowed {
+		return fail("permission-check denied missing permission", fmt.Errorf("status=%d allowed=%v", status, allowed))
+	}
+	ok("permission-check denied missing permission")
+	return nil
+}
+
+func verifyGatewayAuthBoundaries(ctx context.Context, cfg smokeConfig) error {
+	headers := map[string]string{
+		"Authorization":         "Bearer " + serviceToken,
+		"X-OJOS-Caller-Service": judgeAPIService,
+		"X-OJOS-Node-Id":        childNodeID,
+	}
+	status, body, err := doStatus(ctx, http.MethodDelete, cfg.gateway.baseURL()+"/internal/apis/storage.object.delete/submissions/auth-denied.txt", nil, headers)
+	if err != nil {
+		return fail("gateway permission-check denied missing permission", err)
+	}
+	if status != http.StatusForbidden {
+		return fail("gateway permission-check denied missing permission", fmt.Errorf("expected 403, got %d: %s", status, strings.TrimSpace(string(body))))
+	}
+	ok("gateway permission-check denied missing permission")
+
+	status, body, err = doStatus(ctx, http.MethodGet, cfg.gateway.baseURL()+"/internal/apis/storage.object.get/submissions/auth-missing.txt", nil, map[string]string{
+		"X-OJOS-Caller-Service": judgeAPIService,
+		"X-OJOS-Node-Id":        childNodeID,
+	})
+	if err != nil {
+		return fail("gateway permission-check rejected missing token", err)
+	}
+	if status != http.StatusUnauthorized {
+		return fail("gateway permission-check rejected missing token", fmt.Errorf("expected 401, got %d: %s", status, strings.TrimSpace(string(body))))
+	}
+	ok("gateway permission-check rejected missing token")
+
+	status, body, err = doStatus(ctx, http.MethodGet, cfg.gateway.baseURL()+"/internal/apis/storage.object.public-head/submissions/auth-public-missing.txt", nil, map[string]string{
+		"X-OJOS-Node-Id": childNodeID,
+	})
+	if err != nil {
+		return fail("public API skipped token", err)
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return fail("public API skipped token", fmt.Errorf("expected non-auth response, got %d: %s", status, strings.TrimSpace(string(body))))
+	}
+	ok("public API skipped token")
+	return nil
+}
+
+func permissionCheck(ctx context.Context, baseURL string, token string, callerService string, apiID string, permission string) (bool, int, error) {
+	body := map[string]any{
+		"caller_type":    "service",
+		"caller_service": callerService,
+		"caller_node_id": childNodeID,
+		"api_id":         apiID,
+		"permission":     permission,
+		"scope_type":     "system",
+	}
+	headers := map[string]string{}
+	if strings.TrimSpace(token) != "" {
+		headers["Authorization"] = "Bearer " + token
+	}
+	status, data, err := doStatus(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/auth/permission-check", body, headers)
+	if err != nil {
+		return false, 0, err
+	}
+	if status < 200 || status >= 300 {
+		return false, status, nil
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Allowed bool `json:"allowed"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return false, status, err
+	}
+	return resp.Code == 0 && resp.Data.Allowed, status, nil
+}
+
+type effectiveAPIRecord struct {
+	APIID            string `json:"api_id"`
+	ProviderEndpoint string `json:"provider_endpoint"`
+	Status           string `json:"status"`
+}
+
+func effectiveAPIContains(items []effectiveAPIRecord, apiID string, endpointID string) bool {
+	for _, item := range items {
+		if item.APIID == apiID && item.ProviderEndpoint == endpointID && item.Status == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+type routeTableResponse struct {
+	Routes []routeTableItem `json:"routes"`
+}
+
+type routeTableItem struct {
+	APIID            string `json:"api_id"`
+	ProviderNodeID   string `json:"provider_node_id"`
+	ProviderEndpoint string `json:"provider_endpoint"`
+	UpstreamBase     string `json:"upstream_base"`
+	ProxyEnabled     bool   `json:"proxy_enabled"`
+}
+
+func findRoute(routes []routeTableItem, apiID string) *routeTableItem {
+	for i := range routes {
+		if routes[i].APIID == apiID && routes[i].ProxyEnabled {
+			return &routes[i]
+		}
+	}
+	return nil
 }
 
 func startOrchestratorAuthStub(cfg smokeConfig) (*http.Server, error) {
@@ -483,6 +751,10 @@ Storage:
 
 func writeGatewayConfig(cfg smokeConfig) (string, error) {
 	path := filepath.Join(cfg.workRoot, "config", "gateway.yaml")
+	authEndpoint := cfg.orchestrator.baseURL()
+	if cfg.authMode == "real" {
+		authEndpoint = cfg.auth.baseURL()
+	}
 	content := fmt.Sprintf(`Name: gateway-smoke
 Host: %s
 Port: %d
@@ -516,8 +788,26 @@ AuthService:
 		yamlString(filepath.Join(cfg.workRoot, "submissions")),
 		yamlString(cfg.orchestrator.baseURL()),
 		yamlString(childNodeID),
-		yamlString(cfg.orchestrator.baseURL()),
+		yamlString(authEndpoint),
 	)
+	return path, os.WriteFile(path, []byte(content), 0o644)
+}
+
+func writeAuthConfig(cfg smokeConfig) (string, error) {
+	path := filepath.Join(cfg.workRoot, "config", "auth.yaml")
+	content := fmt.Sprintf(`Name: auth-service-smoke
+Host: %s
+Port: %d
+Database:
+  Url: ""
+Jaeger:
+  Endpoint: ""
+Jwt:
+  Secret: "smoke"
+  ExpireHours: 24
+InternalAuth:
+  Token: %s
+`, cfg.auth.host, cfg.auth.port, yamlString(serviceToken))
 	return path, os.WriteFile(path, []byte(content), 0o644)
 }
 
@@ -706,6 +996,15 @@ func querySubmissionCases(ctx context.Context, cfg smokeConfig, submissionID int
 }
 
 func doJSON(ctx context.Context, method string, target string, body any, out any) error {
+	return doJSONWithHeaders(ctx, method, target, body, map[string]string{
+		"X-Auth-Verified": "true",
+		"X-User-Id":       "7",
+		"X-Username":      "smoke",
+		"X-Roles":         "user",
+	}, out)
+}
+
+func doJSONWithHeaders(ctx context.Context, method string, target string, body any, headers map[string]string, out any) error {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -718,10 +1017,11 @@ func doJSON(ctx context.Context, method string, target string, body any, out any
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Auth-Verified", "true")
-	req.Header.Set("X-User-Id", "7")
-	req.Header.Set("X-Username", "smoke")
-	req.Header.Set("X-Roles", "user")
+	for key, value := range headers {
+		if strings.TrimSpace(value) != "" {
+			req.Header.Set(key, value)
+		}
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -738,6 +1038,36 @@ func doJSON(ctx context.Context, method string, target string, body any, out any
 		return nil
 	}
 	return json.Unmarshal(data, out)
+}
+
+func doStatus(ctx context.Context, method string, target string, body any, headers map[string]string) (int, []byte, error) {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return 0, nil, err
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, reader)
+	if err != nil {
+		return 0, nil, err
+	}
+	for key, value := range headers {
+		if strings.TrimSpace(value) != "" {
+			req.Header.Set(key, value)
+		}
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := smokeHTTP.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	return resp.StatusCode, data, nil
 }
 
 func findTaskEntry(ctx context.Context, client *redis.Client, submissionID int64) (string, error) {
@@ -953,24 +1283,28 @@ func findRepoRoot() (string, error) {
 	}
 }
 
-func allocateSmokeEndpoints() (endpoint, endpoint, endpoint, endpoint, error) {
+func allocateSmokeEndpoints() (endpoint, endpoint, endpoint, endpoint, endpoint, error) {
 	orchestrator, err := freeEndpoint()
 	if err != nil {
-		return endpoint{}, endpoint{}, endpoint{}, endpoint{}, err
+		return endpoint{}, endpoint{}, endpoint{}, endpoint{}, endpoint{}, err
+	}
+	auth, err := freeEndpoint()
+	if err != nil {
+		return endpoint{}, endpoint{}, endpoint{}, endpoint{}, endpoint{}, err
 	}
 	storage, err := freeEndpoint()
 	if err != nil {
-		return endpoint{}, endpoint{}, endpoint{}, endpoint{}, err
+		return endpoint{}, endpoint{}, endpoint{}, endpoint{}, endpoint{}, err
 	}
 	gateway, err := freeEndpoint()
 	if err != nil {
-		return endpoint{}, endpoint{}, endpoint{}, endpoint{}, err
+		return endpoint{}, endpoint{}, endpoint{}, endpoint{}, endpoint{}, err
 	}
 	judgeAPI, err := freeEndpoint()
 	if err != nil {
-		return endpoint{}, endpoint{}, endpoint{}, endpoint{}, err
+		return endpoint{}, endpoint{}, endpoint{}, endpoint{}, endpoint{}, err
 	}
-	return orchestrator, storage, gateway, judgeAPI, nil
+	return orchestrator, auth, storage, gateway, judgeAPI, nil
 }
 
 func freeEndpoint() (endpoint, error) {
@@ -995,7 +1329,7 @@ func cleanupStaleSmokeProcesses(workRoot string) error {
 		return nil
 	}
 	script := fmt.Sprintf(
-		`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*%s*' -and ($_.Name -eq 'ojos-storage-service.exe' -or $_.Name -eq 'ojos-gateway.exe' -or $_.Name -eq 'smoke-server.exe' -or $_.Name -eq 'judge-worker.exe') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+		`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*%s*' -and ($_.Name -eq 'ojos-storage-service.exe' -or $_.Name -eq 'ojos-gateway.exe' -or $_.Name -eq 'smoke-server.exe' -or $_.Name -eq 'judge-worker.exe' -or $_.Name -eq 'ojos-orchestrator-daemon.exe' -or $_.Name -eq 'ojos-auth-service.exe') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
 		strings.ReplaceAll(workRoot, "'", "''"),
 	)
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", script)
@@ -1008,6 +1342,35 @@ func processEnv(overrides map[string]string) []string {
 		out = setEnv(out, key, value)
 	}
 	return out
+}
+
+func noProxyEnv(overrides map[string]string) map[string]string {
+	out := map[string]string{
+		"NO_PROXY":    "127.0.0.1,localhost",
+		"no_proxy":    "127.0.0.1,localhost",
+		"HTTP_PROXY":  "",
+		"HTTPS_PROXY": "",
+		"ALL_PROXY":   "",
+		"http_proxy":  "",
+		"https_proxy": "",
+		"all_proxy":   "",
+	}
+	for key, value := range overrides {
+		out[key] = value
+	}
+	return out
+}
+
+func normalizeSmokeMode(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "stub":
+		return "stub"
+	case "real":
+		return "real"
+	default:
+		return value
+	}
 }
 
 func setEnv(env []string, key string, value string) []string {
@@ -1077,7 +1440,7 @@ func envDefault(key string, fallback string) string {
 }
 
 func printLastLogs(w io.Writer, logDir string) {
-	for _, name := range []string{"storage-service.log", "gateway.log", "judge-api.log", "judge-worker.log"} {
+	for _, name := range []string{"orchestrator.log", "auth-service.log", "storage-service.log", "gateway.log", "judge-api.log", "judge-worker.log"} {
 		path := filepath.Join(logDir, name)
 		text := lastLines(path, 30)
 		if strings.TrimSpace(text) == "" {

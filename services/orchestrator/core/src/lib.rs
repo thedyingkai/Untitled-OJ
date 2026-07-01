@@ -24,7 +24,8 @@ pub use database::{
 };
 pub use dispatcher::{
     ActionCapabilityStatus, ActionDispatchResult, ActionMatrixEntry, OrchestratorActionConsole,
-    OrchestratorActionDispatcher, action_matrix, capability_for_action, default_console_request,
+    OrchestratorActionDispatcher, SmokeControlPlaneSeed, action_matrix, capability_for_action,
+    default_console_request,
 };
 pub use executor::{
     DockerComposeDriver, DriverRequest, DriverResult, ExecutionDriver, ExternalEndpointDriver,

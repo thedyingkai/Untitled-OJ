@@ -1,10 +1,12 @@
 use crate::{
-    ActionRequest, DiagnosticExport, DiagnosticReport, DriverResult, EndpointHealthResult,
-    EndpointProbe, MemoryOrchestratorStore, NodeServiceDispatchRequest, NodeServiceDispatchResult,
-    Operation, OperationExecutor, OperationLogRecord, OperationStatus, OrchestratorError,
-    OrchestratorStore, PgOrchestratorStore, RenderedServiceConfig, Result, StaticEndpointProbe,
-    TcpEndpointProbe, Topology, action_catalog, action_descriptor, cancel_operation,
-    check_endpoint_health_with_probe, confirm_operation, default_action_request,
+    ActionRequest, DeployedServiceApi, DiagnosticExport, DiagnosticReport, DriverResult, Endpoint,
+    EndpointDecl, EndpointHealthResult, EndpointProbe, HostService, MemoryOrchestratorStore,
+    NodeRecord, NodeServiceDispatchRequest, NodeServiceDispatchResult, Operation,
+    OperationExecutor, OperationLogRecord, OperationStatus, OrchestratorError, OrchestratorStore,
+    PgOrchestratorStore, RenderedServiceConfig, Result, RuntimeMode, ServiceApiSurface,
+    ServiceHealthDecl, ServiceManifest, ServiceProvides, ServiceRequires, ServiceRuntimeDecl,
+    SourceDecl, StaticEndpointProbe, TcpEndpointProbe, Topology, action_catalog, action_descriptor,
+    cancel_operation, check_endpoint_health_with_probe, confirm_operation, default_action_request,
     export_diagnostic_report, load_operation_workbench_context,
     load_operation_workbench_context_from_store, load_orchestrator_view_from_store,
     operation_log_record, operation_step_log_record, plan_action_request, plan_operation,
@@ -498,6 +500,18 @@ enum ConsoleStoreMode {
     Persistent { database_url: String },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SmokeControlPlaneSeed {
+    pub root_node_id: String,
+    pub root_host_ip: String,
+    pub child_node_id: String,
+    pub child_host_ip: String,
+    pub storage_service_name: String,
+    pub storage_version: String,
+    pub storage_endpoint: String,
+    pub storage_protocol: String,
+}
+
 impl OrchestratorActionConsole {
     pub fn load(repo_root: impl Into<PathBuf>) -> Result<Self> {
         let repo_root = repo_root.into();
@@ -699,6 +713,24 @@ impl OrchestratorActionConsole {
                 .map_err(persistent_store_unavailable);
         }
         self.memory_store.effective_api_routes(node_id)
+    }
+
+    pub fn seed_smoke_control_plane(
+        &mut self,
+        seed: SmokeControlPlaneSeed,
+    ) -> Result<Vec<crate::EffectiveApiRoute>> {
+        if self.uses_persistent_store() {
+            let mut store = self.persistent_store()?;
+            seed_smoke_control_plane_into_store(&mut store, seed.clone())
+                .map_err(persistent_store_unavailable)?;
+            self.memory_store =
+                memory_store_from_store(&store).map_err(persistent_store_unavailable)?;
+            return store
+                .effective_api_routes(&seed.child_node_id)
+                .map_err(persistent_store_unavailable);
+        }
+        seed_smoke_control_plane_into_store(&mut self.memory_store, seed.clone())?;
+        self.memory_store.effective_api_routes(&seed.child_node_id)
     }
 
     pub fn service_permission_records(&self) -> Result<Vec<crate::ServicePermissionRecord>> {
@@ -1158,6 +1190,202 @@ fn memory_store_from_store<S: OrchestratorStore>(store: &S) -> Result<MemoryOrch
         memory.put_topology(topology)?;
     }
     Ok(memory)
+}
+
+fn seed_smoke_control_plane_into_store<S: OrchestratorStore>(
+    store: &mut S,
+    seed: SmokeControlPlaneSeed,
+) -> Result<()> {
+    let storage_service_name = seed.storage_service_name.trim();
+    let storage_version = seed.storage_version.trim();
+    let endpoint_identity = crate::parse_endpoint_id(&seed.storage_endpoint)?;
+    if endpoint_identity.service_name != storage_service_name {
+        return Err(OrchestratorError::InvalidManifest(
+            "smoke storage endpoint service-name must match storage_service_name".to_string(),
+        ));
+    }
+    if endpoint_identity.host.to_string() != seed.root_host_ip {
+        return Err(OrchestratorError::InvalidManifest(
+            "smoke storage endpoint host must match root_host_ip".to_string(),
+        ));
+    }
+    let endpoint_port = endpoint_identity.port.parse::<u16>().map_err(|_| {
+        OrchestratorError::InvalidManifest("smoke storage endpoint port is invalid".to_string())
+    })?;
+
+    store.upsert_node(NodeRecord {
+        node_id: seed.root_node_id.clone(),
+        host_ip: seed.root_host_ip.clone(),
+        parent_node_id: String::new(),
+        role: "root".to_string(),
+        labels: serde_json::json!({"smoke": true}),
+        status: "running".to_string(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    })?;
+    store.upsert_node(NodeRecord {
+        node_id: seed.child_node_id.clone(),
+        host_ip: seed.child_host_ip.clone(),
+        parent_node_id: seed.root_node_id.clone(),
+        role: "node".to_string(),
+        labels: serde_json::json!({"smoke": true}),
+        status: "running".to_string(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    })?;
+    store.upsert_service(smoke_storage_service_manifest(
+        storage_service_name,
+        storage_version,
+        endpoint_port,
+    )?)?;
+    store.upsert_host_service(HostService {
+        host_ip: seed.root_host_ip.clone(),
+        service_name: storage_service_name.to_string(),
+        version: storage_version.to_string(),
+        status: "running".to_string(),
+        config: serde_json::json!({"smoke": true}),
+        labels: serde_json::json!({"node_id": seed.root_node_id, "smoke": true}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    })?;
+    store.upsert_endpoint(Endpoint {
+        endpoint: seed.storage_endpoint.clone(),
+        service_id: storage_service_name.to_string(),
+        protocol: seed.storage_protocol.clone(),
+        health_path: "/health".to_string(),
+        health: "ok".to_string(),
+        reachable: true,
+        display_name: "Smoke storage-service".to_string(),
+        note: "smoke/dev only endpoint seeded by OJOS_SMOKE_MODE".to_string(),
+        config: serde_json::json!({"smoke": true}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    })?;
+
+    for (api_id, methods, permission, auth_mode) in [
+        (
+            "storage.object.put",
+            vec!["PUT".to_string(), "POST".to_string()],
+            "storage.object.write",
+            "service",
+        ),
+        (
+            "storage.object.get",
+            vec!["GET".to_string()],
+            "storage.object.read",
+            "service",
+        ),
+        (
+            "storage.object.head",
+            vec!["HEAD".to_string(), "GET".to_string()],
+            "storage.object.read",
+            "service",
+        ),
+        (
+            "storage.object.delete",
+            vec!["DELETE".to_string()],
+            "storage.object.delete",
+            "service",
+        ),
+        (
+            "storage.object.public-head",
+            vec!["HEAD".to_string(), "GET".to_string()],
+            "public",
+            "public",
+        ),
+    ] {
+        store.upsert_service_api_surface(ServiceApiSurface {
+            service_name: storage_service_name.to_string(),
+            version: storage_version.to_string(),
+            api_id: api_id.to_string(),
+            protocol: seed.storage_protocol.clone(),
+            port_name: "http".to_string(),
+            path_prefix: "/api/storage/objects".to_string(),
+            methods,
+            visibility: "descendants".to_string(),
+            auth_mode: auth_mode.to_string(),
+            permission: permission.to_string(),
+            stability: "stable".to_string(),
+            api_version: "v1".to_string(),
+            rate_limit: String::new(),
+            timeout: "15s".to_string(),
+            config: serde_json::json!({"smoke": true}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })?;
+        store.upsert_deployed_service_api(DeployedServiceApi {
+            host_ip: seed.root_host_ip.clone(),
+            service_name: storage_service_name.to_string(),
+            version: storage_version.to_string(),
+            endpoint: seed.storage_endpoint.clone(),
+            api_id: api_id.to_string(),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })?;
+    }
+    Ok(())
+}
+
+fn smoke_storage_service_manifest(
+    service_id: &str,
+    version: &str,
+    default_port: u16,
+) -> Result<ServiceManifest> {
+    let manifest = ServiceManifest {
+        schema_version: 1,
+        id: service_id.to_string(),
+        name: "Smoke Storage Service".to_string(),
+        version: version.to_string(),
+        kind: "backend-api".to_string(),
+        description: "Smoke/dev only storage-service fixture".to_string(),
+        endpoint: EndpointDecl {
+            protocol: "http".to_string(),
+            default_port,
+            health_path: "/health".to_string(),
+            expose: true,
+            routes: vec!["/api/storage/objects".to_string()],
+        },
+        runtime: ServiceRuntimeDecl {
+            mode: RuntimeMode::External,
+            driver: "external".to_string(),
+            root_allowed: true,
+            non_root_allowed: false,
+            start_policy: "manual".to_string(),
+            restart_policy: "manual".to_string(),
+        },
+        config_schema: serde_json::json!({}),
+        requires: ServiceRequires::default(),
+        provides: ServiceProvides {
+            capabilities: vec!["storage.object".to_string()],
+            endpoints: Vec::new(),
+            routes: vec!["/api/storage/objects".to_string()],
+            workers: Vec::new(),
+            storage_buckets: Vec::new(),
+            events: Vec::new(),
+        },
+        ui: Default::default(),
+        permissions: vec![
+            "storage.object.read".to_string(),
+            "storage.object.write".to_string(),
+            "storage.object.delete".to_string(),
+        ],
+        security: Default::default(),
+        source: SourceDecl {
+            r#type: "local".to_string(),
+            reference: "services/storage-service".to_string(),
+            build: serde_json::json!({}),
+            artifact: serde_json::json!({}),
+        },
+        health: ServiceHealthDecl {
+            checks: vec!["http".to_string()],
+            timeout_seconds: 3,
+            interval_seconds: 10,
+        },
+        resources: serde_json::json!({"smoke": true}),
+    };
+    validate_service_manifest(&manifest)?;
+    Ok(manifest)
 }
 
 fn accept_node_service_install_into_store<S: OrchestratorStore>(

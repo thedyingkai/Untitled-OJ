@@ -2,8 +2,8 @@ use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use orchestrator_core::{
     ActionRequest, EffectiveApiRoute, Endpoint, NodeServiceDispatchRequest,
-    OrchestratorActionConsole, ServiceRoute, default_console_request, parse_endpoint_id,
-    validate_endpoint_id,
+    OrchestratorActionConsole, ServiceRoute, SmokeControlPlaneSeed, default_console_request,
+    parse_endpoint_id, validate_endpoint_id,
 };
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -108,6 +108,23 @@ fn route_api_request(
             let request = serde_json::from_str::<NodeServiceDispatchRequest>(&request.body)?;
             Ok(ApiResponse::ok(json!({
                 "node_dispatch_result": console.accept_node_service_install(request)?,
+            })))
+        }
+        ("POST", ["internal", "smoke", "seed-control-plane"]) => {
+            if !smoke_mode_enabled() {
+                return Ok(ApiResponse::error(
+                    404,
+                    "smoke seed endpoint is disabled; set OJOS_SMOKE_MODE=1 for smoke/dev only",
+                ));
+            }
+            let seed = serde_json::from_str::<SmokeControlPlaneSeed>(&request.body)?;
+            let child_node_id = seed.child_node_id.clone();
+            let routes = console.seed_smoke_control_plane(seed)?;
+            Ok(ApiResponse::ok(json!({
+                "status": "ok",
+                "mode": "smoke/dev-only",
+                "node_id": child_node_id,
+                "effective_apis": routes,
             })))
         }
         ("GET", ["health"]) => Ok(ApiResponse::ok(json!({
@@ -835,6 +852,12 @@ fn route_methods(method: &str) -> Vec<String> {
     } else {
         vec![method.trim().to_ascii_uppercase()]
     }
+}
+
+fn smoke_mode_enabled() -> bool {
+    std::env::var("OJOS_SMOKE_MODE")
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(false)
 }
 
 fn fields_from_body(body: &str) -> Result<BTreeMap<String, String>> {
@@ -1685,6 +1708,71 @@ mod tests {
                         && route["required_permission"] == "demo.read"
                 })
         );
+    }
+
+    #[test]
+    fn daemon_smoke_seed_route_is_disabled_by_default() {
+        let _lock = NODE_INSTALL_ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::remove_var("OJOS_SMOKE_MODE");
+        }
+        let mut console = console();
+        let response = post_json(
+            &mut console,
+            "/internal/smoke/seed-control-plane",
+            r#"{
+                "root_node_id": "root-node",
+                "root_host_ip": "127.0.0.1",
+                "child_node_id": "child-node",
+                "child_host_ip": "127.0.0.2",
+                "storage_service_name": "storage-service",
+                "storage_version": "0.1.0",
+                "storage_endpoint": "127.0.0.1:19280:storage-service",
+                "storage_protocol": "http"
+            }"#,
+        );
+        assert_eq!(response.status, 404);
+    }
+
+    #[test]
+    fn daemon_smoke_seed_route_uses_real_effective_api_view_when_enabled() {
+        let _lock = NODE_INSTALL_ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::set_var("OJOS_SMOKE_MODE", "1");
+        }
+        let mut console = console();
+        let response = post_json(
+            &mut console,
+            "/internal/smoke/seed-control-plane",
+            r#"{
+                "root_node_id": "root-node",
+                "root_host_ip": "127.0.0.1",
+                "child_node_id": "child-node",
+                "child_host_ip": "127.0.0.2",
+                "storage_service_name": "storage-service",
+                "storage_version": "0.1.0",
+                "storage_endpoint": "127.0.0.1:19280:storage-service",
+                "storage_protocol": "http"
+            }"#,
+        );
+        unsafe {
+            std::env::remove_var("OJOS_SMOKE_MODE");
+        }
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["node_id"], "child-node");
+
+        let table = get(
+            &mut console,
+            "/internal/orchestrator/nodes/child-node/routes?include_upstream=true",
+        );
+        assert_eq!(table.status, 200);
+        let routes = table.body["routes"].as_array().expect("routes");
+        assert!(routes.iter().any(|route| {
+            route["api_id"] == "storage.object.get"
+                && route["provider_node_id"] == "root-node"
+                && route["provider_endpoint"] == "127.0.0.1:19280:storage-service"
+                && route["upstream_base"] == "http://127.0.0.1:19280"
+        }));
     }
 
     #[test]

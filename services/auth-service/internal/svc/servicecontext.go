@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 
 	"ojos-auth-service/internal/config"
 	authmw "ojos-auth-service/internal/middleware"
@@ -36,11 +37,13 @@ type ServiceContext struct {
 	AuthService *service.AuthService
 
 	AuthMiddleware rest.Middleware
+	SmokeAuth      *SmokePermissionStore
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
 	ctx := context.Background()
 	applyEnvOverrides(&c)
+	smokeMode := smokeModeEnabled()
 
 	zlog, err := sharedlogger.New(c.Name)
 	if err != nil {
@@ -52,13 +55,23 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		log.Fatalf("init tracing failed: %v", err)
 	}
 
-	db, err := database.NewPostgresPoolByURL(ctx, c.Database.Url)
-	if err != nil {
-		log.Fatalf("connect postgres failed: %v", err)
+	var db *pgxpool.Pool
+	var userRepo *repository.UserRepository
+	var adminRepo *repository.AdminRepository
+	var smokeAuth *SmokePermissionStore
+	if smokeMode {
+		smokeAuth = NewSmokePermissionStore()
+		smokeAuth.Allow("judge-api", "storage.object.read", "storage.object.write", "judge.submission.create", "judge.result.read")
+		smokeAuth.Allow("judge-worker", "storage.object.read", "storage.object.write")
+	} else {
+		var err error
+		db, err = database.NewPostgresPoolByURL(ctx, c.Database.Url)
+		if err != nil {
+			log.Fatalf("connect postgres failed: %v", err)
+		}
+		userRepo = repository.NewUserRepository(db)
+		adminRepo = repository.NewAdminRepository(db)
 	}
-
-	userRepo := repository.NewUserRepository(db)
-	adminRepo := repository.NewAdminRepository(db)
 
 	authService := service.NewAuthService(
 		userRepo,
@@ -78,6 +91,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		AuthService: authService,
 
 		AuthMiddleware: authmw.NewAuthMiddleware(c.Jwt.Secret, c.InternalAuth.Token).Handle,
+		SmokeAuth:      smokeAuth,
 	}
 }
 
@@ -103,6 +117,52 @@ func firstEnv(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func smokeModeEnabled() bool {
+	value := strings.TrimSpace(os.Getenv("OJOS_SMOKE_MODE"))
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
+type SmokePermissionStore struct {
+	mu      sync.RWMutex
+	allowed map[string]map[string]bool
+}
+
+func NewSmokePermissionStore() *SmokePermissionStore {
+	return &SmokePermissionStore{allowed: map[string]map[string]bool{}}
+}
+
+func (s *SmokePermissionStore) Allow(service string, permissions ...string) {
+	service = strings.TrimSpace(service)
+	if service == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.allowed[service] == nil {
+		s.allowed[service] = map[string]bool{}
+	}
+	for _, permission := range permissions {
+		permission = strings.TrimSpace(permission)
+		if permission != "" {
+			s.allowed[service][permission] = true
+		}
+	}
+}
+
+func (s *SmokePermissionStore) ServiceCallerCanUsePermission(service string, permission string) bool {
+	if s == nil {
+		return false
+	}
+	service = strings.TrimSpace(service)
+	permission = strings.TrimSpace(permission)
+	if service == "" || permission == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.allowed[service] != nil && s.allowed[service][permission]
 }
 
 func (s *ServiceContext) Close(ctx context.Context) {
