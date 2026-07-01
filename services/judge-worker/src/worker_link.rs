@@ -36,6 +36,7 @@ pub struct WorkerLinkConfig {
     pub service_token: Option<String>,
     pub caller_node_id: Option<String>,
     pub runner_mode: String,
+    pub smoke_once: bool,
 }
 
 impl WorkerLinkConfig {
@@ -91,6 +92,7 @@ impl WorkerLinkConfig {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         let runner_mode = env_or("OJOS_RUNNER_MODE", || "nsjail".to_string());
+        let smoke_once = env_bool("OJOS_WORKER_SMOKE_ONCE");
 
         Ok(Self {
             worker_id,
@@ -112,10 +114,12 @@ impl WorkerLinkConfig {
             service_token,
             caller_node_id,
             runner_mode,
+            smoke_once,
         })
     }
 }
 
+#[cfg(test)]
 fn internal_api_url(gateway_url: &str, api_id: &str, path: &str) -> String {
     format!(
         "{}/internal/apis/{}/{}",
@@ -140,6 +144,7 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
 
     let client = Client::builder()
         .timeout(Duration::from_secs(60))
+        .no_proxy()
         .build()
         .context("create worker http client failed")?;
 
@@ -191,6 +196,20 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
                 .acquire_owned()
                 .await
                 .context("acquire worker slot failed")?;
+            if config.smoke_once {
+                let _permit = permit;
+                execute_task(client.clone(), config.clone(), languages.clone(), task).await?;
+                if !pending_task_events.is_empty()
+                    && !stream_wakeup
+                        .ack_task_events(&stream_event_ids(&pending_task_events))
+                        .await
+                {
+                    warn!("worker smoke-once task completed but redis ack failed");
+                }
+                info!("worker smoke-once task completed");
+                return Ok(());
+            }
+
             let client = client.clone();
             let config = config.clone();
             let languages = languages.clone();
@@ -785,9 +804,6 @@ fn absolute_url(config: &WorkerLinkConfig, path: &str) -> String {
 fn unzip_safe(zip_path: &Path, target_dir: &Path) -> Result<()> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let target_root = target_dir
-        .canonicalize()
-        .unwrap_or_else(|_| target_dir.to_path_buf());
 
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
@@ -795,9 +811,6 @@ fn unzip_safe(zip_path: &Path, target_dir: &Path) -> Result<()> {
             return Err(anyhow!("zip entry escapes package root"));
         };
         let out_path = target_dir.join(enclosed);
-        if !out_path.starts_with(&target_root) && target_root.exists() {
-            return Err(anyhow!("zip entry escapes package root"));
-        }
 
         if file.is_dir() {
             std::fs::create_dir_all(&out_path)?;
@@ -869,6 +882,16 @@ where
             .parse::<T>()
             .map_err(|err| anyhow!("parse {} failed: {}", key, err)),
         _ => Ok(default),
+    }
+}
+
+fn env_bool(key: &str) -> bool {
+    match std::env::var(key) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
     }
 }
 
@@ -1115,6 +1138,7 @@ mod tests {
             service_token: None,
             caller_node_id: None,
             runner_mode: "nsjail".to_string(),
+            smoke_once: false,
         };
         let client = Client::builder()
             .timeout(Duration::from_secs(5))
@@ -1280,6 +1304,7 @@ mod tests {
             service_token: Some("internal-token".to_string()),
             caller_node_id: Some("child-node".to_string()),
             runner_mode: "fake".to_string(),
+            smoke_once: false,
         };
         let client = Client::builder()
             .timeout(Duration::from_secs(5))

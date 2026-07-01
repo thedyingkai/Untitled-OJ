@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"context"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -12,15 +13,6 @@ import (
 )
 
 func InitOTLP(ctx context.Context, serviceName string, endpoint string) (*sdktrace.TracerProvider, error) {
-	exporter, err := otlptracegrpc.New(
-		ctx,
-		otlptracegrpc.WithEndpoint(endpoint),
-		otlptracegrpc.WithInsecure(),
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	res, err := resource.New(
 		ctx,
 		resource.WithAttributes(
@@ -31,13 +23,24 @@ func InitOTLP(ctx context.Context, serviceName string, endpoint string) (*sdktra
 		return nil, err
 	}
 
-	tp := sdktrace.NewTracerProvider(
+	opts := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		sdktrace.WithSpanProcessor(
-			sdktrace.NewSimpleSpanProcessor(exporter),
-		),
-	)
+	}
+
+	if strings.TrimSpace(endpoint) != "" {
+		exporter, err := otlptracegrpc.New(
+			ctx,
+			otlptracegrpc.WithEndpoint(endpoint),
+			otlptracegrpc.WithInsecure(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exporter)))
+	}
+
+	tp := sdktrace.NewTracerProvider(opts...)
 
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(

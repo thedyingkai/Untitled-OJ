@@ -33,7 +33,12 @@ func (l *GetSubmissionLogic) GetSubmission(req *types.GetSubmissionReq) (resp *t
 		return nil, errors.New("invalid submission id")
 	}
 
-	submission, err := l.svcCtx.Repo.GetSubmission(l.ctx, req.Id)
+	repo := workerTaskRepo(l.svcCtx)
+	if repo == nil {
+		return nil, errors.New("submission repository is not configured")
+	}
+
+	submission, err := repo.GetSubmission(l.ctx, req.Id)
 	if err != nil {
 		if errors.Is(err, repository.ErrSubmissionNotFound) {
 			return nil, errors.New("submission not found")

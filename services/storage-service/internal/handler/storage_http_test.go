@@ -25,6 +25,7 @@ func TestStorageHTTPObjectLifecycle(t *testing.T) {
 	assertStorageObjectLifecycle(t, endpoint, "submissions", "42-source-main.cpp", "int main(){}")
 	assertStorageObjectLifecycle(t, endpoint, "problems", "problem-42.zip", "zip-bytes")
 	assertStorageObjectLifecycle(t, endpoint, "judge-artifacts", "42-log.txt", "judge log")
+	assertStorageObjectLifecycleWithContentType(t, endpoint, "submissions", "42-result.json", `{"status":"ACCEPTED"}`, "application/json; charset=utf-8")
 }
 
 func assertStorageHealthLocal(t *testing.T, endpoint string) {
@@ -45,12 +46,17 @@ func assertStorageHealthLocal(t *testing.T, endpoint string) {
 
 func assertStorageObjectLifecycle(t *testing.T, endpoint string, bucket string, key string, body string) {
 	t.Helper()
+	assertStorageObjectLifecycleWithContentType(t, endpoint, bucket, key, body, "text/plain; charset=utf-8")
+}
+
+func assertStorageObjectLifecycleWithContentType(t *testing.T, endpoint string, bucket string, key string, body string, contentType string) {
+	t.Helper()
 	objectURL := endpoint + "/api/storage/objects/" + bucket + "/" + key
 	putReq, err := http.NewRequest(http.MethodPut, objectURL, bytes.NewBufferString(body))
 	if err != nil {
 		t.Fatalf("build put request: %v", err)
 	}
-	putReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	putReq.Header.Set("Content-Type", contentType)
 	putResp, err := http.DefaultClient.Do(putReq)
 	if err != nil {
 		t.Fatalf("put object: %v", err)

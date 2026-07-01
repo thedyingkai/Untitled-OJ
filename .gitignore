@@ -27,6 +27,7 @@ tokens.local.json
 .tmp/
 tmp/
 temp/
+.smoke/
 .cache/
 .cache-*/
 .orchestrator-release-cache/
