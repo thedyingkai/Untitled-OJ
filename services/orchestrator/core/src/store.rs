@@ -1270,6 +1270,7 @@ pub struct ConfiguredMigrationRunner {
 pub struct LocalSqlMigrationRunner {
     root: PathBuf,
     database_url: Option<String>,
+    service_database_urls: BTreeMap<String, String>,
     dry_run: bool,
     allow_destructive: bool,
 }
@@ -1382,6 +1383,12 @@ struct RegistryResourcePreviousState {
     configs: Vec<RenderedServiceConfig>,
     api_surfaces: Vec<ServiceApiSurface>,
     deployed_apis: Vec<DeployedServiceApi>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PendingMigrationPlan {
+    pending: Vec<crate::ReleaseMigrationDecl>,
+    already_applied: Vec<MigrationExecutionRecord>,
 }
 
 impl AuthPermissionRegistrar for DeferredAuthPermissionRegistrar {
@@ -2819,6 +2826,7 @@ impl LocalSqlMigrationRunner {
         Self {
             root: root.into(),
             database_url: None,
+            service_database_urls: BTreeMap::new(),
             dry_run: false,
             allow_destructive: false,
         }
@@ -2827,6 +2835,22 @@ impl LocalSqlMigrationRunner {
     pub fn with_database_url(mut self, database_url: impl Into<String>) -> Self {
         let database_url = database_url.into();
         self.database_url = (!database_url.trim().is_empty()).then_some(database_url);
+        self
+    }
+
+    pub fn with_service_database_url(
+        mut self,
+        service_name: impl Into<String>,
+        database_url: impl Into<String>,
+    ) -> Self {
+        let service_name = service_name.into();
+        let database_url = database_url.into();
+        if !service_name.trim().is_empty() && !database_url.trim().is_empty() {
+            self.service_database_urls.insert(
+                service_name.trim().to_string(),
+                database_url.trim().to_string(),
+            );
+        }
         self
     }
 
@@ -2847,18 +2871,25 @@ impl LocalSqlMigrationRunner {
             .filter(|value| !value.is_empty())?;
         let dry_run = env_flag("ORCHESTRATOR_MIGRATION_DRY_RUN");
         let allow_destructive = env_flag("ORCHESTRATOR_MIGRATION_ALLOW_DESTRUCTIVE");
-        let database_url = std::env::var("ORCHESTRATOR_MIGRATION_DATABASE_URL")
-            .ok()
-            .or_else(|| std::env::var("DATABASE_URL").ok())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let mut runner = Self::new(root)
+        let runner = Self::new(root)
             .with_dry_run(dry_run)
             .with_allow_destructive(allow_destructive);
-        if let Some(database_url) = database_url {
-            runner = runner.with_database_url(database_url);
-        }
         Some(runner)
+    }
+
+    pub fn database_url_for_service(&self, service_name: &str) -> Option<String> {
+        if let Some(database_url) = self.service_database_urls.get(service_name.trim()) {
+            return Some(database_url.clone());
+        }
+        for env_name in service_database_url_env_candidates(service_name) {
+            if let Ok(database_url) = std::env::var(&env_name) {
+                let database_url = database_url.trim();
+                if !database_url.is_empty() {
+                    return Some(database_url.to_string());
+                }
+            }
+        }
+        self.database_url.clone()
     }
 }
 
@@ -2881,14 +2912,19 @@ impl MigrationRunner for LocalSqlMigrationRunner {
         let mut client = if dry_run {
             None
         } else {
-            let database_url = self.database_url.as_ref().ok_or_else(|| {
-                OrchestratorError::Blocked(
-                    "migration apply requires ORCHESTRATOR_MIGRATION_DATABASE_URL or DATABASE_URL"
+            let database_url = self
+                .database_url_for_service(&request.service_name)
+                .ok_or_else(|| {
+                    OrchestratorError::Blocked(
+                        format!(
+                            "migration apply for {} requires a service-owned database URL",
+                            request.service_name
+                        )
                         .to_string(),
-                )
-            })?;
+                    )
+                })?;
             Some(
-                postgres::Client::connect(database_url, NoTls).map_err(|err| {
+                postgres::Client::connect(&database_url, NoTls).map_err(|err| {
                     OrchestratorError::Dependency(format!(
                         "connect migration database failed: {err}"
                     ))
@@ -3505,37 +3541,40 @@ impl<
         operation: &Operation,
         release: &ServiceReleaseManifest,
     ) -> Result<MigrationExecutionResult> {
-        let request = MigrationExecutionRequest {
-            service_name: release.service_name.clone(),
-            migrations: release.migrations.clone(),
-            release_source_url: release.source.url.clone(),
-            dry_run: operation
+        let dry_run = operation
+            .request
+            .get("migration_dry_run")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+            || operation
                 .request
                 .get("migration_dry_run")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-                || operation
-                    .request
-                    .get("migration_dry_run")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|value| truthy(value)),
-            allow_destructive: operation
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| truthy(value));
+        let allow_destructive = operation
+            .request
+            .get("allow_destructive_migrations")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+            || operation
                 .request
                 .get("allow_destructive_migrations")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-                || operation
-                    .request
-                    .get("allow_destructive_migrations")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|value| truthy(value)),
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| truthy(value));
+        let plan = self.pending_release_migrations(release)?;
+        let request = MigrationExecutionRequest {
+            service_name: release.service_name.clone(),
+            migrations: plan.pending.clone(),
+            release_source_url: release.source.url.clone(),
+            dry_run,
+            allow_destructive,
         };
         if release.migrations.is_empty() {
             let result = MigrationExecutionResult {
                 status: "skipped".to_string(),
                 message: "release declares no migrations".to_string(),
                 runner: "none".to_string(),
-                dry_run: request.dry_run,
+                dry_run,
                 executed: Vec::new(),
             };
             self.store
@@ -3546,27 +3585,60 @@ impl<
                 ))?;
             return Ok(result);
         }
+        if plan.pending.is_empty() {
+            let result = MigrationExecutionResult {
+                status: "skipped".to_string(),
+                message: format!(
+                    "all {} migrations for {} are already applied",
+                    release.migrations.len(),
+                    release.service_name
+                ),
+                runner: "already-applied".to_string(),
+                dry_run,
+                executed: plan.already_applied,
+            };
+            self.persist_migration_execution_result(release, &result)?;
+            self.store
+                .append_operation_log(migration_execution_log_record(
+                    &operation.operation_id,
+                    &release.service_name,
+                    &result,
+                ))?;
+            return Ok(result);
+        }
 
         let result = match self.migration_runner.execute_migrations(&request) {
-            Ok(result) => result,
+            Ok(mut result) => {
+                if !plan.already_applied.is_empty() {
+                    let skipped = plan.already_applied.len();
+                    result.message = format!(
+                        "{}; skipped {skipped} already applied migrations",
+                        result.message
+                    );
+                    result.executed.extend(plan.already_applied);
+                }
+                result
+            }
             Err(err) => {
+                let mut executed = request
+                    .migrations
+                    .iter()
+                    .map(|migration| MigrationExecutionRecord {
+                        migration_version: migration.version.clone(),
+                        path: migration.path.clone(),
+                        checksum: migration.checksum.clone(),
+                        status: "failed".to_string(),
+                        applied_at: String::new(),
+                        message: err.to_string(),
+                    })
+                    .collect::<Vec<_>>();
+                executed.extend(plan.already_applied);
                 let result = MigrationExecutionResult {
                     status: "failed".to_string(),
                     message: err.to_string(),
                     runner: "failed-before-completion".to_string(),
-                    dry_run: request.dry_run,
-                    executed: release
-                        .migrations
-                        .iter()
-                        .map(|migration| MigrationExecutionRecord {
-                            migration_version: migration.version.clone(),
-                            path: migration.path.clone(),
-                            checksum: migration.checksum.clone(),
-                            status: "failed".to_string(),
-                            applied_at: String::new(),
-                            message: err.to_string(),
-                        })
-                        .collect(),
+                    dry_run,
+                    executed,
                 };
                 self.persist_migration_execution_result(release, &result)?;
                 self.store
@@ -3586,6 +3658,46 @@ impl<
                 &result,
             ))?;
         Ok(result)
+    }
+
+    fn pending_release_migrations(
+        &self,
+        release: &ServiceReleaseManifest,
+    ) -> Result<PendingMigrationPlan> {
+        let existing = self
+            .store
+            .list_service_migration_records()?
+            .into_iter()
+            .filter(|record| record.service_name == release.service_name)
+            .map(|record| (record.migration_version.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let mut plan = PendingMigrationPlan::default();
+        for migration in &release.migrations {
+            if let Some(record) = existing.get(&migration.version) {
+                if record.status == "applied" {
+                    if record.checksum != migration.checksum {
+                        return Err(OrchestratorError::Dependency(format!(
+                            "migration {}@{} was already applied with checksum {}, release declares {}",
+                            release.service_name,
+                            migration.version,
+                            empty_checksum_label(&record.checksum),
+                            empty_checksum_label(&migration.checksum)
+                        )));
+                    }
+                    plan.already_applied.push(MigrationExecutionRecord {
+                        migration_version: migration.version.clone(),
+                        path: migration.path.clone(),
+                        checksum: migration.checksum.clone(),
+                        status: "applied".to_string(),
+                        applied_at: record.applied_at.clone(),
+                        message: "already applied; skipped for this install".to_string(),
+                    });
+                    continue;
+                }
+            }
+            plan.pending.push(migration.clone());
+        }
+        Ok(plan)
     }
 
     fn persist_migration_execution_result(
@@ -3913,7 +4025,7 @@ impl<
                 if let Some(release) = release.as_ref() {
                     self.store
                         .upsert_service_release(service_release_record(release)?)?;
-                    self.clear_release_resource_registries(&release.service_name)?;
+                    self.clear_release_resource_registries_for_install(&release.service_name)?;
                     let api_surfaces = service_api_surfaces_from_release(release)?;
                     for api in &api_surfaces {
                         self.store.upsert_service_api_surface(api.clone())?;
@@ -3924,9 +4036,6 @@ impl<
                     }
                     api_surface_count = api_surfaces.len();
                     release_routes = routes;
-                    for record in service_migration_records_from_release(release) {
-                        self.store.upsert_service_migration_record(record)?;
-                    }
                     migration_execution =
                         Some(self.execute_release_migrations(operation, release)?);
                     for record in service_permission_records_from_release(release) {
@@ -5234,6 +5343,24 @@ impl<
             .delete_deployed_service_apis_for_service(service_name)?;
         Ok(())
     }
+
+    fn clear_release_resource_registries_for_install(&mut self, service_name: &str) -> Result<()> {
+        self.store.delete_service_routes_for_service(service_name)?;
+        self.store
+            .delete_service_permission_records_for_service(service_name)?;
+        self.store.delete_service_frontend_entry(service_name)?;
+        self.store
+            .delete_service_redis_resources_for_service(service_name)?;
+        self.store
+            .delete_service_storage_resources_for_service(service_name)?;
+        self.store
+            .delete_rendered_service_configs_for_service(service_name)?;
+        self.store
+            .delete_service_api_surfaces_for_service(service_name)?;
+        self.store
+            .delete_deployed_service_apis_for_service(service_name)?;
+        Ok(())
+    }
 }
 
 fn request_value<T: DeserializeOwned>(operation: &Operation, field: &str) -> Result<T> {
@@ -6057,24 +6184,6 @@ fn route_target_selector(route: &crate::ReleaseRouteDecl) -> serde_json::Value {
             "frontend": route.target
         })
     }
-}
-
-fn service_migration_records_from_release(
-    release: &ServiceReleaseManifest,
-) -> Vec<ServiceMigrationRecord> {
-    release
-        .migrations
-        .iter()
-        .map(|migration| ServiceMigrationRecord {
-            service_name: release.service_name.clone(),
-            migration_version: migration.version.clone(),
-            checksum: migration.checksum.clone(),
-            status: "registered".to_string(),
-            applied_at: String::new(),
-            created_at: String::new(),
-            updated_at: String::new(),
-        })
-        .collect()
 }
 
 fn service_permission_records_from_release(
@@ -7260,6 +7369,48 @@ fn missing_target_health(link: &Link) -> EndpointHealthResult {
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name).ok().is_some_and(|value| truthy(&value))
+}
+
+fn service_database_url_env_candidates(service_name: &str) -> Vec<String> {
+    let key = service_env_key(service_name);
+    let mut prefixes = vec![key.clone()];
+    for suffix in ["_SERVICE", "_API", "_WORKER"] {
+        if let Some(prefix) = key.strip_suffix(suffix) {
+            if !prefix.is_empty() && !prefixes.iter().any(|item| item == prefix) {
+                prefixes.push(prefix.to_string());
+            }
+        }
+    }
+
+    let mut candidates = Vec::new();
+    for prefix in &prefixes {
+        candidates.push(format!("ORCHESTRATOR_MIGRATION_DATABASE_URL_{prefix}"));
+        candidates.push(format!("OJOS_MIGRATION_DATABASE_URL_{prefix}"));
+        candidates.push(format!("{prefix}_DATABASE_URL"));
+    }
+    candidates
+}
+
+fn service_env_key(service_name: &str) -> String {
+    service_name
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn empty_checksum_label(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "<empty>"
+    } else {
+        value
+    }
 }
 
 fn truthy(value: &str) -> bool {

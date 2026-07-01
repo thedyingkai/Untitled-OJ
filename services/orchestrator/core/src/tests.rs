@@ -3988,6 +3988,255 @@ fn local_sql_migration_runner_dry_run_validates_checksum() {
 }
 
 #[test]
+fn local_sql_migration_runner_prefers_service_owned_database_url() {
+    let runner = LocalSqlMigrationRunner::new(repo_root())
+        .with_service_database_url(
+            "auth-service",
+            "postgres://postgres:auth@auth-db:5432/ojos_auth",
+        )
+        .with_service_database_url(
+            "judge-api",
+            "postgres://postgres:judge@judge-db:5432/ojos_judge",
+        );
+
+    assert_eq!(
+        runner.database_url_for_service("auth-service").as_deref(),
+        Some("postgres://postgres:auth@auth-db:5432/ojos_auth")
+    );
+    assert_eq!(
+        runner.database_url_for_service("judge-api").as_deref(),
+        Some("postgres://postgres:judge@judge-db:5432/ojos_judge")
+    );
+    assert_eq!(
+        runner
+            .database_url_for_service("problem-service")
+            .as_deref(),
+        None
+    );
+}
+
+#[test]
+fn release_install_skips_already_applied_migration_with_same_checksum() {
+    let service = valid_service();
+    let mut release = valid_release_for_service(&service);
+    release.migrations = vec![ReleaseMigrationDecl {
+        version: "0001".to_string(),
+        path: "services/demo-api/migrations/0001.sql".to_string(),
+        checksum: "len:18".to_string(),
+        destructive: false,
+    }];
+    let operation = release_install_operation_with_release(
+        "op-release-migration-idempotent",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = RecordingMigrationRunner {
+        calls: Arc::clone(&calls),
+        result: MigrationExecutionResult {
+            status: "applied".to_string(),
+            message: "should not be called".to_string(),
+            runner: "recording".to_string(),
+            dry_run: false,
+            executed: Vec::new(),
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store
+        .upsert_service_migration_record(ServiceMigrationRecord {
+            service_name: "demo-api".to_string(),
+            migration_version: "0001".to_string(),
+            checksum: "len:18".to_string(),
+            status: "applied".to_string(),
+            applied_at: "2026-07-02T00:00:00Z".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("seed applied migration");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_runtime_provisioners(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        runner,
+    )
+    .apply("op-release-migration-idempotent")
+    .expect("apply release install");
+
+    assert!(calls.lock().expect("migration calls").is_empty());
+    let records = store.service_migration_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, "applied");
+    assert_eq!(records[0].applied_at, "2026-07-02T00:00:00Z");
+    let logs = store.operation_logs("op-release-migration-idempotent");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "migrations:demo-api"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("skipped")
+            && log.data.get("runner").and_then(serde_json::Value::as_str) == Some("already-applied")
+    }));
+}
+
+#[test]
+fn repeated_release_install_runs_same_service_migration_once() {
+    let service = valid_service();
+    let mut release = valid_release_for_service(&service);
+    release.migrations = vec![ReleaseMigrationDecl {
+        version: "0001".to_string(),
+        path: "services/demo-api/migrations/0001.sql".to_string(),
+        checksum: "len:18".to_string(),
+        destructive: false,
+    }];
+    let first_operation = release_install_operation_with_release(
+        "op-release-migration-first-install",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        Some("127.0.0.1:18080:demo-api"),
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed first release install");
+    let second_operation = release_install_operation_with_release(
+        "op-release-migration-second-install",
+        &service,
+        Some(&release),
+        &["demo-api".to_string()],
+        "127.0.0.1",
+        Some("127.0.0.1:18081:demo-api"),
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed second release install");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = RecordingMigrationRunner {
+        calls: Arc::clone(&calls),
+        result: MigrationExecutionResult {
+            status: "applied".to_string(),
+            message: "recorded by test migration runner".to_string(),
+            runner: "recording".to_string(),
+            dry_run: false,
+            executed: vec![MigrationExecutionRecord {
+                migration_version: "0001".to_string(),
+                path: "services/demo-api/migrations/0001.sql".to_string(),
+                checksum: "len:18".to_string(),
+                status: "applied".to_string(),
+                applied_at: "applied".to_string(),
+                message: "applied by test".to_string(),
+            }],
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store
+        .put_operation(first_operation)
+        .expect("put first operation");
+    OperationExecutor::with_runtime_provisioners(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        runner.clone(),
+    )
+    .apply("op-release-migration-first-install")
+    .expect("apply first release install");
+    store
+        .put_operation(second_operation)
+        .expect("put second operation");
+    OperationExecutor::with_runtime_provisioners(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        runner,
+    )
+    .apply("op-release-migration-second-install")
+    .expect("apply second release install");
+
+    assert_eq!(calls.lock().expect("migration calls").len(), 1);
+    let records = store.service_migration_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, "applied");
+    let logs = store.operation_logs("op-release-migration-second-install");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "migrations:demo-api"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("skipped")
+            && log.data.get("runner").and_then(serde_json::Value::as_str) == Some("already-applied")
+    }));
+}
+
+#[test]
+fn release_install_fails_when_applied_migration_checksum_changes() {
+    let service = valid_service();
+    let mut release = valid_release_for_service(&service);
+    release.migrations = vec![ReleaseMigrationDecl {
+        version: "0001".to_string(),
+        path: "services/demo-api/migrations/0001.sql".to_string(),
+        checksum: "len:18".to_string(),
+        destructive: false,
+    }];
+    let operation = release_install_operation_with_release(
+        "op-release-migration-checksum-changed",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = RecordingMigrationRunner {
+        calls: Arc::clone(&calls),
+        result: MigrationExecutionResult {
+            status: "applied".to_string(),
+            message: "should not be called".to_string(),
+            runner: "recording".to_string(),
+            dry_run: false,
+            executed: Vec::new(),
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store
+        .upsert_service_migration_record(ServiceMigrationRecord {
+            service_name: "demo-api".to_string(),
+            migration_version: "0001".to_string(),
+            checksum: "len:17".to_string(),
+            status: "applied".to_string(),
+            applied_at: "2026-07-02T00:00:00Z".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("seed applied migration");
+    store.put_operation(operation).expect("put operation");
+
+    let err = OperationExecutor::with_runtime_provisioners(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        runner,
+    )
+    .apply("op-release-migration-checksum-changed")
+    .expect_err("changed checksum should fail release install");
+
+    assert!(calls.lock().expect("migration calls").is_empty());
+    assert!(err.to_string().contains("already applied with checksum"));
+}
+
+#[test]
 fn release_install_rollback_records_migration_rollback_unsupported() {
     let service = valid_service();
     let mut release = valid_release_for_service(&service);
