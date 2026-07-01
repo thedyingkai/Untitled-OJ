@@ -29,32 +29,75 @@ func (l *AdminQueueLogic) AdminQueue() (resp *types.AdminQueueResp, err error) {
 		return nil, err
 	}
 
-	counts, err := l.svcCtx.Repo.QueueTaskCounts(l.ctx)
-	if err != nil {
-		return nil, err
+	var scheduled int64
+	var pending int64
+	var judging int64
+	if l.svcCtx.Repo != nil {
+		counts, err := l.svcCtx.Repo.QueueTaskCounts(l.ctx)
+		if err != nil {
+			return nil, err
+		}
+		scheduled = counts.Scheduled
+		pending = counts.Pending
+		judging = counts.Judging
 	}
 
 	resp = &types.AdminQueueResp{
+		TaskStream:    judgeSubmissionStream,
+		ResultStream:  judgeResultStream,
+		Group:         judgeConsumerGroup,
 		ConsumerGroup: judgeConsumerGroup,
 		ConsumerLag:   -1,
+		Lag:           -1,
 		RedisStatus:   "unavailable",
 		TrimStrategy:  "XADD MAXLEN ~ 10000; PostgreSQL judge_tasks is the task ownership source",
-		Scheduled:     counts.Scheduled,
-		Pending:       counts.Pending,
-		Judging:       counts.Judging,
+		Scheduled:     scheduled,
+		Pending:       pending,
+		Judging:       judging,
 	}
 
-	if info, err := l.svcCtx.Redis.XInfoStream(l.ctx, judgeSubmissionStream).Result(); err == nil {
+	enrichAdminQueueRedisStatus(l.ctx, l.svcCtx.Redis, resp)
+	return resp, nil
+}
+
+func enrichAdminQueueRedisStatus(ctx context.Context, client *redis.Client, resp *types.AdminQueueResp) {
+	if resp == nil {
+		return
+	}
+	if resp.TaskStream == "" {
+		resp.TaskStream = judgeSubmissionStream
+	}
+	if resp.ResultStream == "" {
+		resp.ResultStream = judgeResultStream
+	}
+	if resp.Group == "" {
+		resp.Group = judgeConsumerGroup
+	}
+	if resp.ConsumerGroup == "" {
+		resp.ConsumerGroup = judgeConsumerGroup
+	}
+	if resp.ConsumerLag == 0 && resp.Lag == 0 {
+		resp.ConsumerLag = -1
+		resp.Lag = -1
+	}
+	if resp.RedisStatus == "" {
+		resp.RedisStatus = "unavailable"
+	}
+	if client == nil {
+		return
+	}
+
+	if info, err := client.XInfoStream(ctx, judgeSubmissionStream).Result(); err == nil {
 		resp.StreamLength = info.Length
 		resp.LastId = info.LastGeneratedID
 		resp.RedisStatus = "ok"
 	}
-	if info, err := l.svcCtx.Redis.XInfoStream(l.ctx, judgeResultStream).Result(); err == nil {
+	if info, err := client.XInfoStream(ctx, judgeResultStream).Result(); err == nil {
 		resp.ResultStreamLength = info.Length
 		resp.ResultLastId = info.LastGeneratedID
 		resp.RedisStatus = "ok"
 	}
-	if groups, err := l.svcCtx.Redis.XInfoGroups(l.ctx, judgeSubmissionStream).Result(); err == nil {
+	if groups, err := client.XInfoGroups(ctx, judgeSubmissionStream).Result(); err == nil {
 		resp.RedisStatus = "ok"
 		for _, group := range groups {
 			if group.Name != judgeConsumerGroup {
@@ -62,6 +105,7 @@ func (l *AdminQueueLogic) AdminQueue() (resp *types.AdminQueueResp, err error) {
 			}
 			resp.ConsumerCount = group.Consumers
 			resp.ConsumerLag = group.Lag
+			resp.Lag = group.Lag
 			if group.Pending > resp.PendingCount {
 				resp.PendingCount = group.Pending
 			}
@@ -69,14 +113,30 @@ func (l *AdminQueueLogic) AdminQueue() (resp *types.AdminQueueResp, err error) {
 		}
 	}
 
-	if pending, err := l.svcCtx.Redis.XPending(l.ctx, judgeSubmissionStream, judgeConsumerGroup).Result(); err == nil {
+	if consumers, err := client.XInfoConsumers(ctx, judgeSubmissionStream, judgeConsumerGroup).Result(); err == nil {
+		resp.RedisStatus = "ok"
+		resp.Consumers = make([]types.AdminQueueConsumer, 0, len(consumers))
+		for _, consumer := range consumers {
+			resp.Consumers = append(resp.Consumers, types.AdminQueueConsumer{
+				Name:       consumer.Name,
+				Pending:    consumer.Pending,
+				IdleMs:     consumer.Idle.Milliseconds(),
+				InactiveMs: consumer.Inactive.Milliseconds(),
+			})
+		}
+		if resp.ConsumerCount == 0 {
+			resp.ConsumerCount = int64(len(resp.Consumers))
+		}
+	}
+
+	if pending, err := client.XPending(ctx, judgeSubmissionStream, judgeConsumerGroup).Result(); err == nil {
 		resp.RedisStatus = "ok"
 		resp.PendingCount = pending.Count
 		resp.PendingLowestId = pending.Lower
 		resp.PendingHighestId = pending.Higher
 		if pending.Count > 0 {
-			if items, err := l.svcCtx.Redis.XPendingExt(
-				l.ctx,
+			if items, err := client.XPendingExt(
+				ctx,
 				&redis.XPendingExtArgs{
 					Stream: judgeSubmissionStream,
 					Group:  judgeConsumerGroup,
@@ -93,6 +153,4 @@ func (l *AdminQueueLogic) AdminQueue() (resp *types.AdminQueueResp, err error) {
 			resp.RedisStatus = "partial"
 		}
 	}
-
-	return resp, nil
 }

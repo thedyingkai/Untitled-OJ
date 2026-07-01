@@ -30,6 +30,7 @@ migrations:
     checksum: sha256:26690efb3ceb2639768d3bb395259442926d7f817157f446376112eabdf30910
 permissions:
   - judge.submit
+  - judge.admin
   - submission.view.own
   - submission.view.all
   - judge.worker.status
@@ -83,6 +84,16 @@ apis:
     visibility: descendants
     auth_mode: user
     permission: judge.worker.status
+    version: v1
+    stability: stable
+  - api_id: judge.queue.status
+    protocol: http
+    port_name: http
+    path_prefix: /api/judge/admin/queue
+    methods: [GET]
+    visibility: descendants
+    auth_mode: user
+    permission: judge.admin
     version: v1
     stability: stable
 redis:

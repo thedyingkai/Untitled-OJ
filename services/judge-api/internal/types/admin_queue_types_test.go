@@ -8,8 +8,13 @@ import (
 
 func TestAdminQueueRespExposesRedisStreamObservabilityFields(t *testing.T) {
 	payload, err := json.Marshal(AdminQueueResp{
+		TaskStream:       "ojos:judge:task",
+		ResultStream:     "ojos:judge:result",
+		Group:            "judge-worker",
 		ConsumerCount:    2,
 		ConsumerLag:      7,
+		Lag:              7,
+		Consumers:        []AdminQueueConsumer{{Name: "worker-a", Pending: 1, IdleMs: 25}},
 		PendingLowestId:  "1-0",
 		PendingHighestId: "8-0",
 		RedisStatus:      "ok",
@@ -19,8 +24,14 @@ func TestAdminQueueRespExposesRedisStreamObservabilityFields(t *testing.T) {
 	}
 	text := string(payload)
 	for _, want := range []string{
+		"task_stream",
+		"result_stream",
+		"group",
 		"consumer_count",
 		"consumer_lag",
+		"lag",
+		"consumers",
+		"idle_ms",
 		"pending_lowest_id",
 		"pending_highest_id",
 		"redis_status",

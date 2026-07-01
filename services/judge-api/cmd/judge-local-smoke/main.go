@@ -391,6 +391,9 @@ func run(ctx context.Context, cfg smokeConfig) error {
 		return fail("worker consumed task acked", fmt.Errorf("pending count is %d", pending))
 	}
 	ok("worker consumed task acked")
+	if err := verifyQueueStatusAPI(ctx, cfg); err != nil {
+		return err
+	}
 
 	resultID, resultStatus, err := findResultEntry(ctx, redisClient, submissionID)
 	if err != nil {
@@ -1472,6 +1475,53 @@ func pendingCount(ctx context.Context, client *redis.Client) (int64, error) {
 	default:
 		return 0, fmt.Errorf("unexpected XPENDING count: %#v", count)
 	}
+}
+
+func verifyQueueStatusAPI(ctx context.Context, cfg smokeConfig) error {
+	var resp struct {
+		TaskStream    string `json:"task_stream"`
+		ResultStream  string `json:"result_stream"`
+		Group         string `json:"group"`
+		PendingCount  int64  `json:"pending_count"`
+		ConsumerLag   int64  `json:"consumer_lag"`
+		Lag           int64  `json:"lag"`
+		ConsumerCount int64  `json:"consumer_count"`
+		RedisStatus   string `json:"redis_status"`
+		Consumers     []struct {
+			Name    string `json:"name"`
+			Pending int64  `json:"pending"`
+		} `json:"consumers"`
+	}
+	headers := map[string]string{
+		"X-Auth-Verified": "true",
+		"X-User-Id":       "1",
+		"X-Username":      "smoke-admin",
+		"X-Roles":         "admin",
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.judgeAPI.baseURL()+"/judge/admin/queue/status", nil, headers, &resp); err != nil {
+		return fail("redis queue status API returned pending/lag", err)
+	}
+	if resp.TaskStream != taskStream || resp.ResultStream != resultStream || resp.Group != consumerGroup {
+		return fail("redis queue status API returned pending/lag", fmt.Errorf("unexpected stream identity: %#v", resp))
+	}
+	if resp.RedisStatus != "ok" && resp.RedisStatus != "partial" {
+		return fail("redis queue status API returned pending/lag", fmt.Errorf("unexpected redis_status %q", resp.RedisStatus))
+	}
+	if resp.PendingCount != 0 {
+		return fail("redis queue status API returned pending/lag", fmt.Errorf("expected zero pending after ack, got %d", resp.PendingCount))
+	}
+	lag := resp.Lag
+	if lag < 0 {
+		lag = resp.ConsumerLag
+	}
+	if lag < 0 {
+		return fail("redis queue status API returned pending/lag", fmt.Errorf("lag was not populated: %#v", resp))
+	}
+	if resp.ConsumerCount == 0 || len(resp.Consumers) == 0 {
+		return fail("redis queue status API returned pending/lag", fmt.Errorf("expected at least one consumer: %#v", resp))
+	}
+	ok("redis queue status API returned pending=%d lag=%d consumers=%d", resp.PendingCount, lag, len(resp.Consumers))
+	return nil
 }
 
 func connectRedis(ctx context.Context, redisURL string) (*redis.Client, error) {

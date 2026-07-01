@@ -25,12 +25,17 @@ export interface JudgeTaskItem {
 }
 
 export interface QueueStatus {
+  task_stream?: string
+  result_stream?: string
+  group?: string
   stream_length: number
   result_stream_length: number
   pending_count: number
   consumer_group: string
   consumer_count: number
   consumer_lag: number
+  lag?: number
+  consumers?: QueueConsumer[]
   last_id?: string
   result_last_id?: string
   trim_strategy?: string
@@ -41,6 +46,13 @@ export interface QueueStatus {
   scheduled: number
   pending: number
   judging: number
+}
+
+export interface QueueConsumer {
+  name: string
+  pending: number
+  idle_ms: number
+  inactive_ms: number
 }
 
 export interface QueueStatusResponse extends QueueStatus {}

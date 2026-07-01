@@ -32,6 +32,11 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 					Handler: adminQueueHandler(serverCtx),
 				},
 				{
+					Method:  http.MethodGet,
+					Path:    "/admin/queue/status",
+					Handler: adminQueueHandler(serverCtx),
+				},
+				{
 					Method:  http.MethodPost,
 					Path:    "/admin/submissions/:id/requeue",
 					Handler: adminRequeueSubmissionHandler(serverCtx),

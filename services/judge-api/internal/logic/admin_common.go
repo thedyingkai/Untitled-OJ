@@ -19,9 +19,22 @@ func requireJudgeAdmin(ctx context.Context, svcCtx *svc.ServiceContext) error {
 			return nil
 		}
 	}
-	return sharedperm.RequireUserPermission(
+	checker := svcCtx.ActivePermissionChecker()
+	if checker == nil {
+		return errors.New("permission checker is not configured")
+	}
+	if ok, err := checker.HasUserPermission(
 		ctx,
-		svcCtx.DB,
+		user.UserID,
+		"judge.admin",
+		sharedperm.SystemScope(),
+	); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	return checker.RequireUserPermission(
+		ctx,
 		user.UserID,
 		"system.admin",
 		sharedperm.SystemScope(),

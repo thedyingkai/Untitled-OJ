@@ -8,22 +8,34 @@ type AdminActionResp struct {
 }
 
 type AdminQueueResp struct {
-	StreamLength       int64  `json:"stream_length"`
-	ResultStreamLength int64  `json:"result_stream_length"`
-	PendingCount       int64  `json:"pending_count"`
-	ConsumerGroup      string `json:"consumer_group"`
-	ConsumerCount      int64  `json:"consumer_count"`
-	ConsumerLag        int64  `json:"consumer_lag"`
-	LastId             string `json:"last_id"`
-	ResultLastId       string `json:"result_last_id"`
-	TrimStrategy       string `json:"trim_strategy"`
-	PendingOldestIdle  int64  `json:"pending_oldest_idle_ms"`
-	PendingLowestId    string `json:"pending_lowest_id"`
-	PendingHighestId   string `json:"pending_highest_id"`
-	RedisStatus        string `json:"redis_status"`
-	Scheduled          int64  `json:"scheduled"`
-	Pending            int64  `json:"pending"`
-	Judging            int64  `json:"judging"`
+	TaskStream         string               `json:"task_stream"`
+	ResultStream       string               `json:"result_stream"`
+	Group              string               `json:"group"`
+	StreamLength       int64                `json:"stream_length"`
+	ResultStreamLength int64                `json:"result_stream_length"`
+	PendingCount       int64                `json:"pending_count"`
+	ConsumerGroup      string               `json:"consumer_group"`
+	ConsumerCount      int64                `json:"consumer_count"`
+	ConsumerLag        int64                `json:"consumer_lag"`
+	Lag                int64                `json:"lag"`
+	Consumers          []AdminQueueConsumer `json:"consumers"`
+	LastId             string               `json:"last_id"`
+	ResultLastId       string               `json:"result_last_id"`
+	TrimStrategy       string               `json:"trim_strategy"`
+	PendingOldestIdle  int64                `json:"pending_oldest_idle_ms"`
+	PendingLowestId    string               `json:"pending_lowest_id"`
+	PendingHighestId   string               `json:"pending_highest_id"`
+	RedisStatus        string               `json:"redis_status"`
+	Scheduled          int64                `json:"scheduled"`
+	Pending            int64                `json:"pending"`
+	Judging            int64                `json:"judging"`
+}
+
+type AdminQueueConsumer struct {
+	Name       string `json:"name"`
+	Pending    int64  `json:"pending"`
+	IdleMs     int64  `json:"idle_ms"`
+	InactiveMs int64  `json:"inactive_ms"`
 }
 
 type AdminSubmissionActionReq struct {
