@@ -21,11 +21,18 @@ backend:
   protocol: http
   port: 8082
   health_path: /health
-migrations: []
+migrations:
+  - version: "000001_submission_schema"
+    path: services/judge-api/migrations/000001_submission_schema.up.sql
+    checksum: sha256:9f29385c02164d19be114107c6502762f014d3c37917b6bd3918e6eb0a195030
+  - version: "000002_worker_link"
+    path: services/judge-api/migrations/000002_worker_link.up.sql
+    checksum: sha256:26690efb3ceb2639768d3bb395259442926d7f817157f446376112eabdf30910
 permissions:
   - judge.submit
   - submission.view.own
   - submission.view.all
+  - judge.worker.status
 routes:
   - path: /api/judge/**
     method: ANY
@@ -37,6 +44,40 @@ routes:
     target_type: endpoint-group
     target: judge-api[*]
     permission: public
+required_apis:
+  - storage.object.get
+  - storage.object.put
+apis:
+  - api_id: judge.submission.create
+    protocol: http
+    port_name: http
+    path_prefix: /api/judge/submissions
+    methods: [POST]
+    visibility: descendants
+    auth_mode: user
+    permission: judge.submit
+    version: v1
+    stability: stable
+  - api_id: judge.submission.result
+    protocol: http
+    port_name: http
+    path_prefix: /api/judge/submissions
+    methods: [GET]
+    visibility: descendants
+    auth_mode: user
+    permission: submission.view.own
+    version: v1
+    stability: stable
+  - api_id: judge.worker.status
+    protocol: http
+    port_name: http
+    path_prefix: /api/judge/admin/workers
+    methods: [GET]
+    visibility: descendants
+    auth_mode: user
+    permission: judge.worker.status
+    version: v1
+    stability: stable
 redis:
   - name: redis
     kind: stream

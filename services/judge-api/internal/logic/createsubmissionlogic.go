@@ -37,9 +37,17 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		return nil, errors.New("unauthorized")
 	}
 
-	if err := sharedperm.RequireUserPermission(
+	submissions := l.svcCtx.ActiveSubmissionRepo()
+	if submissions == nil {
+		return nil, errors.New("submission repository is not configured")
+	}
+	permissions := l.svcCtx.ActivePermissionChecker()
+	if permissions == nil {
+		return nil, errors.New("permission checker is not configured")
+	}
+
+	if err := permissions.RequireUserPermission(
 		l.ctx,
-		l.svcCtx.DB,
 		user.UserID,
 		"judge.submit",
 		sharedperm.SystemScope(),
@@ -64,7 +72,7 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		return nil, err
 	}
 
-	problem, err := l.svcCtx.Repo.GetProblemMeta(l.ctx, req.ProblemId)
+	problem, err := submissions.GetProblemMeta(l.ctx, req.ProblemId)
 	if err != nil {
 		return nil, err
 	}
@@ -74,9 +82,8 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 	}
 
 	if problem.Visibility != "public" && problem.CreatedBy != user.UserID {
-		if err := sharedperm.RequireUserPermission(
+		if err := permissions.RequireUserPermission(
 			l.ctx,
-			l.svcCtx.DB,
 			user.UserID,
 			"problem.view",
 			sharedperm.Scope{Type: "problem", ID: req.ProblemId},
@@ -89,7 +96,7 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		return nil, errors.New("problem package is not ready")
 	}
 
-	submissionID, err := l.svcCtx.Repo.CreateSubmission(
+	submissionID, err := submissions.CreateSubmission(
 		l.ctx,
 		req.ProblemId,
 		user.UserID,
@@ -106,28 +113,48 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		Code:         req.Code,
 	})
 	if err != nil {
-		_ = l.svcCtx.Repo.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
+		_ = submissions.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
 		return nil, err
 	}
 
-	if err := l.svcCtx.Repo.UpdateSubmissionSource(
+	codePath := files.CodePath
+	codeSha256 := files.CodeSha256
+	resultPath := files.ResultPath
+	if storageEnabled(l.svcCtx.Config.Storage) {
+		stored, err := storeSubmissionSource(
+			l.ctx,
+			l.svcCtx.Config.Storage,
+			submissionID,
+			language,
+			req.Code,
+		)
+		if err != nil {
+			_ = submissions.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
+			return nil, err
+		}
+		codePath = stored.CodePath
+		codeSha256 = stored.CodeSha256
+		resultPath = stored.ResultPath
+	}
+
+	if err := submissions.UpdateSubmissionSource(
 		l.ctx,
 		submissionID,
-		files.CodePath,
-		files.CodeSha256,
-		files.ResultPath,
+		codePath,
+		codeSha256,
+		resultPath,
 	); err != nil {
-		_ = l.svcCtx.Repo.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
+		_ = submissions.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
 		return nil, err
 	}
 
-	if err := l.svcCtx.Repo.EnsureTaskForSubmission(l.ctx, submissionID); err != nil {
-		_ = l.svcCtx.Repo.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
+	if err := submissions.EnsureTaskForSubmission(l.ctx, submissionID); err != nil {
+		_ = submissions.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
 		return nil, err
 	}
 
 	if err := l.publishSubmissionCreated(submissionID); err != nil {
-		_ = l.svcCtx.Repo.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
+		_ = submissions.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
 		return nil, err
 	}
 
@@ -140,5 +167,5 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 const judgeSubmissionStream = "ojos:judge:submissions"
 
 func (l *CreateSubmissionLogic) publishSubmissionCreated(submissionID int64) error {
-	return publishJudgeSignal(l.ctx, l.svcCtx, "submission.created", "judge-api-service", submissionID)
+	return publishJudgeTaskEvent(l.ctx, l.svcCtx, "submission.created", "judge-api-service", submissionID)
 }

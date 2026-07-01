@@ -31,7 +31,13 @@ type JaegerConfig struct {
 }
 
 type StorageConfig struct {
-	SubmissionsRoot string
+	SubmissionsRoot         string
+	ServiceEndpoint         string `json:",optional"`
+	InternalGatewayEndpoint string `json:",optional"`
+	GetApiID                string `json:",optional"`
+	PutApiID                string `json:",optional"`
+	HeadApiID               string `json:",optional"`
+	Bucket                  string `json:",optional"`
 }
 
 type SubmissionConfig struct {

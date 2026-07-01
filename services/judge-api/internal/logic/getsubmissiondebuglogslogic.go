@@ -45,7 +45,7 @@ func (l *GetSubmissionDebugLogsLogic) GetSubmissionDebugLogs(req *types.GetSubmi
 		return nil, err
 	}
 
-	result, err := readResultFile(submission.ResultPath)
+	result, err := readResultFileWithStorage(l.ctx, l.svcCtx.Config.Storage, submission.ResultPath)
 	if err != nil {
 		return nil, err
 	}
@@ -63,15 +63,15 @@ func (l *GetSubmissionDebugLogsLogic) GetSubmissionDebugLogs(req *types.GetSubmi
 		maxBytes = maxDebugLogMaxByte
 	}
 
-	stdout, stdoutTruncated, err := readTruncatedText(target.StdoutPath, maxBytes)
+	stdout, stdoutTruncated, err := readTruncatedTextWithStorage(l.ctx, l.svcCtx.Config.Storage, target.StdoutPath, maxBytes)
 	if err != nil {
 		return nil, err
 	}
-	stderr, stderrTruncated, err := readTruncatedText(target.StderrPath, maxBytes)
+	stderr, stderrTruncated, err := readTruncatedTextWithStorage(l.ctx, l.svcCtx.Config.Storage, target.StderrPath, maxBytes)
 	if err != nil {
 		return nil, err
 	}
-	checkerLog, checkerTruncated, err := readTruncatedText(target.CheckerLogPath, maxBytes)
+	checkerLog, checkerTruncated, err := readTruncatedTextWithStorage(l.ctx, l.svcCtx.Config.Storage, target.CheckerLogPath, maxBytes)
 	if err != nil {
 		return nil, err
 	}

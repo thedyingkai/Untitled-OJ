@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"ojos-judge-api/internal/config"
 	"ojos-judge-api/internal/repository"
 	"ojos-judge-api/internal/svc"
 	"ojos-judge-api/internal/types"
@@ -46,6 +47,19 @@ func workerLeaseTTL(svcCtx *svc.ServiceContext) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func workerTaskRepo(svcCtx *svc.ServiceContext) svc.WorkerTaskRepository {
+	if svcCtx == nil {
+		return nil
+	}
+	if svcCtx.WorkerRepo != nil {
+		return svcCtx.WorkerRepo
+	}
+	if svcCtx.Repo != nil {
+		return svcCtx.Repo
+	}
+	return nil
+}
+
 func workerBasePath(path string) string {
 	path = strings.TrimRight(strings.TrimSpace(path), "/")
 	if path == "" {
@@ -61,30 +75,55 @@ func validateWorkerStatus(status string) error {
 	return nil
 }
 
+func normalizeWorkerTaskIDs(taskIDs []string) []string {
+	seen := make(map[string]struct{}, len(taskIDs))
+	normalized := make([]string, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		taskID = strings.TrimSpace(taskID)
+		if taskID == "" {
+			continue
+		}
+		if _, ok := seen[taskID]; ok {
+			continue
+		}
+		seen[taskID] = struct{}{}
+		normalized = append(normalized, taskID)
+	}
+	return normalized
+}
+
 func taskLeaseToResp(
 	ctx context.Context,
 	svcCtx *svc.ServiceContext,
 	r *repository.TaskLeaseView,
 ) (types.WorkerTaskLease, error) {
-	submission, err := svcCtx.Repo.GetSubmission(ctx, r.SubmissionID)
+	repo := workerTaskRepo(svcCtx)
+	if repo == nil {
+		return types.WorkerTaskLease{}, errors.New("worker repository is not configured")
+	}
+
+	submission, err := repo.GetSubmission(ctx, r.SubmissionID)
 	if err != nil {
 		return types.WorkerTaskLease{}, err
 	}
 
-	problem, err := svcCtx.Repo.GetProblemMeta(ctx, r.ProblemID)
+	problem, err := repo.GetProblemMeta(ctx, r.ProblemID)
 	if err != nil {
 		return types.WorkerTaskLease{}, err
 	}
 
-	source, err := artifactRefForFile(
+	sourcePath := fmt.Sprintf(
+		"/judge/worker/artifacts/submissions/%d/source?task_id=%s&worker_id=%s&lease_version=%d",
+		r.SubmissionID,
+		r.TaskID,
+		r.WorkerID,
+		r.LeaseVersion,
+	)
+	source, err := artifactRefForSubmissionSource(
+		ctx,
+		svcCtx,
 		submission.CodePath,
-		fmt.Sprintf(
-			"/judge/worker/artifacts/submissions/%d/source?task_id=%s&worker_id=%s&lease_version=%d",
-			r.SubmissionID,
-			r.TaskID,
-			r.WorkerID,
-			r.LeaseVersion,
-		),
+		sourcePath,
 		"text/plain; charset=utf-8",
 	)
 	if err != nil {
@@ -140,6 +179,36 @@ func artifactRefForFile(path string, urlPath string, contentType string) (types.
 		Url:         urlPath,
 		Sha256:      digest,
 		SizeBytes:   stat.Size(),
+		ContentType: contentType,
+	}, nil
+}
+
+func artifactRefForSubmissionSource(
+	ctx context.Context,
+	svcCtx *svc.ServiceContext,
+	path string,
+	urlPath string,
+	contentType string,
+) (types.WorkerArtifactRef, error) {
+	bucket, key, ok := parseStorageRef(path)
+	if !ok {
+		return artifactRefForFile(path, urlPath, contentType)
+	}
+	client := newStorageClient(svcCtx.Config.Storage)
+	meta, err := client.getMetadata(ctx, bucket, key)
+	if err != nil {
+		return types.WorkerArtifactRef{}, err
+	}
+	if meta.SizeBytes < 0 || meta.SizeBytes > artifactPackageMaxSize {
+		return types.WorkerArtifactRef{}, fmt.Errorf("artifact size is invalid: %s", path)
+	}
+	if meta.ContentType != "" {
+		contentType = meta.ContentType
+	}
+	return types.WorkerArtifactRef{
+		Url:         urlPath,
+		Sha256:      meta.SHA256,
+		SizeBytes:   meta.SizeBytes,
 		ContentType: contentType,
 	}, nil
 }
@@ -263,11 +332,16 @@ func sha256File(path string) (string, error) {
 }
 
 func writeWorkerResultArtifacts(
+	ctx context.Context,
+	storage config.StorageConfig,
 	submission *repository.SubmissionView,
 	req *types.WorkerSubmitResultReq,
 ) error {
 	if submission.ResultPath == "" {
 		return errors.New("submission result path is empty")
+	}
+	if _, _, ok := parseStorageRef(submission.ResultPath); ok {
+		return writeWorkerResultArtifactsToStorage(ctx, storage, submission, req)
 	}
 
 	result := ResultFile{
@@ -321,6 +395,87 @@ func writeWorkerResultArtifacts(
 		return errors.New("worker result json exceeds size limit")
 	}
 	return os.WriteFile(submission.ResultPath, data, 0o644)
+}
+
+func writeWorkerResultArtifactsToStorage(
+	ctx context.Context,
+	storage config.StorageConfig,
+	submission *repository.SubmissionView,
+	req *types.WorkerSubmitResultReq,
+) error {
+	bucket, _, ok := parseStorageRef(submission.ResultPath)
+	if !ok {
+		return errors.New("submission result path is not a storage ref")
+	}
+	result := ResultFile{
+		SubmissionID: submission.ID,
+		Status:       req.Status,
+		Score:        req.Score,
+		TimeMS:       req.TimeMs,
+		MemoryKB:     req.MemoryKb,
+		Cases:        make([]ResultCaseItem, 0, len(req.Cases)),
+	}
+
+	for _, c := range req.Cases {
+		caseName := fmt.Sprintf("%03d", c.CaseNo)
+		stdoutPath := storageRef(bucket, fmt.Sprintf("%d-cases-%s-stdout.txt", submission.ID, caseName))
+		if err := putBoundedStorageLog(ctx, storage, stdoutPath, c.Stdout); err != nil {
+			return err
+		}
+		stderrPath := storageRef(bucket, fmt.Sprintf("%d-cases-%s-stderr.txt", submission.ID, caseName))
+		if err := putBoundedStorageLog(ctx, storage, stderrPath, c.Stderr); err != nil {
+			return err
+		}
+		checkerPath := storageRef(bucket, fmt.Sprintf("%d-cases-%s-checker.log", submission.ID, caseName))
+		if err := putBoundedStorageLog(ctx, storage, checkerPath, c.CheckerLog); err != nil {
+			return err
+		}
+
+		result.Cases = append(result.Cases, ResultCaseItem{
+			CaseNo:         c.CaseNo,
+			Status:         c.Status,
+			Score:          c.Score,
+			TimeMS:         c.TimeMs,
+			MemoryKB:       c.MemoryKb,
+			StdoutPath:     stdoutPath,
+			StderrPath:     stderrPath,
+			CheckerLogPath: checkerPath,
+			Message:        c.Message,
+		})
+	}
+
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return err
+	}
+	if len(data) > maxWorkerResultBytes {
+		return errors.New("worker result json exceeds size limit")
+	}
+	return putStorageObject(
+		ctx,
+		storage,
+		submission.ResultPath,
+		"application/json; charset=utf-8",
+		strings.NewReader(string(data)),
+	)
+}
+
+func putBoundedStorageLog(
+	ctx context.Context,
+	storage config.StorageConfig,
+	path string,
+	content string,
+) error {
+	if len([]byte(content)) > maxWorkerLogBytes {
+		content = string([]byte(content)[:maxWorkerLogBytes])
+	}
+	return putStorageObject(
+		ctx,
+		storage,
+		path,
+		"text/plain; charset=utf-8",
+		strings.NewReader(content),
+	)
 }
 
 func writeBoundedLog(dir string, name string, content string) (string, error) {

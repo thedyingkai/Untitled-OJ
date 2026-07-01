@@ -25,6 +25,9 @@ migrations: []
 permissions:
   - judge.worker
 routes: []
+required_apis:
+  - storage.object.get
+  - storage.object.put
 redis:
   - name: redis
     kind: consumer-group

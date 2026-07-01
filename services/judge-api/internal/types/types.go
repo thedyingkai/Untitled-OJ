@@ -8,15 +8,22 @@ type AdminActionResp struct {
 }
 
 type AdminQueueResp struct {
-	StreamLength      int64  `json:"stream_length"`
-	PendingCount      int64  `json:"pending_count"`
-	ConsumerGroup     string `json:"consumer_group"`
-	LastId            string `json:"last_id"`
-	TrimStrategy      string `json:"trim_strategy"`
-	PendingOldestIdle int64  `json:"pending_oldest_idle_ms"`
-	Scheduled         int64  `json:"scheduled"`
-	Pending           int64  `json:"pending"`
-	Judging           int64  `json:"judging"`
+	StreamLength       int64  `json:"stream_length"`
+	ResultStreamLength int64  `json:"result_stream_length"`
+	PendingCount       int64  `json:"pending_count"`
+	ConsumerGroup      string `json:"consumer_group"`
+	ConsumerCount      int64  `json:"consumer_count"`
+	ConsumerLag        int64  `json:"consumer_lag"`
+	LastId             string `json:"last_id"`
+	ResultLastId       string `json:"result_last_id"`
+	TrimStrategy       string `json:"trim_strategy"`
+	PendingOldestIdle  int64  `json:"pending_oldest_idle_ms"`
+	PendingLowestId    string `json:"pending_lowest_id"`
+	PendingHighestId   string `json:"pending_highest_id"`
+	RedisStatus        string `json:"redis_status"`
+	Scheduled          int64  `json:"scheduled"`
+	Pending            int64  `json:"pending"`
+	Judging            int64  `json:"judging"`
 }
 
 type AdminSubmissionActionReq struct {
@@ -218,6 +225,7 @@ type WorkerClaimTasksReq struct {
 	Capabilities       []string `json:"capabilities,optional"`
 	SupportedLanguages []string `json:"supported_languages,optional"`
 	AvailableSlots     int      `json:"available_slots"`
+	TaskIds            []string `json:"task_ids,optional"`
 }
 
 type WorkerClaimTasksResp struct {

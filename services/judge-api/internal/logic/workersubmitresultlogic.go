@@ -37,7 +37,12 @@ func (l *WorkerSubmitResultLogic) WorkerSubmitResult(req *types.WorkerSubmitResu
 		return nil, err
 	}
 
-	lease, err := l.svcCtx.Repo.GetTaskForLease(l.ctx, taskID, workerID, req.LeaseVersion)
+	repo := workerTaskRepo(l.svcCtx)
+	if repo == nil {
+		return nil, errors.New("worker repository is not configured")
+	}
+
+	lease, err := repo.GetTaskForLease(l.ctx, taskID, workerID, req.LeaseVersion)
 	if err != nil {
 		if errors.Is(err, repository.ErrTaskLeaseInvalid) {
 			return nil, errors.New("task lease is invalid")
@@ -51,15 +56,15 @@ func (l *WorkerSubmitResultLogic) WorkerSubmitResult(req *types.WorkerSubmitResu
 		}, nil
 	}
 
-	submission, err := l.svcCtx.Repo.GetSubmission(l.ctx, lease.SubmissionID)
+	submission, err := repo.GetSubmission(l.ctx, lease.SubmissionID)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeWorkerResultArtifacts(submission, req); err != nil {
+	if err := writeWorkerResultArtifacts(l.ctx, l.svcCtx.Config.Storage, submission, req); err != nil {
 		return nil, err
 	}
 
-	err = l.svcCtx.Repo.MarkTaskSucceeded(
+	err = repo.MarkTaskSucceeded(
 		l.ctx,
 		taskID,
 		workerID,
@@ -74,6 +79,9 @@ func (l *WorkerSubmitResultLogic) WorkerSubmitResult(req *types.WorkerSubmitResu
 		if errors.Is(err, repository.ErrTaskLeaseInvalid) {
 			return &types.WorkerSubmitResultResp{Accepted: false, Status: "STALE_LEASE"}, nil
 		}
+		return nil, err
+	}
+	if err := publishJudgeResultEvent(l.ctx, l.svcCtx, taskID, workerID, req); err != nil {
 		return nil, err
 	}
 

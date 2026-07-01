@@ -11,6 +11,7 @@ import (
 	"ojos-judge-api/internal/middleware"
 	"ojos-judge-api/internal/repository"
 	"ojos-shared/security/internalauth"
+	sharedperm "ojos-shared/security/permission"
 
 	"ojos-shared/database"
 	sharedlogger "ojos-shared/logger"
@@ -30,12 +31,76 @@ type ServiceContext struct {
 	DB     *pgxpool.Pool
 	Tracer *sdktrace.TracerProvider
 
-	Repo  *repository.Repository
-	Redis *redis.Client
+	Repo           *repository.Repository
+	SubmissionRepo SubmissionRepository
+	WorkerRepo     WorkerTaskRepository
+	Permission     PermissionChecker
+	Redis          *redis.Client
 
 	UserContextMiddleware  rest.Middleware
 	InternalAuthMiddleware rest.Middleware
 	WorkerAuthMiddleware   rest.Middleware
+}
+
+type WorkerTaskRepository interface {
+	UpsertWorker(ctx context.Context, w repository.WorkerRegistration) (*repository.WorkerView, error)
+	WorkerHeartbeat(ctx context.Context, workerID string, runningCount int) (*repository.WorkerView, error)
+	RecoverStaleTasks(ctx context.Context) (int64, error)
+	ClaimTasks(ctx context.Context, workerID string, supportedLanguages []string, limit int, leaseTTL time.Duration, taskIDs []string) ([]repository.TaskLeaseView, error)
+	RefreshTaskLease(ctx context.Context, taskID string, workerID string, leaseVersion int, leaseTTL time.Duration) (*repository.TaskLeaseView, error)
+	GetTaskForLease(ctx context.Context, taskID string, workerID string, leaseVersion int) (*repository.TaskLeaseView, error)
+	GetSubmission(ctx context.Context, id int64) (*repository.SubmissionView, error)
+	GetProblemMeta(ctx context.Context, id int64) (*repository.ProblemMeta, error)
+	MarkTaskSucceeded(ctx context.Context, taskID string, workerID string, leaseVersion int, status string, score int, timeMS int, memoryKB int, message string) error
+	MarkTaskFailed(ctx context.Context, taskID string, workerID string, leaseVersion int, status string, message string, retryable bool) error
+}
+
+type SubmissionRepository interface {
+	GetProblemMeta(ctx context.Context, id int64) (*repository.ProblemMeta, error)
+	CreateSubmission(ctx context.Context, problemID int64, userID int64, language string) (int64, error)
+	UpdateSubmissionSource(ctx context.Context, submissionID int64, codePath string, codeSha256 string, resultPath string) error
+	EnsureTaskForSubmission(ctx context.Context, submissionID int64) error
+	MarkSubmissionSystemError(ctx context.Context, submissionID int64, message string) error
+}
+
+type PermissionChecker interface {
+	RequireUserPermission(ctx context.Context, userID int64, permissionCode string, scope sharedperm.Scope) error
+	HasUserPermission(ctx context.Context, userID int64, permissionCode string, scope sharedperm.Scope) (bool, error)
+}
+
+type databasePermissionChecker struct {
+	db *pgxpool.Pool
+}
+
+func (p databasePermissionChecker) RequireUserPermission(ctx context.Context, userID int64, permissionCode string, scope sharedperm.Scope) error {
+	return sharedperm.RequireUserPermission(ctx, p.db, userID, permissionCode, scope)
+}
+
+func (p databasePermissionChecker) HasUserPermission(ctx context.Context, userID int64, permissionCode string, scope sharedperm.Scope) (bool, error) {
+	return sharedperm.HasUserPermission(ctx, p.db, userID, permissionCode, scope)
+}
+
+func (s *ServiceContext) ActiveSubmissionRepo() SubmissionRepository {
+	if s == nil {
+		return nil
+	}
+	if s.SubmissionRepo != nil {
+		return s.SubmissionRepo
+	}
+	return s.Repo
+}
+
+func (s *ServiceContext) ActivePermissionChecker() PermissionChecker {
+	if s == nil {
+		return nil
+	}
+	if s.Permission != nil {
+		return s.Permission
+	}
+	if s.DB == nil {
+		return nil
+	}
+	return databasePermissionChecker{db: s.DB}
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
@@ -96,6 +161,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		)
 	}
 
+	repo := repository.New(db)
 	return &ServiceContext{
 		Config: c,
 
@@ -103,8 +169,11 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		DB:     db,
 		Tracer: tp,
 
-		Repo:  repository.New(db),
-		Redis: redisClient,
+		Repo:           repo,
+		SubmissionRepo: repo,
+		WorkerRepo:     repo,
+		Permission:     databasePermissionChecker{db: db},
+		Redis:          redisClient,
 
 		UserContextMiddleware: middleware.NewUserContextMiddleware().Handle,
 		InternalAuthMiddleware: middleware.NewInternalAuthMiddleware(
@@ -116,7 +185,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 }
 
 func applyEnvOverrides(c *config.Config) {
-	if value := firstEnv("DATABASE_URL", "POSTGRES_DSN"); value != "" {
+	if value := firstEnv("JUDGE_DATABASE_URL", "DATABASE_URL", "POSTGRES_DSN"); value != "" {
 		c.Database.Url = value
 	}
 	if value := strings.TrimSpace(os.Getenv("REDIS_URL")); value != "" {
@@ -127,6 +196,24 @@ func applyEnvOverrides(c *config.Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_SUBMISSIONS_ROOT")); value != "" {
 		c.Storage.SubmissionsRoot = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_SERVICE_ENDPOINT")); value != "" {
+		c.Storage.ServiceEndpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_INTERNAL_GATEWAY_ENDPOINT")); value != "" {
+		c.Storage.InternalGatewayEndpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_GET_API_ID")); value != "" {
+		c.Storage.GetApiID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_PUT_API_ID")); value != "" {
+		c.Storage.PutApiID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_HEAD_API_ID")); value != "" {
+		c.Storage.HeadApiID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_SUBMISSIONS_BUCKET")); value != "" {
+		c.Storage.Bucket = value
 	}
 }
 

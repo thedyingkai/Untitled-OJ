@@ -27,6 +27,12 @@ pub struct WorkerLinkConfig {
     pub supported_languages: Vec<String>,
     pub heartbeat_interval: Duration,
     pub task_lease_ttl: Duration,
+    pub redis_url: Option<String>,
+    pub redis_task_stream: String,
+    pub redis_consumer_group: String,
+    pub internal_gateway_url: Option<String>,
+    pub storage_api_get: String,
+    pub storage_api_put: String,
 }
 
 impl WorkerLinkConfig {
@@ -56,6 +62,25 @@ impl WorkerLinkConfig {
         };
         let heartbeat_interval = Duration::from_secs(env_parse("OJOS_HEARTBEAT_INTERVAL", 10u64)?);
         let task_lease_ttl = Duration::from_secs(env_parse("OJOS_TASK_LEASE_TTL", 60u64)?);
+        let redis_url = std::env::var("OJOS_REDIS_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let redis_task_stream = env_or("OJOS_JUDGE_TASK_STREAM", || {
+            "ojos:judge:submissions".to_string()
+        });
+        let redis_consumer_group =
+            env_or("OJOS_JUDGE_CONSUMER_GROUP", || "judge-workers".to_string());
+        let internal_gateway_url = std::env::var("OJOS_INTERNAL_GATEWAY_URL")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        let storage_api_get = env_or("OJOS_STORAGE_OBJECT_GET_API_ID", || {
+            "storage.object.get".to_string()
+        });
+        let storage_api_put = env_or("OJOS_STORAGE_OBJECT_PUT_API_ID", || {
+            "storage.object.put".to_string()
+        });
 
         Ok(Self {
             worker_id,
@@ -68,12 +93,35 @@ impl WorkerLinkConfig {
             supported_languages,
             heartbeat_interval,
             task_lease_ttl,
+            redis_url,
+            redis_task_stream,
+            redis_consumer_group,
+            internal_gateway_url,
+            storage_api_get,
+            storage_api_put,
         })
     }
 }
 
+fn internal_api_url(gateway_url: &str, api_id: &str, path: &str) -> String {
+    format!(
+        "{}/internal/apis/{}/{}",
+        gateway_url.trim_end_matches('/'),
+        api_id.trim_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
 pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
     let config = Arc::new(WorkerLinkConfig::from_env(&languages)?);
+    if let Some(gateway_url) = &config.internal_gateway_url {
+        info!(
+            gateway_url = %gateway_url,
+            storage_api_get = %config.storage_api_get,
+            storage_api_put = %config.storage_api_put,
+            "worker storage ancestor api resolver configured"
+        );
+    }
     fs::create_dir_all(&config.work_dir).await?;
     fs::create_dir_all(&config.artifact_cache_dir).await?;
 
@@ -83,6 +131,7 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
         .context("create worker http client failed")?;
 
     register_worker(&client, &config).await?;
+    let mut stream_wakeup = RedisTaskWakeup::from_config(&config).await;
 
     let semaphore = Arc::new(Semaphore::new(config.max_concurrency));
     {
@@ -102,6 +151,7 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
         });
     }
 
+    let mut pending_task_events = Vec::new();
     loop {
         let available = semaphore.available_permits();
         if available == 0 {
@@ -109,9 +159,16 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
             continue;
         }
 
-        let tasks = claim_tasks(&client, &config, available).await?;
+        let tasks = claim_tasks(&client, &config, available, &pending_task_events).await?;
+        if !pending_task_events.is_empty()
+            && stream_wakeup
+                .ack_task_events(&stream_event_ids(&pending_task_events))
+                .await
+        {
+            pending_task_events.clear();
+        }
         if tasks.is_empty() {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            pending_task_events.extend(stream_wakeup.wait_for_task_event().await);
             continue;
         }
 
@@ -245,16 +302,253 @@ async fn heartbeat_worker(
     Ok(())
 }
 
+enum RedisTaskWakeup {
+    Stream {
+        connection: redis::aio::ConnectionManager,
+        stream: String,
+        group: String,
+        consumer: String,
+    },
+    Sleep(Duration),
+}
+
+impl RedisTaskWakeup {
+    async fn from_config(config: &WorkerLinkConfig) -> Self {
+        let Some(redis_url) = config.redis_url.as_ref() else {
+            return Self::Sleep(Duration::from_secs(1));
+        };
+        match Self::connect(
+            redis_url,
+            &config.redis_task_stream,
+            &config.redis_consumer_group,
+            &config.worker_id,
+        )
+        .await
+        {
+            Ok(wakeup) => wakeup,
+            Err(err) => {
+                warn!(error = %err, "redis task stream wakeup disabled");
+                Self::Sleep(Duration::from_secs(1))
+            }
+        }
+    }
+
+    async fn connect(redis_url: &str, stream: &str, group: &str, consumer: &str) -> Result<Self> {
+        let client = redis::Client::open(redis_url)
+            .with_context(|| "open redis client for judge task stream failed")?;
+        let mut connection = client
+            .get_connection_manager()
+            .await
+            .context("connect redis task stream failed")?;
+        let group_result: redis::RedisResult<()> = redis::cmd("XGROUP")
+            .arg("CREATE")
+            .arg(stream)
+            .arg(group)
+            .arg("$")
+            .arg("MKSTREAM")
+            .query_async(&mut connection)
+            .await;
+        if let Err(err) = group_result {
+            if !err.to_string().contains("BUSYGROUP") {
+                return Err(err).context("create redis task stream consumer group failed");
+            }
+        }
+        info!(
+            stream = %stream,
+            group = %group,
+            consumer = %consumer,
+            "redis task stream wakeup enabled"
+        );
+        Ok(Self::Stream {
+            connection,
+            stream: stream.to_string(),
+            group: group.to_string(),
+            consumer: consumer.to_string(),
+        })
+    }
+
+    async fn wait_for_task_event(&mut self) -> Vec<RedisTaskEvent> {
+        match self {
+            Self::Sleep(duration) => {
+                tokio::time::sleep(*duration).await;
+                Vec::new()
+            }
+            Self::Stream {
+                connection,
+                stream,
+                group,
+                consumer,
+            } => {
+                let result: redis::RedisResult<redis::Value> = redis::cmd("XREADGROUP")
+                    .arg("GROUP")
+                    .arg(group.as_str())
+                    .arg(consumer.as_str())
+                    .arg("COUNT")
+                    .arg(1)
+                    .arg("BLOCK")
+                    .arg(1000)
+                    .arg("STREAMS")
+                    .arg(stream.as_str())
+                    .arg(">")
+                    .query_async(connection)
+                    .await;
+                match result {
+                    Ok(value) if value != redis::Value::Nil => {
+                        let events = redis_stream_task_events(&value);
+                        info!(
+                            stream = %stream,
+                            event_count = events.len(),
+                            "redis task stream event received"
+                        );
+                        events
+                    }
+                    Ok(_) => Vec::new(),
+                    Err(err) => {
+                        warn!(error = %err, "redis task stream read failed");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    }
+
+    async fn ack_task_events(&mut self, entry_ids: &[String]) -> bool {
+        if entry_ids.is_empty() {
+            return true;
+        }
+        match self {
+            Self::Sleep(_) => true,
+            Self::Stream {
+                connection,
+                stream,
+                group,
+                ..
+            } => {
+                let mut cmd = redis::cmd("XACK");
+                cmd.arg(stream.as_str()).arg(group.as_str());
+                for entry_id in entry_ids {
+                    cmd.arg(entry_id.as_str());
+                }
+                let result: redis::RedisResult<i64> = cmd.query_async(connection).await;
+                match result {
+                    Ok(acked) => {
+                        info!(
+                            stream = %stream,
+                            group = %group,
+                            requested = entry_ids.len(),
+                            acked,
+                            "redis task stream events acknowledged"
+                        );
+                        true
+                    }
+                    Err(err) => {
+                        warn!(
+                            stream = %stream,
+                            group = %group,
+                            error = %err,
+                            "redis task stream ack failed"
+                        );
+                        false
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RedisTaskEvent {
+    entry_id: String,
+    task_id: Option<String>,
+    submission_id: Option<i64>,
+}
+
+fn stream_event_ids(events: &[RedisTaskEvent]) -> Vec<String> {
+    events.iter().map(|event| event.entry_id.clone()).collect()
+}
+
+fn stream_task_ids(events: &[RedisTaskEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| event.task_id.clone())
+        .collect()
+}
+
+fn redis_stream_task_events(value: &redis::Value) -> Vec<RedisTaskEvent> {
+    let redis::Value::Array(streams) = value else {
+        return Vec::new();
+    };
+    streams
+        .iter()
+        .flat_map(redis_stream_task_events_from_stream)
+        .collect()
+}
+
+fn redis_stream_task_events_from_stream(value: &redis::Value) -> Vec<RedisTaskEvent> {
+    let redis::Value::Array(parts) = value else {
+        return Vec::new();
+    };
+    let Some(redis::Value::Array(entries)) = parts.get(1) else {
+        return Vec::new();
+    };
+    entries.iter().filter_map(redis_stream_task_event).collect()
+}
+
+fn redis_stream_task_event(value: &redis::Value) -> Option<RedisTaskEvent> {
+    let redis::Value::Array(parts) = value else {
+        return None;
+    };
+    let entry_id = parts.first().and_then(redis_value_to_string)?;
+    let values = parts.get(1).map(redis_stream_fields).unwrap_or_default();
+    Some(RedisTaskEvent {
+        entry_id,
+        task_id: values
+            .iter()
+            .find(|(key, _)| key == "task_id")
+            .map(|(_, value)| value.clone()),
+        submission_id: values
+            .iter()
+            .find(|(key, _)| key == "submission_id")
+            .and_then(|(_, value)| value.parse::<i64>().ok()),
+    })
+}
+
+fn redis_stream_fields(value: &redis::Value) -> Vec<(String, String)> {
+    let redis::Value::Array(parts) = value else {
+        return Vec::new();
+    };
+    parts
+        .chunks(2)
+        .filter_map(|chunk| {
+            let key = chunk.first().and_then(redis_value_to_string)?;
+            let value = chunk.get(1).and_then(redis_value_to_string)?;
+            Some((key, value))
+        })
+        .collect()
+}
+
+fn redis_value_to_string(value: &redis::Value) -> Option<String> {
+    match value {
+        redis::Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok(),
+        redis::Value::SimpleString(value) => Some(value.clone()),
+        redis::Value::Int(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
 async fn claim_tasks(
     client: &Client,
     config: &WorkerLinkConfig,
     available_slots: usize,
+    pending_task_events: &[RedisTaskEvent],
 ) -> Result<Vec<WorkerTaskLease>> {
     let req = WorkerClaimTasksReq {
         worker_id: config.worker_id.clone(),
         capabilities: vec!["nsjail".to_string(), "cgroup-v2".to_string()],
         supported_languages: config.supported_languages.clone(),
         available_slots: available_slots as i32,
+        task_ids: stream_task_ids(pending_task_events),
     };
     let resp: WorkerClaimTasksResp =
         post_json(client, config, "/judge/worker/tasks/claim", &req).await?;
@@ -544,6 +838,8 @@ struct WorkerClaimTasksReq {
     capabilities: Vec<String>,
     supported_languages: Vec<String>,
     available_slots: i32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    task_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -619,3 +915,394 @@ struct WorkerFailTaskReq {
 
 #[derive(Debug, Deserialize)]
 struct WorkerFailTaskResp {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::result::{ResultCase, ResultFile};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn redis_stream_task_events_extracts_ids_and_task_metadata_from_xreadgroup_response() {
+        let value = redis::Value::Array(vec![redis::Value::Array(vec![
+            redis::Value::BulkString(b"ojos:judge:submissions".to_vec()),
+            redis::Value::Array(vec![
+                redis::Value::Array(vec![
+                    redis::Value::BulkString(b"1720000000000-0".to_vec()),
+                    redis::Value::Array(vec![
+                        redis::Value::BulkString(b"type".to_vec()),
+                        redis::Value::BulkString(b"submission.created".to_vec()),
+                        redis::Value::BulkString(b"task_id".to_vec()),
+                        redis::Value::BulkString(b"sub-41".to_vec()),
+                        redis::Value::BulkString(b"submission_id".to_vec()),
+                        redis::Value::BulkString(b"41".to_vec()),
+                    ]),
+                ]),
+                redis::Value::Array(vec![
+                    redis::Value::BulkString(b"1720000000001-0".to_vec()),
+                    redis::Value::Array(vec![
+                        redis::Value::BulkString(b"task_id".to_vec()),
+                        redis::Value::BulkString(b"sub-42".to_vec()),
+                        redis::Value::BulkString(b"submission_id".to_vec()),
+                        redis::Value::BulkString(b"42".to_vec()),
+                    ]),
+                ]),
+            ]),
+        ])]);
+
+        let events = redis_stream_task_events(&value);
+
+        assert_eq!(
+            stream_event_ids(&events),
+            vec!["1720000000000-0".to_string(), "1720000000001-0".to_string()]
+        );
+        assert_eq!(
+            stream_task_ids(&events),
+            vec!["sub-41".to_string(), "sub-42".to_string()]
+        );
+        assert_eq!(events[0].submission_id, Some(41));
+        assert_eq!(events[1].submission_id, Some(42));
+    }
+
+    #[test]
+    fn redis_stream_task_events_ignores_nil_or_malformed_values() {
+        assert!(redis_stream_task_events(&redis::Value::Nil).is_empty());
+        assert!(
+            redis_stream_task_events(&redis::Value::Array(vec![redis::Value::BulkString(
+                b"unexpected".to_vec()
+            )]))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn worker_claim_request_serializes_stream_task_ids() {
+        let req = WorkerClaimTasksReq {
+            worker_id: "worker-a".to_string(),
+            capabilities: vec!["nsjail".to_string()],
+            supported_languages: vec!["rust".to_string()],
+            available_slots: 1,
+            task_ids: vec!["sub-42".to_string()],
+        };
+
+        let payload = serde_json::to_string(&req).expect("serialize claim request");
+
+        assert!(
+            payload.contains("\"task_ids\":[\"sub-42\"]"),
+            "claim request should include stream task ids: {payload}"
+        );
+    }
+
+    #[test]
+    fn worker_storage_access_uses_api_id_resolver_url() {
+        let get = internal_api_url(
+            "http://gateway:8080/",
+            "storage.object.get",
+            "/submissions/42-source-main.cpp",
+        );
+        let put = internal_api_url(
+            "http://gateway:8080",
+            "storage.object.put",
+            "submissions/42-result.json",
+        );
+
+        assert_eq!(
+            get,
+            "http://gateway:8080/internal/apis/storage.object.get/submissions/42-source-main.cpp"
+        );
+        assert_eq!(
+            put,
+            "http://gateway:8080/internal/apis/storage.object.put/submissions/42-result.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_http_client_uses_worker_token_and_runtime_routes() {
+        let artifact_body = b"int main() { return 0; }\n".to_vec();
+        let artifact_sha256 = format!("{:x}", Sha256::digest(&artifact_body));
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let endpoint = start_worker_http_contract_server(captured.clone(), artifact_body.clone());
+
+        let config = WorkerLinkConfig {
+            worker_id: "worker-a".to_string(),
+            worker_name: "Worker A".to_string(),
+            judge_api_url: endpoint,
+            worker_token: "secret-worker-token".to_string(),
+            max_concurrency: 2,
+            work_dir: std::env::temp_dir().join(format!("ojos-worker-test-{}", Uuid::new_v4())),
+            artifact_cache_dir: std::env::temp_dir()
+                .join(format!("ojos-worker-cache-test-{}", Uuid::new_v4())),
+            supported_languages: vec!["cpp17".to_string()],
+            heartbeat_interval: Duration::from_secs(10),
+            task_lease_ttl: Duration::from_secs(45),
+            redis_url: None,
+            redis_task_stream: "ojos:judge:submissions".to_string(),
+            redis_consumer_group: "judge-workers".to_string(),
+            internal_gateway_url: None,
+            storage_api_get: "storage.object.get".to_string(),
+            storage_api_put: "storage.object.put".to_string(),
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .no_proxy()
+            .build()
+            .expect("worker http client");
+
+        register_worker(&client, &config)
+            .await
+            .expect("register worker");
+        heartbeat_worker(&client, &config, 1)
+            .await
+            .expect("heartbeat worker");
+        let tasks = claim_tasks(
+            &client,
+            &config,
+            1,
+            &[RedisTaskEvent {
+                entry_id: "1720000000000-0".to_string(),
+                task_id: Some("sub-42".to_string()),
+                submission_id: Some(42),
+            }],
+        )
+        .await
+        .expect("claim tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "sub-42");
+
+        let artifact_target = config.work_dir.join("source.cpp");
+        if let Some(parent) = artifact_target.parent() {
+            fs::create_dir_all(parent).await.expect("artifact parent");
+        }
+        download_artifact(
+            &client,
+            &config,
+            &WorkerArtifactRef {
+                url: "/judge/worker/artifacts/submissions/42/source?task_id=sub-42&worker_id=worker-a&lease_version=7".to_string(),
+                sha256: artifact_sha256,
+                size_bytes: artifact_body.len() as i64,
+            },
+            &artifact_target,
+        )
+        .await
+        .expect("download artifact");
+        let downloaded = fs::read(&artifact_target).await.expect("read artifact");
+        assert_eq!(downloaded, artifact_body);
+
+        let result_dir = config.work_dir.join("result");
+        fs::create_dir_all(&result_dir).await.expect("result dir");
+        let stdout_path = result_dir.join("stdout.txt");
+        let stderr_path = result_dir.join("stderr.txt");
+        let checker_path = result_dir.join("checker.log");
+        fs::write(&stdout_path, "ok\n").await.expect("stdout");
+        fs::write(&stderr_path, "").await.expect("stderr");
+        fs::write(&checker_path, "matched\n")
+            .await
+            .expect("checker");
+
+        let task = WorkerTaskLease {
+            task_id: "sub-42".to_string(),
+            submission_id: 42,
+            language: "cpp17".to_string(),
+            lease_version: 7,
+            source: WorkerArtifactRef {
+                url: "/unused/source".to_string(),
+                sha256: String::new(),
+                size_bytes: 0,
+            },
+            problem_package: WorkerArtifactRef {
+                url: "/unused/package".to_string(),
+                sha256: String::new(),
+                size_bytes: 0,
+            },
+        };
+        submit_result(
+            &client,
+            &config,
+            &task,
+            &ResultFile {
+                submission_id: 42,
+                status: "ACCEPTED".to_string(),
+                score: 100,
+                time_ms: 12,
+                memory_kb: 2048,
+                message: "accepted".to_string(),
+                cases: vec![ResultCase {
+                    case_no: 1,
+                    status: "ACCEPTED".to_string(),
+                    score: 100,
+                    time_ms: 12,
+                    memory_kb: 2048,
+                    stdout_path: stdout_path.to_string_lossy().to_string(),
+                    stderr_path: stderr_path.to_string_lossy().to_string(),
+                    checker_log_path: checker_path.to_string_lossy().to_string(),
+                    message: "accepted".to_string(),
+                }],
+            },
+        )
+        .await
+        .expect("submit result");
+        fail_task(&client, &config, &task, false, "SYSTEM", "nsjail failed")
+            .await
+            .expect("fail task");
+
+        let requests = captured.lock().expect("captured requests").clone();
+        let paths: Vec<_> = requests
+            .iter()
+            .map(|request| request.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/judge/worker/register",
+                "/judge/worker/heartbeat",
+                "/judge/worker/tasks/claim",
+                "/judge/worker/artifacts/submissions/42/source?task_id=sub-42&worker_id=worker-a&lease_version=7",
+                "/judge/worker/tasks/sub-42/result",
+                "/judge/worker/tasks/sub-42/fail",
+            ]
+        );
+        for request in &requests {
+            assert_eq!(
+                request.header("x-ojos-worker-token"),
+                Some("secret-worker-token"),
+                "worker request {} must carry worker token",
+                request.path
+            );
+        }
+        assert!(requests[0].body.contains("\"worker_id\":\"worker-a\""));
+        assert!(requests[2].body.contains("\"task_ids\":[\"sub-42\"]"));
+        assert!(requests[4].body.contains("\"stdout\":\"ok\\n\""));
+        assert!(requests[4].body.contains("\"checker_log\":\"matched\\n\""));
+        assert!(requests[5].body.contains("\"message\":\"nsjail failed\""));
+
+        let _ = fs::remove_dir_all(&config.work_dir).await;
+        let _ = fs::remove_dir_all(&config.artifact_cache_dir).await;
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedRequest {
+        path: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl CapturedRequest {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
+    }
+
+    fn start_worker_http_contract_server(
+        captured: Arc<Mutex<Vec<CapturedRequest>>>,
+        artifact_body: Vec<u8>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind worker contract server");
+        let addr = listener.local_addr().expect("worker contract addr");
+        std::thread::spawn(move || {
+            for _ in 0..6 {
+                let (mut stream, _) = listener.accept().expect("accept worker request");
+                let request = read_http_request(&mut stream);
+                let body = response_for_worker_request(&request.path, &artifact_body);
+                captured.lock().expect("captured requests").push(request);
+                stream
+                    .write_all(&body)
+                    .expect("write worker contract response");
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    fn response_for_worker_request(path: &str, artifact_body: &[u8]) -> Vec<u8> {
+        if path.starts_with("/judge/worker/artifacts/submissions/42/source") {
+            return http_response("200 OK", "text/plain; charset=utf-8", artifact_body);
+        }
+        let json = match path {
+            "/judge/worker/register" => {
+                r#"{"worker_id":"worker-a","heartbeat_every_s":10,"lease_ttl_seconds":45,"status":"ONLINE"}"#
+            }
+            "/judge/worker/heartbeat" => r#"{}"#,
+            "/judge/worker/tasks/claim" => {
+                r#"{"tasks":[{"task_id":"sub-42","submission_id":42,"problem_id":7,"language":"cpp17","attempt":1,"lease_version":7,"lease_expires_at":"2026-07-01T00:00:00Z","source":{"url":"/unused/source","sha256":"","size_bytes":0,"content_type":"text/plain"},"problem_package":{"url":"/unused/package","sha256":"","size_bytes":0,"content_type":"application/zip"}}]}"#
+            }
+            "/judge/worker/tasks/sub-42/result" => r#"{"accepted":true,"status":"ACCEPTED"}"#,
+            "/judge/worker/tasks/sub-42/fail" => r#"{}"#,
+            _ => r#"{"error":"not found"}"#,
+        };
+        http_response("200 OK", "application/json", json.as_bytes())
+    }
+
+    fn http_response(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> CapturedRequest {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("request read timeout");
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let count = stream.read(&mut buffer).expect("read request");
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+            if http_request_complete(&bytes) {
+                break;
+            }
+        }
+        parse_http_request(&bytes)
+    }
+
+    fn http_request_complete(bytes: &[u8]) -> bool {
+        let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let header = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = header
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")?
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            })
+            .unwrap_or(0);
+        bytes.len() >= header_end + 4 + content_length
+    }
+
+    fn parse_http_request(bytes: &[u8]) -> CapturedRequest {
+        let text = String::from_utf8_lossy(bytes);
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_ref(), ""));
+        let mut lines = head.lines();
+        let request_line = lines.next().unwrap_or_default();
+        let path = request_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        let headers = lines
+            .filter_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                Some((key.trim().to_string(), value.trim().to_string()))
+            })
+            .collect();
+        CapturedRequest {
+            path,
+            headers,
+            body: body.to_string(),
+        }
+    }
+}

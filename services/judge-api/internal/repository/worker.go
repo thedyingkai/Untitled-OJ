@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -251,6 +252,7 @@ func (r *Repository) ClaimTasks(
 	supportedLanguages []string,
 	limit int,
 	leaseTTL time.Duration,
+	taskIDs []string,
 ) ([]TaskLeaseView, error) {
 	if limit <= 0 {
 		return []TaskLeaseView{}, nil
@@ -299,6 +301,7 @@ candidate AS (
     WHERE jt.status = 'PENDING'
       AND s.status = 'PENDING'
       AND (cardinality($2::text[]) = 0 OR jt.language = ANY($2::text[]))
+      AND (cardinality($5::text[]) = 0 OR jt.task_id = ANY($5::text[]))
     ORDER BY jt.id ASC
     FOR UPDATE SKIP LOCKED
     LIMIT $3
@@ -356,6 +359,7 @@ ORDER BY ut.submission_id ASC
 		supportedLanguages,
 		limit,
 		int64(leaseTTL.Seconds()),
+		normalizeTaskIDs(taskIDs),
 	)
 	if err != nil {
 		return nil, err
@@ -843,4 +847,21 @@ SET
 
 func deterministicTaskID(submissionID int64) string {
 	return "sub-" + strconv.FormatInt(submissionID, 10)
+}
+
+func normalizeTaskIDs(taskIDs []string) []string {
+	seen := make(map[string]struct{}, len(taskIDs))
+	normalized := make([]string, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		taskID = strings.TrimSpace(taskID)
+		if taskID == "" {
+			continue
+		}
+		if _, ok := seen[taskID]; ok {
+			continue
+		}
+		seen[taskID] = struct{}{}
+		normalized = append(normalized, taskID)
+	}
+	return normalized
 }

@@ -97,48 +97,51 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 	)
 
 	server.AddRoutes(
-		[]rest.Route{
-			{
-				Method:  http.MethodGet,
-				Path:    "/worker/artifacts/problems/:id/package",
-				Handler: workerArtifactProblemPackageHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodGet,
-				Path:    "/worker/artifacts/submissions/:id/source",
-				Handler: workerArtifactSubmissionSourceHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodPost,
-				Path:    "/worker/heartbeat",
-				Handler: workerHeartbeatHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodPost,
-				Path:    "/worker/register",
-				Handler: workerRegisterHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodPost,
-				Path:    "/worker/tasks/:task_id/fail",
-				Handler: workerFailTaskHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodPost,
-				Path:    "/worker/tasks/:task_id/heartbeat",
-				Handler: workerTaskHeartbeatHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodPost,
-				Path:    "/worker/tasks/:task_id/result",
-				Handler: workerSubmitResultHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodPost,
-				Path:    "/worker/tasks/claim",
-				Handler: workerClaimTasksHandler(serverCtx),
-			},
-		},
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.WorkerAuthMiddleware},
+			[]rest.Route{
+				{
+					Method:  http.MethodGet,
+					Path:    "/worker/artifacts/problems/:id/package",
+					Handler: workerArtifactProblemPackageHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/worker/artifacts/submissions/:id/source",
+					Handler: workerArtifactSubmissionSourceHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/heartbeat",
+					Handler: workerHeartbeatHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/register",
+					Handler: workerRegisterHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/tasks/:task_id/fail",
+					Handler: workerFailTaskHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/tasks/:task_id/heartbeat",
+					Handler: workerTaskHeartbeatHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/tasks/:task_id/result",
+					Handler: workerSubmitResultHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/worker/tasks/claim",
+					Handler: workerClaimTasksHandler(serverCtx),
+				},
+			}...,
+		),
 		rest.WithPrefix("/judge"),
 	)
 }

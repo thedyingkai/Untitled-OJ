@@ -13,6 +13,12 @@ Jaeger:
 
 Storage:
   SubmissionsRoot: /data/ojos/submissions
+  ServiceEndpoint: ""
+  InternalGatewayEndpoint: ""
+  GetApiID: storage.object.get
+  PutApiID: storage.object.put
+  HeadApiID: storage.object.head
+  Bucket: submissions
 
 Submission:
   MaxCodeBytes: 262144

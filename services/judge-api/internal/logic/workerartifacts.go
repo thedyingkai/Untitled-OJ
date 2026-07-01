@@ -18,7 +18,12 @@ func ServeWorkerSubmissionSource(ctx context.Context, svcCtx *svc.ServiceContext
 		return errors.New("invalid artifact lease")
 	}
 
-	lease, err := svcCtx.Repo.GetTaskForLease(ctx, req.TaskId, req.WorkerId, req.LeaseVersion)
+	repo := workerTaskRepo(svcCtx)
+	if repo == nil {
+		return errors.New("worker repository is not configured")
+	}
+
+	lease, err := repo.GetTaskForLease(ctx, req.TaskId, req.WorkerId, req.LeaseVersion)
 	if err != nil {
 		if errors.Is(err, repository.ErrTaskLeaseInvalid) {
 			return errors.New("task lease is invalid")
@@ -29,9 +34,18 @@ func ServeWorkerSubmissionSource(ctx context.Context, svcCtx *svc.ServiceContext
 		return errors.New("artifact lease does not match submission")
 	}
 
-	submission, err := svcCtx.Repo.GetSubmission(ctx, req.Id)
+	submission, err := repo.GetSubmission(ctx, req.Id)
 	if err != nil {
 		return err
+	}
+	if _, _, ok := parseStorageRef(submission.CodePath); ok {
+		return serveStorageArtifact(
+			ctx,
+			svcCtx.Config.Storage,
+			w,
+			submission.CodePath,
+			"text/plain; charset=utf-8",
+		)
 	}
 	return serveArtifactFile(w, r, submission.CodePath, "text/plain; charset=utf-8")
 }
@@ -41,7 +55,12 @@ func ServeWorkerProblemPackage(ctx context.Context, svcCtx *svc.ServiceContext, 
 		return errors.New("invalid artifact lease")
 	}
 
-	lease, err := svcCtx.Repo.GetTaskForLease(ctx, req.TaskId, req.WorkerId, req.LeaseVersion)
+	repo := workerTaskRepo(svcCtx)
+	if repo == nil {
+		return errors.New("worker repository is not configured")
+	}
+
+	lease, err := repo.GetTaskForLease(ctx, req.TaskId, req.WorkerId, req.LeaseVersion)
 	if err != nil {
 		if errors.Is(err, repository.ErrTaskLeaseInvalid) {
 			return errors.New("task lease is invalid")
@@ -52,7 +71,7 @@ func ServeWorkerProblemPackage(ctx context.Context, svcCtx *svc.ServiceContext, 
 		return errors.New("artifact lease does not match problem")
 	}
 
-	problem, err := svcCtx.Repo.GetProblemMeta(ctx, req.Id)
+	problem, err := repo.GetProblemMeta(ctx, req.Id)
 	if err != nil {
 		return err
 	}

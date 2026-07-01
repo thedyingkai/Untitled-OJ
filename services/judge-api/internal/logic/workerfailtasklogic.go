@@ -44,7 +44,12 @@ func (l *WorkerFailTaskLogic) WorkerFailTask(req *types.WorkerFailTaskReq) (resp
 		message = "worker task failed"
 	}
 
-	err = l.svcCtx.Repo.MarkTaskFailed(
+	repo := workerTaskRepo(l.svcCtx)
+	if repo == nil {
+		return nil, errors.New("worker repository is not configured")
+	}
+
+	err = repo.MarkTaskFailed(
 		l.ctx,
 		taskID,
 		workerID,
@@ -63,5 +68,21 @@ func (l *WorkerFailTaskLogic) WorkerFailTask(req *types.WorkerFailTaskReq) (resp
 	if req.Retryable {
 		return &types.WorkerFailTaskResp{Accepted: true, Status: "PENDING"}, nil
 	}
+	if err := publishJudgeResultEvent(l.ctx, l.svcCtx, taskID, workerID, workerFailureResultEvent(req, status, message)); err != nil {
+		return nil, err
+	}
 	return &types.WorkerFailTaskResp{Accepted: true, Status: status}, nil
+}
+
+func workerFailureResultEvent(req *types.WorkerFailTaskReq, status string, message string) *types.WorkerSubmitResultReq {
+	return &types.WorkerSubmitResultReq{
+		TaskId:       req.TaskId,
+		WorkerId:     req.WorkerId,
+		LeaseVersion: req.LeaseVersion,
+		Status:       status,
+		Score:        0,
+		TimeMs:       0,
+		MemoryKb:     0,
+		Message:      message,
+	}
 }

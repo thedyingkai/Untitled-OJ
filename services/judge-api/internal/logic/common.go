@@ -1,12 +1,14 @@
 package logic
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"time"
 
+	"ojos-judge-api/internal/config"
 	"ojos-judge-api/internal/repository"
 	"ojos-judge-api/internal/types"
 )
@@ -96,13 +98,17 @@ func convertSubmissionItem(s repository.SubmissionView) types.SubmissionItem {
 }
 
 func readResultCases(resultPath string) ([]types.SubmissionCaseItem, error) {
+	return readResultCasesWithStorage(context.Background(), config.StorageConfig{}, resultPath)
+}
+
+func readResultCasesWithStorage(ctx context.Context, storage config.StorageConfig, resultPath string) ([]types.SubmissionCaseItem, error) {
 	if resultPath == "" {
 		return []types.SubmissionCaseItem{}, nil
 	}
 
-	data, err := readLimitedFile(resultPath, maxResultJSONBytes)
+	data, err := readResultBytes(ctx, storage, resultPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, errStorageObjectNotFound) {
 			return []types.SubmissionCaseItem{}, nil
 		}
 		return nil, err
@@ -129,13 +135,17 @@ func readResultCases(resultPath string) ([]types.SubmissionCaseItem, error) {
 }
 
 func readResultFile(resultPath string) (*ResultFile, error) {
+	return readResultFileWithStorage(context.Background(), config.StorageConfig{}, resultPath)
+}
+
+func readResultFileWithStorage(ctx context.Context, storage config.StorageConfig, resultPath string) (*ResultFile, error) {
 	if resultPath == "" {
 		return &ResultFile{}, nil
 	}
 
-	data, err := readLimitedFile(resultPath, maxResultJSONBytes)
+	data, err := readResultBytes(ctx, storage, resultPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, errStorageObjectNotFound) {
 			return &ResultFile{}, nil
 		}
 		return nil, err
@@ -146,6 +156,13 @@ func readResultFile(resultPath string) (*ResultFile, error) {
 		return nil, err
 	}
 	return &result, nil
+}
+
+func readResultBytes(ctx context.Context, storage config.StorageConfig, resultPath string) ([]byte, error) {
+	if _, _, ok := parseStorageRef(resultPath); ok {
+		return readStorageObject(ctx, storage, resultPath, maxResultJSONBytes)
+	}
+	return readLimitedFile(resultPath, maxResultJSONBytes)
 }
 
 func readLimitedFile(path string, maxBytes int64) ([]byte, error) {
@@ -160,6 +177,10 @@ func readLimitedFile(path string, maxBytes int64) ([]byte, error) {
 }
 
 func readTruncatedText(path string, maxBytes int) (string, bool, error) {
+	return readTruncatedTextWithStorage(context.Background(), config.StorageConfig{}, path, maxBytes)
+}
+
+func readTruncatedTextWithStorage(ctx context.Context, storage config.StorageConfig, path string, maxBytes int) (string, bool, error) {
 	if path == "" {
 		return "", false, nil
 	}
@@ -168,6 +189,20 @@ func readTruncatedText(path string, maxBytes int) (string, bool, error) {
 	}
 	if maxBytes > maxDebugLogMaxByte {
 		maxBytes = maxDebugLogMaxByte
+	}
+	if _, _, ok := parseStorageRef(path); ok {
+		data, err := readStorageObject(ctx, storage, path, int64(maxBytes)+1)
+		if err != nil {
+			if errors.Is(err, errStorageObjectNotFound) {
+				return "", false, nil
+			}
+			return "", false, err
+		}
+		truncated := len(data) > maxBytes
+		if truncated {
+			data = data[:maxBytes]
+		}
+		return string(data), truncated, nil
 	}
 
 	file, err := os.Open(path)

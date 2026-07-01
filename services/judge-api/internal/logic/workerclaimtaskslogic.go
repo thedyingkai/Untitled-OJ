@@ -35,16 +35,22 @@ func (l *WorkerClaimTasksLogic) WorkerClaimTasks(req *types.WorkerClaimTasksReq)
 		return &types.WorkerClaimTasksResp{Tasks: []types.WorkerTaskLease{}}, nil
 	}
 
-	if _, err := l.svcCtx.Repo.RecoverStaleTasks(l.ctx); err != nil {
+	repo := workerTaskRepo(l.svcCtx)
+	if repo == nil {
+		return nil, errors.New("worker repository is not configured")
+	}
+
+	if _, err := repo.RecoverStaleTasks(l.ctx); err != nil {
 		return nil, err
 	}
 
-	leases, err := l.svcCtx.Repo.ClaimTasks(
+	leases, err := repo.ClaimTasks(
 		l.ctx,
 		workerID,
 		req.SupportedLanguages,
 		req.AvailableSlots,
 		workerLeaseTTL(l.svcCtx),
+		normalizeWorkerTaskIDs(req.TaskIds),
 	)
 	if err != nil {
 		if errors.Is(err, repository.ErrWorkerNotFound) {

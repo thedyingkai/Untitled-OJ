@@ -35,7 +35,12 @@ func (l *WorkerHeartbeatLogic) WorkerHeartbeat(req *types.WorkerHeartbeatReq) (r
 		return nil, errors.New("running_count is invalid")
 	}
 
-	worker, err := l.svcCtx.Repo.WorkerHeartbeat(l.ctx, workerID, req.RunningCount)
+	repo := workerTaskRepo(l.svcCtx)
+	if repo == nil {
+		return nil, errors.New("worker repository is not configured")
+	}
+
+	worker, err := repo.WorkerHeartbeat(l.ctx, workerID, req.RunningCount)
 	if err != nil {
 		if errors.Is(err, repository.ErrWorkerNotFound) {
 			return nil, errors.New("worker is not registered")

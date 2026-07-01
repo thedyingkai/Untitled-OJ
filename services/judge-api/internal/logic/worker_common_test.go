@@ -1,12 +1,14 @@
 package logic
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"ojos-judge-api/internal/config"
 	"ojos-judge-api/internal/repository"
 	"ojos-judge-api/internal/types"
 )
@@ -43,6 +45,28 @@ func TestWorkerBasePath(t *testing.T) {
 	}
 }
 
+func TestWorkerFailureResultEventBuildsTerminalResultPayload(t *testing.T) {
+	req := &types.WorkerFailTaskReq{
+		TaskId:       "sub-42",
+		WorkerId:     "worker-a",
+		LeaseVersion: 3,
+		ErrorType:    "SYSTEM",
+		Message:      "sandbox failed",
+	}
+
+	result := workerFailureResultEvent(req, "SYSTEM_ERROR", "sandbox failed")
+
+	if result.TaskId != "sub-42" || result.WorkerId != "worker-a" || result.LeaseVersion != 3 {
+		t.Fatalf("unexpected task identity in result event: %#v", result)
+	}
+	if result.Status != "SYSTEM_ERROR" || result.Message != "sandbox failed" {
+		t.Fatalf("unexpected failure result summary: %#v", result)
+	}
+	if result.Score != 0 || result.TimeMs != 0 || result.MemoryKb != 0 || len(result.Cases) != 0 {
+		t.Fatalf("failure result event should not invent metrics/cases: %#v", result)
+	}
+}
+
 func TestWriteWorkerResultArtifactsTruncatesLogsAndWritesResult(t *testing.T) {
 	resultPath := filepath.Join(t.TempDir(), "submission", "result.json")
 	if err := os.MkdirAll(filepath.Dir(resultPath), 0755); err != nil {
@@ -70,7 +94,7 @@ func TestWriteWorkerResultArtifactsTruncatesLogsAndWritesResult(t *testing.T) {
 		},
 	}
 
-	err := writeWorkerResultArtifacts(&repository.SubmissionView{ID: 99, ResultPath: resultPath}, req)
+	err := writeWorkerResultArtifacts(context.Background(), config.StorageConfig{}, &repository.SubmissionView{ID: 99, ResultPath: resultPath}, req)
 	if err != nil {
 		t.Fatalf("writeWorkerResultArtifacts returned error: %v", err)
 	}

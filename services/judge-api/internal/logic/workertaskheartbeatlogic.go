@@ -34,7 +34,12 @@ func (l *WorkerTaskHeartbeatLogic) WorkerTaskHeartbeat(req *types.WorkerTaskHear
 		return nil, errors.New("invalid task lease")
 	}
 
-	lease, err := l.svcCtx.Repo.RefreshTaskLease(
+	repo := workerTaskRepo(l.svcCtx)
+	if repo == nil {
+		return nil, errors.New("worker repository is not configured")
+	}
+
+	lease, err := repo.RefreshTaskLease(
 		l.ctx,
 		taskID,
 		workerID,

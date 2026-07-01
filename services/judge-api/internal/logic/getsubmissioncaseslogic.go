@@ -45,7 +45,7 @@ func (l *GetSubmissionCasesLogic) GetSubmissionCases(req *types.GetSubmissionCas
 		return nil, err
 	}
 
-	cases, err := readResultCases(submission.ResultPath)
+	cases, err := readResultCasesWithStorage(l.ctx, l.svcCtx.Config.Storage, submission.ResultPath)
 	if err != nil {
 		return nil, err
 	}

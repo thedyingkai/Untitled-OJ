@@ -38,7 +38,12 @@ func (l *WorkerRegisterLogic) WorkerRegister(req *types.WorkerRegisterReq) (resp
 		return nil, errors.New("max_concurrency is too large")
 	}
 
-	worker, err := l.svcCtx.Repo.UpsertWorker(l.ctx, repository.WorkerRegistration{
+	repo := workerTaskRepo(l.svcCtx)
+	if repo == nil {
+		return nil, errors.New("worker repository is not configured")
+	}
+
+	worker, err := repo.UpsertWorker(l.ctx, repository.WorkerRegistration{
 		WorkerID:           workerID,
 		WorkerName:         strings.TrimSpace(req.WorkerName),
 		Hostname:           strings.TrimSpace(req.Hostname),
