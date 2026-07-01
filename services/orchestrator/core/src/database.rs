@@ -1,10 +1,12 @@
 use crate::{
-    DiagnosticReport, Endpoint, Link, LogView, Operation, OperationLock, OperationLogRecord,
-    OperationStatus, OrchestratorError, OrchestratorStore, RenderedServiceConfig, Result,
-    ServiceFrontendEntry, ServiceManifest, ServiceMigrationRecord, ServicePermissionRecord,
-    ServiceRedisResource, ServiceRelease, ServiceRoute, ServiceStorageResource, Topology,
-    TopologySnapshot, build_topology, parse_endpoint_id, validate_endpoint, validate_endpoint_id,
-    validate_link, validate_log_view, validate_rendered_service_config,
+    DeployedServiceApi, DiagnosticReport, Endpoint, HostService, Link, LogView, NodeRecord,
+    Operation, OperationLock, OperationLogRecord, OperationStatus, OrchestratorError,
+    OrchestratorStore, RenderedServiceConfig, Result, ServiceApiSurface, ServiceFrontendEntry,
+    ServiceManifest, ServiceMigrationRecord, ServicePermissionRecord, ServiceRedisResource,
+    ServiceRelease, ServiceRoute, ServiceStorageResource, Topology, TopologySnapshot,
+    build_topology, parse_endpoint_id, validate_deployed_service_api, validate_endpoint,
+    validate_endpoint_id, validate_host_service, validate_link, validate_log_view,
+    validate_node_record, validate_rendered_service_config, validate_service_api_surface,
     validate_service_frontend_entry, validate_service_manifest, validate_service_migration_record,
     validate_service_permission_record, validate_service_redis_resource,
     validate_service_release_record, validate_service_route, validate_service_storage_resource,
@@ -12,7 +14,7 @@ use crate::{
 };
 use postgres::{Client, NoTls, Row, types::ToSql};
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub const ORCHESTRATOR_TABLES: &[&str] = &[
     "service_releases",
@@ -27,6 +29,9 @@ pub const ORCHESTRATOR_TABLES: &[&str] = &[
     "service_redis_resources",
     "service_storage_resources",
     "rendered_service_configs",
+    "nodes",
+    "service_api_surfaces",
+    "deployed_service_apis",
     "orchestrator_operations",
     "orchestrator_operation_logs",
     "orchestrator_operation_locks",
@@ -205,6 +210,52 @@ ON CONFLICT (service_name, version) DO UPDATE SET
 "#,
     },
     DatabaseStatement {
+        name: "nodes.upsert",
+        sql: r#"
+INSERT INTO nodes (node_id, host_ip, parent_node_id, role, labels, status, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, NOW())
+ON CONFLICT (node_id) DO UPDATE SET
+    host_ip = EXCLUDED.host_ip,
+    parent_node_id = EXCLUDED.parent_node_id,
+    role = EXCLUDED.role,
+    labels = EXCLUDED.labels,
+    status = EXCLUDED.status,
+    updated_at = NOW()
+"#,
+    },
+    DatabaseStatement {
+        name: "service_api_surfaces.upsert",
+        sql: r#"
+INSERT INTO service_api_surfaces (service_name, version, api_id, protocol, port_name, path_prefix, methods, visibility, auth_mode, permission, stability, api_version, rate_limit, timeout, config, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+ON CONFLICT (service_name, version, api_id) DO UPDATE SET
+    protocol = EXCLUDED.protocol,
+    port_name = EXCLUDED.port_name,
+    path_prefix = EXCLUDED.path_prefix,
+    methods = EXCLUDED.methods,
+    visibility = EXCLUDED.visibility,
+    auth_mode = EXCLUDED.auth_mode,
+    permission = EXCLUDED.permission,
+    stability = EXCLUDED.stability,
+    api_version = EXCLUDED.api_version,
+    rate_limit = EXCLUDED.rate_limit,
+    timeout = EXCLUDED.timeout,
+    config = EXCLUDED.config,
+    updated_at = NOW()
+"#,
+    },
+    DatabaseStatement {
+        name: "deployed_service_apis.upsert",
+        sql: r#"
+INSERT INTO deployed_service_apis (host_ip, service_name, version, endpoint, api_id, status, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, NOW())
+ON CONFLICT (host_ip, service_name, api_id, endpoint) DO UPDATE SET
+    version = EXCLUDED.version,
+    status = EXCLUDED.status,
+    updated_at = NOW()
+"#,
+    },
+    DatabaseStatement {
         name: "orchestrator_operations.insert",
         sql: r#"
 INSERT INTO orchestrator_operations (operation_id, action, target_type, target_id, status, request, plan, rollback_plan, result, error_message, updated_at, confirmed_at, started_at, finished_at, rolled_back_at)
@@ -349,6 +400,12 @@ impl OrchestratorStore for PgOrchestratorStore {
         let mut client = self.connect()?;
         client
             .execute(
+                "DELETE FROM host_services WHERE service_name = $1",
+                &[&service_id],
+            )
+            .map_err(|err| OrchestratorError::Dependency(format!("orchestrator db: {err}")))?;
+        client
+            .execute(
                 "DELETE FROM service_links WHERE source_endpoint IN (SELECT endpoint FROM service_endpoints WHERE service_id = $1) OR target_endpoint IN (SELECT endpoint FROM service_endpoints WHERE service_id = $1)",
                 &[&service_id],
             )
@@ -409,6 +466,18 @@ impl OrchestratorStore for PgOrchestratorStore {
             .map_err(|err| OrchestratorError::Dependency(format!("orchestrator db: {err}")))?;
         client
             .execute(
+                "DELETE FROM deployed_service_apis WHERE service_name = $1",
+                &[&service_id],
+            )
+            .map_err(|err| OrchestratorError::Dependency(format!("orchestrator db: {err}")))?;
+        client
+            .execute(
+                "DELETE FROM service_api_surfaces WHERE service_name = $1",
+                &[&service_id],
+            )
+            .map_err(|err| OrchestratorError::Dependency(format!("orchestrator db: {err}")))?;
+        client
+            .execute(
                 "DELETE FROM service_releases WHERE service_name = $1",
                 &[&service_id],
             )
@@ -416,6 +485,43 @@ impl OrchestratorStore for PgOrchestratorStore {
         client
             .execute("DELETE FROM services WHERE service_id = $1", &[&service_id])
             .map_err(|err| OrchestratorError::Dependency(format!("orchestrator db: {err}")))?;
+        Ok(())
+    }
+
+    fn list_host_services(&self) -> Result<Vec<HostService>> {
+        self.query("SELECT host_ip, service_name, version, status, config, labels, created_at::TEXT, updated_at::TEXT FROM host_services ORDER BY host_ip, service_name", &[])?
+            .into_iter()
+            .map(host_service_from_row)
+            .collect()
+    }
+
+    fn get_host_service(&self, host_ip: &str, service_name: &str) -> Result<Option<HostService>> {
+        let mut rows = self.query("SELECT host_ip, service_name, version, status, config, labels, created_at::TEXT, updated_at::TEXT FROM host_services WHERE host_ip = $1 AND service_name = $2", &[&host_ip, &service_name])?;
+        rows.pop().map(host_service_from_row).transpose()
+    }
+
+    fn upsert_host_service(&mut self, host_service: HostService) -> Result<()> {
+        validate_host_service(&host_service)?;
+        self.execute(
+            "INSERT INTO host_services (host_ip, service_name, version, status, config, labels, updated_at) VALUES ($1, $2, $3, $4, $5, $6, NOW()) ON CONFLICT (host_ip, service_name) DO UPDATE SET version = EXCLUDED.version, status = EXCLUDED.status, config = EXCLUDED.config, labels = EXCLUDED.labels, updated_at = NOW()",
+            &[&host_service.host_ip, &host_service.service_name, &host_service.version, &host_service.status, &host_service.config, &host_service.labels],
+        )?;
+        Ok(())
+    }
+
+    fn delete_host_service(&mut self, host_ip: &str, service_name: &str) -> Result<()> {
+        self.execute(
+            "DELETE FROM host_services WHERE host_ip = $1 AND service_name = $2",
+            &[&host_ip, &service_name],
+        )?;
+        Ok(())
+    }
+
+    fn delete_host_services_for_service(&mut self, service_name: &str) -> Result<()> {
+        self.execute(
+            "DELETE FROM host_services WHERE service_name = $1",
+            &[&service_name],
+        )?;
         Ok(())
     }
 
@@ -622,6 +728,91 @@ impl OrchestratorStore for PgOrchestratorStore {
         Ok(())
     }
 
+    fn list_nodes(&self) -> Result<Vec<NodeRecord>> {
+        self.query("SELECT node_id, host_ip, parent_node_id, role, labels, status, created_at::TEXT, updated_at::TEXT FROM nodes ORDER BY node_id", &[])?
+            .into_iter()
+            .map(node_record_from_row)
+            .collect()
+    }
+
+    fn get_node(&self, node_id: &str) -> Result<Option<NodeRecord>> {
+        let mut rows = self.query("SELECT node_id, host_ip, parent_node_id, role, labels, status, created_at::TEXT, updated_at::TEXT FROM nodes WHERE node_id = $1", &[&node_id])?;
+        rows.pop().map(node_record_from_row).transpose()
+    }
+
+    fn upsert_node(&mut self, node: NodeRecord) -> Result<()> {
+        validate_node_record(&node)?;
+        validate_pg_node_tree_upsert(self, &node)?;
+        self.execute(
+            "INSERT INTO nodes (node_id, host_ip, parent_node_id, role, labels, status, updated_at) VALUES ($1, $2, $3, $4, $5, $6, NOW()) ON CONFLICT (node_id) DO UPDATE SET host_ip = EXCLUDED.host_ip, parent_node_id = EXCLUDED.parent_node_id, role = EXCLUDED.role, labels = EXCLUDED.labels, status = EXCLUDED.status, updated_at = NOW()",
+            &[&node.node_id, &node.host_ip, &node.parent_node_id, &node.role, &node.labels, &node.status],
+        )?;
+        Ok(())
+    }
+
+    fn delete_node(&mut self, node_id: &str) -> Result<()> {
+        let children = self.query(
+            "SELECT node_id FROM nodes WHERE parent_node_id = $1 LIMIT 1",
+            &[&node_id],
+        )?;
+        if !children.is_empty() {
+            return Err(OrchestratorError::Dependency(format!(
+                "node {node_id} has child nodes"
+            )));
+        }
+        self.execute("DELETE FROM nodes WHERE node_id = $1", &[&node_id])?;
+        Ok(())
+    }
+
+    fn list_service_api_surfaces(&self) -> Result<Vec<ServiceApiSurface>> {
+        self.query("SELECT service_name, version, api_id, protocol, port_name, path_prefix, methods, visibility, auth_mode, permission, stability, api_version, rate_limit, timeout, config, created_at::TEXT, updated_at::TEXT FROM service_api_surfaces ORDER BY service_name, version, api_id", &[])?
+            .into_iter()
+            .map(service_api_surface_from_row)
+            .collect()
+    }
+
+    fn upsert_service_api_surface(&mut self, api: ServiceApiSurface) -> Result<()> {
+        validate_service_api_surface(&api)?;
+        let methods = serde_json::to_value(&api.methods)?;
+        self.execute(
+            "INSERT INTO service_api_surfaces (service_name, version, api_id, protocol, port_name, path_prefix, methods, visibility, auth_mode, permission, stability, api_version, rate_limit, timeout, config, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW()) ON CONFLICT (service_name, version, api_id) DO UPDATE SET protocol = EXCLUDED.protocol, port_name = EXCLUDED.port_name, path_prefix = EXCLUDED.path_prefix, methods = EXCLUDED.methods, visibility = EXCLUDED.visibility, auth_mode = EXCLUDED.auth_mode, permission = EXCLUDED.permission, stability = EXCLUDED.stability, api_version = EXCLUDED.api_version, rate_limit = EXCLUDED.rate_limit, timeout = EXCLUDED.timeout, config = EXCLUDED.config, updated_at = NOW()",
+            &[&api.service_name, &api.version, &api.api_id, &api.protocol, &api.port_name, &api.path_prefix, &methods, &api.visibility, &api.auth_mode, &api.permission, &api.stability, &api.api_version, &api.rate_limit, &api.timeout, &api.config],
+        )?;
+        Ok(())
+    }
+
+    fn delete_service_api_surfaces_for_service(&mut self, service_name: &str) -> Result<()> {
+        self.execute(
+            "DELETE FROM service_api_surfaces WHERE service_name = $1",
+            &[&service_name],
+        )?;
+        Ok(())
+    }
+
+    fn list_deployed_service_apis(&self) -> Result<Vec<DeployedServiceApi>> {
+        self.query("SELECT host_ip, service_name, version, endpoint, api_id, status, created_at::TEXT, updated_at::TEXT FROM deployed_service_apis ORDER BY host_ip, service_name, api_id, endpoint", &[])?
+            .into_iter()
+            .map(deployed_service_api_from_row)
+            .collect()
+    }
+
+    fn upsert_deployed_service_api(&mut self, api: DeployedServiceApi) -> Result<()> {
+        validate_deployed_service_api(&api)?;
+        self.execute(
+            "INSERT INTO deployed_service_apis (host_ip, service_name, version, endpoint, api_id, status, updated_at) VALUES ($1, $2, $3, $4, $5, $6, NOW()) ON CONFLICT (host_ip, service_name, api_id, endpoint) DO UPDATE SET version = EXCLUDED.version, status = EXCLUDED.status, updated_at = NOW()",
+            &[&api.host_ip, &api.service_name, &api.version, &api.endpoint, &api.api_id, &api.status],
+        )?;
+        Ok(())
+    }
+
+    fn delete_deployed_service_apis_for_service(&mut self, service_name: &str) -> Result<()> {
+        self.execute(
+            "DELETE FROM deployed_service_apis WHERE service_name = $1",
+            &[&service_name],
+        )?;
+        Ok(())
+    }
+
     fn list_endpoints(&self) -> Result<Vec<Endpoint>> {
         self.query("SELECT endpoint, service_id, protocol, health_path, health, reachable, display_name, note, config, created_at::TEXT, updated_at::TEXT FROM service_endpoints ORDER BY endpoint", &[])?
             .into_iter()
@@ -671,6 +862,12 @@ impl OrchestratorStore for PgOrchestratorStore {
             .map_err(|err| OrchestratorError::Dependency(format!("orchestrator db: {err}")))?;
         client
             .execute("DELETE FROM log_sources WHERE endpoint = $1", &[&endpoint])
+            .map_err(|err| OrchestratorError::Dependency(format!("orchestrator db: {err}")))?;
+        client
+            .execute(
+                "DELETE FROM deployed_service_apis WHERE endpoint = $1",
+                &[&endpoint],
+            )
             .map_err(|err| OrchestratorError::Dependency(format!("orchestrator db: {err}")))?;
         client
             .execute(
@@ -1038,6 +1235,21 @@ fn endpoint_from_row(row: Row) -> Result<Endpoint> {
     Ok(endpoint)
 }
 
+fn host_service_from_row(row: Row) -> Result<HostService> {
+    let host_service = HostService {
+        host_ip: row.get(0),
+        service_name: row.get(1),
+        version: row.get(2),
+        status: row.get(3),
+        config: row.get(4),
+        labels: row.get(5),
+        created_at: row.get(6),
+        updated_at: row.get(7),
+    };
+    validate_host_service(&host_service)?;
+    Ok(host_service)
+}
+
 fn link_from_row(row: Row) -> Result<Link> {
     let latency_ms = row.get::<usize, Option<i32>>(6).map(|value| value as u32);
     let link = Link {
@@ -1167,6 +1379,61 @@ fn rendered_service_config_from_row(row: Row) -> Result<RenderedServiceConfig> {
     Ok(config)
 }
 
+fn node_record_from_row(row: Row) -> Result<NodeRecord> {
+    let node = NodeRecord {
+        node_id: row.get(0),
+        host_ip: row.get(1),
+        parent_node_id: row.get(2),
+        role: row.get(3),
+        labels: row.get(4),
+        status: row.get(5),
+        created_at: row.get(6),
+        updated_at: row.get(7),
+    };
+    validate_node_record(&node)?;
+    Ok(node)
+}
+
+fn service_api_surface_from_row(row: Row) -> Result<ServiceApiSurface> {
+    let methods_value: serde_json::Value = row.get(6);
+    let api = ServiceApiSurface {
+        service_name: row.get(0),
+        version: row.get(1),
+        api_id: row.get(2),
+        protocol: row.get(3),
+        port_name: row.get(4),
+        path_prefix: row.get(5),
+        methods: serde_json::from_value(methods_value)?,
+        visibility: row.get(7),
+        auth_mode: row.get(8),
+        permission: row.get(9),
+        stability: row.get(10),
+        api_version: row.get(11),
+        rate_limit: row.get(12),
+        timeout: row.get(13),
+        config: row.get(14),
+        created_at: row.get(15),
+        updated_at: row.get(16),
+    };
+    validate_service_api_surface(&api)?;
+    Ok(api)
+}
+
+fn deployed_service_api_from_row(row: Row) -> Result<DeployedServiceApi> {
+    let api = DeployedServiceApi {
+        host_ip: row.get(0),
+        service_name: row.get(1),
+        version: row.get(2),
+        endpoint: row.get(3),
+        api_id: row.get(4),
+        status: row.get(5),
+        created_at: row.get(6),
+        updated_at: row.get(7),
+    };
+    validate_deployed_service_api(&api)?;
+    Ok(api)
+}
+
 fn operation_from_row(operation_id: String, row: Row) -> Result<Operation> {
     let offset = if row.len() == 16 { 1 } else { 0 };
     let status_text: String = row.get(3 + offset);
@@ -1229,6 +1496,75 @@ fn diagnostic_from_row(row: Row) -> Result<DiagnosticReport> {
     })
 }
 
+fn validate_pg_node_tree_upsert(store: &PgOrchestratorStore, node: &NodeRecord) -> Result<()> {
+    let mut nodes = store
+        .list_nodes()?
+        .into_iter()
+        .map(|item| (item.node_id.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    if nodes
+        .values()
+        .any(|item| item.node_id != node.node_id && item.host_ip == node.host_ip)
+    {
+        return Err(OrchestratorError::InvalidManifest(format!(
+            "node host_ip {} is already registered",
+            node.host_ip
+        )));
+    }
+    match node.role.as_str() {
+        "root" | "standalone" => {
+            if !node.parent_node_id.trim().is_empty() {
+                return Err(OrchestratorError::InvalidManifest(format!(
+                    "{} node must not have parent_node_id",
+                    node.role
+                )));
+            }
+        }
+        "node" => {
+            if node.parent_node_id.trim().is_empty() {
+                return Err(OrchestratorError::InvalidManifest(
+                    "node parent_node_id is required".to_string(),
+                ));
+            }
+            if !nodes.contains_key(&node.parent_node_id) {
+                return Err(OrchestratorError::Dependency(format!(
+                    "parent node {} not found",
+                    node.parent_node_id
+                )));
+            }
+        }
+        _ => {}
+    }
+    nodes.insert(node.node_id.clone(), node.clone());
+    for node_id in nodes.keys() {
+        let mut seen = BTreeSet::new();
+        let mut current = node_id.as_str();
+        loop {
+            if !seen.insert(current.to_string()) {
+                return Err(OrchestratorError::InvalidManifest(format!(
+                    "node tree contains cycle at {current}"
+                )));
+            }
+            let Some(item) = nodes.get(current) else {
+                return Err(OrchestratorError::Dependency(format!(
+                    "node {current} is missing during tree validation"
+                )));
+            };
+            let parent = item.parent_node_id.trim();
+            if parent.is_empty() {
+                break;
+            }
+            if !nodes.contains_key(parent) {
+                return Err(OrchestratorError::Dependency(format!(
+                    "parent node {parent} not found"
+                )));
+            }
+            current = parent;
+        }
+    }
+    Ok(())
+}
+
 fn operation_status_text(status: &OperationStatus) -> String {
     match status {
         OperationStatus::Planned => "PLANNED",
@@ -1285,14 +1621,16 @@ pub(crate) fn db_time_text(value: &str) -> String {
 
 pub fn plan_database_writes<S: OrchestratorStore>(store: &S) -> Result<DatabaseWritePlan> {
     let mut writes = Vec::new();
-    for service in store.services()? {
-        let service_id = service.id.clone();
+    for host_service in store.host_services()? {
         writes.push(database_write(
             "HostService",
-            service.id.clone(),
+            format!("{}:{}", host_service.host_ip, host_service.service_name),
             "host_services",
             "host_services.upsert",
         ));
+    }
+    for service in store.services()? {
+        let service_id = service.id.clone();
         writes.push(database_write(
             "Service",
             service_id,
@@ -1365,6 +1703,33 @@ pub fn plan_database_writes<S: OrchestratorStore>(store: &S) -> Result<DatabaseW
             format!("{}@{}", config.service_name, config.version),
             "rendered_service_configs",
             "rendered_service_configs.upsert",
+        ));
+    }
+    for node in store.nodes()? {
+        writes.push(database_write(
+            "Node",
+            node.node_id,
+            "nodes",
+            "nodes.upsert",
+        ));
+    }
+    for api in store.service_api_surfaces()? {
+        writes.push(database_write(
+            "ServiceApiSurface",
+            format!("{}@{}:{}", api.service_name, api.version, api.api_id),
+            "service_api_surfaces",
+            "service_api_surfaces.upsert",
+        ));
+    }
+    for api in store.deployed_service_apis()? {
+        writes.push(database_write(
+            "DeployedServiceApi",
+            format!(
+                "{}@{}:{}:{}",
+                api.service_name, api.version, api.api_id, api.endpoint
+            ),
+            "deployed_service_apis",
+            "deployed_service_apis.upsert",
         ));
     }
     for endpoint in store.endpoints()? {

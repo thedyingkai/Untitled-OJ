@@ -47,7 +47,19 @@ fn release_install_operation_requires_confirmation_before_apply() {
     assert_eq!(planned.status, OperationStatus::Planned);
     assert_eq!(planned.action, "release.install");
     assert_eq!(planned.target_type, "ServiceRelease");
-    assert_eq!(planned.plan["steps"][0]["action"], json!("insert_service"));
+    let step_actions = planned
+        .plan
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .expect("release.install steps")
+        .iter()
+        .filter_map(|step| step.get("action").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(step_actions.contains(&"validate_service_manifest"));
+    assert!(step_actions.contains(&"create_host_service"));
+    assert!(step_actions.contains(&"allocate_endpoint"));
+    assert!(step_actions.contains(&"health_probe"));
+    assert_eq!(planned.request["endpoint"], json!("127.0.0.1:8080:gateway"));
 
     let confirmed = confirm_operation(&planned).expect("operation should confirm");
     let mut store = MemoryOrchestratorStore::new();

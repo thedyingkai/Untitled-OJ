@@ -1,11 +1,19 @@
 use crate::{
-    ActionRequest, DiagnosticExport, DiagnosticReport, EndpointProbe, MemoryOrchestratorStore,
+    ActionRequest, DiagnosticExport, DiagnosticReport, DriverResult, EndpointHealthResult,
+    EndpointProbe, MemoryOrchestratorStore, NodeServiceDispatchRequest, NodeServiceDispatchResult,
     Operation, OperationExecutor, OperationLogRecord, OperationStatus, OrchestratorError,
-    OrchestratorStore, PgOrchestratorStore, Result, StaticEndpointProbe, TcpEndpointProbe,
-    Topology, action_catalog, action_descriptor, cancel_operation, confirm_operation,
-    default_action_request, export_diagnostic_report, load_operation_workbench_context,
+    OrchestratorStore, PgOrchestratorStore, RenderedServiceConfig, Result, StaticEndpointProbe,
+    TcpEndpointProbe, Topology, action_catalog, action_descriptor, cancel_operation,
+    check_endpoint_health_with_probe, confirm_operation, default_action_request,
+    export_diagnostic_report, load_operation_workbench_context,
     load_operation_workbench_context_from_store, load_orchestrator_view_from_store,
     operation_log_record, operation_step_log_record, plan_action_request, plan_operation,
+    start_operation, succeed_operation, validate_endpoint, validate_host_service,
+    validate_service_manifest,
+};
+use crate::{
+    ConfiguredAuthPermissionRegistrar, ConfiguredMigrationRunner,
+    ConfiguredRedisResourceProvisioner, ConfiguredStorageResourceProvisioner,
 };
 use crate::{OperationWorkbenchContext, OrchestratorView, SharedSchemas};
 use serde::{Deserialize, Serialize};
@@ -17,6 +25,7 @@ use std::time::Duration;
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ActionCapabilityStatus {
     Real,
+    RuntimePipeline,
     StoreBacked,
     Unsupported,
     Readonly,
@@ -26,6 +35,7 @@ impl ActionCapabilityStatus {
     pub fn label(self) -> &'static str {
         match self {
             Self::Real => "REAL",
+            Self::RuntimePipeline => "RUNTIME_PIPELINE",
             Self::StoreBacked => "STORE_BACKED",
             Self::Unsupported => "UNSUPPORTED",
             Self::Readonly => "READONLY",
@@ -174,8 +184,17 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe + Clone> OrchestratorActionDispa
             operation
         };
 
-        let mut executor =
-            OperationExecutor::with_endpoint_probe(self.store, self.endpoint_probe.clone());
+        let mut executor = OperationExecutor::with_runtime_provisioners(
+            self.store,
+            self.endpoint_probe.clone(),
+            ConfiguredAuthPermissionRegistrar::from_env(),
+            ConfiguredRedisResourceProvisioner::from_env(),
+            ConfiguredStorageResourceProvisioner::from_env(),
+            ConfiguredMigrationRunner::from_env(),
+        );
+        if request.field("execute_service_driver") == Some("true") {
+            executor = executor.with_service_driver_execution_enabled();
+        }
         match executor.apply(&operation.operation_id) {
             Ok(applied) => self.result_for_operation(
                 &applied,
@@ -320,8 +339,14 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe + Clone> OrchestratorActionDispa
         request: &ActionRequest,
     ) -> Result<ActionDispatchResult> {
         let operation_id = request.require_field("operation_id")?;
-        let mut executor =
-            OperationExecutor::with_endpoint_probe(self.store, self.endpoint_probe.clone());
+        let mut executor = OperationExecutor::with_runtime_provisioners(
+            self.store,
+            self.endpoint_probe.clone(),
+            ConfiguredAuthPermissionRegistrar::from_env(),
+            ConfiguredRedisResourceProvisioner::from_env(),
+            ConfiguredStorageResourceProvisioner::from_env(),
+            ConfiguredMigrationRunner::from_env(),
+        );
         if request.field("execute_service_driver") == Some("true") {
             executor = executor.with_service_driver_execution_enabled();
         }
@@ -612,6 +637,105 @@ impl OrchestratorActionConsole {
         self.memory_store.list_service_releases()
     }
 
+    pub fn services(&self) -> Result<Vec<crate::ServiceManifest>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store.list_services().map_err(persistent_store_unavailable);
+        }
+        self.memory_store.list_services()
+    }
+
+    pub fn endpoints(&self) -> Result<Vec<crate::Endpoint>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store.list_endpoints().map_err(persistent_store_unavailable);
+        }
+        self.memory_store.list_endpoints()
+    }
+
+    pub fn service_routes(&self) -> Result<Vec<crate::ServiceRoute>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store
+                .list_service_routes()
+                .map_err(persistent_store_unavailable);
+        }
+        self.memory_store.list_service_routes()
+    }
+
+    pub fn nodes(&self) -> Result<Vec<crate::NodeRecord>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store.list_nodes().map_err(persistent_store_unavailable);
+        }
+        self.memory_store.list_nodes()
+    }
+
+    pub fn service_api_surfaces(&self) -> Result<Vec<crate::ServiceApiSurface>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store
+                .list_service_api_surfaces()
+                .map_err(persistent_store_unavailable);
+        }
+        self.memory_store.list_service_api_surfaces()
+    }
+
+    pub fn deployed_service_apis(&self) -> Result<Vec<crate::DeployedServiceApi>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store
+                .list_deployed_service_apis()
+                .map_err(persistent_store_unavailable);
+        }
+        self.memory_store.list_deployed_service_apis()
+    }
+
+    pub fn effective_api_routes(&self, node_id: &str) -> Result<Vec<crate::EffectiveApiRoute>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store
+                .effective_api_routes(node_id)
+                .map_err(persistent_store_unavailable);
+        }
+        self.memory_store.effective_api_routes(node_id)
+    }
+
+    pub fn service_permission_records(&self) -> Result<Vec<crate::ServicePermissionRecord>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store
+                .list_service_permission_records()
+                .map_err(persistent_store_unavailable);
+        }
+        self.memory_store.list_service_permission_records()
+    }
+
+    pub fn service_frontend_entries(&self) -> Result<Vec<crate::ServiceFrontendEntry>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store
+                .list_service_frontend_entries()
+                .map_err(persistent_store_unavailable);
+        }
+        self.memory_store.list_service_frontend_entries()
+    }
+
+    pub fn accept_node_service_install(
+        &mut self,
+        request: NodeServiceDispatchRequest,
+    ) -> Result<NodeServiceDispatchResult> {
+        if self.uses_persistent_store() {
+            let mut store = self.persistent_store()?;
+            let result = accept_node_service_install_into_store(&mut store, request)
+                .map_err(persistent_store_unavailable)?;
+            self.memory_store =
+                memory_store_from_store(&store).map_err(persistent_store_unavailable)?;
+            return Ok(result);
+        }
+        accept_node_service_install_into_store(&mut self.memory_store, request)
+    }
+
     pub fn dispatch(&mut self, request: ActionRequest) -> Result<ActionDispatchResult> {
         if self.uses_persistent_store() {
             let mut store = self.persistent_store()?;
@@ -666,6 +790,7 @@ pub fn action_matrix() -> Vec<ActionMatrixEntry> {
 pub fn capability_for_action(action: &str) -> ActionCapabilityStatus {
     match action {
         "endpoint.health.check" | "link.health.check" => ActionCapabilityStatus::Real,
+        "release.install" => ActionCapabilityStatus::RuntimePipeline,
         "endpoint.create"
         | "endpoint.update"
         | "endpoint.delete"
@@ -683,7 +808,6 @@ pub fn capability_for_action(action: &str) -> ActionCapabilityStatus {
         | "diagnostic.export"
         | "release.create"
         | "release.update"
-        | "release.install"
         | "release.delete"
         | "release.rollback"
         | "route.create"
@@ -979,6 +1103,9 @@ fn memory_store_from_store<S: OrchestratorStore>(store: &S) -> Result<MemoryOrch
     for release in store.list_service_releases()? {
         memory.upsert_service_release(release)?;
     }
+    for host_service in store.list_host_services()? {
+        memory.upsert_host_service(host_service)?;
+    }
     for route in store.list_service_routes()? {
         memory.upsert_service_route(route)?;
     }
@@ -1000,8 +1127,17 @@ fn memory_store_from_store<S: OrchestratorStore>(store: &S) -> Result<MemoryOrch
     for config in store.list_rendered_service_configs()? {
         memory.upsert_rendered_service_config(config)?;
     }
+    for node in store.list_nodes()? {
+        memory.upsert_node(node)?;
+    }
+    for api in store.list_service_api_surfaces()? {
+        memory.upsert_service_api_surface(api)?;
+    }
     for endpoint in store.list_endpoints()? {
         memory.put_endpoint(endpoint)?;
+    }
+    for api in store.list_deployed_service_apis()? {
+        memory.upsert_deployed_service_api(api)?;
     }
     for link in store.list_links()? {
         memory.put_link(link)?;
@@ -1022,6 +1158,416 @@ fn memory_store_from_store<S: OrchestratorStore>(store: &S) -> Result<MemoryOrch
         memory.put_topology(topology)?;
     }
     Ok(memory)
+}
+
+fn accept_node_service_install_into_store<S: OrchestratorStore>(
+    store: &mut S,
+    request: NodeServiceDispatchRequest,
+) -> Result<NodeServiceDispatchResult> {
+    validate_service_manifest(&request.service)?;
+    validate_host_service(&request.host_service)?;
+    validate_endpoint(&request.endpoint)?;
+    if request.host_service.service_name != request.service.id {
+        return Err(OrchestratorError::InvalidManifest(
+            "node install host_service service_name must match service id".to_string(),
+        ));
+    }
+    if request.host_service.version != request.service.version {
+        return Err(OrchestratorError::InvalidManifest(
+            "node install host_service version must match service version".to_string(),
+        ));
+    }
+    if request.endpoint.service_id != request.service.id {
+        return Err(OrchestratorError::InvalidManifest(
+            "node install endpoint service_id must match service id".to_string(),
+        ));
+    }
+    let identity = crate::parse_endpoint_id(&request.endpoint.endpoint)?;
+    if identity.host.to_string() != request.host_service.host_ip {
+        return Err(OrchestratorError::InvalidManifest(
+            "node install endpoint host must match host_service host_ip".to_string(),
+        ));
+    }
+
+    let mut operation = node_install_operation_from_request(&request)?;
+    store.update_operation(operation.clone())?;
+    operation = start_operation(&operation)?;
+    store.update_operation(operation.clone())?;
+    store.append_operation_log(operation_step_log_record(
+        &operation.operation_id,
+        "node-accept",
+        "info",
+        format!(
+            "node orchestrator accepted install dispatch for {}@{}",
+            request.service.id, request.service.version
+        ),
+        serde_json::json!({
+            "service_id": request.service.id,
+            "version": request.service.version,
+            "endpoint": request.endpoint.endpoint,
+            "host_ip": request.host_service.host_ip,
+            "package_load": request.package_load,
+        }),
+    ))?;
+
+    let mut host_service = request.host_service.clone();
+    let mut endpoint = request.endpoint.clone();
+    let mut rendered_config = request.rendered_config.clone();
+    let driver_result = match node_install_driver_result(&request) {
+        Ok(result) => result,
+        Err(err) => {
+            let failed = crate::fail_operation(&operation, err.to_string())?;
+            store.update_operation(failed.clone())?;
+            store.append_operation_log(operation_step_log_record(
+                &failed.operation_id,
+                "node-driver",
+                "error",
+                format!("node service driver failed before execution: {err}"),
+                serde_json::json!({
+                    "service_id": request.service.id,
+                    "version": request.service.version,
+                    "endpoint": request.endpoint.endpoint,
+                    "error": err.to_string(),
+                }),
+            ))?;
+            return Err(err);
+        }
+    };
+    let health = node_install_health_result(&endpoint, driver_result.as_ref())?;
+    if let Some(driver_result) = driver_result.as_ref() {
+        host_service.status = crate::store::release_install_host_status(
+            Some(&NodeServiceDispatchResult {
+                status: "accepted".to_string(),
+                message: String::new(),
+                endpoint: endpoint.endpoint.clone(),
+                accepted: true,
+            }),
+            driver_result,
+            &health,
+        )
+        .to_string();
+        endpoint.health = health.health.clone();
+        endpoint.reachable = health.reachable;
+        set_rendered_external_step(
+            &mut rendered_config,
+            "node_driver",
+            serde_json::json!({
+                "status": driver_result.status,
+                "message": driver_result.message,
+                "command": driver_result.command,
+            }),
+        );
+        set_rendered_external_step(
+            &mut rendered_config,
+            "node_health",
+            serde_json::json!({
+                "status": health.health,
+                "reachable": health.reachable,
+                "message": health.message,
+            }),
+        );
+    }
+
+    store.upsert_service(request.service.clone())?;
+    store.upsert_host_service(host_service.clone())?;
+    store.upsert_rendered_service_config(RenderedServiceConfig {
+        service_name: request.service.id.clone(),
+        version: request.service.version.clone(),
+        config: rendered_config,
+        created_at: String::new(),
+        updated_at: String::new(),
+    })?;
+    store.upsert_endpoint(endpoint.clone())?;
+    store.append_operation_log(operation_step_log_record(
+        &operation.operation_id,
+        "node-store",
+        "info",
+        format!(
+            "node registry stored service {}, host {}, endpoint {}",
+            request.service.id, host_service.host_ip, endpoint.endpoint
+        ),
+        serde_json::json!({
+            "service_id": request.service.id,
+            "version": request.service.version,
+            "host_ip": host_service.host_ip,
+            "host_status": host_service.status,
+            "endpoint": endpoint.endpoint,
+            "endpoint_health": endpoint.health,
+            "endpoint_reachable": endpoint.reachable,
+        }),
+    ))?;
+    if let Some(driver_result) = driver_result.as_ref() {
+        store.append_operation_log(node_driver_log_record(
+            &operation.operation_id,
+            driver_result,
+        ))?;
+    } else {
+        store.append_operation_log(operation_step_log_record(
+            &operation.operation_id,
+            "node-driver",
+            "warn",
+            "node service driver execution deferred",
+            serde_json::json!({
+                "status": "deferred",
+                "execute_env": "ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER",
+            }),
+        ))?;
+    }
+    store.append_operation_log(node_health_log_record(&operation.operation_id, &health))?;
+
+    let result = NodeServiceDispatchResult {
+        status: "accepted".to_string(),
+        message: node_install_message(
+            &request.service.id,
+            &host_service.host_ip,
+            driver_result.as_ref(),
+            &health,
+        ),
+        endpoint: endpoint.endpoint,
+        accepted: true,
+    };
+    let operation_result = serde_json::json!({
+        "operation_id": operation.operation_id,
+        "status": if driver_result
+            .as_ref()
+            .is_some_and(|driver| driver.status == "FAILED")
+        {
+            "FAILED"
+        } else {
+            "SUCCEEDED"
+        },
+        "service_id": request.service.id,
+        "version": request.service.version,
+        "host_ip": host_service.host_ip,
+        "endpoint": result.endpoint,
+        "node_dispatch_result": result,
+        "driver": driver_result,
+        "health": health,
+    });
+    let finished = if let Some(driver) = driver_result
+        .as_ref()
+        .filter(|driver| driver.status == "FAILED")
+    {
+        crate::fail_operation(
+            &operation,
+            format!("node service driver failed: {}", driver.message),
+        )?
+    } else {
+        succeed_operation(&operation, operation_result.clone())?
+    };
+    let mut finished = finished;
+    if matches!(finished.status, OperationStatus::Failed) {
+        finished.result = operation_result;
+    }
+    store.update_operation(finished.clone())?;
+    store.append_operation_log(operation_log_record(
+        &finished.operation_id,
+        if matches!(finished.status, OperationStatus::Failed) {
+            "error"
+        } else {
+            "info"
+        },
+        format!(
+            "node install operation {}",
+            if matches!(finished.status, OperationStatus::Failed) {
+                "failed"
+            } else {
+                "succeeded"
+            }
+        ),
+    ))?;
+
+    Ok(result)
+}
+
+fn node_install_operation_from_request(request: &NodeServiceDispatchRequest) -> Result<Operation> {
+    plan_operation(
+        request.operation_id.clone(),
+        "release.install",
+        "NodeServiceInstall",
+        request.service.id.clone(),
+        serde_json::json!({
+            "service_id": request.service.id,
+            "version": request.service.version,
+            "endpoint": request.endpoint.endpoint,
+            "host_ip": request.host_service.host_ip,
+            "node_mode": true,
+            "package_load": request.package_load,
+        }),
+        serde_json::json!({
+            "steps": [
+                {
+                    "id": "node-accept",
+                    "action": "node.install.accept",
+                    "target": request.service.id,
+                    "detail": "accept root orchestrator dispatch"
+                },
+                {
+                    "id": "node-store",
+                    "action": "node.install.store",
+                    "target": request.endpoint.endpoint,
+                    "detail": "write node-side service, host service, endpoint, rendered config"
+                },
+                {
+                    "id": "node-driver",
+                    "action": "node.install.driver",
+                    "target": request.service.id,
+                    "detail": "run local service driver when enabled"
+                },
+                {
+                    "id": "node-health",
+                    "action": "node.install.health",
+                    "target": request.endpoint.endpoint,
+                    "detail": "probe endpoint after successful driver execution"
+                }
+            ],
+            "requires_confirmation": false
+        }),
+        serde_json::json!({
+            "steps": [],
+            "supported": false,
+            "reason": "node-side service install rollback is not implemented"
+        }),
+    )
+}
+
+fn node_driver_log_record(operation_id: &str, result: &DriverResult) -> OperationLogRecord {
+    operation_step_log_record(
+        operation_id,
+        "node-driver",
+        if result.status == "FAILED" {
+            "error"
+        } else {
+            "info"
+        },
+        format!(
+            "node service driver returned {}: {}",
+            result.status, result.message
+        ),
+        serde_json::json!({
+            "action": result.action,
+            "status": result.status,
+            "message": result.message,
+            "command": result.command,
+        }),
+    )
+}
+
+fn node_health_log_record(operation_id: &str, result: &EndpointHealthResult) -> OperationLogRecord {
+    operation_step_log_record(
+        operation_id,
+        "node-health",
+        if result.reachable { "info" } else { "warn" },
+        format!(
+            "node endpoint health {} reachable={}",
+            result.health, result.reachable
+        ),
+        serde_json::json!({
+            "endpoint": result.endpoint,
+            "health": result.health,
+            "reachable": result.reachable,
+            "latency_ms": result.latency_ms,
+            "message": result.message,
+        }),
+    )
+}
+
+fn set_rendered_external_step(config: &mut Value, key: &str, value: Value) {
+    if !config.is_object() {
+        *config = serde_json::json!({});
+    }
+    let object = config
+        .as_object_mut()
+        .expect("config was normalized to object");
+    let external_steps = object
+        .entry("external_steps".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !external_steps.is_object() {
+        *external_steps = serde_json::json!({});
+    }
+    external_steps
+        .as_object_mut()
+        .expect("external_steps was normalized to object")
+        .insert(key.to_string(), value);
+}
+
+fn node_install_driver_result(
+    request: &NodeServiceDispatchRequest,
+) -> Result<Option<DriverResult>> {
+    if !dispatcher_env_flag("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER") {
+        return Ok(None);
+    }
+    let operation = plan_operation(
+        request.operation_id.clone(),
+        "release.install",
+        "ServiceRelease",
+        request.service.id.clone(),
+        serde_json::json!({
+            "service_id": request.service.id,
+            "endpoint": request.endpoint.endpoint,
+        }),
+        serde_json::json!({}),
+        serde_json::json!({}),
+    )?;
+    crate::store::execute_service_driver_action(&request.service, &operation, true).map(Some)
+}
+
+fn dispatcher_env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn node_install_health_result(
+    endpoint: &crate::Endpoint,
+    driver_result: Option<&DriverResult>,
+) -> Result<EndpointHealthResult> {
+    let Some(driver_result) = driver_result else {
+        return Ok(EndpointHealthResult {
+            endpoint: endpoint.endpoint.clone(),
+            health: endpoint.health.clone(),
+            reachable: endpoint.reachable,
+            latency_ms: None,
+            message: "node health probe deferred until driver execution is enabled".to_string(),
+        });
+    };
+    if driver_result.status == "SUCCEEDED" {
+        check_endpoint_health_with_probe(
+            endpoint,
+            &TcpEndpointProbe::new(Duration::from_millis(800)),
+        )
+    } else {
+        Ok(EndpointHealthResult {
+            endpoint: endpoint.endpoint.clone(),
+            health: "deferred".to_string(),
+            reachable: false,
+            latency_ms: None,
+            message: format!(
+                "node health probe deferred until driver succeeds; current driver status {}",
+                driver_result.status
+            ),
+        })
+    }
+}
+
+fn node_install_message(
+    service_id: &str,
+    host_ip: &str,
+    driver_result: Option<&DriverResult>,
+    health: &EndpointHealthResult,
+) -> String {
+    match driver_result {
+        Some(driver) => format!(
+            "node orchestrator accepted {service_id} on {host_ip}; driver {}; health {}",
+            driver.status, health.health
+        ),
+        None => format!(
+            "node orchestrator accepted {service_id} on {host_ip}; driver execution deferred"
+        ),
+    }
 }
 
 fn persistent_store_unavailable(err: OrchestratorError) -> OrchestratorError {
@@ -1076,7 +1622,9 @@ fn changed_objects_from_result(result: &Value) -> Vec<String> {
 fn writes_store(action: &str, capability: ActionCapabilityStatus) -> bool {
     matches!(
         capability,
-        ActionCapabilityStatus::StoreBacked | ActionCapabilityStatus::Real
+        ActionCapabilityStatus::StoreBacked
+            | ActionCapabilityStatus::RuntimePipeline
+            | ActionCapabilityStatus::Real
     ) || matches!(action, "log.query")
 }
 
@@ -1091,6 +1639,7 @@ fn calls_executor(action: &str) -> bool {
             | "link.update"
             | "link.delete"
             | "link.health.check"
+            | "release.install"
             | "route.create"
             | "route.update"
             | "route.delete"

@@ -64,11 +64,15 @@ pub struct ServiceReleaseManifest {
     #[serde(default)]
     pub routes: Vec<ReleaseRouteDecl>,
     #[serde(default)]
+    pub apis: Vec<ReleaseApiSurfaceDecl>,
+    #[serde(default)]
     pub redis: Vec<ReleaseRedisDecl>,
     #[serde(default)]
     pub storage: Vec<ReleaseStorageDecl>,
     #[serde(default)]
     pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub required_apis: Vec<String>,
     #[serde(default)]
     pub config_schema: Value,
     #[serde(default)]
@@ -141,6 +145,35 @@ pub struct ReleaseRouteDecl {
     pub target: String,
     #[serde(default)]
     pub permission: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseApiSurfaceDecl {
+    pub api_id: String,
+    pub protocol: String,
+    pub port_name: String,
+    #[serde(default)]
+    pub path_prefix: String,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    pub visibility: String,
+    pub auth_mode: String,
+    pub permission: String,
+    pub stability: String,
+    pub version: String,
+    #[serde(default)]
+    pub grpc_service: String,
+    #[serde(default)]
+    pub stream_name: String,
+    #[serde(default)]
+    pub rate_limit: String,
+    #[serde(default)]
+    pub timeout: String,
+    #[serde(default)]
+    pub allowed_callers: Vec<String>,
+    #[serde(default)]
+    pub denied_callers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -624,6 +657,13 @@ pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> 
         ensure(id_re.is_match(dependency), "release dependency is invalid")?;
     }
     unique_by(
+        release.required_apis.iter().map(String::as_str),
+        "duplicate release required api",
+    )?;
+    for api_id in &release.required_apis {
+        ensure(key_re.is_match(api_id), "release required api is invalid")?;
+    }
+    unique_by(
         release.permissions.iter().map(String::as_str),
         "duplicate release permission",
     )?;
@@ -664,6 +704,12 @@ pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> 
             "release migration path is required",
         )?;
         reject_path_components(Path::new(&migration.path))?;
+        ensure(
+            migration
+                .path
+                .starts_with(&format!("services/{}/migrations/", release.service_name)),
+            "release migration path must stay under its service migrations directory",
+        )?;
     }
     let route_keys = release
         .routes
@@ -701,6 +747,84 @@ pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> 
             ensure(
                 key_re.is_match(&route.permission),
                 "release route permission is invalid",
+            )?;
+        }
+    }
+    unique_by(
+        release.apis.iter().map(|api| api.api_id.as_str()),
+        "duplicate release api_id",
+    )?;
+    for api in &release.apis {
+        ensure(key_re.is_match(&api.api_id), "release api_id is invalid")?;
+        ensure(
+            is_supported_protocol(&api.protocol),
+            "release api protocol is invalid",
+        )?;
+        ensure(
+            release_api_port_exists(release, &api.port_name),
+            "release api port_name does not exist",
+        )?;
+        if matches!(api.protocol.as_str(), "http" | "https") {
+            ensure(
+                path_re.is_match(&api.path_prefix),
+                "release api path_prefix is invalid",
+            )?;
+            ensure(!api.methods.is_empty(), "release api methods are required")?;
+            for method in &api.methods {
+                ensure(
+                    is_supported_route_method(method),
+                    "release api method is invalid",
+                )?;
+            }
+        }
+        ensure(
+            matches!(
+                api.visibility.as_str(),
+                "private"
+                    | "same-node"
+                    | "descendants"
+                    | "children"
+                    | "ancestors"
+                    | "global"
+                    | "explicit"
+            ),
+            "release api visibility is invalid",
+        )?;
+        ensure(
+            matches!(
+                api.auth_mode.as_str(),
+                "public" | "user" | "service" | "internal"
+            ),
+            "release api auth_mode is invalid",
+        )?;
+        if api.permission != "public" {
+            ensure(
+                release
+                    .permissions
+                    .iter()
+                    .any(|item| item == &api.permission),
+                "release api permission must be declared in permissions",
+            )?;
+            ensure(
+                key_re.is_match(&api.permission),
+                "release api permission is invalid",
+            )?;
+        }
+        ensure(
+            matches!(
+                api.stability.as_str(),
+                "stable" | "experimental" | "deprecated"
+            ),
+            "release api stability is invalid",
+        )?;
+        ensure(
+            !api.version.trim().is_empty(),
+            "release api version is required",
+        )?;
+        for caller in api.allowed_callers.iter().chain(api.denied_callers.iter()) {
+            ensure(
+                key_re.is_match(caller),
+                "release api caller selector is invalid",
             )?;
         }
     }
@@ -751,6 +875,11 @@ pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> 
         }
     }
     Ok(())
+}
+
+fn release_api_port_exists(release: &ServiceReleaseManifest, port_name: &str) -> bool {
+    let port_name = port_name.trim();
+    port_name == "default" || port_name == release.backend.protocol
 }
 
 fn release_route_key(route: &ReleaseRouteDecl) -> String {
@@ -1117,7 +1246,15 @@ pub fn release_install_operation(
     manifest: &ServiceManifest,
     installed_service_ids: &[String],
 ) -> Result<Operation> {
-    release_install_operation_with_release(operation_id, manifest, None, installed_service_ids)
+    release_install_operation_with_release(
+        operation_id,
+        manifest,
+        None,
+        installed_service_ids,
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
 }
 
 pub fn release_install_operation_with_release(
@@ -1125,7 +1262,15 @@ pub fn release_install_operation_with_release(
     manifest: &ServiceManifest,
     release: Option<&ServiceReleaseManifest>,
     installed_service_ids: &[String],
+    host_ip: &str,
+    endpoint: Option<&str>,
+    install_options: Value,
 ) -> Result<Operation> {
+    let host_ip = host_ip.trim();
+    ensure(!host_ip.is_empty(), "release install host_ip is required")?;
+    host_ip.parse::<IpAddr>().map_err(|_| {
+        OrchestratorError::InvalidManifest("host_ip must be an IP address".to_string())
+    })?;
     if let Some(release) = release {
         validate_service_release(release)?;
         ensure(
@@ -1156,52 +1301,133 @@ pub fn release_install_operation_with_release(
     let exists = installed_service_ids
         .iter()
         .any(|service_id| service_id == &manifest.id);
+    let endpoint = endpoint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}:{}",
+                host_ip, manifest.endpoint.default_port, manifest.id
+            )
+        });
+    validate_endpoint_service_name(&endpoint, &manifest.id)?;
     let mut steps = Vec::new();
     if let Some(release) = release {
+        steps.push(serde_json::json!({
+            "action": "fetch_or_load_release_package",
+            "target": release.source.url,
+            "status": "loader-gated"
+        }));
         steps.push(serde_json::json!({
             "action": "validate_service_release",
             "target": release.service_name,
             "detail": "validate release.yaml against service.yaml"
         }));
+    } else {
+        steps.push(serde_json::json!({
+            "action": "validate_service_manifest",
+            "target": manifest.id
+        }));
+    }
+    steps.push(serde_json::json!({
+        "action": "select_host",
+        "target": host_ip
+    }));
+    steps.push(serde_json::json!({
+        "action": "create_host_service",
+        "target": format!("{}:{}", host_ip, manifest.id),
+        "detail": "host_ip + service-name is unique"
+    }));
+    steps.push(serde_json::json!({
+        "action": "allocate_endpoint",
+        "target": endpoint,
+        "detail": "endpoint identity is ip:port:service-name"
+    }));
+    if let Some(release) = release {
         if !release.permissions.is_empty() {
             steps.push(serde_json::json!({
                 "action": "register_permissions",
                 "target": release.service_name,
-                "count": release.permissions.len()
+                "count": release.permissions.len(),
+                "status": "registry"
+            }));
+            steps.push(serde_json::json!({
+                "action": "sync_auth_permissions",
+                "target": release.service_name,
+                "count": release.permissions.len(),
+                "status": "runtime-capable"
             }));
         }
         if !release.routes.is_empty() {
             steps.push(serde_json::json!({
                 "action": "register_gateway_routes",
                 "target": release.service_name,
-                "count": release.routes.len()
+                "count": release.routes.len(),
+                "status": "registry"
+            }));
+            steps.push(serde_json::json!({
+                "action": "publish_gateway_routes",
+                "target": release.service_name,
+                "count": release.routes.len(),
+                "status": "runtime-capable"
             }));
         }
         if release.frontend.enabled {
             steps.push(serde_json::json!({
                 "action": "register_frontend_entry",
-                "target": release.frontend.route_prefix
+                "target": release.frontend.route_prefix,
+                "status": "registry-only"
             }));
         }
         if !release.migrations.is_empty() {
             steps.push(serde_json::json!({
-                "action": "apply_service_migrations",
+                "action": "register_service_migrations",
                 "target": release.service_name,
-                "count": release.migrations.len()
+                "count": release.migrations.len(),
+                "status": "registry"
+            }));
+            steps.push(serde_json::json!({
+                "action": "run_service_migrations",
+                "target": release.service_name,
+                "count": release.migrations.len(),
+                "status": "runtime-capable",
+                "dry_run": install_options
+                    .get("migration_dry_run")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                "allow_destructive": install_options
+                    .get("allow_destructive_migrations")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
             }));
         }
         if !release.redis.is_empty() {
             steps.push(serde_json::json!({
                 "action": "register_redis_resources",
                 "target": release.service_name,
-                "count": release.redis.len()
+                "count": release.redis.len(),
+                "status": "registry"
+            }));
+            steps.push(serde_json::json!({
+                "action": "provision_redis_resources",
+                "target": release.service_name,
+                "count": release.redis.len(),
+                "status": "runtime-capable"
             }));
         }
         if !release.storage.is_empty() {
             steps.push(serde_json::json!({
                 "action": "register_storage_resources",
                 "target": release.service_name,
-                "count": release.storage.len()
+                "count": release.storage.len(),
+                "status": "registry"
+            }));
+            steps.push(serde_json::json!({
+                "action": "provision_storage_resources",
+                "target": release.service_name,
+                "count": release.storage.len(),
+                "status": "runtime-capable"
             }));
         }
         steps.push(serde_json::json!({
@@ -1209,6 +1435,15 @@ pub fn release_install_operation_with_release(
             "target": release.service_name
         }));
     }
+    steps.push(serde_json::json!({
+        "action": "dispatch_to_node_or_standalone",
+        "target": host_ip,
+        "status": "driver-gated",
+        "execute": install_options
+            .get("execute_service_driver")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }));
     if exists {
         steps.push(serde_json::json!({
             "action": "refresh_service_metadata",
@@ -1221,12 +1456,24 @@ pub fn release_install_operation_with_release(
             "target": manifest.id,
             "detail": "insert service row"
         }));
-        steps.push(serde_json::json!({
-            "action": "declare_default_endpoint",
-            "target": format!("*:{}:{}", manifest.endpoint.default_port, manifest.id),
-            "detail": "actual endpoint is bound by Orchestrator as ip:port:service-name"
-        }));
     }
+    steps.push(serde_json::json!({
+        "action": "start_service",
+        "target": endpoint,
+        "status": "driver-gated",
+        "execute": install_options
+            .get("execute_service_driver")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }));
+    steps.push(serde_json::json!({
+        "action": "health_probe",
+        "target": endpoint
+    }));
+    steps.push(serde_json::json!({
+        "action": "mark_running_state",
+        "target": format!("{}:{}", host_ip, manifest.id)
+    }));
     let operation = plan_operation(
         operation_id,
         "release.install",
@@ -1237,8 +1484,22 @@ pub fn release_install_operation_with_release(
             "version": manifest.version,
             "default_port": manifest.endpoint.default_port,
             "already_known": exists,
+            "host_ip": host_ip,
+            "endpoint": endpoint,
             "service_manifest": manifest,
-            "release_manifest": release
+            "release_manifest": release,
+            "migration_dry_run": install_options
+                .get("migration_dry_run")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "allow_destructive_migrations": install_options
+                .get("allow_destructive_migrations")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "execute_service_driver": install_options
+                .get("execute_service_driver")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
         }),
         serde_json::json!({
             "steps": steps,
@@ -1249,6 +1510,10 @@ pub fn release_install_operation_with_release(
                 {
                     "action": "restore_previous_service_definition",
                     "target": manifest.id
+                },
+                {
+                    "action": "remove_created_host_service_and_endpoint",
+                    "target": endpoint
                 }
             ]
         }),

@@ -295,6 +295,9 @@ pub fn plan_action_request_with_releases(
                     manifest,
                     Some(release),
                     &installed,
+                    request.field("host_ip").unwrap_or("127.0.0.1"),
+                    request.field("endpoint"),
+                    release_install_options(request),
                 )
             }
         }
@@ -537,6 +540,23 @@ fn registry_resource_operation(
                 }
             ]
         }),
+    )
+}
+
+fn release_install_options(request: &ActionRequest) -> Value {
+    serde_json::json!({
+        "migration_dry_run": request.field("migration_dry_run").is_some_and(truthy_field),
+        "allow_destructive_migrations": request
+            .field("allow_destructive_migrations")
+            .is_some_and(truthy_field),
+        "execute_service_driver": request.field("execute_service_driver").is_some_and(truthy_field),
+    })
+}
+
+fn truthy_field(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
     )
 }
 

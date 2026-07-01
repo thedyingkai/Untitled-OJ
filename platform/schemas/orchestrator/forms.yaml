@@ -32,6 +32,9 @@ forms:
       - { name: service_id, type: service_id, required: true }
       - { name: host_ip, type: string }
       - { name: endpoint, type: endpoint }
+      - { name: migration_dry_run, type: boolean }
+      - { name: allow_destructive_migrations, type: boolean }
+      - { name: execute_service_driver, type: boolean }
       - { name: confirm, type: boolean, required: true }
   release.rollback:
     fields:

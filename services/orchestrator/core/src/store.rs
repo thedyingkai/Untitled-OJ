@@ -1,28 +1,46 @@
 use crate::{
-    DiagnosticReport, DockerComposeDriver, DriverRequest, DriverResult, Endpoint,
-    EndpointHealthResult, EndpointProbe, ExecutionDriver, ExternalEndpointDriver, Link,
-    LinkHealthResult, LocalProcessDriver, LogView, Operation, OperationLock, OperationLogRecord,
-    OperationStatus, OrchestratorError, RenderedServiceConfig, Result, RuntimeMode,
-    ServiceFrontendEntry, ServiceManifest, ServiceMigrationRecord, ServicePermissionRecord,
-    ServiceRedisResource, ServiceRelease, ServiceReleaseManifest, ServiceRoute,
-    ServiceStorageResource, StaticEndpointProbe, Topology, TopologySnapshot,
-    build_diagnostic_report, build_topology, check_endpoint_health_with_probe, check_link_health,
-    export_diagnostic_report, operation_log_record, operation_step_log_record, parse_endpoint_id,
-    start_operation, succeed_operation, validate_endpoint, validate_endpoint_id, validate_link,
-    validate_log_view, validate_rendered_service_config, validate_service_frontend_entry,
-    validate_service_manifest, validate_service_migration_record,
-    validate_service_permission_record, validate_service_redis_resource,
+    DeployedServiceApi, DiagnosticReport, DockerComposeDriver, DriverRequest, DriverResult,
+    EffectiveApiRoute, Endpoint, EndpointHealthResult, EndpointProbe, ExecutionDriver,
+    ExternalEndpointDriver, HostService, Link, LinkHealthResult, LocalProcessDriver, LogView,
+    NodeRecord, Operation, OperationLock, OperationLogRecord, OperationStatus, OrchestratorError,
+    RenderedServiceConfig, Result, RuntimeMode, ServiceApiSurface, ServiceFrontendEntry,
+    ServiceManifest, ServiceMigrationRecord, ServicePermissionRecord, ServiceRedisResource,
+    ServiceRelease, ServiceReleaseManifest, ServiceRoute, ServiceStorageResource,
+    StaticEndpointProbe, Topology, TopologySnapshot, build_diagnostic_report, build_topology,
+    check_endpoint_health_with_probe, check_link_health, export_diagnostic_report,
+    operation_log_record, operation_step_log_record, parse_endpoint_id, start_operation,
+    succeed_operation, validate_deployed_service_api, validate_endpoint, validate_endpoint_id,
+    validate_host_service, validate_link, validate_log_view, validate_node_record,
+    validate_rendered_service_config, validate_service_api_surface,
+    validate_service_frontend_entry, validate_service_manifest, validate_service_migration_record,
+    validate_service_permission_record, validate_service_redis_resource, validate_service_release,
     validate_service_release_record, validate_service_route, validate_service_storage_resource,
     validate_topology,
 };
+use postgres::NoTls;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+use tar::Archive;
+use ureq::Agent;
+use zip::ZipArchive;
 
 pub trait OrchestratorStore {
     fn list_services(&self) -> Result<Vec<ServiceManifest>>;
     fn get_service(&self, service_id: &str) -> Result<Option<ServiceManifest>>;
     fn upsert_service(&mut self, service: ServiceManifest) -> Result<()>;
     fn delete_service(&mut self, service_id: &str) -> Result<()>;
+
+    fn list_host_services(&self) -> Result<Vec<HostService>>;
+    fn get_host_service(&self, host_ip: &str, service_name: &str) -> Result<Option<HostService>>;
+    fn upsert_host_service(&mut self, host_service: HostService) -> Result<()>;
+    fn delete_host_service(&mut self, host_ip: &str, service_name: &str) -> Result<()>;
+    fn delete_host_services_for_service(&mut self, service_name: &str) -> Result<()>;
 
     fn list_service_releases(&self) -> Result<Vec<ServiceRelease>>;
     fn get_service_release(
@@ -60,6 +78,19 @@ pub trait OrchestratorStore {
     fn list_rendered_service_configs(&self) -> Result<Vec<RenderedServiceConfig>>;
     fn upsert_rendered_service_config(&mut self, config: RenderedServiceConfig) -> Result<()>;
     fn delete_rendered_service_configs_for_service(&mut self, service_name: &str) -> Result<()>;
+
+    fn list_nodes(&self) -> Result<Vec<NodeRecord>>;
+    fn get_node(&self, node_id: &str) -> Result<Option<NodeRecord>>;
+    fn upsert_node(&mut self, node: NodeRecord) -> Result<()>;
+    fn delete_node(&mut self, node_id: &str) -> Result<()>;
+
+    fn list_service_api_surfaces(&self) -> Result<Vec<ServiceApiSurface>>;
+    fn upsert_service_api_surface(&mut self, api: ServiceApiSurface) -> Result<()>;
+    fn delete_service_api_surfaces_for_service(&mut self, service_name: &str) -> Result<()>;
+
+    fn list_deployed_service_apis(&self) -> Result<Vec<DeployedServiceApi>>;
+    fn upsert_deployed_service_api(&mut self, api: DeployedServiceApi) -> Result<()>;
+    fn delete_deployed_service_apis_for_service(&mut self, service_name: &str) -> Result<()>;
 
     fn list_endpoints(&self) -> Result<Vec<Endpoint>>;
     fn get_endpoint(&self, endpoint: &str) -> Result<Option<Endpoint>>;
@@ -157,6 +188,10 @@ pub trait OrchestratorStore {
         self.list_service_releases()
     }
 
+    fn host_services(&self) -> Result<Vec<HostService>> {
+        self.list_host_services()
+    }
+
     fn service_routes(&self) -> Result<Vec<ServiceRoute>> {
         self.list_service_routes()
     }
@@ -183,6 +218,35 @@ pub trait OrchestratorStore {
 
     fn rendered_service_configs(&self) -> Result<Vec<RenderedServiceConfig>> {
         self.list_rendered_service_configs()
+    }
+
+    fn nodes(&self) -> Result<Vec<NodeRecord>> {
+        self.list_nodes()
+    }
+
+    fn service_api_surfaces(&self) -> Result<Vec<ServiceApiSurface>> {
+        self.list_service_api_surfaces()
+    }
+
+    fn deployed_service_apis(&self) -> Result<Vec<DeployedServiceApi>> {
+        self.list_deployed_service_apis()
+    }
+
+    fn ancestors_of(&self, node_id: &str) -> Result<Vec<NodeRecord>> {
+        ancestors_of_from_nodes(self.list_nodes()?, node_id)
+    }
+
+    fn descendants_of(&self, node_id: &str) -> Result<Vec<NodeRecord>> {
+        descendants_of_from_nodes(self.list_nodes()?, node_id)
+    }
+
+    fn effective_api_routes(&self, node_id: &str) -> Result<Vec<EffectiveApiRoute>> {
+        effective_api_routes_from_registry(
+            node_id,
+            self.list_nodes()?,
+            self.list_service_api_surfaces()?,
+            self.list_deployed_service_apis()?,
+        )
     }
 
     fn endpoints(&self) -> Result<Vec<Endpoint>> {
@@ -213,6 +277,7 @@ pub trait OrchestratorStore {
 #[derive(Debug, Default, Clone)]
 pub struct MemoryOrchestratorStore {
     services: BTreeMap<String, ServiceManifest>,
+    host_services: BTreeMap<(String, String), HostService>,
     service_releases: BTreeMap<(String, String), ServiceRelease>,
     service_routes: BTreeMap<(String, String), ServiceRoute>,
     service_migration_records: BTreeMap<(String, String), ServiceMigrationRecord>,
@@ -221,6 +286,9 @@ pub struct MemoryOrchestratorStore {
     service_redis_resources: BTreeMap<(String, String), ServiceRedisResource>,
     service_storage_resources: BTreeMap<(String, String, String), ServiceStorageResource>,
     rendered_service_configs: BTreeMap<(String, String), RenderedServiceConfig>,
+    nodes: BTreeMap<String, NodeRecord>,
+    service_api_surfaces: BTreeMap<(String, String, String), ServiceApiSurface>,
+    deployed_service_apis: BTreeMap<(String, String, String, String), DeployedServiceApi>,
     endpoints: BTreeMap<String, Endpoint>,
     links: BTreeMap<(String, String), Link>,
     operations: BTreeMap<String, Operation>,
@@ -263,6 +331,10 @@ impl MemoryOrchestratorStore {
         self.service_releases.values().cloned().collect()
     }
 
+    pub fn host_services(&self) -> Vec<HostService> {
+        self.host_services.values().cloned().collect()
+    }
+
     pub fn service_routes(&self) -> Vec<ServiceRoute> {
         self.service_routes.values().cloned().collect()
     }
@@ -289,6 +361,18 @@ impl MemoryOrchestratorStore {
 
     pub fn rendered_service_configs(&self) -> Vec<RenderedServiceConfig> {
         self.rendered_service_configs.values().cloned().collect()
+    }
+
+    pub fn nodes(&self) -> Vec<NodeRecord> {
+        self.nodes.values().cloned().collect()
+    }
+
+    pub fn service_api_surfaces(&self) -> Vec<ServiceApiSurface> {
+        self.service_api_surfaces.values().cloned().collect()
+    }
+
+    pub fn deployed_service_apis(&self) -> Vec<DeployedServiceApi> {
+        self.deployed_service_apis.values().cloned().collect()
     }
 
     pub fn endpoints(&self) -> Vec<Endpoint> {
@@ -344,6 +428,7 @@ impl OrchestratorStore for MemoryOrchestratorStore {
 
     fn delete_service(&mut self, service_id: &str) -> Result<()> {
         self.services.remove(service_id);
+        self.delete_host_services_for_service(service_id)?;
         self.service_releases
             .retain(|(service_name, _), _| service_name != service_id);
         self.delete_service_routes_for_service(service_id)?;
@@ -353,6 +438,8 @@ impl OrchestratorStore for MemoryOrchestratorStore {
         self.delete_service_redis_resources_for_service(service_id)?;
         self.delete_service_storage_resources_for_service(service_id)?;
         self.delete_rendered_service_configs_for_service(service_id)?;
+        self.delete_service_api_surfaces_for_service(service_id)?;
+        self.delete_deployed_service_apis_for_service(service_id)?;
         let removed_endpoints = self
             .endpoints
             .values()
@@ -362,6 +449,41 @@ impl OrchestratorStore for MemoryOrchestratorStore {
         for endpoint in removed_endpoints {
             self.delete_endpoint(&endpoint)?;
         }
+        Ok(())
+    }
+
+    fn list_host_services(&self) -> Result<Vec<HostService>> {
+        Ok(self.host_services())
+    }
+
+    fn get_host_service(&self, host_ip: &str, service_name: &str) -> Result<Option<HostService>> {
+        Ok(self
+            .host_services
+            .get(&(host_ip.to_string(), service_name.to_string()))
+            .cloned())
+    }
+
+    fn upsert_host_service(&mut self, host_service: HostService) -> Result<()> {
+        validate_host_service(&host_service)?;
+        self.host_services.insert(
+            (
+                host_service.host_ip.clone(),
+                host_service.service_name.clone(),
+            ),
+            host_service,
+        );
+        Ok(())
+    }
+
+    fn delete_host_service(&mut self, host_ip: &str, service_name: &str) -> Result<()> {
+        self.host_services
+            .remove(&(host_ip.to_string(), service_name.to_string()));
+        Ok(())
+    }
+
+    fn delete_host_services_for_service(&mut self, service_name: &str) -> Result<()> {
+        self.host_services
+            .retain(|(_, stored_service_name), _| stored_service_name != service_name);
         Ok(())
     }
 
@@ -530,6 +652,104 @@ impl OrchestratorStore for MemoryOrchestratorStore {
         Ok(())
     }
 
+    fn list_nodes(&self) -> Result<Vec<NodeRecord>> {
+        Ok(self.nodes())
+    }
+
+    fn get_node(&self, node_id: &str) -> Result<Option<NodeRecord>> {
+        Ok(self.nodes.get(node_id).cloned())
+    }
+
+    fn upsert_node(&mut self, node: NodeRecord) -> Result<()> {
+        validate_node_record(&node)?;
+        validate_node_tree_upsert(self.nodes.values(), &node)?;
+        self.nodes.insert(node.node_id.clone(), node);
+        Ok(())
+    }
+
+    fn delete_node(&mut self, node_id: &str) -> Result<()> {
+        if self
+            .nodes
+            .values()
+            .any(|node| node.parent_node_id == node_id)
+        {
+            return Err(OrchestratorError::Dependency(format!(
+                "node {node_id} has child nodes"
+            )));
+        }
+        self.nodes.remove(node_id);
+        Ok(())
+    }
+
+    fn list_service_api_surfaces(&self) -> Result<Vec<ServiceApiSurface>> {
+        Ok(self.service_api_surfaces())
+    }
+
+    fn upsert_service_api_surface(&mut self, api: ServiceApiSurface) -> Result<()> {
+        validate_service_api_surface(&api)?;
+        self.service_api_surfaces.insert(
+            (
+                api.service_name.clone(),
+                api.version.clone(),
+                api.api_id.clone(),
+            ),
+            api,
+        );
+        Ok(())
+    }
+
+    fn delete_service_api_surfaces_for_service(&mut self, service_name: &str) -> Result<()> {
+        self.service_api_surfaces
+            .retain(|(stored_service_name, _, _), _| stored_service_name != service_name);
+        Ok(())
+    }
+
+    fn list_deployed_service_apis(&self) -> Result<Vec<DeployedServiceApi>> {
+        Ok(self.deployed_service_apis())
+    }
+
+    fn upsert_deployed_service_api(&mut self, api: DeployedServiceApi) -> Result<()> {
+        validate_deployed_service_api(&api)?;
+        if !self.nodes.values().any(|node| node.host_ip == api.host_ip) {
+            return Err(OrchestratorError::Dependency(format!(
+                "deployed api references host_ip {} without node",
+                api.host_ip
+            )));
+        }
+        if !self.endpoints.contains_key(&api.endpoint) {
+            return Err(OrchestratorError::Dependency(format!(
+                "deployed api references missing endpoint {}",
+                api.endpoint
+            )));
+        }
+        if !self.service_api_surfaces.contains_key(&(
+            api.service_name.clone(),
+            api.version.clone(),
+            api.api_id.clone(),
+        )) {
+            return Err(OrchestratorError::Dependency(format!(
+                "deployed api references missing api surface {}@{}:{}",
+                api.service_name, api.version, api.api_id
+            )));
+        }
+        self.deployed_service_apis.insert(
+            (
+                api.host_ip.clone(),
+                api.service_name.clone(),
+                api.api_id.clone(),
+                api.endpoint.clone(),
+            ),
+            api,
+        );
+        Ok(())
+    }
+
+    fn delete_deployed_service_apis_for_service(&mut self, service_name: &str) -> Result<()> {
+        self.deployed_service_apis
+            .retain(|(_, stored_service_name, _, _), _| stored_service_name != service_name);
+        Ok(())
+    }
+
     fn list_endpoints(&self) -> Result<Vec<Endpoint>> {
         Ok(self.endpoints())
     }
@@ -553,6 +773,8 @@ impl OrchestratorStore for MemoryOrchestratorStore {
     fn delete_endpoint(&mut self, endpoint: &str) -> Result<()> {
         validate_endpoint_id(endpoint)?;
         self.endpoints.remove(endpoint);
+        self.deployed_service_apis
+            .retain(|(_, _, _, stored_endpoint), _| stored_endpoint != endpoint);
         self.links
             .retain(|(source, target), _| source != endpoint && target != endpoint);
         self.log_views
@@ -801,15 +1023,333 @@ impl OrchestratorStore for MemoryOrchestratorStore {
     }
 }
 
-pub struct OperationExecutor<'a, S: OrchestratorStore, P: EndpointProbe = StaticEndpointProbe> {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthPermissionRegistration {
+    pub service_name: String,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthPermissionRegistrationResult {
+    pub status: String,
+    pub message: String,
+    pub endpoint: String,
+    pub registered: usize,
+}
+
+pub trait AuthPermissionRegistrar {
+    fn register_permissions(
+        &self,
+        request: &AuthPermissionRegistration,
+    ) -> Result<AuthPermissionRegistrationResult>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RedisProvisionRequest {
+    pub service_name: String,
+    pub resources: Vec<ServiceRedisResource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RedisProvisionedResource {
+    pub name: String,
+    pub kind: String,
+    pub stream: String,
+    pub consumer_group: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RedisProvisionResult {
+    pub status: String,
+    pub message: String,
+    pub endpoint: String,
+    pub provisioned: Vec<RedisProvisionedResource>,
+}
+
+pub trait RedisResourceProvisioner {
+    fn provision_resources(&self, request: &RedisProvisionRequest) -> Result<RedisProvisionResult>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageProvisionRequest {
+    pub service_name: String,
+    pub resources: Vec<ServiceStorageResource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageProvisionedResource {
+    pub object_type: String,
+    pub bucket: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageProvisionResult {
+    pub status: String,
+    pub message: String,
+    pub endpoint: String,
+    pub provisioned: Vec<StorageProvisionedResource>,
+}
+
+pub trait StorageResourceProvisioner {
+    fn provision_resources(
+        &self,
+        request: &StorageProvisionRequest,
+    ) -> Result<StorageProvisionResult>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationExecutionRequest {
+    pub service_name: String,
+    pub migrations: Vec<crate::ReleaseMigrationDecl>,
+    pub release_source_url: String,
+    pub dry_run: bool,
+    pub allow_destructive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationExecutionRecord {
+    pub migration_version: String,
+    pub path: String,
+    pub checksum: String,
+    pub status: String,
+    pub applied_at: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationExecutionResult {
+    pub status: String,
+    pub message: String,
+    pub runner: String,
+    pub dry_run: bool,
+    pub executed: Vec<MigrationExecutionRecord>,
+}
+
+pub trait MigrationRunner {
+    fn execute_migrations(
+        &self,
+        request: &MigrationExecutionRequest,
+    ) -> Result<MigrationExecutionResult>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleasePackageLoadRequest {
+    pub service_name: String,
+    pub version: String,
+    pub source_url: String,
+    pub expected_manifest: Option<ServiceReleaseManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleasePackageLoadResult {
+    pub status: String,
+    pub message: String,
+    pub source_url: String,
+    pub manifest_loaded: bool,
+    pub checksum: String,
+}
+
+pub trait ReleasePackageLoader {
+    fn load_release_package(
+        &self,
+        request: &ReleasePackageLoadRequest,
+    ) -> Result<ReleasePackageLoadResult>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GatewayRoutePublishRequest {
+    pub operation_id: String,
+    pub service_name: String,
+    pub routes: Vec<ServiceRoute>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GatewayRoutePublishResult {
+    pub status: String,
+    pub message: String,
+    pub endpoint: String,
+    pub route_count: usize,
+    pub reloaded: bool,
+}
+
+pub trait GatewayRoutePublisher {
+    fn publish_routes(
+        &self,
+        request: &GatewayRoutePublishRequest,
+    ) -> Result<GatewayRoutePublishResult>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeServiceDispatchRequest {
+    pub operation_id: String,
+    pub service: ServiceManifest,
+    pub release: Option<ServiceReleaseManifest>,
+    pub host_service: HostService,
+    pub endpoint: Endpoint,
+    pub rendered_config: serde_json::Value,
+    pub package_load: Option<ReleasePackageLoadResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeServiceDispatchResult {
+    pub status: String,
+    pub message: String,
+    pub endpoint: String,
+    pub accepted: bool,
+}
+
+pub trait NodeServiceDispatcher {
+    fn dispatch_service(
+        &self,
+        request: &NodeServiceDispatchRequest,
+    ) -> Result<NodeServiceDispatchResult>;
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DeferredAuthPermissionRegistrar;
+
+#[derive(Debug, Default, Clone)]
+pub struct ConfiguredAuthPermissionRegistrar {
+    sync_enabled: bool,
+    http: Option<HttpAuthPermissionRegistrar>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpAuthPermissionRegistrar {
+    endpoint: String,
+    token: String,
+    timeout: Duration,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DeferredRedisResourceProvisioner;
+
+#[derive(Debug, Default, Clone)]
+pub struct ConfiguredRedisResourceProvisioner {
+    sync_enabled: bool,
+    tcp: Option<TcpRedisResourceProvisioner>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TcpRedisResourceProvisioner {
+    endpoint: String,
+    timeout: Duration,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DeferredStorageResourceProvisioner;
+
+#[derive(Debug, Default, Clone)]
+pub struct ConfiguredStorageResourceProvisioner {
+    sync_enabled: bool,
+    http: Option<HttpStorageResourceProvisioner>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpStorageResourceProvisioner {
+    endpoint: String,
+    timeout: Duration,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DeferredMigrationRunner;
+
+#[derive(Debug, Default, Clone)]
+pub struct ConfiguredMigrationRunner {
+    execution_enabled: bool,
+    runner: Option<LocalSqlMigrationRunner>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalSqlMigrationRunner {
+    root: PathBuf,
+    database_url: Option<String>,
+    dry_run: bool,
+    allow_destructive: bool,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DeferredReleasePackageLoader;
+
+#[derive(Debug, Default, Clone)]
+pub struct ConfiguredReleasePackageLoader {
+    load_enabled: bool,
+    loader: Option<LocalReleasePackageLoader>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalReleasePackageLoader {
+    root: PathBuf,
+    timeout: Duration,
+    max_manifest_bytes: usize,
+    max_package_bytes: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DeferredGatewayRoutePublisher;
+
+#[derive(Debug, Default, Clone)]
+pub struct ConfiguredGatewayRoutePublisher {
+    publish_enabled: bool,
+    http: Option<HttpGatewayRoutePublisher>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpGatewayRoutePublisher {
+    endpoint: String,
+    token: Option<String>,
+    timeout: Duration,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DeferredNodeServiceDispatcher;
+
+#[derive(Debug, Default, Clone)]
+pub struct ConfiguredNodeServiceDispatcher {
+    dispatch_enabled: bool,
+    http: Option<HttpNodeServiceDispatcher>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpNodeServiceDispatcher {
+    endpoint: String,
+    token: Option<String>,
+    timeout: Duration,
+}
+
+pub struct OperationExecutor<
+    'a,
+    S: OrchestratorStore,
+    P: EndpointProbe = StaticEndpointProbe,
+    A: AuthPermissionRegistrar = DeferredAuthPermissionRegistrar,
+    R: RedisResourceProvisioner = DeferredRedisResourceProvisioner,
+    T: StorageResourceProvisioner = DeferredStorageResourceProvisioner,
+    M: MigrationRunner = DeferredMigrationRunner,
+    L: ReleasePackageLoader = DeferredReleasePackageLoader,
+    G: GatewayRoutePublisher = DeferredGatewayRoutePublisher,
+    N: NodeServiceDispatcher = DeferredNodeServiceDispatcher,
+> {
     store: &'a mut S,
     endpoint_probe: P,
+    auth_permission_registrar: A,
+    redis_resource_provisioner: R,
+    storage_resource_provisioner: T,
+    migration_runner: M,
+    release_package_loader: L,
+    gateway_route_publisher: G,
+    node_service_dispatcher: N,
     service_driver_execution_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 struct ReleaseInstallPreviousState {
     service: Option<ServiceManifest>,
+    host_services: Vec<HostService>,
+    endpoints: Vec<Endpoint>,
+    links: Vec<Link>,
+    log_views: Vec<LogView>,
     releases: Vec<ServiceRelease>,
     routes: Vec<ServiceRoute>,
     migrations: Vec<ServiceMigrationRecord>,
@@ -818,6 +1358,8 @@ struct ReleaseInstallPreviousState {
     redis: Vec<ServiceRedisResource>,
     storage: Vec<ServiceStorageResource>,
     configs: Vec<RenderedServiceConfig>,
+    api_surfaces: Vec<ServiceApiSurface>,
+    deployed_apis: Vec<DeployedServiceApi>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -834,23 +1376,1756 @@ struct RegistryResourcePreviousState {
     redis: Vec<ServiceRedisResource>,
     storage: Vec<ServiceStorageResource>,
     configs: Vec<RenderedServiceConfig>,
+    api_surfaces: Vec<ServiceApiSurface>,
+    deployed_apis: Vec<DeployedServiceApi>,
 }
 
-impl<'a, S: OrchestratorStore> OperationExecutor<'a, S, StaticEndpointProbe> {
+impl AuthPermissionRegistrar for DeferredAuthPermissionRegistrar {
+    fn register_permissions(
+        &self,
+        request: &AuthPermissionRegistration,
+    ) -> Result<AuthPermissionRegistrationResult> {
+        Ok(AuthPermissionRegistrationResult {
+            status: "skipped".to_string(),
+            message: format!(
+                "auth-service permission registrar is not configured for {}",
+                request.service_name
+            ),
+            endpoint: String::new(),
+            registered: 0,
+        })
+    }
+}
+
+impl ConfiguredAuthPermissionRegistrar {
+    pub fn from_env() -> Self {
+        let sync_enabled = std::env::var("ORCHESTRATOR_AUTH_PERMISSION_SYNC")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
+        let http = if sync_enabled {
+            HttpAuthPermissionRegistrar::from_env()
+        } else {
+            None
+        };
+        Self { sync_enabled, http }
+    }
+}
+
+impl AuthPermissionRegistrar for ConfiguredAuthPermissionRegistrar {
+    fn register_permissions(
+        &self,
+        request: &AuthPermissionRegistration,
+    ) -> Result<AuthPermissionRegistrationResult> {
+        if let Some(http) = self.http.as_ref() {
+            return http.register_permissions(request);
+        }
+        Ok(AuthPermissionRegistrationResult {
+            status: "skipped".to_string(),
+            message: if self.sync_enabled {
+                "AUTH_SERVICE_ENDPOINT or AUTH_SERVICE_ADMIN_TOKEN is not configured".to_string()
+            } else {
+                "ORCHESTRATOR_AUTH_PERMISSION_SYNC is not enabled".to_string()
+            },
+            endpoint: String::new(),
+            registered: 0,
+        })
+    }
+}
+
+impl HttpAuthPermissionRegistrar {
+    pub fn new(endpoint: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into().trim_end_matches('/').to_string(),
+            token: token.into(),
+            timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn from_env() -> Option<Self> {
+        let endpoint = std::env::var("AUTH_SERVICE_ENDPOINT")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())?;
+        let token = std::env::var("AUTH_SERVICE_ADMIN_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())?;
+        Some(Self::new(endpoint, token))
+    }
+}
+
+impl AuthPermissionRegistrar for HttpAuthPermissionRegistrar {
+    fn register_permissions(
+        &self,
+        request: &AuthPermissionRegistration,
+    ) -> Result<AuthPermissionRegistrationResult> {
+        if request.permissions.is_empty() {
+            return Ok(AuthPermissionRegistrationResult {
+                status: "skipped".to_string(),
+                message: "release declares no permissions".to_string(),
+                endpoint: self.endpoint.clone(),
+                registered: 0,
+            });
+        }
+        if self.endpoint.trim().is_empty() || self.token.trim().is_empty() {
+            return Ok(AuthPermissionRegistrationResult {
+                status: "skipped".to_string(),
+                message: "auth-service endpoint or admin token is not configured".to_string(),
+                endpoint: self.endpoint.clone(),
+                registered: 0,
+            });
+        }
+        let url = format!(
+            "{}/auth/admin/services/{}/permissions",
+            self.endpoint.trim_end_matches('/'),
+            request.service_name
+        );
+        let body = serde_json::json!({
+            "permissions": request.permissions.iter().map(|permission| {
+                serde_json::json!({
+                    "code": permission,
+                    "name": permission,
+                    "description": format!("{} release permission", request.service_name),
+                })
+            }).collect::<Vec<_>>(),
+            "default_role_bindings": [],
+        });
+        let agent: Agent = Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
+            .build()
+            .into();
+        let response = agent
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.token.trim()))
+            .send(serde_json::to_string(&body)?)
+            .map_err(|err| {
+                OrchestratorError::Dependency(format!(
+                    "auth-service permission registration request failed: {err}"
+                ))
+            })?;
+        let status = response.status().as_u16();
+        if (200..=299).contains(&status) {
+            Ok(AuthPermissionRegistrationResult {
+                status: "registered".to_string(),
+                message: format!("auth-service returned {status}"),
+                endpoint: self.endpoint.clone(),
+                registered: request.permissions.len(),
+            })
+        } else {
+            Err(OrchestratorError::Dependency(format!(
+                "auth-service permission registration failed: http {status}"
+            )))
+        }
+    }
+}
+
+impl RedisResourceProvisioner for DeferredRedisResourceProvisioner {
+    fn provision_resources(&self, request: &RedisProvisionRequest) -> Result<RedisProvisionResult> {
+        Ok(RedisProvisionResult {
+            status: "skipped".to_string(),
+            message: format!(
+                "redis resource provisioner is not configured for {}",
+                request.service_name
+            ),
+            endpoint: String::new(),
+            provisioned: Vec::new(),
+        })
+    }
+}
+
+impl ConfiguredRedisResourceProvisioner {
+    pub fn from_env() -> Self {
+        let sync_enabled = std::env::var("ORCHESTRATOR_REDIS_RESOURCE_SYNC")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
+        let tcp = if sync_enabled {
+            TcpRedisResourceProvisioner::from_env()
+        } else {
+            None
+        };
+        Self { sync_enabled, tcp }
+    }
+}
+
+impl RedisResourceProvisioner for ConfiguredRedisResourceProvisioner {
+    fn provision_resources(&self, request: &RedisProvisionRequest) -> Result<RedisProvisionResult> {
+        if let Some(tcp) = self.tcp.as_ref() {
+            return tcp.provision_resources(request);
+        }
+        Ok(RedisProvisionResult {
+            status: "skipped".to_string(),
+            message: if self.sync_enabled {
+                "REDIS_URL or REDIS_ENDPOINT is not configured".to_string()
+            } else {
+                "ORCHESTRATOR_REDIS_RESOURCE_SYNC is not enabled".to_string()
+            },
+            endpoint: String::new(),
+            provisioned: Vec::new(),
+        })
+    }
+}
+
+impl TcpRedisResourceProvisioner {
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn from_env() -> Option<Self> {
+        let endpoint = std::env::var("REDIS_ENDPOINT")
+            .ok()
+            .or_else(|| std::env::var("REDIS_URL").ok())
+            .map(|value| redis_socket_from_endpoint(&value))
+            .filter(|value| !value.trim().is_empty())?;
+        Some(Self::new(endpoint))
+    }
+}
+
+impl RedisResourceProvisioner for TcpRedisResourceProvisioner {
+    fn provision_resources(&self, request: &RedisProvisionRequest) -> Result<RedisProvisionResult> {
+        if request.resources.is_empty() {
+            return Ok(RedisProvisionResult {
+                status: "skipped".to_string(),
+                message: "release declares no redis resources".to_string(),
+                endpoint: self.endpoint.clone(),
+                provisioned: Vec::new(),
+            });
+        }
+        let mut connection = SimpleRedisConnection::connect(&self.endpoint, self.timeout)?;
+        let mut provisioned = Vec::new();
+        for resource in &request.resources {
+            match resource.kind.as_str() {
+                "stream" => {
+                    let stream = redis_stream_name(resource);
+                    connection.send_command(&[
+                        "XGROUP",
+                        "CREATE",
+                        &stream,
+                        "bootstrap",
+                        "$",
+                        "MKSTREAM",
+                    ])?;
+                    provisioned.push(RedisProvisionedResource {
+                        name: resource.name.clone(),
+                        kind: resource.kind.clone(),
+                        stream,
+                        consumer_group: String::new(),
+                        status: "created".to_string(),
+                    });
+                }
+                "consumer-group" => {
+                    let stream = redis_stream_name(resource);
+                    let group = redis_consumer_group_name(resource);
+                    connection
+                        .send_command(&["XGROUP", "CREATE", &stream, &group, "$", "MKSTREAM"])?;
+                    provisioned.push(RedisProvisionedResource {
+                        name: resource.name.clone(),
+                        kind: resource.kind.clone(),
+                        stream,
+                        consumer_group: group,
+                        status: "created".to_string(),
+                    });
+                }
+                "pubsub" | "hash" | "string" | "zset" | "lock" => {
+                    provisioned.push(RedisProvisionedResource {
+                        name: resource.name.clone(),
+                        kind: resource.kind.clone(),
+                        stream: redis_stream_name(resource),
+                        consumer_group: String::new(),
+                        status: "registry-only".to_string(),
+                    });
+                }
+                value => {
+                    return Err(OrchestratorError::InvalidManifest(format!(
+                        "unsupported redis resource kind {value}"
+                    )));
+                }
+            }
+        }
+        Ok(RedisProvisionResult {
+            status: "created".to_string(),
+            message: format!("provisioned {} redis resources", provisioned.len()),
+            endpoint: self.endpoint.clone(),
+            provisioned,
+        })
+    }
+}
+
+impl StorageResourceProvisioner for DeferredStorageResourceProvisioner {
+    fn provision_resources(
+        &self,
+        request: &StorageProvisionRequest,
+    ) -> Result<StorageProvisionResult> {
+        Ok(StorageProvisionResult {
+            status: "skipped".to_string(),
+            message: format!(
+                "storage resource provisioner is not configured for {}",
+                request.service_name
+            ),
+            endpoint: String::new(),
+            provisioned: Vec::new(),
+        })
+    }
+}
+
+impl ConfiguredStorageResourceProvisioner {
+    pub fn from_env() -> Self {
+        let sync_enabled = std::env::var("ORCHESTRATOR_STORAGE_RESOURCE_SYNC")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
+        let http = if sync_enabled {
+            HttpStorageResourceProvisioner::from_env()
+        } else {
+            None
+        };
+        Self { sync_enabled, http }
+    }
+}
+
+impl StorageResourceProvisioner for ConfiguredStorageResourceProvisioner {
+    fn provision_resources(
+        &self,
+        request: &StorageProvisionRequest,
+    ) -> Result<StorageProvisionResult> {
+        if let Some(http) = self.http.as_ref() {
+            return http.provision_resources(request);
+        }
+        Ok(StorageProvisionResult {
+            status: "skipped".to_string(),
+            message: if self.sync_enabled {
+                "STORAGE_SERVICE_ENDPOINT is not configured".to_string()
+            } else {
+                "ORCHESTRATOR_STORAGE_RESOURCE_SYNC is not enabled".to_string()
+            },
+            endpoint: String::new(),
+            provisioned: Vec::new(),
+        })
+    }
+}
+
+impl HttpStorageResourceProvisioner {
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into().trim_end_matches('/').to_string(),
+            timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn from_env() -> Option<Self> {
+        let endpoint = std::env::var("STORAGE_SERVICE_ENDPOINT")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())?;
+        Some(Self::new(endpoint))
+    }
+}
+
+impl StorageResourceProvisioner for HttpStorageResourceProvisioner {
+    fn provision_resources(
+        &self,
+        request: &StorageProvisionRequest,
+    ) -> Result<StorageProvisionResult> {
+        if request.resources.is_empty() {
+            return Ok(StorageProvisionResult {
+                status: "skipped".to_string(),
+                message: "release declares no storage resources".to_string(),
+                endpoint: self.endpoint.clone(),
+                provisioned: Vec::new(),
+            });
+        }
+        if self.endpoint.trim().is_empty() {
+            return Ok(StorageProvisionResult {
+                status: "skipped".to_string(),
+                message: "storage-service endpoint is not configured".to_string(),
+                endpoint: String::new(),
+                provisioned: Vec::new(),
+            });
+        }
+        let agent: Agent = Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
+            .build()
+            .into();
+        let mut provisioned = Vec::new();
+        let mut seen_buckets = BTreeMap::<String, Vec<String>>::new();
+        for resource in &request.resources {
+            seen_buckets
+                .entry(resource.bucket.clone())
+                .or_default()
+                .push(resource.object_type.clone());
+        }
+        for (bucket, object_types) in seen_buckets {
+            let url = format!(
+                "{}/api/storage/buckets/{}",
+                self.endpoint.trim_end_matches('/'),
+                bucket
+            );
+            let response = agent.put(&url).send_empty().map_err(|err| {
+                OrchestratorError::Dependency(format!(
+                    "storage-service bucket ensure request failed: {err}"
+                ))
+            })?;
+            let status = response.status().as_u16();
+            if !(200..=299).contains(&status) {
+                return Err(OrchestratorError::Dependency(format!(
+                    "storage-service bucket ensure failed for {bucket}: http {status}"
+                )));
+            }
+            for object_type in object_types {
+                provisioned.push(StorageProvisionedResource {
+                    object_type,
+                    bucket: bucket.clone(),
+                    status: "ensured".to_string(),
+                });
+            }
+        }
+        Ok(StorageProvisionResult {
+            status: "ensured".to_string(),
+            message: format!("ensured {} storage resources", provisioned.len()),
+            endpoint: self.endpoint.clone(),
+            provisioned,
+        })
+    }
+}
+
+impl MigrationRunner for DeferredMigrationRunner {
+    fn execute_migrations(
+        &self,
+        request: &MigrationExecutionRequest,
+    ) -> Result<MigrationExecutionResult> {
+        Ok(MigrationExecutionResult {
+            status: if request.migrations.is_empty() {
+                "skipped".to_string()
+            } else {
+                "deferred".to_string()
+            },
+            message: if request.migrations.is_empty() {
+                "release declares no migrations".to_string()
+            } else {
+                format!(
+                    "migration runner is not configured for {}",
+                    request.service_name
+                )
+            },
+            runner: "deferred".to_string(),
+            dry_run: request.dry_run,
+            executed: request
+                .migrations
+                .iter()
+                .map(|migration| MigrationExecutionRecord {
+                    migration_version: migration.version.clone(),
+                    path: migration.path.clone(),
+                    checksum: migration.checksum.clone(),
+                    status: if request.migrations.is_empty() {
+                        "skipped".to_string()
+                    } else {
+                        "registered".to_string()
+                    },
+                    applied_at: String::new(),
+                    message: "migration remains registered until a runner is configured"
+                        .to_string(),
+                })
+                .collect(),
+        })
+    }
+}
+
+impl ReleasePackageLoader for DeferredReleasePackageLoader {
+    fn load_release_package(
+        &self,
+        request: &ReleasePackageLoadRequest,
+    ) -> Result<ReleasePackageLoadResult> {
+        Ok(ReleasePackageLoadResult {
+            status: "planned".to_string(),
+            message: format!(
+                "release package fetch/load is deferred for {}",
+                request.source_url
+            ),
+            source_url: request.source_url.clone(),
+            manifest_loaded: false,
+            checksum: String::new(),
+        })
+    }
+}
+
+impl ConfiguredReleasePackageLoader {
+    pub fn from_env() -> Self {
+        let load_enabled = std::env::var("ORCHESTRATOR_RELEASE_PACKAGE_LOAD")
+            .ok()
+            .is_some_and(|value| truthy(&value));
+        let loader = if load_enabled {
+            Some(LocalReleasePackageLoader::from_env())
+        } else {
+            None
+        };
+        Self {
+            load_enabled,
+            loader,
+        }
+    }
+}
+
+impl ReleasePackageLoader for ConfiguredReleasePackageLoader {
+    fn load_release_package(
+        &self,
+        request: &ReleasePackageLoadRequest,
+    ) -> Result<ReleasePackageLoadResult> {
+        if let Some(loader) = self.loader.as_ref() {
+            return loader.load_release_package(request);
+        }
+        Ok(ReleasePackageLoadResult {
+            status: "planned".to_string(),
+            message: if self.load_enabled {
+                "release package loader is enabled but not configured".to_string()
+            } else {
+                "ORCHESTRATOR_RELEASE_PACKAGE_LOAD is not enabled".to_string()
+            },
+            source_url: request.source_url.clone(),
+            manifest_loaded: false,
+            checksum: String::new(),
+        })
+    }
+}
+
+impl LocalReleasePackageLoader {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            timeout: Duration::from_secs(15),
+            max_manifest_bytes: 1024 * 1024,
+            max_package_bytes: 64 * 1024 * 1024,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn with_max_manifest_bytes(mut self, max_manifest_bytes: usize) -> Self {
+        self.max_manifest_bytes = max_manifest_bytes;
+        self
+    }
+
+    pub fn with_max_package_bytes(mut self, max_package_bytes: usize) -> Self {
+        self.max_package_bytes = max_package_bytes;
+        self
+    }
+
+    pub fn from_env() -> Self {
+        let root = std::env::var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self::new(root)
+    }
+
+    fn resolve_release_yaml(&self, source_url: &str) -> Result<PathBuf> {
+        let source_url = source_url.trim();
+        if source_url.starts_with("http://") || source_url.starts_with("https://") {
+            return Err(OrchestratorError::Blocked(
+                "network release package source should be fetched through fetch_remote_release_yaml"
+                    .to_string(),
+            ));
+        }
+        let without_scheme = source_url
+            .strip_prefix("file://")
+            .or_else(|| source_url.strip_prefix("local://"))
+            .unwrap_or(source_url);
+        let mut release_yaml = safe_child_path(&self.root, without_scheme)?;
+        if release_yaml.is_dir() {
+            release_yaml = release_yaml.join("release.yaml");
+        }
+        Ok(release_yaml)
+    }
+
+    fn fetch_remote_release_package(&self, source_url: &str) -> Result<Vec<u8>> {
+        let agent: Agent = Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
+            .build()
+            .into();
+        let response = agent.get(source_url).call().map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "release package fetch request failed for {source_url}: {err}"
+            ))
+        })?;
+        let status = response.status().as_u16();
+        if !(200..=299).contains(&status) {
+            return Err(OrchestratorError::Dependency(format!(
+                "release package fetch failed for {source_url}: http {status}"
+            )));
+        }
+        let mut reader = response.into_body().into_reader();
+        let mut body = Vec::new();
+        reader
+            .by_ref()
+            .take((self.max_package_bytes as u64) + 1)
+            .read_to_end(&mut body)
+            .map_err(|err| {
+                OrchestratorError::Dependency(format!(
+                    "release package body read failed for {source_url}: {err}"
+                ))
+            })?;
+        if body.len() > self.max_package_bytes {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "release package exceeds {} bytes",
+                self.max_package_bytes
+            )));
+        }
+        Ok(body)
+    }
+
+    fn load_remote_release_yaml(&self, source_url: &str) -> Result<String> {
+        let body = self.fetch_remote_release_package(source_url)?;
+        if release_package_source_is_yaml(source_url) || looks_like_yaml_manifest(&body) {
+            return release_yaml_text_from_bytes(&body, source_url, self.max_manifest_bytes);
+        }
+        self.release_yaml_from_archive(source_url, &body)
+    }
+
+    fn release_yaml_from_archive(&self, source_url: &str, body: &[u8]) -> Result<String> {
+        let package_root = self.archive_extract_root(source_url)?;
+        fs::create_dir_all(&package_root).map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "create release package extract root {} failed: {err}",
+                package_root.display()
+            ))
+        })?;
+        if release_package_source_is_zip(source_url) || looks_like_zip(body) {
+            extract_zip_release_package(body, &package_root)?;
+        } else if release_package_source_is_tar(source_url) || looks_like_gzip(body) {
+            extract_tar_release_package(source_url, body, &package_root)?;
+        } else {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "release package {source_url} is not release.yaml or a supported archive"
+            )));
+        }
+        let release_yaml = find_release_yaml_in_package(&package_root)?;
+        let bytes = fs::read(&release_yaml).map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "read extracted release package manifest {} failed: {err}",
+                release_yaml.display()
+            ))
+        })?;
+        release_yaml_text_from_bytes(
+            &bytes,
+            &release_yaml.display().to_string(),
+            self.max_manifest_bytes,
+        )
+    }
+
+    fn archive_extract_root(&self, source_url: &str) -> Result<PathBuf> {
+        let digest = Sha256::digest(source_url.as_bytes());
+        let dirname = format!("release-package-{:x}", digest);
+        Ok(self.root.join(".orchestrator-release-cache").join(dirname))
+    }
+}
+
+fn release_yaml_text_from_bytes(
+    body: &[u8],
+    source_display: &str,
+    max_manifest_bytes: usize,
+) -> Result<String> {
+    if body.len() > max_manifest_bytes {
+        return Err(OrchestratorError::InvalidManifest(format!(
+            "release package manifest exceeds {} bytes",
+            max_manifest_bytes
+        )));
+    }
+    String::from_utf8(body.to_vec()).map_err(|err| {
+        OrchestratorError::InvalidManifest(format!(
+            "release package manifest from {source_display} is not UTF-8: {err}"
+        ))
+    })
+}
+
+fn release_package_source_is_yaml(source_url: &str) -> bool {
+    let source = source_url.to_ascii_lowercase();
+    source.ends_with(".yaml") || source.ends_with(".yml")
+}
+
+fn release_package_source_is_zip(source_url: &str) -> bool {
+    source_url.to_ascii_lowercase().ends_with(".zip")
+}
+
+fn release_package_source_is_tar(source_url: &str) -> bool {
+    let source = source_url.to_ascii_lowercase();
+    source.ends_with(".tar") || source.ends_with(".tar.gz") || source.ends_with(".tgz")
+}
+
+fn looks_like_yaml_manifest(body: &[u8]) -> bool {
+    std::str::from_utf8(body).ok().is_some_and(|text| {
+        let trimmed = text.trim_start_matches('\u{feff}').trim_start();
+        trimmed.starts_with("service_name:") || trimmed.contains("\nservice_name:")
+    })
+}
+
+fn looks_like_zip(body: &[u8]) -> bool {
+    body.starts_with(b"PK\x03\x04")
+        || body.starts_with(b"PK\x05\x06")
+        || body.starts_with(b"PK\x07\x08")
+}
+
+fn looks_like_gzip(body: &[u8]) -> bool {
+    body.starts_with(&[0x1f, 0x8b])
+}
+
+fn extract_zip_release_package(body: &[u8], package_root: &Path) -> Result<()> {
+    clear_release_package_extract_root(package_root)?;
+    let cursor = std::io::Cursor::new(body);
+    let mut archive = ZipArchive::new(cursor).map_err(|err| {
+        OrchestratorError::InvalidManifest(format!("release package zip is invalid: {err}"))
+    })?;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).map_err(|err| {
+            OrchestratorError::InvalidManifest(format!(
+                "read release package zip entry failed: {err}"
+            ))
+        })?;
+        let Some(enclosed) = file.enclosed_name().map(|path| path.to_path_buf()) else {
+            return Err(OrchestratorError::UnsafePath(
+                "release package zip entry escapes package root".to_string(),
+            ));
+        };
+        let entry_path = archive_entry_path_str(&enclosed)?;
+        let out_path = safe_child_path(package_root, entry_path)?;
+        if file.is_dir() {
+            fs::create_dir_all(&out_path).map_err(|err| {
+                OrchestratorError::Dependency(format!(
+                    "create release package directory {} failed: {err}",
+                    out_path.display()
+                ))
+            })?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                OrchestratorError::Dependency(format!(
+                    "create release package directory {} failed: {err}",
+                    parent.display()
+                ))
+            })?;
+        }
+        let mut out = fs::File::create(&out_path).map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "create release package file {} failed: {err}",
+                out_path.display()
+            ))
+        })?;
+        std::io::copy(&mut file, &mut out).map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "extract release package file {} failed: {err}",
+                out_path.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn extract_tar_release_package(source_url: &str, body: &[u8], package_root: &Path) -> Result<()> {
+    clear_release_package_extract_root(package_root)?;
+    let lower = source_url.to_ascii_lowercase();
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") || looks_like_gzip(body) {
+        let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(body));
+        extract_tar_entries(Archive::new(decoder), package_root)
+    } else {
+        extract_tar_entries(Archive::new(std::io::Cursor::new(body)), package_root)
+    }
+}
+
+fn extract_tar_entries<R: Read>(mut archive: Archive<R>, package_root: &Path) -> Result<()> {
+    let entries = archive.entries().map_err(|err| {
+        OrchestratorError::InvalidManifest(format!("release package tar is invalid: {err}"))
+    })?;
+    for entry in entries {
+        let mut entry = entry.map_err(|err| {
+            OrchestratorError::InvalidManifest(format!(
+                "read release package tar entry failed: {err}"
+            ))
+        })?;
+        let path = entry.path().map_err(|err| {
+            OrchestratorError::InvalidManifest(format!(
+                "read release package tar path failed: {err}"
+            ))
+        })?;
+        let entry_path = archive_entry_path_str(&path)?;
+        let out_path = safe_child_path(package_root, entry_path)?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            fs::create_dir_all(&out_path).map_err(|err| {
+                OrchestratorError::Dependency(format!(
+                    "create release package directory {} failed: {err}",
+                    out_path.display()
+                ))
+            })?;
+            continue;
+        }
+        if !entry_type.is_file() {
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                OrchestratorError::Dependency(format!(
+                    "create release package directory {} failed: {err}",
+                    parent.display()
+                ))
+            })?;
+        }
+        entry.unpack(&out_path).map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "extract release package file {} failed: {err}",
+                out_path.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn archive_entry_path_str(path: &Path) -> Result<&str> {
+    path.to_str().ok_or_else(|| {
+        OrchestratorError::InvalidManifest(
+            "release package entry path must be valid UTF-8".to_string(),
+        )
+    })
+}
+
+fn clear_release_package_extract_root(package_root: &Path) -> Result<()> {
+    if package_root.exists() {
+        fs::remove_dir_all(package_root).map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "clear release package extract root {} failed: {err}",
+                package_root.display()
+            ))
+        })?;
+    }
+    fs::create_dir_all(package_root).map_err(|err| {
+        OrchestratorError::Dependency(format!(
+            "create release package extract root {} failed: {err}",
+            package_root.display()
+        ))
+    })
+}
+
+fn find_release_yaml_in_package(package_root: &Path) -> Result<PathBuf> {
+    let root_manifest = package_root.join("release.yaml");
+    if root_manifest.is_file() {
+        return Ok(root_manifest);
+    }
+    let mut found = Vec::new();
+    collect_release_yaml_paths(package_root, package_root, &mut found)?;
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(OrchestratorError::InvalidManifest(
+            "release package archive does not contain release.yaml".to_string(),
+        )),
+        _ => Err(OrchestratorError::InvalidManifest(
+            "release package archive contains multiple release.yaml files".to_string(),
+        )),
+    }
+}
+
+fn collect_release_yaml_paths(root: &Path, dir: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir).map_err(|err| {
+        OrchestratorError::Dependency(format!(
+            "read release package directory {} failed: {err}",
+            dir.display()
+        ))
+    })? {
+        let entry = entry.map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "read release package directory entry under {} failed: {err}",
+                dir.display()
+            ))
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_release_yaml_paths(root, &path, found)?;
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "release.yaml")
+        {
+            if !path.starts_with(root) {
+                return Err(OrchestratorError::UnsafePath(
+                    "release package manifest escapes package root".to_string(),
+                ));
+            }
+            found.push(path);
+        }
+    }
+    Ok(())
+}
+
+impl ReleasePackageLoader for LocalReleasePackageLoader {
+    fn load_release_package(
+        &self,
+        request: &ReleasePackageLoadRequest,
+    ) -> Result<ReleasePackageLoadResult> {
+        let source_url = request.source_url.trim();
+        let (text, source_display) =
+            if source_url.starts_with("http://") || source_url.starts_with("https://") {
+                (
+                    self.load_remote_release_yaml(source_url)?,
+                    source_url.to_string(),
+                )
+            } else {
+                let release_yaml = self.resolve_release_yaml(&request.source_url)?;
+                (
+                    fs::read_to_string(&release_yaml).map_err(|err| {
+                        OrchestratorError::Dependency(format!(
+                            "read release package manifest {} failed: {err}",
+                            release_yaml.display()
+                        ))
+                    })?,
+                    release_yaml.display().to_string(),
+                )
+            };
+        let loaded: ServiceReleaseManifest = serde_yaml::from_str(&text)?;
+        validate_service_release(&loaded)?;
+        if loaded.service_name != request.service_name || loaded.version != request.version {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "release package manifest {}@{} does not match requested {}@{}",
+                loaded.service_name, loaded.version, request.service_name, request.version
+            )));
+        }
+        if let Some(expected) = request.expected_manifest.as_ref() {
+            let expected_value = serde_json::to_value(expected)?;
+            let loaded_value = serde_json::to_value(&loaded)?;
+            if expected_value != loaded_value {
+                return Err(OrchestratorError::InvalidManifest(
+                    "loaded release package manifest differs from operation release_manifest"
+                        .to_string(),
+                ));
+            }
+        }
+        let checksum = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
+        Ok(ReleasePackageLoadResult {
+            status: "loaded".to_string(),
+            message: format!("loaded release package manifest {source_display}"),
+            source_url: request.source_url.clone(),
+            manifest_loaded: true,
+            checksum,
+        })
+    }
+}
+
+impl GatewayRoutePublisher for DeferredGatewayRoutePublisher {
+    fn publish_routes(
+        &self,
+        request: &GatewayRoutePublishRequest,
+    ) -> Result<GatewayRoutePublishResult> {
+        Ok(GatewayRoutePublishResult {
+            status: if request.routes.is_empty() {
+                "skipped".to_string()
+            } else {
+                "planned".to_string()
+            },
+            message: if request.routes.is_empty() {
+                format!(
+                    "release declares no gateway routes for {}",
+                    request.service_name
+                )
+            } else {
+                format!(
+                    "gateway route publisher is not configured for {}",
+                    request.service_name
+                )
+            },
+            endpoint: String::new(),
+            route_count: request.routes.len(),
+            reloaded: false,
+        })
+    }
+}
+
+impl ConfiguredGatewayRoutePublisher {
+    pub fn from_env() -> Self {
+        let publish_enabled = env_flag("ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH");
+        let http = if publish_enabled {
+            HttpGatewayRoutePublisher::from_env()
+        } else {
+            None
+        };
+        Self {
+            publish_enabled,
+            http,
+        }
+    }
+}
+
+impl GatewayRoutePublisher for ConfiguredGatewayRoutePublisher {
+    fn publish_routes(
+        &self,
+        request: &GatewayRoutePublishRequest,
+    ) -> Result<GatewayRoutePublishResult> {
+        if let Some(http) = self.http.as_ref() {
+            return http.publish_routes(request);
+        }
+        Ok(GatewayRoutePublishResult {
+            status: if request.routes.is_empty() {
+                "skipped".to_string()
+            } else {
+                "planned".to_string()
+            },
+            message: if self.publish_enabled {
+                "GATEWAY_ENDPOINT is not configured".to_string()
+            } else {
+                "ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH is not enabled".to_string()
+            },
+            endpoint: String::new(),
+            route_count: request.routes.len(),
+            reloaded: false,
+        })
+    }
+}
+
+impl HttpGatewayRoutePublisher {
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into().trim_end_matches('/').to_string(),
+            token: None,
+            timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into().trim().to_string();
+        if !token.is_empty() {
+            self.token = Some(token);
+        }
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn from_env() -> Option<Self> {
+        let endpoint = std::env::var("GATEWAY_ENDPOINT")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())?;
+        let mut publisher = Self::new(endpoint);
+        if let Ok(token) = std::env::var("GATEWAY_ADMIN_TOKEN") {
+            publisher = publisher.with_token(token);
+        } else if let Ok(token) = std::env::var("ORCHESTRATOR_GATEWAY_TOKEN") {
+            publisher = publisher.with_token(token);
+        }
+        Some(publisher)
+    }
+}
+
+impl GatewayRoutePublisher for HttpGatewayRoutePublisher {
+    fn publish_routes(
+        &self,
+        request: &GatewayRoutePublishRequest,
+    ) -> Result<GatewayRoutePublishResult> {
+        if request.routes.is_empty() {
+            return Ok(GatewayRoutePublishResult {
+                status: "skipped".to_string(),
+                message: format!(
+                    "release declares no gateway routes for {}",
+                    request.service_name
+                ),
+                endpoint: self.endpoint.clone(),
+                route_count: 0,
+                reloaded: false,
+            });
+        }
+        if self.endpoint.trim().is_empty() {
+            return Ok(GatewayRoutePublishResult {
+                status: "planned".to_string(),
+                message: "gateway endpoint is not configured".to_string(),
+                endpoint: String::new(),
+                route_count: request.routes.len(),
+                reloaded: false,
+            });
+        }
+        let url = format!(
+            "{}/api/admin/orchestrator/routes/reload",
+            self.endpoint.trim_end_matches('/')
+        );
+        let body = serde_json::json!({
+            "operation_id": request.operation_id,
+            "service_name": request.service_name,
+            "routes": request.routes,
+        });
+        let agent: Agent = Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
+            .build()
+            .into();
+        let mut builder = agent.post(&url).header("Content-Type", "application/json");
+        if let Some(token) = self.token.as_ref() {
+            builder = builder.header("Authorization", format!("Bearer {}", token.trim()));
+        }
+        let response = builder.send(serde_json::to_string(&body)?).map_err(|err| {
+            OrchestratorError::Dependency(format!("gateway route publish request failed: {err}"))
+        })?;
+        let status = response.status().as_u16();
+        if (200..=299).contains(&status) {
+            Ok(GatewayRoutePublishResult {
+                status: "published".to_string(),
+                message: format!("gateway route table reload accepted: http {status}"),
+                endpoint: self.endpoint.clone(),
+                route_count: request.routes.len(),
+                reloaded: true,
+            })
+        } else {
+            Err(OrchestratorError::Dependency(format!(
+                "gateway route publish failed: http {status}"
+            )))
+        }
+    }
+}
+
+impl NodeServiceDispatcher for DeferredNodeServiceDispatcher {
+    fn dispatch_service(
+        &self,
+        request: &NodeServiceDispatchRequest,
+    ) -> Result<NodeServiceDispatchResult> {
+        Ok(NodeServiceDispatchResult {
+            status: "planned".to_string(),
+            message: format!(
+                "node-mode dispatch is not configured for {}",
+                request.service.id
+            ),
+            endpoint: String::new(),
+            accepted: false,
+        })
+    }
+}
+
+impl ConfiguredNodeServiceDispatcher {
+    pub fn from_env() -> Self {
+        let dispatch_enabled = env_flag("ORCHESTRATOR_NODE_DISPATCH");
+        let http = if dispatch_enabled {
+            HttpNodeServiceDispatcher::from_env()
+        } else {
+            None
+        };
+        Self {
+            dispatch_enabled,
+            http,
+        }
+    }
+}
+
+impl NodeServiceDispatcher for ConfiguredNodeServiceDispatcher {
+    fn dispatch_service(
+        &self,
+        request: &NodeServiceDispatchRequest,
+    ) -> Result<NodeServiceDispatchResult> {
+        if let Some(http) = self.http.as_ref() {
+            return http.dispatch_service(request);
+        }
+        Ok(NodeServiceDispatchResult {
+            status: "planned".to_string(),
+            message: if self.dispatch_enabled {
+                "ORCHESTRATOR_NODE_ENDPOINT is not configured".to_string()
+            } else {
+                "ORCHESTRATOR_NODE_DISPATCH is not enabled".to_string()
+            },
+            endpoint: String::new(),
+            accepted: false,
+        })
+    }
+}
+
+impl HttpNodeServiceDispatcher {
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into().trim_end_matches('/').to_string(),
+            token: None,
+            timeout: Duration::from_secs(10),
+        }
+    }
+
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into().trim().to_string();
+        if !token.is_empty() {
+            self.token = Some(token);
+        }
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn from_env() -> Option<Self> {
+        let endpoint = std::env::var("ORCHESTRATOR_NODE_ENDPOINT")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())?;
+        let mut dispatcher = Self::new(endpoint);
+        if let Ok(token) = std::env::var("ORCHESTRATOR_NODE_TOKEN") {
+            dispatcher = dispatcher.with_token(token);
+        }
+        Some(dispatcher)
+    }
+}
+
+impl NodeServiceDispatcher for HttpNodeServiceDispatcher {
+    fn dispatch_service(
+        &self,
+        request: &NodeServiceDispatchRequest,
+    ) -> Result<NodeServiceDispatchResult> {
+        if self.endpoint.trim().is_empty() {
+            return Ok(NodeServiceDispatchResult {
+                status: "planned".to_string(),
+                message: "node endpoint is not configured".to_string(),
+                endpoint: String::new(),
+                accepted: false,
+            });
+        }
+        let url = format!(
+            "{}/api/node/services/install",
+            self.endpoint.trim_end_matches('/')
+        );
+        let body = serde_json::json!({
+            "operation_id": request.operation_id,
+            "service": request.service,
+            "release": request.release,
+            "host_service": request.host_service,
+            "endpoint": request.endpoint,
+            "rendered_config": request.rendered_config,
+            "package_load": request.package_load,
+        });
+        let agent: Agent = Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
+            .build()
+            .into();
+        let mut builder = agent.post(&url).header("Content-Type", "application/json");
+        if let Some(token) = self.token.as_ref() {
+            builder = builder.header("Authorization", format!("Bearer {}", token.trim()));
+        }
+        let response = builder.send(serde_json::to_string(&body)?).map_err(|err| {
+            OrchestratorError::Dependency(format!("node service dispatch request failed: {err}"))
+        })?;
+        let status = response.status().as_u16();
+        if (200..=299).contains(&status) {
+            Ok(NodeServiceDispatchResult {
+                status: "dispatched".to_string(),
+                message: format!("node-mode orchestrator accepted install request: http {status}"),
+                endpoint: self.endpoint.clone(),
+                accepted: true,
+            })
+        } else {
+            Err(OrchestratorError::Dependency(format!(
+                "node service dispatch failed: http {status}"
+            )))
+        }
+    }
+}
+
+impl ConfiguredMigrationRunner {
+    pub fn from_env() -> Self {
+        let execution_enabled = std::env::var("ORCHESTRATOR_MIGRATION_EXECUTION")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
+        let runner = if execution_enabled {
+            LocalSqlMigrationRunner::from_env()
+        } else {
+            None
+        };
+        Self {
+            execution_enabled,
+            runner,
+        }
+    }
+}
+
+impl MigrationRunner for ConfiguredMigrationRunner {
+    fn execute_migrations(
+        &self,
+        request: &MigrationExecutionRequest,
+    ) -> Result<MigrationExecutionResult> {
+        if let Some(runner) = self.runner.as_ref() {
+            return runner.execute_migrations(request);
+        }
+        Ok(MigrationExecutionResult {
+            status: if request.migrations.is_empty() {
+                "skipped".to_string()
+            } else {
+                "deferred".to_string()
+            },
+            message: if self.execution_enabled {
+                "ORCHESTRATOR_MIGRATION_ROOT is not configured".to_string()
+            } else {
+                "ORCHESTRATOR_MIGRATION_EXECUTION is not enabled".to_string()
+            },
+            runner: "configured-deferred".to_string(),
+            dry_run: request.dry_run,
+            executed: request
+                .migrations
+                .iter()
+                .map(|migration| MigrationExecutionRecord {
+                    migration_version: migration.version.clone(),
+                    path: migration.path.clone(),
+                    checksum: migration.checksum.clone(),
+                    status: "registered".to_string(),
+                    applied_at: String::new(),
+                    message: "migration execution deferred".to_string(),
+                })
+                .collect(),
+        })
+    }
+}
+
+impl LocalSqlMigrationRunner {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            database_url: None,
+            dry_run: false,
+            allow_destructive: false,
+        }
+    }
+
+    pub fn with_database_url(mut self, database_url: impl Into<String>) -> Self {
+        let database_url = database_url.into();
+        self.database_url = (!database_url.trim().is_empty()).then_some(database_url);
+        self
+    }
+
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    pub fn with_allow_destructive(mut self, allow_destructive: bool) -> Self {
+        self.allow_destructive = allow_destructive;
+        self
+    }
+
+    pub fn from_env() -> Option<Self> {
+        let root = std::env::var("ORCHESTRATOR_MIGRATION_ROOT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())?;
+        let dry_run = env_flag("ORCHESTRATOR_MIGRATION_DRY_RUN");
+        let allow_destructive = env_flag("ORCHESTRATOR_MIGRATION_ALLOW_DESTRUCTIVE");
+        let database_url = std::env::var("ORCHESTRATOR_MIGRATION_DATABASE_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let mut runner = Self::new(root)
+            .with_dry_run(dry_run)
+            .with_allow_destructive(allow_destructive);
+        if let Some(database_url) = database_url {
+            runner = runner.with_database_url(database_url);
+        }
+        Some(runner)
+    }
+}
+
+impl MigrationRunner for LocalSqlMigrationRunner {
+    fn execute_migrations(
+        &self,
+        request: &MigrationExecutionRequest,
+    ) -> Result<MigrationExecutionResult> {
+        if request.migrations.is_empty() {
+            return Ok(MigrationExecutionResult {
+                status: "skipped".to_string(),
+                message: "release declares no migrations".to_string(),
+                runner: "local-sql-file".to_string(),
+                dry_run: self.dry_run || request.dry_run,
+                executed: Vec::new(),
+            });
+        }
+        let dry_run = self.dry_run || request.dry_run;
+        let allow_destructive = self.allow_destructive || request.allow_destructive;
+        let mut client = if dry_run {
+            None
+        } else {
+            let database_url = self.database_url.as_ref().ok_or_else(|| {
+                OrchestratorError::Blocked(
+                    "migration apply requires ORCHESTRATOR_MIGRATION_DATABASE_URL or DATABASE_URL"
+                        .to_string(),
+                )
+            })?;
+            Some(
+                postgres::Client::connect(database_url, NoTls).map_err(|err| {
+                    OrchestratorError::Dependency(format!(
+                        "connect migration database failed: {err}"
+                    ))
+                })?,
+            )
+        };
+        let mut executed = Vec::new();
+        for migration in &request.migrations {
+            if migration.destructive && !allow_destructive {
+                return Err(OrchestratorError::Blocked(format!(
+                    "destructive migration {} requires ORCHESTRATOR_MIGRATION_ALLOW_DESTRUCTIVE or allow_destructive=true",
+                    migration.version
+                )));
+            }
+            let path = safe_child_path(&self.root, &migration.path)?;
+            let sql = fs::read_to_string(&path).map_err(|err| {
+                OrchestratorError::Dependency(format!(
+                    "read migration {} failed: {err}",
+                    migration.path
+                ))
+            })?;
+            validate_migration_checksum(migration, sql.as_bytes())?;
+            if let Some(client) = client.as_mut() {
+                client.batch_execute(&sql).map_err(|err| {
+                    OrchestratorError::Dependency(format!(
+                        "apply migration {} failed: {err}",
+                        migration.version
+                    ))
+                })?;
+            }
+            executed.push(MigrationExecutionRecord {
+                migration_version: migration.version.clone(),
+                path: migration.path.clone(),
+                checksum: migration.checksum.clone(),
+                status: if dry_run {
+                    "dry-run".to_string()
+                } else {
+                    "applied".to_string()
+                },
+                applied_at: if dry_run {
+                    String::new()
+                } else {
+                    "applied".to_string()
+                },
+                message: if dry_run {
+                    format!("validated {} bytes without apply", sql.len())
+                } else {
+                    format!("executed {} bytes against migration database", sql.len())
+                },
+            });
+        }
+        Ok(MigrationExecutionResult {
+            status: if dry_run {
+                "dry-run".to_string()
+            } else {
+                "applied".to_string()
+            },
+            message: format!(
+                "{} {} migrations for {}",
+                if dry_run { "validated" } else { "applied" },
+                executed.len(),
+                request.service_name
+            ),
+            runner: "local-sql-file".to_string(),
+            dry_run,
+            executed,
+        })
+    }
+}
+
+impl<'a, S: OrchestratorStore>
+    OperationExecutor<
+        'a,
+        S,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        DeferredGatewayRoutePublisher,
+    >
+{
     pub fn new(store: &'a mut S) -> Self {
         Self {
             store,
             endpoint_probe: StaticEndpointProbe,
+            auth_permission_registrar: DeferredAuthPermissionRegistrar,
+            redis_resource_provisioner: DeferredRedisResourceProvisioner,
+            storage_resource_provisioner: DeferredStorageResourceProvisioner,
+            migration_runner: DeferredMigrationRunner,
+            release_package_loader: DeferredReleasePackageLoader,
+            gateway_route_publisher: DeferredGatewayRoutePublisher,
+            node_service_dispatcher: DeferredNodeServiceDispatcher,
             service_driver_execution_enabled: false,
         }
     }
 }
 
-impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
+impl<'a, S: OrchestratorStore, P: EndpointProbe>
+    OperationExecutor<
+        'a,
+        S,
+        P,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        DeferredGatewayRoutePublisher,
+    >
+{
     pub fn with_endpoint_probe(store: &'a mut S, endpoint_probe: P) -> Self {
         Self {
             store,
             endpoint_probe,
+            auth_permission_registrar: DeferredAuthPermissionRegistrar,
+            redis_resource_provisioner: DeferredRedisResourceProvisioner,
+            storage_resource_provisioner: DeferredStorageResourceProvisioner,
+            migration_runner: DeferredMigrationRunner,
+            release_package_loader: DeferredReleasePackageLoader,
+            gateway_route_publisher: DeferredGatewayRoutePublisher,
+            node_service_dispatcher: DeferredNodeServiceDispatcher,
+            service_driver_execution_enabled: false,
+        }
+    }
+}
+
+impl<'a, S: OrchestratorStore, P: EndpointProbe, A: AuthPermissionRegistrar>
+    OperationExecutor<
+        'a,
+        S,
+        P,
+        A,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        DeferredGatewayRoutePublisher,
+    >
+{
+    pub fn with_endpoint_probe_and_auth_registrar(
+        store: &'a mut S,
+        endpoint_probe: P,
+        auth_permission_registrar: A,
+    ) -> Self {
+        Self {
+            store,
+            endpoint_probe,
+            auth_permission_registrar,
+            redis_resource_provisioner: DeferredRedisResourceProvisioner,
+            storage_resource_provisioner: DeferredStorageResourceProvisioner,
+            migration_runner: DeferredMigrationRunner,
+            release_package_loader: DeferredReleasePackageLoader,
+            gateway_route_publisher: DeferredGatewayRoutePublisher,
+            node_service_dispatcher: DeferredNodeServiceDispatcher,
+            service_driver_execution_enabled: false,
+        }
+    }
+}
+
+impl<
+    'a,
+    S: OrchestratorStore,
+    P: EndpointProbe,
+    A: AuthPermissionRegistrar,
+    R: RedisResourceProvisioner,
+    T: StorageResourceProvisioner,
+    M: MigrationRunner,
+>
+    OperationExecutor<
+        'a,
+        S,
+        P,
+        A,
+        R,
+        T,
+        M,
+        ConfiguredReleasePackageLoader,
+        ConfiguredGatewayRoutePublisher,
+        ConfiguredNodeServiceDispatcher,
+    >
+{
+    pub fn with_runtime_provisioners(
+        store: &'a mut S,
+        endpoint_probe: P,
+        auth_permission_registrar: A,
+        redis_resource_provisioner: R,
+        storage_resource_provisioner: T,
+        migration_runner: M,
+    ) -> Self {
+        Self {
+            store,
+            endpoint_probe,
+            auth_permission_registrar,
+            redis_resource_provisioner,
+            storage_resource_provisioner,
+            migration_runner,
+            release_package_loader: ConfiguredReleasePackageLoader::from_env(),
+            gateway_route_publisher: ConfiguredGatewayRoutePublisher::from_env(),
+            node_service_dispatcher: ConfiguredNodeServiceDispatcher::from_env(),
+            service_driver_execution_enabled: false,
+        }
+    }
+}
+
+impl<
+    'a,
+    S: OrchestratorStore,
+    P: EndpointProbe,
+    A: AuthPermissionRegistrar,
+    R: RedisResourceProvisioner,
+    T: StorageResourceProvisioner,
+    M: MigrationRunner,
+    L: ReleasePackageLoader,
+>
+    OperationExecutor<
+        'a,
+        S,
+        P,
+        A,
+        R,
+        T,
+        M,
+        L,
+        DeferredGatewayRoutePublisher,
+        DeferredNodeServiceDispatcher,
+    >
+{
+    pub fn with_runtime_provisioners_and_release_loader(
+        store: &'a mut S,
+        endpoint_probe: P,
+        auth_permission_registrar: A,
+        redis_resource_provisioner: R,
+        storage_resource_provisioner: T,
+        migration_runner: M,
+        release_package_loader: L,
+    ) -> Self {
+        Self {
+            store,
+            endpoint_probe,
+            auth_permission_registrar,
+            redis_resource_provisioner,
+            storage_resource_provisioner,
+            migration_runner,
+            release_package_loader,
+            gateway_route_publisher: DeferredGatewayRoutePublisher,
+            node_service_dispatcher: DeferredNodeServiceDispatcher,
+            service_driver_execution_enabled: false,
+        }
+    }
+}
+
+impl<
+    'a,
+    S: OrchestratorStore,
+    P: EndpointProbe,
+    A: AuthPermissionRegistrar,
+    R: RedisResourceProvisioner,
+    T: StorageResourceProvisioner,
+    M: MigrationRunner,
+    L: ReleasePackageLoader,
+    N: NodeServiceDispatcher,
+> OperationExecutor<'a, S, P, A, R, T, M, L, DeferredGatewayRoutePublisher, N>
+{
+    pub fn with_runtime_provisioners_release_loader_and_node_dispatcher(
+        store: &'a mut S,
+        endpoint_probe: P,
+        auth_permission_registrar: A,
+        redis_resource_provisioner: R,
+        storage_resource_provisioner: T,
+        migration_runner: M,
+        release_package_loader: L,
+        node_service_dispatcher: N,
+    ) -> Self {
+        Self {
+            store,
+            endpoint_probe,
+            auth_permission_registrar,
+            redis_resource_provisioner,
+            storage_resource_provisioner,
+            migration_runner,
+            release_package_loader,
+            gateway_route_publisher: DeferredGatewayRoutePublisher,
+            node_service_dispatcher,
+            service_driver_execution_enabled: false,
+        }
+    }
+}
+
+impl<
+    'a,
+    S: OrchestratorStore,
+    P: EndpointProbe,
+    A: AuthPermissionRegistrar,
+    R: RedisResourceProvisioner,
+    T: StorageResourceProvisioner,
+    M: MigrationRunner,
+    L: ReleasePackageLoader,
+    G: GatewayRoutePublisher,
+    N: NodeServiceDispatcher,
+> OperationExecutor<'a, S, P, A, R, T, M, L, G, N>
+{
+    pub fn with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
+        store: &'a mut S,
+        endpoint_probe: P,
+        auth_permission_registrar: A,
+        redis_resource_provisioner: R,
+        storage_resource_provisioner: T,
+        migration_runner: M,
+        release_package_loader: L,
+        gateway_route_publisher: G,
+        node_service_dispatcher: N,
+    ) -> Self {
+        Self {
+            store,
+            endpoint_probe,
+            auth_permission_registrar,
+            redis_resource_provisioner,
+            storage_resource_provisioner,
+            migration_runner,
+            release_package_loader,
+            gateway_route_publisher,
+            node_service_dispatcher,
             service_driver_execution_enabled: false,
         }
     }
@@ -858,6 +3133,310 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
     pub fn with_service_driver_execution_enabled(mut self) -> Self {
         self.service_driver_execution_enabled = true;
         self
+    }
+
+    fn load_release_package(
+        &mut self,
+        operation_id: &str,
+        release: &ServiceReleaseManifest,
+    ) -> Result<ReleasePackageLoadResult> {
+        let request = ReleasePackageLoadRequest {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            source_url: release.source.url.clone(),
+            expected_manifest: Some(release.clone()),
+        };
+        let result = self.release_package_loader.load_release_package(&request)?;
+        self.store.append_operation_log(release_package_log_record(
+            operation_id,
+            &release.service_name,
+            &result,
+        ))?;
+        Ok(result)
+    }
+
+    fn register_release_permissions(
+        &mut self,
+        operation_id: &str,
+        release: &ServiceReleaseManifest,
+    ) -> Result<AuthPermissionRegistrationResult> {
+        if release.permissions.is_empty() {
+            let result = AuthPermissionRegistrationResult {
+                status: "skipped".to_string(),
+                message: "release declares no permissions".to_string(),
+                endpoint: String::new(),
+                registered: 0,
+            };
+            self.store.append_operation_log(auth_permission_log_record(
+                operation_id,
+                &release.service_name,
+                &result,
+            ))?;
+            return Ok(result);
+        }
+
+        let request = AuthPermissionRegistration {
+            service_name: release.service_name.clone(),
+            permissions: release.permissions.clone(),
+        };
+        let result = self
+            .auth_permission_registrar
+            .register_permissions(&request)?;
+        self.store.append_operation_log(auth_permission_log_record(
+            operation_id,
+            &release.service_name,
+            &result,
+        ))?;
+        Ok(result)
+    }
+
+    fn publish_gateway_routes(
+        &mut self,
+        operation_id: &str,
+        release: &ServiceReleaseManifest,
+        routes: &[ServiceRoute],
+    ) -> Result<GatewayRoutePublishResult> {
+        let request = GatewayRoutePublishRequest {
+            operation_id: operation_id.to_string(),
+            service_name: release.service_name.clone(),
+            routes: routes.to_vec(),
+        };
+        let result = self.gateway_route_publisher.publish_routes(&request)?;
+        self.store.append_operation_log(gateway_route_log_record(
+            operation_id,
+            &release.service_name,
+            &result,
+        ))?;
+        Ok(result)
+    }
+
+    fn provision_release_redis_resources(
+        &mut self,
+        operation_id: &str,
+        release: &ServiceReleaseManifest,
+        resources: &[ServiceRedisResource],
+    ) -> Result<RedisProvisionResult> {
+        if resources.is_empty() {
+            let result = RedisProvisionResult {
+                status: "skipped".to_string(),
+                message: "release declares no redis resources".to_string(),
+                endpoint: String::new(),
+                provisioned: Vec::new(),
+            };
+            self.store.append_operation_log(redis_provision_log_record(
+                operation_id,
+                &release.service_name,
+                &result,
+            ))?;
+            return Ok(result);
+        }
+
+        let request = RedisProvisionRequest {
+            service_name: release.service_name.clone(),
+            resources: resources.to_vec(),
+        };
+        let result = self
+            .redis_resource_provisioner
+            .provision_resources(&request)?;
+        self.store.append_operation_log(redis_provision_log_record(
+            operation_id,
+            &release.service_name,
+            &result,
+        ))?;
+        Ok(result)
+    }
+
+    fn provision_release_storage_resources(
+        &mut self,
+        operation_id: &str,
+        release: &ServiceReleaseManifest,
+        resources: &[ServiceStorageResource],
+    ) -> Result<StorageProvisionResult> {
+        if resources.is_empty() {
+            let result = StorageProvisionResult {
+                status: "skipped".to_string(),
+                message: "release declares no storage resources".to_string(),
+                endpoint: String::new(),
+                provisioned: Vec::new(),
+            };
+            self.store
+                .append_operation_log(storage_provision_log_record(
+                    operation_id,
+                    &release.service_name,
+                    &result,
+                ))?;
+            return Ok(result);
+        }
+
+        let request = StorageProvisionRequest {
+            service_name: release.service_name.clone(),
+            resources: resources.to_vec(),
+        };
+        let result = self
+            .storage_resource_provisioner
+            .provision_resources(&request)?;
+        self.store
+            .append_operation_log(storage_provision_log_record(
+                operation_id,
+                &release.service_name,
+                &result,
+            ))?;
+        Ok(result)
+    }
+
+    fn dispatch_release_to_node(
+        &mut self,
+        operation: &Operation,
+        service: &ServiceManifest,
+        release: Option<&ServiceReleaseManifest>,
+        host_service: &HostService,
+        endpoint: &Endpoint,
+        rendered_config: serde_json::Value,
+        package_load: Option<&ReleasePackageLoadResult>,
+    ) -> Result<NodeServiceDispatchResult> {
+        let request = NodeServiceDispatchRequest {
+            operation_id: operation.operation_id.clone(),
+            service: service.clone(),
+            release: release.cloned(),
+            host_service: host_service.clone(),
+            endpoint: endpoint.clone(),
+            rendered_config,
+            package_load: package_load.cloned(),
+        };
+        let result = self.node_service_dispatcher.dispatch_service(&request)?;
+        self.store.append_operation_log(node_dispatch_log_record(
+            &operation.operation_id,
+            &service.id,
+            &result,
+        ))?;
+        ensure_node_dispatch_accepted(&result)?;
+        Ok(result)
+    }
+
+    fn execute_release_migrations(
+        &mut self,
+        operation: &Operation,
+        release: &ServiceReleaseManifest,
+    ) -> Result<MigrationExecutionResult> {
+        let request = MigrationExecutionRequest {
+            service_name: release.service_name.clone(),
+            migrations: release.migrations.clone(),
+            release_source_url: release.source.url.clone(),
+            dry_run: operation
+                .request
+                .get("migration_dry_run")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || operation
+                    .request
+                    .get("migration_dry_run")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| truthy(value)),
+            allow_destructive: operation
+                .request
+                .get("allow_destructive_migrations")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || operation
+                    .request
+                    .get("allow_destructive_migrations")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| truthy(value)),
+        };
+        if release.migrations.is_empty() {
+            let result = MigrationExecutionResult {
+                status: "skipped".to_string(),
+                message: "release declares no migrations".to_string(),
+                runner: "none".to_string(),
+                dry_run: request.dry_run,
+                executed: Vec::new(),
+            };
+            self.store
+                .append_operation_log(migration_execution_log_record(
+                    &operation.operation_id,
+                    &release.service_name,
+                    &result,
+                ))?;
+            return Ok(result);
+        }
+
+        let result = match self.migration_runner.execute_migrations(&request) {
+            Ok(result) => result,
+            Err(err) => {
+                let result = MigrationExecutionResult {
+                    status: "failed".to_string(),
+                    message: err.to_string(),
+                    runner: "failed-before-completion".to_string(),
+                    dry_run: request.dry_run,
+                    executed: release
+                        .migrations
+                        .iter()
+                        .map(|migration| MigrationExecutionRecord {
+                            migration_version: migration.version.clone(),
+                            path: migration.path.clone(),
+                            checksum: migration.checksum.clone(),
+                            status: "failed".to_string(),
+                            applied_at: String::new(),
+                            message: err.to_string(),
+                        })
+                        .collect(),
+                };
+                self.persist_migration_execution_result(release, &result)?;
+                self.store
+                    .append_operation_log(migration_execution_log_record(
+                        &operation.operation_id,
+                        &release.service_name,
+                        &result,
+                    ))?;
+                return Err(err);
+            }
+        };
+        self.persist_migration_execution_result(release, &result)?;
+        self.store
+            .append_operation_log(migration_execution_log_record(
+                &operation.operation_id,
+                &release.service_name,
+                &result,
+            ))?;
+        Ok(result)
+    }
+
+    fn persist_migration_execution_result(
+        &mut self,
+        release: &ServiceReleaseManifest,
+        result: &MigrationExecutionResult,
+    ) -> Result<()> {
+        let executed_by_version = result
+            .executed
+            .iter()
+            .map(|record| (record.migration_version.as_str(), record))
+            .collect::<BTreeMap<_, _>>();
+        for migration in &release.migrations {
+            let executed = executed_by_version.get(migration.version.as_str());
+            let status = executed.map(|record| record.status.as_str()).unwrap_or(
+                match result.status.as_str() {
+                    "applied" => "applied",
+                    "dry-run" => "dry-run",
+                    "failed" => "failed",
+                    "skipped" => "skipped",
+                    "deferred" => "registered",
+                    _ => "registered",
+                },
+            );
+            self.store
+                .upsert_service_migration_record(ServiceMigrationRecord {
+                    service_name: release.service_name.clone(),
+                    migration_version: migration.version.clone(),
+                    checksum: migration.checksum.clone(),
+                    status: status.to_string(),
+                    applied_at: executed
+                        .map(|record| record.applied_at.clone())
+                        .unwrap_or_default(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                })?;
+        }
+        Ok(())
     }
 
     pub fn apply(&mut self, operation_id: &str) -> Result<Operation> {
@@ -938,7 +3517,7 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
                     .store
                     .get_operation(&running.operation_id)?
                     .unwrap_or_else(|| running.clone());
-                let result = serde_json::json!({
+                let mut result = serde_json::json!({
                     "operation_id": running.operation_id,
                     "status": "SUCCEEDED",
                     "started_at": running.started_at,
@@ -946,6 +3525,14 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
                     "changed_objects": changed_objects,
                     "topology_snapshot_id": serde_json::Value::Null,
                 });
+                if let Some(runtime_pipeline) =
+                    runtime_pipeline_result_from_logs(self.store, &running)?
+                {
+                    result
+                        .as_object_mut()
+                        .expect("operation result is an object")
+                        .insert("runtime_pipeline".to_string(), runtime_pipeline);
+                }
                 let succeeded = succeed_operation(&operation_after_mutation, result)?;
                 self.store.update_operation(succeeded.clone())?;
                 self.store.append_operation_log(operation_log_record(
@@ -1083,34 +3670,169 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
             "release.install" => {
                 let service: ServiceManifest = request_value(operation, "service_manifest")?;
                 let release = release_manifest_from_operation(operation)?;
+                let host_ip = operation
+                    .request
+                    .get("host_ip")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("127.0.0.1");
+                let endpoint_id = operation
+                    .request
+                    .get("endpoint")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{}:{}:{}",
+                            host_ip, service.endpoint.default_port, service.id
+                        )
+                    });
                 let _previous_state =
                     self.capture_release_install_previous_state(operation, &service.id)?;
+                self.store.put_service(service.clone())?;
+                for endpoint in self
+                    .store
+                    .list_endpoints()?
+                    .into_iter()
+                    .filter(|endpoint| endpoint.service_id == service.id)
+                {
+                    self.store.delete_endpoint(&endpoint.endpoint)?;
+                }
+                self.store.upsert_host_service(host_service_from_install(
+                    &service,
+                    release.as_ref(),
+                    host_ip,
+                    "installing",
+                    serde_json::json!({}),
+                    install_labels(release.as_ref()),
+                )?)?;
+                let endpoint = endpoint_from_install(&service, release.as_ref(), &endpoint_id)?;
+                self.store.put_endpoint(endpoint.clone())?;
+                let mut auth_permission_registration = None;
+                let mut migration_execution = None;
+                let mut redis_provision = None;
+                let mut storage_provision = None;
+                let mut gateway_route_publish = None;
+                let release_package_load = match release.as_ref() {
+                    Some(release) => {
+                        Some(self.load_release_package(&operation.operation_id, release)?)
+                    }
+                    None => None,
+                };
                 if let Some(release) = release.as_ref() {
                     self.store
                         .upsert_service_release(service_release_record(release)?)?;
                     self.clear_release_resource_registries(&release.service_name)?;
-                    for route in service_routes_from_release(release)? {
-                        self.store.upsert_service_route(route)?;
+                    let api_surfaces = service_api_surfaces_from_release(release)?;
+                    for api in &api_surfaces {
+                        self.store.upsert_service_api_surface(api.clone())?;
                     }
+                    let routes = service_routes_from_release(release)?;
+                    for route in &routes {
+                        self.store.upsert_service_route(route.clone())?;
+                    }
+                    gateway_route_publish = Some(self.publish_gateway_routes(
+                        &operation.operation_id,
+                        release,
+                        &routes,
+                    )?);
                     for record in service_migration_records_from_release(release) {
                         self.store.upsert_service_migration_record(record)?;
                     }
+                    migration_execution =
+                        Some(self.execute_release_migrations(operation, release)?);
                     for record in service_permission_records_from_release(release) {
                         self.store.upsert_service_permission_record(record)?;
                     }
+                    auth_permission_registration =
+                        Some(self.register_release_permissions(&operation.operation_id, release)?);
                     self.store.upsert_service_frontend_entry(
                         service_frontend_entry_from_release(release)?,
                     )?;
-                    for resource in service_redis_resources_from_release(release) {
-                        self.store.upsert_service_redis_resource(resource)?;
+                    let redis_resources = service_redis_resources_from_release(release);
+                    for resource in &redis_resources {
+                        self.store.upsert_service_redis_resource(resource.clone())?;
                     }
-                    for resource in service_storage_resources_from_release(release) {
-                        self.store.upsert_service_storage_resource(resource)?;
+                    redis_provision = Some(self.provision_release_redis_resources(
+                        &operation.operation_id,
+                        release,
+                        &redis_resources,
+                    )?);
+                    let storage_resources = service_storage_resources_from_release(release);
+                    for resource in &storage_resources {
+                        self.store
+                            .upsert_service_storage_resource(resource.clone())?;
                     }
+                    storage_provision = Some(self.provision_release_storage_resources(
+                        &operation.operation_id,
+                        release,
+                        &storage_resources,
+                    )?);
                     self.store
                         .upsert_rendered_service_config(rendered_config_from_release(release)?)?;
                 }
-                self.store.put_service(service.clone())?;
+                let dispatch_config =
+                    rendered_runtime_config(&service, release.as_ref(), &endpoint_id, None, None);
+                let dispatch_host_service = host_service_from_install(
+                    &service,
+                    release.as_ref(),
+                    host_ip,
+                    "dispatching",
+                    dispatch_config.clone(),
+                    install_labels(release.as_ref()),
+                )?;
+                let node_dispatch = Some(self.dispatch_release_to_node(
+                    operation,
+                    &service,
+                    release.as_ref(),
+                    &dispatch_host_service,
+                    &endpoint,
+                    dispatch_config,
+                    release_package_load.as_ref(),
+                )?);
+                let driver_result = execute_service_driver_action(
+                    &service,
+                    operation,
+                    self.service_driver_execution_enabled,
+                )?;
+                self.store.append_operation_log(driver_result_log_record(
+                    &operation.operation_id,
+                    &driver_result,
+                ))?;
+                if self.service_driver_execution_enabled {
+                    ensure_driver_result_succeeded(&driver_result)?;
+                }
+                let health = if driver_result.status == "SUCCEEDED" {
+                    self.probe_endpoint_and_persist(&operation.operation_id, &endpoint)?
+                } else {
+                    deferred_install_health(&endpoint, &driver_result)
+                };
+                let final_status =
+                    release_install_host_status(node_dispatch.as_ref(), &driver_result, &health);
+                self.store.upsert_host_service(host_service_from_install(
+                    &service,
+                    release.as_ref(),
+                    host_ip,
+                    final_status,
+                    rendered_runtime_config(
+                        &service,
+                        release.as_ref(),
+                        &endpoint_id,
+                        node_dispatch.as_ref(),
+                        Some(&driver_result),
+                    ),
+                    install_labels(release.as_ref()),
+                )?)?;
+                if let Some(release) = release.as_ref() {
+                    self.ensure_node_for_host(host_ip)?;
+                    for api in deployed_service_apis_from_release(
+                        release,
+                        host_ip,
+                        &endpoint_id,
+                        final_status,
+                    )? {
+                        self.store.upsert_deployed_service_api(api)?;
+                    }
+                }
                 changed.extend(release_changed_objects(&service, release.as_ref()));
                 if let Some(release) = release.as_ref() {
                     self.store.append_operation_log(release_install_log_record(
@@ -1118,6 +3840,28 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
                         release,
                     ))?;
                 }
+                self.store
+                    .append_operation_log(release_install_pipeline_log_record(
+                        &operation.operation_id,
+                        &service,
+                        release.as_ref(),
+                        host_ip,
+                        &endpoint_id,
+                        &health,
+                        migration_execution.as_ref(),
+                        auth_permission_registration.as_ref(),
+                        redis_provision.as_ref(),
+                        storage_provision.as_ref(),
+                        release_package_load.as_ref(),
+                        gateway_route_publish.as_ref(),
+                        node_dispatch.as_ref(),
+                        &driver_result,
+                    ))?;
+                changed.push(changed_object(
+                    "HostService",
+                    &format!("{}:{}", host_ip, service.id),
+                ));
+                changed.push(changed_object("Endpoint", &endpoint_id));
                 changed.push(changed_object("Service", &service.id));
             }
             "release.delete" => {
@@ -1569,6 +4313,7 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let previous_state = release_install_previous_state_from_operation(operation)?;
+                self.append_migration_rollback_unsupported_log(operation)?;
                 if let Some(previous_state) = previous_state {
                     let service_name = operation.target_id.as_str();
                     self.clear_release_resource_registries(service_name)?;
@@ -1678,6 +4423,35 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
     ) -> Result<ReleaseInstallPreviousState> {
         Ok(ReleaseInstallPreviousState {
             service: self.store.get_service(service_name)?,
+            host_services: self
+                .store
+                .list_host_services()?
+                .into_iter()
+                .filter(|host_service| host_service.service_name == service_name)
+                .collect(),
+            endpoints: self
+                .store
+                .list_endpoints()?
+                .into_iter()
+                .filter(|endpoint| endpoint.service_id == service_name)
+                .collect(),
+            links: self
+                .store
+                .list_links()?
+                .into_iter()
+                .filter(|link| {
+                    parse_endpoint_id(&link.source_endpoint)
+                        .is_ok_and(|identity| identity.service_name == service_name)
+                        || parse_endpoint_id(&link.target_endpoint)
+                            .is_ok_and(|identity| identity.service_name == service_name)
+                })
+                .collect(),
+            log_views: self
+                .store
+                .list_log_sources()?
+                .into_iter()
+                .filter(|log_view| log_view.service_id == service_name)
+                .collect(),
             releases: self
                 .store
                 .list_service_releases()?
@@ -1726,6 +4500,18 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
                 .into_iter()
                 .filter(|config| config.service_name == service_name)
                 .collect(),
+            api_surfaces: self
+                .store
+                .list_service_api_surfaces()?
+                .into_iter()
+                .filter(|api| api.service_name == service_name)
+                .collect(),
+            deployed_apis: self
+                .store
+                .list_deployed_service_apis()?
+                .into_iter()
+                .filter(|api| api.service_name == service_name)
+                .collect(),
         })
     }
 
@@ -1736,14 +4522,90 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
     ) -> Result<Vec<serde_json::Value>> {
         let mut changed = Vec::new();
         let Some(service) = previous_state.service.as_ref() else {
+            self.store.delete_host_services_for_service(service_name)?;
+            for endpoint in self
+                .store
+                .list_endpoints()?
+                .into_iter()
+                .filter(|endpoint| endpoint.service_id == service_name)
+            {
+                self.store.delete_endpoint(&endpoint.endpoint)?;
+                changed.push(changed_object("Endpoint", &endpoint.endpoint));
+            }
+            for link in self.store.list_links()?.into_iter().filter(|link| {
+                parse_endpoint_id(&link.source_endpoint)
+                    .is_ok_and(|identity| identity.service_name == service_name)
+                    || parse_endpoint_id(&link.target_endpoint)
+                        .is_ok_and(|identity| identity.service_name == service_name)
+            }) {
+                self.store
+                    .delete_link(&link.source_endpoint, &link.target_endpoint)?;
+                changed.push(changed_object("Link", &link_target_id(&link)));
+            }
+            for log_view in self
+                .store
+                .list_log_sources()?
+                .into_iter()
+                .filter(|log_view| log_view.service_id == service_name)
+            {
+                self.store.delete_log_source(&log_view.source_id)?;
+                changed.push(changed_object("LogView", &log_view.source_id));
+            }
+            for release in self
+                .store
+                .list_service_releases()?
+                .into_iter()
+                .filter(|release| release.service_name == service_name)
+            {
+                self.store
+                    .delete_service_release(&release.service_name, &release.version)?;
+                changed.push(changed_object(
+                    "ServiceRelease",
+                    &format!("{}@{}", release.service_name, release.version),
+                ));
+            }
+            self.clear_release_resource_registries(service_name)?;
             self.store.delete_service(service_name)?;
-            changed.push(changed_object("ServiceRelease", service_name));
             changed.push(changed_object("Service", service_name));
             return Ok(changed);
         };
 
+        self.store.delete_host_services_for_service(service_name)?;
+        for endpoint in self
+            .store
+            .list_endpoints()?
+            .into_iter()
+            .filter(|endpoint| endpoint.service_id == service_name)
+        {
+            self.store.delete_endpoint(&endpoint.endpoint)?;
+        }
         self.store.put_service(service.clone())?;
         changed.push(changed_object("Service", &service.id));
+        for host_service in &previous_state.host_services {
+            self.store.upsert_host_service(host_service.clone())?;
+            changed.push(changed_object(
+                "HostService",
+                &format!("{}:{}", host_service.host_ip, host_service.service_name),
+            ));
+        }
+        for endpoint in &previous_state.endpoints {
+            self.store.put_endpoint(endpoint.clone())?;
+            changed.push(changed_object("Endpoint", &endpoint.endpoint));
+        }
+        for link in &previous_state.links {
+            if self.store.get_endpoint(&link.source_endpoint)?.is_some()
+                && self.store.get_endpoint(&link.target_endpoint)?.is_some()
+            {
+                self.store.put_link(link.clone())?;
+                changed.push(changed_object("Link", &link_target_id(link)));
+            }
+        }
+        for log_view in &previous_state.log_views {
+            if self.store.get_endpoint(&log_view.endpoint)?.is_some() {
+                self.store.put_log_view(log_view.clone())?;
+                changed.push(changed_object("LogView", &log_view.source_id));
+            }
+        }
         for release in &previous_state.releases {
             self.store.upsert_service_release(release.clone())?;
             changed.push(changed_object(
@@ -1799,6 +4661,14 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
                 "RenderedConfig",
                 &format!("{}@{}", config.service_name, config.version),
             ));
+        }
+        for api in &previous_state.api_surfaces {
+            self.store.upsert_service_api_surface(api.clone())?;
+            changed.push(changed_object("ServiceApiSurface", &api_surface_id(api)));
+        }
+        for api in &previous_state.deployed_apis {
+            self.store.upsert_deployed_service_api(api.clone())?;
+            changed.push(changed_object("DeployedServiceApi", &deployed_api_id(api)));
         }
         Ok(changed)
     }
@@ -1896,6 +4766,18 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
                 .into_iter()
                 .filter(|config| config.service_name == service_name)
                 .collect(),
+            api_surfaces: self
+                .store
+                .list_service_api_surfaces()?
+                .into_iter()
+                .filter(|api| api.service_name == service_name)
+                .collect(),
+            deployed_apis: self
+                .store
+                .list_deployed_service_apis()?
+                .into_iter()
+                .filter(|api| api.service_name == service_name)
+                .collect(),
         })
     }
 
@@ -1937,8 +4819,38 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
             self.store.upsert_rendered_service_config(config.clone())?;
             changed.push(changed_object("RenderedConfig", &config_id(config)));
         }
+        for api in &previous_state.api_surfaces {
+            self.store.upsert_service_api_surface(api.clone())?;
+            changed.push(changed_object("ServiceApiSurface", &api_surface_id(api)));
+        }
+        for api in &previous_state.deployed_apis {
+            self.store.upsert_deployed_service_api(api.clone())?;
+            changed.push(changed_object("DeployedServiceApi", &deployed_api_id(api)));
+        }
         changed.push(changed_object("ReleaseRegistry", service_name));
         Ok(changed)
+    }
+
+    fn append_migration_rollback_unsupported_log(&mut self, operation: &Operation) -> Result<()> {
+        let logs = self.store.list_operation_logs(&operation.operation_id)?;
+        let applied = logs.iter().any(|log| {
+            log.step_id.starts_with("migrations:")
+                && log.data.get("status").and_then(serde_json::Value::as_str) == Some("applied")
+        });
+        if applied {
+            self.store.append_operation_log(operation_step_log_record(
+                &operation.operation_id,
+                "migration-rollback:unsupported",
+                "warn",
+                "database migration rollback is unsupported; registry state will be restored only",
+                serde_json::json!({
+                    "status": "unsupported",
+                    "scope": "database-migrations",
+                    "registry_rollback": "restore_previous_state"
+                }),
+            ))?;
+        }
+        Ok(())
     }
 
     fn resolve_release_rollback_target(&mut self, operation: &Operation) -> Result<String> {
@@ -2014,6 +4926,37 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
         Ok(health)
     }
 
+    fn ensure_node_for_host(&mut self, host_ip: &str) -> Result<()> {
+        if self
+            .store
+            .list_nodes()?
+            .into_iter()
+            .any(|node| node.host_ip == host_ip)
+        {
+            return Ok(());
+        }
+        let node_id = format!(
+            "host-{}",
+            host_ip
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+                .collect::<String>()
+                .trim_matches('-')
+        );
+        self.store.upsert_node(NodeRecord {
+            node_id,
+            host_ip: host_ip.to_string(),
+            parent_node_id: String::new(),
+            role: "standalone".to_string(),
+            labels: serde_json::json!({
+                "source": "release.install"
+            }),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+    }
+
     fn clear_release_resource_registries(&mut self, service_name: &str) -> Result<()> {
         self.store.delete_service_routes_for_service(service_name)?;
         self.store
@@ -2027,6 +4970,10 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe> OperationExecutor<'a, S, P> {
             .delete_service_storage_resources_for_service(service_name)?;
         self.store
             .delete_rendered_service_configs_for_service(service_name)?;
+        self.store
+            .delete_service_api_surfaces_for_service(service_name)?;
+        self.store
+            .delete_deployed_service_apis_for_service(service_name)?;
         Ok(())
     }
 }
@@ -2200,6 +5147,21 @@ fn release_changed_objects(
         ));
     }
     changed
+}
+
+fn runtime_pipeline_result_from_logs<S: OrchestratorStore>(
+    store: &S,
+    operation: &Operation,
+) -> Result<Option<serde_json::Value>> {
+    if operation.action != "release.install" {
+        return Ok(None);
+    }
+    Ok(store
+        .list_operation_logs(&operation.operation_id)?
+        .into_iter()
+        .rev()
+        .find(|log| log.step_id.starts_with("install-pipeline:"))
+        .map(|log| log.data))
 }
 
 fn delete_service_route<S: OrchestratorStore>(
@@ -2453,6 +5415,240 @@ fn config_id(config: &RenderedServiceConfig) -> String {
     format!("{}@{}", config.service_name, config.version)
 }
 
+fn api_surface_id(api: &ServiceApiSurface) -> String {
+    format!("{}@{}:{}", api.service_name, api.version, api.api_id)
+}
+
+fn deployed_api_id(api: &DeployedServiceApi) -> String {
+    format!(
+        "{}@{}:{}:{}",
+        api.service_name, api.version, api.api_id, api.endpoint
+    )
+}
+
+fn validate_node_tree_upsert<'a>(
+    existing_nodes: impl Iterator<Item = &'a NodeRecord>,
+    node: &NodeRecord,
+) -> Result<()> {
+    let mut nodes = existing_nodes
+        .map(|item| (item.node_id.clone(), item.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if nodes
+        .values()
+        .any(|item| item.node_id != node.node_id && item.host_ip == node.host_ip)
+    {
+        return Err(OrchestratorError::InvalidManifest(format!(
+            "node host_ip {} is already registered",
+            node.host_ip
+        )));
+    }
+    match node.role.as_str() {
+        "root" | "standalone" => {
+            if !node.parent_node_id.trim().is_empty() {
+                return Err(OrchestratorError::InvalidManifest(format!(
+                    "{} node must not have parent_node_id",
+                    node.role
+                )));
+            }
+        }
+        "node" => {
+            if node.parent_node_id.trim().is_empty() {
+                return Err(OrchestratorError::InvalidManifest(
+                    "node parent_node_id is required".to_string(),
+                ));
+            }
+            if !nodes.contains_key(&node.parent_node_id) {
+                return Err(OrchestratorError::Dependency(format!(
+                    "parent node {} not found",
+                    node.parent_node_id
+                )));
+            }
+        }
+        _ => {}
+    }
+    nodes.insert(node.node_id.clone(), node.clone());
+    ensure_node_tree_acyclic(&nodes)
+}
+
+fn ensure_node_tree_acyclic(nodes: &BTreeMap<String, NodeRecord>) -> Result<()> {
+    for node_id in nodes.keys() {
+        let mut seen = BTreeSet::new();
+        let mut current = node_id.as_str();
+        loop {
+            if !seen.insert(current.to_string()) {
+                return Err(OrchestratorError::InvalidManifest(format!(
+                    "node tree contains cycle at {current}"
+                )));
+            }
+            let Some(node) = nodes.get(current) else {
+                return Err(OrchestratorError::Dependency(format!(
+                    "node {current} is missing during tree validation"
+                )));
+            };
+            let parent = node.parent_node_id.trim();
+            if parent.is_empty() {
+                break;
+            }
+            if !nodes.contains_key(parent) {
+                return Err(OrchestratorError::Dependency(format!(
+                    "parent node {parent} not found"
+                )));
+            }
+            current = parent;
+        }
+    }
+    Ok(())
+}
+
+fn ancestors_of_from_nodes(nodes: Vec<NodeRecord>, node_id: &str) -> Result<Vec<NodeRecord>> {
+    let map = nodes
+        .into_iter()
+        .map(|node| (node.node_id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    ensure_node_tree_acyclic(&map)?;
+    let node = map
+        .get(node_id)
+        .ok_or_else(|| OrchestratorError::Dependency(format!("node {node_id} not found")))?;
+    if node.role == "standalone" {
+        return Ok(Vec::new());
+    }
+    let mut ancestors = Vec::new();
+    let mut parent_id = node.parent_node_id.trim().to_string();
+    while !parent_id.is_empty() {
+        let parent = map.get(&parent_id).ok_or_else(|| {
+            OrchestratorError::Dependency(format!("parent node {parent_id} not found"))
+        })?;
+        ancestors.push(parent.clone());
+        parent_id = parent.parent_node_id.trim().to_string();
+    }
+    Ok(ancestors)
+}
+
+fn descendants_of_from_nodes(nodes: Vec<NodeRecord>, node_id: &str) -> Result<Vec<NodeRecord>> {
+    let map = nodes
+        .into_iter()
+        .map(|node| (node.node_id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    ensure_node_tree_acyclic(&map)?;
+    if !map.contains_key(node_id) {
+        return Err(OrchestratorError::Dependency(format!(
+            "node {node_id} not found"
+        )));
+    }
+    let mut descendants = Vec::new();
+    let mut frontier = vec![node_id.to_string()];
+    while let Some(parent_id) = frontier.pop() {
+        let mut children = map
+            .values()
+            .filter(|node| node.parent_node_id == parent_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        children.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        for child in children {
+            frontier.push(child.node_id.clone());
+            descendants.push(child);
+        }
+    }
+    Ok(descendants)
+}
+
+fn effective_api_routes_from_registry(
+    node_id: &str,
+    nodes: Vec<NodeRecord>,
+    surfaces: Vec<ServiceApiSurface>,
+    deployed_apis: Vec<DeployedServiceApi>,
+) -> Result<Vec<EffectiveApiRoute>> {
+    let node_by_id = nodes
+        .iter()
+        .cloned()
+        .map(|node| (node.node_id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    ensure_node_tree_acyclic(&node_by_id)?;
+    let target = node_by_id
+        .get(node_id)
+        .ok_or_else(|| OrchestratorError::Dependency(format!("node {node_id} not found")))?;
+    let node_by_host = nodes
+        .iter()
+        .cloned()
+        .map(|node| (node.host_ip.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    let surface_by_key = surfaces
+        .into_iter()
+        .map(|api| {
+            (
+                (
+                    api.service_name.clone(),
+                    api.version.clone(),
+                    api.api_id.clone(),
+                ),
+                api,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let ancestor_distances = ancestors_of_from_nodes(nodes, node_id)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, ancestor)| (ancestor.node_id, (index + 1) as u32))
+        .collect::<BTreeMap<_, _>>();
+    let mut routes = Vec::new();
+    for deployed in deployed_apis
+        .into_iter()
+        .filter(|deployed| deployed.status == "running")
+    {
+        let Some(provider_node) = node_by_host.get(&deployed.host_ip) else {
+            continue;
+        };
+        let Some(surface) = surface_by_key.get(&(
+            deployed.service_name.clone(),
+            deployed.version.clone(),
+            deployed.api_id.clone(),
+        )) else {
+            continue;
+        };
+        let (visible, distance, visibility_source) = if provider_node.node_id == target.node_id {
+            if matches!(surface.visibility.as_str(), "same-node" | "global") {
+                (true, 0, "same-node")
+            } else {
+                (false, 0, "")
+            }
+        } else if let Some(distance) = ancestor_distances.get(&provider_node.node_id) {
+            if surface.visibility == "descendants" {
+                (true, *distance, "ancestor-descendants")
+            } else {
+                (false, *distance, "")
+            }
+        } else {
+            (false, 0, "")
+        };
+        if !visible {
+            continue;
+        }
+        routes.push(EffectiveApiRoute {
+            node_id: target.node_id.clone(),
+            api_id: surface.api_id.clone(),
+            provider_node_id: provider_node.node_id.clone(),
+            provider_host_ip: provider_node.host_ip.clone(),
+            provider_service_name: surface.service_name.clone(),
+            provider_endpoint: deployed.endpoint.clone(),
+            protocol: surface.protocol.clone(),
+            path_prefix: surface.path_prefix.clone(),
+            methods: surface.methods.clone(),
+            permission: surface.permission.clone(),
+            auth_mode: surface.auth_mode.clone(),
+            visibility_source: visibility_source.to_string(),
+            distance,
+            status: deployed.status.clone(),
+        });
+    }
+    routes.sort_by(|left, right| {
+        left.distance
+            .cmp(&right.distance)
+            .then_with(|| left.api_id.cmp(&right.api_id))
+            .then_with(|| left.provider_endpoint.cmp(&right.provider_endpoint))
+    });
+    Ok(routes)
+}
+
 fn service_release_record(release: &ServiceReleaseManifest) -> Result<ServiceRelease> {
     Ok(ServiceRelease {
         service_name: release.service_name.clone(),
@@ -2504,6 +5700,73 @@ fn service_routes_from_release(release: &ServiceReleaseManifest) -> Result<Vec<S
                 created_at: String::new(),
                 updated_at: String::new(),
             })
+        })
+        .collect()
+}
+
+fn service_api_surfaces_from_release(
+    release: &ServiceReleaseManifest,
+) -> Result<Vec<ServiceApiSurface>> {
+    release
+        .apis
+        .iter()
+        .map(|api| {
+            let surface = ServiceApiSurface {
+                service_name: release.service_name.clone(),
+                version: release.version.clone(),
+                api_id: api.api_id.clone(),
+                protocol: api.protocol.clone(),
+                port_name: api.port_name.clone(),
+                path_prefix: api.path_prefix.clone(),
+                methods: api
+                    .methods
+                    .iter()
+                    .map(|method| method.to_ascii_uppercase())
+                    .collect(),
+                visibility: api.visibility.clone(),
+                auth_mode: api.auth_mode.clone(),
+                permission: api.permission.clone(),
+                stability: api.stability.clone(),
+                api_version: api.version.clone(),
+                rate_limit: api.rate_limit.clone(),
+                timeout: api.timeout.clone(),
+                config: serde_json::json!({
+                    "allowed_callers": api.allowed_callers,
+                    "denied_callers": api.denied_callers,
+                    "grpc_service": api.grpc_service,
+                    "stream_name": api.stream_name,
+                }),
+                created_at: String::new(),
+                updated_at: String::new(),
+            };
+            validate_service_api_surface(&surface)?;
+            Ok(surface)
+        })
+        .collect()
+}
+
+fn deployed_service_apis_from_release(
+    release: &ServiceReleaseManifest,
+    host_ip: &str,
+    endpoint: &str,
+    status: &str,
+) -> Result<Vec<DeployedServiceApi>> {
+    release
+        .apis
+        .iter()
+        .map(|api| {
+            let deployed = DeployedServiceApi {
+                host_ip: host_ip.to_string(),
+                service_name: release.service_name.clone(),
+                version: release.version.clone(),
+                endpoint: endpoint.to_string(),
+                api_id: api.api_id.clone(),
+                status: status.to_string(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            };
+            validate_deployed_service_api(&deployed)?;
+            Ok(deployed)
         })
         .collect()
 }
@@ -2603,6 +5866,120 @@ fn service_redis_resources_from_release(
         .collect()
 }
 
+fn redis_stream_name(resource: &ServiceRedisResource) -> String {
+    if resource.service_name == "judge-api" && resource.name == "redis" {
+        "ojos:judge:submissions".to_string()
+    } else if resource.service_name == "judge-worker" && resource.name == "redis" {
+        "ojos:judge:submissions".to_string()
+    } else {
+        format!(
+            "ojos:{}:{}",
+            resource.service_name.replace('-', ":"),
+            resource.name.replace('-', ":")
+        )
+    }
+}
+
+fn redis_consumer_group_name(resource: &ServiceRedisResource) -> String {
+    if resource.service_name == "judge-worker" && resource.name == "redis" {
+        "judge-workers".to_string()
+    } else {
+        format!(
+            "{}-{}",
+            resource.service_name.replace(':', "-"),
+            resource.name.replace(':', "-")
+        )
+    }
+}
+
+fn redis_socket_from_endpoint(endpoint: &str) -> String {
+    let value = endpoint.trim();
+    if let Some(rest) = value.strip_prefix("redis://") {
+        let authority = rest.split('/').next().unwrap_or(rest);
+        let without_auth = authority.rsplit('@').next().unwrap_or(authority);
+        if without_auth.contains(':') {
+            without_auth.to_string()
+        } else {
+            format!("{without_auth}:6379")
+        }
+    } else {
+        value.to_string()
+    }
+}
+
+struct SimpleRedisConnection {
+    stream: TcpStream,
+    timeout: Duration,
+}
+
+impl SimpleRedisConnection {
+    fn connect(endpoint: &str, timeout: Duration) -> Result<Self> {
+        let stream = TcpStream::connect(endpoint).map_err(|err| {
+            OrchestratorError::Dependency(format!("connect redis {endpoint} failed: {err}"))
+        })?;
+        stream.set_read_timeout(Some(timeout)).map_err(|err| {
+            OrchestratorError::Dependency(format!("configure redis read timeout failed: {err}"))
+        })?;
+        stream.set_write_timeout(Some(timeout)).map_err(|err| {
+            OrchestratorError::Dependency(format!("configure redis write timeout failed: {err}"))
+        })?;
+        Ok(Self { stream, timeout })
+    }
+
+    fn send_command(&mut self, args: &[&str]) -> Result<()> {
+        let mut payload = format!("*{}\r\n", args.len()).into_bytes();
+        for arg in args {
+            payload.extend_from_slice(format!("${}\r\n", arg.as_bytes().len()).as_bytes());
+            payload.extend_from_slice(arg.as_bytes());
+            payload.extend_from_slice(b"\r\n");
+        }
+        self.stream.write_all(&payload).map_err(|err| {
+            OrchestratorError::Dependency(format!("write redis command failed: {err}"))
+        })?;
+        self.stream.flush().map_err(|err| {
+            OrchestratorError::Dependency(format!("flush redis command failed: {err}"))
+        })?;
+        let response = read_redis_response(&mut self.stream, self.timeout)?;
+        if response.starts_with("-BUSYGROUP") {
+            return Ok(());
+        }
+        if response.starts_with('-') {
+            return Err(OrchestratorError::Dependency(format!(
+                "redis command failed: {}",
+                response.trim()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn read_redis_response(stream: &mut TcpStream, timeout: Duration) -> Result<String> {
+    stream.set_read_timeout(Some(timeout)).map_err(|err| {
+        OrchestratorError::Dependency(format!("configure redis read timeout failed: {err}"))
+    })?;
+    let mut reader = BufReader::new(stream.try_clone().map_err(|err| {
+        OrchestratorError::Dependency(format!("clone redis stream failed: {err}"))
+    })?);
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(|err| {
+        OrchestratorError::Dependency(format!("read redis response failed: {err}"))
+    })?;
+    if line.starts_with('$') {
+        let len = line
+            .trim()
+            .trim_start_matches('$')
+            .parse::<usize>()
+            .map_err(|err| {
+                OrchestratorError::Dependency(format!("parse redis bulk length failed: {err}"))
+            })?;
+        let mut body = vec![0; len + 2];
+        reader.read_exact(&mut body).map_err(|err| {
+            OrchestratorError::Dependency(format!("read redis bulk response failed: {err}"))
+        })?;
+    }
+    Ok(line)
+}
+
 fn service_storage_resources_from_release(
     release: &ServiceReleaseManifest,
 ) -> Vec<ServiceStorageResource> {
@@ -2636,6 +6013,156 @@ fn rendered_config_from_release(release: &ServiceReleaseManifest) -> Result<Rend
         created_at: String::new(),
         updated_at: String::new(),
     })
+}
+
+fn endpoint_from_install(
+    service: &ServiceManifest,
+    release: Option<&ServiceReleaseManifest>,
+    endpoint_id: &str,
+) -> Result<Endpoint> {
+    validate_endpoint_id(endpoint_id)?;
+    let identity = parse_endpoint_id(endpoint_id)?;
+    if identity.service_name != service.id {
+        return Err(OrchestratorError::InvalidManifest(
+            "install endpoint service-name must match service id".to_string(),
+        ));
+    }
+    Ok(Endpoint {
+        endpoint: endpoint_id.to_string(),
+        service_id: service.id.clone(),
+        protocol: release
+            .map(|release| release.backend.protocol.clone())
+            .unwrap_or_else(|| service.endpoint.protocol.clone()),
+        health_path: release
+            .map(|release| release.backend.health_path.clone())
+            .unwrap_or_else(|| service.endpoint.health_path.clone()),
+        health: "unknown".to_string(),
+        reachable: false,
+        display_name: service.name.clone(),
+        note: "allocated by release.install pipeline".to_string(),
+        config: serde_json::json!({
+            "port_name": "default",
+            "visibility": if service.endpoint.expose { "public" } else { "cluster" },
+            "source": "release.install",
+        }),
+        created_at: String::new(),
+        updated_at: String::new(),
+    })
+}
+
+fn host_service_from_install(
+    service: &ServiceManifest,
+    release: Option<&ServiceReleaseManifest>,
+    host_ip: &str,
+    status: &str,
+    config: serde_json::Value,
+    labels: serde_json::Value,
+) -> Result<HostService> {
+    let host_service = HostService {
+        host_ip: host_ip.to_string(),
+        service_name: service.id.clone(),
+        version: release
+            .map(|release| release.version.clone())
+            .unwrap_or_else(|| service.version.clone()),
+        status: status.to_string(),
+        config,
+        labels,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    validate_host_service(&host_service)?;
+    Ok(host_service)
+}
+
+fn install_labels(release: Option<&ServiceReleaseManifest>) -> serde_json::Value {
+    match release {
+        Some(release) => serde_json::json!({
+            "service_type": release.service_type,
+            "runtime": release.runtime.kind,
+            "source": "release.install",
+        }),
+        None => serde_json::json!({
+            "source": "release.install",
+        }),
+    }
+}
+
+fn rendered_runtime_config(
+    service: &ServiceManifest,
+    release: Option<&ServiceReleaseManifest>,
+    endpoint_id: &str,
+    node_dispatch: Option<&NodeServiceDispatchResult>,
+    driver_result: Option<&DriverResult>,
+) -> serde_json::Value {
+    let node_status = node_dispatch
+        .map(|result| result.status.as_str())
+        .unwrap_or("planned");
+    let driver_status = driver_result
+        .map(|result| result.status.as_str())
+        .unwrap_or("deferred");
+    serde_json::json!({
+        "service_name": service.id,
+        "endpoint": endpoint_id,
+        "runtime": release
+            .map(|release| serde_json::to_value(&release.runtime).unwrap_or_else(|_| serde_json::json!({})))
+            .unwrap_or_else(|| serde_json::json!({
+                "mode": format!("{:?}", service.runtime.mode),
+                "driver": service.runtime.driver,
+            })),
+        "external_steps": {
+            "package_fetch": release.is_some(),
+            "node_dispatch": node_status,
+            "service_start": driver_status,
+            "node": node_dispatch.map(|result| serde_json::json!({
+                "status": result.status,
+                "message": result.message,
+                "endpoint": result.endpoint,
+                "accepted": result.accepted,
+            })),
+            "driver": driver_result.map(|result| serde_json::json!({
+                "action": result.action,
+                "status": result.status,
+                "message": result.message,
+                "command": result.command,
+            }))
+        }
+    })
+}
+
+pub(crate) fn release_install_host_status(
+    node_dispatch: Option<&NodeServiceDispatchResult>,
+    driver_result: &DriverResult,
+    health: &EndpointHealthResult,
+) -> &'static str {
+    if node_dispatch.is_some_and(|result| result.status == "failed") {
+        return "failed";
+    }
+    if node_dispatch.is_none_or(|result| !result.accepted) {
+        return "planned";
+    }
+    match driver_result.status.as_str() {
+        "SUCCEEDED" if health.reachable => "running",
+        "SUCCEEDED" => "starting",
+        "FAILED" => "failed",
+        "PLANNED" => "planned",
+        _ => "deferred",
+    }
+}
+
+fn deferred_install_health(
+    endpoint: &Endpoint,
+    driver_result: &DriverResult,
+) -> EndpointHealthResult {
+    EndpointHealthResult {
+        endpoint: endpoint.endpoint.clone(),
+        health: "deferred".to_string(),
+        reachable: false,
+        latency_ms: None,
+        message: format!(
+            "health probe deferred until service driver reaches SUCCEEDED; current driver status {}",
+            driver_result.status
+        ),
+    }
 }
 
 fn endpoint_from_operation<S: OrchestratorStore>(
@@ -2845,7 +6372,7 @@ fn ensure_service_exists<S: OrchestratorStore>(
         .ok_or_else(|| OrchestratorError::Dependency(format!("service {service_id} not found")))
 }
 
-fn execute_service_driver_action(
+pub(crate) fn execute_service_driver_action(
     service: &ServiceManifest,
     operation: &Operation,
     execute_fixed_commands: bool,
@@ -2896,6 +6423,22 @@ fn ensure_driver_result_succeeded(result: &DriverResult) -> Result<()> {
             result.action
         ))),
     }
+}
+
+fn ensure_node_dispatch_accepted(result: &NodeServiceDispatchResult) -> Result<()> {
+    if result.status.eq_ignore_ascii_case("failed") {
+        return Err(OrchestratorError::Dependency(format!(
+            "node dispatch failed: {}",
+            result.message
+        )));
+    }
+    if !result.accepted && result.status != "planned" {
+        return Err(OrchestratorError::Dependency(format!(
+            "node dispatch was not accepted: {}",
+            result.message
+        )));
+    }
+    Ok(())
 }
 
 fn driver_result_log_record(operation_id: &str, result: &DriverResult) -> OperationLogRecord {
@@ -2964,6 +6507,328 @@ fn release_install_log_record(
     )
 }
 
+fn release_package_log_record(
+    operation_id: &str,
+    service_name: &str,
+    result: &ReleasePackageLoadResult,
+) -> OperationLogRecord {
+    let level = match result.status.as_str() {
+        "loaded" => "info",
+        "planned" => "warn",
+        _ => "info",
+    };
+    operation_step_log_record(
+        operation_id,
+        format!("release-package:{service_name}"),
+        level,
+        format!(
+            "release package load for {} {}: {}",
+            service_name, result.status, result.message
+        ),
+        serde_json::json!({
+            "service_name": service_name,
+            "status": result.status,
+            "source_url": result.source_url,
+            "manifest_loaded": result.manifest_loaded,
+            "checksum": result.checksum,
+            "message": result.message,
+        }),
+    )
+}
+
+fn node_dispatch_log_record(
+    operation_id: &str,
+    service_name: &str,
+    result: &NodeServiceDispatchResult,
+) -> OperationLogRecord {
+    let level = if result.status.eq_ignore_ascii_case("failed") {
+        "error"
+    } else if result.accepted {
+        "info"
+    } else {
+        "warn"
+    };
+    operation_step_log_record(
+        operation_id,
+        format!("node-dispatch:{service_name}"),
+        level,
+        format!(
+            "node dispatch for {} {}: {}",
+            service_name, result.status, result.message
+        ),
+        serde_json::json!({
+            "service_name": service_name,
+            "status": result.status,
+            "endpoint": result.endpoint,
+            "accepted": result.accepted,
+            "message": result.message,
+        }),
+    )
+}
+
+fn auth_permission_log_record(
+    operation_id: &str,
+    service_name: &str,
+    result: &AuthPermissionRegistrationResult,
+) -> OperationLogRecord {
+    let level = if result.status == "registered" {
+        "info"
+    } else {
+        "warn"
+    };
+    operation_step_log_record(
+        operation_id,
+        format!("auth-permissions:{service_name}"),
+        level,
+        format!(
+            "auth permission registration for {} {}: {}",
+            service_name, result.status, result.message
+        ),
+        serde_json::json!({
+            "service_name": service_name,
+            "status": result.status,
+            "endpoint": result.endpoint,
+            "registered": result.registered,
+            "message": result.message,
+        }),
+    )
+}
+
+fn gateway_route_log_record(
+    operation_id: &str,
+    service_name: &str,
+    result: &GatewayRoutePublishResult,
+) -> OperationLogRecord {
+    let level = if result.reloaded { "info" } else { "warn" };
+    operation_step_log_record(
+        operation_id,
+        format!("gateway-routes:{service_name}"),
+        level,
+        format!(
+            "gateway route publish for {} {}: {}",
+            service_name, result.status, result.message
+        ),
+        serde_json::json!({
+            "service_name": service_name,
+            "status": result.status,
+            "endpoint": result.endpoint,
+            "route_count": result.route_count,
+            "reloaded": result.reloaded,
+            "message": result.message,
+        }),
+    )
+}
+
+fn redis_provision_log_record(
+    operation_id: &str,
+    service_name: &str,
+    result: &RedisProvisionResult,
+) -> OperationLogRecord {
+    let level = match result.status.as_str() {
+        "created" | "updated" | "ok" => "info",
+        "skipped" => "warn",
+        _ => "info",
+    };
+    operation_step_log_record(
+        operation_id,
+        format!("redis-resources:{service_name}"),
+        level,
+        format!(
+            "redis resource provisioning for {} {}: {}",
+            service_name, result.status, result.message
+        ),
+        serde_json::json!({
+            "service_name": service_name,
+            "status": result.status,
+            "endpoint": result.endpoint,
+            "provisioned": result.provisioned,
+            "message": result.message,
+        }),
+    )
+}
+
+fn storage_provision_log_record(
+    operation_id: &str,
+    service_name: &str,
+    result: &StorageProvisionResult,
+) -> OperationLogRecord {
+    let level = match result.status.as_str() {
+        "ensured" | "created" | "ok" => "info",
+        "skipped" => "warn",
+        _ => "info",
+    };
+    operation_step_log_record(
+        operation_id,
+        format!("storage-resources:{service_name}"),
+        level,
+        format!(
+            "storage resource provisioning for {} {}: {}",
+            service_name, result.status, result.message
+        ),
+        serde_json::json!({
+            "service_name": service_name,
+            "status": result.status,
+            "endpoint": result.endpoint,
+            "provisioned": result.provisioned,
+            "message": result.message,
+        }),
+    )
+}
+
+fn migration_execution_log_record(
+    operation_id: &str,
+    service_name: &str,
+    result: &MigrationExecutionResult,
+) -> OperationLogRecord {
+    let level = match result.status.as_str() {
+        "applied" | "dry-run" | "skipped" => "info",
+        "deferred" => "warn",
+        "failed" => "error",
+        _ => "info",
+    };
+    operation_step_log_record(
+        operation_id,
+        format!("migrations:{service_name}"),
+        level,
+        format!(
+            "migration execution for {} {}: {}",
+            service_name, result.status, result.message
+        ),
+        serde_json::json!({
+            "service_name": service_name,
+            "status": result.status,
+            "runner": result.runner,
+            "dry_run": result.dry_run,
+            "executed": result.executed,
+            "message": result.message,
+        }),
+    )
+}
+
+fn release_install_pipeline_log_record(
+    operation_id: &str,
+    service: &ServiceManifest,
+    release: Option<&ServiceReleaseManifest>,
+    host_ip: &str,
+    endpoint: &str,
+    health: &EndpointHealthResult,
+    migration_execution: Option<&MigrationExecutionResult>,
+    auth_permission_registration: Option<&AuthPermissionRegistrationResult>,
+    redis_provision: Option<&RedisProvisionResult>,
+    storage_provision: Option<&StorageProvisionResult>,
+    release_package_load: Option<&ReleasePackageLoadResult>,
+    gateway_route_publish: Option<&GatewayRoutePublishResult>,
+    node_dispatch: Option<&NodeServiceDispatchResult>,
+    driver_result: &DriverResult,
+) -> OperationLogRecord {
+    let migration_status = match (release, migration_execution) {
+        (Some(release), Some(result)) if !release.migrations.is_empty() => result.status.as_str(),
+        (Some(release), None) if !release.migrations.is_empty() => "pending",
+        _ => "none",
+    };
+    let permission_registration_status = match (release, auth_permission_registration) {
+        (Some(release), Some(result)) if !release.permissions.is_empty() => result.status.as_str(),
+        (Some(release), None) if !release.permissions.is_empty() => "pending",
+        _ => "none",
+    };
+    let redis_resources_status = match (release, redis_provision) {
+        (Some(release), Some(result)) if !release.redis.is_empty() => result.status.as_str(),
+        (Some(release), None) if !release.redis.is_empty() => "pending",
+        _ => "none",
+    };
+    let storage_resources_status = match (release, storage_provision) {
+        (Some(release), Some(result)) if !release.storage.is_empty() => result.status.as_str(),
+        (Some(release), None) if !release.storage.is_empty() => "pending",
+        _ => "none",
+    };
+    let gateway_route_status = match (release, gateway_route_publish) {
+        (Some(release), Some(result)) if !release.routes.is_empty() => result.status.as_str(),
+        (Some(release), None) if !release.routes.is_empty() => "pending",
+        _ => "none",
+    };
+    operation_step_log_record(
+        operation_id,
+        format!("install-pipeline:{}", service.id),
+        "info",
+        format!(
+            "release.install pipeline recorded {} on {} as {}",
+            service.id, host_ip, endpoint
+        ),
+        serde_json::json!({
+            "service_name": service.id,
+            "version": release.map(|release| release.version.as_str()).unwrap_or(service.version.as_str()),
+            "host_ip": host_ip,
+            "endpoint": endpoint,
+            "release_package": release_package_load.map(|result| serde_json::json!({
+                "status": result.status,
+                "source_url": result.source_url,
+                "manifest_loaded": result.manifest_loaded,
+                "checksum": result.checksum,
+                "message": result.message,
+            })),
+            "host_service": "created",
+            "endpoint_allocation": "created",
+            "migrations": {
+                "count": release.map(|release| release.migrations.len()).unwrap_or(0),
+                "status": migration_status,
+                "runner": migration_execution.map(|result| result.runner.as_str()).unwrap_or("none"),
+                "dry_run": migration_execution.is_some_and(|result| result.dry_run),
+                "executed": migration_execution.map(|result| serde_json::json!(result.executed.clone())),
+                "message": migration_execution.map(|result| result.message.as_str())
+            },
+            "permission_registration": permission_registration_status,
+            "auth_permission_registration": auth_permission_registration.map(|result| serde_json::json!({
+                "status": result.status,
+                "endpoint": result.endpoint,
+                "registered": result.registered,
+                "message": result.message,
+            })),
+            "gateway_route_update": gateway_route_status,
+            "gateway_route_publish": gateway_route_publish.map(|result| serde_json::json!({
+                "status": result.status,
+                "endpoint": result.endpoint,
+                "route_count": result.route_count,
+                "reloaded": result.reloaded,
+                "message": result.message,
+            })),
+            "frontend_registration": if release.is_some_and(|release| release.frontend.enabled) { "registry-only" } else { "none" },
+            "redis_resources": redis_resources_status,
+            "redis_provision": redis_provision.map(|result| serde_json::json!({
+                "status": result.status,
+                "endpoint": result.endpoint,
+                "provisioned": result.provisioned,
+                "message": result.message,
+            })),
+            "storage_resources": storage_resources_status,
+            "storage_provision": storage_provision.map(|result| serde_json::json!({
+                "status": result.status,
+                "endpoint": result.endpoint,
+                "provisioned": result.provisioned,
+                "message": result.message,
+            })),
+            "node_dispatch": node_dispatch.map(|result| result.status.as_str()).unwrap_or("planned"),
+            "node_dispatch_result": node_dispatch.map(|result| serde_json::json!({
+                "status": result.status,
+                "endpoint": result.endpoint,
+                "accepted": result.accepted,
+                "message": result.message,
+            })),
+            "service_start": driver_result.status,
+            "service_driver": {
+                "action": driver_result.action,
+                "status": driver_result.status,
+                "message": driver_result.message,
+                "command": driver_result.command,
+            },
+            "health": {
+                "status": health.health,
+                "reachable": health.reachable,
+                "message": health.message,
+            }
+        }),
+    )
+}
+
 fn endpoint_health_log_record(
     operation_id: &str,
     result: &EndpointHealthResult,
@@ -3020,6 +6885,86 @@ fn missing_target_health(link: &Link) -> EndpointHealthResult {
         latency_ms: None,
         message: "target endpoint is missing".to_string(),
     }
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| truthy(&value))
+}
+
+fn truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn safe_child_path(root: &Path, child: &str) -> Result<PathBuf> {
+    let child = child.trim();
+    if child.is_empty() {
+        return Err(OrchestratorError::UnsafePath(
+            "migration path is required".to_string(),
+        ));
+    }
+    let child_path = Path::new(child);
+    let mut normalized = PathBuf::new();
+    for component in child_path.components() {
+        match component {
+            Component::Normal(value) => normalized.push(value),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(OrchestratorError::UnsafePath(
+                    "path traversal is not allowed".to_string(),
+                ));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(OrchestratorError::UnsafePath(
+                    "absolute path is not allowed".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(root.join(normalized))
+}
+
+fn validate_migration_checksum(
+    migration: &crate::ReleaseMigrationDecl,
+    bytes: &[u8],
+) -> Result<()> {
+    let checksum = migration.checksum.trim();
+    if checksum.is_empty() {
+        return Ok(());
+    }
+    if let Some(expected) = checksum.strip_prefix("sha256:") {
+        let expected = expected.trim().to_ascii_lowercase();
+        let actual = format!("{:x}", Sha256::digest(bytes));
+        if expected == actual {
+            return Ok(());
+        }
+        return Err(OrchestratorError::Dependency(format!(
+            "migration {} checksum mismatch: expected sha256:{expected}, got sha256:{actual}",
+            migration.version
+        )));
+    }
+    if let Some(expected) = checksum.strip_prefix("len:") {
+        let expected = expected.trim().parse::<usize>().map_err(|err| {
+            OrchestratorError::InvalidManifest(format!(
+                "migration {} checksum len is invalid: {err}",
+                migration.version
+            ))
+        })?;
+        if expected == bytes.len() {
+            return Ok(());
+        }
+        return Err(OrchestratorError::Dependency(format!(
+            "migration {} checksum mismatch: expected len:{expected}, got len:{}",
+            migration.version,
+            bytes.len()
+        )));
+    }
+    Err(OrchestratorError::InvalidManifest(format!(
+        "migration {} checksum format is unsupported; supported formats are sha256:<hex> and len:<bytes>",
+        migration.version
+    )))
 }
 
 fn operation_steps(operation: &Operation) -> Vec<serde_json::Value> {

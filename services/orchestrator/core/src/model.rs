@@ -66,6 +66,98 @@ pub struct ServiceRelease {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostService {
+    pub host_ip: String,
+    pub service_name: String,
+    pub version: String,
+    pub status: String,
+    #[serde(default)]
+    pub config: Value,
+    #[serde(default)]
+    pub labels: Value,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeRecord {
+    pub node_id: String,
+    pub host_ip: String,
+    #[serde(default)]
+    pub parent_node_id: String,
+    pub role: String,
+    #[serde(default)]
+    pub labels: Value,
+    pub status: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceApiSurface {
+    pub service_name: String,
+    pub version: String,
+    pub api_id: String,
+    pub protocol: String,
+    pub port_name: String,
+    #[serde(default)]
+    pub path_prefix: String,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    pub visibility: String,
+    pub auth_mode: String,
+    pub permission: String,
+    pub stability: String,
+    pub api_version: String,
+    #[serde(default)]
+    pub rate_limit: String,
+    #[serde(default)]
+    pub timeout: String,
+    #[serde(default)]
+    pub config: Value,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeployedServiceApi {
+    pub host_ip: String,
+    pub service_name: String,
+    pub version: String,
+    pub endpoint: String,
+    pub api_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveApiRoute {
+    pub node_id: String,
+    pub api_id: String,
+    pub provider_node_id: String,
+    pub provider_host_ip: String,
+    pub provider_service_name: String,
+    pub provider_endpoint: String,
+    pub protocol: String,
+    pub path_prefix: String,
+    pub methods: Vec<String>,
+    pub permission: String,
+    pub auth_mode: String,
+    pub visibility_source: String,
+    pub distance: u32,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceRoute {
     pub path: String,
     pub method: String,
@@ -363,6 +455,160 @@ pub fn validate_service_release_record(release: &ServiceRelease) -> Result<()> {
     if release.version.trim().is_empty() {
         return Err(OrchestratorError::InvalidManifest(
             "release version is required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_host_service(host_service: &HostService) -> Result<()> {
+    if host_service.host_ip.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "host service host_ip is required".to_string(),
+        ));
+    }
+    if host_service.host_ip.parse::<std::net::IpAddr>().is_err() {
+        return Err(OrchestratorError::InvalidManifest(
+            "host service host_ip must be an IP address".to_string(),
+        ));
+    }
+    if host_service.service_name.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "host service service_name is required".to_string(),
+        ));
+    }
+    if host_service.version.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "host service version is required".to_string(),
+        ));
+    }
+    if host_service.status.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "host service status is required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_node_record(node: &NodeRecord) -> Result<()> {
+    if node.node_id.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "node node_id is required".to_string(),
+        ));
+    }
+    if node.host_ip.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "node host_ip is required".to_string(),
+        ));
+    }
+    if node.host_ip.parse::<std::net::IpAddr>().is_err() {
+        return Err(OrchestratorError::InvalidManifest(
+            "node host_ip must be an IP address".to_string(),
+        ));
+    }
+    if !matches!(node.role.as_str(), "root" | "node" | "standalone") {
+        return Err(OrchestratorError::InvalidManifest(
+            "node role is invalid".to_string(),
+        ));
+    }
+    if node.role == "root" && !node.parent_node_id.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "root node must not have parent_node_id".to_string(),
+        ));
+    }
+    if node.role != "root" && node.node_id == node.parent_node_id {
+        return Err(OrchestratorError::InvalidManifest(
+            "node parent_node_id must not point to itself".to_string(),
+        ));
+    }
+    if node.status.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "node status is required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_service_api_surface(api: &ServiceApiSurface) -> Result<()> {
+    if api.service_name.trim().is_empty() || api.version.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "api surface service_name and version are required".to_string(),
+        ));
+    }
+    if api.api_id.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "api surface api_id is required".to_string(),
+        ));
+    }
+    if api.protocol.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "api surface protocol is required".to_string(),
+        ));
+    }
+    if api.port_name.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "api surface port_name is required".to_string(),
+        ));
+    }
+    if api.protocol == "http" || api.protocol == "https" {
+        if api.path_prefix.trim().is_empty() || !api.path_prefix.starts_with('/') {
+            return Err(OrchestratorError::InvalidManifest(
+                "api surface path_prefix must start with /".to_string(),
+            ));
+        }
+        if api.methods.is_empty() {
+            return Err(OrchestratorError::InvalidManifest(
+                "http api surface methods are required".to_string(),
+            ));
+        }
+    }
+    if !matches!(
+        api.visibility.as_str(),
+        "private" | "same-node" | "descendants" | "children" | "ancestors" | "global" | "explicit"
+    ) {
+        return Err(OrchestratorError::InvalidManifest(
+            "api surface visibility is invalid".to_string(),
+        ));
+    }
+    if !matches!(
+        api.auth_mode.as_str(),
+        "public" | "user" | "service" | "internal"
+    ) {
+        return Err(OrchestratorError::InvalidManifest(
+            "api surface auth_mode is invalid".to_string(),
+        ));
+    }
+    if !matches!(
+        api.stability.as_str(),
+        "stable" | "experimental" | "deprecated"
+    ) {
+        return Err(OrchestratorError::InvalidManifest(
+            "api surface stability is invalid".to_string(),
+        ));
+    }
+    if api.api_version.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "api surface version is required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_deployed_service_api(api: &DeployedServiceApi) -> Result<()> {
+    validate_endpoint_id(&api.endpoint)?;
+    let identity = parse_endpoint_id(&api.endpoint)?;
+    if identity.service_name != api.service_name {
+        return Err(OrchestratorError::InvalidManifest(
+            "deployed api endpoint service-name must match service_name".to_string(),
+        ));
+    }
+    if api.host_ip.trim().is_empty()
+        || api.service_name.trim().is_empty()
+        || api.version.trim().is_empty()
+        || api.api_id.trim().is_empty()
+        || api.status.trim().is_empty()
+    {
+        return Err(OrchestratorError::InvalidManifest(
+            "deployed api fields are required".to_string(),
         ));
     }
     Ok(())

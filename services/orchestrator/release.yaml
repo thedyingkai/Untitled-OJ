@@ -21,7 +21,10 @@ backend:
   protocol: http
   port: 8090
   health_path: /health
-migrations: []
+migrations:
+  - version: "000001_orchestrator_schema"
+    path: services/orchestrator/migrations/000001_orchestrator_schema.up.sql
+    checksum: sha256:998d142be5ef47a81811653404b997cd21b14dd9114a2c72335a25e393688857
 permissions:
   - orchestrator.service.install
   - orchestrator.link.manage

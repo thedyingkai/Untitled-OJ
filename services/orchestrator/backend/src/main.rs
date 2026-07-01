@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use orchestrator_core::{
-    ActionRequest, OrchestratorActionConsole, default_console_request, validate_endpoint_id,
+    ActionRequest, EffectiveApiRoute, Endpoint, NodeServiceDispatchRequest,
+    OrchestratorActionConsole, ServiceRoute, default_console_request, parse_endpoint_id,
+    validate_endpoint_id,
 };
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -27,6 +29,7 @@ struct Cli {
 struct ApiRequest {
     method: String,
     path: String,
+    headers: BTreeMap<String, String>,
     body: String,
 }
 
@@ -92,9 +95,21 @@ fn route_api_request(
     request: ApiRequest,
 ) -> Result<ApiResponse> {
     let path = request.path.split('?').next().unwrap_or("/");
+    let query = request
+        .path
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or("");
     let segments = path_segments(path)?;
     let segment_refs = segments.iter().map(String::as_str).collect::<Vec<_>>();
     match (request.method.as_str(), segment_refs.as_slice()) {
+        ("POST", ["api", "node", "services", "install"]) => {
+            require_node_token(&request)?;
+            let request = serde_json::from_str::<NodeServiceDispatchRequest>(&request.body)?;
+            Ok(ApiResponse::ok(json!({
+                "node_dispatch_result": console.accept_node_service_install(request)?,
+            })))
+        }
         ("GET", ["health"]) => Ok(ApiResponse::ok(json!({
             "status": "ok",
             "service": "ojos-orchestrator-daemon",
@@ -105,6 +120,56 @@ fn route_api_request(
         ("GET", ["services"]) => Ok(ApiResponse::ok(json!({
             "services": console.view()?.services,
         }))),
+        ("GET", ["internal", "orchestrator", "snapshot"]) => Ok(ApiResponse::ok(json!({
+            "version": "1",
+            "generated_at": "",
+            "service_definitions": internal_service_definitions(console, query_bool(query, "include_disabled")),
+            "endpoints": console.endpoints()?,
+            "permissions": internal_permissions(console)?,
+            "menus": [],
+            "frontend_routes": internal_frontend_routes(console)?,
+            "gateway_routes": internal_gateway_routes(console, true)?,
+            "components": [],
+            "health_checks": [],
+            "topology": {
+                "dependency_edges": []
+            }
+        }))),
+        ("GET", ["internal", "orchestrator", "routes"]) => {
+            if let Some(node_id) = query_value(query, "node_id") {
+                Ok(ApiResponse::ok(json!(internal_effective_route_table(
+                    console,
+                    node_id,
+                    query_bool(query, "include_upstream")
+                )?)))
+            } else {
+                Ok(ApiResponse::ok(json!(internal_route_table(
+                    console,
+                    query_bool(query, "include_disabled"),
+                    query_bool(query, "include_upstream")
+                )?)))
+            }
+        }
+        (
+            "GET",
+            [
+                "internal",
+                "orchestrator",
+                "nodes",
+                node_id,
+                "effective-apis",
+            ],
+        ) => Ok(ApiResponse::ok(json!({
+            "node_id": node_id,
+            "effective_apis": console.effective_api_routes(node_id)?,
+        }))),
+        ("GET", ["internal", "orchestrator", "nodes", node_id, "routes"]) => {
+            Ok(ApiResponse::ok(json!(internal_effective_route_table(
+                console,
+                node_id,
+                query_bool(query, "include_upstream")
+            )?)))
+        }
         ("GET", ["release-registry"]) => Ok(ApiResponse::ok(json!({
             "release_registry": console.release_registry()?,
         }))),
@@ -483,6 +548,295 @@ fn operation_action(action: &str, operation_id: &str) -> Result<ActionRequest> {
     Ok(request)
 }
 
+fn internal_service_definitions(
+    console: &OrchestratorActionConsole,
+    _include_disabled: bool,
+) -> Vec<Value> {
+    console
+        .services()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|service| {
+            let manifest = serde_json::to_value(&service).unwrap_or(Value::Null);
+            json!({
+                "service_id": service.id.clone(),
+                "name": service.name.clone(),
+                "version": service.version.clone(),
+                "status": "ENABLED",
+                "kind": service.kind.clone(),
+                "description": service.description.clone(),
+                "manifest": manifest,
+            })
+        })
+        .collect()
+}
+
+fn internal_permissions(console: &OrchestratorActionConsole) -> Result<Vec<Value>> {
+    Ok(console
+        .service_permission_records()?
+        .into_iter()
+        .map(|permission| {
+            json!({
+                "service_id": permission.service_name,
+                "permission_key": permission.permission_key,
+                "description": permission.source,
+            })
+        })
+        .collect())
+}
+
+fn internal_frontend_routes(console: &OrchestratorActionConsole) -> Result<Vec<Value>> {
+    Ok(console
+        .service_frontend_entries()?
+        .into_iter()
+        .filter(|entry| entry.enabled)
+        .map(|entry| {
+            json!({
+                "service_id": entry.service_name,
+                "route_path": entry.route_prefix,
+                "route_name": entry.remote_entry,
+                "component_key": entry.remote_entry,
+                "required_permission": "",
+                "enabled": entry.enabled,
+            })
+        })
+        .collect())
+}
+
+fn internal_gateway_routes(
+    console: &OrchestratorActionConsole,
+    include_upstream: bool,
+) -> Result<Vec<Value>> {
+    let endpoints = console.endpoints()?;
+    Ok(console
+        .service_routes()?
+        .into_iter()
+        .map(|route| {
+            let upstream = if include_upstream {
+                upstream_base_for_route(&route, &endpoints)
+            } else {
+                String::new()
+            };
+            json!({
+                "service_id": route.target_service_name,
+                "prefix": route_prefix_for_gateway(&route.path),
+                "target_service": route.target_service_name,
+                "upstream_base": upstream,
+                "auth_mode": auth_mode_for_route(&route),
+                "required_permission": required_permission(&route.permission),
+                "strip_prefix": "/api",
+                "rewrite_prefix": "",
+                "health_check_id": format!("{}-health", route.target_service_name),
+                "enabled": route.enabled,
+            })
+        })
+        .collect())
+}
+
+fn internal_route_table(
+    console: &OrchestratorActionConsole,
+    _include_disabled: bool,
+    include_upstream: bool,
+) -> Result<Value> {
+    let endpoints = console.endpoints()?;
+    let routes = console
+        .service_routes()?
+        .into_iter()
+        .map(|route| {
+            let prefix = route_prefix_for_gateway(&route.path);
+            let upstream = upstream_base_for_route(&route, &endpoints);
+            let blocked_by = if upstream.is_empty() {
+                vec!["missing endpoint".to_string()]
+            } else {
+                Vec::new()
+            };
+            let proxy_enabled = route.enabled && blocked_by.is_empty();
+            json!({
+                "route_id": format!("{}:{}", route.target_service_name, prefix),
+                "owner_service_id": route.target_service_name,
+                "prefix": prefix,
+                "service_id": route.target_service_name,
+                "target_service": route.target_service_name,
+                "upstream_base": if include_upstream { upstream } else { String::new() },
+                "auth_mode": auth_mode_for_route(&route),
+                "required_permission": required_permission(&route.permission),
+                "methods": route_methods(&route.method),
+                "enabled": route.enabled,
+                "proxy_enabled": proxy_enabled,
+                "priority": route_prefix_for_gateway(&route.path).len(),
+                "strip_prefix": "/api",
+                "rewrite_prefix": "",
+                "health_check_id": format!("{}-health", route.target_service_name),
+                "created_from": "orchestrator_registry",
+                "status": if proxy_enabled { "active" } else if route.enabled { "blocked" } else { "disabled" },
+                "service_status": "",
+                "service_health": "",
+                "conflicts": [],
+                "warnings": [],
+                "blocked_by": blocked_by,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "version": "1",
+        "generated_at": "",
+        "routes": routes,
+        "warnings": [],
+        "can_proxy": routes_have_proxy(console)?,
+    }))
+}
+
+fn internal_effective_route_table(
+    console: &OrchestratorActionConsole,
+    node_id: &str,
+    include_upstream: bool,
+) -> Result<Value> {
+    let routes = console.effective_api_routes(node_id)?;
+    let route_items = routes
+        .iter()
+        .map(|route| effective_route_table_item(route, include_upstream))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({
+        "version": "1",
+        "generated_at": "",
+        "node_id": node_id,
+        "routes": route_items,
+        "warnings": [],
+        "can_proxy": routes.iter().any(|route| route.status == "running"),
+    }))
+}
+
+fn effective_route_table_item(route: &EffectiveApiRoute, include_upstream: bool) -> Result<Value> {
+    let upstream = endpoint_upstream_base_from_id(&route.provider_endpoint, &route.protocol)?;
+    let enabled = route.status == "running";
+    let blocked_by = if upstream.is_empty() {
+        vec!["missing endpoint".to_string()]
+    } else {
+        Vec::new()
+    };
+    let proxy_enabled = enabled && blocked_by.is_empty();
+    Ok(json!({
+        "route_id": format!("{}:{}", route.provider_service_name, route.api_id),
+        "node_id": route.node_id,
+        "api_id": route.api_id,
+        "provider_node_id": route.provider_node_id,
+        "provider_host_ip": route.provider_host_ip,
+        "provider_service_name": route.provider_service_name,
+        "provider_endpoint": route.provider_endpoint,
+        "owner_service_id": route.provider_service_name,
+        "prefix": route.path_prefix,
+        "path_prefix": route.path_prefix,
+        "service_id": route.provider_service_name,
+        "target_service": route.provider_service_name,
+        "upstream_base": if include_upstream { upstream } else { String::new() },
+        "auth_mode": route.auth_mode,
+        "required_permission": required_permission(&route.permission),
+        "permission": route.permission,
+        "methods": route.methods,
+        "enabled": enabled,
+        "proxy_enabled": proxy_enabled,
+        "priority": route.path_prefix.len(),
+        "strip_prefix": "",
+        "rewrite_prefix": "",
+        "health_check_id": format!("{}-health", route.provider_service_name),
+        "created_from": "orchestrator_effective_api_view",
+        "visibility_source": route.visibility_source,
+        "distance": route.distance,
+        "status": if proxy_enabled { "active" } else if enabled { "blocked" } else { "disabled" },
+        "service_status": route.status,
+        "service_health": "",
+        "conflicts": [],
+        "warnings": [],
+        "blocked_by": blocked_by,
+    }))
+}
+
+fn routes_have_proxy(console: &OrchestratorActionConsole) -> Result<bool> {
+    let endpoints = console.endpoints()?;
+    Ok(console
+        .service_routes()?
+        .into_iter()
+        .any(|route| route.enabled && !upstream_base_for_route(&route, &endpoints).is_empty()))
+}
+
+fn upstream_base_for_route(route: &ServiceRoute, endpoints: &[Endpoint]) -> String {
+    let service_name = route.target_service_name.trim();
+    endpoints
+        .iter()
+        .filter(|endpoint| endpoint.service_id == service_name)
+        .filter_map(endpoint_upstream_base)
+        .next()
+        .unwrap_or_default()
+}
+
+fn endpoint_upstream_base(endpoint: &Endpoint) -> Option<String> {
+    let identity = parse_endpoint_id(&endpoint.endpoint).ok()?;
+    let scheme = if endpoint.protocol.trim().is_empty() {
+        "http"
+    } else {
+        endpoint.protocol.trim()
+    };
+    Some(format!("{scheme}://{}:{}", identity.host, identity.port))
+}
+
+fn endpoint_upstream_base_from_id(endpoint: &str, protocol: &str) -> Result<String> {
+    let identity = parse_endpoint_id(endpoint)?;
+    let scheme = if protocol.trim().is_empty() {
+        "http"
+    } else {
+        protocol.trim()
+    };
+    Ok(format!("{scheme}://{}:{}", identity.host, identity.port))
+}
+
+fn route_prefix_for_gateway(path: &str) -> String {
+    let mut prefix = path
+        .trim()
+        .trim_end_matches('*')
+        .trim_end_matches('/')
+        .to_string();
+    if prefix.is_empty() {
+        prefix = "/".to_string();
+    }
+    if !prefix.starts_with('/') {
+        prefix.insert(0, '/');
+    }
+    prefix
+}
+
+fn auth_mode_for_route(route: &ServiceRoute) -> String {
+    if required_permission(&route.permission).is_empty() {
+        "public".to_string()
+    } else {
+        "user".to_string()
+    }
+}
+
+fn required_permission(permission: &str) -> String {
+    let permission = permission.trim();
+    if permission.eq_ignore_ascii_case("public") {
+        String::new()
+    } else {
+        permission.to_string()
+    }
+}
+
+fn route_methods(method: &str) -> Vec<String> {
+    if method.eq_ignore_ascii_case("ANY") || method.trim().is_empty() {
+        vec![
+            "GET".to_string(),
+            "POST".to_string(),
+            "PUT".to_string(),
+            "PATCH".to_string(),
+            "DELETE".to_string(),
+            "OPTIONS".to_string(),
+            "HEAD".to_string(),
+        ]
+    } else {
+        vec![method.trim().to_ascii_uppercase()]
+    }
+}
+
 fn fields_from_body(body: &str) -> Result<BTreeMap<String, String>> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
@@ -501,6 +855,22 @@ fn fields_from_body(body: &str) -> Result<BTreeMap<String, String>> {
         }
     }
     Ok(fields)
+}
+
+fn query_bool(query: &str, name: &str) -> bool {
+    query.split('&').any(|pair| {
+        let Some((key, value)) = pair.split_once('=') else {
+            return false;
+        };
+        key == name && matches!(value, "1" | "true" | "TRUE" | "True")
+    })
+}
+
+fn query_value<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name && !value.trim().is_empty()).then_some(value)
+    })
 }
 
 fn merge_json_fields(fields: &mut BTreeMap<String, String>, value: &Value) -> Result<()> {
@@ -598,12 +968,29 @@ fn parse_http_request_bytes(bytes: Vec<u8>) -> Result<ApiRequest> {
         .next()
         .ok_or_else(|| anyhow!("missing HTTP path"))?
         .to_string();
-    let content_length = content_length(headers)?;
+    let headers = parse_headers(lines)?;
+    let content_length = content_length_from_headers(&headers)?;
     let body_bytes = bytes
         .get(header_end + 4..header_end + 4 + content_length)
         .ok_or_else(|| anyhow!("HTTP body is incomplete"))?;
     let body = String::from_utf8(body_bytes.to_vec())?;
-    Ok(ApiRequest { method, path, body })
+    Ok(ApiRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
+}
+
+fn parse_headers<'a>(lines: impl Iterator<Item = &'a str>) -> Result<BTreeMap<String, String>> {
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+    Ok(headers)
 }
 
 fn header_end(bytes: &[u8]) -> Option<usize> {
@@ -623,6 +1010,40 @@ fn content_length(headers: &str) -> Result<usize> {
         }
     }
     Ok(0)
+}
+
+fn content_length_from_headers(headers: &BTreeMap<String, String>) -> Result<usize> {
+    headers
+        .get("content-length")
+        .map(|value| {
+            value
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| anyhow!("invalid content-length"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(0))
+}
+
+fn require_node_token(request: &ApiRequest) -> Result<()> {
+    let token = std::env::var("ORCHESTRATOR_NODE_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let Some(token) = token else {
+        return Ok(());
+    };
+    let expected = format!("Bearer {token}");
+    let actual = request
+        .headers
+        .get("authorization")
+        .map(String::as_str)
+        .unwrap_or("");
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(anyhow!("node install request is unauthorized"))
+    }
 }
 
 fn write_http_response(stream: &mut TcpStream, response: ApiResponse) -> Result<()> {
@@ -681,6 +1102,9 @@ unsafe extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static NODE_INSTALL_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn repo_root() -> PathBuf {
         let mut current = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -709,12 +1133,272 @@ mod tests {
         ApiRequest {
             method: method.to_string(),
             path: path.to_string(),
+            headers: BTreeMap::new(),
             body: body.to_string(),
         }
     }
 
     fn post_json(console: &mut OrchestratorActionConsole, path: &str, body: &str) -> ApiResponse {
         route_api_request(console, request("POST", path, body)).expect("POST response")
+    }
+
+    fn node_install_body_for(
+        service_yaml: &str,
+        operation_id: &str,
+        host_ip: &str,
+        port: u16,
+    ) -> String {
+        let root = repo_root();
+        let service = orchestrator_core::validate_service_manifest_file(
+            &root,
+            std::path::Path::new(service_yaml),
+        )
+        .expect("service manifest");
+        let endpoint_id = format!("{host_ip}:{port}:{}", service.id);
+        serde_json::to_string(&NodeServiceDispatchRequest {
+            operation_id: operation_id.to_string(),
+            service: service.clone(),
+            release: None,
+            host_service: orchestrator_core::HostService {
+                host_ip: host_ip.to_string(),
+                service_name: service.id.clone(),
+                version: service.version.clone(),
+                status: "starting".to_string(),
+                config: json!({"node": true}),
+                labels: json!({"source": "root-orchestrator"}),
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            endpoint: Endpoint {
+                endpoint: endpoint_id,
+                service_id: service.id.clone(),
+                protocol: service.endpoint.protocol.clone(),
+                health_path: service.endpoint.health_path.clone(),
+                health: "unknown".to_string(),
+                reachable: false,
+                display_name: format!("{} on node", service.id),
+                note: String::new(),
+                config: json!({}),
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            rendered_config: json!({"node": true}),
+            package_load: None,
+        })
+        .expect("node install body")
+    }
+
+    fn node_install_body() -> String {
+        node_install_body_for(
+            "services/gateway/service.yaml",
+            "op-node-install-gateway",
+            "10.10.0.7",
+            8080,
+        )
+    }
+
+    fn restore_node_token_env(previous: Option<String>) {
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("ORCHESTRATOR_NODE_TOKEN", value),
+                None => std::env::remove_var("ORCHESTRATOR_NODE_TOKEN"),
+            }
+        }
+    }
+
+    fn restore_env(name: &str, previous: Option<String>) {
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    #[test]
+    fn daemon_node_install_route_accepts_dispatched_service() {
+        let _guard = NODE_INSTALL_ENV_LOCK.lock().expect("node install env lock");
+        let previous = std::env::var("ORCHESTRATOR_NODE_TOKEN").ok();
+        unsafe {
+            std::env::remove_var("ORCHESTRATOR_NODE_TOKEN");
+        }
+        let mut console = console();
+        let response = route_api_request(
+            &mut console,
+            request("POST", "/api/node/services/install", &node_install_body()),
+        )
+        .expect("node install response");
+        restore_node_token_env(previous);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["node_dispatch_result"]["accepted"], true);
+        assert_eq!(
+            response.body["node_dispatch_result"]["endpoint"],
+            "10.10.0.7:8080:gateway"
+        );
+        let endpoints = console.endpoints().expect("console endpoints");
+        assert!(
+            endpoints
+                .iter()
+                .any(|endpoint| endpoint.endpoint == "10.10.0.7:8080:gateway")
+        );
+        let operation = get(&mut console, "/operations/op-node-install-gateway");
+        assert_eq!(operation.status, 200);
+        assert_eq!(operation.body["operation"]["status"], json!("SUCCEEDED"));
+        assert_eq!(
+            operation.body["operation"]["target_type"],
+            json!("NodeServiceInstall")
+        );
+        let logs = get(&mut console, "/operations/op-node-install-gateway/logs");
+        assert_eq!(logs.status, 200);
+        let logs = logs.body["logs"].as_array().expect("operation logs");
+        assert!(logs.iter().any(|log| log["step_id"] == "node-accept"));
+        assert!(logs.iter().any(|log| log["step_id"] == "node-store"));
+        assert!(logs.iter().any(|log| {
+            log["step_id"] == "node-driver"
+                && log["message"].as_str().unwrap_or("").contains("deferred")
+        }));
+    }
+
+    #[test]
+    fn daemon_node_install_route_requires_token_when_configured() {
+        let _guard = NODE_INSTALL_ENV_LOCK.lock().expect("node install env lock");
+        let previous = std::env::var("ORCHESTRATOR_NODE_TOKEN").ok();
+        unsafe {
+            std::env::set_var("ORCHESTRATOR_NODE_TOKEN", "node-secret");
+        }
+        let mut console = console();
+        let response = handle_api_request(
+            &mut console,
+            request("POST", "/api/node/services/install", &node_install_body()),
+        );
+        restore_node_token_env(previous);
+
+        assert_eq!(response.status, 500);
+        assert!(
+            response.body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unauthorized")
+        );
+    }
+
+    #[test]
+    fn daemon_node_install_route_runs_driver_when_enabled() {
+        let _guard = NODE_INSTALL_ENV_LOCK.lock().expect("node install env lock");
+        let previous_token = std::env::var("ORCHESTRATOR_NODE_TOKEN").ok();
+        let previous_execute = std::env::var("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER").ok();
+        let previous_docker = std::env::var("OJOS_ORCHESTRATOR_DOCKER_BINARY").ok();
+        unsafe {
+            std::env::remove_var("ORCHESTRATOR_NODE_TOKEN");
+            std::env::set_var("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER", "true");
+            std::env::set_var(
+                "OJOS_ORCHESTRATOR_DOCKER_BINARY",
+                "ojos-docker-compose-missing",
+            );
+        }
+        let mut console = console();
+        let response = route_api_request(
+            &mut console,
+            request("POST", "/api/node/services/install", &node_install_body()),
+        )
+        .expect("node install response");
+        restore_env("ORCHESTRATOR_NODE_TOKEN", previous_token);
+        restore_env("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER", previous_execute);
+        restore_env("OJOS_ORCHESTRATOR_DOCKER_BINARY", previous_docker);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["node_dispatch_result"]["accepted"], true);
+        assert!(
+            response.body["node_dispatch_result"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("driver FAILED")
+        );
+        let endpoints = console.endpoints().expect("console endpoints");
+        let endpoint = endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint == "10.10.0.7:8080:gateway")
+            .expect("node endpoint");
+        assert_eq!(endpoint.health, "deferred");
+        assert!(!endpoint.reachable);
+        let operation = get(&mut console, "/operations/op-node-install-gateway");
+        assert_eq!(operation.status, 200);
+        assert_eq!(operation.body["operation"]["status"], json!("FAILED"));
+        assert!(
+            operation.body["operation"]["error_message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("node service driver failed")
+        );
+        let logs = get(&mut console, "/operations/op-node-install-gateway/logs");
+        assert_eq!(logs.status, 200);
+        let logs = logs.body["logs"].as_array().expect("operation logs");
+        assert!(logs.iter().any(|log| {
+            log["step_id"] == "node-driver"
+                && log["level"] == "error"
+                && log["message"].as_str().unwrap_or("").contains("FAILED")
+        }));
+        assert!(logs.iter().any(|log| log["step_id"] == "node-health"));
+    }
+
+    #[test]
+    fn daemon_node_install_route_records_driver_setup_failure() {
+        let _guard = NODE_INSTALL_ENV_LOCK.lock().expect("node install env lock");
+        let previous_token = std::env::var("ORCHESTRATOR_NODE_TOKEN").ok();
+        let previous_execute = std::env::var("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER").ok();
+        unsafe {
+            std::env::remove_var("ORCHESTRATOR_NODE_TOKEN");
+            std::env::set_var("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER", "true");
+        }
+        let mut console = console();
+        let response = handle_api_request(
+            &mut console,
+            request(
+                "POST",
+                "/api/node/services/install",
+                &node_install_body_for(
+                    "services/orchestrator/service.yaml",
+                    "op-node-install-orchestrator",
+                    "10.10.0.8",
+                    8090,
+                ),
+            ),
+        );
+        restore_env("ORCHESTRATOR_NODE_TOKEN", previous_token);
+        restore_env("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER", previous_execute);
+
+        assert_eq!(response.status, 500);
+        assert!(
+            response.body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("local process lifecycle needs a supervisor binding")
+        );
+        let operation = get(&mut console, "/operations/op-node-install-orchestrator");
+        assert_eq!(operation.status, 200);
+        assert_eq!(operation.body["operation"]["status"], json!("FAILED"));
+        assert!(
+            operation.body["operation"]["error_message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("local process lifecycle needs a supervisor binding")
+        );
+        let logs = get(
+            &mut console,
+            "/operations/op-node-install-orchestrator/logs",
+        );
+        assert_eq!(logs.status, 200);
+        let logs = logs.body["logs"].as_array().expect("operation logs");
+        assert!(logs.iter().any(|log| log["step_id"] == "node-accept"));
+        assert!(logs.iter().any(|log| {
+            log["step_id"] == "node-driver"
+                && log["level"] == "error"
+                && log["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("failed before execution")
+        }));
     }
 
     fn get(console: &mut OrchestratorActionConsole, path: &str) -> ApiResponse {
@@ -933,6 +1617,73 @@ mod tests {
             endpoints
                 .iter()
                 .any(|endpoint| endpoint["endpoint"] == "127.0.0.1:19182:gateway")
+        );
+    }
+
+    #[test]
+    fn daemon_internal_routes_expose_registry_upstream_and_permission() {
+        let mut console = console();
+        let endpoint = post_json(
+            &mut console,
+            "/endpoints",
+            r#"{
+                "operation_id": "op-daemon-internal-demo-endpoint",
+                "endpoint": "127.0.0.1:19200:gateway",
+                "service_id": "gateway",
+                "protocol": "http",
+                "health_path": "/health"
+            }"#,
+        );
+        assert_eq!(endpoint.status, 201);
+        assert_eq!(endpoint.body["action_result"]["status"], "SUCCEEDED");
+
+        let route = post_json(
+            &mut console,
+            "/actions",
+            r#"{
+                "action": "route.create",
+                "operation_id": "op-daemon-internal-demo-route",
+                "fields": {
+                    "route_id": "/api/demo/**",
+                    "path": "/api/demo/**",
+                    "method": "ANY",
+                    "target": "gateway[*]",
+                    "permission": "demo.read",
+                    "confirm": "true"
+                }
+            }"#,
+        );
+        assert_eq!(route.status, 200);
+        assert_eq!(route.body["action_result"]["status"], "SUCCEEDED");
+
+        let table = get(
+            &mut console,
+            "/internal/orchestrator/routes?include_upstream=true",
+        );
+        assert_eq!(table.status, 200);
+        let routes = table.body["routes"].as_array().expect("routes");
+        let demo = routes
+            .iter()
+            .find(|route| route["prefix"] == "/api/demo")
+            .expect("demo route");
+        assert_eq!(demo["target_service"], "gateway");
+        assert_eq!(demo["upstream_base"], "http://127.0.0.1:19200");
+        assert_eq!(demo["required_permission"], "demo.read");
+        assert_eq!(demo["auth_mode"], "user");
+        assert_eq!(demo["proxy_enabled"], true);
+
+        let snapshot = get(&mut console, "/internal/orchestrator/snapshot");
+        assert_eq!(snapshot.status, 200);
+        assert!(
+            snapshot.body["gateway_routes"]
+                .as_array()
+                .expect("gateway routes")
+                .iter()
+                .any(|route| {
+                    route["prefix"] == "/api/demo"
+                        && route["upstream_base"] == "http://127.0.0.1:19200"
+                        && route["required_permission"] == "demo.read"
+                })
         );
     }
 

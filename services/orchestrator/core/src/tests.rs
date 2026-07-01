@@ -1,15 +1,188 @@
 use crate::*;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
 
 static DOCKER_BINARY_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[derive(Clone)]
+struct RecordingAuthPermissionRegistrar {
+    calls: Arc<Mutex<Vec<AuthPermissionRegistration>>>,
+}
+
+impl AuthPermissionRegistrar for RecordingAuthPermissionRegistrar {
+    fn register_permissions(
+        &self,
+        request: &AuthPermissionRegistration,
+    ) -> Result<AuthPermissionRegistrationResult> {
+        self.calls
+            .lock()
+            .expect("auth permission registrar calls lock")
+            .push(request.clone());
+        Ok(AuthPermissionRegistrationResult {
+            status: "registered".to_string(),
+            message: "recorded by test registrar".to_string(),
+            endpoint: "http://auth-service.test".to_string(),
+            registered: request.permissions.len(),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingRedisResourceProvisioner {
+    calls: Arc<Mutex<Vec<RedisProvisionRequest>>>,
+}
+
+impl RedisResourceProvisioner for RecordingRedisResourceProvisioner {
+    fn provision_resources(&self, request: &RedisProvisionRequest) -> Result<RedisProvisionResult> {
+        self.calls
+            .lock()
+            .expect("redis provisioner calls lock")
+            .push(request.clone());
+        Ok(RedisProvisionResult {
+            status: "created".to_string(),
+            message: "recorded by test redis provisioner".to_string(),
+            endpoint: "127.0.0.1:6379".to_string(),
+            provisioned: request
+                .resources
+                .iter()
+                .map(|resource| RedisProvisionedResource {
+                    name: resource.name.clone(),
+                    kind: resource.kind.clone(),
+                    stream: "ojos:judge:submissions".to_string(),
+                    consumer_group: if resource.kind == "consumer-group" {
+                        "judge-workers".to_string()
+                    } else {
+                        String::new()
+                    },
+                    status: "created".to_string(),
+                })
+                .collect(),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingStorageResourceProvisioner {
+    calls: Arc<Mutex<Vec<StorageProvisionRequest>>>,
+}
+
+impl StorageResourceProvisioner for RecordingStorageResourceProvisioner {
+    fn provision_resources(
+        &self,
+        request: &StorageProvisionRequest,
+    ) -> Result<StorageProvisionResult> {
+        self.calls
+            .lock()
+            .expect("storage provisioner calls lock")
+            .push(request.clone());
+        Ok(StorageProvisionResult {
+            status: "ensured".to_string(),
+            message: "recorded by test storage provisioner".to_string(),
+            endpoint: "http://storage-service.test".to_string(),
+            provisioned: request
+                .resources
+                .iter()
+                .map(|resource| StorageProvisionedResource {
+                    object_type: resource.object_type.clone(),
+                    bucket: resource.bucket.clone(),
+                    status: "ensured".to_string(),
+                })
+                .collect(),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingMigrationRunner {
+    calls: Arc<Mutex<Vec<MigrationExecutionRequest>>>,
+    result: MigrationExecutionResult,
+}
+
+impl MigrationRunner for RecordingMigrationRunner {
+    fn execute_migrations(
+        &self,
+        request: &MigrationExecutionRequest,
+    ) -> Result<MigrationExecutionResult> {
+        self.calls
+            .lock()
+            .expect("migration runner calls lock")
+            .push(request.clone());
+        Ok(self.result.clone())
+    }
+}
+
+#[derive(Clone)]
+struct RecordingGatewayRoutePublisher {
+    calls: Arc<Mutex<Vec<GatewayRoutePublishRequest>>>,
+    result: GatewayRoutePublishResult,
+}
+
+impl GatewayRoutePublisher for RecordingGatewayRoutePublisher {
+    fn publish_routes(
+        &self,
+        request: &GatewayRoutePublishRequest,
+    ) -> Result<GatewayRoutePublishResult> {
+        self.calls
+            .lock()
+            .expect("gateway route publisher calls lock")
+            .push(request.clone());
+        Ok(GatewayRoutePublishResult {
+            route_count: request.routes.len(),
+            ..self.result.clone()
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingNodeServiceDispatcher {
+    calls: Arc<Mutex<Vec<NodeServiceDispatchRequest>>>,
+    result: NodeServiceDispatchResult,
+}
+
+impl NodeServiceDispatcher for RecordingNodeServiceDispatcher {
+    fn dispatch_service(
+        &self,
+        request: &NodeServiceDispatchRequest,
+    ) -> Result<NodeServiceDispatchResult> {
+        self.calls
+            .lock()
+            .expect("node dispatcher calls lock")
+            .push(request.clone());
+        Ok(self.result.clone())
+    }
+}
+
+#[derive(Clone)]
+struct FailingMigrationRunner {
+    calls: Arc<Mutex<Vec<MigrationExecutionRequest>>>,
+    message: String,
+}
+
+impl MigrationRunner for FailingMigrationRunner {
+    fn execute_migrations(
+        &self,
+        request: &MigrationExecutionRequest,
+    ) -> Result<MigrationExecutionResult> {
+        self.calls
+            .lock()
+            .expect("migration runner calls lock")
+            .push(request.clone());
+        Err(OrchestratorError::Dependency(self.message.clone()))
+    }
+}
 
 fn repo_root() -> PathBuf {
     let mut current = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -71,6 +244,50 @@ fn valid_service() -> ServiceManifest {
             interval_seconds: 10,
         },
         resources: serde_json::json!({}),
+    }
+}
+
+fn valid_release_for_service(service: &ServiceManifest) -> ServiceReleaseManifest {
+    ServiceReleaseManifest {
+        schema_version: 1,
+        service_name: service.id.clone(),
+        version: service.version.clone(),
+        description: format!("{} release", service.name),
+        service_type: service.kind.clone(),
+        source: ReleaseSourceDecl {
+            kind: "local".to_string(),
+            url: format!("local://services/{}", service.id),
+            checksum: String::new(),
+        },
+        runtime: ReleaseRuntimeDecl {
+            kind: "image".to_string(),
+            image: String::new(),
+            binary: String::new(),
+            system_service: String::new(),
+        },
+        frontend: ReleaseFrontendDecl::default(),
+        backend: ReleaseBackendDecl {
+            protocol: service.endpoint.protocol.clone(),
+            port: service.endpoint.default_port,
+            health_path: service.endpoint.health_path.clone(),
+        },
+        migrations: Vec::new(),
+        apis: Vec::new(),
+        permissions: service.permissions.clone(),
+        routes: vec![ReleaseRouteDecl {
+            path: format!("/api/{}/**", service.id),
+            method: "ANY".to_string(),
+            target_type: "endpoint-group".to_string(),
+            target: format!("{}[*]", service.id),
+            permission: "public".to_string(),
+        }],
+        redis: Vec::new(),
+        storage: Vec::new(),
+        dependencies: Vec::new(),
+        required_apis: Vec::new(),
+        config_schema: serde_json::json!({}),
+        secrets: Vec::new(),
+        observability: ReleaseObservabilityDecl::default(),
     }
 }
 
@@ -195,8 +412,31 @@ fn checked_in_service_releases_validate() {
     );
 
     for path in expected {
-        validate_service_release_file(&root, Path::new(path))
+        let release = validate_service_release_file(&root, Path::new(path))
             .unwrap_or_else(|err| panic!("{path} should validate: {err}"));
+        for migration in &release.migrations {
+            assert!(
+                migration
+                    .path
+                    .starts_with(&format!("services/{}/migrations/", release.service_name)),
+                "{path} migration {} must stay under its service migrations directory",
+                migration.version
+            );
+            let migration_path = root.join(&migration.path);
+            assert!(
+                migration_path.is_file(),
+                "{path} migration file should exist: {}",
+                migration.path
+            );
+            let bytes = fs::read(&migration_path).expect("read migration for checksum");
+            let digest = sha256_hex(&bytes);
+            assert_eq!(
+                migration.checksum,
+                format!("sha256:{digest}"),
+                "{path} migration {} checksum must match file content",
+                migration.version
+            );
+        }
     }
 }
 
@@ -519,9 +759,9 @@ backend:
   health_path: /health
 migrations:
   - version: "0001"
-    path: migrations/0001.sql
+    path: services/demo-api/migrations/0001.sql
   - version: "0001"
-    path: migrations/0002.sql
+    path: services/demo-api/migrations/0002.sql
 routes:
   - path: /api/demo/**
     method: GET
@@ -577,6 +817,56 @@ storage:
     assert!(
         err.to_string()
             .contains("release storage path_prefix is invalid")
+    );
+}
+
+#[test]
+fn service_release_api_surface_validation_rules_are_enforced() {
+    let mut release = valid_release_for_service(&valid_service());
+    release.apis = vec![ReleaseApiSurfaceDecl {
+        api_id: "demo.read".to_string(),
+        protocol: "http".to_string(),
+        port_name: "http".to_string(),
+        path_prefix: "/api/demo".to_string(),
+        methods: vec!["GET".to_string()],
+        visibility: "descendants".to_string(),
+        auth_mode: "service".to_string(),
+        permission: "demo.read".to_string(),
+        stability: "stable".to_string(),
+        version: "v1".to_string(),
+        ..Default::default()
+    }];
+    validate_service_release(&release).expect("valid release with apis passes");
+
+    let mut duplicate = release.clone();
+    duplicate.apis.push(duplicate.apis[0].clone());
+    let err = validate_service_release(&duplicate).expect_err("duplicate api_id should fail");
+    assert!(err.to_string().contains("duplicate release api_id"));
+
+    let mut missing_port = release.clone();
+    missing_port.apis[0].port_name = "admin".to_string();
+    let err = validate_service_release(&missing_port).expect_err("missing port should fail");
+    assert!(
+        err.to_string()
+            .contains("release api port_name does not exist")
+    );
+
+    let mut missing_permission = release.clone();
+    missing_permission.apis[0].permission = "demo.write".to_string();
+    let err = validate_service_release(&missing_permission)
+        .expect_err("undeclared permission should fail");
+    assert!(
+        err.to_string()
+            .contains("release api permission must be declared")
+    );
+
+    let mut invalid_visibility = release;
+    invalid_visibility.apis[0].visibility = "siblings".to_string();
+    let err =
+        validate_service_release(&invalid_visibility).expect_err("invalid visibility should fail");
+    assert!(
+        err.to_string()
+            .contains("release api visibility is invalid")
     );
 }
 
@@ -1163,10 +1453,23 @@ fn release_install_operation_uses_operation_model() {
             .is_some_and(|steps| steps.iter().any(|item| item
                 .get("action")
                 .and_then(serde_json::Value::as_str)
-                == Some("declare_default_endpoint")
+                == Some("allocate_endpoint")
                 && item.get("target").and_then(serde_json::Value::as_str)
-                    == Some("*:18080:demo-api"))),
-        "release.install plan placeholders should keep ip:port:service-name shape"
+                    == Some("127.0.0.1:18080:demo-api"))),
+        "release.install plan should allocate a concrete ip:port:service-name endpoint"
+    );
+    assert!(
+        operation
+            .plan
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|steps| steps.iter().any(|item| item
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                == Some("create_host_service")
+                && item.get("target").and_then(serde_json::Value::as_str)
+                    == Some("127.0.0.1:demo-api"))),
+        "release.install plan should produce host_ip + service-name deployment state"
     );
 }
 
@@ -1174,15 +1477,19 @@ fn release_install_operation_uses_operation_model() {
 fn release_install_planner_uses_release_manifest() {
     let root = repo_root();
     let service =
-        validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
+        validate_service_manifest_file(&root, Path::new("services/judge-api/service.yaml"))
+            .unwrap();
     let release =
-        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+        validate_service_release_file(&root, Path::new("services/judge-api/release.yaml")).unwrap();
     let request = ActionRequest::new(
         "op-release-aware-install",
         "release.install",
-        [("service_id".to_string(), "gateway".to_string())]
-            .into_iter()
-            .collect(),
+        [
+            ("service_id".to_string(), "judge-api".to_string()),
+            ("host_ip".to_string(), "10.77.0.2".to_string()),
+        ]
+        .into_iter()
+        .collect(),
     );
 
     let operation = plan_action_request_with_releases(
@@ -1201,7 +1508,7 @@ fn release_install_planner_uses_release_manifest() {
             .get("release_manifest")
             .and_then(|value| value.get("service_name"))
             .and_then(serde_json::Value::as_str),
-        Some("gateway")
+        Some("judge-api")
     );
     let steps = operation
         .plan
@@ -1209,12 +1516,27 @@ fn release_install_planner_uses_release_manifest() {
         .and_then(serde_json::Value::as_array)
         .expect("steps");
     for expected in [
+        "fetch_or_load_release_package",
         "validate_service_release",
+        "select_host",
+        "create_host_service",
+        "allocate_endpoint",
         "register_permissions",
+        "sync_auth_permissions",
         "register_gateway_routes",
+        "publish_gateway_routes",
         "register_frontend_entry",
+        "register_service_migrations",
+        "run_service_migrations",
+        "register_redis_resources",
+        "provision_redis_resources",
+        "register_storage_resources",
+        "provision_storage_resources",
         "render_service_config",
-        "refresh_service_metadata",
+        "dispatch_to_node_or_standalone",
+        "start_service",
+        "health_probe",
+        "mark_running_state",
     ] {
         assert!(
             steps.iter().any(
@@ -1223,6 +1545,13 @@ fn release_install_planner_uses_release_manifest() {
             "missing release-driven step {expected}"
         );
     }
+    assert_eq!(
+        operation
+            .request
+            .get("endpoint")
+            .and_then(serde_json::Value::as_str),
+        Some("10.77.0.2:8082:judge-api")
+    );
 }
 
 #[test]
@@ -1286,6 +1615,8 @@ fn release_install_executor_records_release_resources() {
         .expect("changed objects");
     for expected_type in [
         "ServiceRelease",
+        "HostService",
+        "Endpoint",
         "Permission",
         "Route",
         "Frontend",
@@ -1306,6 +1637,98 @@ fn release_install_executor_records_release_resources() {
             .expect("get service")
             .expect("gateway stored")
             .id,
+        "gateway"
+    );
+    let host_service = store
+        .get_host_service("127.0.0.1", "gateway")
+        .expect("get host service")
+        .expect("gateway host service stored");
+    assert_eq!(host_service.version, release.version);
+    assert_eq!(host_service.status, "planned");
+    assert_eq!(
+        host_service
+            .config
+            .get("external_steps")
+            .and_then(|steps| steps.get("service_start"))
+            .and_then(serde_json::Value::as_str),
+        Some("PLANNED")
+    );
+    assert_eq!(
+        host_service
+            .config
+            .get("external_steps")
+            .and_then(|steps| steps.get("node_dispatch"))
+            .and_then(serde_json::Value::as_str),
+        Some("planned")
+    );
+    let runtime_pipeline = applied
+        .result
+        .get("runtime_pipeline")
+        .expect("release.install result should expose runtime pipeline status");
+    assert_eq!(
+        runtime_pipeline
+            .get("host_service")
+            .and_then(serde_json::Value::as_str),
+        Some("created")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("endpoint_allocation")
+            .and_then(serde_json::Value::as_str),
+        Some("created")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("endpoint")
+            .and_then(serde_json::Value::as_str),
+        Some("127.0.0.1:8080:gateway")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("release_package")
+            .and_then(|package| package.get("status"))
+            .and_then(serde_json::Value::as_str),
+        Some("planned")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("node_dispatch")
+            .and_then(serde_json::Value::as_str),
+        Some("planned")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("node_dispatch_result")
+            .and_then(|node| node.get("accepted"))
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("service_driver")
+            .and_then(|driver| driver.get("status"))
+            .and_then(serde_json::Value::as_str),
+        Some("PLANNED")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("health")
+            .and_then(|health| health.get("status"))
+            .and_then(serde_json::Value::as_str),
+        Some("deferred")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("gateway_route_update")
+            .and_then(serde_json::Value::as_str),
+        Some("planned")
+    );
+    assert_eq!(
+        store
+            .get_endpoint("127.0.0.1:8080:gateway")
+            .expect("get endpoint")
+            .expect("gateway endpoint stored")
+            .service_id,
         "gateway"
     );
     let stored_release = store
@@ -1336,6 +1759,13 @@ fn release_install_executor_records_release_resources() {
     assert_eq!(
         store.service_migration_records().len(),
         release.migrations.len()
+    );
+    assert!(
+        store
+            .service_migration_records()
+            .iter()
+            .all(|record| record.status == "registered"),
+        "release.install must not mark migrations applied until a real runner succeeds"
     );
     assert_eq!(
         store.service_permission_records().len(),
@@ -1378,11 +1808,2248 @@ fn release_install_executor_records_release_resources() {
     let logs = store.operation_logs("op-release-apply-with-resources");
     assert!(logs.iter().any(|log| log.step_id == "release:gateway"));
     assert!(logs.iter().any(|log| {
+        log.step_id == "release-package:gateway"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("planned")
+    }));
+    assert!(
+        logs.iter()
+            .any(|log| log.step_id == "install-pipeline:gateway")
+    );
+    assert!(logs.iter().any(|log| {
         log.data
             .get("frontend_enabled")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
     }));
+    assert!(logs.iter().any(|log| {
+        log.data
+            .get("node_dispatch")
+            .and_then(serde_json::Value::as_str)
+            == Some("planned")
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "gateway-routes:gateway"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("planned")
+            && log
+                .data
+                .get("reloaded")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "install-pipeline:gateway"
+            && log
+                .data
+                .get("gateway_route_update")
+                .and_then(serde_json::Value::as_str)
+                == Some("planned")
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "node-dispatch:gateway"
+            && log
+                .data
+                .get("accepted")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+    }));
+    assert!(logs.iter().any(|log| {
+        log.data
+            .get("health")
+            .and_then(|health| health.get("status"))
+            .and_then(serde_json::Value::as_str)
+            == Some("deferred")
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "driver:release.install"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("PLANNED")
+    }));
+}
+
+#[test]
+fn release_install_runtime_pipeline_result_covers_declared_resources() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/judge-api/service.yaml"))
+            .unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/judge-api/release.yaml")).unwrap();
+    assert!(
+        !release.migrations.is_empty()
+            && !release.permissions.is_empty()
+            && !release.routes.is_empty()
+            && !release.redis.is_empty()
+            && !release.storage.is_empty()
+            && release.frontend.enabled,
+        "judge-api release should cover the full runtime pipeline fixture"
+    );
+    let operation = release_install_operation_with_release(
+        "op-release-judge-api-runtime-pipeline",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("release install operation");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+    let applied = OperationExecutor::new(&mut store)
+        .apply("op-release-judge-api-runtime-pipeline")
+        .expect("apply release install");
+
+    let runtime_pipeline = applied
+        .result
+        .get("runtime_pipeline")
+        .expect("runtime pipeline result");
+    assert_eq!(
+        runtime_pipeline
+            .get("endpoint")
+            .and_then(serde_json::Value::as_str),
+        Some("127.0.0.1:8082:judge-api")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("migrations")
+            .and_then(|migrations| migrations.get("count"))
+            .and_then(serde_json::Value::as_u64),
+        Some(release.migrations.len() as u64)
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("migrations")
+            .and_then(|migrations| migrations.get("status"))
+            .and_then(serde_json::Value::as_str),
+        Some("deferred")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("permission_registration")
+            .and_then(serde_json::Value::as_str),
+        Some("skipped")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("auth_permission_registration")
+            .and_then(|registration| registration.get("registered"))
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("gateway_route_update")
+            .and_then(serde_json::Value::as_str),
+        Some("planned")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("gateway_route_publish")
+            .and_then(|publish| publish.get("route_count"))
+            .and_then(serde_json::Value::as_u64),
+        Some(release.routes.len() as u64)
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("frontend_registration")
+            .and_then(serde_json::Value::as_str),
+        Some("registry-only")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("redis_resources")
+            .and_then(serde_json::Value::as_str),
+        Some("skipped")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("redis_provision")
+            .and_then(|provision| provision.get("provisioned"))
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("storage_resources")
+            .and_then(serde_json::Value::as_str),
+        Some("skipped")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("storage_provision")
+            .and_then(|provision| provision.get("provisioned"))
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(0)
+    );
+
+    assert_eq!(
+        store.service_migration_records().len(),
+        release.migrations.len()
+    );
+    assert_eq!(
+        store.service_permission_records().len(),
+        release.permissions.len()
+    );
+    assert_eq!(store.service_routes().len(), release.routes.len());
+    assert_eq!(store.service_redis_resources().len(), release.redis.len());
+    assert_eq!(
+        store.service_storage_resources().len(),
+        release.storage.len()
+    );
+}
+
+#[test]
+fn release_install_runtime_pipeline_result_reports_configured_runtime_success() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/judge-api/service.yaml"))
+            .unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/judge-api/release.yaml")).unwrap();
+    assert!(
+        !release.migrations.is_empty()
+            && !release.permissions.is_empty()
+            && !release.routes.is_empty()
+            && !release.redis.is_empty()
+            && !release.storage.is_empty()
+            && release.frontend.enabled,
+        "judge-api release should cover the configured runtime pipeline fixture"
+    );
+    let operation = release_install_operation_with_release(
+        "op-release-judge-api-runtime-success",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("release install operation");
+
+    let auth_calls = Arc::new(Mutex::new(Vec::new()));
+    let redis_calls = Arc::new(Mutex::new(Vec::new()));
+    let storage_calls = Arc::new(Mutex::new(Vec::new()));
+    let migration_calls = Arc::new(Mutex::new(Vec::new()));
+    let gateway_calls = Arc::new(Mutex::new(Vec::new()));
+    let node_calls = Arc::new(Mutex::new(Vec::new()));
+    let migration_result = MigrationExecutionResult {
+        status: "applied".to_string(),
+        message: "recorded by configured runtime pipeline test".to_string(),
+        runner: "recording".to_string(),
+        dry_run: false,
+        executed: release
+            .migrations
+            .iter()
+            .map(|migration| MigrationExecutionRecord {
+                migration_version: migration.version.clone(),
+                path: migration.path.clone(),
+                checksum: migration.checksum.clone(),
+                status: "applied".to_string(),
+                applied_at: "applied".to_string(),
+                message: "applied by configured runtime pipeline test".to_string(),
+            })
+            .collect(),
+    };
+    let publisher = RecordingGatewayRoutePublisher {
+        calls: Arc::clone(&gateway_calls),
+        result: GatewayRoutePublishResult {
+            status: "published".to_string(),
+            message: "recorded by configured runtime pipeline test".to_string(),
+            endpoint: "http://gateway.test".to_string(),
+            route_count: 0,
+            reloaded: true,
+        },
+    };
+    let dispatcher = RecordingNodeServiceDispatcher {
+        calls: Arc::clone(&node_calls),
+        result: NodeServiceDispatchResult {
+            status: "ACCEPTED".to_string(),
+            message: "recorded by configured runtime pipeline test".to_string(),
+            endpoint: "127.0.0.1:8082:judge-api".to_string(),
+            accepted: true,
+        },
+    };
+
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+    let applied =
+        OperationExecutor::with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
+            &mut store,
+            StaticEndpointProbe,
+            RecordingAuthPermissionRegistrar {
+                calls: Arc::clone(&auth_calls),
+            },
+            RecordingRedisResourceProvisioner {
+                calls: Arc::clone(&redis_calls),
+            },
+            RecordingStorageResourceProvisioner {
+                calls: Arc::clone(&storage_calls),
+            },
+            RecordingMigrationRunner {
+                calls: Arc::clone(&migration_calls),
+                result: migration_result,
+            },
+            DeferredReleasePackageLoader,
+            publisher,
+            dispatcher,
+        )
+        .apply("op-release-judge-api-runtime-success")
+        .expect("apply release install with configured runtime providers");
+
+    let runtime_pipeline = applied
+        .result
+        .get("runtime_pipeline")
+        .expect("runtime pipeline result");
+    assert_eq!(
+        runtime_pipeline
+            .get("endpoint")
+            .and_then(serde_json::Value::as_str),
+        Some("127.0.0.1:8082:judge-api")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("migrations")
+            .and_then(|migrations| migrations.get("status"))
+            .and_then(serde_json::Value::as_str),
+        Some("applied")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("permission_registration")
+            .and_then(serde_json::Value::as_str),
+        Some("registered")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("auth_permission_registration")
+            .and_then(|registration| registration.get("registered"))
+            .and_then(serde_json::Value::as_u64),
+        Some(release.permissions.len() as u64)
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("gateway_route_update")
+            .and_then(serde_json::Value::as_str),
+        Some("published")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("gateway_route_publish")
+            .and_then(|publish| publish.get("reloaded"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("redis_resources")
+            .and_then(serde_json::Value::as_str),
+        Some("created")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("redis_provision")
+            .and_then(|provision| provision.get("provisioned"))
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(release.redis.len())
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("storage_resources")
+            .and_then(serde_json::Value::as_str),
+        Some("ensured")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("storage_provision")
+            .and_then(|provision| provision.get("provisioned"))
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(release.storage.len())
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("node_dispatch")
+            .and_then(serde_json::Value::as_str),
+        Some("ACCEPTED")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("node_dispatch_result")
+            .and_then(|node| node.get("accepted"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("service_driver")
+            .and_then(|driver| driver.get("status"))
+            .and_then(serde_json::Value::as_str),
+        Some("PLANNED")
+    );
+    assert_eq!(
+        runtime_pipeline
+            .get("health")
+            .and_then(|health| health.get("status"))
+            .and_then(serde_json::Value::as_str),
+        Some("deferred")
+    );
+
+    assert_eq!(auth_calls.lock().expect("auth calls").len(), 1);
+    assert_eq!(
+        auth_calls.lock().expect("auth calls")[0].permissions.len(),
+        release.permissions.len()
+    );
+    assert_eq!(redis_calls.lock().expect("redis calls").len(), 1);
+    assert_eq!(
+        redis_calls.lock().expect("redis calls")[0].resources.len(),
+        release.redis.len()
+    );
+    assert_eq!(storage_calls.lock().expect("storage calls").len(), 1);
+    assert_eq!(
+        storage_calls.lock().expect("storage calls")[0]
+            .resources
+            .len(),
+        release.storage.len()
+    );
+    assert_eq!(migration_calls.lock().expect("migration calls").len(), 1);
+    assert_eq!(
+        migration_calls.lock().expect("migration calls")[0]
+            .migrations
+            .len(),
+        release.migrations.len()
+    );
+    assert_eq!(gateway_calls.lock().expect("gateway calls").len(), 1);
+    assert_eq!(
+        gateway_calls.lock().expect("gateway calls")[0].routes.len(),
+        release.routes.len()
+    );
+    let node_calls = node_calls.lock().expect("node calls");
+    assert_eq!(node_calls.len(), 1);
+    assert_eq!(node_calls[0].endpoint.endpoint, "127.0.0.1:8082:judge-api");
+    assert_eq!(node_calls[0].endpoint.service_id, "judge-api");
+    assert_eq!(node_calls[0].host_service.host_ip, "127.0.0.1");
+    assert_eq!(node_calls[0].host_service.service_name, "judge-api");
+    drop(node_calls);
+
+    assert!(
+        store
+            .service_migration_records()
+            .iter()
+            .all(|record| record.status == "applied")
+    );
+    assert_eq!(
+        store
+            .get_host_service("127.0.0.1", "judge-api")
+            .expect("get host service")
+            .expect("host service")
+            .status,
+        "planned"
+    );
+    assert!(
+        store
+            .get_endpoint("127.0.0.1:8082:judge-api")
+            .expect("get endpoint")
+            .is_some()
+    );
+}
+
+#[test]
+fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
+    let root = repo_root();
+    let service_paths = [
+        ("auth-service", "services/auth-service/service.yaml"),
+        ("storage-service", "services/storage-service/service.yaml"),
+        ("judge-api", "services/judge-api/service.yaml"),
+        ("judge-worker", "services/judge-worker/service.yaml"),
+        ("gateway", "services/gateway/service.yaml"),
+    ];
+    let services = service_paths
+        .iter()
+        .map(|(service_name, path)| {
+            (
+                *service_name,
+                validate_service_manifest_file(&root, Path::new(path))
+                    .expect("minimal stack service manifest"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let releases = service_paths
+        .iter()
+        .map(|(service_name, path)| {
+            (
+                *service_name,
+                validate_service_release_file(
+                    &root,
+                    Path::new(path).with_file_name("release.yaml").as_path(),
+                )
+                .expect("minimal stack release manifest"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let total_permissions = releases
+        .iter()
+        .map(|(_, release)| release.permissions.len())
+        .sum::<usize>();
+    let total_routes = releases
+        .iter()
+        .map(|(_, release)| release.routes.len())
+        .sum::<usize>();
+    let total_migrations = releases
+        .iter()
+        .map(|(_, release)| release.migrations.len())
+        .sum::<usize>();
+    let total_redis = releases
+        .iter()
+        .map(|(_, release)| release.redis.len())
+        .sum::<usize>();
+    let total_storage = releases
+        .iter()
+        .map(|(_, release)| release.storage.len())
+        .sum::<usize>();
+
+    assert!(total_permissions > 0);
+    assert!(total_routes > 0);
+    assert!(total_migrations > 0);
+    assert!(total_redis > 0);
+    assert!(total_storage > 0);
+    assert!(
+        releases
+            .iter()
+            .any(|(service_name, release)| *service_name == "judge-worker"
+                && release
+                    .redis
+                    .iter()
+                    .any(|redis| redis.kind == "consumer-group")),
+        "judge-worker release must declare the consumer group side of the judge queue"
+    );
+
+    let auth_calls = Arc::new(Mutex::new(Vec::new()));
+    let redis_calls = Arc::new(Mutex::new(Vec::new()));
+    let storage_calls = Arc::new(Mutex::new(Vec::new()));
+    let migration_calls = Arc::new(Mutex::new(Vec::new()));
+    let gateway_calls = Arc::new(Mutex::new(Vec::new()));
+    let node_calls = Arc::new(Mutex::new(Vec::new()));
+    let mut store = MemoryOrchestratorStore::new();
+    let host_ip = "127.0.0.1";
+
+    for (index, (service_name, service)) in services.iter().enumerate() {
+        let release = releases
+            .iter()
+            .find(|(name, _)| name == service_name)
+            .map(|(_, release)| release)
+            .expect("release for service");
+        let operation_id = format!("op-stack-install-{service_name}");
+        let operation = release_install_operation_with_release(
+            &operation_id,
+            service,
+            Some(release),
+            &[],
+            host_ip,
+            None,
+            serde_json::json!({}),
+        )
+        .and_then(|operation| confirm_operation(&operation))
+        .expect("release install operation");
+        let endpoint = format!("{host_ip}:{}:{service_name}", service.endpoint.default_port);
+        let migration_result = MigrationExecutionResult {
+            status: if release.migrations.is_empty() {
+                "none".to_string()
+            } else {
+                "applied".to_string()
+            },
+            message: format!("recorded stack migration runner for {service_name}"),
+            runner: "recording".to_string(),
+            dry_run: false,
+            executed: release
+                .migrations
+                .iter()
+                .map(|migration| MigrationExecutionRecord {
+                    migration_version: migration.version.clone(),
+                    path: migration.path.clone(),
+                    checksum: migration.checksum.clone(),
+                    status: "applied".to_string(),
+                    applied_at: "applied".to_string(),
+                    message: format!("applied by stack runtime pipeline test for {service_name}"),
+                })
+                .collect(),
+        };
+
+        store.put_operation(operation).expect("put stack operation");
+        let applied =
+            OperationExecutor::with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
+                &mut store,
+                StaticEndpointProbe,
+                RecordingAuthPermissionRegistrar {
+                    calls: Arc::clone(&auth_calls),
+                },
+                RecordingRedisResourceProvisioner {
+                    calls: Arc::clone(&redis_calls),
+                },
+                RecordingStorageResourceProvisioner {
+                    calls: Arc::clone(&storage_calls),
+                },
+                RecordingMigrationRunner {
+                    calls: Arc::clone(&migration_calls),
+                    result: migration_result,
+                },
+                DeferredReleasePackageLoader,
+                RecordingGatewayRoutePublisher {
+                    calls: Arc::clone(&gateway_calls),
+                    result: GatewayRoutePublishResult {
+                        status: "published".to_string(),
+                        message: format!("recorded stack route publish for {service_name}"),
+                        endpoint: "http://gateway.test".to_string(),
+                        route_count: 0,
+                        reloaded: true,
+                    },
+                },
+                RecordingNodeServiceDispatcher {
+                    calls: Arc::clone(&node_calls),
+                    result: NodeServiceDispatchResult {
+                        status: "ACCEPTED".to_string(),
+                        message: format!("recorded stack node dispatch for {service_name}"),
+                        endpoint: endpoint.clone(),
+                        accepted: true,
+                    },
+                },
+            )
+            .apply(&operation_id)
+            .expect("apply stack release install");
+
+        let runtime_pipeline = applied
+            .result
+            .get("runtime_pipeline")
+            .expect("runtime pipeline result");
+        assert_eq!(
+            runtime_pipeline
+                .get("endpoint")
+                .and_then(serde_json::Value::as_str),
+            Some(endpoint.as_str())
+        );
+        assert_eq!(
+            runtime_pipeline
+                .get("node_dispatch")
+                .and_then(serde_json::Value::as_str),
+            Some("ACCEPTED")
+        );
+        assert_eq!(
+            runtime_pipeline
+                .get("service_driver")
+                .and_then(|driver| driver.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("PLANNED")
+        );
+        assert_eq!(
+            runtime_pipeline
+                .get("health")
+                .and_then(|health| health.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("deferred")
+        );
+        if release.migrations.is_empty() {
+            assert_eq!(
+                runtime_pipeline
+                    .get("migrations")
+                    .and_then(|migrations| migrations.get("status"))
+                    .and_then(serde_json::Value::as_str),
+                Some("none")
+            );
+        } else {
+            assert_eq!(
+                runtime_pipeline
+                    .get("migrations")
+                    .and_then(|migrations| migrations.get("status"))
+                    .and_then(serde_json::Value::as_str),
+                Some("applied")
+            );
+        }
+        assert_eq!(
+            store
+                .get_host_service(host_ip, service_name)
+                .expect("get stack host service")
+                .expect("stack host service")
+                .version,
+            release.version
+        );
+        assert!(
+            store
+                .get_endpoint(&endpoint)
+                .expect("get stack endpoint")
+                .is_some(),
+            "{service_name} endpoint should exist after install"
+        );
+        assert_eq!(
+            store.host_services().len(),
+            index + 1,
+            "stack installs should accumulate host service state"
+        );
+    }
+
+    assert_eq!(store.services().len(), service_paths.len());
+    assert_eq!(store.host_services().len(), service_paths.len());
+    assert_eq!(store.endpoints().len(), service_paths.len());
+    assert_eq!(store.service_releases().len(), service_paths.len());
+    assert_eq!(store.service_routes().len(), total_routes);
+    assert_eq!(store.service_migration_records().len(), total_migrations);
+    assert!(
+        store
+            .service_migration_records()
+            .iter()
+            .all(|record| record.status == "applied")
+    );
+    assert_eq!(store.service_permission_records().len(), total_permissions);
+    assert!(
+        store
+            .service_permission_records()
+            .iter()
+            .any(|permission| permission.service_name == "auth-service"
+                && permission.permission_key == "auth.admin")
+    );
+    assert!(
+        store
+            .service_permission_records()
+            .iter()
+            .any(|permission| permission.service_name == "judge-api"
+                && permission.permission_key == "judge.submit")
+    );
+    assert_eq!(store.service_redis_resources().len(), total_redis);
+    assert!(
+        store
+            .service_redis_resources()
+            .iter()
+            .any(|redis| redis.service_name == "judge-worker" && redis.kind == "consumer-group")
+    );
+    assert_eq!(store.service_storage_resources().len(), total_storage);
+    assert!(
+        store
+            .service_storage_resources()
+            .iter()
+            .any(|storage| storage.service_name == "storage-service"
+                && storage.bucket == "submissions")
+    );
+    assert!(
+        store.service_routes().iter().any(|route| {
+            route.target_service_name == "judge-api"
+                && route.target_type == "endpoint-group"
+                && route
+                    .target_selector
+                    .get("group")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("judge-api[*]")
+        }),
+        "gateway route registry should retain judge-api endpoint-group target"
+    );
+    assert_eq!(
+        auth_calls.lock().expect("auth calls").len(),
+        service_paths.len()
+    );
+    assert_eq!(
+        auth_calls
+            .lock()
+            .expect("auth calls")
+            .iter()
+            .map(|request| request.permissions.len())
+            .sum::<usize>(),
+        total_permissions
+    );
+    assert_eq!(
+        redis_calls.lock().expect("redis calls").len(),
+        releases
+            .iter()
+            .filter(|(_, release)| !release.redis.is_empty())
+            .count()
+    );
+    assert_eq!(
+        redis_calls
+            .lock()
+            .expect("redis calls")
+            .iter()
+            .map(|request| request.resources.len())
+            .sum::<usize>(),
+        total_redis
+    );
+    assert_eq!(
+        storage_calls.lock().expect("storage calls").len(),
+        releases
+            .iter()
+            .filter(|(_, release)| !release.storage.is_empty())
+            .count()
+    );
+    assert_eq!(
+        storage_calls
+            .lock()
+            .expect("storage calls")
+            .iter()
+            .map(|request| request.resources.len())
+            .sum::<usize>(),
+        total_storage
+    );
+    assert_eq!(
+        migration_calls.lock().expect("migration calls").len(),
+        releases
+            .iter()
+            .filter(|(_, release)| !release.migrations.is_empty())
+            .count()
+    );
+    assert_eq!(
+        migration_calls
+            .lock()
+            .expect("migration calls")
+            .iter()
+            .map(|request| request.migrations.len())
+            .sum::<usize>(),
+        total_migrations
+    );
+    assert_eq!(
+        gateway_calls.lock().expect("gateway calls").len(),
+        service_paths.len(),
+        "gateway route publisher refreshes once per service install"
+    );
+    assert_eq!(
+        gateway_calls
+            .lock()
+            .expect("gateway calls")
+            .iter()
+            .map(|request| request.routes.len())
+            .sum::<usize>(),
+        total_routes
+    );
+    assert_eq!(
+        node_calls.lock().expect("node calls").len(),
+        service_paths.len()
+    );
+    assert!(
+        node_calls
+            .lock()
+            .expect("node calls")
+            .iter()
+            .all(|request| request.endpoint.endpoint.ends_with(&request.service.id))
+    );
+}
+
+#[test]
+fn release_install_service_driver_execution_is_explicit_and_fail_fast() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("docker env lock");
+    let previous = std::env::var("OJOS_ORCHESTRATOR_DOCKER_BINARY").ok();
+    unsafe {
+        std::env::set_var(
+            "OJOS_ORCHESTRATOR_DOCKER_BINARY",
+            "ojos-docker-compose-missing",
+        );
+    }
+
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let request = ActionRequest::new(
+        "op-release-install-driver-exec",
+        "release.install",
+        [
+            ("service_id".to_string(), "gateway".to_string()),
+            ("execute_service_driver".to_string(), "true".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let operation = plan_action_request_with_releases(
+        &request,
+        std::slice::from_ref(&service),
+        std::slice::from_ref(&release),
+        &[],
+        &[],
+        None,
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
+        .apply("op-release-install-driver-exec")
+        .expect_err("missing docker binary should fail explicit release install execution");
+
+    let failed = store
+        .operation("op-release-install-driver-exec")
+        .expect("stored operation");
+    assert_eq!(failed.status, OperationStatus::Failed);
+    assert!(
+        failed
+            .error_message
+            .contains("fixed command failed to start")
+    );
+    assert!(
+        store
+            .operation_logs("op-release-install-driver-exec")
+            .iter()
+            .any(|record| record.step_id == "driver:release.install"
+                && record
+                    .data
+                    .get("action")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("release.install"))
+    );
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("OJOS_ORCHESTRATOR_DOCKER_BINARY", value),
+            None => std::env::remove_var("OJOS_ORCHESTRATOR_DOCKER_BINARY"),
+        }
+    }
+}
+
+#[test]
+fn release_install_loads_local_release_package_when_loader_is_configured() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let operation = release_install_operation_with_release(
+        "op-release-package-load",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+    OperationExecutor::with_runtime_provisioners_and_release_loader(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        LocalReleasePackageLoader::new(&root),
+    )
+    .apply("op-release-package-load")
+    .expect("apply release install");
+
+    let logs = store.operation_logs("op-release-package-load");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "release-package:gateway"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("loaded")
+            && log
+                .data
+                .get("manifest_loaded")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "install-pipeline:gateway"
+            && log
+                .data
+                .get("release_package")
+                .and_then(|value| value.get("status"))
+                .and_then(serde_json::Value::as_str)
+                == Some("loaded")
+    }));
+}
+
+#[test]
+fn release_install_dispatches_to_node_when_dispatcher_is_configured() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let operation = release_install_operation_with_release(
+        "op-release-node-dispatch",
+        &service,
+        Some(&release),
+        &[],
+        "10.77.0.2",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = RecordingNodeServiceDispatcher {
+        calls: calls.clone(),
+        result: NodeServiceDispatchResult {
+            status: "dispatched".to_string(),
+            message: "recorded by test node dispatcher".to_string(),
+            endpoint: "http://node-orchestrator.test".to_string(),
+            accepted: true,
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_runtime_provisioners_release_loader_and_node_dispatcher(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        dispatcher,
+    )
+    .apply("op-release-node-dispatch")
+    .expect("apply release install with node dispatch");
+
+    let calls = calls.lock().expect("node dispatch calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].service.id, "gateway");
+    assert_eq!(calls[0].host_service.host_ip, "10.77.0.2");
+    assert_eq!(calls[0].endpoint.endpoint, "10.77.0.2:8080:gateway");
+    assert_eq!(
+        calls[0]
+            .release
+            .as_ref()
+            .map(|manifest| manifest.service_name.as_str()),
+        Some("gateway")
+    );
+    assert_eq!(
+        calls[0]
+            .rendered_config
+            .get("external_steps")
+            .and_then(|steps| steps.get("node_dispatch"))
+            .and_then(serde_json::Value::as_str),
+        Some("planned")
+    );
+    let host_service = store
+        .get_host_service("10.77.0.2", "gateway")
+        .expect("get host service")
+        .expect("host service stored");
+    assert_eq!(
+        host_service
+            .config
+            .get("external_steps")
+            .and_then(|steps| steps.get("node_dispatch"))
+            .and_then(serde_json::Value::as_str),
+        Some("dispatched")
+    );
+    assert_eq!(
+        host_service
+            .config
+            .get("external_steps")
+            .and_then(|steps| steps.get("node"))
+            .and_then(|node| node.get("accepted"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    let logs = store.operation_logs("op-release-node-dispatch");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "node-dispatch:gateway"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("dispatched")
+            && log
+                .data
+                .get("accepted")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "install-pipeline:gateway"
+            && log
+                .data
+                .get("node_dispatch")
+                .and_then(serde_json::Value::as_str)
+                == Some("dispatched")
+    }));
+}
+
+#[test]
+fn release_install_fails_when_configured_node_dispatch_fails() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let operation = release_install_operation_with_release(
+        "op-release-node-dispatch-fails",
+        &service,
+        Some(&release),
+        &[],
+        "10.77.0.3",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = RecordingNodeServiceDispatcher {
+        calls: calls.clone(),
+        result: NodeServiceDispatchResult {
+            status: "FAILED".to_string(),
+            message: "node service driver failed".to_string(),
+            endpoint: "10.77.0.3:8080:gateway".to_string(),
+            accepted: true,
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+
+    let err = OperationExecutor::with_runtime_provisioners_release_loader_and_node_dispatcher(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        dispatcher,
+    )
+    .apply("op-release-node-dispatch-fails")
+    .expect_err("node dispatch failure should fail release install");
+
+    assert!(err.to_string().contains("node dispatch failed"));
+    let calls = calls.lock().expect("node dispatch calls");
+    assert_eq!(calls.len(), 1);
+    let operation = store
+        .get_operation("op-release-node-dispatch-fails")
+        .expect("get operation")
+        .expect("operation stored");
+    assert_eq!(operation.status, OperationStatus::Failed);
+    assert!(
+        operation
+            .error_message
+            .contains("node dispatch failed: node service driver failed")
+    );
+    let logs = store.operation_logs("op-release-node-dispatch-fails");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "node-dispatch:gateway"
+            && log.level == "error"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("FAILED")
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id.is_empty()
+            && log.level == "error"
+            && log.message.contains("node dispatch failed")
+    }));
+}
+
+#[test]
+fn release_install_publishes_gateway_routes_when_publisher_is_configured() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let operation = release_install_operation_with_release(
+        "op-release-gateway-publish",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let publisher = RecordingGatewayRoutePublisher {
+        calls: calls.clone(),
+        result: GatewayRoutePublishResult {
+            status: "published".to_string(),
+            message: "recorded by test gateway publisher".to_string(),
+            endpoint: "http://gateway.test".to_string(),
+            route_count: 0,
+            reloaded: true,
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        publisher,
+        DeferredNodeServiceDispatcher,
+    )
+    .apply("op-release-gateway-publish")
+    .expect("apply release install with gateway route publish");
+
+    let calls = calls.lock().expect("gateway publisher calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].operation_id, "op-release-gateway-publish");
+    assert_eq!(calls[0].service_name, "gateway");
+    assert_eq!(calls[0].routes.len(), release.routes.len());
+    assert!(
+        calls[0]
+            .routes
+            .iter()
+            .any(|route| route.target_service_name == "gateway"
+                && route.target_type == "endpoint-group"
+                && route
+                    .target_selector
+                    .get("group")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("gateway[*]")),
+        "gateway route publisher should receive release route records"
+    );
+    let logs = store.operation_logs("op-release-gateway-publish");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "gateway-routes:gateway"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("published")
+            && log
+                .data
+                .get("reloaded")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "install-pipeline:gateway"
+            && log
+                .data
+                .get("gateway_route_update")
+                .and_then(serde_json::Value::as_str)
+                == Some("published")
+            && log
+                .data
+                .get("gateway_route_publish")
+                .and_then(|value| value.get("reloaded"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    }));
+}
+
+#[test]
+fn release_install_fails_when_loaded_release_package_differs_from_operation_manifest() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
+    let mut release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    release.source.url = "services/auth-service".to_string();
+    let operation = release_install_operation_with_release(
+        "op-release-package-mismatch",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+    let err = OperationExecutor::with_runtime_provisioners_and_release_loader(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        LocalReleasePackageLoader::new(&root),
+    )
+    .apply("op-release-package-mismatch")
+    .expect_err("mismatched loaded release package should fail install");
+    assert!(
+        err.to_string().contains("does not match requested")
+            || err
+                .to_string()
+                .contains("differs from operation release_manifest")
+    );
+    let failed = store
+        .operation("op-release-package-mismatch")
+        .expect("stored operation");
+    assert_eq!(failed.status, OperationStatus::Failed);
+}
+
+#[test]
+fn local_release_package_loader_fetches_http_release_yaml() {
+    let root = repo_root();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let release_yaml =
+        fs::read_to_string(root.join("services/gateway/release.yaml")).expect("read release yaml");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind release package listener");
+    let url = format!(
+        "http://{}/release.yaml",
+        listener.local_addr().expect("release package addr")
+    );
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept release package request");
+        let mut buffer = [0_u8; 1024];
+        let _ = stream
+            .read(&mut buffer)
+            .expect("read release package request");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/yaml\r\nContent-Length: {}\r\n\r\n{}",
+            release_yaml.len(),
+            release_yaml
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write release package response");
+    });
+
+    let result = LocalReleasePackageLoader::new(&root)
+        .load_release_package(&ReleasePackageLoadRequest {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            source_url: url.clone(),
+            expected_manifest: Some(release),
+        })
+        .expect("http release package load");
+    handle.join().expect("release package listener thread");
+    assert_eq!(result.status, "loaded");
+    assert_eq!(result.source_url, url);
+    assert!(result.manifest_loaded);
+    assert!(result.checksum.starts_with("sha256:"));
+}
+
+#[test]
+fn local_release_package_loader_fetches_http_zip_release_package() {
+    let root = repo_root();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let release_yaml =
+        fs::read_to_string(root.join("services/gateway/release.yaml")).expect("read release yaml");
+    let package = zip_release_package(&[("gateway-release/release.yaml", release_yaml.as_str())]);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind release package listener");
+    let url = format!(
+        "http://{}/gateway-release.zip",
+        listener.local_addr().expect("release package addr")
+    );
+    let handle = thread::spawn({
+        let package = package.clone();
+        move || serve_bytes_once(listener, "application/zip", &package)
+    });
+
+    let result = LocalReleasePackageLoader::new(&root)
+        .load_release_package(&ReleasePackageLoadRequest {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            source_url: url.clone(),
+            expected_manifest: Some(release),
+        })
+        .expect("http zip release package load");
+    handle.join().expect("release package listener thread");
+    assert_eq!(result.status, "loaded");
+    assert_eq!(result.source_url, url);
+    assert!(result.manifest_loaded);
+    assert!(result.checksum.starts_with("sha256:"));
+}
+
+#[test]
+fn local_release_package_loader_rejects_zip_path_traversal() {
+    let root = repo_root();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let package = zip_release_package(&[("../release.yaml", "service_name: gateway\n")]);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind release package listener");
+    let url = format!(
+        "http://{}/unsafe-release.zip",
+        listener.local_addr().expect("release package addr")
+    );
+    let handle = thread::spawn({
+        let package = package.clone();
+        move || serve_bytes_once(listener, "application/zip", &package)
+    });
+
+    let err = LocalReleasePackageLoader::new(&root)
+        .load_release_package(&ReleasePackageLoadRequest {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            source_url: url,
+            expected_manifest: Some(release),
+        })
+        .expect_err("unsafe zip release package should fail load");
+    handle.join().expect("release package listener thread");
+    assert!(err.to_string().contains("escapes") || err.to_string().contains("traversal"));
+}
+
+#[test]
+fn local_release_package_loader_fails_on_http_error() {
+    let root = repo_root();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind release package listener");
+    let url = format!(
+        "http://{}/missing.yaml",
+        listener.local_addr().expect("release package addr")
+    );
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept release package request");
+        let mut buffer = [0_u8; 1024];
+        let _ = stream
+            .read(&mut buffer)
+            .expect("read release package request");
+        stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+            .expect("write release package response");
+    });
+
+    let err = LocalReleasePackageLoader::new(&root)
+        .load_release_package(&ReleasePackageLoadRequest {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            source_url: url,
+            expected_manifest: Some(release),
+        })
+        .expect_err("http release package error should fail load");
+    handle.join().expect("release package listener thread");
+    assert!(err.to_string().contains("http 404"));
+}
+
+fn serve_bytes_once(listener: TcpListener, content_type: &str, body: &[u8]) {
+    let (mut stream, _) = listener.accept().expect("accept release package request");
+    let mut buffer = [0_u8; 1024];
+    let _ = stream
+        .read(&mut buffer)
+        .expect("read release package request");
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
+        content_type,
+        body.len()
+    );
+    stream
+        .write_all(response.as_bytes())
+        .expect("write release package response headers");
+    stream
+        .write_all(body)
+        .expect("write release package response body");
+}
+
+fn zip_release_package(entries: &[(&str, &str)]) -> Vec<u8> {
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut archive = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default();
+    for (path, content) in entries {
+        archive
+            .start_file(path, options)
+            .expect("start release package zip entry");
+        archive
+            .write_all(content.as_bytes())
+            .expect("write release package zip entry");
+    }
+    archive
+        .finish()
+        .expect("finish release package zip")
+        .into_inner()
+}
+
+#[test]
+fn release_install_registers_permissions_with_auth_registrar() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let request = ActionRequest::new(
+        "op-release-auth-registration",
+        "release.install",
+        [("service_id".to_string(), "gateway".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    let operation = plan_action_request_with_releases(
+        &request,
+        std::slice::from_ref(&service),
+        std::slice::from_ref(&release),
+        &[],
+        &[],
+        None,
+    )
+    .expect("release-aware operation");
+    let confirmed = confirm_operation(&operation).expect("confirm release install");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registrar = RecordingAuthPermissionRegistrar {
+        calls: Arc::clone(&calls),
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(confirmed).expect("put operation");
+
+    OperationExecutor::with_endpoint_probe_and_auth_registrar(
+        &mut store,
+        StaticEndpointProbe,
+        registrar,
+    )
+    .apply("op-release-auth-registration")
+    .expect("apply release install");
+
+    let calls = calls.lock().expect("auth permission calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].service_name, "gateway");
+    assert_eq!(calls[0].permissions, release.permissions);
+    drop(calls);
+
+    let logs = store.operation_logs("op-release-auth-registration");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "auth-permissions:gateway"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("registered")
+            && log
+                .data
+                .get("registered")
+                .and_then(serde_json::Value::as_u64)
+                == Some(release.permissions.len() as u64)
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "install-pipeline:gateway"
+            && log
+                .data
+                .get("permission_registration")
+                .and_then(serde_json::Value::as_str)
+                == Some("registered")
+            && log
+                .data
+                .get("auth_permission_registration")
+                .and_then(|value| value.get("endpoint"))
+                .and_then(serde_json::Value::as_str)
+                == Some("http://auth-service.test")
+    }));
+}
+
+#[test]
+fn http_auth_permission_registrar_posts_release_permissions_to_auth_service() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local auth test listener");
+    let endpoint = format!("http://{}", listener.local_addr().expect("auth test addr"));
+    let captured = Arc::new(Mutex::new(String::new()));
+    let captured_for_thread = Arc::clone(&captured);
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept auth request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("auth request read timeout");
+        let mut body = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let bytes = stream.read(&mut buffer).expect("read auth request");
+            if bytes == 0 {
+                break;
+            }
+            body.extend_from_slice(&buffer[..bytes]);
+            if http_request_body_is_complete(&body) {
+                break;
+            }
+        }
+        *captured_for_thread.lock().expect("captured auth request") =
+            String::from_utf8(body).expect("auth request utf8");
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 25\r\nContent-Type: application/json\r\n\r\n{\"code\":0,\"msg\":\"ok\"}\n",
+            )
+            .expect("write auth response");
+    });
+
+    let registrar = HttpAuthPermissionRegistrar::new(endpoint, "secret-admin-token")
+        .with_timeout(Duration::from_secs(2));
+    let request = AuthPermissionRegistration {
+        service_name: "judge-api".to_string(),
+        permissions: vec!["judge.submit".to_string(), "judge.read".to_string()],
+    };
+    let result = registrar
+        .register_permissions(&request)
+        .expect("auth permission registration");
+    handle.join().expect("auth listener thread");
+
+    assert_eq!(result.status, "registered");
+    assert_eq!(result.registered, 2);
+    let request_text = captured.lock().expect("captured auth request");
+    assert!(request_text.starts_with("POST /auth/admin/services/judge-api/permissions "));
+    assert!(
+        request_text
+            .to_ascii_lowercase()
+            .contains("authorization: bearer secret-admin-token")
+    );
+    assert!(request_text.contains("\"code\":\"judge.submit\""));
+    assert!(request_text.contains("\"code\":\"judge.read\""));
+    assert!(request_text.contains("\"default_role_bindings\":[]"));
+    assert!(
+        !request_text.contains("system.admin"),
+        "orchestrator must not pre-seed unrelated permissions"
+    );
+}
+
+#[test]
+fn release_install_executes_migrations_with_runner() {
+    let service = valid_service();
+    let mut release = valid_release_for_service(&service);
+    release.migrations = vec![ReleaseMigrationDecl {
+        version: "0001".to_string(),
+        path: "services/demo-api/migrations/0001.sql".to_string(),
+        checksum: "len:18".to_string(),
+        destructive: false,
+    }];
+    let operation = release_install_operation_with_release(
+        "op-release-migration-runner",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .expect("release install operation");
+    let confirmed = confirm_operation(&operation).expect("confirm release install");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = RecordingMigrationRunner {
+        calls: Arc::clone(&calls),
+        result: MigrationExecutionResult {
+            status: "applied".to_string(),
+            message: "recorded by test migration runner".to_string(),
+            runner: "recording".to_string(),
+            dry_run: false,
+            executed: vec![MigrationExecutionRecord {
+                migration_version: "0001".to_string(),
+                path: "services/demo-api/migrations/0001.sql".to_string(),
+                checksum: "len:18".to_string(),
+                status: "applied".to_string(),
+                applied_at: "applied".to_string(),
+                message: "applied by test".to_string(),
+            }],
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(confirmed).expect("put operation");
+
+    OperationExecutor::with_runtime_provisioners(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        runner,
+    )
+    .apply("op-release-migration-runner")
+    .expect("apply release install");
+
+    let calls = calls.lock().expect("migration runner calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].service_name, "demo-api");
+    assert_eq!(calls[0].migrations[0].version, "0001");
+    drop(calls);
+
+    let records = store.service_migration_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, "applied");
+    assert_eq!(records[0].applied_at, "applied");
+    let logs = store.operation_logs("op-release-migration-runner");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "migrations:demo-api"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("applied")
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "install-pipeline:demo-api"
+            && log
+                .data
+                .get("migrations")
+                .and_then(|value| value.get("status"))
+                .and_then(serde_json::Value::as_str)
+                == Some("applied")
+    }));
+}
+
+#[test]
+fn release_install_marks_failed_migration_and_fails_operation() {
+    let service = valid_service();
+    let mut release = valid_release_for_service(&service);
+    release.migrations = vec![ReleaseMigrationDecl {
+        version: "0001".to_string(),
+        path: "services/demo-api/migrations/0001.sql".to_string(),
+        checksum: String::new(),
+        destructive: false,
+    }];
+    let operation = release_install_operation_with_release(
+        "op-release-migration-failure",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = FailingMigrationRunner {
+        calls: Arc::clone(&calls),
+        message: "synthetic migration failure".to_string(),
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_runtime_provisioners(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        runner,
+    )
+    .apply("op-release-migration-failure")
+    .expect_err("migration failure should fail release install");
+
+    assert_eq!(calls.lock().expect("migration calls").len(), 1);
+    let failed = store
+        .get_operation("op-release-migration-failure")
+        .expect("get operation")
+        .expect("operation");
+    assert_eq!(failed.status, OperationStatus::Failed);
+    assert!(failed.error_message.contains("synthetic migration failure"));
+    let records = store.service_migration_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, "failed");
+    let logs = store.operation_logs("op-release-migration-failure");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "migrations:demo-api"
+            && log.level == "error"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("failed")
+    }));
+}
+
+#[test]
+fn failed_release_install_rollback_removes_partial_pipeline_state() {
+    let service = valid_service();
+    let mut release = valid_release_for_service(&service);
+    release.frontend = ReleaseFrontendDecl {
+        enabled: true,
+        route_prefix: "/demo-ui".to_string(),
+        remote_entry: "/assets/demo-api/remoteEntry.js".to_string(),
+        menu_items: vec!["demo".to_string()],
+    };
+    release.migrations = vec![ReleaseMigrationDecl {
+        version: "0001".to_string(),
+        path: "services/demo-api/migrations/0001.sql".to_string(),
+        checksum: "sha256:demo".to_string(),
+        destructive: false,
+    }];
+    release.redis = vec![ReleaseRedisDecl {
+        name: "judge-tasks".to_string(),
+        kind: "stream".to_string(),
+        usage: "demo judge task stream".to_string(),
+    }];
+    release.storage = vec![ReleaseStorageDecl {
+        object_type: "submission-source".to_string(),
+        bucket: "submissions".to_string(),
+        path_prefix: "/demo".to_string(),
+    }];
+    let operation = release_install_operation_with_release(
+        "op-release-install-partial-rollback",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+    let runner = RecordingMigrationRunner {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        result: MigrationExecutionResult {
+            status: "applied".to_string(),
+            message: "recorded by test migration runner".to_string(),
+            runner: "recording".to_string(),
+            dry_run: false,
+            executed: vec![MigrationExecutionRecord {
+                migration_version: "0001".to_string(),
+                path: "services/demo-api/migrations/0001.sql".to_string(),
+                checksum: "sha256:demo".to_string(),
+                status: "applied".to_string(),
+                applied_at: "applied".to_string(),
+                message: "applied by test".to_string(),
+            }],
+        },
+    };
+    let dispatcher = RecordingNodeServiceDispatcher {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        result: NodeServiceDispatchResult {
+            status: "FAILED".to_string(),
+            message: "node runtime rejected install".to_string(),
+            endpoint: "127.0.0.1:18080:demo-api".to_string(),
+            accepted: true,
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_runtime_provisioners_release_loader_and_node_dispatcher(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        runner,
+        DeferredReleasePackageLoader,
+        dispatcher,
+    )
+    .apply("op-release-install-partial-rollback")
+    .expect_err("node dispatch failure should fail release install");
+
+    assert!(store.get_service("demo-api").unwrap().is_some());
+    assert!(
+        store
+            .get_host_service("127.0.0.1", "demo-api")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .get_endpoint("127.0.0.1:18080:demo-api")
+            .unwrap()
+            .is_some()
+    );
+    assert!(!store.service_routes().is_empty());
+    assert!(!store.service_migration_records().is_empty());
+    assert!(!store.service_permission_records().is_empty());
+
+    let rolled_back = OperationExecutor::new(&mut store)
+        .rollback("op-release-install-partial-rollback")
+        .expect("rollback failed release install");
+    assert_eq!(rolled_back.status, OperationStatus::RolledBack);
+    assert!(store.get_service("demo-api").unwrap().is_none());
+    assert!(
+        store
+            .get_host_service("127.0.0.1", "demo-api")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_endpoint("127.0.0.1:18080:demo-api")
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.service_routes().is_empty());
+    assert!(store.service_migration_records().is_empty());
+    assert!(store.service_permission_records().is_empty());
+    assert!(store.service_frontend_entries().is_empty());
+    assert!(store.service_redis_resources().is_empty());
+    assert!(store.service_storage_resources().is_empty());
+    assert!(store.rendered_service_configs().is_empty());
+    assert!(store.service_releases().is_empty());
+}
+
+#[test]
+fn destructive_release_migration_requires_confirmation() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("migrations")).expect("migration dir");
+    fs::create_dir_all(dir.path().join("services/demo-api/migrations")).expect("migration dir");
+    fs::write(
+        dir.path().join("services/demo-api/migrations/0001.sql"),
+        "DROP TABLE demo;\n",
+    )
+    .expect("migration sql");
+    let runner = LocalSqlMigrationRunner::new(dir.path()).with_dry_run(true);
+    let err = runner
+        .execute_migrations(&MigrationExecutionRequest {
+            service_name: "demo-api".to_string(),
+            migrations: vec![ReleaseMigrationDecl {
+                version: "0001".to_string(),
+                path: "services/demo-api/migrations/0001.sql".to_string(),
+                checksum: "len:17".to_string(),
+                destructive: true,
+            }],
+            release_source_url: "local://services/demo-api".to_string(),
+            dry_run: false,
+            allow_destructive: false,
+        })
+        .expect_err("destructive migration requires explicit allowance");
+    assert!(
+        err.to_string()
+            .contains("destructive migration 0001 requires")
+    );
+}
+
+#[test]
+fn local_sql_migration_runner_dry_run_validates_checksum() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("services/demo-api/migrations")).expect("migration dir");
+    fs::write(
+        dir.path().join("services/demo-api/migrations/0001.sql"),
+        "SELECT 1;\n",
+    )
+    .expect("migration sql");
+    let runner = LocalSqlMigrationRunner::new(dir.path()).with_dry_run(true);
+
+    let result = runner
+        .execute_migrations(&MigrationExecutionRequest {
+            service_name: "demo-api".to_string(),
+            migrations: vec![ReleaseMigrationDecl {
+                version: "0001".to_string(),
+                path: "services/demo-api/migrations/0001.sql".to_string(),
+                checksum: "sha256:b4e0497804e46e0a0b0b8c31975b062152d551bac49c3c2e80932567b4085dcd"
+                    .to_string(),
+                destructive: false,
+            }],
+            release_source_url: "local://services/demo-api".to_string(),
+            dry_run: false,
+            allow_destructive: false,
+        })
+        .expect("dry-run migration validates");
+
+    assert_eq!(result.status, "dry-run");
+    assert_eq!(result.executed[0].status, "dry-run");
+    let err = runner
+        .execute_migrations(&MigrationExecutionRequest {
+            service_name: "demo-api".to_string(),
+            migrations: vec![ReleaseMigrationDecl {
+                version: "0001".to_string(),
+                path: "services/demo-api/migrations/0001.sql".to_string(),
+                checksum: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+                destructive: false,
+            }],
+            release_source_url: "local://services/demo-api".to_string(),
+            dry_run: false,
+            allow_destructive: false,
+        })
+        .expect_err("checksum mismatch should fail");
+    assert!(err.to_string().contains("checksum mismatch"));
+}
+
+#[test]
+fn release_install_rollback_records_migration_rollback_unsupported() {
+    let service = valid_service();
+    let mut release = valid_release_for_service(&service);
+    release.migrations = vec![ReleaseMigrationDecl {
+        version: "0001".to_string(),
+        path: "services/demo-api/migrations/0001.sql".to_string(),
+        checksum: String::new(),
+        destructive: false,
+    }];
+    let operation = release_install_operation_with_release(
+        "op-release-migration-rollback",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+    let runner = RecordingMigrationRunner {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        result: MigrationExecutionResult {
+            status: "applied".to_string(),
+            message: "recorded by test migration runner".to_string(),
+            runner: "recording".to_string(),
+            dry_run: false,
+            executed: vec![MigrationExecutionRecord {
+                migration_version: "0001".to_string(),
+                path: "services/demo-api/migrations/0001.sql".to_string(),
+                checksum: String::new(),
+                status: "applied".to_string(),
+                applied_at: "applied".to_string(),
+                message: "applied by test".to_string(),
+            }],
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+    OperationExecutor::with_runtime_provisioners(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        runner,
+    )
+    .apply("op-release-migration-rollback")
+    .expect("apply release install");
+
+    let rolled_back = OperationExecutor::new(&mut store)
+        .rollback("op-release-migration-rollback")
+        .expect("rollback release install");
+    assert_eq!(rolled_back.status, OperationStatus::RolledBack);
+    let logs = store.operation_logs("op-release-migration-rollback");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "migration-rollback:unsupported"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("unsupported")
+    }));
+}
+
+#[test]
+fn release_install_provisions_redis_resources_with_runtime_provisioner() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/judge-worker/service.yaml"))
+            .unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/judge-worker/release.yaml"))
+            .unwrap();
+    let request = ActionRequest::new(
+        "op-release-redis-provision",
+        "release.install",
+        [("service_id".to_string(), "judge-worker".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    let operation = plan_action_request_with_releases(
+        &request,
+        std::slice::from_ref(&service),
+        std::slice::from_ref(&release),
+        &[],
+        &[],
+        None,
+    )
+    .expect("release-aware operation");
+    let confirmed = confirm_operation(&operation).expect("confirm release install");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let redis = RecordingRedisResourceProvisioner {
+        calls: Arc::clone(&calls),
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(confirmed).expect("put operation");
+
+    OperationExecutor::with_runtime_provisioners(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        redis,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+    )
+    .apply("op-release-redis-provision")
+    .expect("apply release install");
+
+    let calls = calls.lock().expect("redis provision calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].service_name, "judge-worker");
+    assert_eq!(calls[0].resources.len(), release.redis.len());
+    assert_eq!(calls[0].resources[0].kind, "consumer-group");
+    drop(calls);
+
+    let logs = store.operation_logs("op-release-redis-provision");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "redis-resources:judge-worker"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("created")
+            && log
+                .data
+                .get("provisioned")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("consumer_group")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("judge-workers")
+                    })
+                })
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "install-pipeline:judge-worker"
+            && log
+                .data
+                .get("redis_resources")
+                .and_then(serde_json::Value::as_str)
+                == Some("created")
+            && log
+                .data
+                .get("redis_provision")
+                .and_then(|value| value.get("endpoint"))
+                .and_then(serde_json::Value::as_str)
+                == Some("127.0.0.1:6379")
+    }));
+}
+
+#[test]
+fn tcp_redis_provisioner_creates_judge_stream_and_consumer_group() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local redis test listener");
+    let endpoint = listener.local_addr().expect("redis test addr").to_string();
+    let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured_thread = Arc::clone(&captured);
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept redis command");
+        let mut buffer = [0_u8; 512];
+        let bytes = stream.read(&mut buffer).expect("read redis command");
+        captured_thread
+            .lock()
+            .expect("captured redis command")
+            .push(
+                std::str::from_utf8(&buffer[..bytes])
+                    .expect("redis command utf8")
+                    .to_string(),
+            );
+        stream.write_all(b"+OK\r\n").expect("write redis ok");
+    });
+
+    let provisioner = TcpRedisResourceProvisioner::new(endpoint);
+    let result = provisioner
+        .provision_resources(&RedisProvisionRequest {
+            service_name: "judge-worker".to_string(),
+            resources: vec![ServiceRedisResource {
+                service_name: "judge-worker".to_string(),
+                name: "redis".to_string(),
+                kind: "consumer-group".to_string(),
+                usage: "judge task workers".to_string(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            }],
+        })
+        .expect("provision redis resource");
+    handle.join().expect("redis listener thread");
+
+    assert_eq!(result.status, "created");
+    assert_eq!(result.provisioned[0].stream, "ojos:judge:submissions");
+    assert_eq!(result.provisioned[0].consumer_group, "judge-workers");
+    let command = captured.lock().expect("captured redis command").join("\n");
+    assert!(command.contains("XGROUP"));
+    assert!(command.contains("CREATE"));
+    assert!(command.contains("ojos:judge:submissions"));
+    assert!(command.contains("judge-workers"));
+    assert!(command.contains("MKSTREAM"));
+}
+
+#[test]
+fn release_install_provisions_storage_resources_with_runtime_provisioner() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/storage-service/service.yaml"))
+            .unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/storage-service/release.yaml"))
+            .unwrap();
+    let request = ActionRequest::new(
+        "op-release-storage-provision",
+        "release.install",
+        [("service_id".to_string(), "storage-service".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    let operation = plan_action_request_with_releases(
+        &request,
+        std::slice::from_ref(&service),
+        std::slice::from_ref(&release),
+        &[],
+        &[],
+        None,
+    )
+    .expect("release-aware operation");
+    let confirmed = confirm_operation(&operation).expect("confirm release install");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let storage = RecordingStorageResourceProvisioner {
+        calls: Arc::clone(&calls),
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(confirmed).expect("put operation");
+
+    OperationExecutor::with_runtime_provisioners(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        storage,
+        DeferredMigrationRunner,
+    )
+    .apply("op-release-storage-provision")
+    .expect("apply release install");
+
+    let calls = calls.lock().expect("storage provision calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].service_name, "storage-service");
+    assert_eq!(calls[0].resources.len(), release.storage.len());
+    assert!(
+        calls[0]
+            .resources
+            .iter()
+            .any(|resource| resource.bucket == "submissions")
+    );
+    drop(calls);
+
+    let logs = store.operation_logs("op-release-storage-provision");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "storage-resources:storage-service"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("ensured")
+            && log
+                .data
+                .get("provisioned")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("bucket").and_then(serde_json::Value::as_str)
+                            == Some("submissions")
+                    })
+                })
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "install-pipeline:storage-service"
+            && log
+                .data
+                .get("storage_resources")
+                .and_then(serde_json::Value::as_str)
+                == Some("ensured")
+            && log
+                .data
+                .get("storage_provision")
+                .and_then(|value| value.get("endpoint"))
+                .and_then(serde_json::Value::as_str)
+                == Some("http://storage-service.test")
+    }));
+}
+
+#[test]
+fn http_storage_provisioner_ensures_declared_buckets() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local storage test listener");
+    let endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("storage test addr")
+    );
+    let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured_thread = Arc::clone(&captured);
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept storage request");
+        let mut buffer = [0_u8; 1024];
+        let bytes = stream.read(&mut buffer).expect("read storage request");
+        captured_thread
+            .lock()
+            .expect("captured storage request")
+            .push(
+                std::str::from_utf8(&buffer[..bytes])
+                    .expect("storage request utf8")
+                    .to_string(),
+            );
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 41\r\n\r\n{\"bucket\":\"submissions\",\"created\":true}",
+            )
+            .expect("write storage response");
+    });
+
+    let provisioner = HttpStorageResourceProvisioner::new(endpoint);
+    let result = provisioner
+        .provision_resources(&StorageProvisionRequest {
+            service_name: "storage-service".to_string(),
+            resources: vec![ServiceStorageResource {
+                service_name: "storage-service".to_string(),
+                object_type: "submission-code".to_string(),
+                bucket: "submissions".to_string(),
+                path_prefix: String::new(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            }],
+        })
+        .expect("provision storage resource");
+    handle.join().expect("storage listener thread");
+
+    assert_eq!(result.status, "ensured");
+    assert_eq!(result.provisioned[0].bucket, "submissions");
+    let request = captured
+        .lock()
+        .expect("captured storage request")
+        .join("\n");
+    assert!(request.starts_with("PUT /api/storage/buckets/submissions "));
 }
 
 #[test]
@@ -1536,6 +4203,29 @@ fn release_install_rollback_restores_previous_registry_resources() {
         created_at: String::new(),
         updated_at: String::new(),
     };
+    let old_host_service = HostService {
+        host_ip: "127.0.0.1".to_string(),
+        service_name: "gateway".to_string(),
+        version: "0.0.9".to_string(),
+        status: "running".to_string(),
+        config: serde_json::json!({ "old": true }),
+        labels: serde_json::json!({ "source": "old-release" }),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let old_endpoint = Endpoint {
+        endpoint: "127.0.0.1:18080:gateway".to_string(),
+        service_id: "gateway".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "healthy".to_string(),
+        reachable: true,
+        display_name: "Old Gateway".to_string(),
+        note: String::new(),
+        config: serde_json::json!({ "old": true }),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
 
     let request = ActionRequest::new(
         "op-release-rollback-restores-registry",
@@ -1557,6 +4247,10 @@ fn release_install_rollback_restores_previous_registry_resources() {
 
     let mut store = MemoryOrchestratorStore::new();
     store.put_service(old_service).expect("seed old service");
+    store
+        .upsert_host_service(old_host_service)
+        .expect("seed old host service");
+    store.put_endpoint(old_endpoint).expect("seed old endpoint");
     store
         .upsert_service_release(old_release)
         .expect("seed old release");
@@ -1591,6 +4285,21 @@ fn release_install_rollback_restores_previous_registry_resources() {
         store.get_service("gateway").unwrap().unwrap().version,
         new_release.version
     );
+    assert_eq!(
+        store
+            .get_endpoint("127.0.0.1:8080:gateway")
+            .unwrap()
+            .unwrap()
+            .service_id,
+        "gateway"
+    );
+    assert!(
+        store
+            .get_endpoint("127.0.0.1:18080:gateway")
+            .unwrap()
+            .is_none(),
+        "old endpoint should be replaced during release install"
+    );
     assert!(
         store
             .service_routes()
@@ -1611,6 +4320,29 @@ fn release_install_rollback_restores_previous_registry_resources() {
     assert_eq!(
         store.get_service("gateway").unwrap().unwrap().version,
         "0.0.9"
+    );
+    assert_eq!(
+        store
+            .get_host_service("127.0.0.1", "gateway")
+            .unwrap()
+            .unwrap()
+            .version,
+        "0.0.9"
+    );
+    assert!(
+        store
+            .get_endpoint("127.0.0.1:8080:gateway")
+            .unwrap()
+            .is_none(),
+        "new endpoint should be removed during rollback"
+    );
+    assert_eq!(
+        store
+            .get_endpoint("127.0.0.1:18080:gateway")
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "Old Gateway"
     );
     assert!(
         store
@@ -2653,6 +5385,7 @@ fn operation_workbench_context_can_load_from_store_state() {
             health_path: "/health".to_string(),
         },
         migrations: Vec::new(),
+        apis: Vec::new(),
         permissions: vec!["demo.read".to_string()],
         routes: vec![ReleaseRouteDecl {
             path: "/api/gateway/**".to_string(),
@@ -2664,6 +5397,7 @@ fn operation_workbench_context_can_load_from_store_state() {
         redis: Vec::new(),
         storage: Vec::new(),
         dependencies: Vec::new(),
+        required_apis: Vec::new(),
         config_schema: serde_json::json!({}),
         secrets: Vec::new(),
         observability: ReleaseObservabilityDecl::default(),
@@ -5124,6 +7858,291 @@ fn link_create_update_delete_and_health_write_store() {
     );
 }
 
+#[derive(Clone, Copy)]
+enum RegistryKind {
+    Route,
+    Frontend,
+    Migration,
+    Permission,
+    Redis,
+    Storage,
+    Config,
+}
+
+impl RegistryKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Route => "route",
+            Self::Frontend => "frontend",
+            Self::Migration => "migration",
+            Self::Permission => "permission",
+            Self::Redis => "redis",
+            Self::Storage => "storage",
+            Self::Config => "config",
+        }
+    }
+
+    fn create_fields(self) -> Vec<(&'static str, &'static str)> {
+        match self {
+            Self::Route => vec![
+                ("route_id", "gateway-auth"),
+                ("service_id", "gateway"),
+                ("path", "/api/auth/**"),
+                ("method", "ANY"),
+                ("target", "gateway[*]"),
+                ("permission", "gateway.read"),
+            ],
+            Self::Frontend => vec![
+                ("frontend_id", "gateway-shell"),
+                ("service_id", "gateway"),
+                ("route_prefix", "/"),
+                ("remote_entry", "/assets/gateway/remoteEntry.js"),
+            ],
+            Self::Migration => vec![
+                ("migration_id", "gateway-0001"),
+                ("service_id", "gateway"),
+                ("version", "0001"),
+                ("checksum", "sha256:old"),
+            ],
+            Self::Permission => vec![
+                ("permission_id", "gateway.read"),
+                ("service_id", "gateway"),
+                ("source", "manual"),
+            ],
+            Self::Redis => vec![
+                ("resource_id", "gateway-events"),
+                ("service_id", "gateway"),
+                ("kind", "stream"),
+                ("usage", "events"),
+            ],
+            Self::Storage => vec![
+                ("resource_id", "gateway-object"),
+                ("service_id", "gateway"),
+                ("bucket", "gateway-bucket"),
+                ("path_prefix", "/gateway"),
+            ],
+            Self::Config => vec![
+                ("config_id", "gateway-default"),
+                ("service_id", "gateway"),
+                ("version", "default"),
+                ("config", r#"{"mode":"old"}"#),
+            ],
+        }
+    }
+
+    fn update_fields(self) -> Vec<(&'static str, &'static str)> {
+        match self {
+            Self::Route => vec![
+                ("route_id", "gateway-auth"),
+                ("service_id", "gateway"),
+                ("path", "/api/auth/**"),
+                ("method", "ANY"),
+                ("target", "gateway[*]"),
+                ("permission", "gateway.admin"),
+            ],
+            Self::Frontend => vec![
+                ("frontend_id", "gateway-shell"),
+                ("service_id", "gateway"),
+                ("route_prefix", "/"),
+                ("remote_entry", "/assets/gateway/v2/remoteEntry.js"),
+            ],
+            Self::Migration => vec![
+                ("migration_id", "gateway-0001"),
+                ("service_id", "gateway"),
+                ("version", "0001"),
+                ("checksum", "sha256:new"),
+            ],
+            Self::Permission => vec![
+                ("permission_id", "gateway.read"),
+                ("service_id", "gateway"),
+                ("source", "release"),
+            ],
+            Self::Redis => vec![
+                ("resource_id", "gateway-events"),
+                ("service_id", "gateway"),
+                ("kind", "consumer-group"),
+                ("usage", "updated events"),
+            ],
+            Self::Storage => vec![
+                ("resource_id", "gateway-object"),
+                ("service_id", "gateway"),
+                ("bucket", "gateway-bucket-v2"),
+                ("path_prefix", "/gateway/v2"),
+            ],
+            Self::Config => vec![
+                ("config_id", "gateway-default"),
+                ("service_id", "gateway"),
+                ("version", "default"),
+                ("config", r#"{"mode":"new"}"#),
+            ],
+        }
+    }
+
+    fn delete_fields(self) -> Vec<(&'static str, &'static str)> {
+        match self {
+            Self::Route => vec![("route_id", "ANY /api/auth/**")],
+            Self::Frontend => vec![("frontend_id", "gateway:/")],
+            Self::Migration => vec![("migration_id", "gateway@0001")],
+            Self::Permission => vec![("permission_id", "gateway.read")],
+            Self::Redis => vec![("resource_id", "gateway:gateway-events")],
+            Self::Storage => vec![("resource_id", "gateway:gateway-object:gateway-bucket")],
+            Self::Config => vec![("config_id", "gateway@default")],
+        }
+    }
+
+    fn exists(self, store: &MemoryOrchestratorStore) -> bool {
+        match self {
+            Self::Route => store
+                .service_routes()
+                .iter()
+                .any(|item| item.path == "/api/auth/**" && item.target_service_name == "gateway"),
+            Self::Frontend => store
+                .service_frontend_entries()
+                .iter()
+                .any(|item| item.service_name == "gateway"),
+            Self::Migration => store
+                .service_migration_records()
+                .iter()
+                .any(|item| item.service_name == "gateway" && item.migration_version == "0001"),
+            Self::Permission => store.service_permission_records().iter().any(|item| {
+                item.service_name == "gateway" && item.permission_key == "gateway.read"
+            }),
+            Self::Redis => store
+                .service_redis_resources()
+                .iter()
+                .any(|item| item.service_name == "gateway" && item.name == "gateway-events"),
+            Self::Storage => store
+                .service_storage_resources()
+                .iter()
+                .any(|item| item.service_name == "gateway" && item.object_type == "gateway-object"),
+            Self::Config => store
+                .rendered_service_configs()
+                .iter()
+                .any(|item| item.service_name == "gateway" && item.version == "default"),
+        }
+    }
+
+    fn updated(self, store: &MemoryOrchestratorStore) -> bool {
+        match self {
+            Self::Route => store
+                .service_routes()
+                .iter()
+                .any(|item| item.path == "/api/auth/**" && item.permission == "gateway.admin"),
+            Self::Frontend => store
+                .service_frontend_entries()
+                .iter()
+                .any(|item| item.remote_entry == "/assets/gateway/v2/remoteEntry.js"),
+            Self::Migration => store
+                .service_migration_records()
+                .iter()
+                .any(|item| item.checksum == "sha256:new"),
+            Self::Permission => store
+                .service_permission_records()
+                .iter()
+                .any(|item| item.permission_key == "gateway.read" && item.source == "release"),
+            Self::Redis => store
+                .service_redis_resources()
+                .iter()
+                .any(|item| item.name == "gateway-events" && item.kind == "consumer-group"),
+            Self::Storage => store.service_storage_resources().iter().any(|item| {
+                item.object_type == "gateway-object" && item.bucket == "gateway-bucket-v2"
+            }),
+            Self::Config => store.rendered_service_configs().iter().any(|item| {
+                item.config.get("mode").and_then(serde_json::Value::as_str) == Some("new")
+            }),
+        }
+    }
+}
+
+fn dispatch_confirmed(
+    store: &mut MemoryOrchestratorStore,
+    action: &str,
+    operation_id: &str,
+    fields: Vec<(&str, &str)>,
+) {
+    let mut fields = fields;
+    fields.push(("confirm", "true"));
+    OrchestratorActionDispatcher::with_endpoint_probe(store, StaticEndpointProbe)
+        .dispatch(request(action, operation_id, &fields))
+        .expect("dispatch confirmed registry action");
+}
+
+#[test]
+fn registry_subresource_crud_apply_and_rollback_paths_are_store_backed() {
+    for kind in [
+        RegistryKind::Route,
+        RegistryKind::Frontend,
+        RegistryKind::Migration,
+        RegistryKind::Permission,
+        RegistryKind::Redis,
+        RegistryKind::Storage,
+        RegistryKind::Config,
+    ] {
+        let mut store = dispatcher_store_with_services();
+        let label = kind.label();
+
+        dispatch_confirmed(
+            &mut store,
+            &format!("{label}.create"),
+            &format!("op-{label}-create"),
+            kind.create_fields(),
+        );
+        assert!(
+            kind.exists(&store),
+            "{label}.create should persist registry resource"
+        );
+        OperationExecutor::new(&mut store)
+            .rollback(&format!("op-{label}-create"))
+            .expect("rollback create");
+        assert!(
+            !kind.exists(&store),
+            "{label}.create rollback should remove newly-created registry resource"
+        );
+
+        dispatch_confirmed(
+            &mut store,
+            &format!("{label}.create"),
+            &format!("op-{label}-create-again"),
+            kind.create_fields(),
+        );
+        dispatch_confirmed(
+            &mut store,
+            &format!("{label}.update"),
+            &format!("op-{label}-update"),
+            kind.update_fields(),
+        );
+        assert!(
+            kind.updated(&store),
+            "{label}.update should mutate registry resource"
+        );
+        OperationExecutor::new(&mut store)
+            .rollback(&format!("op-{label}-update"))
+            .expect("rollback update");
+        assert!(
+            kind.exists(&store) && !kind.updated(&store),
+            "{label}.update rollback should restore previous registry state"
+        );
+
+        dispatch_confirmed(
+            &mut store,
+            &format!("{label}.delete"),
+            &format!("op-{label}-delete"),
+            kind.delete_fields(),
+        );
+        assert!(
+            !kind.exists(&store),
+            "{label}.delete should remove registry resource"
+        );
+        OperationExecutor::new(&mut store)
+            .rollback(&format!("op-{label}-delete"))
+            .expect("rollback delete");
+        assert!(
+            kind.exists(&store),
+            "{label}.delete rollback should restore registry resource"
+        );
+    }
+}
+
 #[test]
 fn set_expand_apply_are_not_formal_console_actions() {
     let root = repo_root();
@@ -5293,7 +8312,7 @@ fn action_console_release_install_uses_loaded_release_manifest() {
 fn orchestrator_database_migration_contains_only_formal_tables() {
     let root = repo_root();
     let sql = fs::read_to_string(
-        root.join("deploy/orchestrator-migrations/000001_orchestrator_schema.up.sql"),
+        root.join("services/orchestrator/migrations/000001_orchestrator_schema.up.sql"),
     )
     .expect("orchestrator migration");
     let report = inspect_orchestrator_schema(&sql).expect("schema should be service-first");
@@ -5339,7 +8358,7 @@ fn orchestrator_database_migration_contains_only_formal_tables() {
 }
 
 #[test]
-fn compose_separates_orchestrator_and_oj_databases() {
+fn compose_separates_orchestrator_and_service_databases() {
     let root = repo_root();
     let compose = fs::read_to_string(root.join("deploy/compose/docker-compose.yml"))
         .expect("compose file should exist");
@@ -5352,9 +8371,15 @@ fn compose_separates_orchestrator_and_oj_databases() {
 
     for service_name in [
         "orchestrator-db",
-        "postgresql",
+        "auth-db",
+        "problem-db",
+        "judge-db",
+        "user-db",
         "orchestrator-migrations",
-        "oj-migrations",
+        "auth-service-migrations",
+        "problem-service-migrations",
+        "judge-api-migrations",
+        "user-service-migrations",
     ] {
         assert!(
             services
@@ -5370,44 +8395,152 @@ fn compose_separates_orchestrator_and_oj_databases() {
         ))
         .expect("orchestrator-migrations service");
     assert!(
-        yaml_text(orchestrator_migrations).contains("../orchestrator-migrations:/migrations:ro"),
-        "orchestrator migrations must mount only deploy/orchestrator-migrations"
+        yaml_text(orchestrator_migrations)
+            .contains("../../services/orchestrator/migrations:/migrations:ro"),
+        "orchestrator migrations must mount only service-local migrations"
     );
     assert!(
         yaml_text(orchestrator_migrations).contains("ORCHESTRATOR_DATABASE_URL"),
         "orchestrator migrations must use ORCHESTRATOR_DATABASE_URL"
     );
 
-    let oj_migrations = services
-        .get(serde_yaml::Value::String("oj-migrations".to_string()))
-        .expect("oj-migrations service");
     assert!(
-        yaml_text(oj_migrations).contains("../oj-migrations:/migrations:ro"),
-        "OJ migrations must mount only deploy/oj-migrations"
-    );
-    assert!(
-        yaml_text(oj_migrations).contains("OJ_DATABASE_URL"),
-        "OJ migrations must use OJ_DATABASE_URL"
+        !services
+            .keys()
+            .any(|key| key.as_str() == Some("oj-migrations") || key.as_str() == Some("postgresql")),
+        "compose must not use one centralized OJ database or migration job"
     );
 
-    for service_name in ["gateway", "auth-service", "problem-service", "judge-api"] {
+    for (database_service, database_name, password_env) in [
+        ("auth-db", "ojos_auth", "AUTH_POSTGRES_PASSWORD"),
+        ("problem-db", "ojos_problem", "PROBLEM_POSTGRES_PASSWORD"),
+        ("judge-db", "ojos_judge", "JUDGE_POSTGRES_PASSWORD"),
+        ("user-db", "ojos_user", "USER_POSTGRES_PASSWORD"),
+    ] {
+        let service = services
+            .get(serde_yaml::Value::String(database_service.to_string()))
+            .unwrap_or_else(|| panic!("compose missing service {database_service}"));
+        let text = yaml_text(service);
+        assert!(
+            text.contains(&format!("POSTGRES_DB: ${{")) && text.contains(database_name),
+            "{database_service} must initialize its own service database {database_name}"
+        );
+        assert!(
+            text.contains(password_env),
+            "{database_service} must use a service-owned password environment variable"
+        );
+        assert!(
+            text.contains(&format!("{database_service}-data:/var/lib/postgresql/data")),
+            "{database_service} must use its own database volume"
+        );
+    }
+
+    for (migration_service, mount, database_env, database_host) in [
+        (
+            "orchestrator-migrations",
+            "../../services/orchestrator/migrations:/migrations:ro",
+            "ORCHESTRATOR_DATABASE_URL",
+            "orchestrator-db",
+        ),
+        (
+            "auth-service-migrations",
+            "../../services/auth-service/migrations:/migrations:ro",
+            "AUTH_DATABASE_URL",
+            "auth-db",
+        ),
+        (
+            "problem-service-migrations",
+            "../../services/problem-service/migrations:/migrations:ro",
+            "PROBLEM_DATABASE_URL",
+            "problem-db",
+        ),
+        (
+            "judge-api-migrations",
+            "../../services/judge-api/migrations:/migrations:ro",
+            "JUDGE_DATABASE_URL",
+            "judge-db",
+        ),
+        (
+            "user-service-migrations",
+            "../../services/user-service/migrations:/migrations:ro",
+            "USER_DATABASE_URL",
+            "user-db",
+        ),
+    ] {
+        let service = services
+            .get(serde_yaml::Value::String(migration_service.to_string()))
+            .unwrap_or_else(|| panic!("compose missing service {migration_service}"));
+        let text = yaml_text(service);
+        assert!(
+            text.contains(mount),
+            "{migration_service} must mount only its service-local migrations"
+        );
+        assert!(
+            text.contains(database_env),
+            "{migration_service} must use its service-owned database URL"
+        );
+        assert!(
+            text.contains(database_host),
+            "{migration_service} must point at {database_host}"
+        );
+    }
+
+    for (service_name, database_env) in [
+        ("auth-service", "AUTH_DATABASE_URL"),
+        ("problem-service", "PROBLEM_DATABASE_URL"),
+        ("judge-api", "JUDGE_DATABASE_URL"),
+        ("user-service", "USER_DATABASE_URL"),
+    ] {
         let service = services
             .get(serde_yaml::Value::String(service_name.to_string()))
             .unwrap_or_else(|| panic!("compose missing service {service_name}"));
         let text = yaml_text(service);
         assert!(
-            text.contains("OJ_DATABASE_URL"),
-            "{service_name} must use OJ_DATABASE_URL for business data"
+            text.contains(database_env),
+            "{service_name} must use its service-owned database URL"
+        );
+        assert!(
+            !text.contains("OJ_DATABASE_URL"),
+            "{service_name} must not use a shared OJ_DATABASE_URL"
         );
         assert!(
             !text.contains("ORCHESTRATOR_DATABASE_URL"),
             "{service_name} must not receive ORCHESTRATOR_DATABASE_URL"
         );
     }
+
+    let gateway = services
+        .get(serde_yaml::Value::String("gateway".to_string()))
+        .expect("compose missing service gateway");
+    let gateway_text = yaml_text(gateway);
+    for database_env in [
+        "AUTH_DATABASE_URL",
+        "PROBLEM_DATABASE_URL",
+        "JUDGE_DATABASE_URL",
+        "USER_DATABASE_URL",
+        "ORCHESTRATOR_DATABASE_URL",
+        "OJ_DATABASE_URL",
+    ] {
+        assert!(
+            !gateway_text.contains(database_env),
+            "gateway must not receive service-owned database URL {database_env}"
+        );
+    }
+    assert!(
+        gateway_text.contains("AUTH_SERVICE_ENDPOINT"),
+        "gateway must call auth-service API instead of reading the auth database"
+    );
+
+    assert!(
+        !root
+            .join("deploy/postgresql-init/001_service_databases.sql")
+            .exists(),
+        "service databases must be initialized by service-owned Postgres containers"
+    );
 }
 
 #[test]
-fn oj_migrations_do_not_create_orchestrator_tables() {
+fn service_local_migrations_stay_inside_service_database_boundaries() {
     let root = repo_root();
     let forbidden_table_patterns = ORCHESTRATOR_TABLES
         .iter()
@@ -5434,33 +8567,84 @@ fn oj_migrations_do_not_create_orchestrator_tables() {
         "'launcher.disable'",
         "'service_manager'",
     ];
+    let migration_roots = [
+        (
+            "auth-service",
+            "services/auth-service/migrations",
+            Vec::<&str>::new(),
+        ),
+        (
+            "problem-service",
+            "services/problem-service/migrations",
+            vec!["references users", "from users", "join users"],
+        ),
+        (
+            "judge-api",
+            "services/judge-api/migrations",
+            vec![
+                "references users",
+                "references problems",
+                "references test_cases",
+                "from problems",
+                "join problems",
+                "from users",
+                "join users",
+            ],
+        ),
+        (
+            "user-service",
+            "services/user-service/migrations",
+            vec![
+                "references users",
+                "references problems",
+                "references submissions",
+                "from users",
+                "join users",
+                "from problems",
+                "join problems",
+                "from submissions",
+                "join submissions",
+            ],
+        ),
+    ];
 
-    for entry in fs::read_dir(root.join("deploy/oj-migrations")).expect("oj migrations") {
-        let entry = entry.expect("migration entry");
-        if entry.path().extension().and_then(|value| value.to_str()) != Some("sql") {
-            continue;
-        }
-        let sql = fs::read_to_string(entry.path()).expect("read oj migration");
-        let lowered = sql.to_lowercase();
-        for item in &forbidden_table_patterns {
-            assert!(
-                !lowered.contains(item),
-                "{} must not create or write orchestrator table pattern {item}",
-                entry
-                    .file_name()
-                    .to_str()
-                    .expect("migration file name should be UTF-8")
-            );
-        }
-        for item in forbidden_permission_patterns {
-            assert!(
-                !lowered.contains(item),
-                "{} must not seed orchestrator or launcher permission {item}",
-                entry
-                    .file_name()
-                    .to_str()
-                    .expect("migration file name should be UTF-8")
-            );
+    for (service_name, migration_root, forbidden_cross_service_patterns) in migration_roots {
+        for entry in fs::read_dir(root.join(migration_root))
+            .unwrap_or_else(|_| panic!("{service_name} migrations should exist"))
+        {
+            let entry = entry.expect("migration entry");
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("sql") {
+                continue;
+            }
+            let sql = fs::read_to_string(entry.path()).expect("read service migration");
+            let lowered = sql.to_lowercase();
+            for item in &forbidden_table_patterns {
+                assert!(
+                    !lowered.contains(item),
+                    "{} must not create or write orchestrator table pattern {item}",
+                    entry
+                        .file_name()
+                        .to_str()
+                        .expect("migration file name should be UTF-8")
+                );
+            }
+            for item in forbidden_permission_patterns {
+                assert!(
+                    !lowered.contains(item),
+                    "{} must not seed orchestrator or launcher permission {item}",
+                    entry
+                        .file_name()
+                        .to_str()
+                        .expect("migration file name should be UTF-8")
+                );
+            }
+            for item in &forbidden_cross_service_patterns {
+                assert!(
+                    !lowered.contains(item),
+                    "{} migration must not depend on cross-service database object pattern {item}",
+                    service_name
+                );
+            }
         }
     }
 }
@@ -5507,6 +8691,18 @@ fn database_write_plan_maps_store_objects_to_formal_tables() {
             updated_at: String::new(),
         })
         .expect("put endpoint");
+    store
+        .upsert_host_service(HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: "gateway".to_string(),
+            version: "0.1.0".to_string(),
+            status: "running".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({"source": "test"}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put host service");
     store
         .put_endpoint(Endpoint {
             endpoint: "127.0.0.1:8083:problem-service".to_string(),
@@ -5658,6 +8854,51 @@ fn database_write_plan_maps_store_objects_to_formal_tables() {
         })
         .expect("put rendered config");
     store
+        .upsert_node(NodeRecord {
+            node_id: "root".to_string(),
+            host_ip: "127.0.0.1".to_string(),
+            parent_node_id: String::new(),
+            role: "root".to_string(),
+            labels: serde_json::json!({}),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put node");
+    store
+        .upsert_service_api_surface(ServiceApiSurface {
+            service_name: "problem-service".to_string(),
+            version: "0.1.0".to_string(),
+            api_id: "problem.problem.read".to_string(),
+            protocol: "http".to_string(),
+            port_name: "http".to_string(),
+            path_prefix: "/api/problem/problems".to_string(),
+            methods: vec!["GET".to_string()],
+            visibility: "descendants".to_string(),
+            auth_mode: "user".to_string(),
+            permission: "problem.problem.read".to_string(),
+            stability: "stable".to_string(),
+            api_version: "v1".to_string(),
+            rate_limit: String::new(),
+            timeout: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put api surface");
+    store
+        .upsert_deployed_service_api(DeployedServiceApi {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: "problem-service".to_string(),
+            version: "0.1.0".to_string(),
+            endpoint: "127.0.0.1:8083:problem-service".to_string(),
+            api_id: "problem.problem.read".to_string(),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put deployed api");
+    store
         .append_operation_log(operation_log_record(
             "op-health-gateway",
             "info",
@@ -5694,6 +8935,9 @@ fn database_write_plan_maps_store_objects_to_formal_tables() {
         ("RedisResource", "service_redis_resources"),
         ("StorageResource", "service_storage_resources"),
         ("RenderedConfig", "rendered_service_configs"),
+        ("Node", "nodes"),
+        ("ServiceApiSurface", "service_api_surfaces"),
+        ("DeployedServiceApi", "deployed_service_apis"),
         ("Operation", "orchestrator_operations"),
         ("OperationLog", "orchestrator_operation_logs"),
         ("Topology", "topology_snapshots"),
@@ -6175,10 +9419,11 @@ fn docker_compose_driver_runs_only_when_explicitly_enabled() {
         .with_docker_binary_for_test("ojos-docker-compose-missing")
         .with_execution_enabled()
         .execute(&request)
-        .expect_err("explicit execution should surface fixed command start errors");
+        .expect("explicit execution should return structured driver failure");
+    assert_eq!(missing_binary.status, "FAILED");
     assert!(
         missing_binary
-            .to_string()
+            .message
             .contains("docker compose fixed command failed to start")
     );
 }
@@ -7327,6 +10572,224 @@ fn reconcile_loop_runs_bounded_ticks_and_can_stop() {
     );
 }
 
+#[test]
+fn node_tree_resolves_ancestors_descendants_and_rejects_cycles() {
+    let mut store = MemoryOrchestratorStore::new();
+    put_test_node(&mut store, "root", "10.0.0.1", "", "root");
+    put_test_node(&mut store, "child", "10.0.0.2", "root", "node");
+    put_test_node(&mut store, "grandchild", "10.0.0.3", "child", "node");
+    put_test_node(&mut store, "sibling", "10.0.0.4", "root", "node");
+    put_test_node(&mut store, "standalone", "10.0.0.5", "", "standalone");
+
+    assert!(
+        store
+            .ancestors_of("root")
+            .expect("root ancestors")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .ancestors_of("child")
+            .expect("child ancestors")
+            .into_iter()
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        vec!["root"]
+    );
+    assert_eq!(
+        store
+            .ancestors_of("grandchild")
+            .expect("grandchild ancestors")
+            .into_iter()
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        vec!["child", "root"]
+    );
+    assert!(
+        !store
+            .ancestors_of("grandchild")
+            .expect("grandchild ancestors")
+            .iter()
+            .any(|node| node.node_id == "sibling")
+    );
+    assert!(
+        store
+            .ancestors_of("standalone")
+            .expect("standalone ancestors")
+            .is_empty()
+    );
+    assert!(
+        store
+            .upsert_node(test_node("orphan", "10.0.0.6", "missing", "node"))
+            .expect_err("missing parent should fail")
+            .to_string()
+            .contains("parent node missing not found")
+    );
+
+    let mut cyclic = MemoryOrchestratorStore::new();
+    put_test_node(&mut cyclic, "root", "10.0.1.1", "", "root");
+    put_test_node(&mut cyclic, "a", "10.0.1.2", "root", "node");
+    put_test_node(&mut cyclic, "b", "10.0.1.3", "a", "node");
+    assert!(
+        cyclic
+            .upsert_node(test_node("a", "10.0.1.2", "b", "node"))
+            .expect_err("cycle should fail")
+            .to_string()
+            .contains("cycle")
+    );
+}
+
+#[test]
+fn effective_api_view_exposes_running_ancestor_descendant_apis_only() {
+    let mut store = MemoryOrchestratorStore::new();
+    put_test_node(&mut store, "root", "10.1.0.1", "", "root");
+    put_test_node(&mut store, "child", "10.1.0.2", "root", "node");
+    put_test_node(&mut store, "sibling", "10.1.0.3", "root", "node");
+    put_test_node(&mut store, "grandchild", "10.1.0.4", "child", "node");
+
+    put_test_service_and_endpoint(
+        &mut store,
+        "storage-service",
+        "10.1.0.1:8085:storage-service",
+        "10.1.0.1",
+    );
+    put_test_service_and_endpoint(
+        &mut store,
+        "judge-worker",
+        "10.1.0.2:8090:judge-worker",
+        "10.1.0.2",
+    );
+    put_test_service_and_endpoint(
+        &mut store,
+        "sibling-storage",
+        "10.1.0.3:8085:sibling-storage",
+        "10.1.0.3",
+    );
+    put_test_service_and_endpoint(
+        &mut store,
+        "child-api",
+        "10.1.0.2:8088:child-api",
+        "10.1.0.2",
+    );
+    put_test_service_and_endpoint(
+        &mut store,
+        "grandchild-api",
+        "10.1.0.4:8089:grandchild-api",
+        "10.1.0.4",
+    );
+
+    put_test_api(
+        &mut store,
+        "storage-service",
+        "storage.object.get",
+        "/api/storage/objects",
+        "descendants",
+        "storage.object.read",
+        "10.1.0.1:8085:storage-service",
+        "running",
+    );
+    put_test_api(
+        &mut store,
+        "storage-service",
+        "storage.object.put",
+        "/api/storage/objects",
+        "descendants",
+        "storage.object.write",
+        "10.1.0.1:8085:storage-service",
+        "running",
+    );
+    put_test_api(
+        &mut store,
+        "storage-service",
+        "storage.private.admin",
+        "/api/storage/admin",
+        "private",
+        "storage.admin",
+        "10.1.0.1:8085:storage-service",
+        "running",
+    );
+    put_test_api(
+        &mut store,
+        "sibling-storage",
+        "storage.sibling.get",
+        "/api/sibling-storage/objects",
+        "descendants",
+        "storage.object.read",
+        "10.1.0.3:8085:sibling-storage",
+        "running",
+    );
+    put_test_api(
+        &mut store,
+        "child-api",
+        "child.local",
+        "/api/child",
+        "same-node",
+        "public",
+        "10.1.0.2:8088:child-api",
+        "running",
+    );
+    put_test_api(
+        &mut store,
+        "grandchild-api",
+        "grandchild.local",
+        "/api/grandchild",
+        "same-node",
+        "public",
+        "10.1.0.4:8089:grandchild-api",
+        "running",
+    );
+
+    let routes = store
+        .effective_api_routes("child")
+        .expect("child effective routes");
+    let api_ids = routes
+        .iter()
+        .map(|route| route.api_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(api_ids.contains(&"storage.object.get"));
+    assert!(api_ids.contains(&"storage.object.put"));
+    assert!(api_ids.contains(&"child.local"));
+    assert!(!api_ids.contains(&"storage.sibling.get"));
+    assert!(!api_ids.contains(&"storage.private.admin"));
+    assert!(!api_ids.contains(&"grandchild.local"));
+    assert_eq!(
+        routes
+            .iter()
+            .find(|route| route.api_id == "storage.object.get")
+            .map(|route| (
+                route.provider_node_id.as_str(),
+                route.provider_endpoint.as_str(),
+                route.distance
+            )),
+        Some(("root", "10.1.0.1:8085:storage-service", 1))
+    );
+    assert!(
+        store.links().is_empty(),
+        "effective view does not require manual link"
+    );
+
+    store
+        .upsert_deployed_service_api(DeployedServiceApi {
+            host_ip: "10.1.0.1".to_string(),
+            service_name: "storage-service".to_string(),
+            version: "0.1.0".to_string(),
+            endpoint: "10.1.0.1:8085:storage-service".to_string(),
+            api_id: "storage.object.get".to_string(),
+            status: "stopped".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("stop storage get api");
+    let routes = store
+        .effective_api_routes("child")
+        .expect("child effective routes after stop");
+    assert!(
+        !routes
+            .iter()
+            .any(|route| route.api_id == "storage.object.get")
+    );
+}
+
 fn local_http_endpoint(health_path: &str, response: &'static str) -> Endpoint {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local http listener");
     let socket_addr = listener.local_addr().expect("local addr").to_string();
@@ -7353,4 +10816,150 @@ fn local_http_endpoint(health_path: &str, response: &'static str) -> Endpoint {
         created_at: String::new(),
         updated_at: String::new(),
     }
+}
+
+fn test_node(node_id: &str, host_ip: &str, parent_node_id: &str, role: &str) -> NodeRecord {
+    NodeRecord {
+        node_id: node_id.to_string(),
+        host_ip: host_ip.to_string(),
+        parent_node_id: parent_node_id.to_string(),
+        role: role.to_string(),
+        labels: serde_json::json!({}),
+        status: "running".to_string(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+fn put_test_node(
+    store: &mut MemoryOrchestratorStore,
+    node_id: &str,
+    host_ip: &str,
+    parent_node_id: &str,
+    role: &str,
+) {
+    store
+        .upsert_node(test_node(node_id, host_ip, parent_node_id, role))
+        .expect("put test node");
+}
+
+fn put_test_service_and_endpoint(
+    store: &mut MemoryOrchestratorStore,
+    service_id: &str,
+    endpoint: &str,
+    host_ip: &str,
+) {
+    let mut service = valid_service();
+    service.id = service_id.to_string();
+    service.name = service_id.to_string();
+    service.endpoint.default_port = parse_endpoint_id(endpoint)
+        .expect("endpoint identity")
+        .port
+        .parse()
+        .expect("endpoint port");
+    service.permissions = vec![
+        "storage.object.read".to_string(),
+        "storage.object.write".to_string(),
+        "storage.admin".to_string(),
+        "public".to_string(),
+    ];
+    store
+        .put_service(service.clone())
+        .expect("put test service");
+    store
+        .upsert_host_service(HostService {
+            host_ip: host_ip.to_string(),
+            service_name: service_id.to_string(),
+            version: service.version.clone(),
+            status: "running".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put host service");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: endpoint.to_string(),
+            service_id: service_id.to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: service_id.to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+}
+
+fn put_test_api(
+    store: &mut MemoryOrchestratorStore,
+    service_name: &str,
+    api_id: &str,
+    path_prefix: &str,
+    visibility: &str,
+    permission: &str,
+    endpoint: &str,
+    status: &str,
+) {
+    store
+        .upsert_service_api_surface(ServiceApiSurface {
+            service_name: service_name.to_string(),
+            version: "0.1.0".to_string(),
+            api_id: api_id.to_string(),
+            protocol: "http".to_string(),
+            port_name: "http".to_string(),
+            path_prefix: path_prefix.to_string(),
+            methods: vec!["GET".to_string()],
+            visibility: visibility.to_string(),
+            auth_mode: if permission == "public" {
+                "public".to_string()
+            } else {
+                "service".to_string()
+            },
+            permission: permission.to_string(),
+            stability: "stable".to_string(),
+            api_version: "v1".to_string(),
+            rate_limit: String::new(),
+            timeout: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put api surface");
+    let host_ip = parse_endpoint_id(endpoint)
+        .expect("endpoint identity")
+        .host
+        .to_string();
+    store
+        .upsert_deployed_service_api(DeployedServiceApi {
+            host_ip,
+            service_name: service_name.to_string(),
+            version: "0.1.0".to_string(),
+            endpoint: endpoint.to_string(),
+            api_id: api_id.to_string(),
+            status: status.to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put deployed api");
+}
+
+fn http_request_body_is_complete(bytes: &[u8]) -> bool {
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let Ok(header) = std::str::from_utf8(&bytes[..header_end]) else {
+        return false;
+    };
+    let header = header.to_ascii_lowercase();
+    let content_length = header
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    bytes.len() >= header_end + 4 + content_length
 }

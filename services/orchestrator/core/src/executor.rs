@@ -136,14 +136,17 @@ impl ExecutionDriver for DockerComposeDriver {
     fn execute(&self, request: &DriverRequest) -> Result<DriverResult> {
         let command = self.command_for(&request.action, &request.service_id)?;
         if self.run_commands {
-            let output = Command::new(&command[0])
-                .args(&command[1..])
-                .output()
-                .map_err(|err| {
-                    OrchestratorError::Dependency(format!(
-                        "docker compose fixed command failed to start: {err}"
-                    ))
-                })?;
+            let output = match Command::new(&command[0]).args(&command[1..]).output() {
+                Ok(output) => output,
+                Err(err) => {
+                    return Ok(DriverResult {
+                        action: request.action.clone(),
+                        status: "FAILED".to_string(),
+                        message: format!("docker compose fixed command failed to start: {err}"),
+                        command,
+                    });
+                }
+            };
             let status = if output.status.success() {
                 "SUCCEEDED"
             } else {
