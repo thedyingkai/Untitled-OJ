@@ -2354,6 +2354,14 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
         .iter()
         .map(|(_, release)| release.routes.len())
         .sum::<usize>();
+    let total_api_surfaces = releases
+        .iter()
+        .map(|(_, release)| release.apis.len())
+        .sum::<usize>();
+    let total_frontend = releases
+        .iter()
+        .filter(|(_, release)| release.frontend.enabled)
+        .count();
     let total_migrations = releases
         .iter()
         .map(|(_, release)| release.migrations.len())
@@ -2369,6 +2377,8 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
 
     assert!(total_permissions > 0);
     assert!(total_routes > 0);
+    assert!(total_api_surfaces > 0);
+    assert!(total_frontend > 0);
     assert!(total_migrations > 0);
     assert!(total_redis > 0);
     assert!(total_storage > 0);
@@ -2550,6 +2560,34 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
     assert_eq!(store.endpoints().len(), service_paths.len());
     assert_eq!(store.service_releases().len(), service_paths.len());
     assert_eq!(store.service_routes().len(), total_routes);
+    let api_surfaces = store.service_api_surfaces();
+    assert_eq!(api_surfaces.len(), total_api_surfaces);
+    for (service_name, api_id) in [
+        ("auth-service", "auth.permission.check"),
+        ("gateway", "gateway.health"),
+        ("gateway", "gateway.routes.reload"),
+        ("judge-api", "judge.queue.status"),
+    ] {
+        assert!(
+            api_surfaces
+                .iter()
+                .any(|api| api.service_name == service_name && api.api_id == api_id),
+            "{service_name} release.install should register API surface {api_id}"
+        );
+    }
+    assert!(
+        store.service_frontend_entries().len() >= total_frontend,
+        "frontend registry should contain at least every enabled frontend entry"
+    );
+    for service_name in ["auth-service", "gateway", "judge-api"] {
+        assert!(
+            store
+                .service_frontend_entries()
+                .iter()
+                .any(|frontend| frontend.service_name == service_name),
+            "{service_name} release.install should register frontend entry"
+        );
+    }
     assert_eq!(store.service_migration_records().len(), total_migrations);
     assert!(
         store
@@ -4851,6 +4889,25 @@ fn release_install_rollback_restores_previous_registry_resources() {
         created_at: String::new(),
         updated_at: String::new(),
     };
+    let old_api_surface = ServiceApiSurface {
+        service_name: "gateway".to_string(),
+        version: "0.0.9".to_string(),
+        api_id: "gateway.old.health".to_string(),
+        protocol: "http".to_string(),
+        port_name: "http".to_string(),
+        path_prefix: "/old/health".to_string(),
+        methods: vec!["GET".to_string()],
+        visibility: "descendants".to_string(),
+        auth_mode: "public".to_string(),
+        permission: "public".to_string(),
+        stability: "stable".to_string(),
+        api_version: "v1".to_string(),
+        rate_limit: String::new(),
+        timeout: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
     let old_redis = ServiceRedisResource {
         service_name: "gateway".to_string(),
         name: "old-stream".to_string(),
@@ -4938,6 +4995,9 @@ fn release_install_rollback_restores_previous_registry_resources() {
         .upsert_service_frontend_entry(old_frontend)
         .expect("seed old frontend");
     store
+        .upsert_service_api_surface(old_api_surface)
+        .expect("seed old api surface");
+    store
         .upsert_service_redis_resource(old_redis)
         .expect("seed old redis");
     store
@@ -4976,6 +5036,18 @@ fn release_install_rollback_restores_previous_registry_resources() {
             .service_routes()
             .iter()
             .any(|route| route.path == "/api/**" && route.target_service_name == "gateway")
+    );
+    assert!(
+        store
+            .service_api_surfaces()
+            .iter()
+            .any(|api| api.service_name == "gateway" && api.api_id == "gateway.health")
+    );
+    assert!(
+        !store
+            .service_api_surfaces()
+            .iter()
+            .any(|api| api.service_name == "gateway" && api.api_id == "gateway.old.health")
     );
     assert!(
         !store
@@ -5030,6 +5102,7 @@ fn release_install_rollback_restores_previous_registry_resources() {
         "new release should be removed during rollback"
     );
     assert_eq!(store.service_routes()[0].path, "/old-gateway");
+    assert_eq!(store.service_api_surfaces()[0].api_id, "gateway.old.health");
     assert_eq!(
         store.service_migration_records()[0].migration_version,
         "0000-old"

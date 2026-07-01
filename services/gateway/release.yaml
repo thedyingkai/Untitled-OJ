@@ -30,6 +30,37 @@ routes:
     target_type: endpoint-group
     target: gateway[*]
     permission: public
+apis:
+  - api_id: gateway.health
+    protocol: http
+    port_name: http
+    path_prefix: /health
+    methods: [GET]
+    visibility: descendants
+    auth_mode: public
+    permission: public
+    version: v1
+    stability: stable
+  - api_id: gateway.routes.reload
+    protocol: http
+    port_name: http
+    path_prefix: /api/admin/orchestrator/routes/reload
+    methods: [POST]
+    visibility: same-node
+    auth_mode: service
+    permission: gateway.read
+    version: v1
+    stability: experimental
+  - api_id: gateway.service.status
+    protocol: http
+    port_name: http
+    path_prefix: /api/admin/services
+    methods: [GET]
+    visibility: descendants
+    auth_mode: user
+    permission: gateway.read
+    version: v1
+    stability: stable
 redis: []
 storage: []
 dependencies:
