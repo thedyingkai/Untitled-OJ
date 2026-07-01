@@ -1413,7 +1413,7 @@ mod tests {
             response.body["message"]
                 .as_str()
                 .unwrap_or("")
-                .contains("local process lifecycle needs a supervisor binding")
+                .contains("requires release runtime configuration")
         );
         let operation = get(&mut console, "/operations/op-node-install-orchestrator");
         assert_eq!(operation.status, 200);
@@ -1422,7 +1422,7 @@ mod tests {
             operation.body["operation"]["error_message"]
                 .as_str()
                 .unwrap_or("")
-                .contains("local process lifecycle needs a supervisor binding")
+                .contains("requires release runtime configuration")
         );
         let logs = get(
             &mut console,

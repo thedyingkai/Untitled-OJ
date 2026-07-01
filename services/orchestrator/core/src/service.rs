@@ -6,7 +6,7 @@ use regex::Regex;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Component, Path};
@@ -100,6 +100,14 @@ pub struct ReleaseRuntimeDecl {
     pub binary: String,
     #[serde(default)]
     pub system_service: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub working_dir: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -609,6 +617,7 @@ pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> 
         is_supported_release_runtime_kind(&release.runtime.kind),
         "release runtime.kind is invalid",
     )?;
+    validate_release_runtime(&release.runtime)?;
     if release.frontend.enabled {
         ensure(
             path_re.is_match(&release.frontend.route_prefix),
@@ -2516,7 +2525,50 @@ fn is_supported_release_source_kind(value: &str) -> bool {
 fn is_supported_release_runtime_kind(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "image" | "binary" | "system-service" | "external"
+        "image" | "binary" | "system-service" | "external" | "local-process"
+    )
+}
+
+fn validate_release_runtime(runtime: &ReleaseRuntimeDecl) -> Result<()> {
+    let env_re = Regex::new(r"^[A-Z_][A-Z0-9_]*$").expect("valid regex");
+    let kind = runtime.kind.trim().to_ascii_lowercase();
+    if kind == "local-process" {
+        ensure(
+            !runtime.command.trim().is_empty(),
+            "release runtime.command is required for local-process",
+        )?;
+    }
+    validate_runtime_text(&runtime.command, "release runtime.command")?;
+    validate_runtime_text(&runtime.binary, "release runtime.binary")?;
+    validate_runtime_text(&runtime.system_service, "release runtime.system_service")?;
+    for arg in &runtime.args {
+        validate_runtime_text(arg, "release runtime.args")?;
+    }
+    if !runtime.working_dir.trim().is_empty() {
+        validate_relative_runtime_path(&runtime.working_dir)?;
+    }
+    for (key, value) in &runtime.env {
+        ensure(env_re.is_match(key), "release runtime.env key is invalid")?;
+        validate_runtime_text(value, "release runtime.env value")?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_text(value: &str, label: &str) -> Result<()> {
+    ensure(
+        !value.contains('\n') && !value.contains('\r') && !value.contains('\0'),
+        &format!("{label} is invalid"),
+    )
+}
+
+fn validate_relative_runtime_path(path: &str) -> Result<()> {
+    let path = Path::new(path.trim());
+    ensure(
+        !path.is_absolute()
+            && path
+                .components()
+                .all(|component| !matches!(component, Component::ParentDir | Component::Prefix(_))),
+        "release runtime.working_dir must stay inside repository",
     )
 }
 

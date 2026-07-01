@@ -25,7 +25,7 @@ import (
 
 var smokeHTTP = &http.Client{
 	Transport: &http.Transport{Proxy: nil},
-	Timeout:   15 * time.Second,
+	Timeout:   60 * time.Second,
 }
 
 const (
@@ -175,6 +175,10 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	if err := prepareWorkRoot(cfg.workRoot); err != nil {
 		return fail("prepare smoke workspace", err)
 	}
+	storageCfg, err := writeStorageConfig(cfg)
+	if err != nil {
+		return fail("storage-service config", err)
+	}
 
 	redisClient, err := connectRedis(ctx, cfg.redisURL)
 	if err != nil {
@@ -241,24 +245,24 @@ func run(ctx context.Context, cfg smokeConfig) error {
 		}
 	}
 
-	storageCfg, err := writeStorageConfig(cfg)
-	if err != nil {
-		return fail("storage-service config", err)
+	if cfg.installMode == "release-install" {
+		ok("storage-service start deferred to release.install")
+	} else {
+		storageProc, err := startProcess(ctx, processSpec{
+			name:    "storage-service",
+			dir:     filepath.Join(cfg.repoRoot, "services", "storage-service"),
+			logPath: filepath.Join(cfg.workRoot, "logs", "storage-service.log"),
+			args:    []string{"go", "run", ".", "-f", storageCfg},
+		})
+		if err != nil {
+			return fail("storage-service start", err)
+		}
+		processes = append(processes, storageProc)
+		if err := waitProcessHealth(ctx, storageProc, cfg.storage.baseURL()+"/health"); err != nil {
+			return fail("storage-service health", err)
+		}
+		ok("storage-service health")
 	}
-	storageProc, err := startProcess(ctx, processSpec{
-		name:    "storage-service",
-		dir:     filepath.Join(cfg.repoRoot, "services", "storage-service"),
-		logPath: filepath.Join(cfg.workRoot, "logs", "storage-service.log"),
-		args:    []string{"go", "run", ".", "-f", storageCfg},
-	})
-	if err != nil {
-		return fail("storage-service start", err)
-	}
-	processes = append(processes, storageProc)
-	if err := waitProcessHealth(ctx, storageProc, cfg.storage.baseURL()+"/health"); err != nil {
-		return fail("storage-service health", err)
-	}
-	ok("storage-service health")
 
 	if cfg.controlPlaneMode == "real" && cfg.installMode == "seed" {
 		if err := seedRealOrchestrator(ctx, cfg); err != nil {
@@ -405,6 +409,12 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("result query returned Finished/Accepted")
 
+	if cfg.controlPlaneMode == "real" && cfg.installMode == "release-install" {
+		if err := rollbackStorageReleaseInstall(ctx, cfg); err != nil {
+			return err
+		}
+	}
+
 	if cfg.authMode == "stub" && (!cfg.authStubCalls.HasCaller(judgeAPIService) || !cfg.authStubCalls.HasCaller(workerService)) {
 		return fail("service identity observed", fmt.Errorf("auth stub calls: %v", cfg.authStubCalls.Snapshot()))
 	}
@@ -472,6 +482,10 @@ func startRealOrchestrator(ctx context.Context, cfg smokeConfig) (*childProcess,
 			"GATEWAY_ENDPOINT":                   cfg.gateway.baseURL(),
 			"GATEWAY_ADMIN_TOKEN":                cfg.gatewayAdminJWT,
 			"GATEWAY_NODE_ID":                    childNodeID,
+			"OJOS_STORAGE_SERVICE_CONFIG":        storageConfigPath(cfg),
+			"OJOS_STORAGE_ROOT":                  filepath.Join(cfg.workRoot, "storage"),
+			"OJOS_STORAGE_BUCKETS":               "submissions,problems,judge-artifacts",
+			"OJOS_LOCAL_PROCESS_STATE_DIR":       filepath.Join(cfg.workRoot, "local-process"),
 		}),
 	})
 }
@@ -581,8 +595,8 @@ func installStorageRelease(ctx context.Context, cfg smokeConfig) error {
 		"host_ip":                  cfg.storage.host,
 		"endpoint":                 endpointID,
 		"gateway_node_id":          childNodeID,
-		"execute_service_driver":   false,
-		"external_service_running": true,
+		"execute_service_driver":   true,
+		"external_service_running": false,
 	}
 	var installResp struct {
 		ActionResult struct {
@@ -642,6 +656,31 @@ func verifyRouteMissing(ctx context.Context, cfg smokeConfig, apiID string) erro
 	if findRoute(table.Routes, apiID) != nil {
 		return fmt.Errorf("route %s existed before release.install", apiID)
 	}
+	return nil
+}
+
+func rollbackStorageReleaseInstall(ctx context.Context, cfg smokeConfig) error {
+	var resp struct {
+		ActionResult struct {
+			ActionID    string `json:"action_id"`
+			Status      string `json:"status"`
+			OperationID string `json:"operation_id"`
+			Error       string `json:"error"`
+			Message     string `json:"message"`
+		} `json:"action_result"`
+	}
+	target := cfg.orchestrator.baseURL() + "/operations/op-smoke-storage-release-install/rollback"
+	if err := doJSONWithHeaders(ctx, http.MethodPost, target, map[string]any{}, map[string]string{}, &resp); err != nil {
+		return fail("release.install rollback stopped storage-service", err)
+	}
+	normalizedStatus := strings.ToLower(strings.ReplaceAll(resp.ActionResult.Status, "_", ""))
+	if normalizedStatus != "succeeded" && normalizedStatus != "rolledback" {
+		return fail("release.install rollback stopped storage-service", fmt.Errorf("unexpected rollback status %q operation_id=%s error=%s message=%s", resp.ActionResult.Status, resp.ActionResult.OperationID, resp.ActionResult.Error, resp.ActionResult.Message))
+	}
+	if err := waitStorageUnavailable(ctx, cfg.storage.baseURL()+"/health"); err != nil {
+		return fail("release.install rollback stopped storage-service", err)
+	}
+	ok("release.install rollback stopped storage-service")
 	return nil
 }
 
@@ -961,7 +1000,7 @@ func storageRoute(apiID string, methods []string, permission string, upstream st
 }
 
 func writeStorageConfig(cfg smokeConfig) (string, error) {
-	path := filepath.Join(cfg.workRoot, "config", "storageservice.yaml")
+	path := storageConfigPath(cfg)
 	content := fmt.Sprintf(`Name: storage-service-smoke
 Host: %s
 Port: %d
@@ -973,6 +1012,10 @@ Storage:
     - judge-artifacts
 `, cfg.storage.host, cfg.storage.port, yamlString(filepath.Join(cfg.workRoot, "storage")))
 	return path, os.WriteFile(path, []byte(content), 0o644)
+}
+
+func storageConfigPath(cfg smokeConfig) string {
+	return filepath.Join(cfg.workRoot, "config", "storageservice.yaml")
 }
 
 func writeGatewayConfig(cfg smokeConfig) (string, error) {
@@ -1431,6 +1474,28 @@ func waitProcessHealth(ctx context.Context, proc *childProcess, target string) e
 	return last
 }
 
+func waitStorageUnavailable(ctx context.Context, target string) error {
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := smokeHTTP.Do(req)
+		if err != nil {
+			return nil
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 500 {
+			return nil
+		}
+		if wait(ctx, 300*time.Millisecond) != nil {
+			return ctx.Err()
+		}
+	}
+	return errors.New("storage-service still responds after rollback")
+}
+
 func waitFile(ctx context.Context, path string) error {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -1555,7 +1620,7 @@ func cleanupStaleSmokeProcesses(workRoot string) error {
 		return nil
 	}
 	script := fmt.Sprintf(
-		`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*%s*' -and ($_.Name -eq 'ojos-storage-service.exe' -or $_.Name -eq 'ojos-gateway.exe' -or $_.Name -eq 'smoke-server.exe' -or $_.Name -eq 'judge-worker.exe' -or $_.Name -eq 'ojos-orchestrator-daemon.exe' -or $_.Name -eq 'ojos-auth-service.exe') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+		`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*%s*' -and ($_.Name -eq 'go.exe' -or $_.Name -eq 'storageservice.exe' -or $_.Name -eq 'ojos-storage-service.exe' -or $_.Name -eq 'ojos-gateway.exe' -or $_.Name -eq 'smoke-server.exe' -or $_.Name -eq 'judge-worker.exe' -or $_.Name -eq 'ojos-orchestrator-daemon.exe' -or $_.Name -eq 'ojos-auth-service.exe') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
 		strings.ReplaceAll(workRoot, "'", "''"),
 	)
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", script)

@@ -3409,6 +3409,97 @@ impl<
         Ok(result)
     }
 
+    fn stop_local_process_release(
+        &mut self,
+        operation_id: &str,
+        service: &ServiceManifest,
+        release: &ServiceReleaseManifest,
+        endpoint: String,
+    ) -> Result<DriverResult> {
+        if !release
+            .runtime
+            .kind
+            .trim()
+            .eq_ignore_ascii_case("local-process")
+        {
+            return Ok(DriverResult {
+                action: "service.stop".to_string(),
+                status: "SUPPORTED".to_string(),
+                message: format!(
+                    "release runtime {} does not require local-process stop",
+                    release.runtime.kind
+                ),
+                command: Vec::new(),
+                pid: None,
+                pid_file: String::new(),
+            });
+        }
+        let request = DriverRequest {
+            action: "service.stop".to_string(),
+            service_id: service.id.clone(),
+            endpoint,
+            link: None,
+            log_source: None,
+            release_runtime: Some(release.runtime.clone()),
+        };
+        let result = LocalProcessDriver::new().execute(&request)?;
+        self.store
+            .append_operation_log(driver_result_log_record(operation_id, &result))?;
+        ensure_driver_result_succeeded(&result)?;
+        Ok(result)
+    }
+
+    fn stop_installed_local_process_release(
+        &mut self,
+        operation: &Operation,
+        service_name: &str,
+    ) -> Result<Option<DriverResult>> {
+        let Some(service) = self.store.get_service(service_name)? else {
+            return Ok(None);
+        };
+        let endpoint = operation
+            .request
+            .get("endpoint")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                self.store
+                    .list_endpoints()
+                    .ok()
+                    .and_then(|endpoints| {
+                        endpoints
+                            .into_iter()
+                            .find(|endpoint| endpoint.service_id == service_name)
+                    })
+                    .map(|endpoint| endpoint.endpoint)
+            })
+            .unwrap_or_default();
+        let release = release_manifest_from_operation(operation)?.or_else(|| {
+            self.store
+                .list_service_releases()
+                .ok()
+                .and_then(|releases| {
+                    releases
+                        .into_iter()
+                        .find(|release| release.service_name == service_name)
+                })
+                .and_then(|release| serde_json::from_value(release.manifest).ok())
+        });
+        let Some(release) = release else {
+            return Ok(None);
+        };
+        if !release
+            .runtime
+            .kind
+            .trim()
+            .eq_ignore_ascii_case("local-process")
+        {
+            return Ok(None);
+        }
+        self.stop_local_process_release(&operation.operation_id, &service, &release, endpoint)
+            .map(Some)
+    }
+
     fn execute_release_migrations(
         &mut self,
         operation: &Operation,
@@ -3902,7 +3993,7 @@ impl<
                 let health = if external_service_running {
                     external_running_install_health(&endpoint)
                 } else if driver_result.status == "SUCCEEDED" {
-                    self.probe_endpoint_and_persist(&operation.operation_id, &endpoint)?
+                    self.wait_endpoint_health_and_persist(&operation.operation_id, &endpoint)?
                 } else {
                     deferred_install_health(&endpoint, &driver_result)
                 };
@@ -3998,6 +4089,7 @@ impl<
                     .get("service_id")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(operation.target_id.as_str());
+                let _ = self.stop_installed_local_process_release(operation, service_name)?;
                 let version = operation
                     .request
                     .get("version")
@@ -4441,6 +4533,8 @@ impl<
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let previous_state = release_install_previous_state_from_operation(operation)?;
+                let _ =
+                    self.stop_installed_local_process_release(operation, &operation.target_id)?;
                 self.append_migration_rollback_unsupported_log(operation)?;
                 if let Some(previous_state) = previous_state {
                     let service_name = operation.target_id.as_str();
@@ -5044,6 +5138,42 @@ impl<
         endpoint: &Endpoint,
     ) -> Result<EndpointHealthResult> {
         let health = check_endpoint_health_with_probe(endpoint, &self.endpoint_probe)?;
+        self.store.update_endpoint_health(
+            &health.endpoint,
+            health.health.clone(),
+            health.reachable,
+        )?;
+        self.store
+            .append_operation_log(endpoint_health_log_record(operation_id, &health))?;
+        Ok(health)
+    }
+
+    fn wait_endpoint_health_and_persist(
+        &mut self,
+        operation_id: &str,
+        endpoint: &Endpoint,
+    ) -> Result<EndpointHealthResult> {
+        let mut last = None;
+        for attempt in 0..25 {
+            let health = check_endpoint_health_with_probe(endpoint, &self.endpoint_probe)?;
+            if health.reachable {
+                self.store.update_endpoint_health(
+                    &health.endpoint,
+                    health.health.clone(),
+                    health.reachable,
+                )?;
+                self.store
+                    .append_operation_log(endpoint_health_log_record(operation_id, &health))?;
+                return Ok(health);
+            }
+            last = Some(health);
+            if attempt < 24 {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+        let health = last.ok_or_else(|| {
+            OrchestratorError::Dependency("endpoint health wait produced no result".to_string())
+        })?;
         self.store.update_endpoint_health(
             &health.endpoint,
             health.health.clone(),
@@ -6252,6 +6382,8 @@ fn rendered_runtime_config(
                 "status": result.status,
                 "message": result.message,
                 "command": result.command,
+                "pid": result.pid,
+                "pid_file": result.pid_file,
             }))
         }
     })
@@ -6265,7 +6397,7 @@ pub(crate) fn release_install_host_status(
     if node_dispatch.is_some_and(|result| result.status == "failed") {
         return "failed";
     }
-    if node_dispatch.is_none_or(|result| !result.accepted) {
+    if node_dispatch.is_some_and(|result| !result.accepted && result.status != "planned") {
         return "planned";
     }
     match driver_result.status.as_str() {
@@ -6562,6 +6694,13 @@ pub(crate) fn execute_service_driver_action(
     operation: &Operation,
     execute_fixed_commands: bool,
 ) -> Result<DriverResult> {
+    let release_runtime = operation
+        .request
+        .get("release_manifest")
+        .and_then(|value| value.get("runtime"))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
     let request = DriverRequest {
         action: operation.action.clone(),
         service_id: service.id.clone(),
@@ -6573,7 +6712,26 @@ pub(crate) fn execute_service_driver_action(
             .to_string(),
         link: None,
         log_source: None,
+        release_runtime,
     };
+    if request
+        .release_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.kind.trim().eq_ignore_ascii_case("local-process"))
+    {
+        if execute_fixed_commands {
+            return LocalProcessDriver::new().execute(&request);
+        }
+        return Ok(DriverResult {
+            action: operation.action.clone(),
+            status: "PLANNED".to_string(),
+            message: "local-process runtime declared but execute_service_driver is false"
+                .to_string(),
+            command: Vec::new(),
+            pid: None,
+            pid_file: String::new(),
+        });
+    }
     match service.runtime.mode {
         RuntimeMode::Container => {
             let driver = DockerComposeDriver::new(".", "deploy/compose/docker-compose.yml");
@@ -6640,6 +6798,8 @@ fn driver_result_log_record(operation_id: &str, result: &DriverResult) -> Operat
             "status": result.status,
             "message": result.message,
             "command": result.command,
+            "pid": result.pid,
+            "pid_file": result.pid_file,
         }),
     )
 }
@@ -7028,6 +7188,8 @@ fn release_install_pipeline_log_record(
                 "status": driver_result.status,
                 "message": driver_result.message,
                 "command": driver_result.command,
+                "pid": driver_result.pid,
+                "pid_file": driver_result.pid_file,
             },
             "health": {
                 "status": health.health,

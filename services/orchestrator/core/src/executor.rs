@@ -1,7 +1,11 @@
-use crate::{Endpoint, Link, LogView, OrchestratorError, Result, validate_endpoint_id};
+use crate::{
+    Endpoint, Link, LogView, OrchestratorError, ReleaseRuntimeDecl, Result, validate_endpoint_id,
+};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DriverRequest {
@@ -10,6 +14,8 @@ pub struct DriverRequest {
     pub endpoint: String,
     pub link: Option<Link>,
     pub log_source: Option<LogView>,
+    #[serde(default)]
+    pub release_runtime: Option<ReleaseRuntimeDecl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -18,6 +24,10 @@ pub struct DriverResult {
     pub status: String,
     pub message: String,
     pub command: Vec<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub pid_file: String,
 }
 
 pub trait ExecutionDriver {
@@ -25,8 +35,11 @@ pub trait ExecutionDriver {
     fn execute(&self, request: &DriverRequest) -> Result<DriverResult>;
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct LocalProcessDriver;
+#[derive(Debug, Clone)]
+pub struct LocalProcessDriver {
+    project_dir: PathBuf,
+    state_dir: PathBuf,
+}
 
 #[derive(Debug, Clone)]
 pub struct DockerComposeDriver {
@@ -41,7 +54,36 @@ pub struct ExternalEndpointDriver;
 
 impl LocalProcessDriver {
     pub fn new() -> Self {
-        Self
+        let project_dir = std::env::var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT")
+            .or_else(|_| std::env::var("OJOS_REPO_ROOT"))
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self::with_project_dir(project_dir)
+    }
+
+    pub fn with_project_dir(project_dir: impl Into<PathBuf>) -> Self {
+        let project_dir = project_dir.into();
+        let state_dir = std::env::var("OJOS_LOCAL_PROCESS_STATE_DIR")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                project_dir
+                    .join(".ojos")
+                    .join("runtime")
+                    .join("local-process")
+            });
+        Self {
+            project_dir,
+            state_dir,
+        }
+    }
+
+    pub fn with_state_dir(mut self, state_dir: impl Into<PathBuf>) -> Self {
+        self.state_dir = state_dir.into();
+        self
     }
 }
 
@@ -117,14 +159,157 @@ impl ExecutionDriver for LocalProcessDriver {
                 status: "SUPPORTED".to_string(),
                 message: "local process read-only action is allowed".to_string(),
                 command: Vec::new(),
+                pid: None,
+                pid_file: String::new(),
             }),
-            "service.start" | "service.stop" | "service.restart" | "service.enable"
-            | "service.disable" | "release.install" | "service.delete" => unsupported(
-                &request.action,
-                "local process lifecycle needs a supervisor binding before it can run safely",
-            ),
+            "release.install" | "service.start" | "service.enable" => {
+                self.start_local_process(request)
+            }
+            "service.stop" | "service.disable" | "service.delete" => {
+                self.stop_local_process(request)
+            }
+            "service.restart" => {
+                let _ = self.stop_local_process(request)?;
+                self.start_local_process(request)
+            }
             _ => unsupported(&request.action, "unsupported local process action"),
         }
+    }
+}
+
+impl LocalProcessDriver {
+    fn start_local_process(&self, request: &DriverRequest) -> Result<DriverResult> {
+        let runtime = local_process_runtime(request)?;
+        let command = expand_runtime_value(&runtime.command, &runtime.env)?;
+        let executable = safe_command(&command)?;
+        let args = runtime
+            .args
+            .iter()
+            .map(|arg| {
+                expand_runtime_value(arg, &runtime.env).and_then(|value| safe_argument(&value))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let working_dir = self.runtime_working_dir(runtime)?;
+        fs::create_dir_all(&self.state_dir)?;
+        let pid_file = self.pid_file(&request.service_id)?;
+        let stdout = OpenOptions::new().create(true).append(true).open(
+            self.state_dir
+                .join(format!("{}.stdout.log", request.service_id)),
+        )?;
+        let stderr = OpenOptions::new().create(true).append(true).open(
+            self.state_dir
+                .join(format!("{}.stderr.log", request.service_id)),
+        )?;
+        let mut command_builder = Command::new(&executable);
+        command_builder
+            .args(&args)
+            .current_dir(&working_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .env("OJOS_SERVICE_ID", &request.service_id)
+            .env("OJOS_SERVICE_ENDPOINT", &request.endpoint);
+        for (key, value) in &runtime.env {
+            let expanded = expand_runtime_value(value, &runtime.env)?;
+            command_builder.env(key, expanded);
+        }
+        let child = command_builder.spawn().map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "local process service_start failed to spawn {}: {err}",
+                request.service_id
+            ))
+        })?;
+        let pid = child.id();
+        fs::write(&pid_file, pid.to_string())?;
+        Ok(DriverResult {
+            action: request.action.clone(),
+            status: "SUCCEEDED".to_string(),
+            message: format!(
+                "local process service_start spawned {} with pid {}",
+                request.service_id, pid
+            ),
+            command: std::iter::once(executable).chain(args).collect(),
+            pid: Some(pid),
+            pid_file: safe_path(&pid_file)?,
+        })
+    }
+
+    fn stop_local_process(&self, request: &DriverRequest) -> Result<DriverResult> {
+        fs::create_dir_all(&self.state_dir)?;
+        let pid_file = self.pid_file(&request.service_id)?;
+        let pid_text = match fs::read_to_string(&pid_file) {
+            Ok(value) => value,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DriverResult {
+                    action: request.action.clone(),
+                    status: "SUCCEEDED".to_string(),
+                    message: format!(
+                        "local process service_stop found no pid file for {}",
+                        request.service_id
+                    ),
+                    command: Vec::new(),
+                    pid: None,
+                    pid_file: safe_path(&pid_file)?,
+                });
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let pid: u32 = pid_text.trim().parse().map_err(|_| {
+            OrchestratorError::Dependency(format!(
+                "local process pid file for {} is invalid",
+                request.service_id
+            ))
+        })?;
+        let command = stop_process_command(pid)?;
+        let output = Command::new(&command[0]).args(&command[1..]).output();
+        match output {
+            Ok(output) if output.status.success() || process_already_stopped(&output) => {
+                let _ = fs::remove_file(&pid_file);
+                Ok(DriverResult {
+                    action: request.action.clone(),
+                    status: "SUCCEEDED".to_string(),
+                    message: format!(
+                        "local process service_stop stopped {} pid {}",
+                        request.service_id, pid
+                    ),
+                    command,
+                    pid: Some(pid),
+                    pid_file: safe_path(&pid_file)?,
+                })
+            }
+            Ok(output) => Ok(DriverResult {
+                action: request.action.clone(),
+                status: "FAILED".to_string(),
+                message: driver_output_message(&output)?,
+                command,
+                pid: Some(pid),
+                pid_file: safe_path(&pid_file)?,
+            }),
+            Err(err) => Ok(DriverResult {
+                action: request.action.clone(),
+                status: "FAILED".to_string(),
+                message: format!("local process service_stop failed to run stop command: {err}"),
+                command,
+                pid: Some(pid),
+                pid_file: safe_path(&pid_file)?,
+            }),
+        }
+    }
+
+    fn runtime_working_dir(&self, runtime: &ReleaseRuntimeDecl) -> Result<PathBuf> {
+        let relative = runtime.working_dir.trim();
+        let path = if relative.is_empty() {
+            self.project_dir.clone()
+        } else {
+            safe_relative_path(relative).map(|path| self.project_dir.join(path))?
+        };
+        Ok(path)
+    }
+
+    fn pid_file(&self, service_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .state_dir
+            .join(format!("{}.pid", safe_file_stem(service_id)?)))
     }
 }
 
@@ -144,6 +329,8 @@ impl ExecutionDriver for DockerComposeDriver {
                         status: "FAILED".to_string(),
                         message: format!("docker compose fixed command failed to start: {err}"),
                         command,
+                        pid: None,
+                        pid_file: String::new(),
                     });
                 }
             };
@@ -157,6 +344,8 @@ impl ExecutionDriver for DockerComposeDriver {
                 status: status.to_string(),
                 message: driver_output_message(&output)?,
                 command,
+                pid: None,
+                pid_file: String::new(),
             });
         }
         Ok(DriverResult {
@@ -164,6 +353,8 @@ impl ExecutionDriver for DockerComposeDriver {
             status: "PLANNED".to_string(),
             message: "fixed docker compose command built".to_string(),
             command,
+            pid: None,
+            pid_file: String::new(),
         })
     }
 }
@@ -207,6 +398,8 @@ impl ExecutionDriver for ExternalEndpointDriver {
                 status: "SUPPORTED".to_string(),
                 message: "external endpoint metadata action is allowed".to_string(),
                 command: Vec::new(),
+                pid: None,
+                pid_file: String::new(),
             }),
             "service.start" | "service.stop" | "service.restart" => unsupported(
                 &request.action,
@@ -224,6 +417,23 @@ pub fn driver_request_for_endpoint(action: &str, endpoint: &Endpoint) -> DriverR
         endpoint: endpoint.endpoint.clone(),
         link: None,
         log_source: None,
+        release_runtime: None,
+    }
+}
+
+fn local_process_runtime(request: &DriverRequest) -> Result<&ReleaseRuntimeDecl> {
+    let runtime = request.release_runtime.as_ref().ok_or_else(|| {
+        OrchestratorError::Blocked(
+            "local-process lifecycle requires release runtime configuration".to_string(),
+        )
+    })?;
+    if runtime.kind.trim().eq_ignore_ascii_case("local-process") {
+        Ok(runtime)
+    } else {
+        Err(OrchestratorError::Blocked(format!(
+            "[DEFERRED] runtime kind {} not supported in local smoke",
+            runtime.kind
+        )))
     }
 }
 
@@ -246,6 +456,59 @@ fn safe_path(path: &Path) -> Result<String> {
     Ok(text)
 }
 
+fn safe_relative_path(path: &str) -> Result<PathBuf> {
+    let path = Path::new(path.trim());
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(OrchestratorError::UnsafePath(
+            "local process working_dir must stay inside project directory".to_string(),
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn safe_command(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('\n')
+        || trimmed.contains('\r')
+        || trimmed.contains('\0')
+    {
+        return Err(OrchestratorError::UnsafePath(
+            "local process command is not safe".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn safe_argument(value: &str) -> Result<String> {
+    if value.contains('\n') || value.contains('\r') || value.contains('\0') {
+        return Err(OrchestratorError::UnsafePath(
+            "local process argument is not safe".to_string(),
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn safe_file_stem(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('\n')
+        || trimmed.contains('\r')
+        || trimmed.contains('\0')
+    {
+        return Err(OrchestratorError::UnsafePath(
+            "local process service id is not safe".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 fn safe_executable(value: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty()
@@ -259,6 +522,75 @@ fn safe_executable(value: &str) -> Result<String> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+fn expand_runtime_value(value: &str, local_env: &BTreeMap<String, String>) -> Result<String> {
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find('}') else {
+            return Err(OrchestratorError::InvalidManifest(
+                "local process runtime variable is not closed".to_string(),
+            ));
+        };
+        let key = &after_start[..end];
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        {
+            return Err(OrchestratorError::InvalidManifest(
+                "local process runtime variable is invalid".to_string(),
+            ));
+        }
+        let placeholder = format!("${{{key}}}");
+        let value = local_env
+            .get(key)
+            .filter(|value| value.trim() != placeholder)
+            .cloned()
+            .or_else(|| std::env::var(key).ok())
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(format!(
+                    "local process runtime variable {key} is not configured"
+                ))
+            })?;
+        out.push_str(&value);
+        rest = &after_start[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+#[cfg(windows)]
+fn stop_process_command(pid: u32) -> Result<Vec<String>> {
+    Ok(vec![
+        "taskkill".to_string(),
+        "/PID".to_string(),
+        pid.to_string(),
+        "/T".to_string(),
+        "/F".to_string(),
+    ])
+}
+
+#[cfg(not(windows))]
+fn stop_process_command(pid: u32) -> Result<Vec<String>> {
+    Ok(vec!["kill".to_string(), pid.to_string()])
+}
+
+#[cfg(windows)]
+fn process_already_stopped(output: &std::process::Output) -> bool {
+    decode_driver_output_bytes(&output.stderr)
+        .map(|text| text.contains("not found") || text.contains("not running"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn process_already_stopped(output: &std::process::Output) -> bool {
+    decode_driver_output_bytes(&output.stderr)
+        .map(|text| text.contains("No such process"))
+        .unwrap_or(false)
 }
 
 fn driver_output_message(output: &std::process::Output) -> Result<String> {

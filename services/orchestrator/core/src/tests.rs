@@ -1,9 +1,9 @@
 use crate::*;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -282,6 +282,10 @@ fn valid_release_for_service(service: &ServiceManifest) -> ServiceReleaseManifes
             image: String::new(),
             binary: String::new(),
             system_service: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            working_dir: String::new(),
+            env: BTreeMap::new(),
         },
         frontend: ReleaseFrontendDecl::default(),
         backend: ReleaseBackendDecl {
@@ -5643,6 +5647,10 @@ fn operation_workbench_context_can_load_from_store_state() {
             image: String::new(),
             binary: String::new(),
             system_service: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            working_dir: String::new(),
+            env: BTreeMap::new(),
         },
         frontend: ReleaseFrontendDecl::default(),
         backend: ReleaseBackendDecl {
@@ -9388,11 +9396,19 @@ fn local_process_lifecycle_failure_is_persisted_by_executor() {
 
     let failed = OperationExecutor::new(&mut store)
         .apply("op-local-start")
-        .expect_err("local process lifecycle should remain unsupported");
-    assert!(failed.to_string().contains("supervisor binding"));
+        .expect_err("local process lifecycle requires release runtime");
+    assert!(
+        failed
+            .to_string()
+            .contains("requires release runtime configuration")
+    );
     let stored = store.operation("op-local-start").expect("stored operation");
     assert_eq!(stored.status, OperationStatus::Failed);
-    assert!(stored.error_message.contains("supervisor binding"));
+    assert!(
+        stored
+            .error_message
+            .contains("requires release runtime configuration")
+    );
     assert!(
         store
             .operation_logs("op-local-start")
@@ -9460,6 +9476,7 @@ fn fixed_executor_drivers_reject_arbitrary_actions() {
         endpoint: endpoint.endpoint.clone(),
         link: Some(link),
         log_source: None,
+        release_runtime: None,
     };
     assert_eq!(
         external
@@ -9475,6 +9492,7 @@ fn fixed_executor_drivers_reject_arbitrary_actions() {
         endpoint: endpoint.endpoint.clone(),
         link: None,
         log_source: None,
+        release_runtime: None,
     };
     assert!(
         external.execute(&missing_link_request).is_err(),
@@ -9487,6 +9505,7 @@ fn fixed_executor_drivers_reject_arbitrary_actions() {
         endpoint: String::new(),
         link: None,
         log_source: None,
+        release_runtime: None,
     };
     assert_eq!(
         external
@@ -9583,8 +9602,11 @@ fn local_process_driver_reports_unsupported_safely() {
     let start = driver_request_for_endpoint("service.start", &endpoint);
     let err = LocalProcessDriver::new()
         .execute(&start)
-        .expect_err("local process start requires supervisor binding");
-    assert!(err.to_string().contains("supervisor binding"));
+        .expect_err("local process start requires release runtime");
+    assert!(
+        err.to_string()
+            .contains("requires release runtime configuration")
+    );
 
     let logs = driver_request_for_endpoint("log.create", &endpoint);
     assert_eq!(
@@ -9594,6 +9616,162 @@ fn local_process_driver_reports_unsupported_safely() {
             .status,
         "SUPPORTED"
     );
+}
+
+#[cfg(windows)]
+fn free_local_tcp_port() -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind local test port");
+    listener.local_addr().expect("local addr").port()
+}
+
+#[cfg(windows)]
+fn assert_endpoint_unreachable(host: &str, port: u16) {
+    for _ in 0..30 {
+        if TcpStream::connect((host, port)).is_err() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    panic!("endpoint {host}:{port} should be unreachable after rollback");
+}
+
+#[cfg(windows)]
+#[test]
+fn release_install_local_process_starts_service_and_rollback_stops_it() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let previous_root = std::env::var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT").ok();
+    let previous_state = std::env::var("OJOS_LOCAL_PROCESS_STATE_DIR").ok();
+    let dir = tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    unsafe {
+        std::env::set_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT", dir.path());
+        std::env::set_var("OJOS_LOCAL_PROCESS_STATE_DIR", &state_dir);
+    }
+
+    let port = free_local_tcp_port();
+    let endpoint_id = format!("127.0.0.1:{port}:local-demo");
+    let mut service = valid_service();
+    service.id = "local-demo".to_string();
+    service.name = "Local Demo".to_string();
+    service.kind = "backend-api".to_string();
+    service.endpoint.default_port = port;
+    service.endpoint.health_path = "/health".to_string();
+    service.runtime.mode = RuntimeMode::LocalProcess;
+    service.runtime.driver = "local-process".to_string();
+    let script = format!(
+        "$listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse('127.0.0.1'),{port});$listener.Start();while($true){{$client=$listener.AcceptTcpClient();$stream=$client.GetStream();$buffer=New-Object byte[] 1024;$null=$stream.Read($buffer,0,$buffer.Length);$bytes=[Text.Encoding]::ASCII.GetBytes(\"HTTP/1.1 200 OK`r`nContent-Length:2`r`n`r`nok\");$stream.Write($bytes,0,$bytes.Length);$client.Close();}}"
+    );
+    let release = ServiceReleaseManifest {
+        schema_version: 1,
+        service_name: service.id.clone(),
+        version: service.version.clone(),
+        description: "Local process demo release".to_string(),
+        service_type: service.kind.clone(),
+        source: ReleaseSourceDecl {
+            kind: "local".to_string(),
+            url: "local://local-demo".to_string(),
+            checksum: String::new(),
+        },
+        runtime: ReleaseRuntimeDecl {
+            kind: "local-process".to_string(),
+            image: String::new(),
+            binary: String::new(),
+            system_service: String::new(),
+            command: "powershell".to_string(),
+            args: vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                script,
+            ],
+            working_dir: String::new(),
+            env: BTreeMap::new(),
+        },
+        frontend: ReleaseFrontendDecl::default(),
+        backend: ReleaseBackendDecl {
+            protocol: "http".to_string(),
+            port,
+            health_path: "/health".to_string(),
+        },
+        migrations: Vec::new(),
+        permissions: Vec::new(),
+        routes: Vec::new(),
+        apis: Vec::new(),
+        redis: Vec::new(),
+        storage: Vec::new(),
+        dependencies: Vec::new(),
+        required_apis: Vec::new(),
+        config_schema: serde_json::json!({}),
+        secrets: Vec::new(),
+        observability: ReleaseObservabilityDecl::default(),
+    };
+    validate_service_release(&release).expect("local-process release validates");
+    let operation = release_install_operation_with_release(
+        "op-local-process-release-install",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        Some(&endpoint_id),
+        serde_json::json!({"execute_service_driver": true}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed local process release install");
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+    let applied = OperationExecutor::with_endpoint_probe(
+        &mut store,
+        TcpEndpointProbe::new(Duration::from_millis(200)),
+    )
+    .with_service_driver_execution_enabled()
+    .apply("op-local-process-release-install")
+    .expect("local process release install should start and pass health");
+    assert_eq!(applied.status, OperationStatus::Succeeded);
+    let host = store.host_services()[0].clone();
+    assert_eq!(host.status, "running");
+    assert!(
+        host.config
+            .get("external_steps")
+            .and_then(|value| value.get("driver"))
+            .and_then(|value| value.get("pid"))
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|pid| pid > 0),
+        "rendered runtime config should record local process pid"
+    );
+    assert!(
+        state_dir.join("local-demo.pid").exists(),
+        "local process pid file should be recorded"
+    );
+
+    store
+        .operation_logs("op-local-process-release-install")
+        .iter()
+        .find(|record| record.step_id == "driver:release.install")
+        .and_then(|record| record.data.get("pid"))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|pid| *pid > 0)
+        .expect("driver log should record pid");
+
+    OperationExecutor::new(&mut store)
+        .rollback("op-local-process-release-install")
+        .expect("rollback should stop local process");
+    assert!(
+        !state_dir.join("local-demo.pid").exists(),
+        "rollback should remove local process pid file"
+    );
+    assert_endpoint_unreachable("127.0.0.1", port);
+
+    unsafe {
+        match previous_root {
+            Some(value) => std::env::set_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT", value),
+            None => std::env::remove_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT"),
+        }
+        match previous_state {
+            Some(value) => std::env::set_var("OJOS_LOCAL_PROCESS_STATE_DIR", value),
+            None => std::env::remove_var("OJOS_LOCAL_PROCESS_STATE_DIR"),
+        }
+    }
 }
 
 #[test]
@@ -9643,7 +9821,10 @@ fn unsupported_driver_action_writes_operation_log() {
     let err = OperationExecutor::new(&mut store)
         .apply("op-unsupported-driver")
         .expect_err("unsupported driver action should fail operation");
-    assert!(err.to_string().contains("supervisor binding"));
+    assert!(
+        err.to_string()
+            .contains("requires release runtime configuration")
+    );
     assert_eq!(
         store
             .operation("op-unsupported-driver")

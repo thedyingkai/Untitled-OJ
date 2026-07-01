@@ -8,10 +8,14 @@ source:
   url: local://services/storage-service
   checksum: ""
 runtime:
-  kind: image
+  kind: local-process
   image: ""
   binary: ""
   system_service: ""
+  command: go
+  args: ["run", ".", "-f", "${OJOS_STORAGE_SERVICE_CONFIG}"]
+  working_dir: services/storage-service
+  env: {}
 frontend:
   enabled: false
   route_prefix: ""
