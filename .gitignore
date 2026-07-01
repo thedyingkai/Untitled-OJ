@@ -29,6 +29,7 @@ tmp/
 temp/
 .cache/
 .cache-*/
+.orchestrator-release-cache/
 *.tmp
 *.bak
 *.old

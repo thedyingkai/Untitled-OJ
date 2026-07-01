@@ -28,7 +28,7 @@ func NewUpdateProfileLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Upd
 }
 
 func (l *UpdateProfileLogic) UpdateProfile(req *types.ProfilePatchReq) (resp *types.ProfileResp, err error) {
-	return profilePtr(l.svcCtx.ProfileStore.Update(req.UserId, store.ProfilePatch{
+	return profilePtr(l.svcCtx.ProfileStore.UpdateCtx(l.ctx, req.UserId, store.ProfilePatch{
 		DisplayName:  req.DisplayName,
 		Bio:          req.Bio,
 		AvatarObject: req.AvatarObject,

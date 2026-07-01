@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,9 @@ import (
 	"time"
 
 	"ojos-user-service/internal/types"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type ProfilePatch struct {
@@ -25,24 +29,155 @@ type ProfilePatch struct {
 
 type ProfileStore struct {
 	root string
+	db   *pgxpool.Pool
 	now  func() time.Time
 	mu   sync.Mutex
 }
 
 var safeUserID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 
-func NewProfileStore(root string) (*ProfileStore, error) {
+func NewProfileStore(root string, db *pgxpool.Pool) (*ProfileStore, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		root = "/data/ojos/users"
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil, err
+	if db == nil {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return nil, err
+		}
 	}
 	return &ProfileStore{
 		root: root,
+		db:   db,
 		now:  time.Now,
 	}, nil
+}
+
+func NewFileProfileStore(root string) (*ProfileStore, error) {
+	return NewProfileStore(root, nil)
+}
+
+func NewPostgresProfileStore(db *pgxpool.Pool) (*ProfileStore, error) {
+	if db == nil {
+		return nil, errors.New("postgres pool is required")
+	}
+	return NewProfileStore("", db)
+}
+
+func (s *ProfileStore) GetOrCreateCtx(ctx context.Context, userID, displayName string) (types.ProfileResp, error) {
+	if s.db != nil {
+		return s.getOrCreatePostgres(ctx, userID, displayName)
+	}
+	return s.GetOrCreate(userID, displayName)
+}
+
+func (s *ProfileStore) UpdateCtx(ctx context.Context, userID string, patch ProfilePatch) (types.ProfileResp, error) {
+	if s.db != nil {
+		return s.updatePostgres(ctx, userID, patch)
+	}
+	return s.Update(userID, patch)
+}
+
+func (s *ProfileStore) getOrCreatePostgres(ctx context.Context, userID, displayName string) (types.ProfileResp, error) {
+	if err := validateUserID(userID); err != nil {
+		return types.ProfileResp{}, err
+	}
+	if strings.TrimSpace(displayName) == "" {
+		displayName = userID
+	}
+	var profile types.ProfileResp
+	err := s.db.QueryRow(ctx, `
+INSERT INTO user_profiles(user_id, display_name, preferences, created_at, updated_at)
+VALUES($1, $2, '{"theme":"system"}'::jsonb, NOW(), NOW())
+ON CONFLICT(user_id) DO UPDATE
+SET user_id = EXCLUDED.user_id
+RETURNING
+    user_id,
+    display_name,
+    bio,
+    avatar_object,
+    preferences,
+    solved_problems,
+    submissions,
+    accepted,
+    created_at::TEXT,
+    updated_at::TEXT
+`, userID, strings.TrimSpace(displayName)).Scan(
+		&profile.UserId,
+		&profile.DisplayName,
+		&profile.Bio,
+		&profile.AvatarObject,
+		&profile.Preferences,
+		&profile.Stats.SolvedProblems,
+		&profile.Stats.Submissions,
+		&profile.Stats.Accepted,
+		&profile.CreatedAt,
+		&profile.UpdatedAt,
+	)
+	if err != nil {
+		return types.ProfileResp{}, err
+	}
+	if profile.Preferences == nil {
+		profile.Preferences = map[string]string{}
+	}
+	return profile, nil
+}
+
+func (s *ProfileStore) updatePostgres(ctx context.Context, userID string, patch ProfilePatch) (types.ProfileResp, error) {
+	if err := validateUserID(userID); err != nil {
+		return types.ProfileResp{}, err
+	}
+	if patch.Preferences == nil {
+		patch.Preferences = map[string]string{}
+	}
+	preferences, err := json.Marshal(patch.Preferences)
+	if err != nil {
+		return types.ProfileResp{}, err
+	}
+	var profile types.ProfileResp
+	err = s.db.QueryRow(ctx, `
+INSERT INTO user_profiles(user_id, display_name, preferences, created_at, updated_at)
+VALUES($1, $1, '{"theme":"system"}'::jsonb, NOW(), NOW())
+ON CONFLICT(user_id) DO UPDATE
+SET
+    display_name = CASE WHEN $2 <> '' THEN $2 ELSE user_profiles.display_name END,
+    bio = CASE WHEN $3 <> '' THEN $3 ELSE user_profiles.bio END,
+    avatar_object = CASE WHEN $4 <> '' THEN $4 ELSE user_profiles.avatar_object END,
+    preferences = CASE WHEN $5::jsonb <> '{}'::jsonb THEN $5::jsonb ELSE user_profiles.preferences END,
+    updated_at = NOW()
+RETURNING
+    user_id,
+    display_name,
+    bio,
+    avatar_object,
+    preferences,
+    solved_problems,
+    submissions,
+    accepted,
+    created_at::TEXT,
+    updated_at::TEXT
+`, userID, strings.TrimSpace(patch.DisplayName), strings.TrimSpace(patch.Bio), strings.TrimSpace(patch.AvatarObject), string(preferences)).Scan(
+		&profile.UserId,
+		&profile.DisplayName,
+		&profile.Bio,
+		&profile.AvatarObject,
+		&profile.Preferences,
+		&profile.Stats.SolvedProblems,
+		&profile.Stats.Submissions,
+		&profile.Stats.Accepted,
+		&profile.CreatedAt,
+		&profile.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return types.ProfileResp{}, os.ErrNotExist
+	}
+	if err != nil {
+		return types.ProfileResp{}, err
+	}
+	if profile.Preferences == nil {
+		profile.Preferences = map[string]string{}
+	}
+	return profile, nil
 }
 
 func (s *ProfileStore) GetOrCreate(userID, displayName string) (types.ProfileResp, error) {

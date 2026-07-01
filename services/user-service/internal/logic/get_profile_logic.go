@@ -27,5 +27,5 @@ func NewGetProfileLogic(ctx context.Context, svcCtx *svc.ServiceContext) *GetPro
 }
 
 func (l *GetProfileLogic) GetProfile(req *types.ProfileReq) (resp *types.ProfileResp, err error) {
-	return profilePtr(l.svcCtx.ProfileStore.GetOrCreate(req.UserId, req.UserId))
+	return profilePtr(l.svcCtx.ProfileStore.GetOrCreateCtx(l.ctx, req.UserId, req.UserId))
 }

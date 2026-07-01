@@ -21,7 +21,10 @@ backend:
   protocol: http
   port: 8084
   health_path: /health
-migrations: []
+migrations:
+  - version: "000001_user_profile_schema"
+    path: services/user-service/migrations/000001_user_profile_schema.up.sql
+    checksum: sha256:a04fa319c993564f740f7dd149119bd43bba6705645a213a72eba8bd65f7f92d
 permissions:
   - user.profile.read.self
   - user.profile.update.self

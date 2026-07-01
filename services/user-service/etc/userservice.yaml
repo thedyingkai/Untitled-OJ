@@ -2,5 +2,8 @@ Name: user-service
 Host: 0.0.0.0
 Port: 8084
 
+Database:
+  Url: ""
+
 Storage:
   ProfilesRoot: /data/ojos/users

@@ -28,7 +28,7 @@ func NewUpdatePreferencesLogic(ctx context.Context, svcCtx *svc.ServiceContext) 
 }
 
 func (l *UpdatePreferencesLogic) UpdatePreferences(req *types.ProfilePatchReq) (resp *types.ProfileResp, err error) {
-	return profilePtr(l.svcCtx.ProfileStore.Update(req.UserId, store.ProfilePatch{
+	return profilePtr(l.svcCtx.ProfileStore.UpdateCtx(l.ctx, req.UserId, store.ProfilePatch{
 		Preferences: req.Preferences,
 	}))
 }

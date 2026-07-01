@@ -27,7 +27,7 @@ func NewGetStatsLogic(ctx context.Context, svcCtx *svc.ServiceContext) *GetStats
 }
 
 func (l *GetStatsLogic) GetStats(req *types.ProfileReq) (resp *types.UserStats, err error) {
-	profile, err := l.svcCtx.ProfileStore.GetOrCreate(req.UserId, req.UserId)
+	profile, err := l.svcCtx.ProfileStore.GetOrCreateCtx(l.ctx, req.UserId, req.UserId)
 	if err != nil {
 		return nil, err
 	}

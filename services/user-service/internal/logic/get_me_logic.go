@@ -32,5 +32,5 @@ func (l *GetMeLogic) GetMe(userID, displayName string) (resp *types.ProfileResp,
 	if userID == "" {
 		userID = "anonymous"
 	}
-	return profilePtr(l.svcCtx.ProfileStore.GetOrCreate(userID, displayName))
+	return profilePtr(l.svcCtx.ProfileStore.GetOrCreateCtx(l.ctx, userID, displayName))
 }

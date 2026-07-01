@@ -27,7 +27,7 @@ func NewGetPreferencesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Ge
 }
 
 func (l *GetPreferencesLogic) GetPreferences(req *types.ProfileReq) (resp *types.PreferencesResp, err error) {
-	profile, err := l.svcCtx.ProfileStore.GetOrCreate(req.UserId, req.UserId)
+	profile, err := l.svcCtx.ProfileStore.GetOrCreateCtx(l.ctx, req.UserId, req.UserId)
 	if err != nil {
 		return nil, err
 	}

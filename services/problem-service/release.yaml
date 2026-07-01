@@ -21,19 +21,65 @@ backend:
   protocol: http
   port: 8083
   health_path: /health
-migrations: []
+migrations:
+  - version: "000001_problem_schema"
+    path: services/problem-service/migrations/000001_problem_schema.up.sql
+    checksum: sha256:bfdcf08fa7f85176bac3dba33de52de209a202ff584474a7aedb2461498a4dc4
 permissions:
   - problem.view
   - problem.create
   - problem.edit
   - problem.delete
   - problem.manage.data
+  - problem.testdata.read
+  - problem.testdata.write
 routes:
   - path: /api/problem/**
     method: ANY
     target_type: endpoint-group
     target: problem-service[*]
     permission: public
+apis:
+  - api_id: problem.problem.read
+    protocol: http
+    port_name: http
+    path_prefix: /api/problem/problems
+    methods: [GET]
+    visibility: descendants
+    auth_mode: user
+    permission: problem.view
+    version: v1
+    stability: stable
+  - api_id: problem.problem.manage
+    protocol: http
+    port_name: http
+    path_prefix: /api/problem/problems
+    methods: [POST, PUT, PATCH, DELETE]
+    visibility: descendants
+    auth_mode: user
+    permission: problem.edit
+    version: v1
+    stability: stable
+  - api_id: problem.testdata.read
+    protocol: http
+    port_name: http
+    path_prefix: /api/problem/testdata
+    methods: [GET]
+    visibility: descendants
+    auth_mode: service
+    permission: problem.testdata.read
+    version: v1
+    stability: stable
+  - api_id: problem.testdata.write
+    protocol: http
+    port_name: http
+    path_prefix: /api/problem/testdata
+    methods: [POST, PUT, DELETE]
+    visibility: descendants
+    auth_mode: service
+    permission: problem.testdata.write
+    version: v1
+    stability: stable
 redis: []
 storage:
   - object_type: problem-package
