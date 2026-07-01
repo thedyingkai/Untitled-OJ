@@ -140,9 +140,27 @@ impl GatewayRoutePublisher for RecordingGatewayRoutePublisher {
             .expect("gateway route publisher calls lock")
             .push(request.clone());
         Ok(GatewayRoutePublishResult {
-            route_count: request.routes.len(),
+            route_count: if request.effective_routes.is_empty() {
+                request.routes.len()
+            } else {
+                request.effective_routes.len()
+            },
             ..self.result.clone()
         })
+    }
+}
+
+#[derive(Clone)]
+struct FailingGatewayRoutePublisher {
+    message: String,
+}
+
+impl GatewayRoutePublisher for FailingGatewayRoutePublisher {
+    fn publish_routes(
+        &self,
+        _request: &GatewayRoutePublishRequest,
+    ) -> Result<GatewayRoutePublishResult> {
+        Err(OrchestratorError::Dependency(self.message.clone()))
     }
 }
 
@@ -1828,7 +1846,7 @@ fn release_install_executor_records_release_resources() {
             == Some("planned")
     }));
     assert!(logs.iter().any(|log| {
-        log.step_id == "gateway-routes:gateway"
+        log.step_id == "gateway_reload:gateway"
             && log.data.get("status").and_then(serde_json::Value::as_str) == Some("planned")
             && log
                 .data
@@ -3005,7 +3023,7 @@ fn release_install_publishes_gateway_routes_when_publisher_is_configured() {
     );
     let logs = store.operation_logs("op-release-gateway-publish");
     assert!(logs.iter().any(|log| {
-        log.step_id == "gateway-routes:gateway"
+        log.step_id == "gateway_reload:gateway"
             && log.data.get("status").and_then(serde_json::Value::as_str) == Some("published")
             && log
                 .data
@@ -3055,7 +3073,10 @@ fn release_install_api_surface_only_release_triggers_gateway_reload() {
         &[],
         "127.0.0.1",
         Some(endpoint),
-        serde_json::json!({"external_service_running": true}),
+        serde_json::json!({
+            "external_service_running": true,
+            "gateway_node_id": "child-node"
+        }),
     )
     .and_then(|operation| confirm_operation(&operation))
     .expect("confirmed storage release install");
@@ -3116,8 +3137,26 @@ fn release_install_api_surface_only_release_triggers_gateway_reload() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].service_name, "storage-service");
     assert!(calls[0].routes.is_empty());
+    assert_eq!(calls[0].node_id, "child-node");
     assert_eq!(calls[0].api_count, release.apis.len());
     assert!(calls[0].force_reload);
+    for api_id in [
+        "storage.object.put",
+        "storage.object.get",
+        "storage.object.head",
+    ] {
+        assert!(
+            calls[0]
+                .effective_routes
+                .iter()
+                .any(|route| route.api_id == api_id
+                    && route.provider_endpoint == endpoint
+                    && route.provider_node_id == "root-node"
+                    && route.node_id == "child-node"
+                    && route.status == "running"),
+            "gateway publisher should receive effective route {api_id}"
+        );
+    }
     drop(calls);
 
     let routes = store
@@ -3141,7 +3180,7 @@ fn release_install_api_surface_only_release_triggers_gateway_reload() {
 
     let logs = store.operation_logs("op-release-storage-api-reload");
     assert!(logs.iter().any(|log| {
-        log.step_id == "gateway-routes:storage-service"
+        log.step_id == "gateway_reload:storage-service"
             && log.data.get("status").and_then(serde_json::Value::as_str) == Some("published")
             && log
                 .data
@@ -3166,6 +3205,91 @@ fn release_install_api_surface_only_release_triggers_gateway_reload() {
                 .get("host_service")
                 .and_then(serde_json::Value::as_str)
                 == Some("created")
+    }));
+}
+
+#[test]
+fn release_install_fails_when_gateway_reload_fails() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/storage-service/service.yaml"))
+            .unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/storage-service/release.yaml"))
+            .unwrap();
+    let operation = release_install_operation_with_release(
+        "op-release-storage-gateway-reload-fails",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        Some("127.0.0.1:19280:storage-service"),
+        serde_json::json!({
+            "external_service_running": true,
+            "gateway_node_id": "child-node"
+        }),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed storage release install");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store
+        .upsert_node(NodeRecord {
+            node_id: "root-node".to_string(),
+            host_ip: "127.0.0.1".to_string(),
+            parent_node_id: String::new(),
+            role: "root".to_string(),
+            labels: serde_json::json!({}),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("root node");
+    store
+        .upsert_node(NodeRecord {
+            node_id: "child-node".to_string(),
+            host_ip: "127.0.0.2".to_string(),
+            parent_node_id: "root-node".to_string(),
+            role: "node".to_string(),
+            labels: serde_json::json!({}),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("child node");
+    store.put_operation(operation).expect("put operation");
+
+    let err = OperationExecutor::with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        FailingGatewayRoutePublisher {
+            message: "gateway route publish failed: http 503".to_string(),
+        },
+        DeferredNodeServiceDispatcher,
+    )
+    .apply("op-release-storage-gateway-reload-fails")
+    .expect_err("gateway reload failure must fail release.install");
+
+    assert!(err.to_string().contains("gateway route publish failed"));
+    let operation = store
+        .operation("op-release-storage-gateway-reload-fails")
+        .expect("failed operation");
+    assert_eq!(operation.status, OperationStatus::Failed);
+    assert!(
+        operation
+            .error_message
+            .contains("gateway route publish failed")
+    );
+    let logs = store.operation_logs("op-release-storage-gateway-reload-fails");
+    assert!(logs.iter().any(|log| {
+        log.step_id.is_empty()
+            && log.level == "error"
+            && log.message.contains("gateway route publish failed")
     }));
 }
 

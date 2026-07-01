@@ -499,6 +499,74 @@ func TestOrchestratorRoutesReloadUpdatesGatewayProxyTable(t *testing.T) {
 	}
 }
 
+func TestOrchestratorRoutesReloadAcceptsPushedRoutes(t *testing.T) {
+	ctx := context.Background()
+	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceProxy, err := proxy.NewServiceProxy(nil, nil, "test-secret", nil, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceProxy.SetPermissionChecker(func(context.Context, string, proxy.PermissionCheckCaller, string) (bool, error) {
+		return true, nil
+	})
+	logic := &AdminOrchestratorRoutesReloadLogic{
+		ctx: ctx,
+		svcCtx: &svc.ServiceContext{
+			Config:       config.Config{Jwt: config.JwtConfig{Secret: "test-secret"}},
+			ServiceProxy: serviceProxy,
+		},
+	}
+
+	resp, err := logic.AdminOrchestratorRoutesReload(&types.AdminRoutesReloadReq{
+		Authorization: "Bearer " + token,
+		OperationId:   "op-release-storage-install",
+		ServiceName:   "storage-service",
+		Version:       "1",
+		CanProxy:      true,
+		Routes: []types.OrchestratorRouteItem{
+			{
+				RouteId:            "storage-service:storage.object.get",
+				ApiId:              "storage.object.get",
+				NodeId:             "child-node",
+				ProviderNodeId:     "root-node",
+				ProviderService:    "storage-service",
+				ProviderEndpoint:   "127.0.0.1:8085:storage-service",
+				OwnerServiceId:     "storage-service",
+				Prefix:             "/api/storage/objects",
+				ServiceId:          "storage-service",
+				TargetService:      "storage-service",
+				UpstreamBase:       "http://127.0.0.1:1",
+				AuthMode:           "service",
+				RequiredPermission: "storage.object.read",
+				Methods:            []string{http.MethodGet},
+				Enabled:            true,
+				ProxyEnabled:       true,
+				Priority:           len("/api/storage/objects"),
+				CreatedFrom:        "orchestrator_effective_api_view",
+				Status:             "active",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("pushed route reload failed: %v", err)
+	}
+	if resp.Status != "reloaded" || resp.RouteCount != 1 {
+		t.Fatalf("unexpected pushed reload response: %#v", resp)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/internal/apis/storage.object.get/submissions/a.cpp", nil)
+	req.Header.Set("Authorization", "Bearer service-token")
+	req.Header.Set("X-OJOS-Caller-Service", "judge-api")
+	req.Header.Set("X-OJOS-Node-Id", "child-node")
+	serviceProxy.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("expected pushed proxy route to be active and hit upstream, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestServiceStatusesAdminAPIUsesServiceStatusDriver(t *testing.T) {
 	ctx := context.Background()
 	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)

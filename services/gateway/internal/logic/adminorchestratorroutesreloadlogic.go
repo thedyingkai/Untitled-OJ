@@ -40,6 +40,17 @@ func (l *AdminOrchestratorRoutesReloadLogic) AdminOrchestratorRoutesReload(req *
 	if l.svcCtx == nil || l.svcCtx.ServiceProxy == nil {
 		return nil, errOrchestratorUnavailable()
 	}
+	if len(req.Routes) > 0 {
+		table := pushedRouteTable(req)
+		l.svcCtx.ServiceProxy.SetRouteTable(table)
+		return &types.OrchestratorRoutesReloadResp{
+			Status:      "reloaded",
+			Message:     "gateway route table reloaded from pushed orchestrator routes",
+			OperationId: strings.TrimSpace(req.OperationId),
+			ServiceName: strings.TrimSpace(req.ServiceName),
+			RouteCount:  len(table.Routes),
+		}, nil
+	}
 	reader := l.routeReader
 	if reader == nil {
 		reader = NewAdminServicesLogic(l.ctx, l.svcCtx)
@@ -55,4 +66,53 @@ func (l *AdminOrchestratorRoutesReloadLogic) AdminOrchestratorRoutesReload(req *
 		ServiceName: strings.TrimSpace(req.ServiceName),
 		RouteCount:  len(table.Routes),
 	}, nil
+}
+
+func pushedRouteTable(req *types.AdminRoutesReloadReq) servicestatus.RouteTable {
+	routes := make([]servicestatus.ServiceRoute, 0, len(req.Routes))
+	for _, route := range req.Routes {
+		routes = append(routes, servicestatus.ServiceRoute{
+			RouteID:            route.RouteId,
+			ApiID:              route.ApiId,
+			NodeID:             route.NodeId,
+			ProviderNodeID:     route.ProviderNodeId,
+			ProviderHostIP:     route.ProviderHostIp,
+			ProviderService:    route.ProviderService,
+			ProviderEndpoint:   route.ProviderEndpoint,
+			VisibilitySource:   route.VisibilitySource,
+			Distance:           route.Distance,
+			OwnerServiceID:     route.OwnerServiceId,
+			Prefix:             route.Prefix,
+			ServiceID:          route.ServiceId,
+			TargetService:      route.TargetService,
+			UpstreamBase:       route.UpstreamBase,
+			AuthMode:           route.AuthMode,
+			RequiredPermission: route.RequiredPermission,
+			Methods:            route.Methods,
+			Enabled:            route.Enabled,
+			ProxyEnabled:       route.ProxyEnabled,
+			Priority:           route.Priority,
+			StripPrefix:        route.StripPrefix,
+			RewritePrefix:      route.RewritePrefix,
+			HealthCheckID:      route.HealthCheckId,
+			CreatedFrom:        route.CreatedFrom,
+			Status:             route.Status,
+			ServiceStatus:      route.ServiceStatus,
+			ServiceHealth:      route.ServiceHealth,
+			Conflicts:          route.Conflicts,
+			Warnings:           route.Warnings,
+			BlockedBy:          route.BlockedBy,
+		})
+	}
+	version := strings.TrimSpace(req.Version)
+	if version == "" {
+		version = "1"
+	}
+	return servicestatus.RouteTable{
+		Version:     version,
+		GeneratedAt: strings.TrimSpace(req.GeneratedAt),
+		Routes:      routes,
+		Warnings:    req.Warnings,
+		CanProxy:    req.CanProxy || len(routes) > 0,
+	}
 }

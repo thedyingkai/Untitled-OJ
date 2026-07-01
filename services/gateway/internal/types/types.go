@@ -99,9 +99,15 @@ type OrchestratorRoutesResp struct {
 }
 
 type AdminRoutesReloadReq struct {
-	Authorization string `header:"Authorization,optional"`
-	OperationId   string `json:"operation_id,optional"`
-	ServiceName   string `json:"service_name,optional"`
+	Authorization string                  `header:"Authorization,optional"`
+	OperationId   string                  `json:"operation_id,optional"`
+	ServiceName   string                  `json:"service_name,optional"`
+	NodeId        string                  `json:"node_id,optional"`
+	Version       string                  `json:"version,optional"`
+	GeneratedAt   string                  `json:"generated_at,optional"`
+	Routes        []OrchestratorRouteItem `json:"routes,optional"`
+	Warnings      []string                `json:"warnings,optional"`
+	CanProxy      bool                    `json:"can_proxy,optional"`
 }
 
 type OrchestratorRoutesReloadResp struct {

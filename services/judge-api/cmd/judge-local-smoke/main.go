@@ -462,12 +462,16 @@ func startRealOrchestrator(ctx context.Context, cfg smokeConfig) (*childProcess,
 			"--bind", fmt.Sprintf("%s:%d", cfg.orchestrator.host, cfg.orchestrator.port),
 		},
 		env: noProxyEnv(map[string]string{
-			"OJOS_SMOKE_MODE":                   "1",
-			"ORCHESTRATOR_RELEASE_PACKAGE_LOAD": "1",
-			"ORCHESTRATOR_RELEASE_PACKAGE_ROOT": cfg.repoRoot,
-			"ORCHESTRATOR_AUTH_PERMISSION_SYNC": "1",
-			"AUTH_SERVICE_ENDPOINT":             cfg.auth.baseURL(),
-			"AUTH_SERVICE_ADMIN_TOKEN":          serviceToken,
+			"OJOS_SMOKE_MODE":                    "1",
+			"ORCHESTRATOR_RELEASE_PACKAGE_LOAD":  "1",
+			"ORCHESTRATOR_RELEASE_PACKAGE_ROOT":  cfg.repoRoot,
+			"ORCHESTRATOR_AUTH_PERMISSION_SYNC":  "1",
+			"AUTH_SERVICE_ENDPOINT":              cfg.auth.baseURL(),
+			"AUTH_SERVICE_ADMIN_TOKEN":           serviceToken,
+			"ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH": "1",
+			"GATEWAY_ENDPOINT":                   cfg.gateway.baseURL(),
+			"GATEWAY_ADMIN_TOKEN":                cfg.gatewayAdminJWT,
+			"GATEWAY_NODE_ID":                    childNodeID,
 		}),
 	})
 }
@@ -576,6 +580,7 @@ func installStorageRelease(ctx context.Context, cfg smokeConfig) error {
 		"operation_id":             "op-smoke-storage-release-install",
 		"host_ip":                  cfg.storage.host,
 		"endpoint":                 endpointID,
+		"gateway_node_id":          childNodeID,
 		"execute_service_driver":   false,
 		"external_service_running": true,
 	}
@@ -602,36 +607,10 @@ func installStorageRelease(ctx context.Context, cfg smokeConfig) error {
 	if err := verifyRealOrchestratorRoutes(ctx, cfg, endpointID); err != nil {
 		return err
 	}
-	if err := reloadGatewayRoutes(ctx, cfg); err != nil {
-		return fail("gateway route reload completed", err)
-	}
 	if err := waitGatewayRoute(ctx, cfg, "storage.object.put", endpointID); err != nil {
 		return fail("gateway route reload completed", err)
 	}
 	ok("gateway route reload completed")
-	return nil
-}
-
-func reloadGatewayRoutes(ctx context.Context, cfg smokeConfig) error {
-	body := map[string]any{
-		"operation_id": "op-smoke-storage-release-install",
-		"service_name": storageService,
-	}
-	var resp struct {
-		Status     string `json:"status"`
-		RouteCount int    `json:"route_count"`
-	}
-	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.gateway.baseURL()+"/api/admin/orchestrator/routes/reload", body, map[string]string{
-		"Authorization": "Bearer " + cfg.gatewayAdminJWT,
-	}, &resp); err != nil {
-		return err
-	}
-	if resp.Status != "reloaded" {
-		return fmt.Errorf("unexpected reload status %q", resp.Status)
-	}
-	if resp.RouteCount == 0 {
-		return errors.New("gateway reload returned zero routes")
-	}
 	return nil
 }
 

@@ -1163,6 +1163,8 @@ pub struct GatewayRoutePublishRequest {
     pub operation_id: String,
     pub service_name: String,
     pub routes: Vec<ServiceRoute>,
+    pub effective_routes: Vec<EffectiveApiRoute>,
+    pub node_id: String,
     pub api_count: usize,
     pub force_reload: bool,
 }
@@ -2376,7 +2378,7 @@ impl GatewayRoutePublisher for DeferredGatewayRoutePublisher {
                 )
             },
             endpoint: String::new(),
-            route_count: request.routes.len(),
+            route_count: gateway_publish_route_count(request),
             reloaded: false,
         })
     }
@@ -2424,7 +2426,7 @@ impl GatewayRoutePublisher for ConfiguredGatewayRoutePublisher {
                 )
             },
             endpoint: String::new(),
-            route_count: request.routes.len(),
+            route_count: gateway_publish_route_count(request),
             reloaded: false,
         })
     }
@@ -2467,6 +2469,78 @@ impl HttpGatewayRoutePublisher {
     }
 }
 
+fn gateway_publish_route_count(request: &GatewayRoutePublishRequest) -> usize {
+    if request.effective_routes.is_empty() {
+        request.routes.len()
+    } else {
+        request.effective_routes.len()
+    }
+}
+
+fn gateway_effective_route_items(routes: &[EffectiveApiRoute]) -> Result<Vec<serde_json::Value>> {
+    routes
+        .iter()
+        .map(|route| {
+            let upstream = endpoint_upstream_base_from_id(&route.provider_endpoint, &route.protocol)?;
+            let enabled = route.status == "running";
+            let proxy_enabled = enabled && !upstream.is_empty();
+            Ok(serde_json::json!({
+                "route_id": format!("{}:{}", route.provider_service_name, route.api_id),
+                "node_id": route.node_id,
+                "api_id": route.api_id,
+                "provider_node_id": route.provider_node_id,
+                "provider_host_ip": route.provider_host_ip,
+                "provider_service_name": route.provider_service_name,
+                "provider_endpoint": route.provider_endpoint,
+                "owner_service_id": route.provider_service_name,
+                "prefix": route.path_prefix,
+                "path_prefix": route.path_prefix,
+                "service_id": route.provider_service_name,
+                "target_service": route.provider_service_name,
+                "upstream_base": upstream,
+                "auth_mode": route.auth_mode,
+                "required_permission": required_permission_for_gateway(&route.permission),
+                "permission": route.permission,
+                "methods": route.methods,
+                "enabled": enabled,
+                "proxy_enabled": proxy_enabled,
+                "priority": route.path_prefix.len(),
+                "strip_prefix": "",
+                "rewrite_prefix": "",
+                "health_check_id": format!("{}-health", route.provider_service_name),
+                "created_from": "orchestrator_effective_api_view",
+                "visibility_source": route.visibility_source,
+                "distance": route.distance,
+                "status": if proxy_enabled { "active" } else if enabled { "blocked" } else { "disabled" },
+                "service_status": route.status,
+                "service_health": if enabled { "ok" } else { "unknown" },
+                "conflicts": [],
+                "warnings": [],
+                "blocked_by": if upstream.is_empty() { vec!["missing endpoint"] } else { Vec::<&str>::new() },
+            }))
+        })
+        .collect()
+}
+
+fn endpoint_upstream_base_from_id(endpoint: &str, protocol: &str) -> Result<String> {
+    let identity = parse_endpoint_id(endpoint)?;
+    Ok(format!(
+        "{}://{}:{}",
+        protocol.trim(),
+        identity.host,
+        identity.port
+    ))
+}
+
+fn required_permission_for_gateway(permission: &str) -> String {
+    let permission = permission.trim();
+    if permission == "public" {
+        String::new()
+    } else {
+        permission.to_string()
+    }
+}
+
 impl GatewayRoutePublisher for HttpGatewayRoutePublisher {
     fn publish_routes(
         &self,
@@ -2489,7 +2563,7 @@ impl GatewayRoutePublisher for HttpGatewayRoutePublisher {
                 status: "planned".to_string(),
                 message: "gateway endpoint is not configured".to_string(),
                 endpoint: String::new(),
-                route_count: request.routes.len(),
+                route_count: gateway_publish_route_count(request),
                 reloaded: false,
             });
         }
@@ -2500,6 +2574,11 @@ impl GatewayRoutePublisher for HttpGatewayRoutePublisher {
         let body = serde_json::json!({
             "operation_id": request.operation_id,
             "service_name": request.service_name,
+            "version": "1",
+            "node_id": request.node_id,
+            "routes": gateway_effective_route_items(&request.effective_routes)?,
+            "warnings": [],
+            "can_proxy": !request.effective_routes.is_empty(),
         });
         let agent: Agent = Agent::config_builder()
             .timeout_global(Some(self.timeout))
@@ -2521,7 +2600,7 @@ impl GatewayRoutePublisher for HttpGatewayRoutePublisher {
                 status: "published".to_string(),
                 message: format!("gateway route table reload accepted: http {status}"),
                 endpoint: self.endpoint.clone(),
-                route_count: request.routes.len(),
+                route_count: gateway_publish_route_count(request),
                 reloaded: true,
             })
         } else {
@@ -3203,14 +3282,18 @@ impl<
         operation_id: &str,
         release: &ServiceReleaseManifest,
         routes: &[ServiceRoute],
+        effective_routes: &[EffectiveApiRoute],
+        node_id: &str,
         api_count: usize,
     ) -> Result<GatewayRoutePublishResult> {
         let request = GatewayRoutePublishRequest {
             operation_id: operation_id.to_string(),
             service_name: release.service_name.clone(),
             routes: routes.to_vec(),
+            effective_routes: effective_routes.to_vec(),
+            node_id: node_id.to_string(),
             api_count,
-            force_reload: api_count > 0 || !routes.is_empty(),
+            force_reload: api_count > 0 || !routes.is_empty() || !effective_routes.is_empty(),
         };
         let result = self.gateway_route_publisher.publish_routes(&request)?;
         self.store.append_operation_log(gateway_route_log_record(
@@ -3728,6 +3811,8 @@ impl<
                 let mut redis_provision = None;
                 let mut storage_provision = None;
                 let mut gateway_route_publish = None;
+                let mut release_routes = Vec::new();
+                let mut api_surface_count = 0_usize;
                 let release_package_load = match release.as_ref() {
                     Some(release) => {
                         Some(self.load_release_package(&operation.operation_id, release)?)
@@ -3746,12 +3831,8 @@ impl<
                     for route in &routes {
                         self.store.upsert_service_route(route.clone())?;
                     }
-                    gateway_route_publish = Some(self.publish_gateway_routes(
-                        &operation.operation_id,
-                        release,
-                        &routes,
-                        api_surfaces.len(),
-                    )?);
+                    api_surface_count = api_surfaces.len();
+                    release_routes = routes;
                     for record in service_migration_records_from_release(release) {
                         self.store.upsert_service_migration_record(record)?;
                     }
@@ -3865,6 +3946,20 @@ impl<
                     )? {
                         self.store.upsert_deployed_service_api(api)?;
                     }
+                    let gateway_node_id = gateway_reload_node_id(operation);
+                    let effective_routes = if let Some(node_id) = gateway_node_id.as_deref() {
+                        self.store.effective_api_routes(node_id)?
+                    } else {
+                        Vec::new()
+                    };
+                    gateway_route_publish = Some(self.publish_gateway_routes(
+                        &operation.operation_id,
+                        release,
+                        &release_routes,
+                        &effective_routes,
+                        gateway_node_id.as_deref().unwrap_or(""),
+                        api_surface_count,
+                    )?);
                 }
                 changed.extend(release_changed_objects(&service, release.as_ref()));
                 if let Some(release) = release.as_ref() {
@@ -6218,6 +6313,32 @@ fn operation_bool_field(operation: &Operation, field: &str) -> bool {
             .is_some_and(json_truthy_value)
 }
 
+fn gateway_reload_node_id(operation: &Operation) -> Option<String> {
+    operation
+        .request
+        .get("gateway_node_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            operation
+                .request
+                .get("install_options")
+                .and_then(|value| value.get("gateway_node_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            std::env::var("GATEWAY_NODE_ID")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+}
+
 fn json_truthy_value(value: &serde_json::Value) -> bool {
     value.as_bool().unwrap_or_else(|| {
         value.as_str().is_some_and(|text| {
@@ -6666,14 +6787,29 @@ fn gateway_route_log_record(
     result: &GatewayRoutePublishResult,
 ) -> OperationLogRecord {
     let level = if result.reloaded { "info" } else { "warn" };
+    let message = if result.reloaded {
+        format!("[OK] gateway route reload completed for {service_name}")
+    } else if result
+        .message
+        .to_ascii_lowercase()
+        .contains("gateway_endpoint")
+        || result
+            .message
+            .to_ascii_lowercase()
+            .contains("gateway endpoint is not configured")
+    {
+        "[DEFERRED] gateway route reload skipped: gateway endpoint not configured".to_string()
+    } else {
+        format!(
+            "gateway route reload for {} {}: {}",
+            service_name, result.status, result.message
+        )
+    };
     operation_step_log_record(
         operation_id,
-        format!("gateway-routes:{service_name}"),
+        format!("gateway_reload:{service_name}"),
         level,
-        format!(
-            "gateway route publish for {} {}: {}",
-            service_name, result.status, result.message
-        ),
+        message,
         serde_json::json!({
             "service_name": service_name,
             "status": result.status,

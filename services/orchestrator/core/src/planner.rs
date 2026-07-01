@@ -554,6 +554,7 @@ fn release_install_options(request: &ActionRequest) -> Value {
             .field("external_service_running")
             .or_else(|| request.field("existing_endpoint_running"))
             .is_some_and(truthy_field),
+        "gateway_node_id": request.field("gateway_node_id").unwrap_or(""),
     })
 }
 

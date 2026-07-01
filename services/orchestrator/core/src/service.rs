@@ -1523,7 +1523,11 @@ pub fn release_install_operation_with_release(
             "external_service_running": install_options
                 .get("external_service_running")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
+                .unwrap_or(false),
+            "gateway_node_id": install_options
+                .get("gateway_node_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
         }),
         serde_json::json!({
             "steps": steps,
