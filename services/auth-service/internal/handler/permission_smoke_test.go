@@ -25,21 +25,29 @@ func TestSmokePermissionCheckServiceCallerBoundaries(t *testing.T) {
 	if registerResult.status != http.StatusOK {
 		t.Fatalf("register storage permissions got status=%d body=%s", registerResult.status, registerResult.body)
 	}
+	identityResult := registerSmokeJudgeWorkerIdentity(register)
+	if identityResult.status != http.StatusOK {
+		t.Fatalf("register judge-worker identity got status=%d body=%s", identityResult.status, identityResult.body)
+	}
 	handler := svcCtx.AuthMiddleware(userPermissionCheckHandler(svcCtx))
 
-	allowed := permissionCheckRequest("smoke-token", "judge-worker", "storage.object.read", handler)
+	allowed := permissionCheckRequest("smoke-token", "judge-worker", "storage.object.get", "storage.object.read", handler)
 	if allowed.status != http.StatusOK || !allowed.allowed {
 		t.Fatalf("allowed service caller got status=%d allowed=%v body=%s", allowed.status, allowed.allowed, allowed.body)
 	}
 
-	missing := permissionCheckRequest("", "judge-worker", "storage.object.read", handler)
+	missing := permissionCheckRequest("", "judge-worker", "storage.object.get", "storage.object.read", handler)
 	if missing.status != http.StatusUnauthorized {
 		t.Fatalf("missing token got status=%d body=%s", missing.status, missing.body)
 	}
 
-	denied := permissionCheckRequest("smoke-token", "judge-worker", "storage.object.delete", handler)
+	denied := permissionCheckRequest("smoke-token", "judge-worker", "storage.object.delete", "storage.object.delete", handler)
 	if denied.status != http.StatusOK || denied.allowed {
 		t.Fatalf("denied service caller got status=%d allowed=%v body=%s", denied.status, denied.allowed, denied.body)
+	}
+	unknown := permissionCheckRequest("smoke-token", "fake-worker", "storage.object.get", "storage.object.read", handler)
+	if unknown.status != http.StatusOK || unknown.allowed {
+		t.Fatalf("unknown service caller got status=%d allowed=%v body=%s", unknown.status, unknown.allowed, unknown.body)
 	}
 
 	list := svcCtx.AuthMiddleware(listPermissionsHandler(svcCtx))
@@ -81,10 +89,35 @@ func registerSmokeStoragePermissions(handler http.HandlerFunc) registerSmokeResu
 	return registerSmokeResult{status: rr.Code, body: rr.Body.String()}
 }
 
-func permissionCheckRequest(token string, service string, permission string, handler http.HandlerFunc) permissionCheckTestResult {
+func registerSmokeJudgeWorkerIdentity(handler http.HandlerFunc) registerSmokeResult {
+	payload, _ := json.Marshal(map[string]any{
+		"permissions": []map[string]any{
+			{"code": "judge.worker", "name": "judge.worker"},
+		},
+		"default_role_bindings": []any{},
+		"service_identity": map[string]any{
+			"service_name": "judge-worker",
+			"allowed_apis": []string{"storage.object.get", "storage.object.put"},
+			"grants": []map[string]any{
+				{"api_id": "storage.object.get", "permission": "storage.object.read"},
+				{"api_id": "storage.object.put", "permission": "storage.object.write"},
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/auth/admin/services/judge-worker/permissions", bytes.NewReader(payload))
+	req = pathvar.WithVars(req, map[string]string{"service_code": "judge-worker"})
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer smoke-token")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+	return registerSmokeResult{status: rr.Code, body: rr.Body.String()}
+}
+
+func permissionCheckRequest(token string, service string, apiID string, permission string, handler http.HandlerFunc) permissionCheckTestResult {
 	payload, _ := json.Marshal(map[string]any{
 		"caller_type":    "service",
 		"caller_service": service,
+		"api_id":         apiID,
 		"permission":     permission,
 		"scope_type":     "system",
 	})

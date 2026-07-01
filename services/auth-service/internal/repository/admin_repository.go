@@ -54,6 +54,17 @@ type ServiceRoleBindingInput struct {
 	Permissions []string
 }
 
+type ServiceIdentityInput struct {
+	ServiceCode string
+	AllowedAPIs []string
+	Grants      []ServiceIdentityGrantInput
+}
+
+type ServiceIdentityGrantInput struct {
+	APIID          string
+	PermissionCode string
+}
+
 type AuditListItem struct {
 	ID             int64
 	ActorType      string
@@ -144,13 +155,13 @@ ORDER BY service_code, code
 	return items, rows.Err()
 }
 
-func (r *AdminRepository) RegisterServicePermissions(ctx context.Context, serviceCode string, permissions []ServicePermissionInput, bindings []ServiceRoleBindingInput) ([]string, error) {
+func (r *AdminRepository) RegisterServicePermissions(ctx context.Context, serviceCode string, permissions []ServicePermissionInput, bindings []ServiceRoleBindingInput, identity *ServiceIdentityInput) ([]string, error) {
 	serviceCode = strings.TrimSpace(serviceCode)
 	if serviceCode == "" {
 		return nil, errors.New("service_code is required")
 	}
-	if len(permissions) == 0 {
-		return nil, errors.New("permissions are required")
+	if len(permissions) == 0 && serviceIdentityEmpty(identity) {
+		return nil, errors.New("permissions or service_identity are required")
 	}
 
 	tx, err := r.db.Begin(ctx)
@@ -187,12 +198,14 @@ DO UPDATE SET service_code = EXCLUDED.service_code, name = EXCLUDED.name, descri
 		declaredCodes = append(declaredCodes, code)
 	}
 
-	if _, err := tx.Exec(ctx, `
+	if len(declaredCodes) > 0 {
+		if _, err := tx.Exec(ctx, `
 DELETE FROM permissions
 WHERE service_code = $1
   AND NOT (code = ANY($2::text[]))
 `, serviceCode, declaredCodes); err != nil {
-		return nil, err
+			return nil, err
+		}
 	}
 
 	for _, binding := range bindings {
@@ -234,6 +247,12 @@ DO NOTHING
 		}
 	}
 
+	if !serviceIdentityEmpty(identity) {
+		if err := r.registerServiceIdentity(ctx, tx, serviceCode, identity); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -245,19 +264,36 @@ func (r *AdminRepository) DeleteServicePermissions(ctx context.Context, serviceC
 	if serviceCode == "" {
 		return 0, errors.New("service_code is required")
 	}
-	tag, err := r.db.Exec(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+	if _, err := tx.Exec(ctx, `
+DELETE FROM service_identities
+WHERE service_code = $1
+`, serviceCode); err != nil {
+		return 0, err
+	}
+	tag, err := tx.Exec(ctx, `
 DELETE FROM permissions
 WHERE service_code = $1
 `, serviceCode)
 	if err != nil {
 		return 0, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
 	return tag.RowsAffected(), nil
 }
 
-func (r *AdminRepository) ServiceCallerCanUsePermission(ctx context.Context, serviceCode string, permissionCode string) (bool, error) {
+func (r *AdminRepository) ServiceCallerCanUsePermission(ctx context.Context, serviceCode string, permissionCode string, apiID string) (bool, error) {
 	serviceCode = strings.TrimSpace(serviceCode)
 	permissionCode = strings.TrimSpace(permissionCode)
+	apiID = strings.TrimSpace(apiID)
 	if serviceCode == "" || permissionCode == "" {
 		return false, nil
 	}
@@ -265,10 +301,18 @@ func (r *AdminRepository) ServiceCallerCanUsePermission(ctx context.Context, ser
 	err := r.db.QueryRow(ctx, `
 SELECT EXISTS (
     SELECT 1
-    FROM permissions
-    WHERE code = $1
+    FROM service_identities si
+    JOIN service_permission_grants spg
+      ON spg.caller_service_code = si.service_code
+    JOIN permissions p
+      ON p.code = spg.permission_code
+    WHERE si.service_code = $1
+      AND si.enabled
+      AND spg.enabled
+      AND spg.permission_code = $2
+      AND ($3 = '' OR spg.api_id = $3)
 )
-`, permissionCode).Scan(&ok)
+`, serviceCode, permissionCode, apiID).Scan(&ok)
 	return ok, err
 }
 
@@ -428,6 +472,80 @@ LIMIT 200
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func serviceIdentityEmpty(identity *ServiceIdentityInput) bool {
+	if identity == nil {
+		return true
+	}
+	if strings.TrimSpace(identity.ServiceCode) != "" {
+		return false
+	}
+	if len(identity.AllowedAPIs) > 0 || len(identity.Grants) > 0 {
+		return false
+	}
+	return true
+}
+
+func (r *AdminRepository) registerServiceIdentity(ctx context.Context, tx pgx.Tx, serviceCode string, identity *ServiceIdentityInput) error {
+	identityCode := strings.TrimSpace(identity.ServiceCode)
+	if identityCode == "" {
+		identityCode = serviceCode
+	}
+	if identityCode != serviceCode {
+		return errors.New("service_identity service_name must match service_code")
+	}
+	allowedAPIs := make(map[string]bool, len(identity.AllowedAPIs))
+	for _, rawAPI := range identity.AllowedAPIs {
+		apiID := strings.TrimSpace(rawAPI)
+		if apiID != "" {
+			allowedAPIs[apiID] = true
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO service_identities(service_code, enabled, updated_at)
+VALUES($1, TRUE, NOW())
+ON CONFLICT(service_code)
+DO UPDATE SET enabled = TRUE, updated_at = NOW()
+`, serviceCode); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+DELETE FROM service_permission_grants
+WHERE caller_service_code = $1
+`, serviceCode); err != nil {
+		return err
+	}
+	for _, grant := range identity.Grants {
+		apiID := strings.TrimSpace(grant.APIID)
+		permissionCode := strings.TrimSpace(grant.PermissionCode)
+		if apiID == "" || permissionCode == "" {
+			return errors.New("service_identity grant api_id and permission are required")
+		}
+		if len(allowedAPIs) > 0 && !allowedAPIs[apiID] {
+			return errors.New("service_identity grant api_id must be declared in allowed_apis")
+		}
+		var providerService string
+		if err := tx.QueryRow(ctx, `
+SELECT service_code
+FROM permissions
+WHERE code = $1
+`, permissionCode).Scan(&providerService); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errors.New("service_identity grant references unknown permission")
+			}
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO service_permission_grants(caller_service_code, api_id, permission_code, provider_service_code, enabled, updated_at)
+VALUES($1, $2, $3, $4, TRUE, NOW())
+ON CONFLICT(caller_service_code, api_id, permission_code)
+DO UPDATE SET provider_service_code = EXCLUDED.provider_service_code, enabled = TRUE, updated_at = NOW()
+`, serviceCode, apiID, permissionCode, providerService); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureServiceRole(ctx context.Context, tx pgx.Tx, serviceCode string, roleName string) (int64, error) {

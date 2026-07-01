@@ -43,7 +43,8 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 				Description: item.Description,
 			})
 		}
-		registered := l.svcCtx.SmokeAuth.RegisterServicePermissions(serviceCode, permissions)
+		identity := smokeIdentityFromRequest(req)
+		registered := l.svcCtx.SmokeAuth.RegisterServicePermissions(serviceCode, permissions, identity)
 		return &types.ServicePermissionsResp{
 			Code: 0,
 			Msg:  "success",
@@ -69,7 +70,8 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 			Permissions: binding.Permissions,
 		})
 	}
-	registered, err := l.svcCtx.AdminRepo.RegisterServicePermissions(l.ctx, serviceCode, permissions, bindings)
+	identity := repositoryIdentityFromRequest(req)
+	registered, err := l.svcCtx.AdminRepo.RegisterServicePermissions(l.ctx, serviceCode, permissions, bindings, identity)
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +84,52 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 			Permissions: registered,
 		},
 	}, nil
+}
+
+func smokeIdentityFromRequest(req *types.RegisterServicePermissionsReq) *svc.SmokeServiceIdentity {
+	if req == nil {
+		return nil
+	}
+	if strings.TrimSpace(req.ServiceIdentity.ServiceName) == "" &&
+		len(req.ServiceIdentity.AllowedApis) == 0 &&
+		len(req.ServiceIdentity.Grants) == 0 {
+		return nil
+	}
+	grants := make([]svc.SmokeServiceIdentityGrant, 0, len(req.ServiceIdentity.Grants))
+	for _, grant := range req.ServiceIdentity.Grants {
+		grants = append(grants, svc.SmokeServiceIdentityGrant{
+			APIID:          grant.ApiId,
+			PermissionCode: grant.Permission,
+		})
+	}
+	return &svc.SmokeServiceIdentity{
+		ServiceCode: req.ServiceIdentity.ServiceName,
+		AllowedAPIs: req.ServiceIdentity.AllowedApis,
+		Grants:      grants,
+	}
+}
+
+func repositoryIdentityFromRequest(req *types.RegisterServicePermissionsReq) *repository.ServiceIdentityInput {
+	if req == nil {
+		return nil
+	}
+	if strings.TrimSpace(req.ServiceIdentity.ServiceName) == "" &&
+		len(req.ServiceIdentity.AllowedApis) == 0 &&
+		len(req.ServiceIdentity.Grants) == 0 {
+		return nil
+	}
+	grants := make([]repository.ServiceIdentityGrantInput, 0, len(req.ServiceIdentity.Grants))
+	for _, grant := range req.ServiceIdentity.Grants {
+		grants = append(grants, repository.ServiceIdentityGrantInput{
+			APIID:          grant.ApiId,
+			PermissionCode: grant.Permission,
+		})
+	}
+	return &repository.ServiceIdentityInput{
+		ServiceCode: req.ServiceIdentity.ServiceName,
+		AllowedAPIs: req.ServiceIdentity.AllowedApis,
+		Grants:      grants,
+	}
 }
 
 func (l *ServicePermissionsLogic) Delete(req *types.DeleteServicePermissionsReq) (*types.ServicePermissionsResp, error) {

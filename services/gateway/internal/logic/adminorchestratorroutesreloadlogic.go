@@ -40,7 +40,7 @@ func (l *AdminOrchestratorRoutesReloadLogic) AdminOrchestratorRoutesReload(req *
 	if l.svcCtx == nil || l.svcCtx.ServiceProxy == nil {
 		return nil, errOrchestratorUnavailable()
 	}
-	if len(req.Routes) > 0 {
+	if req.PushedRouteTable || len(req.Routes) > 0 {
 		table := pushedRouteTable(req)
 		l.svcCtx.ServiceProxy.SetRouteTable(table)
 		return &types.OrchestratorRoutesReloadResp{

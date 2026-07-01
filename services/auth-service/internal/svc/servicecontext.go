@@ -124,8 +124,9 @@ func smokeModeEnabled() bool {
 
 type SmokePermissionStore struct {
 	mu         sync.RWMutex
-	allowed    map[string]map[string]bool
 	registered map[string]map[string]SmokePermission
+	identities map[string]bool
+	grants     map[string]map[string]map[string]bool
 }
 
 type SmokePermission struct {
@@ -137,8 +138,9 @@ type SmokePermission struct {
 
 func NewSmokePermissionStore() *SmokePermissionStore {
 	return &SmokePermissionStore{
-		allowed:    map[string]map[string]bool{},
 		registered: map[string]map[string]SmokePermission{},
+		identities: map[string]bool{},
+		grants:     map[string]map[string]map[string]bool{},
 	}
 }
 
@@ -149,32 +151,57 @@ func (s *SmokePermissionStore) Allow(service string, permissions ...string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.allowed[service] == nil {
-		s.allowed[service] = map[string]bool{}
+	s.identities[service] = true
+	if s.grants[service] == nil {
+		s.grants[service] = map[string]map[string]bool{}
 	}
 	for _, permission := range permissions {
 		permission = strings.TrimSpace(permission)
 		if permission != "" {
-			s.allowed[service][permission] = true
+			if s.grants[service][""] == nil {
+				s.grants[service][""] = map[string]bool{}
+			}
+			s.grants[service][""][permission] = true
 		}
 	}
 }
 
-func (s *SmokePermissionStore) ServiceCallerCanUsePermission(service string, permission string) bool {
+func (s *SmokePermissionStore) ServiceCallerCanUsePermission(service string, permission string, apiID string) bool {
 	if s == nil {
 		return false
 	}
 	service = strings.TrimSpace(service)
 	permission = strings.TrimSpace(permission)
+	apiID = strings.TrimSpace(apiID)
 	if service == "" || permission == "" {
 		return false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.allowed[service] != nil && s.allowed[service][permission]
+	if !s.identities[service] {
+		return false
+	}
+	if s.grants[service] == nil {
+		return false
+	}
+	if apiID != "" && s.grants[service][apiID] != nil && s.grants[service][apiID][permission] {
+		return true
+	}
+	return s.grants[service][""] != nil && s.grants[service][""][permission]
 }
 
-func (s *SmokePermissionStore) RegisterServicePermissions(service string, permissions []SmokePermission) []string {
+type SmokeServiceIdentity struct {
+	ServiceCode string
+	AllowedAPIs []string
+	Grants      []SmokeServiceIdentityGrant
+}
+
+type SmokeServiceIdentityGrant struct {
+	APIID          string
+	PermissionCode string
+}
+
+func (s *SmokePermissionStore) RegisterServicePermissions(service string, permissions []SmokePermission, identity *SmokeServiceIdentity) []string {
 	if s == nil {
 		return nil
 	}
@@ -198,7 +225,9 @@ func (s *SmokePermissionStore) RegisterServicePermissions(service string, permis
 		s.registered[service][code] = item
 		registered = append(registered, code)
 	}
-	s.allowRegisteredServiceCallersLocked(service, registered)
+	if identity != nil {
+		s.registerServiceIdentityLocked(service, identity)
+	}
 	return registered
 }
 
@@ -214,15 +243,8 @@ func (s *SmokePermissionStore) DeleteServicePermissions(service string) int64 {
 	defer s.mu.Unlock()
 	deleted := int64(len(s.registered[service]))
 	delete(s.registered, service)
-	if service == "storage-service" {
-		for _, caller := range []string{"judge-api", "judge-worker"} {
-			for _, permission := range []string{"storage.object.read", "storage.object.write"} {
-				if s.allowed[caller] != nil {
-					delete(s.allowed[caller], permission)
-				}
-			}
-		}
-	}
+	delete(s.identities, service)
+	delete(s.grants, service)
 	return deleted
 }
 
@@ -241,20 +263,36 @@ func (s *SmokePermissionStore) ListPermissions() []SmokePermission {
 	return items
 }
 
-func (s *SmokePermissionStore) allowRegisteredServiceCallersLocked(service string, permissions []string) {
-	if service != "storage-service" {
+func (s *SmokePermissionStore) registerServiceIdentityLocked(service string, identity *SmokeServiceIdentity) {
+	identityService := strings.TrimSpace(identity.ServiceCode)
+	if identityService == "" {
+		identityService = service
+	}
+	if identityService != service {
 		return
 	}
-	for _, permission := range permissions {
-		switch permission {
-		case "storage.object.read", "storage.object.write":
-			for _, caller := range []string{"judge-api", "judge-worker"} {
-				if s.allowed[caller] == nil {
-					s.allowed[caller] = map[string]bool{}
-				}
-				s.allowed[caller][permission] = true
-			}
+	s.identities[service] = true
+	s.grants[service] = map[string]map[string]bool{}
+	allowed := map[string]bool{}
+	for _, rawAPI := range identity.AllowedAPIs {
+		apiID := strings.TrimSpace(rawAPI)
+		if apiID != "" {
+			allowed[apiID] = true
 		}
+	}
+	for _, grant := range identity.Grants {
+		apiID := strings.TrimSpace(grant.APIID)
+		permission := strings.TrimSpace(grant.PermissionCode)
+		if apiID == "" || permission == "" {
+			continue
+		}
+		if len(allowed) > 0 && !allowed[apiID] {
+			continue
+		}
+		if s.grants[service][apiID] == nil {
+			s.grants[service][apiID] = map[string]bool{}
+		}
+		s.grants[service][apiID][permission] = true
 	}
 }
 

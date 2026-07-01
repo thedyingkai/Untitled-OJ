@@ -12,7 +12,7 @@ import (
 func requireAdmin(ctx context.Context, svcCtx *svc.ServiceContext) (int64, error) {
 	claims, ok := middleware.ClaimsFromContext(ctx)
 	if !ok || claims == nil || claims.UserID <= 0 {
-		if svcCtx != nil && svcCtx.SmokeAuth != nil && claims != nil {
+		if claims != nil {
 			for _, role := range claims.Roles {
 				if role == "internal" {
 					return 1, nil

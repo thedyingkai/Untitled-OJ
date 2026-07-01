@@ -31,6 +31,9 @@ migrations:
   - version: "000006_add_internal_auth_keys"
     path: services/auth-service/migrations/000006_add_internal_auth_keys.up.sql
     checksum: sha256:63e532eae31e7ec491046978c1c6e3628bad384b67bf1f30c48d8bab1207698e
+  - version: "000007_service_identity_grants"
+    path: services/auth-service/migrations/000007_service_identity_grants.up.sql
+    checksum: sha256:9cf06075b3977f234bb885e533e7abe165cd3d1f92f393b3ec1eefd39740ebc9
 permissions:
   - auth.admin
   - system.admin

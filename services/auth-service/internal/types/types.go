@@ -121,10 +121,22 @@ type ServicePermissionRoleBinding struct {
 	Permissions []string `json:"permissions"`
 }
 
+type ServiceIdentityGrantItem struct {
+	ApiId      string `json:"api_id"`
+	Permission string `json:"permission"`
+}
+
+type ServiceIdentityRegistration struct {
+	ServiceName string                     `json:"service_name,optional"`
+	AllowedApis []string                   `json:"allowed_apis,optional"`
+	Grants      []ServiceIdentityGrantItem `json:"grants,optional"`
+}
+
 type RegisterServicePermissionsReq struct {
 	ServiceCode         string                         `path:"service_code"`
 	Permissions         []ServicePermissionItem        `json:"permissions"`
 	DefaultRoleBindings []ServicePermissionRoleBinding `json:"default_role_bindings,optional"`
+	ServiceIdentity     ServiceIdentityRegistration    `json:"service_identity,optional"`
 }
 
 type DeleteServicePermissionsReq struct {

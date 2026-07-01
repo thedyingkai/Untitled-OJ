@@ -1027,6 +1027,20 @@ impl OrchestratorStore for MemoryOrchestratorStore {
 pub struct AuthPermissionRegistration {
     pub service_name: String,
     pub permissions: Vec<String>,
+    pub service_identity: Option<AuthServiceIdentityRegistration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthServiceIdentityRegistration {
+    pub service_name: String,
+    pub allowed_apis: Vec<String>,
+    pub grants: Vec<AuthServiceIdentityGrant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthServiceIdentityGrant {
+    pub api_id: String,
+    pub permission: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1480,7 +1494,7 @@ impl AuthPermissionRegistrar for HttpAuthPermissionRegistrar {
         &self,
         request: &AuthPermissionRegistration,
     ) -> Result<AuthPermissionRegistrationResult> {
-        if request.permissions.is_empty() {
+        if request.permissions.is_empty() && request.service_identity.is_none() {
             return Ok(AuthPermissionRegistrationResult {
                 status: "skipped".to_string(),
                 message: "release declares no permissions".to_string(),
@@ -1501,7 +1515,7 @@ impl AuthPermissionRegistrar for HttpAuthPermissionRegistrar {
             self.endpoint.trim_end_matches('/'),
             request.service_name
         );
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "permissions": request.permissions.iter().map(|permission| {
                 serde_json::json!({
                     "code": permission,
@@ -1511,6 +1525,18 @@ impl AuthPermissionRegistrar for HttpAuthPermissionRegistrar {
             }).collect::<Vec<_>>(),
             "default_role_bindings": [],
         });
+        if let Some(identity) = request.service_identity.as_ref() {
+            body["service_identity"] = serde_json::json!({
+                "service_name": identity.service_name,
+                "allowed_apis": identity.allowed_apis,
+                "grants": identity.grants.iter().map(|grant| {
+                    serde_json::json!({
+                        "api_id": grant.api_id,
+                        "permission": grant.permission,
+                    })
+                }).collect::<Vec<_>>(),
+            });
+        }
         let agent: Agent = Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .http_status_as_error(false)
@@ -2583,6 +2609,7 @@ impl GatewayRoutePublisher for HttpGatewayRoutePublisher {
             "service_name": request.service_name,
             "version": "1",
             "node_id": request.node_id,
+            "pushed_route_table": true,
             "routes": gateway_effective_route_items(&request.effective_routes)?,
             "warnings": [],
             "can_proxy": !request.effective_routes.is_empty(),
@@ -3283,10 +3310,11 @@ impl<
         operation_id: &str,
         release: &ServiceReleaseManifest,
     ) -> Result<AuthPermissionRegistrationResult> {
-        if release.permissions.is_empty() {
+        let service_identity = service_identity_registration_from_release(&*self.store, release)?;
+        if release.permissions.is_empty() && service_identity.is_none() {
             let result = AuthPermissionRegistrationResult {
                 status: "skipped".to_string(),
-                message: "release declares no permissions".to_string(),
+                message: "release declares no permissions or service identity".to_string(),
                 endpoint: String::new(),
                 registered: 0,
             };
@@ -3301,6 +3329,7 @@ impl<
         let request = AuthPermissionRegistration {
             service_name: release.service_name.clone(),
             permissions: release.permissions.clone(),
+            service_identity,
         };
         let result = self
             .auth_permission_registrar
@@ -4116,6 +4145,24 @@ impl<
                         &operation.operation_id,
                         &health,
                     ))?;
+                }
+                if self.service_driver_execution_enabled
+                    && !external_service_running
+                    && driver_result.status == "SUCCEEDED"
+                    && !health.reachable
+                {
+                    if let Some(release) = release.as_ref() {
+                        let _ = self.stop_local_process_release(
+                            &operation.operation_id,
+                            &service,
+                            release,
+                            endpoint.endpoint.clone(),
+                        );
+                    }
+                    return Err(OrchestratorError::Dependency(format!(
+                        "service_start health failed for {}: {}",
+                        endpoint.endpoint, health.message
+                    )));
                 }
                 let final_status = if external_service_running {
                     "running"
@@ -5263,7 +5310,10 @@ impl<
         endpoint: &Endpoint,
     ) -> Result<EndpointHealthResult> {
         let mut last = None;
-        for attempt in 0..25 {
+        let attempts = env_usize("ORCHESTRATOR_ENDPOINT_HEALTH_ATTEMPTS").unwrap_or(25);
+        let interval_ms = env_u64("ORCHESTRATOR_ENDPOINT_HEALTH_INTERVAL_MS").unwrap_or(200);
+        let attempts = attempts.max(1);
+        for attempt in 0..attempts {
             let health = check_endpoint_health_with_probe(endpoint, &self.endpoint_probe)?;
             if health.reachable {
                 self.store.update_endpoint_health(
@@ -5276,8 +5326,8 @@ impl<
                 return Ok(health);
             }
             last = Some(health);
-            if attempt < 24 {
-                std::thread::sleep(Duration::from_millis(200));
+            if attempt + 1 < attempts {
+                std::thread::sleep(Duration::from_millis(interval_ms));
             }
         }
         let health = last.ok_or_else(|| {
@@ -6184,6 +6234,54 @@ fn route_target_selector(route: &crate::ReleaseRouteDecl) -> serde_json::Value {
             "frontend": route.target
         })
     }
+}
+
+fn service_identity_registration_from_release<S: OrchestratorStore>(
+    store: &S,
+    release: &ServiceReleaseManifest,
+) -> Result<Option<AuthServiceIdentityRegistration>> {
+    if release.service_identity.service_name.trim().is_empty()
+        && release.service_identity.allowed_apis.is_empty()
+    {
+        return Ok(None);
+    }
+    let service_name = release.service_identity.service_name.trim();
+    if service_name != release.service_name {
+        return Err(OrchestratorError::InvalidManifest(
+            "release service_identity service_name must match service_name".to_string(),
+        ));
+    }
+    let allowed_apis = release
+        .service_identity
+        .allowed_apis
+        .iter()
+        .map(|api| api.trim().to_string())
+        .filter(|api| !api.is_empty())
+        .collect::<Vec<_>>();
+    let surfaces = store.list_service_api_surfaces()?;
+    let mut grants = Vec::new();
+    for api_id in &allowed_apis {
+        let surface = surfaces
+            .iter()
+            .find(|surface| surface.api_id == *api_id)
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(format!(
+                    "service_identity api {api_id} is not registered in API surface registry"
+                ))
+            })?;
+        if surface.permission == "public" || surface.permission.trim().is_empty() {
+            continue;
+        }
+        grants.push(AuthServiceIdentityGrant {
+            api_id: api_id.clone(),
+            permission: surface.permission.clone(),
+        });
+    }
+    Ok(Some(AuthServiceIdentityRegistration {
+        service_name: release.service_name.clone(),
+        allowed_apis,
+        grants,
+    }))
 }
 
 fn service_permission_records_from_release(
@@ -7369,6 +7467,18 @@ fn missing_target_health(link: &Link) -> EndpointHealthResult {
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name).ok().is_some_and(|value| truthy(&value))
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
 fn service_database_url_env_candidates(service_name: &str) -> Vec<String> {

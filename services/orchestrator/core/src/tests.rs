@@ -307,9 +307,40 @@ fn valid_release_for_service(service: &ServiceManifest) -> ServiceReleaseManifes
         storage: Vec::new(),
         dependencies: Vec::new(),
         required_apis: Vec::new(),
+        service_identity: ReleaseServiceIdentityDecl::default(),
         config_schema: serde_json::json!({}),
         secrets: Vec::new(),
         observability: ReleaseObservabilityDecl::default(),
+    }
+}
+
+fn seed_storage_identity_api_surfaces(store: &mut MemoryOrchestratorStore) {
+    for (api_id, method, permission) in [
+        ("storage.object.get", "GET", "storage.object.read"),
+        ("storage.object.head", "HEAD", "storage.object.read"),
+        ("storage.object.put", "PUT", "storage.object.write"),
+    ] {
+        store
+            .upsert_service_api_surface(ServiceApiSurface {
+                service_name: "storage-service".to_string(),
+                version: "0.1.0".to_string(),
+                api_id: api_id.to_string(),
+                protocol: "http".to_string(),
+                port_name: "http".to_string(),
+                path_prefix: "/api/storage/objects".to_string(),
+                methods: vec![method.to_string()],
+                visibility: "descendants".to_string(),
+                auth_mode: "service".to_string(),
+                permission: permission.to_string(),
+                stability: "stable".to_string(),
+                api_version: "v1".to_string(),
+                rate_limit: String::new(),
+                timeout: String::new(),
+                config: serde_json::json!({}),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .expect("put storage identity api surface");
     }
 }
 
@@ -1917,6 +1948,7 @@ fn release_install_runtime_pipeline_result_covers_declared_resources() {
     .expect("release install operation");
 
     let mut store = MemoryOrchestratorStore::new();
+    seed_storage_identity_api_surfaces(&mut store);
     store.put_operation(operation).expect("put operation");
     let applied = OperationExecutor::new(&mut store)
         .apply("op-release-judge-api-runtime-pipeline")
@@ -2097,6 +2129,7 @@ fn release_install_runtime_pipeline_result_reports_configured_runtime_success() 
     };
 
     let mut store = MemoryOrchestratorStore::new();
+    seed_storage_identity_api_surfaces(&mut store);
     store.put_operation(operation).expect("put operation");
     let applied =
         OperationExecutor::with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
@@ -3546,6 +3579,7 @@ fn release_install_registers_permissions_with_auth_registrar() {
         calls: Arc::clone(&calls),
     };
     let mut store = MemoryOrchestratorStore::new();
+    seed_storage_identity_api_surfaces(&mut store);
     store.put_operation(confirmed).expect("put operation");
 
     OperationExecutor::with_endpoint_probe_and_auth_registrar(
@@ -3589,6 +3623,111 @@ fn release_install_registers_permissions_with_auth_registrar() {
 }
 
 #[test]
+fn release_install_registers_service_identity_grants_with_auth_registrar() {
+    let mut service = valid_service();
+    service.id = "judge-worker".to_string();
+    service.name = "Judge Worker".to_string();
+    service.kind = "backend-worker".to_string();
+    service.permissions = vec!["judge.worker".to_string()];
+    let mut release = valid_release_for_service(&service);
+    release.routes = Vec::new();
+    release.required_apis = vec![
+        "storage.object.get".to_string(),
+        "storage.object.put".to_string(),
+    ];
+    release.service_identity = ReleaseServiceIdentityDecl {
+        service_name: "judge-worker".to_string(),
+        allowed_apis: release.required_apis.clone(),
+    };
+
+    let operation = release_install_operation_with_release(
+        "op-release-service-identity-registration",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.2",
+        Some("127.0.0.2:9101:judge-worker"),
+        serde_json::json!({"external_service_running": true}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registrar = RecordingAuthPermissionRegistrar {
+        calls: Arc::clone(&calls),
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store
+        .upsert_service_api_surface(ServiceApiSurface {
+            service_name: "storage-service".to_string(),
+            version: "0.1.0".to_string(),
+            api_id: "storage.object.get".to_string(),
+            protocol: "http".to_string(),
+            port_name: "http".to_string(),
+            path_prefix: "/api/storage/objects".to_string(),
+            methods: vec!["GET".to_string()],
+            visibility: "descendants".to_string(),
+            auth_mode: "service".to_string(),
+            permission: "storage.object.read".to_string(),
+            stability: "stable".to_string(),
+            api_version: "v1".to_string(),
+            rate_limit: String::new(),
+            timeout: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put get surface");
+    store
+        .upsert_service_api_surface(ServiceApiSurface {
+            service_name: "storage-service".to_string(),
+            version: "0.1.0".to_string(),
+            api_id: "storage.object.put".to_string(),
+            protocol: "http".to_string(),
+            port_name: "http".to_string(),
+            path_prefix: "/api/storage/objects".to_string(),
+            methods: vec!["PUT".to_string()],
+            visibility: "descendants".to_string(),
+            auth_mode: "service".to_string(),
+            permission: "storage.object.write".to_string(),
+            stability: "stable".to_string(),
+            api_version: "v1".to_string(),
+            rate_limit: String::new(),
+            timeout: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put put surface");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_endpoint_probe_and_auth_registrar(
+        &mut store,
+        StaticEndpointProbe,
+        registrar,
+    )
+    .apply("op-release-service-identity-registration")
+    .expect("apply release install");
+
+    let calls = calls.lock().expect("auth permission calls");
+    assert_eq!(calls.len(), 1);
+    let identity = calls[0]
+        .service_identity
+        .as_ref()
+        .expect("service identity registration");
+    assert_eq!(identity.service_name, "judge-worker");
+    assert_eq!(identity.allowed_apis, release.required_apis);
+    assert!(identity.grants.contains(&AuthServiceIdentityGrant {
+        api_id: "storage.object.get".to_string(),
+        permission: "storage.object.read".to_string(),
+    }));
+    assert!(identity.grants.contains(&AuthServiceIdentityGrant {
+        api_id: "storage.object.put".to_string(),
+        permission: "storage.object.write".to_string(),
+    }));
+}
+
+#[test]
 fn http_auth_permission_registrar_posts_release_permissions_to_auth_service() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local auth test listener");
     let endpoint = format!("http://{}", listener.local_addr().expect("auth test addr"));
@@ -3625,6 +3764,14 @@ fn http_auth_permission_registrar_posts_release_permissions_to_auth_service() {
     let request = AuthPermissionRegistration {
         service_name: "judge-api".to_string(),
         permissions: vec!["judge.submit".to_string(), "judge.read".to_string()],
+        service_identity: Some(AuthServiceIdentityRegistration {
+            service_name: "judge-api".to_string(),
+            allowed_apis: vec!["storage.object.get".to_string()],
+            grants: vec![AuthServiceIdentityGrant {
+                api_id: "storage.object.get".to_string(),
+                permission: "storage.object.read".to_string(),
+            }],
+        }),
     };
     let result = registrar
         .register_permissions(&request)
@@ -3643,6 +3790,10 @@ fn http_auth_permission_registrar_posts_release_permissions_to_auth_service() {
     assert!(request_text.contains("\"code\":\"judge.submit\""));
     assert!(request_text.contains("\"code\":\"judge.read\""));
     assert!(request_text.contains("\"default_role_bindings\":[]"));
+    assert!(request_text.contains("\"service_identity\""));
+    assert!(request_text.contains("\"service_name\":\"judge-api\""));
+    assert!(request_text.contains("\"api_id\":\"storage.object.get\""));
+    assert!(request_text.contains("\"permission\":\"storage.object.read\""));
     assert!(
         !request_text.contains("system.admin"),
         "orchestrator must not pre-seed unrelated permissions"
@@ -4330,6 +4481,7 @@ fn release_install_provisions_redis_resources_with_runtime_provisioner() {
         calls: Arc::clone(&calls),
     };
     let mut store = MemoryOrchestratorStore::new();
+    seed_storage_identity_api_surfaces(&mut store);
     store.put_operation(confirmed).expect("put operation");
 
     OperationExecutor::with_runtime_provisioners(
@@ -5921,6 +6073,7 @@ fn operation_workbench_context_can_load_from_store_state() {
         storage: Vec::new(),
         dependencies: Vec::new(),
         required_apis: Vec::new(),
+        service_identity: ReleaseServiceIdentityDecl::default(),
         config_schema: serde_json::json!({}),
         secrets: Vec::new(),
         observability: ReleaseObservabilityDecl::default(),
@@ -9951,6 +10104,7 @@ fn release_install_local_process_starts_service_and_rollback_stops_it() {
         storage: Vec::new(),
         dependencies: Vec::new(),
         required_apis: Vec::new(),
+        service_identity: ReleaseServiceIdentityDecl::default(),
         config_schema: serde_json::json!({}),
         secrets: Vec::new(),
         observability: ReleaseObservabilityDecl::default(),

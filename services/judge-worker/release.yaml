@@ -28,6 +28,11 @@ routes: []
 required_apis:
   - storage.object.get
   - storage.object.put
+service_identity:
+  service_name: judge-worker
+  allowed_apis:
+    - storage.object.get
+    - storage.object.put
 redis:
   - name: redis
     kind: consumer-group

@@ -45,11 +45,14 @@ func TestServiceCallerPermissionChecksRegisteredPermissionCode(t *testing.T) {
 	source := string(data)
 	for _, want := range []string{
 		"func (r *AdminRepository) ServiceCallerCanUsePermission",
-		"FROM permissions",
-		"WHERE code = $1",
+		"FROM service_identities si",
+		"JOIN service_permission_grants spg",
+		"si.service_code = $1",
+		"spg.permission_code = $2",
+		"spg.api_id = $3",
 	} {
 		if !strings.Contains(source, want) {
-			t.Fatalf("ServiceCallerCanUsePermission must query registered permission declarations; missing %q", want)
+			t.Fatalf("ServiceCallerCanUsePermission must query registered service identity grants; missing %q", want)
 		}
 	}
 }

@@ -27,6 +27,12 @@ type fakeServiceStatusDriver struct {
 	services []servicestatus.ServiceStatus
 }
 
+type failingRouteTableReader struct{}
+
+func (failingRouteTableReader) ServiceRouteTable(context.Context) (servicestatus.RouteTable, error) {
+	return servicestatus.RouteTable{}, errors.New("route reader should not be called")
+}
+
 func testSnapshotData() orchestratorsnapshot.SnapshotData {
 	return orchestratorsnapshot.SnapshotData{
 		Services: []orchestratorsnapshot.Service{
@@ -564,6 +570,41 @@ func TestOrchestratorRoutesReloadAcceptsPushedRoutes(t *testing.T) {
 	serviceProxy.ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("expected pushed proxy route to be active and hit upstream, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestOrchestratorRoutesReloadAcceptsExplicitEmptyPushedRouteTable(t *testing.T) {
+	ctx := context.Background()
+	token, err := sharedjwt.Generate("test-secret", 1, "root", []string{"admin"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceProxy, err := proxy.NewServiceProxy(nil, nil, "test-secret", nil, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	logic := &AdminOrchestratorRoutesReloadLogic{
+		ctx: ctx,
+		svcCtx: &svc.ServiceContext{
+			Config:       config.Config{Jwt: config.JwtConfig{Secret: "test-secret"}},
+			ServiceProxy: serviceProxy,
+		},
+		routeReader: failingRouteTableReader{},
+	}
+
+	resp, err := logic.AdminOrchestratorRoutesReload(&types.AdminRoutesReloadReq{
+		Authorization:    "Bearer " + token,
+		OperationId:      "op-release-empty-push",
+		ServiceName:      "storage-service",
+		Version:          "1",
+		PushedRouteTable: true,
+		Routes:           []types.OrchestratorRouteItem{},
+	})
+	if err != nil {
+		t.Fatalf("explicit empty pushed table should not call route reader: %v", err)
+	}
+	if resp.Status != "reloaded" || resp.RouteCount != 0 {
+		t.Fatalf("unexpected empty pushed reload response: %#v", resp)
 	}
 }
 

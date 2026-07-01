@@ -46,7 +46,14 @@ routes:
     permission: public
 required_apis:
   - storage.object.get
+  - storage.object.head
   - storage.object.put
+service_identity:
+  service_name: judge-api
+  allowed_apis:
+    - storage.object.get
+    - storage.object.head
+    - storage.object.put
 apis:
   - api_id: judge.submission.create
     protocol: http

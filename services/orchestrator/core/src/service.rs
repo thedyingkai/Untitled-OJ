@@ -74,6 +74,8 @@ pub struct ServiceReleaseManifest {
     #[serde(default)]
     pub required_apis: Vec<String>,
     #[serde(default)]
+    pub service_identity: ReleaseServiceIdentityDecl,
+    #[serde(default)]
     pub config_schema: Value,
     #[serde(default)]
     pub secrets: Vec<String>,
@@ -199,6 +201,15 @@ pub struct ReleaseStorageDecl {
     pub bucket: String,
     #[serde(default)]
     pub path_prefix: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseServiceIdentityDecl {
+    #[serde(default)]
+    pub service_name: String,
+    #[serde(default)]
+    pub allowed_apis: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -671,6 +682,35 @@ pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> 
     )?;
     for api_id in &release.required_apis {
         ensure(key_re.is_match(api_id), "release required api is invalid")?;
+    }
+    if !release.service_identity.service_name.trim().is_empty()
+        || !release.service_identity.allowed_apis.is_empty()
+    {
+        ensure(
+            release.service_identity.service_name == release.service_name,
+            "release service_identity service_name must match service_name",
+        )?;
+        unique_by(
+            release
+                .service_identity
+                .allowed_apis
+                .iter()
+                .map(String::as_str),
+            "duplicate release service_identity allowed api",
+        )?;
+        for api_id in &release.service_identity.allowed_apis {
+            ensure(
+                key_re.is_match(api_id),
+                "release service_identity allowed api is invalid",
+            )?;
+            ensure(
+                release
+                    .required_apis
+                    .iter()
+                    .any(|required| required == api_id),
+                "release service_identity allowed api must be declared in required_apis",
+            )?;
+        }
     }
     unique_by(
         release.permissions.iter().map(String::as_str),

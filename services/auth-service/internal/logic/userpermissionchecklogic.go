@@ -57,6 +57,7 @@ func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionChec
 					Allowed: l.svcCtx.SmokeAuth.ServiceCallerCanUsePermission(
 						callerService,
 						strings.TrimSpace(req.Permission),
+						strings.TrimSpace(req.ApiId),
 					),
 				},
 			}, nil
@@ -68,6 +69,7 @@ func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionChec
 			l.ctx,
 			callerService,
 			strings.TrimSpace(req.Permission),
+			strings.TrimSpace(req.ApiId),
 		)
 		if err != nil {
 			return nil, err
