@@ -1163,6 +1163,8 @@ pub struct GatewayRoutePublishRequest {
     pub operation_id: String,
     pub service_name: String,
     pub routes: Vec<ServiceRoute>,
+    pub api_count: usize,
+    pub force_reload: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2357,19 +2359,19 @@ impl GatewayRoutePublisher for DeferredGatewayRoutePublisher {
         request: &GatewayRoutePublishRequest,
     ) -> Result<GatewayRoutePublishResult> {
         Ok(GatewayRoutePublishResult {
-            status: if request.routes.is_empty() {
-                "skipped".to_string()
-            } else {
+            status: if !request.routes.is_empty() || request.force_reload {
                 "planned".to_string()
+            } else {
+                "skipped".to_string()
             },
-            message: if request.routes.is_empty() {
+            message: if !request.routes.is_empty() || request.force_reload {
                 format!(
-                    "release declares no gateway routes for {}",
+                    "gateway route publisher is not configured for {}",
                     request.service_name
                 )
             } else {
                 format!(
-                    "gateway route publisher is not configured for {}",
+                    "release declares no gateway routes or API surface changes for {}",
                     request.service_name
                 )
             },
@@ -2404,15 +2406,22 @@ impl GatewayRoutePublisher for ConfiguredGatewayRoutePublisher {
             return http.publish_routes(request);
         }
         Ok(GatewayRoutePublishResult {
-            status: if request.routes.is_empty() {
-                "skipped".to_string()
-            } else {
+            status: if !request.routes.is_empty() || request.force_reload {
                 "planned".to_string()
-            },
-            message: if self.publish_enabled {
-                "GATEWAY_ENDPOINT is not configured".to_string()
             } else {
-                "ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH is not enabled".to_string()
+                "skipped".to_string()
+            },
+            message: if !request.routes.is_empty() || request.force_reload {
+                if self.publish_enabled {
+                    "GATEWAY_ENDPOINT is not configured".to_string()
+                } else {
+                    "ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH is not enabled".to_string()
+                }
+            } else {
+                format!(
+                    "release declares no gateway routes or API surface changes for {}",
+                    request.service_name
+                )
             },
             endpoint: String::new(),
             route_count: request.routes.len(),
@@ -2463,11 +2472,11 @@ impl GatewayRoutePublisher for HttpGatewayRoutePublisher {
         &self,
         request: &GatewayRoutePublishRequest,
     ) -> Result<GatewayRoutePublishResult> {
-        if request.routes.is_empty() {
+        if request.routes.is_empty() && !request.force_reload {
             return Ok(GatewayRoutePublishResult {
                 status: "skipped".to_string(),
                 message: format!(
-                    "release declares no gateway routes for {}",
+                    "release declares no gateway routes or API surface changes for {}",
                     request.service_name
                 ),
                 endpoint: self.endpoint.clone(),
@@ -2491,7 +2500,6 @@ impl GatewayRoutePublisher for HttpGatewayRoutePublisher {
         let body = serde_json::json!({
             "operation_id": request.operation_id,
             "service_name": request.service_name,
-            "routes": request.routes,
         });
         let agent: Agent = Agent::config_builder()
             .timeout_global(Some(self.timeout))
@@ -3195,16 +3203,21 @@ impl<
         operation_id: &str,
         release: &ServiceReleaseManifest,
         routes: &[ServiceRoute],
+        api_count: usize,
     ) -> Result<GatewayRoutePublishResult> {
         let request = GatewayRoutePublishRequest {
             operation_id: operation_id.to_string(),
             service_name: release.service_name.clone(),
             routes: routes.to_vec(),
+            api_count,
+            force_reload: api_count > 0 || !routes.is_empty(),
         };
         let result = self.gateway_route_publisher.publish_routes(&request)?;
         self.store.append_operation_log(gateway_route_log_record(
             operation_id,
             &release.service_name,
+            api_count,
+            request.force_reload,
             &result,
         ))?;
         Ok(result)
@@ -3686,6 +3699,9 @@ impl<
                             host_ip, service.endpoint.default_port, service.id
                         )
                     });
+                let external_service_running =
+                    operation_bool_field(operation, "external_service_running")
+                        || operation_bool_field(operation, "existing_endpoint_running");
                 let _previous_state =
                     self.capture_release_install_previous_state(operation, &service.id)?;
                 self.store.put_service(service.clone())?;
@@ -3734,6 +3750,7 @@ impl<
                         &operation.operation_id,
                         release,
                         &routes,
+                        api_surfaces.len(),
                     )?);
                     for record in service_migration_records_from_release(release) {
                         self.store.upsert_service_migration_record(record)?;
@@ -3801,13 +3818,29 @@ impl<
                 if self.service_driver_execution_enabled {
                     ensure_driver_result_succeeded(&driver_result)?;
                 }
-                let health = if driver_result.status == "SUCCEEDED" {
+                let health = if external_service_running {
+                    external_running_install_health(&endpoint)
+                } else if driver_result.status == "SUCCEEDED" {
                     self.probe_endpoint_and_persist(&operation.operation_id, &endpoint)?
                 } else {
                     deferred_install_health(&endpoint, &driver_result)
                 };
-                let final_status =
-                    release_install_host_status(node_dispatch.as_ref(), &driver_result, &health);
+                if external_service_running {
+                    self.store.update_endpoint_health(
+                        &endpoint.endpoint,
+                        health.health.clone(),
+                        health.reachable,
+                    )?;
+                    self.store.append_operation_log(endpoint_health_log_record(
+                        &operation.operation_id,
+                        &health,
+                    ))?;
+                }
+                let final_status = if external_service_running {
+                    "running"
+                } else {
+                    release_install_host_status(node_dispatch.as_ref(), &driver_result, &health)
+                };
                 self.store.upsert_host_service(host_service_from_install(
                     &service,
                     release.as_ref(),
@@ -6165,6 +6198,37 @@ fn deferred_install_health(
     }
 }
 
+fn external_running_install_health(endpoint: &Endpoint) -> EndpointHealthResult {
+    EndpointHealthResult {
+        endpoint: endpoint.endpoint.clone(),
+        health: "ok".to_string(),
+        reachable: true,
+        latency_ms: None,
+        message: "service process was started externally before release.install; service_start remains deferred"
+            .to_string(),
+    }
+}
+
+fn operation_bool_field(operation: &Operation, field: &str) -> bool {
+    operation.request.get(field).is_some_and(json_truthy_value)
+        || operation
+            .request
+            .get("install_options")
+            .and_then(|value| value.get(field))
+            .is_some_and(json_truthy_value)
+}
+
+fn json_truthy_value(value: &serde_json::Value) -> bool {
+    value.as_bool().unwrap_or_else(|| {
+        value.as_str().is_some_and(|text| {
+            matches!(
+                text.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+    })
+}
+
 fn endpoint_from_operation<S: OrchestratorStore>(
     operation: &Operation,
     store: &S,
@@ -6597,6 +6661,8 @@ fn auth_permission_log_record(
 fn gateway_route_log_record(
     operation_id: &str,
     service_name: &str,
+    api_count: usize,
+    force_reload: bool,
     result: &GatewayRoutePublishResult,
 ) -> OperationLogRecord {
     let level = if result.reloaded { "info" } else { "warn" };
@@ -6613,6 +6679,8 @@ fn gateway_route_log_record(
             "status": result.status,
             "endpoint": result.endpoint,
             "route_count": result.route_count,
+            "api_count": api_count,
+            "force_reload": force_reload,
             "reloaded": result.reloaded,
             "message": result.message,
         }),
@@ -6742,8 +6810,12 @@ fn release_install_pipeline_log_record(
         _ => "none",
     };
     let gateway_route_status = match (release, gateway_route_publish) {
-        (Some(release), Some(result)) if !release.routes.is_empty() => result.status.as_str(),
-        (Some(release), None) if !release.routes.is_empty() => "pending",
+        (Some(release), Some(result)) if !release.routes.is_empty() || !release.apis.is_empty() => {
+            result.status.as_str()
+        }
+        (Some(release), None) if !release.routes.is_empty() || !release.apis.is_empty() => {
+            "pending"
+        }
         _ => "none",
     };
     operation_step_log_record(
@@ -6788,6 +6860,7 @@ fn release_install_pipeline_log_record(
                 "status": result.status,
                 "endpoint": result.endpoint,
                 "route_count": result.route_count,
+                "api_count": release.map(|release| release.apis.len()).unwrap_or(0),
                 "reloaded": result.reloaded,
                 "message": result.message,
             })),

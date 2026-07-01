@@ -2988,6 +2988,8 @@ fn release_install_publishes_gateway_routes_when_publisher_is_configured() {
     assert_eq!(calls[0].operation_id, "op-release-gateway-publish");
     assert_eq!(calls[0].service_name, "gateway");
     assert_eq!(calls[0].routes.len(), release.routes.len());
+    assert_eq!(calls[0].api_count, release.apis.len());
+    assert!(calls[0].force_reload);
     assert!(
         calls[0]
             .routes
@@ -3024,6 +3026,146 @@ fn release_install_publishes_gateway_routes_when_publisher_is_configured() {
                 .and_then(|value| value.get("reloaded"))
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
+    }));
+}
+
+#[test]
+fn release_install_api_surface_only_release_triggers_gateway_reload() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/storage-service/service.yaml"))
+            .unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/storage-service/release.yaml"))
+            .unwrap();
+    assert!(
+        release.routes.is_empty(),
+        "storage release should be API-only for gateway reload"
+    );
+    assert!(
+        !release.apis.is_empty(),
+        "storage release should declare API surface"
+    );
+
+    let endpoint = "127.0.0.1:19280:storage-service";
+    let operation = release_install_operation_with_release(
+        "op-release-storage-api-reload",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        Some(endpoint),
+        serde_json::json!({"external_service_running": true}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed storage release install");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let publisher = RecordingGatewayRoutePublisher {
+        calls: calls.clone(),
+        result: GatewayRoutePublishResult {
+            status: "published".to_string(),
+            message: "recorded API surface reload".to_string(),
+            endpoint: "http://gateway.test".to_string(),
+            route_count: 0,
+            reloaded: true,
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store
+        .upsert_node(NodeRecord {
+            node_id: "root-node".to_string(),
+            host_ip: "127.0.0.1".to_string(),
+            parent_node_id: String::new(),
+            role: "root".to_string(),
+            labels: serde_json::json!({}),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("root node");
+    store
+        .upsert_node(NodeRecord {
+            node_id: "child-node".to_string(),
+            host_ip: "127.0.0.2".to_string(),
+            parent_node_id: "root-node".to_string(),
+            role: "node".to_string(),
+            labels: serde_json::json!({}),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("child node");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        publisher,
+        DeferredNodeServiceDispatcher,
+    )
+    .apply("op-release-storage-api-reload")
+    .expect("apply API-only storage release install");
+
+    let calls = calls.lock().expect("gateway publisher calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].service_name, "storage-service");
+    assert!(calls[0].routes.is_empty());
+    assert_eq!(calls[0].api_count, release.apis.len());
+    assert!(calls[0].force_reload);
+    drop(calls);
+
+    let routes = store
+        .effective_api_routes("child-node")
+        .expect("child effective API routes");
+    for api_id in [
+        "storage.object.put",
+        "storage.object.get",
+        "storage.object.head",
+    ] {
+        assert!(
+            routes.iter().any(|route| {
+                route.api_id == api_id
+                    && route.provider_endpoint == endpoint
+                    && route.provider_node_id == "root-node"
+                    && route.status == "running"
+            }),
+            "release.install should produce running effective API route {api_id}"
+        );
+    }
+
+    let logs = store.operation_logs("op-release-storage-api-reload");
+    assert!(logs.iter().any(|log| {
+        log.step_id == "gateway-routes:storage-service"
+            && log.data.get("status").and_then(serde_json::Value::as_str) == Some("published")
+            && log
+                .data
+                .get("api_count")
+                .and_then(serde_json::Value::as_u64)
+                == Some(release.apis.len() as u64)
+            && log
+                .data
+                .get("force_reload")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    }));
+    assert!(logs.iter().any(|log| {
+        log.step_id == "install-pipeline:storage-service"
+            && log
+                .data
+                .get("gateway_route_update")
+                .and_then(serde_json::Value::as_str)
+                == Some("published")
+            && log
+                .data
+                .get("host_service")
+                .and_then(serde_json::Value::as_str)
+                == Some("created")
     }));
 }
 

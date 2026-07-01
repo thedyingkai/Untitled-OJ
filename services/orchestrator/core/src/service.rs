@@ -1373,6 +1373,26 @@ pub fn release_install_operation_with_release(
                 "status": "runtime-capable"
             }));
         }
+        if !release.apis.is_empty() {
+            steps.push(serde_json::json!({
+                "action": "register_api_surface",
+                "target": release.service_name,
+                "count": release.apis.len(),
+                "status": "registry"
+            }));
+            steps.push(serde_json::json!({
+                "action": "refresh_effective_api_view",
+                "target": release.service_name,
+                "count": release.apis.len(),
+                "status": "runtime-capable"
+            }));
+            steps.push(serde_json::json!({
+                "action": "reload_gateway_effective_routes",
+                "target": release.service_name,
+                "count": release.apis.len(),
+                "status": "runtime-capable"
+            }));
+        }
         if release.frontend.enabled {
             steps.push(serde_json::json!({
                 "action": "register_frontend_entry",
@@ -1498,6 +1518,10 @@ pub fn release_install_operation_with_release(
                 .unwrap_or(false),
             "execute_service_driver": install_options
                 .get("execute_service_driver")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "external_service_running": install_options
+                .get("external_service_running")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         }),

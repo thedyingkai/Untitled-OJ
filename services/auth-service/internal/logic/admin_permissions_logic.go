@@ -73,6 +73,19 @@ func (l *AdminPermissionsLogic) ListPermissions() (*types.ListPermissionsResp, e
 	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
 		return nil, err
 	}
+	if l.svcCtx.SmokeAuth != nil {
+		perms := l.svcCtx.SmokeAuth.ListPermissions()
+		items := make([]types.PermissionItem, 0, len(perms))
+		for _, perm := range perms {
+			items = append(items, types.PermissionItem{
+				Code:        perm.Code,
+				ServiceCode: perm.ServiceCode,
+				Name:        perm.Name,
+				Description: perm.Description,
+			})
+		}
+		return &types.ListPermissionsResp{Code: 0, Msg: "success", Data: items}, nil
+	}
 	perms, err := l.svcCtx.AdminRepo.ListPermissions(l.ctx)
 	if err != nil {
 		return nil, err

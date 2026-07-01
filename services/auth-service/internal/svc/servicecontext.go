@@ -61,8 +61,6 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	var smokeAuth *SmokePermissionStore
 	if smokeMode {
 		smokeAuth = NewSmokePermissionStore()
-		smokeAuth.Allow("judge-api", "storage.object.read", "storage.object.write", "judge.submission.create", "judge.result.read")
-		smokeAuth.Allow("judge-worker", "storage.object.read", "storage.object.write")
 	} else {
 		var err error
 		db, err = database.NewPostgresPoolByURL(ctx, c.Database.Url)
@@ -125,12 +123,23 @@ func smokeModeEnabled() bool {
 }
 
 type SmokePermissionStore struct {
-	mu      sync.RWMutex
-	allowed map[string]map[string]bool
+	mu         sync.RWMutex
+	allowed    map[string]map[string]bool
+	registered map[string]map[string]SmokePermission
+}
+
+type SmokePermission struct {
+	Code        string
+	ServiceCode string
+	Name        string
+	Description string
 }
 
 func NewSmokePermissionStore() *SmokePermissionStore {
-	return &SmokePermissionStore{allowed: map[string]map[string]bool{}}
+	return &SmokePermissionStore{
+		allowed:    map[string]map[string]bool{},
+		registered: map[string]map[string]SmokePermission{},
+	}
 }
 
 func (s *SmokePermissionStore) Allow(service string, permissions ...string) {
@@ -163,6 +172,90 @@ func (s *SmokePermissionStore) ServiceCallerCanUsePermission(service string, per
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.allowed[service] != nil && s.allowed[service][permission]
+}
+
+func (s *SmokePermissionStore) RegisterServicePermissions(service string, permissions []SmokePermission) []string {
+	if s == nil {
+		return nil
+	}
+	service = strings.TrimSpace(service)
+	if service == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.registered[service] == nil {
+		s.registered[service] = map[string]SmokePermission{}
+	}
+	registered := make([]string, 0, len(permissions))
+	for _, item := range permissions {
+		code := strings.TrimSpace(item.Code)
+		if code == "" {
+			continue
+		}
+		item.Code = code
+		item.ServiceCode = service
+		s.registered[service][code] = item
+		registered = append(registered, code)
+	}
+	s.allowRegisteredServiceCallersLocked(service, registered)
+	return registered
+}
+
+func (s *SmokePermissionStore) DeleteServicePermissions(service string) int64 {
+	if s == nil {
+		return 0
+	}
+	service = strings.TrimSpace(service)
+	if service == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deleted := int64(len(s.registered[service]))
+	delete(s.registered, service)
+	if service == "storage-service" {
+		for _, caller := range []string{"judge-api", "judge-worker"} {
+			for _, permission := range []string{"storage.object.read", "storage.object.write"} {
+				if s.allowed[caller] != nil {
+					delete(s.allowed[caller], permission)
+				}
+			}
+		}
+	}
+	return deleted
+}
+
+func (s *SmokePermissionStore) ListPermissions() []SmokePermission {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]SmokePermission, 0)
+	for _, byPermission := range s.registered {
+		for _, item := range byPermission {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func (s *SmokePermissionStore) allowRegisteredServiceCallersLocked(service string, permissions []string) {
+	if service != "storage-service" {
+		return
+	}
+	for _, permission := range permissions {
+		switch permission {
+		case "storage.object.read", "storage.object.write":
+			for _, caller := range []string{"judge-api", "judge-worker"} {
+				if s.allowed[caller] == nil {
+					s.allowed[caller] = map[string]bool{}
+				}
+				s.allowed[caller][permission] = true
+			}
+		}
+	}
 }
 
 func (s *ServiceContext) Close(ctx context.Context) {

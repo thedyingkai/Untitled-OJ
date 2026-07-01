@@ -34,6 +34,26 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 	if serviceCode == "" {
 		return nil, errors.New("service_code is required")
 	}
+	if l.svcCtx.SmokeAuth != nil {
+		permissions := make([]svc.SmokePermission, 0, len(req.Permissions))
+		for _, item := range req.Permissions {
+			permissions = append(permissions, svc.SmokePermission{
+				Code:        item.Code,
+				Name:        item.Name,
+				Description: item.Description,
+			})
+		}
+		registered := l.svcCtx.SmokeAuth.RegisterServicePermissions(serviceCode, permissions)
+		return &types.ServicePermissionsResp{
+			Code: 0,
+			Msg:  "success",
+			Data: types.ServicePermissionsData{
+				ServiceCode: serviceCode,
+				Registered:  len(registered),
+				Permissions: registered,
+			},
+		}, nil
+	}
 	permissions := make([]repository.ServicePermissionInput, 0, len(req.Permissions))
 	for _, item := range req.Permissions {
 		permissions = append(permissions, repository.ServicePermissionInput{
@@ -69,6 +89,18 @@ func (l *ServicePermissionsLogic) Delete(req *types.DeleteServicePermissionsReq)
 		return nil, err
 	}
 	serviceCode := strings.TrimSpace(req.ServiceCode)
+	if l.svcCtx.SmokeAuth != nil {
+		deleted := l.svcCtx.SmokeAuth.DeleteServicePermissions(serviceCode)
+		return &types.ServicePermissionsResp{
+			Code: 0,
+			Msg:  "success",
+			Data: types.ServicePermissionsData{
+				ServiceCode: serviceCode,
+				Deleted:     deleted,
+				Permissions: []string{},
+			},
+		}, nil
+	}
 	deleted, err := l.svcCtx.AdminRepo.DeleteServicePermissions(l.ctx, serviceCode)
 	if err != nil {
 		return nil, err

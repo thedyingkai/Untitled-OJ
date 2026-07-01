@@ -512,6 +512,14 @@ pub struct SmokeControlPlaneSeed {
     pub storage_protocol: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SmokeNodeTreeSeed {
+    pub root_node_id: String,
+    pub root_host_ip: String,
+    pub child_node_id: String,
+    pub child_host_ip: String,
+}
+
 impl OrchestratorActionConsole {
     pub fn load(repo_root: impl Into<PathBuf>) -> Result<Self> {
         let repo_root = repo_root.into();
@@ -731,6 +739,22 @@ impl OrchestratorActionConsole {
         }
         seed_smoke_control_plane_into_store(&mut self.memory_store, seed.clone())?;
         self.memory_store.effective_api_routes(&seed.child_node_id)
+    }
+
+    pub fn seed_smoke_node_tree(
+        &mut self,
+        seed: SmokeNodeTreeSeed,
+    ) -> Result<Vec<crate::NodeRecord>> {
+        if self.uses_persistent_store() {
+            let mut store = self.persistent_store()?;
+            seed_smoke_node_tree_into_store(&mut store, &seed)
+                .map_err(persistent_store_unavailable)?;
+            self.memory_store =
+                memory_store_from_store(&store).map_err(persistent_store_unavailable)?;
+            return store.list_nodes().map_err(persistent_store_unavailable);
+        }
+        seed_smoke_node_tree_into_store(&mut self.memory_store, &seed)?;
+        self.memory_store.list_nodes()
     }
 
     pub fn service_permission_records(&self) -> Result<Vec<crate::ServicePermissionRecord>> {
@@ -1213,26 +1237,15 @@ fn seed_smoke_control_plane_into_store<S: OrchestratorStore>(
         OrchestratorError::InvalidManifest("smoke storage endpoint port is invalid".to_string())
     })?;
 
-    store.upsert_node(NodeRecord {
-        node_id: seed.root_node_id.clone(),
-        host_ip: seed.root_host_ip.clone(),
-        parent_node_id: String::new(),
-        role: "root".to_string(),
-        labels: serde_json::json!({"smoke": true}),
-        status: "running".to_string(),
-        created_at: String::new(),
-        updated_at: String::new(),
-    })?;
-    store.upsert_node(NodeRecord {
-        node_id: seed.child_node_id.clone(),
-        host_ip: seed.child_host_ip.clone(),
-        parent_node_id: seed.root_node_id.clone(),
-        role: "node".to_string(),
-        labels: serde_json::json!({"smoke": true}),
-        status: "running".to_string(),
-        created_at: String::new(),
-        updated_at: String::new(),
-    })?;
+    seed_smoke_node_tree_into_store(
+        store,
+        &SmokeNodeTreeSeed {
+            root_node_id: seed.root_node_id.clone(),
+            root_host_ip: seed.root_host_ip.clone(),
+            child_node_id: seed.child_node_id.clone(),
+            child_host_ip: seed.child_host_ip.clone(),
+        },
+    )?;
     store.upsert_service(smoke_storage_service_manifest(
         storage_service_name,
         storage_version,
@@ -1324,6 +1337,33 @@ fn seed_smoke_control_plane_into_store<S: OrchestratorStore>(
             updated_at: String::new(),
         })?;
     }
+    Ok(())
+}
+
+fn seed_smoke_node_tree_into_store<S: OrchestratorStore>(
+    store: &mut S,
+    seed: &SmokeNodeTreeSeed,
+) -> Result<()> {
+    store.upsert_node(NodeRecord {
+        node_id: seed.root_node_id.clone(),
+        host_ip: seed.root_host_ip.clone(),
+        parent_node_id: String::new(),
+        role: "root".to_string(),
+        labels: serde_json::json!({"smoke": true, "seed": "node-tree-only"}),
+        status: "running".to_string(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    })?;
+    store.upsert_node(NodeRecord {
+        node_id: seed.child_node_id.clone(),
+        host_ip: seed.child_host_ip.clone(),
+        parent_node_id: seed.root_node_id.clone(),
+        role: "node".to_string(),
+        labels: serde_json::json!({"smoke": true, "seed": "node-tree-only"}),
+        status: "running".to_string(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    })?;
     Ok(())
 }
 

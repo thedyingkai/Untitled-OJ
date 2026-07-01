@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	sharedjwt "ojos-shared/security/jwt"
 )
 
 var smokeHTTP = &http.Client{
@@ -47,6 +48,8 @@ type smokeConfig struct {
 	redisURL         string
 	controlPlaneMode string
 	authMode         string
+	installMode      string
+	gatewayAdminJWT  string
 	orchestrator     endpoint
 	auth             endpoint
 	storage          endpoint
@@ -86,6 +89,7 @@ func main() {
 		redisURL     = flag.String("redis", envDefault("OJOS_REAL_REDIS_URL", envDefault("REDIS_URL", "redis://127.0.0.1:6379/0")), "Redis URL for live smoke")
 		controlPlane = flag.String("control-plane", envDefault("OJOS_SMOKE_CONTROL_PLANE", "stub"), "control plane mode: stub or real")
 		authMode     = flag.String("auth", envDefault("OJOS_SMOKE_AUTH", "stub"), "auth mode: stub or real")
+		installMode  = flag.String("install-mode", envDefault("OJOS_SMOKE_INSTALL_MODE", ""), "install mode: seed or release-install")
 		workRoot     = flag.String("work-root", "", "smoke workspace; defaults to <repo>/.smoke/judge-local")
 		timeout      = flag.Duration("timeout", 90*time.Second, "overall smoke timeout")
 		cleanStreams = flag.Bool("clean-streams", true, "delete judge task/result stream keys before the smoke")
@@ -132,6 +136,22 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[FAIL] smoke mode\nreason: unsupported auth mode %q\n", cfg.authMode)
 		os.Exit(1)
 	}
+	normalizedInstallMode := normalizeInstallMode(*installMode, cfg.controlPlaneMode)
+	if normalizedInstallMode != "seed" && normalizedInstallMode != "release-install" {
+		fmt.Fprintf(os.Stderr, "[FAIL] install mode\nreason: unsupported install mode %q\n", normalizedInstallMode)
+		os.Exit(1)
+	}
+	cfg.installMode = normalizedInstallMode
+	if cfg.controlPlaneMode == "stub" && cfg.installMode == "release-install" {
+		fmt.Fprintf(os.Stderr, "[FAIL] install mode\nreason: release-install mode requires -control-plane real\n")
+		os.Exit(1)
+	}
+	adminJWT, err := sharedjwt.Generate("smoke", 1, "smoke-admin", []string{"admin"}, 24)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[FAIL] gateway admin token\nreason: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.gatewayAdminJWT = adminJWT
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
 	defer cancel()
@@ -212,7 +232,11 @@ func run(ctx context.Context, cfg smokeConfig) error {
 			return fail("auth-service real server started", err)
 		}
 		ok("auth-service real server started")
-		if err := verifyRealAuth(ctx, cfg); err != nil {
+		if cfg.installMode == "seed" {
+			if err := verifyRealAuth(ctx, cfg); err != nil {
+				return err
+			}
+		} else if err := verifyRealAuthMissingToken(ctx, cfg); err != nil {
 			return err
 		}
 	}
@@ -236,8 +260,12 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("storage-service health")
 
-	if cfg.controlPlaneMode == "real" {
+	if cfg.controlPlaneMode == "real" && cfg.installMode == "seed" {
 		if err := seedRealOrchestrator(ctx, cfg); err != nil {
+			return err
+		}
+	} else if cfg.controlPlaneMode == "real" && cfg.installMode == "release-install" {
+		if err := seedRealNodeTree(ctx, cfg); err != nil {
 			return err
 		}
 	}
@@ -261,7 +289,22 @@ func run(ctx context.Context, cfg smokeConfig) error {
 		return fail("gateway health", err)
 	}
 	ok("gateway health")
+
+	if cfg.controlPlaneMode == "real" && cfg.installMode == "release-install" {
+		if err := verifyStorageRouteAbsentBeforeInstall(ctx, cfg); err != nil {
+			return err
+		}
+		if err := installStorageRelease(ctx, cfg); err != nil {
+			return err
+		}
+	}
 	if cfg.authMode == "real" {
+		if err := verifyRealAuth(ctx, cfg); err != nil {
+			return err
+		}
+		if err := verifyStoragePermissionsRegistered(ctx, cfg); err != nil {
+			return err
+		}
 		if err := verifyGatewayAuthBoundaries(ctx, cfg); err != nil {
 			return err
 		}
@@ -419,7 +462,12 @@ func startRealOrchestrator(ctx context.Context, cfg smokeConfig) (*childProcess,
 			"--bind", fmt.Sprintf("%s:%d", cfg.orchestrator.host, cfg.orchestrator.port),
 		},
 		env: noProxyEnv(map[string]string{
-			"OJOS_SMOKE_MODE": "1",
+			"OJOS_SMOKE_MODE":                   "1",
+			"ORCHESTRATOR_RELEASE_PACKAGE_LOAD": "1",
+			"ORCHESTRATOR_RELEASE_PACKAGE_ROOT": cfg.repoRoot,
+			"ORCHESTRATOR_AUTH_PERMISSION_SYNC": "1",
+			"AUTH_SERVICE_ENDPOINT":             cfg.auth.baseURL(),
+			"AUTH_SERVICE_ADMIN_TOKEN":          serviceToken,
 		}),
 	})
 }
@@ -477,6 +525,116 @@ func seedRealOrchestrator(ctx context.Context, cfg smokeConfig) error {
 	return nil
 }
 
+func seedRealNodeTree(ctx context.Context, cfg smokeConfig) error {
+	body := map[string]any{
+		"root_node_id":  rootNodeID,
+		"root_host_ip":  cfg.storage.host,
+		"child_node_id": childNodeID,
+		"child_host_ip": "127.0.0.2",
+	}
+	var resp struct {
+		Status string `json:"status"`
+		NodeID string `json:"node_id"`
+		Nodes  []struct {
+			NodeID string `json:"node_id"`
+			HostIP string `json:"host_ip"`
+			Role   string `json:"role"`
+		} `json:"nodes"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.orchestrator.baseURL()+"/internal/smoke/seed-node-tree", body, map[string]string{}, &resp); err != nil {
+		return fail("node tree seeded", err)
+	}
+	if resp.NodeID != childNodeID || len(resp.Nodes) < 2 {
+		return fail("node tree seeded", fmt.Errorf("unexpected node tree response: node_id=%q nodes=%d", resp.NodeID, len(resp.Nodes)))
+	}
+	ok("node tree seeded")
+	return nil
+}
+
+func verifyStorageRouteAbsentBeforeInstall(ctx context.Context, cfg smokeConfig) error {
+	if err := verifyRouteMissing(ctx, cfg, "storage.object.get"); err != nil {
+		return fail("release.install before route absent", err)
+	}
+	status, body, err := doStatus(ctx, http.MethodGet, cfg.gateway.baseURL()+"/internal/apis/storage.object.get/submissions/pre-install.txt", nil, map[string]string{
+		"Authorization":         "Bearer " + serviceToken,
+		"X-OJOS-Caller-Service": judgeAPIService,
+		"X-OJOS-Node-Id":        childNodeID,
+	})
+	if err != nil {
+		return fail("release.install before route absent", err)
+	}
+	if status != http.StatusServiceUnavailable && status != http.StatusNotFound {
+		return fail("release.install before route absent", fmt.Errorf("expected missing storage route before install, got %d: %s", status, strings.TrimSpace(string(body))))
+	}
+	ok("release.install before route absent")
+	return nil
+}
+
+func installStorageRelease(ctx context.Context, cfg smokeConfig) error {
+	endpointID := fmt.Sprintf("%s:%d:%s", cfg.storage.host, cfg.storage.port, storageService)
+	body := map[string]any{
+		"operation_id":             "op-smoke-storage-release-install",
+		"host_ip":                  cfg.storage.host,
+		"endpoint":                 endpointID,
+		"execute_service_driver":   false,
+		"external_service_running": true,
+	}
+	var installResp struct {
+		ActionResult struct {
+			ActionID    string `json:"action_id"`
+			Status      string `json:"status"`
+			Message     string `json:"message"`
+			OperationID string `json:"operation_id"`
+			Error       string `json:"error"`
+		} `json:"action_result"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.orchestrator.baseURL()+"/releases/"+storageService+"/install", body, map[string]string{}, &installResp); err != nil {
+		return fail("release.install storage-service", err)
+	}
+	if installResp.ActionResult.ActionID != "release.install" {
+		return fail("release.install storage-service", fmt.Errorf("unexpected action_id %q", installResp.ActionResult.ActionID))
+	}
+	if !strings.EqualFold(strings.ReplaceAll(installResp.ActionResult.Status, "_", ""), "succeeded") {
+		return fail("release.install storage-service", fmt.Errorf("unexpected status %q operation_id=%s error=%s message=%s", installResp.ActionResult.Status, installResp.ActionResult.OperationID, installResp.ActionResult.Error, installResp.ActionResult.Message))
+	}
+	ok("release.install storage-service")
+
+	if err := verifyRealOrchestratorRoutes(ctx, cfg, endpointID); err != nil {
+		return err
+	}
+	if err := reloadGatewayRoutes(ctx, cfg); err != nil {
+		return fail("gateway route reload completed", err)
+	}
+	if err := waitGatewayRoute(ctx, cfg, "storage.object.put", endpointID); err != nil {
+		return fail("gateway route reload completed", err)
+	}
+	ok("gateway route reload completed")
+	return nil
+}
+
+func reloadGatewayRoutes(ctx context.Context, cfg smokeConfig) error {
+	body := map[string]any{
+		"operation_id": "op-smoke-storage-release-install",
+		"service_name": storageService,
+	}
+	var resp struct {
+		Status     string `json:"status"`
+		RouteCount int    `json:"route_count"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.gateway.baseURL()+"/api/admin/orchestrator/routes/reload", body, map[string]string{
+		"Authorization": "Bearer " + cfg.gatewayAdminJWT,
+	}, &resp); err != nil {
+		return err
+	}
+	if resp.Status != "reloaded" {
+		return fmt.Errorf("unexpected reload status %q", resp.Status)
+	}
+	if resp.RouteCount == 0 {
+		return errors.New("gateway reload returned zero routes")
+	}
+	return nil
+}
+
 func verifyRealOrchestratorRoutes(ctx context.Context, cfg smokeConfig, endpointID string) error {
 	var table routeTableResponse
 	target := cfg.orchestrator.baseURL() + "/internal/orchestrator/nodes/" + childNodeID + "/routes?include_upstream=true"
@@ -494,6 +652,46 @@ func verifyRealOrchestratorRoutes(ctx context.Context, cfg smokeConfig, endpoint
 	}
 	ok("child effective routes loaded from real orchestrator")
 	return nil
+}
+
+func verifyRouteMissing(ctx context.Context, cfg smokeConfig, apiID string) error {
+	var table routeTableResponse
+	target := cfg.orchestrator.baseURL() + "/internal/orchestrator/nodes/" + childNodeID + "/routes?include_upstream=true"
+	if err := doJSONWithHeaders(ctx, http.MethodGet, target, nil, map[string]string{}, &table); err != nil {
+		return err
+	}
+	if findRoute(table.Routes, apiID) != nil {
+		return fmt.Errorf("route %s existed before release.install", apiID)
+	}
+	return nil
+}
+
+func waitGatewayRoute(ctx context.Context, cfg smokeConfig, apiID string, endpointID string) error {
+	deadline := time.Now().Add(20 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		status, body, err := doStatus(ctx, http.MethodPut, cfg.gateway.baseURL()+"/internal/apis/"+apiID+"/submissions/reload-probe.txt", map[string]string{
+			"probe": "release-install-gateway-reload",
+		}, map[string]string{
+			"Authorization":         "Bearer " + serviceToken,
+			"X-OJOS-Caller-Service": judgeAPIService,
+			"X-OJOS-Node-Id":        childNodeID,
+		})
+		if err != nil {
+			last = err
+		} else if status >= 200 && status < 300 {
+			return nil
+		} else {
+			last = fmt.Errorf("gateway route still unavailable for %s endpoint=%s status=%d body=%s", apiID, endpointID, status, strings.TrimSpace(string(body)))
+		}
+		if wait(ctx, 300*time.Millisecond) != nil {
+			return ctx.Err()
+		}
+	}
+	if last == nil {
+		last = fmt.Errorf("gateway route %s did not appear", apiID)
+	}
+	return last
 }
 
 func verifyRealAuth(ctx context.Context, cfg smokeConfig) error {
@@ -526,6 +724,52 @@ func verifyRealAuth(ctx context.Context, cfg smokeConfig) error {
 	return nil
 }
 
+func verifyRealAuthMissingToken(ctx context.Context, cfg smokeConfig) error {
+	_, status, err := permissionCheck(ctx, cfg.auth.baseURL(), "", judgeAPIService, "storage.object.put", "storage.object.write")
+	if err != nil {
+		return fail("permission-check rejected missing token", err)
+	}
+	if status != http.StatusUnauthorized {
+		return fail("permission-check rejected missing token", fmt.Errorf("expected 401, got %d", status))
+	}
+	ok("permission-check rejected missing token")
+	return nil
+}
+
+func verifyStoragePermissionsRegistered(ctx context.Context, cfg smokeConfig) error {
+	var resp struct {
+		Code int `json:"code"`
+		Data []struct {
+			Code        string `json:"code"`
+			ServiceCode string `json:"service_code"`
+		} `json:"data"`
+	}
+	headers := map[string]string{"Authorization": "Bearer " + serviceToken}
+	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.auth.baseURL()+"/auth/admin/permissions", nil, headers, &resp); err != nil {
+		return fail("storage permissions registered into auth-service", err)
+	}
+	want := map[string]bool{
+		"storage.object.read":   false,
+		"storage.object.write":  false,
+		"storage.object.delete": false,
+	}
+	for _, item := range resp.Data {
+		if item.ServiceCode != storageService {
+			continue
+		}
+		if _, ok := want[item.Code]; ok {
+			want[item.Code] = true
+		}
+	}
+	for code, found := range want {
+		if !found {
+			return fail("storage permissions registered into auth-service", fmt.Errorf("missing permission %s", code))
+		}
+	}
+	ok("storage permissions registered into auth-service")
+	return nil
+}
+
 func verifyGatewayAuthBoundaries(ctx context.Context, cfg smokeConfig) error {
 	headers := map[string]string{
 		"Authorization":         "Bearer " + serviceToken,
@@ -553,6 +797,9 @@ func verifyGatewayAuthBoundaries(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("gateway permission-check rejected missing token")
 
+	if cfg.installMode == "release-install" {
+		return nil
+	}
 	status, body, err = doStatus(ctx, http.MethodGet, cfg.gateway.baseURL()+"/internal/apis/storage.object.public-head/submissions/auth-public-missing.txt", nil, map[string]string{
 		"X-OJOS-Node-Id": childNodeID,
 	})
@@ -1368,6 +1615,22 @@ func normalizeSmokeMode(value string) string {
 		return "stub"
 	case "real":
 		return "real"
+	default:
+		return value
+	}
+}
+
+func normalizeInstallMode(value string, controlPlaneMode string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		if controlPlaneMode == "real" {
+			return "release-install"
+		}
+		return "seed"
+	}
+	switch value {
+	case "seed", "release-install":
+		return value
 	default:
 		return value
 	}

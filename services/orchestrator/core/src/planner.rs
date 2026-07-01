@@ -550,6 +550,10 @@ fn release_install_options(request: &ActionRequest) -> Value {
             .field("allow_destructive_migrations")
             .is_some_and(truthy_field),
         "execute_service_driver": request.field("execute_service_driver").is_some_and(truthy_field),
+        "external_service_running": request
+            .field("external_service_running")
+            .or_else(|| request.field("existing_endpoint_running"))
+            .is_some_and(truthy_field),
     })
 }
 
