@@ -102,6 +102,40 @@ type PermissionItem {
 	Description string `json:"description"`
 }
 
+type ServicePermissionItem {
+	Code        string `json:"code"`
+	Name        string `json:"name,optional"`
+	Description string `json:"description,optional"`
+}
+
+type ServicePermissionRoleBinding {
+	Role        string   `json:"role"`
+	Permissions []string `json:"permissions"`
+}
+
+type RegisterServicePermissionsReq {
+	ServiceCode         string                         `path:"service_code"`
+	Permissions         []ServicePermissionItem        `json:"permissions"`
+	DefaultRoleBindings []ServicePermissionRoleBinding `json:"default_role_bindings,optional"`
+}
+
+type DeleteServicePermissionsReq {
+	ServiceCode string `path:"service_code"`
+}
+
+type ServicePermissionsData {
+	ServiceCode string   `json:"service_code"`
+	Registered  int      `json:"registered"`
+	Deleted     int64    `json:"deleted,optional"`
+	Permissions []string `json:"permissions"`
+}
+
+type ServicePermissionsResp {
+	Code int                    `json:"code"`
+	Msg  string                 `json:"msg"`
+	Data ServicePermissionsData `json:"data"`
+}
+
 type ListPermissionsResp {
 	Code int              `json:"code"`
 	Msg  string           `json:"msg"`
@@ -134,6 +168,25 @@ type PermissionCheckResp {
 	Code int                 `json:"code"`
 	Msg  string              `json:"msg"`
 	Data PermissionCheckData `json:"data"`
+}
+
+type UserEffectivePermissionsReq {
+	UserId    int64  `path:"user_id"`
+	ScopeType string `form:"scope_type,optional"`
+	ScopeId   int64  `form:"scope_id,optional"`
+}
+
+type UserEffectivePermissionsData {
+	UserId      int64    `json:"user_id"`
+	ScopeType   string   `json:"scope_type"`
+	ScopeId     int64    `json:"scope_id"`
+	Permissions []string `json:"permissions"`
+}
+
+type UserEffectivePermissionsResp {
+	Code int                          `json:"code"`
+	Msg  string                       `json:"msg"`
+	Data UserEffectivePermissionsData `json:"data"`
 }
 
 type AuditLogItem {
@@ -203,11 +256,23 @@ service auth {
 	@handler listPermissions
 	get /admin/permissions returns (ListPermissionsResp)
 
+	@handler registerServicePermissions
+	post /admin/services/:service_code/permissions (RegisterServicePermissionsReq) returns (ServicePermissionsResp)
+
+	@handler deleteServicePermissions
+	delete /admin/services/:service_code/permissions (DeleteServicePermissionsReq) returns (ServicePermissionsResp)
+
 	@handler addUserRole
 	post /admin/users/roles (UserRoleReq) returns (AdminActionResp)
 
 	@handler removeUserRole
 	delete /admin/users/roles (UserRoleReq) returns (AdminActionResp)
+
+	@handler userEffectivePermissions
+	get /admin/users/:user_id/effective-permissions (UserEffectivePermissionsReq) returns (UserEffectivePermissionsResp)
+
+	@handler userPermissionCheck
+	post /permission-check (PermissionCheckReq) returns (PermissionCheckResp)
 
 	@handler addProblemRole
 	post /admin/problems/roles (ProblemRoleReq) returns (AdminActionResp)
@@ -221,4 +286,3 @@ service auth {
 	@handler listAuditLogs
 	get /admin/audit-logs returns (ListAuditLogsResp)
 }
-

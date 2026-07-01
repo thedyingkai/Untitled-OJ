@@ -21,7 +21,16 @@ backend:
   protocol: http
   port: 8081
   health_path: /health
-migrations: []
+migrations:
+  - version: "000001_init_schema"
+    path: services/auth-service/migrations/000001_init_schema.up.sql
+    checksum: sha256:c1205afb55cb5bf50110f8fbcf2a7b1eceb5e5f8ed23eb65c959a0ff605ffc55
+  - version: "000003_permission_core"
+    path: services/auth-service/migrations/000003_permission_core.up.sql
+    checksum: sha256:a4afc17fd38c3d93e5f918b178c27cc2a8a908cd09cbb0e3141f58c2acb1acf1
+  - version: "000006_add_internal_auth_keys"
+    path: services/auth-service/migrations/000006_add_internal_auth_keys.up.sql
+    checksum: sha256:63e532eae31e7ec491046978c1c6e3628bad384b67bf1f30c48d8bab1207698e
 permissions:
   - auth.admin
   - system.admin
@@ -31,6 +40,37 @@ routes:
     target_type: endpoint-group
     target: auth-service[*]
     permission: public
+apis:
+  - api_id: auth.login
+    protocol: http
+    port_name: http
+    path_prefix: /auth/login
+    methods: [POST]
+    visibility: descendants
+    auth_mode: public
+    permission: public
+    version: v1
+    stability: stable
+  - api_id: auth.permission.check
+    protocol: http
+    port_name: http
+    path_prefix: /auth/permission-check
+    methods: [POST]
+    visibility: descendants
+    auth_mode: service
+    permission: system.admin
+    version: v1
+    stability: stable
+  - api_id: auth.user.permissions
+    protocol: http
+    port_name: http
+    path_prefix: /auth/users/permissions
+    methods: [GET]
+    visibility: descendants
+    auth_mode: user
+    permission: auth.admin
+    version: v1
+    stability: stable
 redis:
   - name: redis
     kind: stream

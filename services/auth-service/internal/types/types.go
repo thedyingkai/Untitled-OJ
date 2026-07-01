@@ -106,6 +106,59 @@ type PermissionItem struct {
 	Description string `json:"description"`
 }
 
+type ServicePermissionItem struct {
+	Code        string `json:"code"`
+	Name        string `json:"name,optional"`
+	Description string `json:"description,optional"`
+}
+
+type ServicePermissionRoleBinding struct {
+	Role        string   `json:"role"`
+	Permissions []string `json:"permissions"`
+}
+
+type RegisterServicePermissionsReq struct {
+	ServiceCode         string                         `path:"service_code"`
+	Permissions         []ServicePermissionItem        `json:"permissions"`
+	DefaultRoleBindings []ServicePermissionRoleBinding `json:"default_role_bindings,optional"`
+}
+
+type DeleteServicePermissionsReq struct {
+	ServiceCode string `path:"service_code"`
+}
+
+type ServicePermissionsData struct {
+	ServiceCode string   `json:"service_code"`
+	Registered  int      `json:"registered"`
+	Deleted     int64    `json:"deleted,optional"`
+	Permissions []string `json:"permissions"`
+}
+
+type ServicePermissionsResp struct {
+	Code int                    `json:"code"`
+	Msg  string                 `json:"msg"`
+	Data ServicePermissionsData `json:"data"`
+}
+
+type UserEffectivePermissionsReq struct {
+	UserId    int64  `path:"user_id"`
+	ScopeType string `form:"scope_type,optional"`
+	ScopeId   int64  `form:"scope_id,optional"`
+}
+
+type UserEffectivePermissionsData struct {
+	UserId      int64    `json:"user_id"`
+	ScopeType   string   `json:"scope_type"`
+	ScopeId     int64    `json:"scope_id"`
+	Permissions []string `json:"permissions"`
+}
+
+type UserEffectivePermissionsResp struct {
+	Code int                          `json:"code"`
+	Msg  string                       `json:"msg"`
+	Data UserEffectivePermissionsData `json:"data"`
+}
+
 type ProblemRoleReq struct {
 	UserId    int64  `json:"user_id"`
 	ProblemId int64  `json:"problem_id"`

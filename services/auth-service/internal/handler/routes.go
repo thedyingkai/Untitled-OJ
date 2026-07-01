@@ -73,6 +73,21 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 					Handler: listRolesHandler(serverCtx),
 				},
 				{
+					Method:  http.MethodPost,
+					Path:    "/admin/services/:service_code/permissions",
+					Handler: registerServicePermissionsHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodDelete,
+					Path:    "/admin/services/:service_code/permissions",
+					Handler: deleteServicePermissionsHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/users/:user_id/effective-permissions",
+					Handler: userEffectivePermissionsHandler(serverCtx),
+				},
+				{
 					Method:  http.MethodGet,
 					Path:    "/admin/users",
 					Handler: listUsersHandler(serverCtx),
@@ -91,6 +106,11 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 					Method:  http.MethodGet,
 					Path:    "/me",
 					Handler: meHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/permission-check",
+					Handler: userPermissionCheckHandler(serverCtx),
 				},
 				{
 					Method:  http.MethodGet,

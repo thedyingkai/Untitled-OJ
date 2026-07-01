@@ -82,7 +82,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 }
 
 func applyEnvOverrides(c *config.Config) {
-	if value := firstEnv("DATABASE_URL", "POSTGRES_DSN"); value != "" {
+	if value := firstEnv("AUTH_DATABASE_URL", "DATABASE_URL", "POSTGRES_DSN"); value != "" {
 		c.Database.Url = value
 	}
 	if value := strings.TrimSpace(os.Getenv("JAEGER_ENDPOINT")); value != "" {

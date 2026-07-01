@@ -2,8 +2,13 @@ package repository
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 
+	"ojos-shared/security/permission"
+
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -36,6 +41,17 @@ type PermissionListItem struct {
 	ServiceCode string
 	Name        string
 	Description string
+}
+
+type ServicePermissionInput struct {
+	Code        string
+	Name        string
+	Description string
+}
+
+type ServiceRoleBindingInput struct {
+	Role        string
+	Permissions []string
 }
 
 type AuditListItem struct {
@@ -126,6 +142,156 @@ ORDER BY service_code, code
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (r *AdminRepository) RegisterServicePermissions(ctx context.Context, serviceCode string, permissions []ServicePermissionInput, bindings []ServiceRoleBindingInput) ([]string, error) {
+	serviceCode = strings.TrimSpace(serviceCode)
+	if serviceCode == "" {
+		return nil, errors.New("service_code is required")
+	}
+	if len(permissions) == 0 {
+		return nil, errors.New("permissions are required")
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	registered := make([]string, 0, len(permissions))
+	known := make(map[string]bool, len(permissions))
+	declaredCodes := make([]string, 0, len(permissions))
+	for _, item := range permissions {
+		code := strings.TrimSpace(item.Code)
+		if code == "" {
+			return nil, errors.New("permission code is required")
+		}
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			name = code
+		}
+		description := strings.TrimSpace(item.Description)
+		if _, err := tx.Exec(ctx, `
+INSERT INTO permissions(code, service_code, name, description)
+VALUES($1, $2, $3, $4)
+ON CONFLICT(code)
+DO UPDATE SET service_code = EXCLUDED.service_code, name = EXCLUDED.name, description = EXCLUDED.description
+`, code, serviceCode, name, description); err != nil {
+			return nil, err
+		}
+		registered = append(registered, code)
+		known[code] = true
+		declaredCodes = append(declaredCodes, code)
+	}
+
+	if _, err := tx.Exec(ctx, `
+DELETE FROM permissions
+WHERE service_code = $1
+  AND NOT (code = ANY($2::text[]))
+`, serviceCode, declaredCodes); err != nil {
+		return nil, err
+	}
+
+	for _, binding := range bindings {
+		roleName := strings.TrimSpace(binding.Role)
+		if roleName == "" {
+			return nil, errors.New("role is required")
+		}
+		roleID, err := ensureServiceRole(ctx, tx, serviceCode, roleName)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `
+DELETE FROM role_permissions
+WHERE role_id = $1
+  AND permission_code IN (
+      SELECT code
+      FROM permissions
+      WHERE service_code = $2
+  )
+`, roleID, serviceCode); err != nil {
+			return nil, err
+		}
+		for _, rawPermission := range binding.Permissions {
+			permissionCode := strings.TrimSpace(rawPermission)
+			if permissionCode == "" {
+				continue
+			}
+			if !known[permissionCode] {
+				return nil, errors.New("role binding references permission outside service release")
+			}
+			if _, err := tx.Exec(ctx, `
+INSERT INTO role_permissions(role_id, permission_code)
+VALUES($1, $2)
+ON CONFLICT(role_id, permission_code)
+DO NOTHING
+`, roleID, permissionCode); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return registered, nil
+}
+
+func (r *AdminRepository) DeleteServicePermissions(ctx context.Context, serviceCode string) (int64, error) {
+	serviceCode = strings.TrimSpace(serviceCode)
+	if serviceCode == "" {
+		return 0, errors.New("service_code is required")
+	}
+	tag, err := r.db.Exec(ctx, `
+DELETE FROM permissions
+WHERE service_code = $1
+`, serviceCode)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (r *AdminRepository) UserEffectivePermissions(ctx context.Context, userID int64, scopeType string, scopeID int64) ([]string, error) {
+	if userID <= 0 {
+		return nil, errors.New("user_id is required")
+	}
+	rows, err := r.db.Query(ctx, `
+SELECT code
+FROM permissions
+ORDER BY service_code, code
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	candidates := make([]string, 0)
+	for rows.Next() {
+		var code string
+		if err := rows.Scan(&code); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, code)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	allowed := make([]string, 0, len(candidates))
+	for _, code := range candidates {
+		ok, err := hasUserPermissionForScope(ctx, r.db, userID, code, scopeType, scopeID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			allowed = append(allowed, code)
+		}
+	}
+	return allowed, nil
 }
 
 func (r *AdminRepository) AddGlobalUserRole(ctx context.Context, actorID int64, userID int64, roleName string) error {
@@ -245,4 +411,30 @@ LIMIT 200
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func ensureServiceRole(ctx context.Context, tx pgx.Tx, serviceCode string, roleName string) (int64, error) {
+	var roleID int64
+	err := tx.QueryRow(ctx, `
+INSERT INTO roles(name, service_code, description, is_system)
+VALUES($1, $2, $3, FALSE)
+ON CONFLICT(name)
+DO UPDATE SET service_code = EXCLUDED.service_code
+RETURNING id
+`, roleName, serviceCode, "release role for "+serviceCode).Scan(&roleID)
+	return roleID, err
+}
+
+func hasUserPermissionForScope(ctx context.Context, db *pgxpool.Pool, userID int64, permissionCode string, scopeType string, scopeID int64) (bool, error) {
+	scopeType = strings.TrimSpace(scopeType)
+	if scopeType == "" {
+		scopeType = permission.ScopeSystem
+	}
+	return permission.HasUserPermission(
+		ctx,
+		db,
+		userID,
+		permissionCode,
+		permission.Scope{Type: scopeType, ID: scopeID},
+	)
 }
