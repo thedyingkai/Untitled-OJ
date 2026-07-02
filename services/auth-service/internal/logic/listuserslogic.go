@@ -26,6 +26,6 @@ func NewListUsersLogic(ctx context.Context, svcCtx *svc.ServiceContext) *ListUse
 	}
 }
 
-func (l *ListUsersLogic) ListUsers() (resp *types.ListUsersResp, err error) {
-	return NewAdminPermissionsLogic(l.ctx, l.svcCtx).ListUsers()
+func (l *ListUsersLogic) ListUsers(req *types.ListQueryReq) (resp *types.ListUsersResp, err error) {
+	return NewAdminPermissionsLogic(l.ctx, l.svcCtx).ListUsers(req)
 }

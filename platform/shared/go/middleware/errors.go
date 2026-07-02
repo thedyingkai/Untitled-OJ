@@ -13,6 +13,13 @@ import (
 	"github.com/zeromicro/go-zero/rest/httpx"
 )
 
+type CodedHTTPError interface {
+	error
+	HTTPStatus() int
+	ErrorCode() int
+	PublicMessage() string
+}
+
 func InstallHTTPErrorHandler() {
 	httpx.SetErrorHandlerCtx(func(_ context.Context, err error) (int, any) {
 		status, code, msg := classifyHTTPError(err)
@@ -26,6 +33,11 @@ func InstallHTTPErrorHandler() {
 func classifyHTTPError(err error) (int, int, string) {
 	if err == nil {
 		return http.StatusInternalServerError, 50000, "internal server error"
+	}
+
+	var coded CodedHTTPError
+	if errors.As(err, &coded) {
+		return coded.HTTPStatus(), coded.ErrorCode(), coded.PublicMessage()
 	}
 
 	switch {

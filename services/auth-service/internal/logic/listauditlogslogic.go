@@ -26,6 +26,6 @@ func NewListAuditLogsLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Lis
 	}
 }
 
-func (l *ListAuditLogsLogic) ListAuditLogs() (resp *types.ListAuditLogsResp, err error) {
-	return NewAdminPermissionsLogic(l.ctx, l.svcCtx).ListAuditLogs()
+func (l *ListAuditLogsLogic) ListAuditLogs(req *types.ListQueryReq) (resp *types.ListAuditLogsResp, err error) {
+	return NewAdminPermissionsLogic(l.ctx, l.svcCtx).ListAuditLogs(req)
 }

@@ -89,3 +89,43 @@ func TestPermissionCheckAuditHelperExists(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminPermissionListsExposePageMetadata(t *testing.T) {
+	data, err := os.ReadFile("admin_permissions_logic.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"repositoryListQuery",
+		"func pageMeta",
+		"Page: pageMeta(query, total)",
+		"ListUsers(req *types.ListQueryReq)",
+		"ListRoles(req *types.ListQueryReq)",
+		"ListPermissions(req *types.ListQueryReq)",
+		"ListAuditLogs(req *types.ListQueryReq)",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("admin list page metadata missing %q", want)
+		}
+	}
+}
+
+func TestAdminPermissionLogicUsesDomainErrors(t *testing.T) {
+	data, err := os.ReadFile("admin_permissions_logic.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"apperror.BadRequest",
+		"apperror.CodeInvalidRequest",
+		"apperror.CodeInvalidPrincipal",
+		"apperror.CodeInvalidScope",
+		"apperror.Conflict",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("admin logic domain error missing %q", want)
+		}
+	}
+}

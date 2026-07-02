@@ -2,9 +2,9 @@ package logic
 
 import (
 	"context"
-	"errors"
 	"strings"
 
+	"ojos-auth-service/internal/apperror"
 	"ojos-auth-service/internal/middleware"
 	"ojos-auth-service/internal/repository"
 	"ojos-auth-service/internal/svc"
@@ -34,7 +34,7 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 	}
 	serviceCode := strings.TrimSpace(req.ServiceCode)
 	if serviceCode == "" {
-		return nil, errors.New("service_code is required")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "service_code is required")
 	}
 	authToken, _ := middleware.TokenFromContext(l.ctx)
 	credentialToken := credentialTokenFromRegistration(req, authToken)
@@ -186,7 +186,7 @@ func (l *ServicePermissionsLogic) GetServiceIdentity(req *types.DeleteServicePer
 		return nil, err
 	}
 	if l.svcCtx.SmokeAuth != nil {
-		return nil, errors.New("service identity details are unavailable in smoke auth")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "service identity details are unavailable in smoke auth")
 	}
 	details, err := l.svcCtx.AdminRepo.ListServiceIdentity(l.ctx, strings.TrimSpace(req.ServiceCode))
 	if err != nil {
@@ -205,7 +205,7 @@ func (l *ServicePermissionsLogic) AddServiceCredential(req *types.ServiceCredent
 		return nil, err
 	}
 	if l.svcCtx.SmokeAuth != nil {
-		return nil, errors.New("service credential lifecycle is unavailable in smoke auth")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "service credential lifecycle is unavailable in smoke auth")
 	}
 	expiresAt, err := parseOptionalRFC3339(req.ExpiresAt)
 	if err != nil {
@@ -231,7 +231,7 @@ func (l *ServicePermissionsLogic) RevokeServiceCredential(req *types.RevokeServi
 		return nil, err
 	}
 	if l.svcCtx.SmokeAuth != nil {
-		return nil, errors.New("service credential lifecycle is unavailable in smoke auth")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "service credential lifecycle is unavailable in smoke auth")
 	}
 	if err := l.svcCtx.AdminRepo.RevokeServiceCredential(l.ctx, actorID, strings.TrimSpace(req.ServiceCode), req.Token, req.TokenHash, req.Reason); err != nil {
 		return nil, err

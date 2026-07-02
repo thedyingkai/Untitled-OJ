@@ -26,6 +26,6 @@ func NewListRolesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *ListRol
 	}
 }
 
-func (l *ListRolesLogic) ListRoles() (resp *types.ListRolesResp, err error) {
-	return NewAdminPermissionsLogic(l.ctx, l.svcCtx).ListRoles()
+func (l *ListRolesLogic) ListRoles(req *types.ListQueryReq) (resp *types.ListRolesResp, err error) {
+	return NewAdminPermissionsLogic(l.ctx, l.svcCtx).ListRoles(req)
 }

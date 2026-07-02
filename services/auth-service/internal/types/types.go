@@ -89,52 +89,76 @@ type HealthResp struct {
 	Data HealthData `json:"data"`
 }
 
+type PageMeta struct {
+	Page     int64 `json:"page"`
+	PageSize int64 `json:"page_size"`
+	Total    int64 `json:"total"`
+}
+
+type ListQueryReq struct {
+	Page          int64  `form:"page,optional"`
+	PageSize      int64  `form:"page_size,optional"`
+	Q             string `form:"q,optional"`
+	ServiceCode   string `form:"service_code,optional"`
+	PrincipalType string `form:"principal_type,optional"`
+	ScopeType     string `form:"scope_type,optional"`
+	Action        string `form:"action,optional"`
+}
+
 type ListAuditLogsResp struct {
 	Code int            `json:"code"`
 	Msg  string         `json:"msg"`
 	Data []AuditLogItem `json:"data"`
+	Page PageMeta       `json:"page"`
 }
 
 type ListPermissionsResp struct {
 	Code int              `json:"code"`
 	Msg  string           `json:"msg"`
 	Data []PermissionItem `json:"data"`
+	Page PageMeta         `json:"page"`
 }
 
 type ListRolesResp struct {
 	Code int        `json:"code"`
 	Msg  string     `json:"msg"`
 	Data []RoleItem `json:"data"`
+	Page PageMeta   `json:"page"`
 }
 
 type ListPermissionAssignmentsResp struct {
 	Code int                        `json:"code"`
 	Msg  string                     `json:"msg"`
 	Data []PermissionAssignmentItem `json:"data"`
+	Page PageMeta                   `json:"page"`
 }
 
 type ListResourceEdgesResp struct {
 	Code int                `json:"code"`
 	Msg  string             `json:"msg"`
 	Data []ResourceEdgeItem `json:"data"`
+	Page PageMeta           `json:"page"`
 }
 
 type ListResourceTypesResp struct {
 	Code int                `json:"code"`
 	Msg  string             `json:"msg"`
 	Data []ResourceTypeItem `json:"data"`
+	Page PageMeta           `json:"page"`
 }
 
 type ListRoleBindingsResp struct {
 	Code int               `json:"code"`
 	Msg  string            `json:"msg"`
 	Data []RoleBindingItem `json:"data"`
+	Page PageMeta          `json:"page"`
 }
 
 type ListUsersResp struct {
 	Code int        `json:"code"`
 	Msg  string     `json:"msg"`
 	Data []UserItem `json:"data"`
+	Page PageMeta   `json:"page"`
 }
 
 type DeletePermissionReq struct {

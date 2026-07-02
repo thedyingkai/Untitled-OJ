@@ -2,10 +2,11 @@ package logic
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 
+	"ojos-auth-service/internal/apperror"
+	"ojos-auth-service/internal/repository"
 	"ojos-auth-service/internal/svc"
 	"ojos-auth-service/internal/types"
 	"ojos-shared/security/permission"
@@ -27,11 +28,12 @@ func NewAdminPermissionsLogic(ctx context.Context, svcCtx *svc.ServiceContext) *
 	}
 }
 
-func (l *AdminPermissionsLogic) ListUsers() (*types.ListUsersResp, error) {
+func (l *AdminPermissionsLogic) ListUsers(req *types.ListQueryReq) (*types.ListUsersResp, error) {
 	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
 		return nil, err
 	}
-	users, err := l.svcCtx.AdminRepo.ListUsers(l.ctx)
+	query := repositoryListQuery(req)
+	users, total, err := l.svcCtx.AdminRepo.ListUsers(l.ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -45,14 +47,15 @@ func (l *AdminPermissionsLogic) ListUsers() (*types.ListUsersResp, error) {
 			CreatedAt: user.CreatedAt.UTC().Format(time.RFC3339Nano),
 		})
 	}
-	return &types.ListUsersResp{Code: 0, Msg: "success", Data: items}, nil
+	return &types.ListUsersResp{Code: 0, Msg: "success", Data: items, Page: pageMeta(query, total)}, nil
 }
 
-func (l *AdminPermissionsLogic) ListRoles() (*types.ListRolesResp, error) {
+func (l *AdminPermissionsLogic) ListRoles(req *types.ListQueryReq) (*types.ListRolesResp, error) {
 	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
 		return nil, err
 	}
-	roles, err := l.svcCtx.AdminRepo.ListRoles(l.ctx)
+	query := repositoryListQuery(req)
+	roles, total, err := l.svcCtx.AdminRepo.ListRoles(l.ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -66,10 +69,10 @@ func (l *AdminPermissionsLogic) ListRoles() (*types.ListRolesResp, error) {
 			IsSystem:    role.IsSystem,
 		})
 	}
-	return &types.ListRolesResp{Code: 0, Msg: "success", Data: items}, nil
+	return &types.ListRolesResp{Code: 0, Msg: "success", Data: items, Page: pageMeta(query, total)}, nil
 }
 
-func (l *AdminPermissionsLogic) ListPermissions() (*types.ListPermissionsResp, error) {
+func (l *AdminPermissionsLogic) ListPermissions(req *types.ListQueryReq) (*types.ListPermissionsResp, error) {
 	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
 		return nil, err
 	}
@@ -84,9 +87,11 @@ func (l *AdminPermissionsLogic) ListPermissions() (*types.ListPermissionsResp, e
 				Description: perm.Description,
 			})
 		}
-		return &types.ListPermissionsResp{Code: 0, Msg: "success", Data: items}, nil
+		query := repositoryListQuery(req)
+		return &types.ListPermissionsResp{Code: 0, Msg: "success", Data: items, Page: pageMeta(query, int64(len(items)))}, nil
 	}
-	perms, err := l.svcCtx.AdminRepo.ListPermissions(l.ctx)
+	query := repositoryListQuery(req)
+	perms, total, err := l.svcCtx.AdminRepo.ListPermissions(l.ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -99,14 +104,15 @@ func (l *AdminPermissionsLogic) ListPermissions() (*types.ListPermissionsResp, e
 			Description: perm.Description,
 		})
 	}
-	return &types.ListPermissionsResp{Code: 0, Msg: "success", Data: items}, nil
+	return &types.ListPermissionsResp{Code: 0, Msg: "success", Data: items, Page: pageMeta(query, total)}, nil
 }
 
-func (l *AdminPermissionsLogic) ListResourceTypes() (*types.ListResourceTypesResp, error) {
+func (l *AdminPermissionsLogic) ListResourceTypes(req *types.ListQueryReq) (*types.ListResourceTypesResp, error) {
 	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
 		return nil, err
 	}
-	items, err := l.svcCtx.AdminRepo.ListResourceTypes(l.ctx)
+	query := repositoryListQuery(req)
+	items, total, err := l.svcCtx.AdminRepo.ListResourceTypes(l.ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -120,14 +126,15 @@ func (l *AdminPermissionsLogic) ListResourceTypes() (*types.ListResourceTypesRes
 			CreatedAt:   item.CreatedAt,
 		})
 	}
-	return &types.ListResourceTypesResp{Code: 0, Msg: "success", Data: out}, nil
+	return &types.ListResourceTypesResp{Code: 0, Msg: "success", Data: out, Page: pageMeta(query, total)}, nil
 }
 
-func (l *AdminPermissionsLogic) ListRoleBindings() (*types.ListRoleBindingsResp, error) {
+func (l *AdminPermissionsLogic) ListRoleBindings(req *types.ListQueryReq) (*types.ListRoleBindingsResp, error) {
 	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
 		return nil, err
 	}
-	items, err := l.svcCtx.AdminRepo.ListRoleBindings(l.ctx)
+	query := repositoryListQuery(req)
+	items, total, err := l.svcCtx.AdminRepo.ListRoleBindings(l.ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -146,14 +153,15 @@ func (l *AdminPermissionsLogic) ListRoleBindings() (*types.ListRoleBindingsResp,
 			CreatedAt:     item.CreatedAt,
 		})
 	}
-	return &types.ListRoleBindingsResp{Code: 0, Msg: "success", Data: out}, nil
+	return &types.ListRoleBindingsResp{Code: 0, Msg: "success", Data: out, Page: pageMeta(query, total)}, nil
 }
 
-func (l *AdminPermissionsLogic) ListPermissionAssignments() (*types.ListPermissionAssignmentsResp, error) {
+func (l *AdminPermissionsLogic) ListPermissionAssignments(req *types.ListQueryReq) (*types.ListPermissionAssignmentsResp, error) {
 	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
 		return nil, err
 	}
-	items, err := l.svcCtx.AdminRepo.ListPermissionAssignments(l.ctx)
+	query := repositoryListQuery(req)
+	items, total, err := l.svcCtx.AdminRepo.ListPermissionAssignments(l.ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -174,14 +182,15 @@ func (l *AdminPermissionsLogic) ListPermissionAssignments() (*types.ListPermissi
 			CreatedAt:      item.CreatedAt,
 		})
 	}
-	return &types.ListPermissionAssignmentsResp{Code: 0, Msg: "success", Data: out}, nil
+	return &types.ListPermissionAssignmentsResp{Code: 0, Msg: "success", Data: out, Page: pageMeta(query, total)}, nil
 }
 
-func (l *AdminPermissionsLogic) ListResourceEdges() (*types.ListResourceEdgesResp, error) {
+func (l *AdminPermissionsLogic) ListResourceEdges(req *types.ListQueryReq) (*types.ListResourceEdgesResp, error) {
 	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
 		return nil, err
 	}
-	items, err := l.svcCtx.AdminRepo.ListResourceEdges(l.ctx)
+	query := repositoryListQuery(req)
+	items, total, err := l.svcCtx.AdminRepo.ListResourceEdges(l.ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +206,7 @@ func (l *AdminPermissionsLogic) ListResourceEdges() (*types.ListResourceEdgesRes
 			CreatedAt:  item.CreatedAt,
 		})
 	}
-	return &types.ListResourceEdgesResp{Code: 0, Msg: "success", Data: out}, nil
+	return &types.ListResourceEdgesResp{Code: 0, Msg: "success", Data: out, Page: pageMeta(query, total)}, nil
 }
 
 func (l *AdminPermissionsLogic) UpsertRole(req *types.RoleManageReq) (*types.AdminActionResp, error) {
@@ -206,7 +215,7 @@ func (l *AdminPermissionsLogic) UpsertRole(req *types.RoleManageReq) (*types.Adm
 		return nil, err
 	}
 	if req == nil || strings.TrimSpace(req.Name) == "" {
-		return nil, errors.New("role name is required")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "role name is required")
 	}
 	if err := l.svcCtx.AdminRepo.UpsertRole(l.ctx, actorID, req.Name, req.ServiceCode, req.Description, req.IsSystem); err != nil {
 		return nil, err
@@ -220,7 +229,7 @@ func (l *AdminPermissionsLogic) DeleteRole(req *types.DeleteRoleReq) (*types.Adm
 		return nil, err
 	}
 	if req == nil || strings.TrimSpace(req.Name) == "" {
-		return nil, errors.New("role name is required")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "role name is required")
 	}
 	if err := l.svcCtx.AdminRepo.DeleteRole(l.ctx, actorID, req.Name); err != nil {
 		return nil, err
@@ -234,7 +243,7 @@ func (l *AdminPermissionsLogic) GrantRolePermission(req *types.RolePermissionReq
 		return nil, err
 	}
 	if req == nil || strings.TrimSpace(req.Role) == "" || strings.TrimSpace(req.Permission) == "" {
-		return nil, errors.New("role and permission are required")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "role and permission are required")
 	}
 	if err := permission.GrantRolePermission(l.ctx, l.svcCtx.DB, req.Role, req.Permission); err != nil {
 		return nil, err
@@ -254,7 +263,7 @@ func (l *AdminPermissionsLogic) RevokeRolePermission(req *types.RolePermissionRe
 		return nil, err
 	}
 	if req == nil || strings.TrimSpace(req.Role) == "" || strings.TrimSpace(req.Permission) == "" {
-		return nil, errors.New("role and permission are required")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "role and permission are required")
 	}
 	if err := permission.RevokeRolePermission(l.ctx, l.svcCtx.DB, req.Role, req.Permission); err != nil {
 		return nil, err
@@ -274,7 +283,7 @@ func (l *AdminPermissionsLogic) UpsertPermission(req *types.PermissionManageReq)
 		return nil, err
 	}
 	if req == nil || strings.TrimSpace(req.Code) == "" {
-		return nil, errors.New("permission code is required")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "permission code is required")
 	}
 	if err := permission.RegisterPermission(l.ctx, l.svcCtx.DB, req.Code, req.ServiceCode, req.Name, req.Description); err != nil {
 		return nil, err
@@ -294,7 +303,7 @@ func (l *AdminPermissionsLogic) DeletePermission(req *types.DeletePermissionReq)
 		return nil, err
 	}
 	if req == nil || strings.TrimSpace(req.Code) == "" {
-		return nil, errors.New("permission code is required")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "permission code is required")
 	}
 	if err := l.svcCtx.AdminRepo.DeletePermission(l.ctx, actorID, req.Code); err != nil {
 		return nil, err
@@ -308,7 +317,7 @@ func (l *AdminPermissionsLogic) UpsertResourceType(req *types.ResourceTypeManage
 		return nil, err
 	}
 	if req == nil || strings.TrimSpace(req.Code) == "" {
-		return nil, errors.New("resource type code is required")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "resource type code is required")
 	}
 	if err := permission.RegisterResourceType(l.ctx, l.svcCtx.DB, req.Code, req.ServiceCode, req.Name, req.Description); err != nil {
 		return nil, err
@@ -328,7 +337,7 @@ func (l *AdminPermissionsLogic) DeleteResourceType(req *types.DeleteResourceType
 		return nil, err
 	}
 	if req == nil || strings.TrimSpace(req.Code) == "" {
-		return nil, errors.New("resource type code is required")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "resource type code is required")
 	}
 	if err := l.svcCtx.AdminRepo.DeleteResourceType(l.ctx, actorID, req.Code); err != nil {
 		return nil, err
@@ -342,7 +351,7 @@ func (l *AdminPermissionsLogic) AddUserRole(req *types.UserRoleReq) (*types.Admi
 		return nil, err
 	}
 	if req.UserId <= 0 || strings.TrimSpace(req.Role) == "" {
-		return nil, errors.New("invalid role request")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "invalid role request")
 	}
 	if err := l.svcCtx.AdminRepo.AddGlobalUserRole(l.ctx, actorID, req.UserId, strings.TrimSpace(req.Role)); err != nil {
 		return nil, err
@@ -356,7 +365,7 @@ func (l *AdminPermissionsLogic) RemoveUserRole(req *types.UserRoleReq) (*types.A
 		return nil, err
 	}
 	if req.UserId <= 0 || strings.TrimSpace(req.Role) == "" {
-		return nil, errors.New("invalid role request")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "invalid role request")
 	}
 	if err := l.svcCtx.AdminRepo.RemoveGlobalUserRole(l.ctx, actorID, req.UserId, strings.TrimSpace(req.Role)); err != nil {
 		return nil, err
@@ -523,7 +532,7 @@ func (l *AdminPermissionsLogic) AddProblemRole(req *types.ProblemRoleReq) (*type
 		return nil, err
 	}
 	if req.UserId <= 0 || req.ProblemId <= 0 || strings.TrimSpace(req.Role) == "" {
-		return nil, errors.New("invalid problem role request")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "invalid problem role request")
 	}
 	if err := permission.BindRole(
 		l.ctx,
@@ -545,7 +554,7 @@ func (l *AdminPermissionsLogic) RemoveProblemRole(req *types.ProblemRoleReq) (*t
 		return nil, err
 	}
 	if req.UserId <= 0 || req.ProblemId <= 0 || strings.TrimSpace(req.Role) == "" {
-		return nil, errors.New("invalid problem role request")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "invalid problem role request")
 	}
 	if err := l.svcCtx.AdminRepo.RemoveScopedRole(l.ctx, actorID, req.UserId, strings.TrimSpace(req.Role), "problem", req.ProblemId); err != nil {
 		return nil, err
@@ -559,7 +568,7 @@ func (l *AdminPermissionsLogic) CheckPermission(req *types.PermissionCheckReq) (
 		return nil, err
 	}
 	if req.UserId <= 0 || strings.TrimSpace(req.Permission) == "" {
-		return nil, errors.New("invalid permission check request")
+		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "invalid permission check request")
 	}
 	scopeType := strings.TrimSpace(req.ScopeType)
 	if scopeType == "" {
@@ -585,11 +594,12 @@ func (l *AdminPermissionsLogic) CheckPermission(req *types.PermissionCheckReq) (
 	}, nil
 }
 
-func (l *AdminPermissionsLogic) ListAuditLogs() (*types.ListAuditLogsResp, error) {
+func (l *AdminPermissionsLogic) ListAuditLogs(req *types.ListQueryReq) (*types.ListAuditLogsResp, error) {
 	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
 		return nil, err
 	}
-	logs, err := l.svcCtx.AdminRepo.ListAuditLogs(l.ctx)
+	query := repositoryListQuery(req)
+	logs, total, err := l.svcCtx.AdminRepo.ListAuditLogs(l.ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +620,7 @@ func (l *AdminPermissionsLogic) ListAuditLogs() (*types.ListAuditLogsResp, error
 			CreatedAt:      item.CreatedAt.UTC().Format(time.RFC3339Nano),
 		})
 	}
-	return &types.ListAuditLogsResp{Code: 0, Msg: "success", Data: items}, nil
+	return &types.ListAuditLogsResp{Code: 0, Msg: "success", Data: items, Page: pageMeta(query, total)}, nil
 }
 
 func okResp() *types.AdminActionResp {
@@ -623,14 +633,14 @@ func okResp() *types.AdminActionResp {
 
 func principalFromRoleBinding(req *types.RoleBindingReq) (permission.Principal, error) {
 	if req == nil {
-		return permission.Principal{}, errors.New("role binding request is required")
+		return permission.Principal{}, apperror.BadRequest(apperror.CodeInvalidRequest, "role binding request is required")
 	}
 	return principalFromParts(req.TargetType, req.TargetId)
 }
 
 func principalFromPermissionAssignment(req *types.PermissionAssignmentReq) (permission.Principal, error) {
 	if req == nil {
-		return permission.Principal{}, errors.New("permission assignment request is required")
+		return permission.Principal{}, apperror.BadRequest(apperror.CodeInvalidRequest, "permission assignment request is required")
 	}
 	return principalFromParts(req.TargetType, req.TargetId)
 }
@@ -641,13 +651,13 @@ func principalFromParts(targetType string, targetID int64) (permission.Principal
 		targetType = permission.PrincipalUser
 	}
 	if targetID <= 0 {
-		return permission.Principal{}, errors.New("target_id is required")
+		return permission.Principal{}, apperror.BadRequest(apperror.CodeInvalidPrincipal, "target_id is required")
 	}
 	switch targetType {
 	case permission.PrincipalUser, permission.PrincipalTeam, permission.PrincipalGroup, permission.PrincipalService:
 		return permission.Principal{Type: targetType, ID: targetID}, nil
 	default:
-		return permission.Principal{}, errors.New("unsupported target_type")
+		return permission.Principal{}, apperror.BadRequest(apperror.CodeInvalidPrincipal, "unsupported target_type")
 	}
 }
 
@@ -661,7 +671,7 @@ func scopeFromStrings(scopeType string, scopeID int64) permission.Scope {
 
 func resourceEdgeFromRequest(req *types.ResourceEdgeReq) (permission.Scope, permission.Scope, string, error) {
 	if req == nil {
-		return permission.Scope{}, permission.Scope{}, "", errors.New("resource edge request is required")
+		return permission.Scope{}, permission.Scope{}, "", apperror.BadRequest(apperror.CodeInvalidRequest, "resource edge request is required")
 	}
 	parent := permission.Scope{Type: strings.TrimSpace(req.ParentType), ID: req.ParentId}
 	child := permission.Scope{Type: strings.TrimSpace(req.ChildType), ID: req.ChildId}
@@ -670,10 +680,10 @@ func resourceEdgeFromRequest(req *types.ResourceEdgeReq) (permission.Scope, perm
 		relation = "contains"
 	}
 	if parent.Type == "" || child.Type == "" {
-		return permission.Scope{}, permission.Scope{}, "", errors.New("parent_type and child_type are required")
+		return permission.Scope{}, permission.Scope{}, "", apperror.BadRequest(apperror.CodeInvalidScope, "parent_type and child_type are required")
 	}
 	if parent.Type == child.Type && parent.ID == child.ID {
-		return permission.Scope{}, permission.Scope{}, "", errors.New("resource edge cannot point to itself")
+		return permission.Scope{}, permission.Scope{}, "", apperror.Conflict(apperror.CodeConflict, "resource edge cannot point to itself")
 	}
 	return parent, child, relation, nil
 }
@@ -688,4 +698,47 @@ func parseOptionalRFC3339(value string) (*time.Time, error) {
 		return nil, err
 	}
 	return &parsed, nil
+}
+
+func repositoryListQuery(req *types.ListQueryReq) repository.ListQuery {
+	if req == nil {
+		return repository.ListQuery{Page: 1, PageSize: 50}
+	}
+	page := req.Page
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := req.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	return repository.ListQuery{
+		Page:          page,
+		PageSize:      pageSize,
+		Q:             req.Q,
+		ServiceCode:   req.ServiceCode,
+		PrincipalType: req.PrincipalType,
+		ScopeType:     req.ScopeType,
+		Action:        req.Action,
+	}
+}
+
+func pageMeta(query repository.ListQuery, total int64) types.PageMeta {
+	if query.Page <= 0 {
+		query.Page = 1
+	}
+	if query.PageSize <= 0 {
+		query.PageSize = 50
+	}
+	if query.PageSize > 200 {
+		query.PageSize = 200
+	}
+	return types.PageMeta{
+		Page:     query.Page,
+		PageSize: query.PageSize,
+		Total:    total,
+	}
 }

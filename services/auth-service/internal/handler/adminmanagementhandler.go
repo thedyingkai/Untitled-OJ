@@ -62,7 +62,12 @@ func revokeRolePermissionHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 
 func listRoleBindingsHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp, err := logic.NewAdminPermissionsLogic(r.Context(), svcCtx).ListRoleBindings()
+		var req types.ListQueryReq
+		if err := httpx.Parse(r, &req); err != nil {
+			httpx.ErrorCtx(r.Context(), w, err)
+			return
+		}
+		resp, err := logic.NewAdminPermissionsLogic(r.Context(), svcCtx).ListRoleBindings(&req)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 			return
@@ -97,7 +102,12 @@ func deletePermissionHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 
 func listPermissionAssignmentsHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp, err := logic.NewAdminPermissionsLogic(r.Context(), svcCtx).ListPermissionAssignments()
+		var req types.ListQueryReq
+		if err := httpx.Parse(r, &req); err != nil {
+			httpx.ErrorCtx(r.Context(), w, err)
+			return
+		}
+		resp, err := logic.NewAdminPermissionsLogic(r.Context(), svcCtx).ListPermissionAssignments(&req)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 			return
@@ -120,7 +130,12 @@ func upsertResourceTypeHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 
 func listResourceTypesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp, err := logic.NewAdminPermissionsLogic(r.Context(), svcCtx).ListResourceTypes()
+		var req types.ListQueryReq
+		if err := httpx.Parse(r, &req); err != nil {
+			httpx.ErrorCtx(r.Context(), w, err)
+			return
+		}
+		resp, err := logic.NewAdminPermissionsLogic(r.Context(), svcCtx).ListResourceTypes(&req)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 			return
@@ -143,7 +158,12 @@ func deleteResourceTypeHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 
 func listResourceEdgesHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp, err := logic.NewAdminPermissionsLogic(r.Context(), svcCtx).ListResourceEdges()
+		var req types.ListQueryReq
+		if err := httpx.Parse(r, &req); err != nil {
+			httpx.ErrorCtx(r.Context(), w, err)
+			return
+		}
+		resp, err := logic.NewAdminPermissionsLogic(r.Context(), svcCtx).ListResourceEdges(&req)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 			return

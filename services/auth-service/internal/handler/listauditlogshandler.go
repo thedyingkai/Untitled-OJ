@@ -9,12 +9,18 @@ import (
 	"github.com/zeromicro/go-zero/rest/httpx"
 	"ojos-auth-service/internal/logic"
 	"ojos-auth-service/internal/svc"
+	"ojos-auth-service/internal/types"
 )
 
 func listAuditLogsHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		var req types.ListQueryReq
+		if err := httpx.Parse(r, &req); err != nil {
+			httpx.ErrorCtx(r.Context(), w, err)
+			return
+		}
 		l := logic.NewListAuditLogsLogic(r.Context(), svcCtx)
-		resp, err := l.ListAuditLogs()
+		resp, err := l.ListAuditLogs(&req)
 		if err != nil {
 			httpx.ErrorCtx(r.Context(), w, err)
 		} else {

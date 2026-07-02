@@ -26,6 +26,6 @@ func NewListPermissionsLogic(ctx context.Context, svcCtx *svc.ServiceContext) *L
 	}
 }
 
-func (l *ListPermissionsLogic) ListPermissions() (resp *types.ListPermissionsResp, err error) {
-	return NewAdminPermissionsLogic(l.ctx, l.svcCtx).ListPermissions()
+func (l *ListPermissionsLogic) ListPermissions(req *types.ListQueryReq) (resp *types.ListPermissionsResp, err error) {
+	return NewAdminPermissionsLogic(l.ctx, l.svcCtx).ListPermissions(req)
 }

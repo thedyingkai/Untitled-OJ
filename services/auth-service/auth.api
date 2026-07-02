@@ -75,10 +75,27 @@ type UserItem {
 	CreatedAt string   `json:"created_at"`
 }
 
+type PageMeta {
+	Page     int64 `json:"page"`
+	PageSize int64 `json:"page_size"`
+	Total    int64 `json:"total"`
+}
+
+type ListQueryReq {
+	Page          int64  `form:"page,optional"`
+	PageSize      int64  `form:"page_size,optional"`
+	Q             string `form:"q,optional"`
+	ServiceCode   string `form:"service_code,optional"`
+	PrincipalType string `form:"principal_type,optional"`
+	ScopeType     string `form:"scope_type,optional"`
+	Action        string `form:"action,optional"`
+}
+
 type ListUsersResp {
 	Code int        `json:"code"`
 	Msg  string     `json:"msg"`
 	Data []UserItem `json:"data"`
+	Page PageMeta   `json:"page"`
 }
 
 type RoleItem {
@@ -93,6 +110,7 @@ type ListRolesResp {
 	Code int        `json:"code"`
 	Msg  string     `json:"msg"`
 	Data []RoleItem `json:"data"`
+	Page PageMeta   `json:"page"`
 }
 
 type PermissionItem {
@@ -136,6 +154,7 @@ type ListResourceTypesResp {
 	Code int                `json:"code"`
 	Msg  string             `json:"msg"`
 	Data []ResourceTypeItem `json:"data"`
+	Page PageMeta           `json:"page"`
 }
 
 type RoleManageReq {
@@ -171,6 +190,7 @@ type ListRoleBindingsResp {
 	Code int               `json:"code"`
 	Msg  string            `json:"msg"`
 	Data []RoleBindingItem `json:"data"`
+	Page PageMeta          `json:"page"`
 }
 
 type PermissionAssignmentItem {
@@ -192,6 +212,7 @@ type ListPermissionAssignmentsResp {
 	Code int                        `json:"code"`
 	Msg  string                     `json:"msg"`
 	Data []PermissionAssignmentItem `json:"data"`
+	Page PageMeta                   `json:"page"`
 }
 
 type ResourceEdgeItem {
@@ -208,6 +229,7 @@ type ListResourceEdgesResp {
 	Code int                `json:"code"`
 	Msg  string             `json:"msg"`
 	Data []ResourceEdgeItem `json:"data"`
+	Page PageMeta           `json:"page"`
 }
 
 type ServicePermissionItem {
@@ -262,6 +284,7 @@ type ListPermissionsResp {
 	Code int              `json:"code"`
 	Msg  string           `json:"msg"`
 	Data []PermissionItem `json:"data"`
+	Page PageMeta         `json:"page"`
 }
 
 type UserRoleReq {
@@ -362,6 +385,7 @@ type ListAuditLogsResp {
 	Code int            `json:"code"`
 	Msg  string         `json:"msg"`
 	Data []AuditLogItem `json:"data"`
+	Page PageMeta       `json:"page"`
 }
 
 type ServiceCredentialItem {
@@ -452,10 +476,10 @@ service auth {
 	get /me returns (ProfileResp)
 
 	@handler listUsers
-	get /admin/users returns (ListUsersResp)
+	get /admin/users (ListQueryReq) returns (ListUsersResp)
 
 	@handler listRoles
-	get /admin/roles returns (ListRolesResp)
+	get /admin/roles (ListQueryReq) returns (ListRolesResp)
 
 	@handler upsertRole
 	post /admin/roles (RoleManageReq) returns (AdminActionResp)
@@ -470,7 +494,7 @@ service auth {
 	delete /admin/role-permissions (RolePermissionReq) returns (AdminActionResp)
 
 	@handler listPermissions
-	get /admin/permissions returns (ListPermissionsResp)
+	get /admin/permissions (ListQueryReq) returns (ListPermissionsResp)
 
 	@handler upsertPermission
 	post /admin/permissions (PermissionManageReq) returns (AdminActionResp)
@@ -482,7 +506,7 @@ service auth {
 	post /admin/resource-types (ResourceTypeManageReq) returns (AdminActionResp)
 
 	@handler listResourceTypes
-	get /admin/resource-types returns (ListResourceTypesResp)
+	get /admin/resource-types (ListQueryReq) returns (ListResourceTypesResp)
 
 	@handler deleteResourceType
 	delete /admin/resource-types (DeleteResourceTypeReq) returns (AdminActionResp)
@@ -503,7 +527,7 @@ service auth {
 	post /admin/role-bindings (RoleBindingReq) returns (AdminActionResp)
 
 	@handler listRoleBindings
-	get /admin/role-bindings returns (ListRoleBindingsResp)
+	get /admin/role-bindings (ListQueryReq) returns (ListRoleBindingsResp)
 
 	@handler unbindRole
 	delete /admin/role-bindings (RoleBindingReq) returns (AdminActionResp)
@@ -512,7 +536,7 @@ service auth {
 	post /admin/permission-assignments (PermissionAssignmentReq) returns (AdminActionResp)
 
 	@handler listPermissionAssignments
-	get /admin/permission-assignments returns (ListPermissionAssignmentsResp)
+	get /admin/permission-assignments (ListQueryReq) returns (ListPermissionAssignmentsResp)
 
 	@handler revokePermission
 	delete /admin/permission-assignments (PermissionAssignmentReq) returns (AdminActionResp)
@@ -521,7 +545,7 @@ service auth {
 	post /admin/resource-edges (ResourceEdgeReq) returns (AdminActionResp)
 
 	@handler listResourceEdges
-	get /admin/resource-edges returns (ListResourceEdgesResp)
+	get /admin/resource-edges (ListQueryReq) returns (ListResourceEdgesResp)
 
 	@handler removeResourceEdge
 	delete /admin/resource-edges (ResourceEdgeReq) returns (AdminActionResp)
@@ -551,5 +575,5 @@ service auth {
 	post /admin/permission-check (PermissionCheckReq) returns (PermissionCheckResp)
 
 	@handler listAuditLogs
-	get /admin/audit-logs returns (ListAuditLogsResp)
+	get /admin/audit-logs (ListQueryReq) returns (ListAuditLogsResp)
 }

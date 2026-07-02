@@ -30,12 +30,45 @@ type UserListItem struct {
 	CreatedAt time.Time
 }
 
+type ListQuery struct {
+	Page          int64
+	PageSize      int64
+	Q             string
+	ServiceCode   string
+	PrincipalType string
+	ScopeType     string
+	Action        string
+}
+
 type RoleListItem struct {
 	ID          int64
 	Name        string
 	ServiceCode string
 	Description string
 	IsSystem    bool
+}
+
+func normalizeListQuery(query ListQuery) ListQuery {
+	if query.Page <= 0 {
+		query.Page = 1
+	}
+	if query.PageSize <= 0 {
+		query.PageSize = 50
+	}
+	if query.PageSize > 200 {
+		query.PageSize = 200
+	}
+	query.Q = strings.TrimSpace(query.Q)
+	query.ServiceCode = strings.TrimSpace(query.ServiceCode)
+	query.PrincipalType = strings.ToLower(strings.TrimSpace(query.PrincipalType))
+	query.ScopeType = strings.ToLower(strings.TrimSpace(query.ScopeType))
+	query.Action = strings.TrimSpace(query.Action)
+	return query
+}
+
+func (q ListQuery) limitOffset() (int64, int64) {
+	q = normalizeListQuery(q)
+	return q.PageSize, (q.Page - 1) * q.PageSize
 }
 
 type PermissionListItem struct {
@@ -160,7 +193,17 @@ type AuditListItem struct {
 	CreatedAt      time.Time
 }
 
-func (r *AdminRepository) ListUsers(ctx context.Context) ([]UserListItem, error) {
+func (r *AdminRepository) ListUsers(ctx context.Context, query ListQuery) ([]UserListItem, int64, error) {
+	query = normalizeListQuery(query)
+	limit, offset := query.limitOffset()
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM users u
+WHERE ($1 = '' OR u.username ILIKE '%' || $1 || '%' OR COALESCE(u.email, '') ILIKE '%' || $1 || '%')
+`, query.Q).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := r.db.Query(ctx, `
 SELECT
     u.id,
@@ -171,12 +214,13 @@ SELECT
 FROM users u
 LEFT JOIN user_roles ur ON ur.user_id = u.id
 LEFT JOIN roles r ON r.id = ur.role_id
+WHERE ($1 = '' OR u.username ILIKE '%' || $1 || '%' OR COALESCE(u.email, '') ILIKE '%' || $1 || '%')
 GROUP BY u.id, u.username, u.email, u.created_at
 ORDER BY u.id DESC
-LIMIT 500
-`)
+LIMIT $2 OFFSET $3
+`, query.Q, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -184,21 +228,35 @@ LIMIT 500
 	for rows.Next() {
 		var item UserListItem
 		if err := rows.Scan(&item.UserID, &item.Username, &item.Email, &item.Roles, &item.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return items, total, rows.Err()
 }
 
-func (r *AdminRepository) ListRoles(ctx context.Context) ([]RoleListItem, error) {
+func (r *AdminRepository) ListRoles(ctx context.Context, query ListQuery) ([]RoleListItem, int64, error) {
+	query = normalizeListQuery(query)
+	limit, offset := query.limitOffset()
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM roles
+WHERE ($1 = '' OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR service_code = $2)
+`, query.Q, query.ServiceCode).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := r.db.Query(ctx, `
 SELECT id, name, service_code, description, is_system
 FROM roles
+WHERE ($1 = '' OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR service_code = $2)
 ORDER BY service_code, name
-`)
+LIMIT $3 OFFSET $4
+`, query.Q, query.ServiceCode, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -206,21 +264,35 @@ ORDER BY service_code, name
 	for rows.Next() {
 		var item RoleListItem
 		if err := rows.Scan(&item.ID, &item.Name, &item.ServiceCode, &item.Description, &item.IsSystem); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return items, total, rows.Err()
 }
 
-func (r *AdminRepository) ListPermissions(ctx context.Context) ([]PermissionListItem, error) {
+func (r *AdminRepository) ListPermissions(ctx context.Context, query ListQuery) ([]PermissionListItem, int64, error) {
+	query = normalizeListQuery(query)
+	limit, offset := query.limitOffset()
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM permissions
+WHERE ($1 = '' OR code ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR service_code = $2)
+`, query.Q, query.ServiceCode).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := r.db.Query(ctx, `
 SELECT code, service_code, name, description
 FROM permissions
+WHERE ($1 = '' OR code ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR service_code = $2)
 ORDER BY service_code, code
-`)
+LIMIT $3 OFFSET $4
+`, query.Q, query.ServiceCode, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -228,14 +300,25 @@ ORDER BY service_code, code
 	for rows.Next() {
 		var item PermissionListItem
 		if err := rows.Scan(&item.Code, &item.ServiceCode, &item.Name, &item.Description); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return items, total, rows.Err()
 }
 
-func (r *AdminRepository) ListResourceTypes(ctx context.Context) ([]ResourceTypeListItem, error) {
+func (r *AdminRepository) ListResourceTypes(ctx context.Context, query ListQuery) ([]ResourceTypeListItem, int64, error) {
+	query = normalizeListQuery(query)
+	limit, offset := query.limitOffset()
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM resource_types
+WHERE ($1 = '' OR code ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR service_code = $2)
+`, query.Q, query.ServiceCode).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := r.db.Query(ctx, `
 SELECT
     code,
@@ -244,25 +327,40 @@ SELECT
     description,
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
 FROM resource_types
+WHERE ($1 = '' OR code ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR service_code = $2)
 ORDER BY service_code, code
-LIMIT 500
-`)
+LIMIT $3 OFFSET $4
+`, query.Q, query.ServiceCode, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	items := make([]ResourceTypeListItem, 0)
 	for rows.Next() {
 		var item ResourceTypeListItem
 		if err := rows.Scan(&item.Code, &item.ServiceCode, &item.Name, &item.Description, &item.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return items, total, rows.Err()
 }
 
-func (r *AdminRepository) ListRoleBindings(ctx context.Context) ([]RoleBindingListItem, error) {
+func (r *AdminRepository) ListRoleBindings(ctx context.Context, query ListQuery) ([]RoleBindingListItem, int64, error) {
+	query = normalizeListQuery(query)
+	limit, offset := query.limitOffset()
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM role_bindings rb
+JOIN roles r ON r.id = rb.role_id
+WHERE ($1 = '' OR r.name ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR rb.principal_type = $2)
+  AND ($3 = '' OR rb.scope_type = $3)
+`, query.Q, query.PrincipalType, query.ScopeType).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := r.db.Query(ctx, `
 SELECT
     rb.id,
@@ -277,25 +375,40 @@ SELECT
     to_char(rb.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
 FROM role_bindings rb
 JOIN roles r ON r.id = rb.role_id
+WHERE ($1 = '' OR r.name ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR rb.principal_type = $2)
+  AND ($3 = '' OR rb.scope_type = $3)
 ORDER BY rb.id DESC
-LIMIT 500
-`)
+LIMIT $4 OFFSET $5
+`, query.Q, query.PrincipalType, query.ScopeType, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	items := make([]RoleBindingListItem, 0)
 	for rows.Next() {
 		var item RoleBindingListItem
 		if err := rows.Scan(&item.ID, &item.PrincipalType, &item.PrincipalID, &item.Role, &item.ScopeType, &item.ScopeID, &item.GrantedByType, &item.GrantedByID, &item.ExpiresAt, &item.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return items, total, rows.Err()
 }
 
-func (r *AdminRepository) ListPermissionAssignments(ctx context.Context) ([]PermissionAssignmentListItem, error) {
+func (r *AdminRepository) ListPermissionAssignments(ctx context.Context, query ListQuery) ([]PermissionAssignmentListItem, int64, error) {
+	query = normalizeListQuery(query)
+	limit, offset := query.limitOffset()
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM permission_assignments
+WHERE ($1 = '' OR permission_code ILIKE '%' || $1 || '%' OR reason ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR principal_type = $2)
+  AND ($3 = '' OR scope_type = $3)
+`, query.Q, query.PrincipalType, query.ScopeType).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := r.db.Query(ctx, `
 SELECT
     id,
@@ -311,25 +424,38 @@ SELECT
     COALESCE(to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), ''),
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
 FROM permission_assignments
+WHERE ($1 = '' OR permission_code ILIKE '%' || $1 || '%' OR reason ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR principal_type = $2)
+  AND ($3 = '' OR scope_type = $3)
 ORDER BY id DESC
-LIMIT 500
-`)
+LIMIT $4 OFFSET $5
+`, query.Q, query.PrincipalType, query.ScopeType, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	items := make([]PermissionAssignmentListItem, 0)
 	for rows.Next() {
 		var item PermissionAssignmentListItem
 		if err := rows.Scan(&item.ID, &item.PrincipalType, &item.PrincipalID, &item.PermissionCode, &item.ScopeType, &item.ScopeID, &item.Effect, &item.Reason, &item.GrantedByType, &item.GrantedByID, &item.ExpiresAt, &item.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return items, total, rows.Err()
 }
 
-func (r *AdminRepository) ListResourceEdges(ctx context.Context) ([]ResourceEdgeListItem, error) {
+func (r *AdminRepository) ListResourceEdges(ctx context.Context, query ListQuery) ([]ResourceEdgeListItem, int64, error) {
+	query = normalizeListQuery(query)
+	limit, offset := query.limitOffset()
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM resource_edges
+WHERE ($1 = '' OR parent_type ILIKE '%' || $1 || '%' OR child_type ILIKE '%' || $1 || '%' OR relation ILIKE '%' || $1 || '%')
+`, query.Q).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := r.db.Query(ctx, `
 SELECT
     id,
@@ -340,22 +466,23 @@ SELECT
     relation,
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
 FROM resource_edges
+WHERE ($1 = '' OR parent_type ILIKE '%' || $1 || '%' OR child_type ILIKE '%' || $1 || '%' OR relation ILIKE '%' || $1 || '%')
 ORDER BY id DESC
-LIMIT 500
-`)
+LIMIT $2 OFFSET $3
+`, query.Q, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	items := make([]ResourceEdgeListItem, 0)
 	for rows.Next() {
 		var item ResourceEdgeListItem
 		if err := rows.Scan(&item.ID, &item.ParentType, &item.ParentID, &item.ChildType, &item.ChildID, &item.Relation, &item.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return items, total, rows.Err()
 }
 
 func (r *AdminRepository) UpsertRole(ctx context.Context, actorID int64, name string, serviceCode string, description string, isSystem bool) error {
@@ -944,7 +1071,19 @@ FROM deleted
 	return err
 }
 
-func (r *AdminRepository) ListAuditLogs(ctx context.Context) ([]AuditListItem, error) {
+func (r *AdminRepository) ListAuditLogs(ctx context.Context, query ListQuery) ([]AuditListItem, int64, error) {
+	query = normalizeListQuery(query)
+	limit, offset := query.limitOffset()
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM permission_audit_logs
+WHERE ($1 = '' OR action ILIKE '%' || $1 || '%' OR target_type ILIKE '%' || $1 || '%' OR permission_code ILIKE '%' || $1 || '%' OR role_name ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR action = $2)
+  AND ($3 = '' OR scope_type = $3)
+`, query.Q, query.Action, query.ScopeType).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := r.db.Query(ctx, `
 SELECT
     id,
@@ -960,11 +1099,14 @@ SELECT
     effect,
     created_at
 FROM permission_audit_logs
+WHERE ($1 = '' OR action ILIKE '%' || $1 || '%' OR target_type ILIKE '%' || $1 || '%' OR permission_code ILIKE '%' || $1 || '%' OR role_name ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR action = $2)
+  AND ($3 = '' OR scope_type = $3)
 ORDER BY id DESC
-LIMIT 200
-`)
+LIMIT $4 OFFSET $5
+`, query.Q, query.Action, query.ScopeType, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -985,11 +1127,11 @@ LIMIT 200
 			&item.Effect,
 			&item.CreatedAt,
 		); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return items, total, rows.Err()
 }
 
 func serviceIdentityEmpty(identity *ServiceIdentityInput) bool {

@@ -112,3 +112,27 @@ func TestCentralPermissionObjectCrudIsAuditable(t *testing.T) {
 		}
 	}
 }
+
+func TestCentralListsUseDatabasePaginationAndFilters(t *testing.T) {
+	data, err := os.ReadFile("admin_repository.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"type ListQuery struct",
+		"func normalizeListQuery",
+		"LIMIT $",
+		"OFFSET $",
+		"COUNT(*)",
+		"ILIKE '%' || $1 || '%'",
+		"service_code = $2",
+		"principal_type = $2",
+		"scope_type = $3",
+		"action = $2",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("central list pagination/filter missing %q", want)
+		}
+	}
+}
