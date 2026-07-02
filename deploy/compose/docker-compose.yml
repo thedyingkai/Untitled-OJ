@@ -351,6 +351,10 @@ services:
         condition: service_started
       storage-service:
         condition: service_started
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+      - SYS_CHROOT
     environment:
       LANGUAGES_CONFIG: config/languages.yaml
       OJOS_JUDGE_API_URL: http://judge-api:8082
@@ -371,7 +375,7 @@ services:
       OJOS_HEARTBEAT_INTERVAL: 10
       OJOS_TASK_LEASE_TTL: 60
       OJOS_ALLOW_CGROUP_FALLBACK: ${OJOS_ALLOW_CGROUP_FALLBACK:-true}
-      OJOS_NSJAIL_NO_PIVOTROOT: ${OJOS_NSJAIL_NO_PIVOTROOT:-false}
+      OJOS_NSJAIL_NO_PIVOTROOT: ${OJOS_NSJAIL_NO_PIVOTROOT:-true}
       RUST_LOG: info
     volumes:
       - worker-data:/var/lib/ojos-worker

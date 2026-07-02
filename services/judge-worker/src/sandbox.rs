@@ -1,6 +1,4 @@
 use anyhow::{Context, Result, anyhow};
-#[cfg(target_os = "linux")]
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::time::{Duration, Instant};
@@ -39,9 +37,10 @@ pub enum SandboxStatus {
     RuntimeError,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn nsjail_available() -> bool {
     StdCommand::new("nsjail")
-        .arg("--version")
+        .arg("--help")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -695,13 +694,8 @@ mod tests {
             return;
         }
 
-        let Some(output) = run_nsjail_live_or_skip(
-            &work_dir,
-            "/bin/echo OK",
-            1000,
-            1024 * 1024,
-        )
-        .await
+        let Some(output) =
+            run_nsjail_live_or_skip(&work_dir, "/bin/echo OK", 1000, 1024 * 1024).await
         else {
             return;
         };
@@ -723,8 +717,7 @@ mod tests {
         }
 
         let command = "cat > main.cpp <<'EOF'\n#include <iostream>\nint main(){ std::cout << \"OK\\n\"; }\nEOF\ng++ main.cpp -O2 -pipe -o main\n./main";
-        let Some(output) =
-            run_nsjail_live_or_skip(&work_dir, command, 3000, 1024 * 1024).await
+        let Some(output) = run_nsjail_live_or_skip(&work_dir, command, 3000, 1024 * 1024).await
         else {
             return;
         };
