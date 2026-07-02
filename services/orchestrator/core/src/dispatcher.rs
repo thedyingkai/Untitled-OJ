@@ -527,8 +527,7 @@ impl OrchestratorActionConsole {
         Self::from_context(context, Some(&repo_root))
     }
 
-    #[cfg(test)]
-    pub(crate) fn load_with_database_url(
+    pub fn load_with_database_url(
         repo_root: impl Into<PathBuf>,
         database_url: Option<String>,
     ) -> Result<Self> {

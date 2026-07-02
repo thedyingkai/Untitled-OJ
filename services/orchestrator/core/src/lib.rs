@@ -112,7 +112,8 @@ pub use view::{
     DiagnosticViewRow, EndpointViewRow, LinkViewRow, LogViewRow, OperationViewRow,
     OperationWorkbenchView, OrchestratorView, OrchestratorViewPage, ReleaseRegistryViewRow,
     ServiceViewRow, TemplateViewRow, endpoint_hosts, ensure_view_is_loaded, load_orchestrator_view,
-    load_orchestrator_view_from_store, merge_operation_workbench_session_into_view,
+    load_orchestrator_view_from_store, load_orchestrator_view_with_database_url,
+    merge_operation_workbench_session_into_view,
 };
 pub use workbench::{
     OperationWorkbench, OperationWorkbenchContext, OperationWorkbenchRun,

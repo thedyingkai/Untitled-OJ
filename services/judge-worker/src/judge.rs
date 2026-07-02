@@ -1010,3 +1010,439 @@ async fn write_local_result(result_dir: &Path, result: &ResultFile) -> Result<()
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LanguagesConfig;
+    use crate::sandbox::nsjail_available;
+    use std::process::{Command as StdCommand, Stdio};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Debug, Clone, Copy)]
+    enum MatrixVerdict {
+        Accepted,
+        WrongAnswer,
+        CompileError,
+        RuntimeError,
+        TimeLimitExceeded,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct LanguageCase {
+        id: &'static str,
+        source_file: &'static str,
+        compile_tools: &'static [&'static str],
+        run_tools: &'static [&'static str],
+        accepted: &'static str,
+        wrong_answer: &'static str,
+        compile_error: &'static str,
+        runtime_error: &'static str,
+        time_limit: &'static str,
+    }
+
+    const LANGUAGE_CASES: &[LanguageCase] = &[
+        LanguageCase {
+            id: "cpp17",
+            source_file: "main.cpp",
+            compile_tools: &["g++"],
+            run_tools: &[],
+            accepted: r#"
+#include <iostream>
+int main() {
+    long long a, b;
+    if (std::cin >> a >> b) {
+        std::cout << (a + b) << '\n';
+    }
+    return 0;
+}
+"#,
+            wrong_answer: r#"
+#include <iostream>
+int main() {
+    std::cout << 0 << '\n';
+    return 0;
+}
+"#,
+            compile_error: "int main( { return 0; }\n",
+            runtime_error: r#"
+#include <cstdlib>
+int main() {
+    std::abort();
+}
+"#,
+            time_limit: r#"
+int main() {
+    while (true) {}
+}
+"#,
+        },
+        LanguageCase {
+            id: "c11",
+            source_file: "main.c",
+            compile_tools: &["gcc"],
+            run_tools: &[],
+            accepted: r#"
+#include <stdio.h>
+int main(void) {
+    long long a, b;
+    if (scanf("%lld %lld", &a, &b) == 2) {
+        printf("%lld\n", a + b);
+    }
+    return 0;
+}
+"#,
+            wrong_answer: r#"
+#include <stdio.h>
+int main(void) {
+    printf("0\n");
+    return 0;
+}
+"#,
+            compile_error: "int main( { return 0; }\n",
+            runtime_error: r#"
+#include <stdlib.h>
+int main(void) {
+    abort();
+}
+"#,
+            time_limit: r#"
+int main(void) {
+    for (;;) {}
+}
+"#,
+        },
+        LanguageCase {
+            id: "java17",
+            source_file: "Main.java",
+            compile_tools: &["javac"],
+            run_tools: &["java"],
+            accepted: r#"
+import java.util.*;
+public class Main {
+    public static void main(String[] args) {
+        Scanner sc = new Scanner(System.in);
+        long a = sc.nextLong();
+        long b = sc.nextLong();
+        System.out.println(a + b);
+    }
+}
+"#,
+            wrong_answer: r#"
+public class Main {
+    public static void main(String[] args) {
+        System.out.println(0);
+    }
+}
+"#,
+            compile_error: "public class Main { public static void main(String[] args) { }\n",
+            runtime_error: r#"
+public class Main {
+    public static void main(String[] args) {
+        throw new RuntimeException("boom");
+    }
+}
+"#,
+            time_limit: r#"
+public class Main {
+    public static void main(String[] args) {
+        while (true) {}
+    }
+}
+"#,
+        },
+        LanguageCase {
+            id: "python3",
+            source_file: "main.py",
+            compile_tools: &["python3"],
+            run_tools: &["python3"],
+            accepted: r#"
+import sys
+a, b = map(int, sys.stdin.read().split())
+print(a + b)
+"#,
+            wrong_answer: "print(0)\n",
+            compile_error: "def main(:\n    pass\n",
+            runtime_error: "raise RuntimeError('boom')\n",
+            time_limit: "while True:\n    pass\n",
+        },
+    ];
+
+    #[tokio::test]
+    async fn nsjail_c_cpp_java_python_verdict_matrix_when_available() {
+        if !live_verdict_matrix_available() {
+            return;
+        }
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let languages = Arc::new(
+            LanguagesConfig::load(&manifest_dir.join("config/languages.yaml").to_string_lossy())
+                .await
+                .expect("load languages config"),
+        );
+
+        for language in LANGUAGE_CASES {
+            for verdict in [
+                MatrixVerdict::Accepted,
+                MatrixVerdict::WrongAnswer,
+                MatrixVerdict::CompileError,
+                MatrixVerdict::RuntimeError,
+                MatrixVerdict::TimeLimitExceeded,
+            ] {
+                let root = create_verdict_matrix_workspace(language, verdict);
+                let source = root.join("source").join(language.source_file);
+                let package = root.join("problem");
+                let result = root.join("result");
+
+                let judged = judge_artifacts(
+                    languages.clone(),
+                    1000 + matrix_verdict_index(verdict),
+                    language.id,
+                    &source,
+                    &package,
+                    &result,
+                )
+                .await
+                .unwrap_or_else(|err| {
+                    panic!("{} {:?} matrix run failed: {err:#}", language.id, verdict)
+                });
+
+                assert_eq!(
+                    judged.status,
+                    expected_status(verdict),
+                    "{} {:?} should produce expected final status: {}",
+                    language.id,
+                    verdict,
+                    judged.message
+                );
+                assert_eq!(
+                    judged.score,
+                    expected_score(verdict),
+                    "{} {:?} should produce expected score",
+                    language.id,
+                    verdict
+                );
+                assert!(
+                    result.join("result.json").exists(),
+                    "{} {:?} should write result.json",
+                    language.id,
+                    verdict
+                );
+
+                let _ = std::fs::remove_dir_all(&root);
+            }
+        }
+    }
+
+    fn live_verdict_matrix_available() -> bool {
+        if !cfg!(target_os = "linux") {
+            return skip_or_fail("judge verdict matrix requires Linux");
+        }
+        if !nsjail_available() {
+            return skip_or_fail("judge verdict matrix requires nsjail on PATH");
+        }
+        for language in LANGUAGE_CASES {
+            for tool in language
+                .compile_tools
+                .iter()
+                .chain(language.run_tools.iter())
+            {
+                if !command_available(tool) {
+                    return skip_or_fail(&format!(
+                        "judge verdict matrix requires tool {tool} for {}",
+                        language.id
+                    ));
+                }
+            }
+        }
+        true
+    }
+
+    fn skip_or_fail(message: &str) -> bool {
+        if require_nsjail_live() {
+            panic!("{message}");
+        }
+        eprintln!("skipping {message}");
+        false
+    }
+
+    fn require_nsjail_live() -> bool {
+        std::env::var("OJOS_REQUIRE_NSJAIL_LIVE")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn command_available(name: &str) -> bool {
+        StdCommand::new(name)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    fn create_verdict_matrix_workspace(language: &LanguageCase, verdict: MatrixVerdict) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ojos-judge-verdict-matrix-{}-{}-{}",
+            language.id,
+            matrix_verdict_index(verdict),
+            unique_nanos()
+        ));
+        let package = root.join("problem");
+        let source_dir = root.join("source");
+        std::fs::create_dir_all(package.join("tests")).expect("create problem tests");
+        std::fs::create_dir_all(&source_dir).expect("create source dir");
+        write_file(
+            &source_dir.join(language.source_file),
+            source_for_verdict(language, verdict),
+        );
+        write_problem_package(&package, verdict);
+        root
+    }
+
+    fn write_problem_package(package: &Path, verdict: MatrixVerdict) {
+        let case_time_limit = match verdict {
+            MatrixVerdict::TimeLimitExceeded => 400,
+            _ => 3000,
+        };
+        write_file(
+            &package.join("problem.yaml"),
+            &format!(
+                r#"
+schema: ojos.problem.v1
+id: 1
+slug: verdict-matrix
+title: Verdict Matrix
+type: traditional
+visibility: public
+status: ready
+limits:
+  default:
+    time_ms: 3000
+    memory_mb: 256
+  languages:
+    java17:
+      time_ms: 5000
+      memory_mb: 512
+runner:
+  config: runner.yaml
+checker:
+  config: checker.yaml
+validator:
+  config: validator.yaml
+scorer:
+  config: scorer.yaml
+tests:
+  root: tests
+  groups: tests/groups.yaml
+  cases: tests/cases.yaml
+"#,
+            ),
+        );
+        write_file(
+            &package.join("runner.yaml"),
+            "type: builtin\nname: traditional-runner\nconfig: {}\n",
+        );
+        write_file(
+            &package.join("checker.yaml"),
+            "type: builtin\nname: default-trim-checker\nconfig: {}\n",
+        );
+        write_file(
+            &package.join("validator.yaml"),
+            "type: builtin\nname: default-input-validator\nconfig: {}\n",
+        );
+        write_file(
+            &package.join("scorer.yaml"),
+            "type: builtin\nname: default-sum-scorer\nconfig: {}\n",
+        );
+        write_file(
+            &package.join("tests").join("groups.yaml"),
+            "groups:\n  - group_no: 0\n    score: 100\n    rule: sum\n",
+        );
+        write_file(
+            &package.join("tests").join("cases.yaml"),
+            &format!(
+                r#"
+cases:
+  - case_no: 1
+    input: 001.in
+    answer: 001.ans
+    score: 40
+    group: 0
+    sample: true
+    hidden: false
+    time_limit_ms: {case_time_limit}
+    memory_limit_mb: 256
+  - case_no: 2
+    input: 002.in
+    answer: 002.ans
+    score: 60
+    group: 0
+    sample: false
+    hidden: true
+    time_limit_ms: {case_time_limit}
+    memory_limit_mb: 256
+"#,
+            ),
+        );
+        write_file(&package.join("tests").join("001.in"), "1 2\n");
+        write_file(&package.join("tests").join("001.ans"), "3\n");
+        write_file(&package.join("tests").join("002.in"), "10 20\n");
+        write_file(&package.join("tests").join("002.ans"), "30\n");
+    }
+
+    fn source_for_verdict(language: &LanguageCase, verdict: MatrixVerdict) -> &'static str {
+        match verdict {
+            MatrixVerdict::Accepted => language.accepted,
+            MatrixVerdict::WrongAnswer => language.wrong_answer,
+            MatrixVerdict::CompileError => language.compile_error,
+            MatrixVerdict::RuntimeError => language.runtime_error,
+            MatrixVerdict::TimeLimitExceeded => language.time_limit,
+        }
+    }
+
+    fn expected_status(verdict: MatrixVerdict) -> &'static str {
+        match verdict {
+            MatrixVerdict::Accepted => "ACCEPTED",
+            MatrixVerdict::WrongAnswer => "WRONG_ANSWER",
+            MatrixVerdict::CompileError => "COMPILE_ERROR",
+            MatrixVerdict::RuntimeError => "RUNTIME_ERROR",
+            MatrixVerdict::TimeLimitExceeded => "TIME_LIMIT_EXCEEDED",
+        }
+    }
+
+    fn expected_score(verdict: MatrixVerdict) -> i32 {
+        match verdict {
+            MatrixVerdict::Accepted => 100,
+            _ => 0,
+        }
+    }
+
+    fn matrix_verdict_index(verdict: MatrixVerdict) -> i64 {
+        match verdict {
+            MatrixVerdict::Accepted => 1,
+            MatrixVerdict::WrongAnswer => 2,
+            MatrixVerdict::CompileError => 3,
+            MatrixVerdict::RuntimeError => 4,
+            MatrixVerdict::TimeLimitExceeded => 5,
+        }
+    }
+
+    fn unique_nanos() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        std::fs::write(path, content.trim_start()).expect("write matrix file");
+    }
+}

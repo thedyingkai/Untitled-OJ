@@ -263,7 +263,7 @@ pub fn load_orchestrator_view(repo_root: &Path) -> Result<OrchestratorView> {
     )
 }
 
-pub(crate) fn load_orchestrator_view_with_database_url(
+pub fn load_orchestrator_view_with_database_url(
     repo_root: &Path,
     database_url: Option<String>,
 ) -> Result<OrchestratorView> {

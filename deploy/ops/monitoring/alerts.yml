@@ -1,0 +1,74 @@
+groups:
+  - name: ojos-platform
+    rules:
+      - alert: OJOSServiceDown
+        expr: probe_success{job="ojos-health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OJOS service health check failed"
+          description: "{{ $labels.service }} at {{ $labels.instance }} has failed blackbox health checks for more than 2 minutes."
+
+      - alert: OJOSPostgresDown
+        expr: pg_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OJOS PostgreSQL exporter cannot reach database"
+          description: "Database {{ $labels.database }} is unreachable from postgres_exporter."
+
+      - alert: OJOSRedisDown
+        expr: redis_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OJOS Redis is unreachable"
+          description: "Redis exporter cannot reach the configured Redis instance."
+
+      - alert: OJOSJudgeWorkerOffline
+        expr: absent(ojos_judge_workers_online) or ojos_judge_workers_online < 1
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No judge workers are online"
+          description: "judge-api reports no online workers, or the worker availability metric is missing."
+
+      - alert: OJOSJudgeQueueBacklog
+        expr: ojos_judge_queue_pending_tasks > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Judge queue backlog is growing"
+          description: "Pending judge tasks have stayed above 100 for more than 5 minutes."
+
+      - alert: OJOSHighHTTP5xxRate
+        expr: sum by (service) (rate(http_requests_total{status=~"5.."}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High HTTP 5xx rate"
+          description: "{{ $labels.service }} is returning sustained 5xx responses."
+
+      - alert: OJOSContainerRestarting
+        expr: changes(container_start_time_seconds{name!=""}[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container restarted"
+          description: "Container {{ $labels.name }} restarted within the last 15 minutes."
+
+      - alert: OJOSBackupStale
+        expr: absent(ojos_backup_last_success_timestamp_seconds) or (time() - ojos_backup_last_success_timestamp_seconds > 93600)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OJOS backups are stale"
+          description: "No successful backup metric has been observed in the last 26 hours."

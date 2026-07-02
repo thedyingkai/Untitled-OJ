@@ -9,3 +9,5 @@
 *.ts text eol=lf working-tree-encoding=UTF-8
 *.vue text eol=lf working-tree-encoding=UTF-8
 *.go text eol=lf working-tree-encoding=UTF-8
+*.sh text eol=lf working-tree-encoding=UTF-8
+*.sql text eol=lf working-tree-encoding=UTF-8

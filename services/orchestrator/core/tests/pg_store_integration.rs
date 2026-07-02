@@ -14,11 +14,11 @@ use serde_json::json;
 use std::fs;
 
 #[test]
-#[ignore = "requires a migrated PostgreSQL database and ORCHESTRATOR_DATABASE_URL"]
 fn pg_store_persists_core_objects_and_reads_them_back() {
     let suffix = unique_suffix();
-    let database_url = std::env::var(PgOrchestratorStore::ENV_NAME)
-        .expect("ORCHESTRATOR_DATABASE_URL should be set");
+    let Some(database_url) = pg_live_database_url() else {
+        return;
+    };
     let mut store =
         PgOrchestratorStore::from_env().expect("ORCHESTRATOR_DATABASE_URL should be set");
 
@@ -261,11 +261,11 @@ fn pg_store_persists_core_objects_and_reads_them_back() {
 }
 
 #[test]
-#[ignore = "requires migrated PostgreSQL, ORCHESTRATOR_DATABASE_URL, and explicit migration_live filter"]
 fn migration_live_postgres_release_install_pipeline_records_real_statuses() {
     let suffix = unique_suffix();
-    let database_url = std::env::var(PgOrchestratorStore::ENV_NAME)
-        .expect("ORCHESTRATOR_DATABASE_URL should be set");
+    let Some(database_url) = pg_live_database_url() else {
+        return;
+    };
     let temp = tempfile::tempdir().expect("temp migration root");
     let mut store =
         PgOrchestratorStore::from_env().expect("ORCHESTRATOR_DATABASE_URL should be set");
@@ -669,6 +669,40 @@ fn port_offset(value: &str) -> u16 {
         .bytes()
         .fold(0_u16, |acc, item| acc.wrapping_add(u16::from(item)))
         % 1000
+}
+
+fn pg_live_database_url() -> Option<String> {
+    match std::env::var(PgOrchestratorStore::ENV_NAME)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => Some(value),
+        None if require_pg_live() => {
+            panic!(
+                "{} must be set when OJOS_REQUIRE_PG_LIVE=1",
+                PgOrchestratorStore::ENV_NAME
+            )
+        }
+        None => {
+            eprintln!(
+                "skipping PostgreSQL live integration: {} is not set; CI sets OJOS_REQUIRE_PG_LIVE=1 so this cannot silently pass in production gates",
+                PgOrchestratorStore::ENV_NAME
+            );
+            None
+        }
+    }
+}
+
+fn require_pg_live() -> bool {
+    std::env::var("OJOS_REQUIRE_PG_LIVE")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn cleanup(

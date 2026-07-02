@@ -24,7 +24,7 @@ backend:
 migrations:
   - version: "000001_orchestrator_schema"
     path: services/orchestrator/migrations/000001_orchestrator_schema.up.sql
-    checksum: sha256:998d142be5ef47a81811653404b997cd21b14dd9114a2c72335a25e393688857
+    checksum: sha256:9e9a000d5fc436fb717e7f20c9adb12b657ee2ad1af5ec73852fbef75ee6724d
 permissions:
   - orchestrator.service.install
   - orchestrator.link.manage

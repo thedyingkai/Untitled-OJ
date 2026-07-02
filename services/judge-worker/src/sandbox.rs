@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -406,6 +406,8 @@ async fn run_nsjail_shell(
     let time_limit_sec = ((time_limit_ms + 999) / 1000).max(1);
     let wall_timeout = Duration::from_millis(time_limit_ms + 1000);
 
+    let jail_root = PreparedJailRoot::create(work_dir)?;
+
     let mut cmd = Command::new("nsjail");
 
     cmd.arg("--mode").arg("o");
@@ -432,29 +434,30 @@ async fn run_nsjail_shell(
         .arg("--cwd")
         .arg("/work")
         .arg("--chroot")
-        .arg("/jail/root")
-        .arg("--bindmount_ro")
-        .arg("/bin:/bin")
-        .arg("--bindmount_ro")
-        .arg("/lib:/lib")
-        .arg("--bindmount_ro")
-        .arg("/lib64:/lib64")
-        .arg("--bindmount_ro")
-        .arg("/usr:/usr")
-        .arg("--bindmount_ro")
-        .arg("/etc/alternatives:/etc/alternatives")
-        .arg("--bindmount_ro")
-        .arg("/dev/null:/dev/null")
-        .arg("--bindmount_ro")
-        .arg("/dev/zero:/dev/zero")
-        .arg("--bindmount_ro")
-        .arg("/dev/urandom:/dev/urandom")
-        .arg("--bindmount_ro")
-        .arg("/dev/random:/dev/random");
+        .arg(jail_root.path());
+
+    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/bin", "/bin")?;
+    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/lib", "/lib")?;
+    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/lib64", "/lib64")?;
+    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/usr", "/usr")?;
+    add_existing_readonly_bind(
+        &mut cmd,
+        jail_root.path(),
+        "/etc/alternatives",
+        "/etc/alternatives",
+    )?;
+    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/dev/null", "/dev/null")?;
+    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/dev/zero", "/dev/zero")?;
+    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/dev/urandom", "/dev/urandom")?;
+    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/dev/random", "/dev/random")?;
 
     if Path::new("/etc/java-17-openjdk").exists() {
-        cmd.arg("--bindmount_ro")
-            .arg("/etc/java-17-openjdk:/etc/java-17-openjdk");
+        add_existing_readonly_bind(
+            &mut cmd,
+            jail_root.path(),
+            "/etc/java-17-openjdk",
+            "/etc/java-17-openjdk",
+        )?;
     }
 
     cmd.arg("--bindmount")
@@ -634,6 +637,78 @@ async fn run_nsjail_shell(
     })
 }
 
+struct PreparedJailRoot {
+    path: PathBuf,
+}
+
+impl PreparedJailRoot {
+    fn create(work_dir: &Path) -> Result<Self> {
+        let parent = work_dir.parent().unwrap_or_else(|| Path::new("/tmp"));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock before unix epoch")?
+            .as_nanos();
+        let path = parent.join(format!("ojos-nsjail-root-{}-{now}", std::process::id()));
+
+        for dir in ["dev", "etc", "proc", "tmp", "work"] {
+            std::fs::create_dir_all(path.join(dir)).with_context(|| {
+                format!("create jail root directory failed: {}", path.display())
+            })?;
+        }
+
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for PreparedJailRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn add_existing_readonly_bind(
+    cmd: &mut Command,
+    jail_root: &Path,
+    source: &str,
+    destination: &str,
+) -> Result<()> {
+    let source_path = Path::new(source);
+    let Ok(metadata) = std::fs::metadata(source_path) else {
+        return Ok(());
+    };
+
+    let destination_relative = destination.trim_start_matches('/');
+    let destination_path = jail_root.join(destination_relative);
+    if metadata.is_dir() {
+        std::fs::create_dir_all(&destination_path).with_context(|| {
+            format!(
+                "create jail mountpoint failed: {}",
+                destination_path.display()
+            )
+        })?;
+    } else {
+        if let Some(parent) = destination_path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create jail mount parent failed: {}", parent.display())
+            })?;
+        }
+        let _ = std::fs::File::create(&destination_path).with_context(|| {
+            format!(
+                "create jail file mountpoint failed: {}",
+                destination_path.display()
+            )
+        })?;
+    }
+
+    cmd.arg("--bindmount_ro")
+        .arg(format!("{source}:{destination}"));
+    Ok(())
+}
+
 fn env_bool(key: &str) -> bool {
     std::env::var(key)
         .map(|value| {
@@ -762,7 +837,12 @@ mod tests {
             return;
         };
 
-        assert_eq!(output.status, SandboxStatus::Ok);
+        assert_eq!(
+            output.status,
+            SandboxStatus::Ok,
+            "{}",
+            sandbox_debug(&output)
+        );
         assert_eq!(String::from_utf8_lossy(&output.stdout), "OK\n");
         let _ = fs::remove_dir_all(&work_dir).await;
     }
@@ -784,7 +864,12 @@ mod tests {
             return;
         };
 
-        assert_eq!(output.status, SandboxStatus::Ok);
+        assert_eq!(
+            output.status,
+            SandboxStatus::Ok,
+            "{}",
+            sandbox_debug(&output)
+        );
         assert_eq!(String::from_utf8_lossy(&output.stdout), "OK\n");
         let _ = fs::remove_dir_all(&work_dir).await;
     }
@@ -800,7 +885,11 @@ mod tests {
         };
 
         assert_eq!(output.status, SandboxStatus::RuntimeError);
-        assert!(output.message.contains("code 7"));
+        assert!(
+            output.message.contains("code 7"),
+            "{}",
+            sandbox_debug(&output)
+        );
         let _ = fs::remove_dir_all(&work_dir).await;
     }
 
@@ -815,7 +904,12 @@ mod tests {
             return;
         };
 
-        assert_eq!(output.status, SandboxStatus::TimeLimitExceeded);
+        assert_eq!(
+            output.status,
+            SandboxStatus::TimeLimitExceeded,
+            "{}",
+            sandbox_debug(&output)
+        );
         let _ = fs::remove_dir_all(&work_dir).await;
     }
 
@@ -835,6 +929,15 @@ mod tests {
             output.status
         );
         let _ = fs::remove_dir_all(&work_dir).await;
+    }
+
+    fn sandbox_debug(output: &SandboxOutput) -> String {
+        format!(
+            "message:\n{}\nstdout:\n{}\nstderr:\n{}",
+            output.message,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
     }
 
     async fn nsjail_live_work_dir(name: &str) -> Option<PathBuf> {

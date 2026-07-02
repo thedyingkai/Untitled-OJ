@@ -19,6 +19,20 @@ jobs:
   docker-e2e:
     name: Docker E2E auxiliary checks
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ojos-live-ci
+          POSTGRES_DB: ojos_orchestrator_live
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ojos_orchestrator_live"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,6 +55,15 @@ jobs:
           echo "It does not upload .env files, temporary files, release artifacts, tokens, or logs."
           echo "Final release decisions still require reviewing docs, schemas, migrations, Service manifests, Set templates, and change reports."
 
+      - name: Prepare PostgreSQL live schema
+        shell: bash
+        env:
+          ORCHESTRATOR_DATABASE_URL: postgres://postgres:ojos-live-ci@127.0.0.1:55432/ojos_orchestrator_live?sslmode=disable
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql "$ORCHESTRATOR_DATABASE_URL" -f services/orchestrator/migrations/000001_orchestrator_schema.up.sql
       - name: Rust checks
         shell: bash
         run: |
@@ -52,6 +75,14 @@ jobs:
           cargo fmt --check
           cargo check
           cargo test
+      - name: Orchestrator PostgreSQL live integration
+        shell: bash
+        env:
+          ORCHESTRATOR_DATABASE_URL: postgres://postgres:ojos-live-ci@127.0.0.1:55432/ojos_orchestrator_live?sslmode=disable
+          OJOS_REQUIRE_PG_LIVE: "1"
+        run: |
+          set -euo pipefail
+          cargo test -p orchestrator-core --test pg_store_integration -- --test-threads=1
 
       - name: Build nsjail for strict judge-worker live tests
         shell: bash
@@ -76,7 +107,9 @@ jobs:
           git clone --depth=1 https://github.com/google/nsjail.git /tmp/nsjail
           make -C /tmp/nsjail
           sudo cp /tmp/nsjail/nsjail /usr/local/bin/nsjail
-          nsjail --version
+          test -x /usr/local/bin/nsjail
+          command -v nsjail
+          nsjail --help >/tmp/nsjail-help.txt
 
       - name: Strict judge-worker nsjail live tests
         shell: bash
@@ -151,8 +184,8 @@ jobs:
           set -euo pipefail
           rendered="$(docker compose --env-file .env.example -f deploy/compose/docker-compose.yml config)"
           printf '%s\n' "$rendered" >/tmp/ojos-compose-rendered.yml
-          if grep -q 'OJOS_RUNNER_MODE: fake' /tmp/ojos-compose-rendered.yml; then
-            echo "judge-worker must not default to fake runner" >&2
+          if ! grep -q 'OJOS_RUNNER_MODE: nsjail' /tmp/ojos-compose-rendered.yml; then
+            echo "judge-worker must render with OJOS_RUNNER_MODE=nsjail" >&2
             exit 1
           fi
           if grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: "true"' /tmp/ojos-compose-rendered.yml || grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: true' /tmp/ojos-compose-rendered.yml; then
@@ -160,6 +193,10 @@ jobs:
             exit 1
           fi
           docker compose --env-file .env.example -f deploy/compose/docker-compose.yml config --quiet
+
+      - name: Production ops gates
+        shell: bash
+        run: bash deploy/ops/ci-policy.sh
 
       - name: Docker image build
         if: ${{ inputs.run_docker_build == 'true' }}

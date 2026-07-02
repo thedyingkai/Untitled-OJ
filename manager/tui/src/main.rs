@@ -48,7 +48,8 @@ impl App {
 
     #[cfg(test)]
     fn new_memory(repo_root: PathBuf) -> Result<Self> {
-        Self::new(repo_root)
+        let console = OrchestratorActionConsole::load_with_database_url(repo_root, None)?;
+        Self::from_console(console)
     }
 
     fn from_console(console: OrchestratorActionConsole) -> Result<Self> {
@@ -1214,7 +1215,9 @@ mod tests {
                 .expect("TUI source should be readable as UTF-8");
         assert!(source.contains("Deployment templates are readonly"));
 
-        let repo_view = orchestrator_core::load_orchestrator_view(&repo_root()).expect("repo view");
+        let repo_view =
+            orchestrator_core::load_orchestrator_view_with_database_url(&repo_root(), None)
+                .expect("repo view");
         assert!(!repo_view.templates.is_empty());
 
         let app = App::new_memory(repo_root()).expect("TUI app should load");

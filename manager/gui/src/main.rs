@@ -36,7 +36,8 @@ impl GuiApp {
 
     #[cfg(test)]
     fn new_memory(repo_root: PathBuf) -> Result<Self> {
-        Self::new(repo_root)
+        let console = OrchestratorActionConsole::load_with_database_url(repo_root, None)?;
+        Self::from_console(console)
     }
 
     fn from_console(console: OrchestratorActionConsole) -> Result<Self> {
@@ -792,19 +793,36 @@ fn gui_font_candidates() -> Vec<PathBuf> {
     if let Some(path) = std::env::var_os("OJOS_ORCHESTRATOR_GUI_FONT") {
         paths.push(PathBuf::from(path));
     }
-    paths.extend([
+    paths.extend(platform_gui_font_candidates());
+    paths
+}
+
+#[cfg(windows)]
+fn platform_gui_font_candidates() -> Vec<PathBuf> {
+    vec![
         PathBuf::from(r"C:\Windows\Fonts\NotoSansSC-VF.ttf"),
         PathBuf::from(r"C:\Windows\Fonts\msyh.ttc"),
         PathBuf::from(r"C:\Windows\Fonts\simhei.ttf"),
         PathBuf::from(r"C:\Windows\Fonts\simsun.ttc"),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn platform_gui_font_candidates() -> Vec<PathBuf> {
+    vec![
         PathBuf::from("/System/Library/Fonts/PingFang.ttc"),
         PathBuf::from("/System/Library/Fonts/STHeiti Light.ttc"),
+    ]
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_gui_font_candidates() -> Vec<PathBuf> {
+    vec![
         PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
         PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansSC-Regular.otf"),
         PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
-    ]);
-    paths
+    ]
 }
 
 fn configure_utf8_console() -> Result<()> {
@@ -1079,7 +1097,9 @@ mod tests {
 
     #[test]
     fn gui_set_templates_are_readonly() {
-        let repo_view = orchestrator_core::load_orchestrator_view(&repo_root()).expect("repo view");
+        let repo_view =
+            orchestrator_core::load_orchestrator_view_with_database_url(&repo_root(), None)
+                .expect("repo view");
         assert!(!repo_view.templates.is_empty());
         let app = GuiApp::new_memory(repo_root()).expect("GUI app should load");
         assert!(app.view.templates.is_empty());
@@ -1146,6 +1166,7 @@ mod tests {
         assert!(fonts.font_data.contains_key("ojos-cjk-test-cjk.ttf"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn gui_font_candidates_cover_windows_cjk_fonts() {
         let candidates = gui_font_candidates();
@@ -1159,6 +1180,32 @@ mod tests {
                 && names.contains(&"simhei.ttf")
                 && names.contains(&"simsun.ttc")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gui_font_candidates_cover_linux_cjk_fonts() {
+        let candidates = gui_font_candidates();
+        let names = candidates
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            names.contains(&"NotoSansCJK-Regular.ttc")
+                && names.contains(&"NotoSansSC-Regular.otf")
+                && names.contains(&"wqy-microhei.ttc")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn gui_font_candidates_cover_macos_cjk_fonts() {
+        let candidates = gui_font_candidates();
+        let names = candidates
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"PingFang.ttc") && names.contains(&"STHeiti Light.ttc"));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+route:
+  receiver: ojos-webhook
+  group_by:
+    - alertname
+    - service
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: ojos-webhook
+    webhook_configs:
+      - url: "__OJOS_ALERT_WEBHOOK_URL__"
+        send_resolved: true

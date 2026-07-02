@@ -1,0 +1,100 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - prometheus:9090
+
+  - job_name: node-exporter
+    static_configs:
+      - targets:
+          - node-exporter:9100
+
+  - job_name: cadvisor
+    static_configs:
+      - targets:
+          - cadvisor:8080
+
+  - job_name: redis-exporter
+    static_configs:
+      - targets:
+          - redis-exporter:9121
+
+  - job_name: postgres-exporters
+    static_configs:
+      - targets:
+          - postgres-exporter-orchestrator:9187
+        labels:
+          database: orchestrator
+      - targets:
+          - postgres-exporter-auth:9187
+        labels:
+          database: auth
+      - targets:
+          - postgres-exporter-problem:9187
+        labels:
+          database: problem
+      - targets:
+          - postgres-exporter-judge:9187
+        labels:
+          database: judge
+      - targets:
+          - postgres-exporter-user:9187
+        labels:
+          database: user
+
+  - job_name: ojos-health
+    metrics_path: /probe
+    params:
+      module:
+        - http_2xx
+    static_configs:
+      - targets:
+          - http://gateway:8080/health
+        labels:
+          service: gateway
+      - targets:
+          - http://orchestrator:8090/health
+        labels:
+          service: orchestrator
+      - targets:
+          - http://auth-service:8081/health
+        labels:
+          service: auth-service
+      - targets:
+          - http://problem-service:8083/health
+        labels:
+          service: problem-service
+      - targets:
+          - http://judge-api:8082/health
+        labels:
+          service: judge-api
+      - targets:
+          - http://storage-service:8085/health
+        labels:
+          service: storage-service
+      - targets:
+          - http://minio:9000/minio/health/live
+        labels:
+          service: minio
+    relabel_configs:
+      - source_labels:
+          - __address__
+        target_label: __param_target
+      - source_labels:
+          - __param_target
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115

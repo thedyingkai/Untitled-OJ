@@ -20,8 +20,8 @@ fn gui_entry_uses_core_view_model() {
         .and_then(|path| path.parent())
         .expect("repo root")
         .to_path_buf();
-    let view =
-        orchestrator_core::load_orchestrator_view(&repo_root).expect("GUI should load core view");
+    let view = orchestrator_core::load_orchestrator_view_with_database_url(&repo_root, None)
+        .expect("GUI should load core view");
     assert!(!view.services.is_empty());
     assert!(!view.templates.is_empty());
     assert!(!view.endpoints.is_empty());

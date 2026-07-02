@@ -56,7 +56,6 @@ type smokeConfig struct {
 	authMode         string
 	installMode      string
 	storageBackend   string
-	workerRunnerMode string
 	releaseSource    string
 	storagePackage   string
 	judgeAPIPackage  string
@@ -126,7 +125,6 @@ func main() {
 		installMode     = flag.String("install-mode", envDefault("OJOS_SMOKE_INSTALL_MODE", ""), "install mode: seed or release-install")
 		mode            = flag.String("mode", envDefault("OJOS_JUDGE_SMOKE_MODE", ""), "smoke matrix mode: beta-local or compose")
 		storageBackend  = flag.String("storage-backend", envDefault("OJOS_SMOKE_STORAGE_BACKEND", "local"), "storage backend for storage-service: local or minio")
-		workerRunner    = flag.String("worker-runner", envDefault("OJOS_JUDGE_SMOKE_RUNNER_MODE", "nsjail"), "judge-worker runner mode: nsjail or fake")
 		releaseSource   = flag.String("release-source", envDefault("OJOS_SMOKE_RELEASE_SOURCE", ""), "release source for release.install: tree or package")
 		storagePackage  = flag.String("storage-release-package", envDefault("OJOS_STORAGE_RELEASE_PACKAGE", ""), "optional storage-service release package zip path")
 		judgeAPIPackage = flag.String("judge-api-release-package", envDefault("OJOS_JUDGE_API_RELEASE_PACKAGE", ""), "optional judge-api release package zip path")
@@ -168,11 +166,6 @@ func main() {
 	normalizedStorageBackend := normalizeStorageBackend(*storageBackend)
 	if normalizedStorageBackend != "local" && normalizedStorageBackend != "minio" {
 		fmt.Fprintf(os.Stderr, "[FAIL] storage backend\nreason: unsupported storage backend %q\n", normalizedStorageBackend)
-		os.Exit(1)
-	}
-	normalizedWorkerRunner := normalizeWorkerRunnerMode(*workerRunner)
-	if normalizedWorkerRunner != "nsjail" && normalizedWorkerRunner != "fake" {
-		fmt.Fprintf(os.Stderr, "[FAIL] worker runner\nreason: unsupported worker runner mode %q\n", normalizedWorkerRunner)
 		os.Exit(1)
 	}
 	normalizedReleaseSource := normalizeReleaseSource(*releaseSource)
@@ -241,7 +234,6 @@ func main() {
 		controlPlaneMode: normalizeSmokeMode(*controlPlane),
 		authMode:         normalizeSmokeMode(*authMode),
 		storageBackend:   normalizedStorageBackend,
-		workerRunnerMode: normalizedWorkerRunner,
 		releaseSource:    normalizedReleaseSource,
 		storagePackage:   *storagePackage,
 		judgeAPIPackage:  *judgeAPIPackage,
@@ -766,7 +758,7 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 		return err
 	}
 
-	fmt.Printf("[OK] compose smoke summary: submission_id=%d task_entry_id=%s result_entry_id=%s status=%s worker=compose runner=%s reload=smoke-driven\n", submissionID, taskID, resultID, status, cfg.workerRunnerMode)
+	fmt.Printf("[OK] compose smoke summary: submission_id=%d task_entry_id=%s result_entry_id=%s status=%s worker=compose runner=nsjail reload=smoke-driven\n", submissionID, taskID, resultID, status)
 	return nil
 }
 
@@ -789,14 +781,11 @@ func startWorker(ctx context.Context, cfg smokeConfig) (*childProcess, error) {
 		"OJOS_STORAGE_OBJECT_PUT_API_ID": "storage.object.put",
 		"OJOS_SERVICE_TOKEN":             cfg.serviceToken,
 		"OJOS_CALLER_NODE_ID":            childNodeID,
-		"OJOS_RUNNER_MODE":               cfg.workerRunnerMode,
+		"OJOS_RUNNER_MODE":               "nsjail",
 		"OJOS_ALLOW_CGROUP_FALLBACK":     envDefault("OJOS_ALLOW_CGROUP_FALLBACK", "false"),
 		"OJOS_NSJAIL_NO_PIVOTROOT":       envDefault("OJOS_NSJAIL_NO_PIVOTROOT", "false"),
 		"OJOS_WORKER_SMOKE_ONCE":         "1",
 	})
-	if cfg.workerRunnerMode == "fake" {
-		env["OJOS_ALLOW_FAKE_RUNNER"] = "1"
-	}
 	return startProcess(ctx, processSpec{
 		name:    "judge-worker",
 		dir:     filepath.Join(cfg.repoRoot, "services", "judge-worker"),
@@ -1530,7 +1519,7 @@ func verifyRealAuth(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("permission-check denied missing permission")
 
-	allowed, status, err = permissionCheck(ctx, cfg.auth.baseURL(), cfg.serviceToken, "fake-worker", "storage.object.get", "storage.object.read")
+	allowed, status, err = permissionCheck(ctx, cfg.auth.baseURL(), cfg.serviceToken, "unknown-worker", "storage.object.get", "storage.object.read")
 	if err != nil {
 		return fail("permission-check denied unknown service", err)
 	}
@@ -1602,7 +1591,7 @@ func verifyGatewayAuthBoundaries(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("gateway permission-check denied missing permission")
 
-	headers["X-OJOS-Caller-Service"] = "fake-worker"
+	headers["X-OJOS-Caller-Service"] = "unknown-worker"
 	status, body, err = doStatus(ctx, http.MethodGet, cfg.gateway.baseURL()+"/internal/apis/storage.object.get/submissions/auth-unknown.txt", nil, headers)
 	if err != nil {
 		return fail("gateway permission-check denied unknown service", err)
@@ -3112,18 +3101,6 @@ func normalizeMatrixMode(value string) string {
 	}
 }
 
-func normalizeWorkerRunnerMode(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "", "nsjail":
-		return "nsjail"
-	case "fake":
-		return "fake"
-	default:
-		return value
-	}
-}
-
 func normalizeStorageBackend(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
@@ -3248,11 +3225,7 @@ func printBetaMatrix(parent context.Context, cfg smokeConfig) {
 	ok("storage backend %s", cfg.storageBackend)
 	ok("Redis task/result")
 	ok("queue pending/lag")
-	if cfg.workerRunnerMode == "nsjail" {
-		ok("judge-worker nsjail runner")
-	} else {
-		skip("judge-worker nsjail runner: explicit fake runner development mode")
-	}
+	ok("judge-worker nsjail runner")
 	ok("result ACCEPTED")
 	printComposeMatrixStatus(parent, cfg)
 	if cfg.storageBackend == "minio" {
@@ -3400,13 +3373,10 @@ func composeProcessEnv(cfg smokeConfig) []string {
 		"MINIO_ENDPOINT":             envDefault("MINIO_ENDPOINT", "minio:9000"),
 		"MINIO_USE_SSL":              envDefault("MINIO_USE_SSL", "false"),
 		"OJOS_STORAGE_BACKEND":       cfg.storageBackend,
-		"OJOS_RUNNER_MODE":           cfg.workerRunnerMode,
+		"OJOS_RUNNER_MODE":           "nsjail",
 		"OJOS_ALLOW_CGROUP_FALLBACK": envDefault("OJOS_ALLOW_CGROUP_FALLBACK", "false"),
 		"OJOS_NSJAIL_NO_PIVOTROOT":   envDefault("OJOS_NSJAIL_NO_PIVOTROOT", "false"),
 	})
-	if cfg.workerRunnerMode == "fake" {
-		env["OJOS_ALLOW_FAKE_RUNNER"] = "1"
-	}
 	return processEnv(env)
 }
 

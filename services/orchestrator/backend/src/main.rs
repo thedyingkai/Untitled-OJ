@@ -1273,7 +1273,8 @@ mod tests {
     }
 
     fn console() -> OrchestratorActionConsole {
-        OrchestratorActionConsole::load(repo_root()).expect("daemon console")
+        OrchestratorActionConsole::load_with_database_url(repo_root(), None)
+            .expect("daemon console")
     }
 
     fn request(method: &str, path: &str, body: &str) -> ApiRequest {

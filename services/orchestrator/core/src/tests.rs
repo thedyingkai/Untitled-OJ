@@ -3,7 +3,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
+#[cfg(windows)]
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -6222,7 +6224,7 @@ fn operation_workbench_updates_fields_and_runs_step_by_step() {
 #[test]
 fn operation_workbench_context_loads_repo_and_drives_sessions() {
     let root = repo_root();
-    let context = load_operation_workbench_context(&root)
+    let context = crate::workbench::load_operation_workbench_context_with_database_url(&root, None)
         .expect("workbench context")
         .with_memory_store();
 
@@ -6467,7 +6469,7 @@ fn operation_workbench_context_can_load_from_store_state() {
 #[test]
 fn operation_workbench_context_applies_store_backed_core_actions() {
     let root = repo_root();
-    let context = load_operation_workbench_context(&root)
+    let context = crate::workbench::load_operation_workbench_context_with_database_url(&root, None)
         .expect("workbench context")
         .with_memory_store();
 
@@ -6537,7 +6539,7 @@ fn orchestrator_entrypoints_require_reachable_persistent_store_when_database_url
 #[test]
 fn repo_manifest_registry_sync_seeds_only_services_and_releases() {
     let root = repo_root();
-    let context = load_operation_workbench_context(&root)
+    let context = crate::workbench::load_operation_workbench_context_with_database_url(&root, None)
         .expect("workbench context")
         .with_memory_store();
     let mut store = MemoryOrchestratorStore::new();
@@ -6615,7 +6617,7 @@ fn memory_cache_node_load_is_parent_first() {
 #[test]
 fn operation_workbench_session_seed_persists_planned_and_confirmed_state() {
     let root = repo_root();
-    let context = load_operation_workbench_context(&root)
+    let context = crate::workbench::load_operation_workbench_context_with_database_url(&root, None)
         .expect("workbench context")
         .with_memory_store();
     let session = context
@@ -6833,6 +6835,14 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
         ".gitkeep placeholders should not be used as architecture"
     );
 
+    let allowed_ops_scripts = [
+        "deploy/ops/backup.sh",
+        "deploy/ops/ci-policy.sh",
+        "deploy/ops/preflight.sh",
+        "deploy/ops/restore.sh",
+        "deploy/ops/rollback-drill.sh",
+        "deploy/ops/secret-check.sh",
+    ];
     let script_files = relative_files(&root, &root)
         .into_iter()
         .filter(|path| {
@@ -6843,12 +6853,13 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
                 && !path.starts_with(".git/")
                 && !path.contains("/target/")
                 && !path.contains("/node_modules/")
+                && !allowed_ops_scripts.contains(&path.as_str())
         })
         .collect::<Vec<_>>();
     assert_eq!(
         script_files,
         Vec::<String>::new(),
-        "script files should not be retained as product or acceptance surface"
+        "unexpected script files should not be retained as product or acceptance surface"
     );
 }
 
@@ -7027,7 +7038,8 @@ fn string_set(items: &[serde_yaml::Value]) -> HashSet<String> {
 #[test]
 fn orchestrator_view_loads_all_core_object_rows() {
     let root = repo_root();
-    let view = load_orchestrator_view(&root).expect("load orchestrator view");
+    let view =
+        load_orchestrator_view_with_database_url(&root, None).expect("load orchestrator view");
     ensure_view_is_loaded(&view).expect("view should contain core data");
 
     assert_eq!(view.services.len(), 12);
@@ -7708,7 +7720,7 @@ fn operation_logs_can_be_reopened() {
 #[test]
 fn workbench_uses_store_backed_operation_lifecycle() {
     let root = repo_root();
-    let context = load_operation_workbench_context(&root)
+    let context = crate::workbench::load_operation_workbench_context_with_database_url(&root, None)
         .expect("workbench context")
         .with_memory_store();
     let session = context
@@ -9271,7 +9283,8 @@ fn operation_plan_confirm_apply_rollback_and_logs_are_visible() {
 #[test]
 fn action_console_keeps_memory_store_changes_visible_after_refresh() {
     let root = repo_root();
-    let mut console = OrchestratorActionConsole::load(root).expect("console");
+    let mut console =
+        OrchestratorActionConsole::load_with_database_url(root, None).expect("console");
     console
         .dispatch_with_static_probe(request(
             "endpoint.create",
@@ -9302,7 +9315,8 @@ fn action_console_keeps_memory_store_changes_visible_after_refresh() {
 #[test]
 fn action_console_release_install_uses_loaded_release_manifest() {
     let root = repo_root();
-    let mut console = OrchestratorActionConsole::load(root).expect("console");
+    let mut console =
+        OrchestratorActionConsole::load_with_database_url(root, None).expect("console");
     let result = console
         .dispatch_with_static_probe(request(
             "release.install",
@@ -11344,10 +11358,10 @@ fn orchestrator_view_can_load_from_store_state() {
 #[test]
 fn operation_workbench_session_merges_into_view_operations_and_logs() {
     let root = repo_root();
-    let context = load_operation_workbench_context(&root)
+    let context = crate::workbench::load_operation_workbench_context_with_database_url(&root, None)
         .expect("workbench context")
         .with_memory_store();
-    let mut view = load_orchestrator_view(&root).expect("repo view");
+    let mut view = load_orchestrator_view_with_database_url(&root, None).expect("repo view");
     let session = context
         .build_session("release.install")
         .and_then(|session| context.confirm(&session))

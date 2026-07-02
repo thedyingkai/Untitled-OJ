@@ -371,7 +371,6 @@ services:
       OJOS_JUDGE_TASK_STREAM: ojos:judge:task
       OJOS_JUDGE_CONSUMER_GROUP: judge-worker
       OJOS_RUNNER_MODE: ${OJOS_RUNNER_MODE:-nsjail}
-      OJOS_ALLOW_FAKE_RUNNER: ${OJOS_ALLOW_FAKE_RUNNER:-false}
       OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
       OJOS_SERVICE_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
       OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}

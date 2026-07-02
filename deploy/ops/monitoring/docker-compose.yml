@@ -1,0 +1,155 @@
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${OJOS_PROMETHEUS_RETENTION:-30d}
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - observability
+      - app
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - |
+        test -n "$${OJOS_ALERT_WEBHOOK_URL:?OJOS_ALERT_WEBHOOK_URL is required}"
+        escaped_url="$$(printf '%s' "$${OJOS_ALERT_WEBHOOK_URL}" | sed 's/[\/&]/\\&/g')"
+        sed "s#__OJOS_ALERT_WEBHOOK_URL__#$${escaped_url}#g" /etc/alertmanager/alertmanager.yml.template >/tmp/alertmanager.yml
+        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager
+    environment:
+      OJOS_ALERT_WEBHOOK_URL: ${OJOS_ALERT_WEBHOOK_URL}
+    volumes:
+      - ./alertmanager.yml.template:/etc/alertmanager/alertmanager.yml.template:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    networks:
+      - observability
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/blackbox_exporter/config.yml
+    volumes:
+      - ./blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    networks:
+      - observability
+      - app
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    networks:
+      - observability
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    networks:
+      - observability
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: ${REDIS_URL}
+    networks:
+      - observability
+      - app
+
+  postgres-exporter-orchestrator:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: ${ORCHESTRATOR_DATABASE_URL}
+    networks:
+      - observability
+      - app
+
+  postgres-exporter-auth:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: ${AUTH_DATABASE_URL}
+    networks:
+      - observability
+      - app
+
+  postgres-exporter-problem:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: ${PROBLEM_DATABASE_URL}
+    networks:
+      - observability
+      - app
+
+  postgres-exporter-judge:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: ${JUDGE_DATABASE_URL}
+    networks:
+      - observability
+      - app
+
+  postgres-exporter-user:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: ${USER_DATABASE_URL}
+    networks:
+      - observability
+      - app
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - observability
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
+
+networks:
+  observability:
+  app:
+    name: ${OJOS_MONITORING_APP_NETWORK:-compose_default}
+    external: true
