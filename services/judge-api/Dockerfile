@@ -13,7 +13,7 @@ ENV GOPROXY=${GOPROXY}
 WORKDIR /app
 
 COPY services/judge-api/go.mod services/judge-api/go.sum ./judge-api/
-COPY platform/shared/go/go.mod platform/shared/go/go.sum ./platform/shared/go/
+COPY platform/shared/go/go.mod platform/shared/go/go.sum /platform/shared/go/
 
 WORKDIR /app/judge-api
 RUN go mod download
@@ -21,7 +21,7 @@ RUN go mod download
 WORKDIR /app
 
 COPY services/judge-api ./judge-api
-COPY platform/shared/go ./platform/shared/go
+COPY platform/shared/go /platform/shared/go
 
 WORKDIR /app/judge-api
 

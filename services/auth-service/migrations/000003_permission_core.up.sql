@@ -118,7 +118,7 @@ VALUES
     ('problem', 'core', 'Problem', 'Problem resource'),
     ('group', 'core', 'Group', 'Organization or group resource'),
     ('submission', 'core', 'Submission', 'Submission resource'),
-    ('post', 'core', 'Forum post resource')
+    ('post', 'core', 'Forum Post', 'Forum post resource')
 ON CONFLICT (code) DO UPDATE SET
     service_code = EXCLUDED.service_code,
     name = EXCLUDED.name,

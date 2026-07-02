@@ -13,12 +13,14 @@ ENV GOPROXY=${GOPROXY}
 WORKDIR /app
 
 COPY services/user-service/go.mod services/user-service/go.sum ./user-service/
+COPY platform/shared/go/go.mod platform/shared/go/go.sum /platform/shared/go/
 
 WORKDIR /app/user-service
 RUN go mod download
 
 WORKDIR /app
 COPY services/user-service ./user-service
+COPY platform/shared/go /platform/shared/go
 
 WORKDIR /app/user-service
 RUN go build -o user-service .

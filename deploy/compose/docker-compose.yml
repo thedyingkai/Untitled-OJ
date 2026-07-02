@@ -145,12 +145,12 @@ services:
       context: ../..
       dockerfile: services/gateway/Dockerfile
       args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
-        http_proxy: ${HTTP_PROXY:-}
-        https_proxy: ${HTTPS_PROXY:-}
-        no_proxy: ${NO_PROXY:-}
+        HTTP_PROXY: ${OJOS_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${OJOS_BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${OJOS_BUILD_NO_PROXY:-}
+        http_proxy: ${OJOS_BUILD_HTTP_PROXY:-}
+        https_proxy: ${OJOS_BUILD_HTTPS_PROXY:-}
+        no_proxy: ${OJOS_BUILD_NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
       auth-service:
@@ -184,12 +184,12 @@ services:
       context: ../..
       dockerfile: services/auth-service/Dockerfile
       args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
-        http_proxy: ${HTTP_PROXY:-}
-        https_proxy: ${HTTPS_PROXY:-}
-        no_proxy: ${NO_PROXY:-}
+        HTTP_PROXY: ${OJOS_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${OJOS_BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${OJOS_BUILD_NO_PROXY:-}
+        http_proxy: ${OJOS_BUILD_HTTP_PROXY:-}
+        https_proxy: ${OJOS_BUILD_HTTPS_PROXY:-}
+        no_proxy: ${OJOS_BUILD_NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
       auth-service-migrations:
@@ -211,12 +211,12 @@ services:
       context: ../..
       dockerfile: services/user-service/Dockerfile
       args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
-        http_proxy: ${HTTP_PROXY:-}
-        https_proxy: ${HTTPS_PROXY:-}
-        no_proxy: ${NO_PROXY:-}
+        HTTP_PROXY: ${OJOS_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${OJOS_BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${OJOS_BUILD_NO_PROXY:-}
+        http_proxy: ${OJOS_BUILD_HTTP_PROXY:-}
+        https_proxy: ${OJOS_BUILD_HTTPS_PROXY:-}
+        no_proxy: ${OJOS_BUILD_NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
       user-service-migrations:
@@ -235,12 +235,12 @@ services:
       context: ../..
       dockerfile: services/storage-service/Dockerfile
       args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
-        http_proxy: ${HTTP_PROXY:-}
-        https_proxy: ${HTTPS_PROXY:-}
-        no_proxy: ${NO_PROXY:-}
+        HTTP_PROXY: ${OJOS_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${OJOS_BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${OJOS_BUILD_NO_PROXY:-}
+        http_proxy: ${OJOS_BUILD_HTTP_PROXY:-}
+        https_proxy: ${OJOS_BUILD_HTTPS_PROXY:-}
+        no_proxy: ${OJOS_BUILD_NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     expose:
       - "8085"
@@ -263,12 +263,12 @@ services:
       context: ../..
       dockerfile: services/judge-api/Dockerfile
       args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
-        http_proxy: ${HTTP_PROXY:-}
-        https_proxy: ${HTTPS_PROXY:-}
-        no_proxy: ${NO_PROXY:-}
+        HTTP_PROXY: ${OJOS_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${OJOS_BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${OJOS_BUILD_NO_PROXY:-}
+        http_proxy: ${OJOS_BUILD_HTTP_PROXY:-}
+        https_proxy: ${OJOS_BUILD_HTTPS_PROXY:-}
+        no_proxy: ${OJOS_BUILD_NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
       judge-api-migrations:
@@ -305,12 +305,12 @@ services:
       context: ../..
       dockerfile: services/judge-worker/Dockerfile
       args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
-        http_proxy: ${HTTP_PROXY:-}
-        https_proxy: ${HTTPS_PROXY:-}
-        no_proxy: ${NO_PROXY:-}
+        HTTP_PROXY: ${OJOS_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${OJOS_BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${OJOS_BUILD_NO_PROXY:-}
+        http_proxy: ${OJOS_BUILD_HTTP_PROXY:-}
+        https_proxy: ${OJOS_BUILD_HTTPS_PROXY:-}
+        no_proxy: ${OJOS_BUILD_NO_PROXY:-}
     depends_on:
       judge-api:
         condition: service_started
@@ -350,12 +350,12 @@ services:
       context: ../..
       dockerfile: services/problem-service/Dockerfile
       args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
-        http_proxy: ${HTTP_PROXY:-}
-        https_proxy: ${HTTPS_PROXY:-}
-        no_proxy: ${NO_PROXY:-}
+        HTTP_PROXY: ${OJOS_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${OJOS_BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${OJOS_BUILD_NO_PROXY:-}
+        http_proxy: ${OJOS_BUILD_HTTP_PROXY:-}
+        https_proxy: ${OJOS_BUILD_HTTPS_PROXY:-}
+        no_proxy: ${OJOS_BUILD_NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
       problem-service-migrations:
