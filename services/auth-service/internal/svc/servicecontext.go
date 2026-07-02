@@ -123,10 +123,11 @@ func smokeModeEnabled() bool {
 }
 
 type SmokePermissionStore struct {
-	mu         sync.RWMutex
-	registered map[string]map[string]SmokePermission
-	identities map[string]bool
-	grants     map[string]map[string]map[string]bool
+	mu          sync.RWMutex
+	registered  map[string]map[string]SmokePermission
+	identities  map[string]bool
+	credentials map[string]map[string]bool
+	grants      map[string]map[string]map[string]bool
 }
 
 type SmokePermission struct {
@@ -138,9 +139,10 @@ type SmokePermission struct {
 
 func NewSmokePermissionStore() *SmokePermissionStore {
 	return &SmokePermissionStore{
-		registered: map[string]map[string]SmokePermission{},
-		identities: map[string]bool{},
-		grants:     map[string]map[string]map[string]bool{},
+		registered:  map[string]map[string]SmokePermission{},
+		identities:  map[string]bool{},
+		credentials: map[string]map[string]bool{},
+		grants:      map[string]map[string]map[string]bool{},
 	}
 }
 
@@ -152,6 +154,10 @@ func (s *SmokePermissionStore) Allow(service string, permissions ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.identities[service] = true
+	if s.credentials[service] == nil {
+		s.credentials[service] = map[string]bool{}
+	}
+	s.credentials[service][""] = true
 	if s.grants[service] == nil {
 		s.grants[service] = map[string]map[string]bool{}
 	}
@@ -166,7 +172,7 @@ func (s *SmokePermissionStore) Allow(service string, permissions ...string) {
 	}
 }
 
-func (s *SmokePermissionStore) ServiceCallerCanUsePermission(service string, permission string, apiID string) bool {
+func (s *SmokePermissionStore) ServiceCallerCanUsePermission(service string, permission string, apiID string, token string) bool {
 	if s == nil {
 		return false
 	}
@@ -181,6 +187,9 @@ func (s *SmokePermissionStore) ServiceCallerCanUsePermission(service string, per
 	if !s.identities[service] {
 		return false
 	}
+	if !s.serviceCredentialAllowedLocked(service, token) {
+		return false
+	}
 	if s.grants[service] == nil {
 		return false
 	}
@@ -191,9 +200,10 @@ func (s *SmokePermissionStore) ServiceCallerCanUsePermission(service string, per
 }
 
 type SmokeServiceIdentity struct {
-	ServiceCode string
-	AllowedAPIs []string
-	Grants      []SmokeServiceIdentityGrant
+	ServiceCode     string
+	AllowedAPIs     []string
+	Grants          []SmokeServiceIdentityGrant
+	CredentialToken string
 }
 
 type SmokeServiceIdentityGrant struct {
@@ -244,6 +254,7 @@ func (s *SmokePermissionStore) DeleteServicePermissions(service string) int64 {
 	deleted := int64(len(s.registered[service]))
 	delete(s.registered, service)
 	delete(s.identities, service)
+	delete(s.credentials, service)
 	delete(s.grants, service)
 	return deleted
 }
@@ -272,6 +283,12 @@ func (s *SmokePermissionStore) registerServiceIdentityLocked(service string, ide
 		return
 	}
 	s.identities[service] = true
+	if s.credentials[service] == nil {
+		s.credentials[service] = map[string]bool{}
+	}
+	if token := strings.TrimSpace(identity.CredentialToken); token != "" {
+		s.credentials[service][token] = true
+	}
 	s.grants[service] = map[string]map[string]bool{}
 	allowed := map[string]bool{}
 	for _, rawAPI := range identity.AllowedAPIs {
@@ -294,6 +311,18 @@ func (s *SmokePermissionStore) registerServiceIdentityLocked(service string, ide
 		}
 		s.grants[service][apiID][permission] = true
 	}
+}
+
+func (s *SmokePermissionStore) serviceCredentialAllowedLocked(service string, token string) bool {
+	credentials := s.credentials[service]
+	if len(credentials) == 0 {
+		return false
+	}
+	token = strings.TrimSpace(token)
+	if credentials[token] {
+		return true
+	}
+	return credentials[""]
 }
 
 func (s *ServiceContext) Close(ctx context.Context) {

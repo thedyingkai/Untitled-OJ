@@ -46,8 +46,10 @@ func TestServiceCallerPermissionChecksRegisteredPermissionCode(t *testing.T) {
 	for _, want := range []string{
 		"func (r *AdminRepository) ServiceCallerCanUsePermission",
 		"FROM service_identities si",
+		"JOIN service_credentials sc",
 		"JOIN service_permission_grants spg",
 		"si.service_code = $1",
+		"sc.token_hash = $4",
 		"spg.permission_code = $2",
 		"spg.api_id = $3",
 	} {

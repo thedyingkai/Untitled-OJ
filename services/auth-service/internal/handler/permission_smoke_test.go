@@ -49,6 +49,10 @@ func TestSmokePermissionCheckServiceCallerBoundaries(t *testing.T) {
 	if unknown.status != http.StatusOK || unknown.allowed {
 		t.Fatalf("unknown service caller got status=%d allowed=%v body=%s", unknown.status, unknown.allowed, unknown.body)
 	}
+	wrongToken := permissionCheckRequest("wrong-token", "judge-worker", "storage.object.get", "storage.object.read", handler)
+	if wrongToken.status != http.StatusUnauthorized {
+		t.Fatalf("wrong service token got status=%d body=%s", wrongToken.status, wrongToken.body)
+	}
 
 	list := svcCtx.AuthMiddleware(listPermissionsHandler(svcCtx))
 	req := httptest.NewRequest(http.MethodGet, "/auth/admin/permissions", nil)

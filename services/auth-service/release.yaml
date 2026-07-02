@@ -34,6 +34,9 @@ migrations:
   - version: "000007_service_identity_grants"
     path: services/auth-service/migrations/000007_service_identity_grants.up.sql
     checksum: sha256:9cf06075b3977f234bb885e533e7abe165cd3d1f92f393b3ec1eefd39740ebc9
+  - version: "000008_service_credentials"
+    path: services/auth-service/migrations/000008_service_credentials.up.sql
+    checksum: sha256:4bc2991c93d7c2d76d73ddfe06870d462ebae68fc7902f7ba2a33e568d567ae5
 permissions:
   - auth.admin
   - system.admin

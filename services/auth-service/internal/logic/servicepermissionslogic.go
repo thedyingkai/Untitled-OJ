@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"ojos-auth-service/internal/middleware"
 	"ojos-auth-service/internal/repository"
 	"ojos-auth-service/internal/svc"
 	"ojos-auth-service/internal/types"
@@ -34,6 +35,7 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 	if serviceCode == "" {
 		return nil, errors.New("service_code is required")
 	}
+	credentialToken, _ := middleware.TokenFromContext(l.ctx)
 	if l.svcCtx.SmokeAuth != nil {
 		permissions := make([]svc.SmokePermission, 0, len(req.Permissions))
 		for _, item := range req.Permissions {
@@ -43,7 +45,7 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 				Description: item.Description,
 			})
 		}
-		identity := smokeIdentityFromRequest(req)
+		identity := smokeIdentityFromRequest(req, credentialToken)
 		registered := l.svcCtx.SmokeAuth.RegisterServicePermissions(serviceCode, permissions, identity)
 		return &types.ServicePermissionsResp{
 			Code: 0,
@@ -70,7 +72,7 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 			Permissions: binding.Permissions,
 		})
 	}
-	identity := repositoryIdentityFromRequest(req)
+	identity := repositoryIdentityFromRequest(req, credentialToken)
 	registered, err := l.svcCtx.AdminRepo.RegisterServicePermissions(l.ctx, serviceCode, permissions, bindings, identity)
 	if err != nil {
 		return nil, err
@@ -86,7 +88,7 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 	}, nil
 }
 
-func smokeIdentityFromRequest(req *types.RegisterServicePermissionsReq) *svc.SmokeServiceIdentity {
+func smokeIdentityFromRequest(req *types.RegisterServicePermissionsReq, credentialToken string) *svc.SmokeServiceIdentity {
 	if req == nil {
 		return nil
 	}
@@ -103,13 +105,14 @@ func smokeIdentityFromRequest(req *types.RegisterServicePermissionsReq) *svc.Smo
 		})
 	}
 	return &svc.SmokeServiceIdentity{
-		ServiceCode: req.ServiceIdentity.ServiceName,
-		AllowedAPIs: req.ServiceIdentity.AllowedApis,
-		Grants:      grants,
+		ServiceCode:     req.ServiceIdentity.ServiceName,
+		AllowedAPIs:     req.ServiceIdentity.AllowedApis,
+		Grants:          grants,
+		CredentialToken: credentialToken,
 	}
 }
 
-func repositoryIdentityFromRequest(req *types.RegisterServicePermissionsReq) *repository.ServiceIdentityInput {
+func repositoryIdentityFromRequest(req *types.RegisterServicePermissionsReq, credentialToken string) *repository.ServiceIdentityInput {
 	if req == nil {
 		return nil
 	}
@@ -126,9 +129,10 @@ func repositoryIdentityFromRequest(req *types.RegisterServicePermissionsReq) *re
 		})
 	}
 	return &repository.ServiceIdentityInput{
-		ServiceCode: req.ServiceIdentity.ServiceName,
-		AllowedAPIs: req.ServiceIdentity.AllowedApis,
-		Grants:      grants,
+		ServiceCode:     req.ServiceIdentity.ServiceName,
+		AllowedAPIs:     req.ServiceIdentity.AllowedApis,
+		Grants:          grants,
+		CredentialToken: credentialToken,
 	}
 }
 

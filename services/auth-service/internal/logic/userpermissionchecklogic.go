@@ -49,6 +49,7 @@ func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionChec
 		if callerService == "" {
 			return nil, errors.New("caller_service is required")
 		}
+		credentialToken, _ := middleware.TokenFromContext(l.ctx)
 		if l.svcCtx.SmokeAuth != nil {
 			return &types.PermissionCheckResp{
 				Code: 0,
@@ -58,6 +59,7 @@ func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionChec
 						callerService,
 						strings.TrimSpace(req.Permission),
 						strings.TrimSpace(req.ApiId),
+						credentialToken,
 					),
 				},
 			}, nil
@@ -70,6 +72,7 @@ func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionChec
 			callerService,
 			strings.TrimSpace(req.Permission),
 			strings.TrimSpace(req.ApiId),
+			credentialToken,
 		)
 		if err != nil {
 			return nil, err

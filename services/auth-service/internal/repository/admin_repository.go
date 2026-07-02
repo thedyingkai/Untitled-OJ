@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
@@ -55,9 +57,10 @@ type ServiceRoleBindingInput struct {
 }
 
 type ServiceIdentityInput struct {
-	ServiceCode string
-	AllowedAPIs []string
-	Grants      []ServiceIdentityGrantInput
+	ServiceCode     string
+	AllowedAPIs     []string
+	Grants          []ServiceIdentityGrantInput
+	CredentialToken string
 }
 
 type ServiceIdentityGrantInput struct {
@@ -290,11 +293,12 @@ WHERE service_code = $1
 	return tag.RowsAffected(), nil
 }
 
-func (r *AdminRepository) ServiceCallerCanUsePermission(ctx context.Context, serviceCode string, permissionCode string, apiID string) (bool, error) {
+func (r *AdminRepository) ServiceCallerCanUsePermission(ctx context.Context, serviceCode string, permissionCode string, apiID string, token string) (bool, error) {
 	serviceCode = strings.TrimSpace(serviceCode)
 	permissionCode = strings.TrimSpace(permissionCode)
 	apiID = strings.TrimSpace(apiID)
-	if serviceCode == "" || permissionCode == "" {
+	tokenHash := serviceCredentialTokenHash(token)
+	if serviceCode == "" || permissionCode == "" || tokenHash == "" {
 		return false, nil
 	}
 	var ok bool
@@ -302,17 +306,21 @@ func (r *AdminRepository) ServiceCallerCanUsePermission(ctx context.Context, ser
 SELECT EXISTS (
     SELECT 1
     FROM service_identities si
+    JOIN service_credentials sc
+      ON sc.service_code = si.service_code
     JOIN service_permission_grants spg
       ON spg.caller_service_code = si.service_code
     JOIN permissions p
       ON p.code = spg.permission_code
     WHERE si.service_code = $1
       AND si.enabled
+      AND sc.enabled
+      AND sc.token_hash = $4
       AND spg.enabled
       AND spg.permission_code = $2
       AND ($3 = '' OR spg.api_id = $3)
 )
-`, serviceCode, permissionCode, apiID).Scan(&ok)
+`, serviceCode, permissionCode, apiID, tokenHash).Scan(&ok)
 	return ok, err
 }
 
@@ -510,6 +518,16 @@ DO UPDATE SET enabled = TRUE, updated_at = NOW()
 `, serviceCode); err != nil {
 		return err
 	}
+	if tokenHash := serviceCredentialTokenHash(identity.CredentialToken); tokenHash != "" {
+		if _, err := tx.Exec(ctx, `
+INSERT INTO service_credentials(service_code, token_hash, token_hint, enabled, updated_at)
+VALUES($1, $2, $3, TRUE, NOW())
+ON CONFLICT(service_code, token_hash)
+DO UPDATE SET token_hint = EXCLUDED.token_hint, enabled = TRUE, updated_at = NOW()
+`, serviceCode, tokenHash, serviceCredentialTokenHint(identity.CredentialToken)); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 DELETE FROM service_permission_grants
 WHERE caller_service_code = $1
@@ -546,6 +564,26 @@ DO UPDATE SET provider_service_code = EXCLUDED.provider_service_code, enabled = 
 		}
 	}
 	return nil
+}
+
+func serviceCredentialTokenHash(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func serviceCredentialTokenHint(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	if len(token) <= 8 {
+		return token
+	}
+	return token[:4] + "..." + token[len(token)-4:]
 }
 
 func ensureServiceRole(ctx context.Context, tx pgx.Tx, serviceCode string, roleName string) (int64, error) {

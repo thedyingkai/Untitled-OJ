@@ -15,6 +15,7 @@ import (
 type contextKey string
 
 const ClaimsContextKey contextKey = "auth_claims"
+const TokenContextKey contextKey = "auth_token"
 
 type AuthMiddleware struct {
 	secret        string
@@ -55,6 +56,7 @@ func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 				Roles:    []string{"internal"},
 			}
 			ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
+			ctx = context.WithValue(ctx, TokenContextKey, tokenString)
 			next(w, r.WithContext(ctx))
 			return
 		}
@@ -66,6 +68,7 @@ func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
+		ctx = context.WithValue(ctx, TokenContextKey, tokenString)
 
 		next(w, r.WithContext(ctx))
 	}
@@ -74,6 +77,14 @@ func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 func ClaimsFromContext(ctx context.Context) (*token.Claims, bool) {
 	claims, ok := ctx.Value(ClaimsContextKey).(*token.Claims)
 	return claims, ok
+}
+
+func TokenFromContext(ctx context.Context) (string, bool) {
+	tokenString, ok := ctx.Value(TokenContextKey).(string)
+	if !ok || strings.TrimSpace(tokenString) == "" {
+		return "", false
+	}
+	return tokenString, true
 }
 
 func writeAuthError(w http.ResponseWriter, code int, msg string) {
