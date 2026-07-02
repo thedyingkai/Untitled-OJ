@@ -7210,7 +7210,7 @@ fn gateway_route_log_record(
 ) -> OperationLogRecord {
     let level = if result.reloaded { "info" } else { "warn" };
     let message = if result.reloaded {
-        format!("[OK] gateway route reload completed for {service_name}")
+        format!("[OK] gateway reload triggered by orchestrator for {service_name}")
     } else if result
         .message
         .to_ascii_lowercase()

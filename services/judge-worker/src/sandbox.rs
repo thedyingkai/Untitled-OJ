@@ -687,21 +687,114 @@ mod tests {
 
     #[tokio::test]
     async fn nsjail_echo_smoke_when_available() {
-        if !cfg!(target_os = "linux") {
-            eprintln!("skipping nsjail echo smoke: nsjail runner requires Linux");
+        let Some(work_dir) = nsjail_live_work_dir("echo").await else {
             return;
-        }
-        if !nsjail_available() {
-            eprintln!("skipping nsjail echo smoke: nsjail binary is unavailable");
-            return;
-        }
+        };
         if !Path::new("/bin/echo").exists() {
             eprintln!("skipping nsjail echo smoke: /bin/echo is unavailable");
             return;
         }
 
+        let Some(output) = run_nsjail_live_or_skip(
+            &work_dir,
+            "/bin/echo OK",
+            1000,
+            1024 * 1024,
+        )
+        .await
+        else {
+            return;
+        };
+
+        assert_eq!(output.status, SandboxStatus::Ok);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "OK\n");
+        let _ = fs::remove_dir_all(&work_dir).await;
+    }
+
+    #[tokio::test]
+    async fn nsjail_cpp_hello_world_when_available() {
+        let Some(work_dir) = nsjail_live_work_dir("cpp-hello").await else {
+            return;
+        };
+        if !command_available("g++") {
+            eprintln!("skipping nsjail C++ hello smoke: g++ is unavailable");
+            let _ = fs::remove_dir_all(&work_dir).await;
+            return;
+        }
+
+        let command = "cat > main.cpp <<'EOF'\n#include <iostream>\nint main(){ std::cout << \"OK\\n\"; }\nEOF\ng++ main.cpp -O2 -pipe -o main\n./main";
+        let Some(output) =
+            run_nsjail_live_or_skip(&work_dir, command, 3000, 1024 * 1024).await
+        else {
+            return;
+        };
+
+        assert_eq!(output.status, SandboxStatus::Ok);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "OK\n");
+        let _ = fs::remove_dir_all(&work_dir).await;
+    }
+
+    #[tokio::test]
+    async fn nsjail_runtime_error_when_available() {
+        let Some(work_dir) = nsjail_live_work_dir("runtime-error").await else {
+            return;
+        };
+        let Some(output) = run_nsjail_live_or_skip(&work_dir, "exit 7", 1000, 1024 * 1024).await
+        else {
+            return;
+        };
+
+        assert_eq!(output.status, SandboxStatus::RuntimeError);
+        assert!(output.message.contains("code 7"));
+        let _ = fs::remove_dir_all(&work_dir).await;
+    }
+
+    #[tokio::test]
+    async fn nsjail_timeout_when_available() {
+        let Some(work_dir) = nsjail_live_work_dir("timeout").await else {
+            return;
+        };
+        let Some(output) =
+            run_nsjail_live_or_skip(&work_dir, "while true; do :; done", 300, 1024 * 1024).await
+        else {
+            return;
+        };
+
+        assert_eq!(output.status, SandboxStatus::TimeLimitExceeded);
+        let _ = fs::remove_dir_all(&work_dir).await;
+    }
+
+    #[tokio::test]
+    async fn nsjail_output_limit_when_available() {
+        let Some(work_dir) = nsjail_live_work_dir("output-limit").await else {
+            return;
+        };
+        let Some(output) = run_nsjail_live_or_skip(&work_dir, "yes X", 1000, 1024).await else {
+            return;
+        };
+
+        assert!(
+            output.status == SandboxStatus::OutputLimitExceeded
+                || output.status == SandboxStatus::TimeLimitExceeded,
+            "unexpected status: {:?}",
+            output.status
+        );
+        let _ = fs::remove_dir_all(&work_dir).await;
+    }
+
+    async fn nsjail_live_work_dir(name: &str) -> Option<PathBuf> {
+        if !cfg!(target_os = "linux") {
+            eprintln!("skipping nsjail {name} smoke: nsjail runner requires Linux/WSL");
+            return None;
+        }
+        if !nsjail_available() {
+            eprintln!(
+                "skipping nsjail {name} smoke: nsjail binary is unavailable; install nsjail in Linux/WSL and rerun cargo test"
+            );
+            return None;
+        }
         let work_dir = std::env::temp_dir().join(format!(
-            "ojos-nsjail-smoke-{}-{}",
+            "ojos-nsjail-{name}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -711,31 +804,53 @@ mod tests {
         fs::create_dir_all(&work_dir)
             .await
             .expect("create nsjail smoke work dir");
+        Some(work_dir)
+    }
 
-        let output = match run_nsjail_shell(
-            &work_dir,
-            "/bin/echo OK",
+    async fn run_nsjail_live_or_skip(
+        work_dir: &Path,
+        command: &str,
+        time_limit_ms: u64,
+        output_limit_bytes: u64,
+    ) -> Option<SandboxOutput> {
+        match run_nsjail_shell(
+            work_dir,
+            command,
             None,
             None,
             None,
-            1000,
+            time_limit_ms,
             64,
             16,
-            1024 * 1024,
+            output_limit_bytes,
         )
         .await
         {
-            Ok(output) => output,
-            Err(err) if err.to_string().contains("cgroup") => {
-                eprintln!("skipping nsjail echo smoke: {err}");
-                let _ = fs::remove_dir_all(&work_dir).await;
-                return;
+            Ok(output) => Some(output),
+            Err(err) if nsjail_environment_error(&err.to_string()) => {
+                eprintln!("skipping nsjail live smoke: {err}");
+                let _ = fs::remove_dir_all(work_dir).await;
+                None
             }
-            Err(err) => panic!("nsjail echo smoke failed: {err}"),
-        };
+            Err(err) => panic!("nsjail live smoke failed: {err}"),
+        }
+    }
 
-        assert_eq!(output.status, SandboxStatus::Ok);
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "OK\n");
-        let _ = fs::remove_dir_all(&work_dir).await;
+    fn nsjail_environment_error(message: &str) -> bool {
+        let lower = message.to_ascii_lowercase();
+        lower.contains("cgroup")
+            || lower.contains("operation not permitted")
+            || lower.contains("permission denied")
+            || lower.contains("no such file or directory")
+    }
+
+    fn command_available(name: &str) -> bool {
+        StdCommand::new(name)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
     }
 }

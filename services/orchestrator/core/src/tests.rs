@@ -3115,6 +3115,9 @@ fn release_install_publishes_gateway_routes_when_publisher_is_configured() {
     let logs = store.operation_logs("op-release-gateway-publish");
     assert!(logs.iter().any(|log| {
         log.step_id == "gateway_reload:gateway"
+            && log
+                .message
+                .contains("[OK] gateway reload triggered by orchestrator")
             && log.data.get("status").and_then(serde_json::Value::as_str) == Some("published")
             && log
                 .data
@@ -3272,6 +3275,9 @@ fn release_install_api_surface_only_release_triggers_gateway_reload() {
     let logs = store.operation_logs("op-release-storage-api-reload");
     assert!(logs.iter().any(|log| {
         log.step_id == "gateway_reload:storage-service"
+            && log
+                .message
+                .contains("[OK] gateway reload triggered by orchestrator")
             && log.data.get("status").and_then(serde_json::Value::as_str) == Some("published")
             && log
                 .data

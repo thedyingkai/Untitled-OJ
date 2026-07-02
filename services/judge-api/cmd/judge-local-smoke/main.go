@@ -29,17 +29,18 @@ var smokeHTTP = &http.Client{
 }
 
 const (
-	taskStream       = "ojos:judge:task"
-	resultStream     = "ojos:judge:result"
-	consumerGroup    = "judge-worker"
-	childNodeID      = "child-node"
-	rootNodeID       = "root-node"
-	storageService   = "storage-service"
-	workerService    = "judge-worker"
-	judgeAPIService  = "judge-api"
-	serviceToken     = "ojos-smoke-internal"
-	workerToken      = "ojos-smoke-worker"
-	workerEndpointID = "127.0.0.2_19000_judge-worker"
+	taskStream           = "ojos:judge:task"
+	resultStream         = "ojos:judge:result"
+	consumerGroup        = "judge-worker"
+	childNodeID          = "child-node"
+	rootNodeID           = "root-node"
+	storageService       = "storage-service"
+	workerService        = "judge-worker"
+	judgeAPIService      = "judge-api"
+	serviceToken         = "ojos-smoke-internal"
+	workerToken          = "ojos-smoke-worker"
+	workerEndpointID     = "127.0.0.2_19000_judge-worker"
+	submissionSourceCode = "#include <iostream>\nint main() { std::cout << \"ok\\n\"; return 0; }\n"
 )
 
 type smokeConfig struct {
@@ -50,6 +51,7 @@ type smokeConfig struct {
 	controlPlaneMode string
 	authMode         string
 	installMode      string
+	storageBackend   string
 	gatewayAdminJWT  string
 	orchestrator     endpoint
 	auth             endpoint
@@ -87,14 +89,15 @@ func (e stepError) Unwrap() error {
 
 func main() {
 	var (
-		redisURL     = flag.String("redis", envDefault("OJOS_REAL_REDIS_URL", envDefault("REDIS_URL", "redis://127.0.0.1:6379/0")), "Redis URL for live smoke")
-		controlPlane = flag.String("control-plane", envDefault("OJOS_SMOKE_CONTROL_PLANE", "stub"), "control plane mode: stub or real")
-		authMode     = flag.String("auth", envDefault("OJOS_SMOKE_AUTH", "stub"), "auth mode: stub or real")
-		installMode  = flag.String("install-mode", envDefault("OJOS_SMOKE_INSTALL_MODE", ""), "install mode: seed or release-install")
-		mode         = flag.String("mode", envDefault("OJOS_JUDGE_SMOKE_MODE", ""), "smoke matrix mode: beta-local")
-		workRoot     = flag.String("work-root", "", "smoke workspace; defaults to <repo>/.smoke/judge-local")
-		timeout      = flag.Duration("timeout", 90*time.Second, "overall smoke timeout")
-		cleanStreams = flag.Bool("clean-streams", true, "delete judge task/result stream keys before the smoke")
+		redisURL       = flag.String("redis", envDefault("OJOS_REAL_REDIS_URL", envDefault("REDIS_URL", "redis://127.0.0.1:6379/0")), "Redis URL for live smoke")
+		controlPlane   = flag.String("control-plane", envDefault("OJOS_SMOKE_CONTROL_PLANE", "stub"), "control plane mode: stub or real")
+		authMode       = flag.String("auth", envDefault("OJOS_SMOKE_AUTH", "stub"), "auth mode: stub or real")
+		installMode    = flag.String("install-mode", envDefault("OJOS_SMOKE_INSTALL_MODE", ""), "install mode: seed or release-install")
+		mode           = flag.String("mode", envDefault("OJOS_JUDGE_SMOKE_MODE", ""), "smoke matrix mode: beta-local")
+		storageBackend = flag.String("storage-backend", envDefault("OJOS_SMOKE_STORAGE_BACKEND", "local"), "storage backend for storage-service: local or minio")
+		workRoot       = flag.String("work-root", "", "smoke workspace; defaults to <repo>/.smoke/judge-local")
+		timeout        = flag.Duration("timeout", 90*time.Second, "overall smoke timeout")
+		cleanStreams   = flag.Bool("clean-streams", true, "delete judge task/result stream keys before the smoke")
 	)
 	flag.Parse()
 
@@ -119,6 +122,11 @@ func main() {
 			*timeout = 240 * time.Second
 		}
 	}
+	normalizedStorageBackend := normalizeStorageBackend(*storageBackend)
+	if normalizedStorageBackend != "local" && normalizedStorageBackend != "minio" {
+		fmt.Fprintf(os.Stderr, "[FAIL] storage backend\nreason: unsupported storage backend %q\n", normalizedStorageBackend)
+		os.Exit(1)
+	}
 	orchestratorEndpoint, authEndpoint, storageEndpoint, gatewayEndpoint, judgeAPIEndpoint, err := allocateSmokeEndpoints()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[FAIL] allocate smoke ports\nreason: %v\n", err)
@@ -131,6 +139,7 @@ func main() {
 		redisURL:         normalizeRedisURL(*redisURL),
 		controlPlaneMode: normalizeSmokeMode(*controlPlane),
 		authMode:         normalizeSmokeMode(*authMode),
+		storageBackend:   normalizedStorageBackend,
 		orchestrator:     orchestratorEndpoint,
 		auth:             authEndpoint,
 		storage:          storageEndpoint,
@@ -328,7 +337,16 @@ func run(ctx context.Context, cfg smokeConfig) error {
 		if err := waitGatewayRoute(ctx, cfg, "storage.object.put", storageEndpointID); err != nil {
 			return fail("gateway route reload completed", err)
 		}
+		if err := verifyOrchestratorDrivenGatewayReload(ctx, cfg); err != nil {
+			return err
+		}
 		ok("gateway route reload completed")
+		if err := verifyStorageBackend(ctx, cfg); err != nil {
+			return err
+		}
+		if err := verifyStorageLifecycleThroughResolver(ctx, cfg); err != nil {
+			return err
+		}
 	}
 	if cfg.authMode == "real" {
 		if err := verifyRealAuth(ctx, cfg); err != nil {
@@ -373,8 +391,8 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("submission created: %d", submissionID)
 
-	sourcePath := filepath.Join(cfg.workRoot, "storage", "objects", "submissions", fmt.Sprintf("%d-source-main.cpp", submissionID))
-	if err := waitFile(ctx, sourcePath); err != nil {
+	sourceKey := fmt.Sprintf("%d-source-main.cpp", submissionID)
+	if err := waitStorageObject(ctx, cfg, "submissions", sourceKey, submissionSourceCode); err != nil {
 		return fail("source stored through internal resolver", err)
 	}
 	if err := waitLogContains(ctx, filepath.Join(cfg.workRoot, "logs", "gateway.log"), fmt.Sprintf("/internal/apis/storage.object.put/submissions/%d-source-main.cpp", submissionID)); err != nil {
@@ -422,8 +440,8 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	if resultStatus != "ACCEPTED" {
 		return fail("result written", fmt.Errorf("unexpected result status %q", resultStatus))
 	}
-	resultPath := filepath.Join(cfg.workRoot, "storage", "objects", "submissions", fmt.Sprintf("%d-result.json", submissionID))
-	if err := waitFile(ctx, resultPath); err != nil {
+	resultKey := fmt.Sprintf("%d-result.json", submissionID)
+	if err := waitStorageObject(ctx, cfg, "submissions", resultKey, "ACCEPTED"); err != nil {
 		return fail("result written", err)
 	}
 	ok("result written")
@@ -564,7 +582,7 @@ func seedRealOrchestrator(ctx context.Context, cfg smokeConfig) error {
 		return fail("node tree seeded", fmt.Errorf("unexpected seeded node %q", resp.NodeID))
 	}
 	ok("node tree seeded")
-	for _, want := range []string{"storage.object.put", "storage.object.get", "storage.object.head"} {
+	for _, want := range []string{"storage.object.put", "storage.object.get", "storage.object.head", "storage.object.delete"} {
 		if !effectiveAPIContains(resp.EffectiveAPIs, want, endpointID) {
 			return fail("storage API surface registered", fmt.Errorf("missing effective API %s endpoint=%s", want, endpointID))
 		}
@@ -734,7 +752,7 @@ func verifyRealOrchestratorRoutes(ctx context.Context, cfg smokeConfig, endpoint
 	if err := doJSONWithHeaders(ctx, http.MethodGet, target, nil, map[string]string{}, &table); err != nil {
 		return fail("child effective routes loaded from real orchestrator", err)
 	}
-	for _, want := range []string{"storage.object.put", "storage.object.get", "storage.object.head"} {
+	for _, want := range []string{"storage.object.put", "storage.object.get", "storage.object.head", "storage.object.delete"} {
 		route := findRoute(table.Routes, want)
 		if route == nil {
 			return fail("child effective routes loaded from real orchestrator", fmt.Errorf("missing route %s", want))
@@ -808,6 +826,131 @@ func waitGatewayRoute(ctx context.Context, cfg smokeConfig, apiID string, endpoi
 	}
 	if last == nil {
 		last = fmt.Errorf("gateway route %s did not appear", apiID)
+	}
+	return last
+}
+
+func verifyOrchestratorDrivenGatewayReload(ctx context.Context, cfg smokeConfig) error {
+	var resp struct {
+		Logs []struct {
+			StepID  string `json:"step_id"`
+			Level   string `json:"level"`
+			Message string `json:"message"`
+			Data    struct {
+				Reloaded bool   `json:"reloaded"`
+				Status   string `json:"status"`
+			} `json:"data"`
+		} `json:"logs"`
+	}
+	target := cfg.orchestrator.baseURL() + "/operations/op-smoke-storage-release-install/logs"
+	if err := doJSONWithHeaders(ctx, http.MethodGet, target, nil, map[string]string{}, &resp); err != nil {
+		return fail("gateway reload triggered by orchestrator", err)
+	}
+	for _, log := range resp.Logs {
+		if log.StepID == "gateway_reload:storage-service" &&
+			log.Data.Reloaded &&
+			strings.EqualFold(log.Data.Status, "published") &&
+			strings.Contains(log.Message, "gateway reload triggered by orchestrator") {
+			ok("gateway reload triggered by orchestrator")
+			return nil
+		}
+	}
+	return fail("gateway reload triggered by orchestrator", fmt.Errorf("gateway reload operation log not found: %#v", resp.Logs))
+}
+
+func verifyStorageBackend(ctx context.Context, cfg smokeConfig) error {
+	var health struct {
+		Status  string `json:"status"`
+		Backend string `json:"backend"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.storage.baseURL()+"/health", nil, map[string]string{}, &health); err != nil {
+		return fail("storage backend "+cfg.storageBackend, err)
+	}
+	if !strings.EqualFold(health.Backend, cfg.storageBackend) {
+		return fail("storage backend "+cfg.storageBackend, fmt.Errorf("expected backend %q, got status=%q backend=%q", cfg.storageBackend, health.Status, health.Backend))
+	}
+	ok("storage backend %s", cfg.storageBackend)
+	return nil
+}
+
+func verifyStorageLifecycleThroughResolver(ctx context.Context, cfg smokeConfig) error {
+	key := fmt.Sprintf("beta-%s-%d.txt", cfg.storageBackend, time.Now().UnixNano())
+	body := "beta storage lifecycle via internal resolver\n"
+	headers := map[string]string{
+		"Authorization":         "Bearer " + serviceToken,
+		"X-OJOS-Caller-Service": judgeAPIService,
+		"X-OJOS-Node-Id":        childNodeID,
+	}
+	objectPath := "/internal/apis/storage.object.put/judge-artifacts/" + key
+	status, respBody, err := doStatus(ctx, http.MethodPut, cfg.gateway.baseURL()+objectPath, body, headers)
+	if err != nil {
+		return fail("storage lifecycle via internal resolver", err)
+	}
+	if status < 200 || status >= 300 {
+		return fail("storage lifecycle via internal resolver", fmt.Errorf("PUT got %d: %s", status, strings.TrimSpace(string(respBody))))
+	}
+
+	status, respBody, err = doStatus(ctx, http.MethodHead, cfg.gateway.baseURL()+"/internal/apis/storage.object.head/judge-artifacts/"+key, nil, headers)
+	if err != nil {
+		return fail("storage lifecycle via internal resolver", err)
+	}
+	if status < 200 || status >= 300 {
+		return fail("storage lifecycle via internal resolver", fmt.Errorf("HEAD got %d: %s", status, strings.TrimSpace(string(respBody))))
+	}
+
+	status, respBody, err = doStatus(ctx, http.MethodGet, cfg.gateway.baseURL()+"/internal/apis/storage.object.get/judge-artifacts/"+key, nil, headers)
+	if err != nil {
+		return fail("storage lifecycle via internal resolver", err)
+	}
+	if status < 200 || status >= 300 || string(respBody) != body {
+		return fail("storage lifecycle via internal resolver", fmt.Errorf("GET got status=%d body=%q", status, string(respBody)))
+	}
+
+	status, respBody, err = doStatus(ctx, http.MethodDelete, cfg.storage.baseURL()+"/api/storage/objects/judge-artifacts/"+key, nil, map[string]string{})
+	if err != nil {
+		return fail("storage lifecycle delete through storage HTTP", err)
+	}
+	if status < 200 || status >= 300 {
+		return fail("storage lifecycle delete through storage HTTP", fmt.Errorf("DELETE got %d: %s", status, strings.TrimSpace(string(respBody))))
+	}
+	status, respBody, err = doStatus(ctx, http.MethodGet, cfg.gateway.baseURL()+"/internal/apis/storage.object.get/judge-artifacts/"+key, nil, headers)
+	if err != nil {
+		return fail("storage lifecycle delete through storage HTTP", err)
+	}
+	if status != http.StatusNotFound && !(status == http.StatusBadRequest && strings.Contains(strings.ToLower(string(respBody)), "key does not exist")) {
+		return fail("storage lifecycle delete through storage HTTP", fmt.Errorf("expected GET after delete to return 404, got %d: %s", status, strings.TrimSpace(string(respBody))))
+	}
+	ok("storage lifecycle via internal resolver and storage HTTP delete")
+	return nil
+}
+
+func waitStorageObject(ctx context.Context, cfg smokeConfig, bucket string, key string, wantSubstring string) error {
+	headers := map[string]string{
+		"Authorization":         "Bearer " + serviceToken,
+		"X-OJOS-Caller-Service": judgeAPIService,
+		"X-OJOS-Node-Id":        childNodeID,
+	}
+	target := cfg.gateway.baseURL() + "/internal/apis/storage.object.get/" + bucket + "/" + key
+	deadline := time.Now().Add(20 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		status, body, err := doStatus(ctx, http.MethodGet, target, nil, headers)
+		if err != nil {
+			last = err
+		} else if status >= 200 && status < 300 {
+			if wantSubstring == "" || strings.Contains(string(body), wantSubstring) {
+				return nil
+			}
+			last = fmt.Errorf("object %s/%s did not contain expected text", bucket, key)
+		} else {
+			last = fmt.Errorf("object %s/%s unavailable: status=%d body=%s", bucket, key, status, strings.TrimSpace(string(body)))
+		}
+		if wait(ctx, 300*time.Millisecond) != nil {
+			return ctx.Err()
+		}
+	}
+	if last == nil {
+		last = fmt.Errorf("object %s/%s did not appear", bucket, key)
 	}
 	return last
 }
@@ -1121,22 +1264,33 @@ func storageRoute(apiID string, methods []string, permission string, upstream st
 
 func writeStorageConfig(cfg smokeConfig) (string, error) {
 	path := storageConfigPath(cfg)
+	minioEndpoint := envDefault("OJOS_REAL_MINIO_ENDPOINT", envDefault("MINIO_ENDPOINT", "127.0.0.1:9000"))
+	minioAccessKey := envDefault("OJOS_REAL_MINIO_ACCESS_KEY", envDefault("MINIO_ROOT_USER", "ojos-minio"))
+	minioSecretKey := envDefault("OJOS_REAL_MINIO_SECRET_KEY", envDefault("MINIO_ROOT_PASSWORD", "ojos-minio-local"))
+	minioUseSSL := envDefault("OJOS_REAL_MINIO_USE_SSL", envDefault("MINIO_USE_SSL", "false"))
 	content := fmt.Sprintf(`Name: storage-service-smoke
 Host: %s
 Port: %d
 Storage:
-  Backend: local
+  Backend: %s
   Root: %s
   Buckets:
     - submissions
     - problems
     - judge-artifacts
   MinIO:
-    Endpoint: minio:9000
-    AccessKey: ojos
-    SecretKey: ojos-local-dev
-    UseSSL: false
-`, cfg.storage.host, cfg.storage.port, yamlString(filepath.Join(cfg.workRoot, "storage")))
+    Endpoint: %s
+    AccessKey: %s
+    SecretKey: %s
+    UseSSL: %s
+`, cfg.storage.host, cfg.storage.port,
+		cfg.storageBackend,
+		yamlString(filepath.Join(cfg.workRoot, "storage")),
+		yamlString(minioEndpoint),
+		yamlString(minioAccessKey),
+		yamlString(minioSecretKey),
+		minioUseSSL,
+	)
 	return path, os.WriteFile(path, []byte(content), 0o644)
 }
 
@@ -1336,7 +1490,7 @@ func createSubmission(ctx context.Context, cfg smokeConfig) (int64, error) {
 	body := map[string]any{
 		"problem_id": int64(1001),
 		"language":   "cpp17",
-		"code":       "#include <iostream>\nint main() { std::cout << \"ok\\n\"; return 0; }\n",
+		"code":       submissionSourceCode,
 	}
 	var resp struct {
 		SubmissionID int64  `json:"submission_id"`
@@ -1437,12 +1591,25 @@ func doJSONWithHeaders(ctx context.Context, method string, target string, body a
 
 func doStatus(ctx context.Context, method string, target string, body any, headers map[string]string) (int, []byte, error) {
 	var reader io.Reader
+	contentType := ""
 	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return 0, nil, err
+		switch value := body.(type) {
+		case io.Reader:
+			reader = value
+		case string:
+			reader = strings.NewReader(value)
+			contentType = "text/plain; charset=utf-8"
+		case []byte:
+			reader = bytes.NewReader(value)
+			contentType = "application/octet-stream"
+		default:
+			data, err := json.Marshal(body)
+			if err != nil {
+				return 0, nil, err
+			}
+			reader = bytes.NewReader(data)
+			contentType = "application/json"
 		}
-		reader = bytes.NewReader(data)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
@@ -1453,8 +1620,8 @@ func doStatus(ctx context.Context, method string, target string, body any, heade
 			req.Header.Set(key, value)
 		}
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := smokeHTTP.Do(req)
 	if err != nil {
@@ -1527,17 +1694,22 @@ func pendingCount(ctx context.Context, client *redis.Client) (int64, error) {
 
 func verifyQueueStatusAPI(ctx context.Context, cfg smokeConfig) error {
 	var resp struct {
-		TaskStream    string `json:"task_stream"`
-		ResultStream  string `json:"result_stream"`
-		Group         string `json:"group"`
-		PendingCount  int64  `json:"pending_count"`
-		ConsumerLag   int64  `json:"consumer_lag"`
-		Lag           int64  `json:"lag"`
-		ConsumerCount int64  `json:"consumer_count"`
-		RedisStatus   string `json:"redis_status"`
-		Consumers     []struct {
-			Name    string `json:"name"`
-			Pending int64  `json:"pending"`
+		TaskStream        string `json:"task_stream"`
+		ResultStream      string `json:"result_stream"`
+		Group             string `json:"group"`
+		PendingCount      int64  `json:"pending_count"`
+		ConsumerLag       int64  `json:"consumer_lag"`
+		Lag               int64  `json:"lag"`
+		ConsumerCount     int64  `json:"consumer_count"`
+		LastID            string `json:"last_id"`
+		ResultLastID      string `json:"result_last_id"`
+		PendingOldestIdle int64  `json:"pending_oldest_idle_ms"`
+		RedisStatus       string `json:"redis_status"`
+		Consumers         []struct {
+			Name       string `json:"name"`
+			Pending    int64  `json:"pending"`
+			IdleMs     int64  `json:"idle_ms"`
+			InactiveMs int64  `json:"inactive_ms"`
 		} `json:"consumers"`
 	}
 	headers := map[string]string{
@@ -1568,7 +1740,15 @@ func verifyQueueStatusAPI(ctx context.Context, cfg smokeConfig) error {
 	if resp.ConsumerCount == 0 || len(resp.Consumers) == 0 {
 		return fail("redis queue status API returned pending/lag", fmt.Errorf("expected at least one consumer: %#v", resp))
 	}
-	ok("redis queue status API returned pending=%d lag=%d consumers=%d", resp.PendingCount, lag, len(resp.Consumers))
+	if strings.TrimSpace(resp.LastID) == "" || strings.TrimSpace(resp.ResultLastID) == "" {
+		return fail("redis queue status API returned pending/lag", fmt.Errorf("expected stream last ids: %#v", resp))
+	}
+	for _, consumer := range resp.Consumers {
+		if strings.TrimSpace(consumer.Name) == "" || consumer.IdleMs < 0 || consumer.InactiveMs < 0 {
+			return fail("redis queue status API returned pending/lag", fmt.Errorf("consumer idle fields missing: %#v", resp.Consumers))
+		}
+	}
+	ok("redis queue status API returned pending=%d lag=%d consumers=%d idle_ms=%d", resp.PendingCount, lag, len(resp.Consumers), resp.Consumers[0].IdleMs)
 	return nil
 }
 
@@ -1849,6 +2029,18 @@ func normalizeMatrixMode(value string) string {
 	}
 }
 
+func normalizeStorageBackend(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "local":
+		return "local"
+	case "minio":
+		return "minio"
+	default:
+		return value
+	}
+}
+
 func normalizeInstallMode(value string, controlPlaneMode string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
@@ -1934,13 +2126,21 @@ func printBetaMatrix(parent context.Context, cfg smokeConfig) {
 	ok("nodes created through API")
 	ok("auth real")
 	ok("service identity allow/deny")
+	skip("release package install in smoke: source tree release.yaml")
 	ok("release.install storage-service")
-	ok("gateway reload")
-	ok("storage local backend")
+	ok("release.install service_start storage-service local-process")
+	ok("gateway reload orchestrator-driven")
+	ok("storage backend %s", cfg.storageBackend)
 	ok("Redis task/result")
+	ok("queue pending/lag")
 	ok("judge-worker fake runner")
 	ok("result ACCEPTED")
 	printComposeMatrixStatus(parent, cfg)
+	if cfg.storageBackend == "minio" {
+		ok("MinIO beta smoke: storage-service backend=minio")
+	} else {
+		skip("MinIO beta smoke: storage backend is local")
+	}
 	printMinIOMatrixStatus(parent, cfg)
 	printNsjailMatrixStatus(parent)
 }
