@@ -63,10 +63,7 @@ type SubmissionRepository interface {
 	MarkSubmissionSystemError(ctx context.Context, submissionID int64, message string) error
 }
 
-type PermissionChecker interface {
-	RequireUserPermission(ctx context.Context, userID int64, permissionCode string, scope sharedperm.Scope) error
-	HasUserPermission(ctx context.Context, userID int64, permissionCode string, scope sharedperm.Scope) (bool, error)
-}
+type PermissionChecker = sharedperm.UserChecker
 
 func (s *ServiceContext) ActiveSubmissionRepo() SubmissionRepository {
 	if s == nil {
@@ -85,10 +82,7 @@ func (s *ServiceContext) ActivePermissionChecker() PermissionChecker {
 	if s.Permission != nil {
 		return s.Permission
 	}
-	if s.DB == nil {
-		return nil
-	}
-	return databasePermissionChecker{db: s.DB}
+	return sharedperm.NewDatabaseUserChecker(s.DB)
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
@@ -150,10 +144,6 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	}
 
 	repo := repository.New(db)
-	permissionChecker := newAuthServicePermissionChecker(c.AuthService.Endpoint, c.AuthService.AdminToken)
-	if permissionChecker == nil {
-		permissionChecker = databasePermissionChecker{db: db}
-	}
 	return &ServiceContext{
 		Config: c,
 
@@ -164,8 +154,12 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		Repo:           repo,
 		SubmissionRepo: repo,
 		WorkerRepo:     repo,
-		Permission:     permissionChecker,
-		Redis:          redisClient,
+		Permission: sharedperm.NewUserChecker(
+			c.AuthService.Endpoint,
+			c.AuthService.AdminToken,
+			db,
+		),
+		Redis: redisClient,
 
 		UserContextMiddleware: middleware.NewUserContextMiddleware().Handle,
 		InternalAuthMiddleware: middleware.NewInternalAuthMiddleware(
