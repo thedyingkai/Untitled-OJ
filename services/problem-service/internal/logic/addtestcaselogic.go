@@ -29,7 +29,7 @@ func NewAddTestCaseLogic(ctx context.Context, svcCtx *svc.ServiceContext) *AddTe
 }
 
 func (l *AddTestCaseLogic) AddTestCase(req *types.AddTestCaseReq) (resp *types.AddTestCaseResp, err error) {
-	if _, err := requireProblemPermission(l.ctx, l.svcCtx, "problem.manage.data", req.ProblemId); err != nil {
+	if _, err := requireProblemPermission(l.ctx, l.svcCtx, "problem.testdata.write", req.ProblemId); err != nil {
 		return nil, err
 	}
 	if err := validateLimits(req.TimeLimitMs, req.MemoryLimitMb, true); err != nil {

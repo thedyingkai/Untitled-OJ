@@ -17,6 +17,7 @@ import (
 	"ojos-shared/database"
 	sharedlogger "ojos-shared/logger"
 	"ojos-shared/security/internalauth"
+	sharedperm "ojos-shared/security/permission"
 	"ojos-shared/tracing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,7 +35,8 @@ type ServiceContext struct {
 	Tracer *sdktrace.TracerProvider
 	Redis  *redis.Client
 
-	Repo *repository.Repository
+	Repo       *repository.Repository
+	Permission sharedperm.UserChecker
 
 	InternalAuthMiddleware rest.Middleware
 	UserContextMiddleware  rest.Middleware
@@ -99,6 +101,11 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		Redis:  redisClient,
 
 		Repo: repository.New(db),
+		Permission: sharedperm.NewUserChecker(
+			c.AuthService.Endpoint,
+			c.AuthService.AdminToken,
+			db,
+		),
 
 		InternalAuthMiddleware: middleware.NewInternalAuthMiddleware(
 			c.InternalAuth.Enabled,
@@ -117,6 +124,12 @@ func applyEnvOverrides(c *config.Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("JAEGER_ENDPOINT")); value != "" {
 		c.Jaeger.Endpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("AUTH_SERVICE_ENDPOINT")); value != "" {
+		c.AuthService.Endpoint = value
+	}
+	if value := firstEnv("AUTH_SERVICE_ADMIN_TOKEN", "AUTH_INTERNAL_TOKEN"); value != "" {
+		c.AuthService.AdminToken = value
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEMS_ROOT")); value != "" {
 		c.Storage.ProblemsRoot = value
@@ -142,6 +155,16 @@ func applyEnvOverrides(c *config.Config) {
 	if value := firstEnv("OJOS_CALLER_NODE_ID", "OJOS_NODE_ID"); value != "" {
 		c.Storage.CallerNodeID = value
 	}
+}
+
+func (s *ServiceContext) ActivePermissionChecker() sharedperm.UserChecker {
+	if s == nil {
+		return nil
+	}
+	if s.Permission != nil {
+		return s.Permission
+	}
+	return sharedperm.NewDatabaseUserChecker(s.DB)
 }
 
 func firstEnv(keys ...string) string {

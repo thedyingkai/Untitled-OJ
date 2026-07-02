@@ -27,5 +27,8 @@ func NewGetProfileLogic(ctx context.Context, svcCtx *svc.ServiceContext) *GetPro
 }
 
 func (l *GetProfileLogic) GetProfile(req *types.ProfileReq) (resp *types.ProfileResp, err error) {
+	if err := requireUserProfilePermission(l.ctx, l.svcCtx, req.UserId, "user.profile.read.self", "user.profile.read.any"); err != nil {
+		return nil, err
+	}
 	return profilePtr(l.svcCtx.ProfileStore.GetOrCreateCtx(l.ctx, req.UserId, req.UserId))
 }

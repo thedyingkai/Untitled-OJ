@@ -88,8 +88,10 @@ ui:
     - submission.view.own
 permissions:
   - judge.submit
+  - judge.admin
   - submission.view.own
   - submission.view.all
+  - judge.worker.status
 health:
   checks:
     - http

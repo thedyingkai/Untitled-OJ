@@ -30,6 +30,7 @@ migrations:
     checksum: sha256:bc8859278465da7294ee84727a1af09daea01b22e1fc1a30ecafceb56d5c2813
 permissions:
   - problem.view
+  - problem.view.private
   - problem.create
   - problem.edit
   - problem.delete
@@ -41,7 +42,7 @@ routes:
     method: ANY
     target_type: endpoint-group
     target: problem-service[*]
-    permission: public
+    permission: problem.view
 required_apis:
   - storage.object.put
 service_identity:

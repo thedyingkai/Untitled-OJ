@@ -12,6 +12,7 @@ type Config struct {
 	Redis        RedisConfig
 	Jaeger       JaegerConfig
 	Storage      StorageConfig
+	AuthService  AuthServiceConfig
 	InternalAuth InternalAuthConfig
 }
 
@@ -36,6 +37,11 @@ type StorageConfig struct {
 	ServiceToken            string `json:",optional"`
 	CallerService           string `json:",optional"`
 	CallerNodeID            string `json:",optional"`
+}
+
+type AuthServiceConfig struct {
+	Endpoint   string `json:",optional"`
+	AdminToken string `json:",optional"`
 }
 
 type InternalAuthConfig struct {

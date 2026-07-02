@@ -74,6 +74,7 @@ ui:
 permissions:
   - storage.object.read
   - storage.object.write
+  - storage.object.delete
 health:
   checks:
     - http

@@ -83,6 +83,8 @@ ui:
 permissions:
   - user.profile.read.self
   - user.profile.update.self
+  - user.profile.read.any
+  - user.profile.update.any
   - user.stats.read
 health:
   checks:

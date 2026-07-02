@@ -8,10 +8,11 @@ import (
 
 	"ojos-problem-service/internal/svc"
 	"ojos-shared/security/authctx"
+	sharedperm "ojos-shared/security/permission"
 )
 
 func requireProblemDataPermission(ctx context.Context, svcCtx *svc.ServiceContext, problemID int64) error {
-	_, err := requireProblemPermission(ctx, svcCtx, "problem.manage.data", problemID)
+	_, err := requireProblemPermission(ctx, svcCtx, "problem.testdata.read", problemID)
 	return err
 }
 
@@ -23,7 +24,32 @@ func requireProblemPermission(ctx context.Context, svcCtx *svc.ServiceContext, p
 	if problemID <= 0 {
 		return nil, errors.New("invalid problem id")
 	}
-	if userHasProblemPermission(user, permission) {
+	checker := svcCtx.ActivePermissionChecker()
+	if checker == nil {
+		return nil, errors.New("permission checker is not configured")
+	}
+	allowed, err := checker.HasUserPermission(
+		ctx,
+		user.UserID,
+		permission,
+		sharedperm.Scope{Type: "problem", ID: problemID},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if allowed {
+		return user, nil
+	}
+	if isOwnerScopedProblemPermission(permission) && svcCtx != nil && svcCtx.Repo != nil {
+		owner, err := svcCtx.Repo.IsProblemOwner(ctx, user.UserID, problemID)
+		if err != nil {
+			return nil, err
+		}
+		if owner {
+			return user, nil
+		}
+	}
+	if hasRole(normalizedRoles(user), "super_admin") {
 		return user, nil
 	}
 	return nil, fmt.Errorf("forbidden: missing %s", permission)
@@ -34,37 +60,63 @@ func requireSystemProblemPermission(ctx context.Context, svcCtx *svc.ServiceCont
 	if !ok || user == nil || user.UserID <= 0 {
 		return nil, errors.New("unauthorized")
 	}
-	if userHasProblemPermission(user, permission) {
+	checker := svcCtx.ActivePermissionChecker()
+	if checker == nil {
+		return nil, errors.New("permission checker is not configured")
+	}
+	allowed, err := checker.HasUserPermission(
+		ctx,
+		user.UserID,
+		permission,
+		sharedperm.SystemScope(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if allowed || hasRole(normalizedRoles(user), "super_admin") {
 		return user, nil
 	}
 	return nil, fmt.Errorf("forbidden: missing %s", permission)
 }
 
-func userCanViewPrivateProblems(user *authctx.UserContext) bool {
-	for role := range normalizedRoles(user) {
-		switch role {
-		case "super_admin", "admin", "problem_setter", "problem_owner", "problem_data_manager":
-			return true
-		}
+func userCanViewPrivateProblems(ctx context.Context, svcCtx *svc.ServiceContext, user *authctx.UserContext) (bool, error) {
+	if user == nil || user.UserID <= 0 {
+		return false, nil
 	}
-	return false
+	roles := normalizedRoles(user)
+	if hasRole(roles, "super_admin") {
+		return true, nil
+	}
+	checker := svcCtx.ActivePermissionChecker()
+	if checker == nil {
+		return false, errors.New("permission checker is not configured")
+	}
+	return checker.HasUserPermission(
+		ctx,
+		user.UserID,
+		"problem.view.private",
+		sharedperm.SystemScope(),
+	)
 }
 
-func userHasProblemPermission(user *authctx.UserContext, permission string) bool {
-	roles := normalizedRoles(user)
-	if hasRole(roles, "super_admin") || hasRole(roles, "admin") {
-		return true
+func userHasProblemPermission(ctx context.Context, svcCtx *svc.ServiceContext, user *authctx.UserContext, permission string) (bool, error) {
+	if user == nil || user.UserID <= 0 {
+		return false, nil
 	}
+	if hasRole(normalizedRoles(user), "super_admin") {
+		return true, nil
+	}
+	checker := svcCtx.ActivePermissionChecker()
+	if checker == nil {
+		return false, errors.New("permission checker is not configured")
+	}
+	return checker.HasUserPermission(ctx, user.UserID, permission, sharedperm.SystemScope())
+}
 
+func isOwnerScopedProblemPermission(permission string) bool {
 	switch strings.TrimSpace(permission) {
-	case "problem.view":
-		return hasAnyRole(roles, "user", "problem_viewer", "problem_setter", "problem_owner", "problem_data_manager")
-	case "problem.create":
-		return hasAnyRole(roles, "problem_setter", "problem_owner")
-	case "problem.edit", "problem.delete":
-		return hasAnyRole(roles, "problem_setter", "problem_owner")
-	case "problem.manage.data", "problem.testdata.read", "problem.testdata.write":
-		return hasAnyRole(roles, "problem_setter", "problem_owner", "problem_data_manager")
+	case "problem.view", "problem.view.private", "problem.edit", "problem.delete", "problem.manage.data", "problem.testdata.read", "problem.testdata.write":
+		return true
 	default:
 		return false
 	}

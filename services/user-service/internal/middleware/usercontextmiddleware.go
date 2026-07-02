@@ -11,8 +11,7 @@ import (
 	"ojos-shared/security/authctx"
 )
 
-type UserContextMiddleware struct {
-}
+type UserContextMiddleware struct{}
 
 func NewUserContextMiddleware() *UserContextMiddleware {
 	return &UserContextMiddleware{}

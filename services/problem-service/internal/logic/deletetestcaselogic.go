@@ -29,7 +29,7 @@ func NewDeleteTestCaseLogic(ctx context.Context, svcCtx *svc.ServiceContext) *De
 }
 
 func (l *DeleteTestCaseLogic) DeleteTestCase(req *types.DeleteTestCaseReq) (resp *types.DeleteTestCaseResp, err error) {
-	if _, err := requireProblemPermission(l.ctx, l.svcCtx, "problem.manage.data", req.ProblemId); err != nil {
+	if _, err := requireProblemPermission(l.ctx, l.svcCtx, "problem.testdata.write", req.ProblemId); err != nil {
 		return nil, err
 	}
 	if req.CaseNo <= 0 {

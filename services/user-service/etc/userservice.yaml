@@ -5,5 +5,9 @@ Port: 8084
 Database:
   Url: ""
 
+AuthService:
+  Endpoint: ""
+  AdminToken: ""
+
 Storage:
   ProfilesRoot: /data/ojos/users

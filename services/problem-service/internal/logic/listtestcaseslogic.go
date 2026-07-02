@@ -28,7 +28,7 @@ func NewListTestCasesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Lis
 }
 
 func (l *ListTestCasesLogic) ListTestCases(req *types.ListTestCasesReq) (resp *types.ListTestCasesResp, err error) {
-	if _, err := requireProblemPermission(l.ctx, l.svcCtx, "problem.manage.data", req.ProblemId); err != nil {
+	if _, err := requireProblemPermission(l.ctx, l.svcCtx, "problem.testdata.read", req.ProblemId); err != nil {
 		return nil, err
 	}
 

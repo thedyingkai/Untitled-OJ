@@ -28,6 +28,9 @@ func NewUpdateProfileLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Upd
 }
 
 func (l *UpdateProfileLogic) UpdateProfile(req *types.ProfilePatchReq) (resp *types.ProfileResp, err error) {
+	if err := requireUserProfilePermission(l.ctx, l.svcCtx, req.UserId, "user.profile.update.self", "user.profile.update.any"); err != nil {
+		return nil, err
+	}
 	return profilePtr(l.svcCtx.ProfileStore.UpdateCtx(l.ctx, req.UserId, store.ProfilePatch{
 		DisplayName:  req.DisplayName,
 		Bio:          req.Bio,

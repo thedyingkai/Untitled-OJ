@@ -28,9 +28,20 @@ func NewGetMeLogic(ctx context.Context, svcCtx *svc.ServiceContext) *GetMeLogic 
 }
 
 func (l *GetMeLogic) GetMe(userID, displayName string) (resp *types.ProfileResp, err error) {
+	contextUserID, contextDisplayName, err := currentUserIDString(l.ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireUserProfilePermission(l.ctx, l.svcCtx, contextUserID, "user.profile.read.self", "user.profile.read.any"); err != nil {
+		return nil, err
+	}
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
-		userID = "anonymous"
+		userID = contextUserID
+	}
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		displayName = contextDisplayName
 	}
 	return profilePtr(l.svcCtx.ProfileStore.GetOrCreateCtx(l.ctx, userID, displayName))
 }

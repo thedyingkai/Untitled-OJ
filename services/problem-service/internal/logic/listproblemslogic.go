@@ -35,10 +35,17 @@ func (l *ListProblemsLogic) ListProblems(req *types.ListProblemsReq) (resp *type
 		return nil, errors.New("unauthorized")
 	}
 
-	if !userHasProblemPermission(user, "problem.view") {
+	canView, err := userHasProblemPermission(l.ctx, l.svcCtx, user, "problem.view")
+	if err != nil {
+		return nil, err
+	}
+	if !canView {
 		return nil, errors.New("forbidden: missing problem.view")
 	}
-	canViewPrivate := userCanViewPrivateProblems(user)
+	canViewPrivate, err := userCanViewPrivateProblems(l.ctx, l.svcCtx, user)
+	if err != nil {
+		return nil, err
+	}
 
 	problems, total, err := l.svcCtx.Repo.ListProblems(
 		l.ctx,

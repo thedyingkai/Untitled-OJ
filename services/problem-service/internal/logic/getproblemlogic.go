@@ -6,11 +6,11 @@ package logic
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"ojos-problem-service/internal/packagefs"
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
-	"ojos-shared/security/authctx"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -30,19 +30,19 @@ func NewGetProblemLogic(ctx context.Context, svcCtx *svc.ServiceContext) *GetPro
 }
 
 func (l *GetProblemLogic) GetProblem(req *types.GetProblemReq) (resp *types.GetProblemResp, err error) {
-	user, ok := authctx.FromContext(l.ctx)
-	if !ok || user == nil || user.UserID <= 0 {
-		return nil, errors.New("unauthorized")
-	}
-
 	if req.Id <= 0 {
 		return nil, errors.New("invalid problem id")
 	}
 
-	canViewPrivate := userCanViewPrivateProblems(user)
-
-	p, err := l.svcCtx.Repo.GetProblemVisibleToUser(l.ctx, req.Id, user.UserID, canViewPrivate)
+	p, err := l.svcCtx.Repo.GetProblem(l.ctx, req.Id)
 	if err != nil {
+		return nil, err
+	}
+	requiredPermission := "problem.view"
+	if strings.TrimSpace(p.Visibility) != "public" {
+		requiredPermission = "problem.view.private"
+	}
+	if _, err := requireProblemPermission(l.ctx, l.svcCtx, requiredPermission, req.Id); err != nil {
 		return nil, err
 	}
 

@@ -28,13 +28,36 @@ migrations:
 permissions:
   - user.profile.read.self
   - user.profile.update.self
+  - user.profile.read.any
+  - user.profile.update.any
   - user.stats.read
 routes:
   - path: /api/users/**
     method: ANY
     target_type: endpoint-group
     target: user-service[*]
-    permission: public
+    permission: user.profile.read.self
+apis:
+  - api_id: user.profile.read
+    protocol: http
+    port_name: http
+    path_prefix: /api/users
+    methods: [GET]
+    visibility: descendants
+    auth_mode: user
+    permission: user.profile.read.self
+    version: v1
+    stability: stable
+  - api_id: user.profile.update
+    protocol: http
+    port_name: http
+    path_prefix: /api/users
+    methods: [PATCH]
+    visibility: descendants
+    auth_mode: user
+    permission: user.profile.update.self
+    version: v1
+    stability: stable
 redis: []
 storage:
   - object_type: avatar

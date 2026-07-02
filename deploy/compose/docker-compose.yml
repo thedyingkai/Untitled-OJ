@@ -260,6 +260,8 @@ services:
       - "8084"
     environment:
       DATABASE_URL: ${USER_DATABASE_URL:-postgres://postgres:ojos-user-local@user-db:5432/ojos_user?sslmode=disable}
+      AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
+      AUTH_SERVICE_ADMIN_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
 
   storage-service:
     build:
@@ -407,6 +409,8 @@ services:
       DATABASE_URL: ${PROBLEM_DATABASE_URL:-postgres://postgres:ojos-problem-local@problem-db:5432/ojos_problem?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
+      AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
+      AUTH_SERVICE_ADMIN_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
       OJOS_STORAGE_SERVICE_URL: http://storage-service:8085
       OJOS_INTERNAL_GATEWAY_URL: http://gateway:8080

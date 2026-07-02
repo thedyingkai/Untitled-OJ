@@ -23,38 +23,41 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 	)
 
 	server.AddRoutes(
-		[]rest.Route{
-			{
-				Method:  http.MethodGet,
-				Path:    "/:user_id/preferences",
-				Handler: getPreferencesHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodPatch,
-				Path:    "/:user_id/preferences",
-				Handler: updatePreferencesHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodGet,
-				Path:    "/:user_id/profile",
-				Handler: getProfileHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodPatch,
-				Path:    "/:user_id/profile",
-				Handler: updateProfileHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodGet,
-				Path:    "/:user_id/stats",
-				Handler: getStatsHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodGet,
-				Path:    "/me",
-				Handler: getMeHandler(serverCtx),
-			},
-		},
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.UserContextMiddleware},
+			[]rest.Route{
+				{
+					Method:  http.MethodGet,
+					Path:    "/:user_id/preferences",
+					Handler: getPreferencesHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPatch,
+					Path:    "/:user_id/preferences",
+					Handler: updatePreferencesHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/:user_id/profile",
+					Handler: getProfileHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPatch,
+					Path:    "/:user_id/profile",
+					Handler: updateProfileHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/:user_id/stats",
+					Handler: getStatsHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/me",
+					Handler: getMeHandler(serverCtx),
+				},
+			}...,
+		),
 		rest.WithPrefix("/api/users"),
 	)
 }

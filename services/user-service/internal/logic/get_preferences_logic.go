@@ -27,6 +27,9 @@ func NewGetPreferencesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Ge
 }
 
 func (l *GetPreferencesLogic) GetPreferences(req *types.ProfileReq) (resp *types.PreferencesResp, err error) {
+	if err := requireUserProfilePermission(l.ctx, l.svcCtx, req.UserId, "user.profile.read.self", "user.profile.read.any"); err != nil {
+		return nil, err
+	}
 	profile, err := l.svcCtx.ProfileStore.GetOrCreateCtx(l.ctx, req.UserId, req.UserId)
 	if err != nil {
 		return nil, err

@@ -39,7 +39,7 @@ routes:
     method: ANY
     target_type: endpoint-group
     target: judge-api[*]
-    permission: public
+    permission: submission.view.own
   - path: /api/judge/worker/**
     method: ANY
     target_type: endpoint-group

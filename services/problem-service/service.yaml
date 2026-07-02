@@ -79,10 +79,13 @@ ui:
     - problem.view
 permissions:
   - problem.view
+  - problem.view.private
   - problem.create
   - problem.edit
   - problem.delete
   - problem.manage.data
+  - problem.testdata.read
+  - problem.testdata.write
 health:
   checks:
     - http

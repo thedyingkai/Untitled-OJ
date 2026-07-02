@@ -11,6 +11,10 @@ Redis:
 Jaeger:
   Endpoint: ojos-jaeger:4317
 
+AuthService:
+  Endpoint: ""
+  AdminToken: ""
+
 Storage:
   ProblemsRoot: /data/ojos/problems
 
