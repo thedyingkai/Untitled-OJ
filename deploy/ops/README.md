@@ -9,6 +9,8 @@ Additional executable drills:
 - `redis-recovery-drill.sh`: Redis Stream pending claim/recovery and AOF restart drill.
 - `alert-firing-drill.sh`: Prometheus rule firing and Alertmanager webhook delivery drill.
 - `manager-smoke.sh`: minimum operator smoke for manager GUI/TUI backed by a real orchestrator daemon.
+- `trace-e2e-drill.sh`: compose judge submission trace drill that queries Jaeger and records Redis worker-boundary trace metadata.
+- `basic-load-soak.sh`: minimum auth/problem/storage/judge/result load smoke with success rate, latency, queue pending, and worker processed metrics.
 
 Required checks before opening traffic:
 

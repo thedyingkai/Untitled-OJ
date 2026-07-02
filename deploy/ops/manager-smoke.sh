@@ -50,9 +50,24 @@ finish() {
 }
 trap finish EXIT
 
-command -v cargo >/dev/null 2>&1 || { echo "[ENV-BLOCKED] cargo" >&2; exit 127; }
-command -v curl >/dev/null 2>&1 || { echo "[ENV-BLOCKED] curl" >&2; exit 127; }
-command -v jq >/dev/null 2>&1 || { echo "[ENV-BLOCKED] jq" >&2; exit 127; }
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    cat >&2 <<EOF
+[ENV-BLOCKED] manager-smoke
+命令：command -v $1
+错误摘要：$1 not found
+判断：环境问题
+是否阻塞当前任务：是
+最小修复建议：安装或启动缺失依赖后重跑 manager smoke drill
+后续处理：需要用户介入
+EOF
+    exit 127
+  }
+}
+
+need_cmd cargo
+need_cmd curl
+need_cmd jq
 
 api() {
   local method="$1"

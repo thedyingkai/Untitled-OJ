@@ -25,6 +25,21 @@ docker_run() {
   MSYS2_ARG_CONV_EXCL='*' docker run "$@"
 }
 
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    cat >&2 <<EOF
+[ENV-BLOCKED] alert-firing-drill
+命令：command -v $1
+错误摘要：$1 not found
+判断：环境问题
+是否阻塞当前任务：是
+最小修复建议：安装或启动缺失依赖后重跑 alert firing drill
+后续处理：需要用户介入
+EOF
+    exit 127
+  }
+}
+
 host_mount_path() {
   if command -v cygpath >/dev/null 2>&1; then
     cygpath -w "$1"
@@ -70,9 +85,9 @@ finish() {
 }
 trap finish EXIT
 
-command -v docker >/dev/null 2>&1 || { echo "[ENV-BLOCKED] docker" >&2; exit 127; }
-command -v jq >/dev/null 2>&1 || { echo "[ENV-BLOCKED] jq" >&2; exit 127; }
-command -v python3 >/dev/null 2>&1 || { echo "[ENV-BLOCKED] python3" >&2; exit 127; }
+need_cmd docker
+need_cmd jq
+need_cmd python3
 
 cat >"$evidence_dir/config/alerts.yml" <<'YAML'
 groups:

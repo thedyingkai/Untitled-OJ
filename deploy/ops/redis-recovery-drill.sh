@@ -32,6 +32,21 @@ docker_exec() {
   MSYS2_ARG_CONV_EXCL='*' docker exec "$@"
 }
 
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    cat >&2 <<EOF
+[ENV-BLOCKED] redis-recovery-drill
+命令：command -v $1
+错误摘要：$1 not found
+判断：环境问题
+是否阻塞当前任务：是
+最小修复建议：安装或启动缺失依赖后重跑 Redis recovery drill
+后续处理：需要用户介入
+EOF
+    exit 127
+  }
+}
+
 finish() {
   local rc=$?
   [[ $rc -eq 0 ]] && status="passed" || status="failed"
@@ -73,10 +88,10 @@ finish() {
 }
 trap finish EXIT
 
-command -v docker >/dev/null 2>&1 || { echo "[ENV-BLOCKED] docker" >&2; exit 127; }
-command -v jq >/dev/null 2>&1 || { echo "[ENV-BLOCKED] jq" >&2; exit 127; }
-command -v go >/dev/null 2>&1 || { echo "[ENV-BLOCKED] go" >&2; exit 127; }
-command -v curl >/dev/null 2>&1 || { echo "[ENV-BLOCKED] curl" >&2; exit 127; }
+need_cmd docker
+need_cmd jq
+need_cmd go
+need_cmd curl
 
 docker run -d \
   --name "$container" \

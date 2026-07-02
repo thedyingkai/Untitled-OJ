@@ -25,14 +25,17 @@ backup_filename=""
 backup_checksum=""
 restored_row_count=""
 restored_row_checksum=""
-restored_object_key="ojos/staging-drill/$run_id/sample.txt"
+restored_object_key="staging-drill-$run_id-sample.txt"
 restored_object_checksum=""
+storage_service_restored_object_checksum=""
 schema_rollback="schema rollback unsupported; app-level rollback only"
+minio_lifecycle_policy="deferred: bucket policy/lifecycle is not production-configured in this drill"
 
 network="ojos-staging-drill-$run_id"
 pg_container="ojos-staging-drill-postgres-$run_id"
 minio_container="ojos-staging-drill-minio-$run_id"
 orchestrator_pid=""
+storage_service_pid=""
 work_root="${OJOS_STAGING_DRILL_WORK_DIR:-}"
 work_root_created="0"
 work_repo=""
@@ -49,11 +52,20 @@ minio_access="ojosdrillaccess"
 minio_secret="OjosDrillMinio_0123456789abcdef"
 minio_bucket="ojos-staging-drill"
 orchestrator_port="${OJOS_STAGING_DRILL_ORCHESTRATOR_PORT:-18090}"
+storage_service_port="${OJOS_STAGING_DRILL_STORAGE_SERVICE_PORT:-18085}"
+storage_service_config="$evidence_dir/storage-service.yaml"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
-    echo "[ENV-BLOCKED] $1"
-    echo "command '$1' is required for staging drill" >&2
+    cat >&2 <<EOF
+[ENV-BLOCKED] staging-drill
+命令：command -v $1
+错误摘要：$1 not found
+判断：环境问题
+是否阻塞当前任务：是
+最小修复建议：安装或启动缺失依赖后重跑 staging drill
+后续处理：需要用户介入
+EOF
     exit 127
   }
 }
@@ -94,7 +106,9 @@ write_manifest() {
     --arg restored_row_checksum "$restored_row_checksum" \
     --arg restored_object_key "$restored_object_key" \
     --arg restored_object_checksum "$restored_object_checksum" \
+    --arg storage_service_restored_object_checksum "$storage_service_restored_object_checksum" \
     --arg schema_rollback "$schema_rollback" \
+    --arg minio_lifecycle_policy "$minio_lifecycle_policy" \
     '{
       drill: "staging-backup-restore-rollback",
       run_id: $run_id,
@@ -110,6 +124,8 @@ write_manifest() {
       restored_row_checksum: $restored_row_checksum,
       restored_object_key: $restored_object_key,
       restored_object_checksum: $restored_object_checksum,
+      storage_service_restored_object_checksum: $storage_service_restored_object_checksum,
+      minio_lifecycle_policy: $minio_lifecycle_policy,
       release_rollback: {
         service: "judge-api",
         v1: "0.1.0",
@@ -121,7 +137,9 @@ write_manifest() {
         responses: "responses/",
         postgres_dump: "postgres/staging-drill.dump",
         minio_backup: "minio-backup/sample.txt",
-        minio_restore: "minio-restore/sample.txt"
+        minio_restore: "minio-restore/sample.txt",
+        storage_service_health: "responses/storage-service-health.json",
+        storage_service_object: "minio-restore/storage-service-sample.txt"
       }
     }' >"$evidence_dir/manifest.json"
 }
@@ -137,6 +155,10 @@ collect_container_logs() {
 }
 
 cleanup() {
+  if [[ -n "$storage_service_pid" ]]; then
+    kill "$storage_service_pid" >/dev/null 2>&1 || true
+    wait "$storage_service_pid" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$orchestrator_pid" ]]; then
     kill "$orchestrator_pid" >/dev/null 2>&1 || true
     wait "$orchestrator_pid" >/dev/null 2>&1 || true
@@ -178,6 +200,7 @@ need_cmd bash
 need_cmd cargo
 need_cmd curl
 need_cmd docker
+need_cmd go
 need_cmd jq
 need_cmd sed
 need_cmd tar
@@ -244,9 +267,11 @@ echo "starting disposable MinIO"
 docker run -d \
   --name "$minio_container" \
   --network "$network" \
+  -p 127.0.0.1::9000 \
   -e "MINIO_ROOT_USER=$minio_access" \
   -e "MINIO_ROOT_PASSWORD=$minio_secret" \
   "$minio_image" server /data --console-address ":9001" >/dev/null
+minio_port="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "9000/tcp") 0).HostPort}}' "$minio_container")"
 
 mc_config="$evidence_dir/mc-config"
 mkdir -p "$mc_config" "$evidence_dir/minio-src" "$evidence_dir/minio-backup" "$evidence_dir/minio-restore"
@@ -281,6 +306,53 @@ mc cp minio-backup/sample.txt "drill/$minio_bucket/$restored_object_key"
 mc cp "drill/$minio_bucket/$restored_object_key" minio-restore/sample.txt
 restored_object_checksum="$(sha256_file "$evidence_dir/minio-restore/sample.txt")"
 [[ "$restored_object_checksum" == "$object_source_checksum" ]]
+
+cat >"$storage_service_config" <<YAML
+Name: storage-service-staging-drill
+Host: 127.0.0.1
+Port: $storage_service_port
+
+Storage:
+  Backend: minio
+  Root: "$evidence_dir/storage-service-data"
+  Buckets:
+    - $minio_bucket
+  MinIO:
+    Endpoint: "127.0.0.1:$minio_port"
+    AccessKey: "$minio_access"
+    SecretKey: "$minio_secret"
+    UseSSL: false
+YAML
+
+(
+  cd "$repo_root/services/storage-service"
+  STORAGE_BACKEND=minio \
+  MINIO_ENDPOINT="127.0.0.1:$minio_port" \
+  MINIO_ACCESS_KEY="$minio_access" \
+  MINIO_SECRET_KEY="$minio_secret" \
+  MINIO_USE_SSL=false \
+  OJOS_STORAGE_BUCKETS="$minio_bucket" \
+  go run . -f "$storage_service_config"
+) >"$logs_dir/storage-service.log" 2>&1 &
+storage_service_pid="$!"
+
+for _ in $(seq 1 120); do
+  if curl -fsS "http://127.0.0.1:$storage_service_port/health" >/dev/null 2>&1; then
+    break
+  fi
+  if ! kill -0 "$storage_service_pid" >/dev/null 2>&1; then
+    echo "storage-service exited early" >&2
+    cat "$logs_dir/storage-service.log" >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
+curl -fsS "http://127.0.0.1:$storage_service_port/health" >"$responses_dir/storage-service-health.json"
+jq -e '.status == "ok" and .backend == "minio"' "$responses_dir/storage-service-health.json" >/dev/null
+curl -fsS "http://127.0.0.1:$storage_service_port/api/storage/objects/$minio_bucket/$restored_object_key" \
+  >"$evidence_dir/minio-restore/storage-service-sample.txt"
+storage_service_restored_object_checksum="$(sha256_file "$evidence_dir/minio-restore/storage-service-sample.txt")"
+[[ "$storage_service_restored_object_checksum" == "$object_source_checksum" ]]
 
 echo "preparing disposable repo copy for release v1/v2 drill"
 if [[ -z "$work_root" ]]; then

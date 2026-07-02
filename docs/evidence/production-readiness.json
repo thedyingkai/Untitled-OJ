@@ -52,8 +52,8 @@
     "workflow": "Staging Drill",
     "commit": "ab3a2e4",
     "local_status": "passed",
-    "local_evidence": "artifacts/staging-drill-local-9/manifest.json",
-    "evidence": "deploy/ops/staging-drill.sh writes manifest/logs/responses/checksums and .github/workflows/staging-drill.yml uploads artifacts; local real restore verified in artifacts/staging-drill-local-9"
+    "local_evidence": "artifacts/staging-drill-local-10/manifest.json",
+    "evidence": "deploy/ops/staging-drill.sh writes manifest/logs/responses/checksums and .github/workflows/staging-drill.yml uploads artifacts; local real restore verified in artifacts/staging-drill-local-10 including storage-service readback checksum"
   },
   {
     "component": "gateway frontend",
@@ -89,11 +89,13 @@
   {
     "component": "Jaeger/observability",
     "capability": "trace E2E",
-    "status": "deferred",
-    "gate": "deferred",
-    "workflow": "",
-    "commit": "afb48b6",
-    "evidence": "No completed Jaeger query drill yet for gateway -> judge-api -> storage-service -> Redis/worker -> storage-service -> judge-api result"
+    "status": "pending-first-run",
+    "gate": "nightly",
+    "workflow": "Orchestrator Docker E2E",
+    "commit": "pending-current-change",
+    "local_status": "passed",
+    "local_evidence": "artifacts/trace-e2e-drill-local-9/manifest.json",
+    "evidence": "deploy/ops/trace-e2e-drill.sh ran a real compose judge submission and queried Jaeger trace_id=35ec7aa59b46df1d46430e5b1c67134f with gateway-service, judge-api-service, storage-service, judge-worker, span_count=8, and judge-worker execute task native OTLP span"
   },
   {
     "component": "deploy/ops",
@@ -116,11 +118,13 @@
   {
     "component": "deploy/ops",
     "capability": "basic load/soak",
-    "status": "deferred",
-    "gate": "deferred",
-    "workflow": "",
-    "commit": "afb48b6",
-    "evidence": "No completed real staging load/soak run yet; must not be called capacity testing"
+    "status": "pending-first-run",
+    "gate": "nightly",
+    "workflow": "Orchestrator Docker E2E",
+    "commit": "pending-current-change",
+    "local_status": "passed",
+    "local_evidence": "artifacts/basic-load-soak-local-2/manifest.json",
+    "evidence": "deploy/ops/basic-load-soak.sh local smoke passed with concurrency=20, request_count=41, success_rate=1.0, p95_ms=69.039, error_count=0, queue_pending_max=0, worker_processed_count=1; this is not a capacity test"
   },
   {
     "component": "auth-service",
@@ -152,7 +156,7 @@
     "workflow": "Staging Drill",
     "commit": "ab3a2e4",
     "local_status": "passed",
-    "local_evidence": "artifacts/staging-drill-local-9/manifest.json",
-    "evidence": "deploy/ops/staging-drill.sh backs up, deletes, restores, and checksums a MinIO sample object; local sample object restore passed in artifacts/staging-drill-local-9"
+    "local_evidence": "artifacts/staging-drill-local-10/manifest.json",
+    "evidence": "deploy/ops/staging-drill.sh backs up, deletes, restores, and checksums a MinIO sample object; local sample object restore passed in artifacts/staging-drill-local-10 and storage-service readback checksum matched"
   }
 ]

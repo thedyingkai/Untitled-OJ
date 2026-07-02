@@ -6841,6 +6841,7 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
     let allowed_ops_scripts = [
         "deploy/ops/backup.sh",
         "deploy/ops/alert-firing-drill.sh",
+        "deploy/ops/basic-load-soak.sh",
         "deploy/ops/ci-policy.sh",
         "deploy/ops/manager-smoke.sh",
         "deploy/ops/preflight.sh",
@@ -6850,6 +6851,7 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
         "deploy/ops/secret-check.sh",
         "deploy/ops/service-credential-drill.sh",
         "deploy/ops/staging-drill.sh",
+        "deploy/ops/trace-e2e-drill.sh",
     ];
     let script_files = relative_files(&root, &root)
         .into_iter()

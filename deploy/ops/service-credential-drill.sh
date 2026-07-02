@@ -21,7 +21,15 @@ start_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
-    echo "[ENV-BLOCKED] $1" >&2
+    cat >&2 <<EOF
+[ENV-BLOCKED] service-credential-drill
+命令：command -v $1
+错误摘要：$1 not found
+判断：环境问题
+是否阻塞当前任务：是
+最小修复建议：安装或启动缺失依赖后重跑 service credential lifecycle drill
+后续处理：需要用户介入
+EOF
     exit 127
   }
 }

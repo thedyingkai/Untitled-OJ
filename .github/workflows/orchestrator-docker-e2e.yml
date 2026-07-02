@@ -297,3 +297,34 @@ jobs:
         with:
           name: docker-image-build-evidence
           path: artifacts/image-build
+      - name: Compose trace E2E drill
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true') }}
+        shell: bash
+        env:
+          OJOS_TRACE_DRILL_BOOTSTRAP_COMPOSE: "1"
+          OJOS_TRACE_DRILL_BUILD_COMPOSE: "0"
+          OJOS_TRACE_DRILL_CLEANUP_COMPOSE: "0"
+          OJOS_EVIDENCE_DIR: artifacts/trace-e2e-drill
+        run: bash deploy/ops/trace-e2e-drill.sh
+      - name: Compose basic load/soak drill
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true') }}
+        shell: bash
+        env:
+          OJOS_LOAD_DRILL_BOOTSTRAP_COMPOSE: "0"
+          OJOS_LOAD_DRILL_RUN_SMOKE: "1"
+          OJOS_LOAD_CONCURRENCY: "20"
+          OJOS_LOAD_REQUESTS: "40"
+          OJOS_EVIDENCE_DIR: artifacts/basic-load-soak
+        run: bash deploy/ops/basic-load-soak.sh
+      - name: Upload runtime drill evidence
+        if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true')) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-runtime-drill-evidence
+          path: |
+            artifacts/trace-e2e-drill
+            artifacts/basic-load-soak
+      - name: Cleanup compose runtime drill
+        if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true')) }}
+        shell: bash
+        run: docker compose --env-file .env.example -f deploy/compose/docker-compose.yml down --remove-orphans
