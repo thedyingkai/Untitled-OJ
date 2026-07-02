@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
+bash_bin="${BASH:-bash}"
 
 die() {
   echo "preflight: $*" >&2
@@ -14,6 +15,7 @@ need_cmd() {
 }
 
 need_cmd docker
+need_cmd "$bash_bin"
 
 monitoring_file="${OJOS_MONITORING_COMPOSE_FILE:-$repo_root/deploy/ops/monitoring/docker-compose.yml}"
 if [[ -f "$monitoring_file" ]]; then
@@ -21,7 +23,7 @@ if [[ -f "$monitoring_file" ]]; then
   export OJOS_SECRET_CHECK_REQUIRE_MONITORING="${OJOS_SECRET_CHECK_REQUIRE_MONITORING:-1}"
 fi
 
-bash "$script_dir/secret-check.sh"
+"$bash_bin" "$script_dir/secret-check.sh"
 
 compose_file="${OJOS_COMPOSE_FILE:-$repo_root/deploy/compose/docker-compose.yml}"
 [[ -f "$compose_file" ]] || die "compose file does not exist: $compose_file"

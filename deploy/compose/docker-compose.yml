@@ -73,7 +73,7 @@ services:
 
   redis:
     image: redis:8.8.0
-    command: [ "redis-server", "--appendonly", "yes" ]
+    command: [ "redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-DEV_ONLY_redis_password_not_for_production}" ]
     ports:
       - "127.0.0.1:6379:6379"
 
@@ -192,7 +192,7 @@ services:
       orchestrator:
         condition: service_started
     environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
@@ -316,7 +316,7 @@ services:
       - "127.0.0.1:8082:8082"
     environment:
       DATABASE_URL: ${JUDGE_DATABASE_URL:-postgres://postgres:ojos-judge-local@judge-db:5432/ojos_judge?sslmode=disable}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
       AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
@@ -367,7 +367,7 @@ services:
       OJOS_INTERNAL_GATEWAY_URL: http://gateway:8080
       OJOS_STORAGE_OBJECT_GET_API_ID: storage.object.get
       OJOS_STORAGE_OBJECT_PUT_API_ID: storage.object.put
-      OJOS_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      OJOS_REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
       OJOS_JUDGE_TASK_STREAM: ojos:judge:task
       OJOS_JUDGE_CONSUMER_GROUP: judge-worker
       OJOS_RUNNER_MODE: ${OJOS_RUNNER_MODE:-nsjail}
@@ -412,7 +412,7 @@ services:
       - "8083"
     environment:
       DATABASE_URL: ${PROBLEM_DATABASE_URL:-postgres://postgres:ojos-problem-local@problem-db:5432/ojos_problem?sslmode=disable}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
       AUTH_SERVICE_ADMIN_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}

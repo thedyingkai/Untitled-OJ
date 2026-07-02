@@ -1,0 +1,28 @@
+name: Staging Drill
+
+on:
+  schedule:
+    - cron: "43 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup-restore-rollback:
+    name: Backup restore rollback staging drill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run staging backup/restore/rollback drill
+        shell: bash
+        env:
+          OJOS_EVIDENCE_DIR: artifacts/staging-drill
+        run: bash deploy/ops/staging-drill.sh
+      - name: Upload staging drill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-drill-evidence
+          path: artifacts/staging-drill

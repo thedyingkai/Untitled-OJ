@@ -1,0 +1,43 @@
+name: Ops Drills Nightly
+
+on:
+  schedule:
+    - cron: "11 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recovery-security-observability:
+    name: Recovery security observability drills
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Service credential lifecycle drill
+        shell: bash
+        env:
+          OJOS_EVIDENCE_DIR: artifacts/service-credential-drill
+        run: bash deploy/ops/service-credential-drill.sh
+      - name: Redis recovery drill
+        shell: bash
+        env:
+          OJOS_EVIDENCE_DIR: artifacts/redis-recovery-drill
+        run: bash deploy/ops/redis-recovery-drill.sh
+      - name: Alert firing drill
+        shell: bash
+        env:
+          OJOS_EVIDENCE_DIR: artifacts/alert-firing-drill
+        run: bash deploy/ops/alert-firing-drill.sh
+      - name: Manager operator smoke
+        shell: bash
+        env:
+          OJOS_EVIDENCE_DIR: artifacts/manager-smoke
+        run: bash deploy/ops/manager-smoke.sh
+      - name: Upload ops drill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ops-drill-evidence
+          path: artifacts

@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
+bash_bin="${BASH:-bash}"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -11,12 +12,13 @@ need_cmd() {
   }
 }
 
-need_cmd bash
+need_cmd "$bash_bin"
 need_cmd docker
 
-while IFS= read -r script; do
-  bash -n "$script"
-done < <(find "$script_dir" -name '*.sh' -print | sort)
+shopt -s globstar nullglob
+for script in "$script_dir"/**/*.sh; do
+  "$bash_bin" -n "$script"
+done
 
 if grep -R --line-number \
   --include='*.yaml' \
@@ -46,7 +48,7 @@ if grep -q '"/usr", "/usr"' "$repo_root/services/judge-worker/src/sandbox.rs"; t
   exit 1
 fi
 
-if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$repo_root/.env.example" bash "$script_dir/secret-check.sh" >/tmp/ojos-weak-secret-check.log 2>&1; then
+if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$repo_root/.env.example" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-weak-secret-check.log 2>&1; then
   echo "ops-ci: weak root .env.example unexpectedly passed secret policy" >&2
   exit 1
 fi
@@ -82,7 +84,8 @@ ORCHESTRATOR_POSTGRES_USER=ojos_orchestrator_app
 ORCHESTRATOR_POSTGRES_PASSWORD=OrchestratorDbProd_0123456789
 ORCHESTRATOR_DATABASE_URL=postgres://ojos_orchestrator_app:OrchestratorDbProd_0123456789@orchestrator-db:5432/ojos_orchestrator?sslmode=disable
 
-REDIS_URL=redis://redis:6379/0
+REDIS_PASSWORD=RedisProd_0123456789abcdef012345
+REDIS_URL=redis://:RedisProd_0123456789abcdef012345@redis:6379/0
 JWT_SECRET=JwtProd_0123456789abcdef0123456789abcdef
 AUTH_INTERNAL_TOKEN=AuthIntProd_0123456789abcdef0123456789
 ORCHESTRATOR_INTERNAL_TOKEN=OrchIntProd_0123456789abcdef0123456789
@@ -115,7 +118,7 @@ OJOS_ALERT_WEBHOOK_URL=https://alerts.invalid/ojos
 GRAFANA_ADMIN_PASSWORD=GrafanaAdminProd_0123456789abcdef01
 EOF
 
-OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$strong_env" bash "$script_dir/secret-check.sh"
+OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$strong_env" "$bash_bin" "$script_dir/secret-check.sh"
 
 rendered="$(mktemp)"
 trap 'rm -f "$strong_env" "$rendered"' EXIT

@@ -2,6 +2,14 @@
 
 This directory contains the production gates for deployment operations.
 
+Additional executable drills:
+
+- `staging-drill.sh`: disposable PostgreSQL + MinIO backup/restore and release rollback drill.
+- `service-credential-drill.sh`: service credential allow/deny/revoke/expire matrix against real auth migrations.
+- `redis-recovery-drill.sh`: Redis Stream pending claim/recovery and AOF restart drill.
+- `alert-firing-drill.sh`: Prometheus rule firing and Alertmanager webhook delivery drill.
+- `manager-smoke.sh`: minimum operator smoke for manager GUI/TUI backed by a real orchestrator daemon.
+
 Required checks before opening traffic:
 
 ```bash

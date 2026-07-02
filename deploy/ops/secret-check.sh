@@ -52,7 +52,7 @@ reject_weak_value() {
       die "$name uses a forbidden placeholder/default value"
       ;;
   esac
-  if [[ "$lower" =~ (ojos-local|static-compose|smoke|test-token|worker-token|jwt-secret|internal-token|minio-password|minio-user|local-worker|local-jwt|local-internal) ]]; then
+  if [[ "$lower" =~ (dev_only|ojos-local|static-compose|smoke|test-token|worker-token|jwt-secret|internal-token|minio-password|minio-user|local-worker|local-jwt|local-internal) ]]; then
     die "$name uses a known non-production value"
   fi
 }
@@ -84,12 +84,25 @@ require_database_url() {
   fi
 }
 
+require_redis_url() {
+  local name="$1"
+  local value
+  value="$(value_for "$name")"
+  [[ -n "$value" ]] || die "$name is required"
+  reject_weak_value "$name" "$value"
+  [[ "$value" =~ ^rediss?://([^:/@]+:)?[^@]+@[^/]+(/[0-9]+)?$ ]] || die "$name must be a password-authenticated Redis URL"
+  if [[ "$value" =~ (127\.0\.0\.1|localhost) && "${OJOS_SECRET_CHECK_ALLOW_LOCAL:-0}" != "1" ]]; then
+    die "$name points at localhost; set OJOS_SECRET_CHECK_ALLOW_LOCAL=1 only for non-production drills"
+  fi
+}
+
 load_env_file
 
 require_secret JWT_SECRET 32
 require_secret AUTH_INTERNAL_TOKEN 32
 require_secret ORCHESTRATOR_INTERNAL_TOKEN 32
 require_secret OJOS_WORKER_TOKEN 32
+require_secret REDIS_PASSWORD 20
 require_secret MINIO_ROOT_USER 8
 require_secret MINIO_ROOT_PASSWORD 32
 require_secret MINIO_ACCESS_KEY 8
@@ -105,6 +118,7 @@ require_database_url PROBLEM_DATABASE_URL
 require_database_url JUDGE_DATABASE_URL
 require_database_url USER_DATABASE_URL
 require_database_url ORCHESTRATOR_DATABASE_URL
+require_redis_url REDIS_URL
 
 if [[ "${OJOS_SECRET_CHECK_REQUIRE_ALERTS:-0}" == "1" ]]; then
   alert_url="$(value_for OJOS_ALERT_WEBHOOK_URL)"

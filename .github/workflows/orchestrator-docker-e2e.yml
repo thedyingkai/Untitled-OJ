@@ -265,4 +265,35 @@ jobs:
           OJOS_WORKER_TOKEN: static-compose-worker-token
           MINIO_ROOT_USER: static-compose-minio-user
           MINIO_ROOT_PASSWORD: static-compose-minio-password
-        run: docker compose --env-file .env.example -f deploy/compose/docker-compose.yml build orchestrator auth-service storage-service gateway problem-service judge-api judge-worker user-service
+        shell: bash
+        run: |
+          set -euo pipefail
+          services=(orchestrator auth-service storage-service gateway problem-service judge-api judge-worker user-service)
+          docker compose --env-file .env.example -f deploy/compose/docker-compose.yml build "${services[@]}"
+          mkdir -p artifacts/image-build
+          docker compose --env-file .env.example -f deploy/compose/docker-compose.yml images >artifacts/image-build/docker-compose-images.txt
+          if docker compose --env-file .env.example -f deploy/compose/docker-compose.yml images --format json >artifacts/image-build/docker-compose-images.jsonl 2>/dev/null; then
+            jq -s '.' artifacts/image-build/docker-compose-images.jsonl >artifacts/image-build/docker-compose-images.json
+          else
+            jq -n --arg note "docker compose images --format json is unavailable on this runner; see docker-compose-images.txt" '{note: $note}' >artifacts/image-build/docker-compose-images.json
+          fi
+          jq -n \
+            --arg commit "${GITHUB_SHA:-local}" \
+            --arg build_time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg services "$(IFS=,; echo "${services[*]}")" \
+            --rawfile compose_images artifacts/image-build/docker-compose-images.txt \
+            --rawfile runtime_lock services/judge-worker/config/runtime-lock.yaml \
+            '{
+              commit: $commit,
+              build_time: $build_time,
+              services: ($services | split(",")),
+              base_image_digest: "not recorded by docker compose build; image tags are pinned and compose image list is attached",
+              compose_images: $compose_images,
+              judge_worker_runtime_lock: $runtime_lock
+            }' >artifacts/image-build/image-build-evidence.json
+      - name: Upload Docker image build evidence
+        if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true')) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-build-evidence
+          path: artifacts/image-build

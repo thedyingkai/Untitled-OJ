@@ -1,0 +1,137 @@
+[
+  {
+    "component": "judge-api",
+    "capability": "Redis live integration",
+    "status": "passed",
+    "gate": "ci",
+    "workflow": "Orchestrator CI",
+    "commit": "6107be0",
+    "evidence": "OJOS_REAL_REDIS_URL is set in .github/workflows/orchestrator-ci.yml and Go tests include services/judge-api/internal/logic/redis_real_smoke_test.go"
+  },
+  {
+    "component": "storage-service",
+    "capability": "MinIO live integration",
+    "status": "passed",
+    "gate": "ci",
+    "workflow": "Orchestrator CI",
+    "commit": "6107be0",
+    "evidence": "Orchestrator CI starts minio/minio:RELEASE.2025-09-07T16-13-09Z and runs storage-service MinIO real integration"
+  },
+  {
+    "component": "deploy/ops",
+    "capability": "docker e2e production gate",
+    "status": "passed",
+    "gate": "nightly",
+    "workflow": "Orchestrator Docker E2E",
+    "commit": "6107be0",
+    "evidence": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28607098095"
+  },
+  {
+    "component": "judge-worker",
+    "capability": "nsjail verdict matrix",
+    "status": "passed",
+    "gate": "ci",
+    "workflow": "Orchestrator CI",
+    "commit": "6107be0",
+    "evidence": "Strict judge-worker nsjail live tests run with OJOS_REQUIRE_NSJAIL_LIVE=1"
+  },
+  {
+    "component": "judge-worker",
+    "capability": "sandbox abuse tests",
+    "status": "passed",
+    "gate": "ci",
+    "workflow": "Orchestrator CI",
+    "commit": "6107be0",
+    "evidence": "services/judge-worker/src/sandbox.rs tests cover seccomp policy, mount whitelist, timeout, output limit, runtime error, and C/C++ live smoke when nsjail is required"
+  },
+  {
+    "component": "deploy/ops",
+    "capability": "backup/restore/rollback drill",
+    "status": "pending-first-run",
+    "gate": "nightly",
+    "workflow": "Staging Drill",
+    "commit": "working-tree",
+    "evidence": "deploy/ops/staging-drill.sh writes manifest/logs/responses/checksums and .github/workflows/staging-drill.yml uploads artifacts"
+  },
+  {
+    "component": "gateway frontend",
+    "capability": "browser E2E",
+    "status": "pending-first-run",
+    "gate": "ci",
+    "workflow": "Orchestrator CI",
+    "commit": "working-tree",
+    "evidence": "services/gateway/frontend/tests/e2e/gateway.spec.ts with Playwright trace/screenshot/video artifacts; local npm run test:e2e passed before first CI run"
+  },
+  {
+    "component": "Jaeger/observability",
+    "capability": "alert firing",
+    "status": "pending-first-run",
+    "gate": "nightly",
+    "workflow": "Ops Drills Nightly",
+    "commit": "working-tree",
+    "evidence": "deploy/ops/alert-firing-drill.sh verifies OJOSDrillAlwaysFiring reaches Alertmanager webhook"
+  },
+  {
+    "component": "Jaeger/observability",
+    "capability": "trace E2E",
+    "status": "deferred",
+    "gate": "deferred",
+    "workflow": "",
+    "commit": "working-tree",
+    "evidence": "No completed Jaeger query drill yet for gateway -> judge-api -> storage-service -> Redis/worker -> storage-service -> judge-api result"
+  },
+  {
+    "component": "deploy/ops",
+    "capability": "secret policy",
+    "status": "pending-first-run",
+    "gate": "ci",
+    "workflow": "Orchestrator CI",
+    "commit": "working-tree",
+    "evidence": "deploy/ops/secret-check.sh now requires Redis password and .env.production.example is separate from dev .env.example; local deploy/ops/ci-policy.sh passed before first CI run"
+  },
+  {
+    "component": "deploy/ops",
+    "capability": "image build",
+    "status": "pending-first-run",
+    "gate": "nightly",
+    "workflow": "Orchestrator Docker E2E",
+    "commit": "working-tree",
+    "evidence": "Scheduled Docker image build now uploads artifacts/image-build/image-build-evidence.json"
+  },
+  {
+    "component": "deploy/ops",
+    "capability": "basic load/soak",
+    "status": "deferred",
+    "gate": "deferred",
+    "workflow": "",
+    "commit": "working-tree",
+    "evidence": "No completed real staging load/soak run yet; must not be called capacity testing"
+  },
+  {
+    "component": "auth-service",
+    "capability": "service credential lifecycle",
+    "status": "pending-first-run",
+    "gate": "nightly",
+    "workflow": "Ops Drills Nightly",
+    "commit": "working-tree",
+    "evidence": "deploy/ops/service-credential-drill.sh applies real auth migrations and verifies allow/deny/revoke/expire matrix"
+  },
+  {
+    "component": "Redis",
+    "capability": "pending/recovery drill",
+    "status": "pending-first-run",
+    "gate": "nightly",
+    "workflow": "Ops Drills Nightly",
+    "commit": "working-tree",
+    "evidence": "deploy/ops/redis-recovery-drill.sh verifies XPENDING, XAUTOCLAIM, XACK, result write, and AOF restart persistence"
+  },
+  {
+    "component": "MinIO",
+    "capability": "sample object restore drill",
+    "status": "pending-first-run",
+    "gate": "nightly",
+    "workflow": "Staging Drill",
+    "commit": "working-tree",
+    "evidence": "deploy/ops/staging-drill.sh backs up, deletes, restores, and checksums a MinIO sample object"
+  }
+]

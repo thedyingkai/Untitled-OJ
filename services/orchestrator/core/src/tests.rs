@@ -6777,6 +6777,8 @@ fn formal_docs_tree_contains_only_rewritten_docs() {
         docs,
         vec![
             "docs/architecture/README.md",
+            "docs/evidence/production-readiness.json",
+            "docs/evidence/staging-drill.md",
             "docs/orchestrator/action-model.md",
             "docs/orchestrator/boundary.md",
             "docs/orchestrator/database.md",
@@ -6784,6 +6786,7 @@ fn formal_docs_tree_contains_only_rewritten_docs() {
             "docs/orchestrator/operation-model.md",
             "docs/orchestrator/requirements.md",
             "docs/orchestrator/topology-model.md",
+            "docs/production-readiness.md",
             "docs/release/README.md",
             "docs/release/evidence.md",
             "docs/services/README.md",
@@ -6837,11 +6840,16 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
 
     let allowed_ops_scripts = [
         "deploy/ops/backup.sh",
+        "deploy/ops/alert-firing-drill.sh",
         "deploy/ops/ci-policy.sh",
+        "deploy/ops/manager-smoke.sh",
         "deploy/ops/preflight.sh",
+        "deploy/ops/redis-recovery-drill.sh",
         "deploy/ops/restore.sh",
         "deploy/ops/rollback-drill.sh",
         "deploy/ops/secret-check.sh",
+        "deploy/ops/service-credential-drill.sh",
+        "deploy/ops/staging-drill.sh",
     ];
     let script_files = relative_files(&root, &root)
         .into_iter()
