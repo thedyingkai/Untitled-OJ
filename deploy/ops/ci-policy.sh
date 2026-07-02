@@ -18,6 +18,34 @@ while IFS= read -r script; do
   bash -n "$script"
 done < <(find "$script_dir" -name '*.sh' -print | sort)
 
+if grep -R --line-number \
+  --include='*.yaml' \
+  --include='*.yml' \
+  --include='Dockerfile' \
+  -E 'minio/minio:latest|redis:8([[:space:]]|$)' \
+  "$repo_root/deploy" "$repo_root/services" >/tmp/ojos-floating-images.log 2>&1; then
+  cat /tmp/ojos-floating-images.log >&2
+  echo "ops-ci: production runtime images must use fixed tags" >&2
+  exit 1
+fi
+
+grep -q 'ARG NSJAIL_COMMIT=d6454b4640b6d8699b532a8afa37e4d67e477078' "$repo_root/services/judge-worker/Dockerfile" || {
+  echo "ops-ci: judge-worker Dockerfile must pin the reviewed nsjail commit" >&2
+  exit 1
+}
+grep -q 'nsjail_commit: d6454b4640b6d8699b532a8afa37e4d67e477078' "$repo_root/services/judge-worker/config/runtime-lock.yaml" || {
+  echo "ops-ci: judge-worker runtime lock must match the Dockerfile nsjail commit" >&2
+  exit 1
+}
+grep -q -- '--seccomp_string' "$repo_root/services/judge-worker/src/sandbox.rs" || {
+  echo "ops-ci: judge-worker nsjail runs must install a seccomp policy" >&2
+  exit 1
+}
+if grep -q '"/usr", "/usr"' "$repo_root/services/judge-worker/src/sandbox.rs"; then
+  echo "ops-ci: judge-worker sandbox must not bind-mount the entire /usr tree" >&2
+  exit 1
+fi
+
 if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$repo_root/.env.example" bash "$script_dir/secret-check.sh" >/tmp/ojos-weak-secret-check.log 2>&1; then
   echo "ops-ci: weak root .env.example unexpectedly passed secret policy" >&2
   exit 1

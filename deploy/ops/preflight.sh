@@ -45,6 +45,9 @@ fi
 if grep -Eq 'ojos-local|static-compose|local-jwt|local-worker|local-internal|minio-local|<[^>]+>' "$rendered"; then
   die "rendered compose still contains local/default placeholders"
 fi
+if grep -Eq 'minio/minio:latest|redis:8([[:space:]]|$)' "$rendered"; then
+  die "rendered compose contains floating runtime image tags"
+fi
 
 docker compose "${compose_args[@]}" config --quiet
 

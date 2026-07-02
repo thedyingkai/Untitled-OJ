@@ -11,3 +11,5 @@
 *.go text eol=lf working-tree-encoding=UTF-8
 *.sh text eol=lf working-tree-encoding=UTF-8
 *.sql text eol=lf working-tree-encoding=UTF-8
+Dockerfile text eol=lf working-tree-encoding=UTF-8
+**/Dockerfile text eol=lf working-tree-encoding=UTF-8

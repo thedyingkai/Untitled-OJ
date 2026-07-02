@@ -1,15 +1,15 @@
 schema_version: 1
 service_name: redis
-version: 8.0.0
+version: 8.8.0
 description: Release contract for redis.
 service_type: cache
 source:
   kind: url
-  url: docker://redis:8
+  url: docker://redis:8.8.0
   checksum: ""
 runtime:
   kind: external
-  image: ""
+  image: redis:8.8.0
   binary: ""
   system_service: ""
 frontend:

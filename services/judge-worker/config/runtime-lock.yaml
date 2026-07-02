@@ -1,0 +1,25 @@
+schema_version: 1
+runtime_image: rust:1.89-bookworm
+debian_suite: bookworm
+nsjail_commit: d6454b4640b6d8699b532a8afa37e4d67e477078
+seccomp_policy: deny-network-and-kernel-escape-v1
+mount_policy: explicit-runtime-subtree-whitelist-v1
+language_runtimes:
+  cpp17:
+    compiler: g++
+    major_version: 12
+    standard: c++17
+  cpp20:
+    compiler: g++
+    major_version: 12
+    standard: c++20
+  c11:
+    compiler: gcc
+    major_version: 12
+    standard: c11
+  java17:
+    runtime: openjdk
+    major_version: 17
+  python3:
+    runtime: cpython
+    major_minor: "3.11"

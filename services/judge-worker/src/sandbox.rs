@@ -17,6 +17,77 @@ const RUN_OUTPUT_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
 const COMPILE_FILE_SIZE_LIMIT_MB: u64 = 256;
 const RUN_FILE_SIZE_LIMIT_MB: u64 = 64;
+const NSJAIL_SECCOMP_POLICY: &str = r#"
+KILL_PROCESS {
+    ptrace,
+    process_vm_readv,
+    process_vm_writev
+}
+ERRNO(38) {
+    clone3,
+    io_uring_setup,
+    io_uring_enter,
+    io_uring_register
+}
+ERRNO(1) {
+    socket,
+    connect,
+    bind,
+    listen,
+    accept,
+    accept4,
+    sendto,
+    recvfrom,
+    sendmsg,
+    recvmsg,
+    shutdown,
+    getsockname,
+    getpeername,
+    setsockopt,
+    getsockopt,
+    mount,
+    umount2,
+    pivot_root,
+    swapon,
+    swapoff,
+    reboot,
+    kexec_load,
+    finit_module,
+    init_module,
+    delete_module,
+    bpf,
+    perf_event_open,
+    open_by_handle_at,
+    name_to_handle_at,
+    setns,
+    unshare,
+    keyctl,
+    add_key,
+    request_key
+}
+DEFAULT ALLOW
+"#;
+
+const READONLY_BIND_MOUNTS: &[(&str, &str)] = &[
+    ("/bin", "/bin"),
+    ("/lib", "/lib"),
+    ("/lib64", "/lib64"),
+    ("/usr/bin", "/usr/bin"),
+    ("/usr/include", "/usr/include"),
+    ("/usr/lib", "/usr/lib"),
+    ("/usr/lib64", "/usr/lib64"),
+    ("/usr/libexec", "/usr/libexec"),
+    ("/usr/lib/jvm", "/usr/lib/jvm"),
+    ("/usr/local/bin", "/usr/local/bin"),
+    ("/usr/local/lib", "/usr/local/lib"),
+    ("/usr/share", "/usr/share"),
+    ("/etc/alternatives", "/etc/alternatives"),
+    ("/etc/java-17-openjdk", "/etc/java-17-openjdk"),
+    ("/dev/null", "/dev/null"),
+    ("/dev/zero", "/dev/zero"),
+    ("/dev/urandom", "/dev/urandom"),
+    ("/dev/random", "/dev/random"),
+];
 
 #[derive(Debug, Clone)]
 pub struct SandboxOutput {
@@ -431,33 +502,15 @@ async fn run_nsjail_shell(
         .arg("64")
         .arg("--rlimit_nproc")
         .arg("64")
+        .arg("--seccomp_string")
+        .arg(NSJAIL_SECCOMP_POLICY)
         .arg("--cwd")
         .arg("/work")
         .arg("--chroot")
         .arg(jail_root.path());
 
-    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/bin", "/bin")?;
-    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/lib", "/lib")?;
-    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/lib64", "/lib64")?;
-    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/usr", "/usr")?;
-    add_existing_readonly_bind(
-        &mut cmd,
-        jail_root.path(),
-        "/etc/alternatives",
-        "/etc/alternatives",
-    )?;
-    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/dev/null", "/dev/null")?;
-    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/dev/zero", "/dev/zero")?;
-    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/dev/urandom", "/dev/urandom")?;
-    add_existing_readonly_bind(&mut cmd, jail_root.path(), "/dev/random", "/dev/random")?;
-
-    if Path::new("/etc/java-17-openjdk").exists() {
-        add_existing_readonly_bind(
-            &mut cmd,
-            jail_root.path(),
-            "/etc/java-17-openjdk",
-            "/etc/java-17-openjdk",
-        )?;
+    for (source, destination) in READONLY_BIND_MOUNTS {
+        add_existing_readonly_bind(&mut cmd, jail_root.path(), source, destination)?;
     }
 
     cmd.arg("--bindmount")
@@ -819,6 +872,40 @@ mod tests {
     #[test]
     fn nsjail_availability_probe_is_safe() {
         let _ = nsjail_available();
+    }
+
+    #[test]
+    fn nsjail_mounts_are_whitelisted_and_do_not_bind_entire_usr() {
+        assert!(
+            !READONLY_BIND_MOUNTS
+                .iter()
+                .any(|(source, destination)| *source == "/usr" || *destination == "/usr"),
+            "judge sandbox must bind only explicit /usr subtrees"
+        );
+        assert!(READONLY_BIND_MOUNTS.contains(&("/usr/bin", "/usr/bin")));
+        assert!(READONLY_BIND_MOUNTS.contains(&("/usr/lib", "/usr/lib")));
+    }
+
+    #[test]
+    fn nsjail_seccomp_policy_blocks_network_and_kernel_escape_syscalls() {
+        for syscall in [
+            "socket",
+            "connect",
+            "mount",
+            "unshare",
+            "setns",
+            "ptrace",
+            "process_vm_readv",
+            "process_vm_writev",
+            "bpf",
+            "keyctl",
+        ] {
+            assert!(
+                NSJAIL_SECCOMP_POLICY.contains(syscall),
+                "missing seccomp entry for {syscall}"
+            );
+        }
+        assert!(NSJAIL_SECCOMP_POLICY.contains("DEFAULT ALLOW"));
     }
 
     #[tokio::test]

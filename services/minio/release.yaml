@@ -1,15 +1,15 @@
 schema_version: 1
 service_name: minio
-version: 0.1.0
+version: 2025.9.7
 description: Release contract for minio.
 service_type: storage
 source:
   kind: url
-  url: docker://minio/minio:latest
+  url: docker://minio/minio:RELEASE.2025-09-07T16-13-09Z
   checksum: ""
 runtime:
   kind: external
-  image: ""
+  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
   binary: ""
   system_service: ""
 frontend:

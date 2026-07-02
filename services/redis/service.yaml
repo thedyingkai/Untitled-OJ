@@ -1,7 +1,7 @@
 schema_version: 1
 id: redis
 name: Redis
-version: 8.0.0
+version: 8.8.0
 kind: cache
 description: OJ 业务缓存、队列信号和 nonce 存储 Service。
 runtime:
@@ -54,7 +54,7 @@ security:
     internal_only: true
 source:
   type: external
-  ref: redis:8
+  ref: redis:8.8.0
   build: {}
   artifact: {}
 ui:

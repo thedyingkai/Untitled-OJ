@@ -14,13 +14,51 @@ jobs:
   go-test:
     name: Go tests
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:8.8.0
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.3"
+      - name: Start MinIO live integration service
+        shell: bash
+        env:
+          MINIO_ROOT_USER: ojosminioaccess
+          MINIO_ROOT_PASSWORD: OjosMinioLive_0123456789abcdef
+        run: |
+          set -euo pipefail
+          docker run -d \
+            --name ojos-ci-minio \
+            -p 9000:9000 \
+            -p 9001:9001 \
+            -e "MINIO_ROOT_USER=$MINIO_ROOT_USER" \
+            -e "MINIO_ROOT_PASSWORD=$MINIO_ROOT_PASSWORD" \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data --console-address ":9001"
+          for attempt in {1..60}; do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs ojos-ci-minio >&2 || true
+          exit 1
       - name: Test Go modules
         shell: bash
+        env:
+          OJOS_REAL_REDIS_URL: redis://127.0.0.1:6379/0
+          OJOS_REAL_MINIO_ENDPOINT: 127.0.0.1:9000
+          OJOS_REAL_MINIO_ACCESS_KEY: ojosminioaccess
+          OJOS_REAL_MINIO_SECRET_KEY: OjosMinioLive_0123456789abcdef
+          OJOS_REAL_MINIO_USE_SSL: "false"
         run: |
           set -euo pipefail
           modules=(
@@ -94,6 +132,8 @@ jobs:
           cargo test
       - name: Build nsjail for strict judge-worker live tests
         shell: bash
+        env:
+          NSJAIL_COMMIT: d6454b4640b6d8699b532a8afa37e4d67e477078
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -112,7 +152,10 @@ jobs:
             pkg-config \
             protobuf-compiler \
             python3
-          git clone --depth=1 https://github.com/google/nsjail.git /tmp/nsjail
+          git init /tmp/nsjail
+          git -C /tmp/nsjail remote add origin https://github.com/google/nsjail.git
+          git -C /tmp/nsjail fetch --depth=1 origin "$NSJAIL_COMMIT"
+          git -C /tmp/nsjail checkout --detach FETCH_HEAD
           make -C /tmp/nsjail
           sudo cp /tmp/nsjail/nsjail /usr/local/bin/nsjail
           test -x /usr/local/bin/nsjail

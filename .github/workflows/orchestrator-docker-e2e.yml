@@ -1,6 +1,12 @@
 name: Orchestrator Docker E2E
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 18 * * *"
   workflow_dispatch:
     inputs:
       run_docker_build:
@@ -17,7 +23,7 @@ permissions:
 
 jobs:
   docker-e2e:
-    name: Docker E2E auxiliary checks
+    name: Docker E2E production gate
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -30,6 +36,15 @@ jobs:
           - 55432:5432
         options: >-
           --health-cmd "pg_isready -U postgres -d ojos_orchestrator_live"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:8.8.0
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -51,9 +66,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "This workflow is an auxiliary engineering check."
+          echo "This workflow is a production gate for Docker, live dependencies, and release/runtime policy."
           echo "It does not upload .env files, temporary files, release artifacts, tokens, or logs."
-          echo "Final release decisions still require reviewing docs, schemas, migrations, Service manifests, Set templates, and change reports."
+          echo "Scheduled runs build all production service images."
 
       - name: Prepare PostgreSQL live schema
         shell: bash
@@ -86,6 +101,8 @@ jobs:
 
       - name: Build nsjail for strict judge-worker live tests
         shell: bash
+        env:
+          NSJAIL_COMMIT: d6454b4640b6d8699b532a8afa37e4d67e477078
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -104,7 +121,10 @@ jobs:
             pkg-config \
             protobuf-compiler \
             python3
-          git clone --depth=1 https://github.com/google/nsjail.git /tmp/nsjail
+          git init /tmp/nsjail
+          git -C /tmp/nsjail remote add origin https://github.com/google/nsjail.git
+          git -C /tmp/nsjail fetch --depth=1 origin "$NSJAIL_COMMIT"
+          git -C /tmp/nsjail checkout --detach FETCH_HEAD
           make -C /tmp/nsjail
           sudo cp /tmp/nsjail/nsjail /usr/local/bin/nsjail
           test -x /usr/local/bin/nsjail
@@ -126,8 +146,37 @@ jobs:
             "OJOS_NSJAIL_NO_PIVOTROOT=false" \
             cargo test nsjail_ -- --test-threads=1
 
+      - name: Start MinIO live integration service
+        shell: bash
+        env:
+          MINIO_ROOT_USER: ojosminioaccess
+          MINIO_ROOT_PASSWORD: OjosMinioLive_0123456789abcdef
+        run: |
+          set -euo pipefail
+          docker run -d \
+            --name ojos-e2e-minio \
+            -p 9000:9000 \
+            -p 9001:9001 \
+            -e "MINIO_ROOT_USER=$MINIO_ROOT_USER" \
+            -e "MINIO_ROOT_PASSWORD=$MINIO_ROOT_PASSWORD" \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data --console-address ":9001"
+          for attempt in {1..60}; do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs ojos-e2e-minio >&2 || true
+          exit 1
+
       - name: Go checks
         shell: bash
+        env:
+          OJOS_REAL_REDIS_URL: redis://127.0.0.1:6379/0
+          OJOS_REAL_MINIO_ENDPOINT: 127.0.0.1:9000
+          OJOS_REAL_MINIO_ACCESS_KEY: ojosminioaccess
+          OJOS_REAL_MINIO_SECRET_KEY: OjosMinioLive_0123456789abcdef
+          OJOS_REAL_MINIO_USE_SSL: "false"
         run: |
           set -euo pipefail
           modules=(
@@ -199,7 +248,7 @@ jobs:
         run: bash deploy/ops/ci-policy.sh
 
       - name: Docker image build
-        if: ${{ inputs.run_docker_build == 'true' }}
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true') }}
         env:
           AUTH_POSTGRES_PASSWORD: static-compose-auth-password
           AUTH_DATABASE_URL: postgres://postgres:static-compose-auth-password@auth-db:5432/ojos_auth?sslmode=disable
