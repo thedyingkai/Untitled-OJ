@@ -46,7 +46,7 @@ ERRNO(1) {
     setsockopt,
     getsockopt,
     mount,
-    umount2,
+    umount,
     pivot_root,
     swapon,
     swapoff,
