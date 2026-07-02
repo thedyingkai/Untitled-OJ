@@ -6220,7 +6220,7 @@ fn service_routes_from_release(release: &ServiceReleaseManifest) -> Result<Vec<S
         .collect()
 }
 
-fn service_api_surfaces_from_release(
+pub(crate) fn service_api_surfaces_from_release(
     release: &ServiceReleaseManifest,
 ) -> Result<Vec<ServiceApiSurface>> {
     release

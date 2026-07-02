@@ -1,3 +1,4 @@
+use crate::store::service_api_surfaces_from_release;
 use crate::{
     ActionPlanPreview, ActionRequest, DeploymentTemplate, Endpoint, FormFieldSchema,
     MemoryOrchestratorStore, Operation, OperationExecutor, OperationLogRecord, OperationStatus,
@@ -214,25 +215,7 @@ impl OperationWorkbenchContext {
         session: &OperationWorkbenchSession,
     ) -> Result<MemoryOrchestratorStore> {
         let mut store = MemoryOrchestratorStore::new();
-        for service in &self.services {
-            store.put_service(service.clone())?;
-        }
-        for release in &self.releases {
-            store.upsert_service_release(service_release_record(release)?)?;
-        }
-        for endpoint in &self.endpoints {
-            store.put_endpoint(endpoint.clone())?;
-        }
-        for link in &self.links {
-            store.put_link(link.clone())?;
-        }
-        if let Some(topology) = &self.topology {
-            store.put_topology(topology.clone())?;
-        }
-        store.put_operation(session.current_operation.clone())?;
-        for record in &session.logs {
-            store.append_operation_log(record.clone())?;
-        }
+        seed_session_store(&mut store, self, session)?;
         Ok(store)
     }
 
@@ -631,6 +614,9 @@ pub(crate) fn seed_session_store(
     }
     for release in &context.releases {
         store.upsert_service_release(service_release_record(release)?)?;
+        for api in service_api_surfaces_from_release(release)? {
+            store.upsert_service_api_surface(api)?;
+        }
     }
     for endpoint in &context.endpoints {
         store.put_endpoint(endpoint.clone())?;
