@@ -70,7 +70,7 @@ func TestCreateSubmissionRouteStoresSourceAndPublishesTask(t *testing.T) {
 
 	resp := postUserJSON(t, endpoint+"/judge/submissions", 7, map[string]any{
 		"problem_id": 1001,
-		"language":   "cpp",
+		"language":   "cpp17",
 		"code":       "int main() { return 0; }\n",
 	})
 	defer resp.Body.Close()
@@ -87,7 +87,7 @@ func TestCreateSubmissionRouteStoresSourceAndPublishesTask(t *testing.T) {
 	}
 
 	if repo.createdProblemID != 1001 || repo.createdUserID != 7 || repo.createdLanguage != "cpp17" {
-		t.Fatalf("submission repo did not receive normalized create call: %#v", repo)
+		t.Fatalf("submission repo did not receive configured language create call: %#v", repo)
 	}
 	if repo.updatedSubmissionID != 42 || repo.updatedCodePath != "storage://submissions/42-source-main.cpp" || repo.updatedResultPath != "storage://submissions/42-result.json" {
 		t.Fatalf("submission source paths were not storage-service refs: %#v", repo)
@@ -334,6 +334,7 @@ func startJudgeSubmissionHTTPServer(
 				ServiceEndpoint: storageEndpoint,
 				Bucket:          "submissions",
 			},
+			Languages: judgeRouteTestLanguages(),
 		},
 		SubmissionRepo:         repo,
 		Permission:             permissions,
@@ -386,6 +387,7 @@ func startJudgeRuntimeHTTPServer(
 				ServiceToken:            "internal-token",
 			},
 			WorkerAuth: config.WorkerAuthConfig{Token: workerToken, LeaseTTLSeconds: 45},
+			Languages:  judgeRouteTestLanguages(),
 		},
 		SubmissionRepo:         repo,
 		WorkerRepo:             repo,
@@ -399,6 +401,12 @@ func startJudgeRuntimeHTTPServer(
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForJudgeWorkerHTTPServer(t, endpoint)
 	return endpoint, server.Stop
+}
+
+func judgeRouteTestLanguages() config.LanguagesConfig {
+	return config.LanguagesConfig{Items: []config.LanguageConfig{
+		{Id: "cpp17", DisplayName: "C++17", Version: "test", Enabled: true, SourceFile: "main.cpp"},
+	}}
 }
 
 func postUserJSON(t *testing.T, url string, userID int64, body any) *http.Response {

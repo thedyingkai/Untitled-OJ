@@ -13,6 +13,7 @@ func TestCreateSubmissionFilesCleansPreviousArtifacts(t *testing.T) {
 		Root:         root,
 		SubmissionID: 7,
 		Language:     "python3",
+		SourceFile:   "main.py",
 		Code:         "print(3)\n",
 	})
 	if err != nil {
@@ -30,6 +31,7 @@ func TestCreateSubmissionFilesCleansPreviousArtifacts(t *testing.T) {
 		Root:         root,
 		SubmissionID: 7,
 		Language:     "java17",
+		SourceFile:   "Main.java",
 		Code:         "public class Main {}\n",
 	})
 	if err != nil {

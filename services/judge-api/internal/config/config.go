@@ -62,6 +62,7 @@ type LanguageConfig struct {
 	DisplayName string
 	Version     string `json:",optional"`
 	Enabled     bool
+	SourceFile  string `json:",optional"`
 }
 
 type WorkerAuthConfig struct {

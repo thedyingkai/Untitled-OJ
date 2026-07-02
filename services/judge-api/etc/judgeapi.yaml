@@ -37,18 +37,22 @@ Languages:
       DisplayName: C++17
       Version: GCC C++17
       Enabled: true
+      SourceFile: main.cpp
     - Id: c11
       DisplayName: C11
       Version: GCC C11
       Enabled: true
+      SourceFile: main.c
     - Id: python3
       DisplayName: Python 3
       Version: CPython 3
       Enabled: true
+      SourceFile: main.py
     - Id: java17
       DisplayName: Java 17
       Version: OpenJDK 17
       Enabled: true
+      SourceFile: Main.java
 
 WorkerAuth:
   Token: ""

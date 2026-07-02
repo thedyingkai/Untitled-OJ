@@ -144,6 +144,7 @@ type JudgeLanguage struct {
 	DisplayName string `json:"display_name"`
 	Version     string `json:"version,optional"`
 	Enabled     bool   `json:"enabled"`
+	SourceFile  string `json:"source_file,optional"`
 }
 
 type ListLanguagesResp struct {

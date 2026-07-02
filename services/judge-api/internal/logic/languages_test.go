@@ -10,11 +10,9 @@ import (
 func TestNormalizeLanguageID(t *testing.T) {
 	tests := map[string]string{
 		" cpp17 ": "cpp17",
-		"C++":     "cpp17",
-		"c":       "c11",
-		"PY3":     "python3",
-		"python":  "python3",
-		"java":    "java17",
+		"C++":     "c++",
+		"PY3":     "py3",
+		"python":  "python",
 		"rust":    "rust",
 	}
 
@@ -39,7 +37,7 @@ func TestValidateEnabledLanguage(t *testing.T) {
 		},
 	}
 
-	got, err := validateEnabledLanguage(svcCtx, "C++")
+	got, err := validateEnabledLanguage(svcCtx, "cpp17")
 	if err != nil {
 		t.Fatalf("expected cpp17 to be accepted: %v", err)
 	}
@@ -47,8 +45,12 @@ func TestValidateEnabledLanguage(t *testing.T) {
 		t.Fatalf("expected cpp17, got %q", got)
 	}
 
-	if _, err := validateEnabledLanguage(svcCtx, "python"); err == nil {
+	if _, err := validateEnabledLanguage(svcCtx, "python3"); err == nil {
 		t.Fatalf("expected disabled python3 to be rejected")
+	}
+
+	if _, err := validateEnabledLanguage(svcCtx, "python"); err == nil {
+		t.Fatalf("expected alias python to be rejected")
 	}
 
 	if _, err := validateEnabledLanguage(svcCtx, "rust"); err == nil {

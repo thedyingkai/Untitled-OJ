@@ -71,6 +71,10 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 	if err != nil {
 		return nil, err
 	}
+	sourceFile := sourceFileForLanguage(l.svcCtx, language)
+	if strings.TrimSpace(sourceFile) == "" {
+		return nil, errors.New("language source_file is not configured")
+	}
 
 	problem, err := submissions.GetProblemMeta(l.ctx, req.ProblemId)
 	if err != nil {
@@ -110,6 +114,7 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		Root:         l.svcCtx.Config.Storage.SubmissionsRoot,
 		SubmissionID: submissionID,
 		Language:     language,
+		SourceFile:   sourceFile,
 		Code:         req.Code,
 	})
 	if err != nil {
@@ -125,7 +130,7 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 			l.ctx,
 			l.svcCtx.Config.Storage,
 			submissionID,
-			language,
+			sourceFile,
 			req.Code,
 		)
 		if err != nil {

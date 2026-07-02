@@ -52,7 +52,7 @@ func TestStoreSubmissionSourceUsesStorageService(t *testing.T) {
 		context.Background(),
 		config.StorageConfig{ServiceEndpoint: server.URL, Bucket: "submissions"},
 		42,
-		"cpp17",
+		"main.cpp",
 		"int main() { return 0; }",
 	)
 	if err != nil {

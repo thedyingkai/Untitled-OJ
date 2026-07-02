@@ -14,6 +14,7 @@ type CreateSubmissionFilesArgs struct {
 	Root         string
 	SubmissionID int64
 	Language     string
+	SourceFile   string
 	Code         string
 }
 
@@ -30,9 +31,6 @@ func CreateSubmissionFiles(arg CreateSubmissionFilesArgs) (*CreateSubmissionFile
 	}
 	if arg.SubmissionID <= 0 {
 		return nil, errors.New("invalid submission id")
-	}
-	if strings.TrimSpace(arg.Language) == "" {
-		arg.Language = "cpp17"
 	}
 	if arg.Code == "" {
 		return nil, errors.New("empty code")
@@ -56,7 +54,7 @@ func CreateSubmissionFiles(arg CreateSubmissionFilesArgs) (*CreateSubmissionFile
 		}
 	}
 
-	filename, err := SourceFilename(arg.Language)
+	filename, err := SourceFilename(arg.SourceFile)
 	if err != nil {
 		return nil, err
 	}
@@ -83,19 +81,18 @@ func CreateSubmissionFiles(arg CreateSubmissionFilesArgs) (*CreateSubmissionFile
 	}, nil
 }
 
-func SourceFilename(language string) (string, error) {
-	switch strings.TrimSpace(language) {
-	case "", "cpp", "cpp17", "cpp20":
-		return "main.cpp", nil
-	case "c", "c11", "c17":
-		return "main.c", nil
-	case "java", "java17":
-		return "Main.java", nil
-	case "python", "python3", "py3":
-		return "main.py", nil
-	default:
-		return "", fmt.Errorf("unsupported language: %s", language)
+func SourceFilename(sourceFile string) (string, error) {
+	sourceFile = strings.TrimSpace(sourceFile)
+	if sourceFile == "" {
+		return "", errors.New("source file is required for language")
 	}
+	if filepath.Base(sourceFile) != sourceFile {
+		return "", fmt.Errorf("source file must be a file name, got %s", sourceFile)
+	}
+	if sourceFile == "." || sourceFile == ".." {
+		return "", fmt.Errorf("invalid source file: %s", sourceFile)
+	}
+	return sourceFile, nil
 }
 
 func FileSha256(path string) (string, error) {

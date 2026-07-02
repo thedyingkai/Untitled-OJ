@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"ojos-judge-api/internal/config"
+	"ojos-judge-api/internal/submissionfs"
 )
 
 const storageScheme = "storage://"
@@ -57,11 +58,11 @@ func storeSubmissionSource(
 	ctx context.Context,
 	c config.StorageConfig,
 	submissionID int64,
-	language string,
+	sourceFile string,
 	code string,
 ) (*storedSubmissionSource, error) {
 	bucket := storageBucket(c)
-	key := submissionSourceKey(submissionID, language)
+	key := submissionSourceKey(submissionID, sourceFile)
 	client := newStorageClient(c)
 	meta, err := client.putObject(ctx, bucket, key, "text/plain; charset=utf-8", strings.NewReader(code))
 	if err != nil {
@@ -186,8 +187,8 @@ func parseStorageRef(value string) (string, string, bool) {
 	return bucket, key, true
 }
 
-func submissionSourceKey(submissionID int64, language string) string {
-	filename, err := sourceFilenameForArtifact(language)
+func submissionSourceKey(submissionID int64, sourceFile string) string {
+	filename, err := submissionfs.SourceFilename(sourceFile)
 	if err != nil {
 		filename = "main.txt"
 	}
@@ -196,21 +197,6 @@ func submissionSourceKey(submissionID int64, language string) string {
 
 func submissionResultKey(submissionID int64) string {
 	return fmt.Sprintf("%d-result.json", submissionID)
-}
-
-func sourceFilenameForArtifact(language string) (string, error) {
-	switch strings.TrimSpace(language) {
-	case "", "cpp", "cpp17", "cpp20":
-		return "main.cpp", nil
-	case "c", "c11", "c17":
-		return "main.c", nil
-	case "java", "java17":
-		return "Main.java", nil
-	case "python", "python3", "py3":
-		return "main.py", nil
-	default:
-		return "", fmt.Errorf("unsupported language: %s", language)
-	}
 }
 
 func newStorageClient(config config.StorageConfig) storageClient {

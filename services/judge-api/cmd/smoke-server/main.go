@@ -98,10 +98,10 @@ func main() {
 			},
 			Submission: config.SubmissionConfig{MaxCodeBytes: 262144},
 			Languages: config.LanguagesConfig{Items: []config.LanguageConfig{
-				{Id: "cpp17", DisplayName: "C++17", Version: "smoke", Enabled: true},
-				{Id: "c11", DisplayName: "C11", Version: "smoke", Enabled: true},
-				{Id: "python3", DisplayName: "Python 3", Version: "smoke", Enabled: true},
-				{Id: "java17", DisplayName: "Java 17", Version: "smoke", Enabled: true},
+				{Id: "cpp17", DisplayName: "C++17", Version: "smoke", Enabled: true, SourceFile: "main.cpp"},
+				{Id: "c11", DisplayName: "C11", Version: "smoke", Enabled: true, SourceFile: "main.c"},
+				{Id: "python3", DisplayName: "Python 3", Version: "smoke", Enabled: true, SourceFile: "main.py"},
+				{Id: "java17", DisplayName: "Java 17", Version: "smoke", Enabled: true, SourceFile: "Main.java"},
 			}},
 			WorkerAuth: config.WorkerAuthConfig{
 				Token:           *workerToken,
