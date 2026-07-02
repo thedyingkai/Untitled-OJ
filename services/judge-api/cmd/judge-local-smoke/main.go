@@ -121,7 +121,7 @@ func main() {
 		controlPlane    = flag.String("control-plane", envDefault("OJOS_SMOKE_CONTROL_PLANE", "stub"), "control plane mode: stub or real")
 		authMode        = flag.String("auth", envDefault("OJOS_SMOKE_AUTH", "stub"), "auth mode: stub or real")
 		installMode     = flag.String("install-mode", envDefault("OJOS_SMOKE_INSTALL_MODE", ""), "install mode: seed or release-install")
-		mode            = flag.String("mode", envDefault("OJOS_JUDGE_SMOKE_MODE", ""), "smoke matrix mode: beta-local")
+		mode            = flag.String("mode", envDefault("OJOS_JUDGE_SMOKE_MODE", ""), "smoke matrix mode: beta-local or compose")
 		storageBackend  = flag.String("storage-backend", envDefault("OJOS_SMOKE_STORAGE_BACKEND", "local"), "storage backend for storage-service: local or minio")
 		releaseSource   = flag.String("release-source", envDefault("OJOS_SMOKE_RELEASE_SOURCE", ""), "release source for release.install: tree or package")
 		storagePackage  = flag.String("storage-release-package", envDefault("OJOS_STORAGE_RELEASE_PACKAGE", ""), "optional storage-service release package zip path")
@@ -625,6 +625,11 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 		}
 	}
 	ok("compose redis connected")
+
+	if err := composeRestartService(ctx, cfg, "storage-service"); err != nil {
+		return fail("compose storage-service backend "+cfg.storageBackend, err)
+	}
+	ok("compose storage-service backend configured: %s", cfg.storageBackend)
 
 	healthChecks := []struct {
 		name string
@@ -2267,6 +2272,7 @@ func composeCommand(parent context.Context, cfg smokeConfig, timeout time.Durati
 	commandArgs := append([]string{"compose", "-f", composePath}, args...)
 	cmd := exec.CommandContext(ctx, "docker", commandArgs...)
 	cmd.Dir = cfg.repoRoot
+	cmd.Env = composeProcessEnv(cfg)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("docker %s failed: %s", strings.Join(commandArgs, " "), oneLine(out, err))
@@ -3255,6 +3261,7 @@ func composeRestartService(parent context.Context, cfg smokeConfig, service stri
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d", "--force-recreate", service)
 	cmd.Dir = cfg.repoRoot
+	cmd.Env = composeProcessEnv(cfg)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("docker compose restart %s failed: %s", service, oneLine(out, err))
@@ -3272,6 +3279,17 @@ func composeRestartService(parent context.Context, cfg smokeConfig, service stri
 		}
 	}
 	return fmt.Errorf("compose service %s did not reach running state", service)
+}
+
+func composeProcessEnv(cfg smokeConfig) []string {
+	return processEnv(noProxyEnv(map[string]string{
+		"STORAGE_BACKEND":      cfg.storageBackend,
+		"MINIO_ROOT_USER":      envDefault("MINIO_ROOT_USER", "ojos-minio"),
+		"MINIO_ROOT_PASSWORD":  envDefault("MINIO_ROOT_PASSWORD", "ojos-minio-local"),
+		"MINIO_ENDPOINT":       envDefault("MINIO_ENDPOINT", "minio:9000"),
+		"MINIO_USE_SSL":        envDefault("MINIO_USE_SSL", "false"),
+		"OJOS_STORAGE_BACKEND": cfg.storageBackend,
+	}))
 }
 
 func printMinIOMatrixStatus(parent context.Context, cfg smokeConfig) {
