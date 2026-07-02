@@ -134,6 +134,9 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-ojos-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-ojos-minio-local}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     expose:
       - "9000"
       - "9001"
