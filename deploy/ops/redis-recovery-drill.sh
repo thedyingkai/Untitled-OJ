@@ -10,6 +10,8 @@ evidence_dir="$(cd "$evidence_dir" && pwd)"
 mkdir -p "$evidence_dir/logs"
 log_file="$evidence_dir/logs/redis-recovery-drill.log"
 exec > >(tee -a "$log_file") 2>&1
+export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1},localhost,127.0.0.1,::1"
+export no_proxy="${no_proxy:-$NO_PROXY}"
 
 container="ojos-redis-recovery-$run_id"
 pg_container="ojos-redis-recovery-postgres-$run_id"

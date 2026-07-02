@@ -10,6 +10,8 @@ evidence_dir="$(cd "$evidence_dir" && pwd)"
 mkdir -p "$evidence_dir/logs" "$evidence_dir/responses"
 log_file="$evidence_dir/logs/manager-smoke.log"
 exec > >(tee -a "$log_file") 2>&1
+export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1},localhost,127.0.0.1,::1"
+export no_proxy="${no_proxy:-$NO_PROXY}"
 
 port="${OJOS_MANAGER_SMOKE_ORCHESTRATOR_PORT:-18091}"
 base_url="http://127.0.0.1:$port"

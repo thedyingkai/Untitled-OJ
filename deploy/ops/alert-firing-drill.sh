@@ -10,6 +10,8 @@ evidence_dir="$(cd "$evidence_dir" && pwd)"
 mkdir -p "$evidence_dir/logs" "$evidence_dir/config" "$evidence_dir/webhook"
 log_file="$evidence_dir/logs/alert-firing-drill.log"
 exec > >(tee -a "$log_file") 2>&1
+export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1},localhost,127.0.0.1,::1"
+export no_proxy="${no_proxy:-$NO_PROXY}"
 
 network="ojos-alert-drill-$run_id"
 prometheus="ojos-alert-prometheus-$run_id"

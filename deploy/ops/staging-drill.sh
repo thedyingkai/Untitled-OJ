@@ -14,6 +14,8 @@ mkdir -p "$responses_dir" "$logs_dir"
 
 log_file="$logs_dir/staging-drill.log"
 exec > >(tee -a "$log_file") 2>&1
+export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1},localhost,127.0.0.1,::1"
+export no_proxy="${no_proxy:-$NO_PROXY}"
 
 start_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 end_ts=""
