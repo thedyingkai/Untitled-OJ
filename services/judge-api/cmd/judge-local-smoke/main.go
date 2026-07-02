@@ -558,28 +558,57 @@ func seedRealOrchestrator(ctx context.Context, cfg smokeConfig) error {
 }
 
 func seedRealNodeTree(ctx context.Context, cfg smokeConfig) error {
-	body := map[string]any{
-		"root_node_id":  rootNodeID,
-		"root_host_ip":  cfg.storage.host,
-		"child_node_id": childNodeID,
-		"child_host_ip": "127.0.0.2",
+	nodes := []map[string]any{
+		{
+			"node_id":        rootNodeID,
+			"host_ip":        cfg.storage.host,
+			"parent_node_id": "",
+			"role":           "root",
+			"labels": map[string]any{
+				"smoke": true,
+			},
+			"status": "running",
+		},
+		{
+			"node_id":        childNodeID,
+			"host_ip":        "127.0.0.2",
+			"parent_node_id": rootNodeID,
+			"role":           "node",
+			"labels": map[string]any{
+				"smoke": true,
+			},
+			"status": "running",
+		},
 	}
-	var resp struct {
-		Status string `json:"status"`
-		NodeID string `json:"node_id"`
-		Nodes  []struct {
+	for _, body := range nodes {
+		var resp struct {
+			Node struct {
+				NodeID string `json:"node_id"`
+				HostIP string `json:"host_ip"`
+				Role   string `json:"role"`
+			} `json:"node"`
+		}
+		if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.orchestrator.baseURL()+"/nodes", body, map[string]string{}, &resp); err != nil {
+			return fail("nodes created through API", err)
+		}
+		if resp.Node.NodeID != body["node_id"] {
+			return fail("nodes created through API", fmt.Errorf("unexpected node API response: got %q want %q", resp.Node.NodeID, body["node_id"]))
+		}
+	}
+	var tree struct {
+		Nodes []struct {
 			NodeID string `json:"node_id"`
 			HostIP string `json:"host_ip"`
 			Role   string `json:"role"`
 		} `json:"nodes"`
 	}
-	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.orchestrator.baseURL()+"/internal/smoke/seed-node-tree", body, map[string]string{}, &resp); err != nil {
-		return fail("node tree seeded", err)
+	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.orchestrator.baseURL()+"/nodes", nil, map[string]string{}, &tree); err != nil {
+		return fail("nodes created through API", err)
 	}
-	if resp.NodeID != childNodeID || len(resp.Nodes) < 2 {
-		return fail("node tree seeded", fmt.Errorf("unexpected node tree response: node_id=%q nodes=%d", resp.NodeID, len(resp.Nodes)))
+	if len(tree.Nodes) < 2 {
+		return fail("nodes created through API", fmt.Errorf("expected at least root and child nodes, got %d", len(tree.Nodes)))
 	}
-	ok("node tree seeded")
+	ok("nodes created through API")
 	return nil
 }
 

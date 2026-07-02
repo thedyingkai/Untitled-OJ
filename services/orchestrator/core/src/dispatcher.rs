@@ -693,6 +693,43 @@ impl OrchestratorActionConsole {
         self.memory_store.list_nodes()
     }
 
+    pub fn node(&self, node_id: &str) -> Result<Option<crate::NodeRecord>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store
+                .get_node(node_id)
+                .map_err(persistent_store_unavailable);
+        }
+        self.memory_store.get_node(node_id)
+    }
+
+    pub fn upsert_node(&mut self, node: crate::NodeRecord) -> Result<crate::NodeRecord> {
+        if self.uses_persistent_store() {
+            let mut store = self.persistent_store()?;
+            store
+                .upsert_node(node.clone())
+                .map_err(persistent_store_unavailable)?;
+            self.memory_store =
+                memory_store_from_store(&store).map_err(persistent_store_unavailable)?;
+            return Ok(node);
+        }
+        self.memory_store.upsert_node(node.clone())?;
+        Ok(node)
+    }
+
+    pub fn delete_node(&mut self, node_id: &str) -> Result<()> {
+        if self.uses_persistent_store() {
+            let mut store = self.persistent_store()?;
+            store
+                .delete_node(node_id)
+                .map_err(persistent_store_unavailable)?;
+            self.memory_store =
+                memory_store_from_store(&store).map_err(persistent_store_unavailable)?;
+            return Ok(());
+        }
+        self.memory_store.delete_node(node_id)
+    }
+
     pub fn service_api_surfaces(&self) -> Result<Vec<crate::ServiceApiSurface>> {
         if self.uses_persistent_store() {
             let store = self.persistent_store()?;

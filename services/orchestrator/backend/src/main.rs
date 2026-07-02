@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use orchestrator_core::{
-    ActionRequest, EffectiveApiRoute, Endpoint, NodeServiceDispatchRequest,
+    ActionRequest, EffectiveApiRoute, Endpoint, NodeRecord, NodeServiceDispatchRequest,
     OrchestratorActionConsole, ServiceRoute, SmokeControlPlaneSeed, SmokeNodeTreeSeed,
     default_console_request, parse_endpoint_id, validate_endpoint_id,
 };
@@ -154,6 +154,48 @@ fn route_api_request(
         ("GET", ["services"]) => Ok(ApiResponse::ok(json!({
             "services": console.view()?.services,
         }))),
+        ("GET", ["nodes"]) => Ok(ApiResponse::ok(json!({
+            "nodes": console.nodes()?,
+        }))),
+        ("POST", ["nodes"]) => {
+            let node = node_record_from_body(&request.body, None, None)?;
+            let node = console.upsert_node(node)?;
+            Ok(ApiResponse::created(json!({
+                "node": node,
+            })))
+        }
+        ("GET", ["nodes", node_id, "routes"]) => {
+            Ok(ApiResponse::ok(json!(internal_effective_route_table(
+                console,
+                node_id,
+                query_bool(query, "include_upstream")
+            )?)))
+        }
+        ("GET", ["nodes", node_id]) => {
+            let Some(node) = console.node(node_id)? else {
+                return Ok(ApiResponse::error(404, format!("node {node_id} not found")));
+            };
+            Ok(ApiResponse::ok(json!({
+                "node": node,
+            })))
+        }
+        ("PATCH", ["nodes", node_id]) => {
+            let Some(existing) = console.node(node_id)? else {
+                return Ok(ApiResponse::error(404, format!("node {node_id} not found")));
+            };
+            let node = node_record_from_body(&request.body, Some(node_id), Some(existing))?;
+            let node = console.upsert_node(node)?;
+            Ok(ApiResponse::ok(json!({
+                "node": node,
+            })))
+        }
+        ("DELETE", ["nodes", node_id]) => {
+            console.delete_node(node_id)?;
+            Ok(ApiResponse::no_content(json!({
+                "deleted": true,
+                "node_id": node_id,
+            })))
+        }
         ("GET", ["internal", "orchestrator", "snapshot"]) => Ok(ApiResponse::ok(json!({
             "version": "1",
             "generated_at": "",
@@ -580,6 +622,56 @@ fn operation_action(action: &str, operation_id: &str) -> Result<ActionRequest> {
         .fields
         .insert("confirm".to_string(), "true".to_string());
     Ok(request)
+}
+
+fn node_record_from_body(
+    body: &str,
+    path_node_id: Option<&str>,
+    existing: Option<NodeRecord>,
+) -> Result<NodeRecord> {
+    let value = serde_json::from_str::<Value>(body.trim())?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("node request body must be a JSON object"))?;
+    let mut node = existing.unwrap_or(NodeRecord {
+        node_id: String::new(),
+        host_ip: String::new(),
+        parent_node_id: String::new(),
+        role: String::new(),
+        labels: json!({}),
+        status: String::new(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    });
+    if let Some(node_id) = path_node_id {
+        node.node_id = node_id.to_string();
+    }
+    if let Some(value) = object.get("node_id").and_then(Value::as_str) {
+        let value = value.trim();
+        if let Some(path_node_id) = path_node_id {
+            if value != path_node_id {
+                return Err(anyhow!("node_id body/path mismatch"));
+            }
+        } else {
+            node.node_id = value.to_string();
+        }
+    }
+    if let Some(value) = object.get("host_ip").and_then(Value::as_str) {
+        node.host_ip = value.trim().to_string();
+    }
+    if let Some(value) = object.get("parent_node_id").and_then(Value::as_str) {
+        node.parent_node_id = value.trim().to_string();
+    }
+    if let Some(value) = object.get("role").and_then(Value::as_str) {
+        node.role = value.trim().to_string();
+    }
+    if let Some(value) = object.get("labels") {
+        node.labels = value.clone();
+    }
+    if let Some(value) = object.get("status").and_then(Value::as_str) {
+        node.status = value.trim().to_string();
+    }
+    Ok(node)
 }
 
 fn internal_service_definitions(
@@ -1823,6 +1915,121 @@ mod tests {
         assert!(
             table.body["routes"].as_array().expect("routes").is_empty(),
             "node-tree seed must not pre-seed storage API surface or routes"
+        );
+    }
+
+    #[test]
+    fn daemon_node_lifecycle_routes_validate_tree_and_routes() {
+        let mut console = console();
+        let root = post_json(
+            &mut console,
+            "/nodes",
+            r#"{
+                "node_id": "root-node",
+                "host_ip": "127.0.0.1",
+                "parent_node_id": "",
+                "role": "root",
+                "labels": {"source": "api-test"},
+                "status": "running"
+            }"#,
+        );
+        assert_eq!(root.status, 201);
+        assert_eq!(root.body["node"]["node_id"], "root-node");
+
+        let child = post_json(
+            &mut console,
+            "/nodes",
+            r#"{
+                "node_id": "child-node",
+                "host_ip": "127.0.0.2",
+                "parent_node_id": "root-node",
+                "role": "node",
+                "labels": {"source": "api-test"},
+                "status": "running"
+            }"#,
+        );
+        assert_eq!(child.status, 201);
+        assert_eq!(child.body["node"]["parent_node_id"], "root-node");
+
+        let orphan = handle_api_request(
+            &mut console,
+            request(
+                "POST",
+                "/nodes",
+                r#"{
+                    "node_id": "orphan-node",
+                    "host_ip": "127.0.0.3",
+                    "parent_node_id": "missing-node",
+                    "role": "node",
+                    "status": "running"
+                }"#,
+            ),
+        );
+        assert_eq!(orphan.status, 500);
+        assert!(
+            orphan.body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("parent node")
+        );
+
+        let cycle = handle_api_request(
+            &mut console,
+            request(
+                "PATCH",
+                "/nodes/root-node",
+                r#"{
+                    "parent_node_id": "child-node",
+                    "role": "node"
+                }"#,
+            ),
+        );
+        assert_eq!(cycle.status, 500);
+        assert!(
+            cycle.body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("cycle")
+        );
+
+        let listed = get(&mut console, "/nodes");
+        assert_eq!(listed.status, 200);
+        assert_eq!(listed.body["nodes"].as_array().expect("nodes").len(), 2);
+
+        let detail = get(&mut console, "/nodes/child-node");
+        assert_eq!(detail.status, 200);
+        assert_eq!(detail.body["node"]["host_ip"], "127.0.0.2");
+
+        let install = post_json(
+            &mut console,
+            "/releases/storage-service/install",
+            r#"{
+                "operation_id": "op-node-api-storage-install",
+                "host_ip": "127.0.0.1",
+                "endpoint": "127.0.0.1:19280:storage-service",
+                "gateway_node_id": "child-node",
+                "execute_service_driver": false,
+                "external_service_running": true
+            }"#,
+        );
+        assert_eq!(install.status, 200);
+        assert_eq!(install.body["action_result"]["status"], "SUCCEEDED");
+
+        let routes = get(
+            &mut console,
+            "/nodes/child-node/routes?include_upstream=true",
+        );
+        assert_eq!(routes.status, 200);
+        assert!(
+            routes.body["routes"]
+                .as_array()
+                .expect("routes")
+                .iter()
+                .any(|route| {
+                    route["api_id"] == "storage.object.get"
+                        && route["provider_node_id"] == "root-node"
+                        && route["upstream_base"] == "http://127.0.0.1:19280"
+                })
         );
     }
 

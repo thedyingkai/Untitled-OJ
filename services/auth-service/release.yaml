@@ -27,7 +27,7 @@ migrations:
     checksum: sha256:c1205afb55cb5bf50110f8fbcf2a7b1eceb5e5f8ed23eb65c959a0ff605ffc55
   - version: "000003_permission_core"
     path: services/auth-service/migrations/000003_permission_core.up.sql
-    checksum: sha256:a4afc17fd38c3d93e5f918b178c27cc2a8a908cd09cbb0e3141f58c2acb1acf1
+    checksum: sha256:9fd4893efc8c7553aeb855e539648be13c681fac74d6c9ada001778d56c398ec
   - version: "000006_add_internal_auth_keys"
     path: services/auth-service/migrations/000006_add_internal_auth_keys.up.sql
     checksum: sha256:63e532eae31e7ec491046978c1c6e3628bad384b67bf1f30c48d8bab1207698e

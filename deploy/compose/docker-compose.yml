@@ -72,6 +72,8 @@ services:
   redis:
     image: redis:8
     command: [ "redis-server", "--appendonly", "yes" ]
+    ports:
+      - "127.0.0.1:6379:6379"
 
   orchestrator-migrations:
     image: migrate/migrate:v4.18.3
