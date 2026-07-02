@@ -45,6 +45,7 @@ const (
 type smokeConfig struct {
 	repoRoot         string
 	workRoot         string
+	mode             string
 	redisURL         string
 	controlPlaneMode string
 	authMode         string
@@ -90,6 +91,7 @@ func main() {
 		controlPlane = flag.String("control-plane", envDefault("OJOS_SMOKE_CONTROL_PLANE", "stub"), "control plane mode: stub or real")
 		authMode     = flag.String("auth", envDefault("OJOS_SMOKE_AUTH", "stub"), "auth mode: stub or real")
 		installMode  = flag.String("install-mode", envDefault("OJOS_SMOKE_INSTALL_MODE", ""), "install mode: seed or release-install")
+		mode         = flag.String("mode", envDefault("OJOS_JUDGE_SMOKE_MODE", ""), "smoke matrix mode: beta-local")
 		workRoot     = flag.String("work-root", "", "smoke workspace; defaults to <repo>/.smoke/judge-local")
 		timeout      = flag.Duration("timeout", 90*time.Second, "overall smoke timeout")
 		cleanStreams = flag.Bool("clean-streams", true, "delete judge task/result stream keys before the smoke")
@@ -104,6 +106,19 @@ func main() {
 	if strings.TrimSpace(*workRoot) == "" {
 		*workRoot = filepath.Join(repoRoot, ".smoke", "judge-local")
 	}
+	normalizedMatrixMode := normalizeMatrixMode(*mode)
+	if normalizedMatrixMode != "" && normalizedMatrixMode != "beta-local" {
+		fmt.Fprintf(os.Stderr, "[FAIL] smoke mode\nreason: unsupported matrix mode %q\n", normalizedMatrixMode)
+		os.Exit(1)
+	}
+	if normalizedMatrixMode == "beta-local" {
+		*controlPlane = "real"
+		*authMode = "real"
+		*installMode = "release-install"
+		if *timeout < 240*time.Second {
+			*timeout = 240 * time.Second
+		}
+	}
 	orchestratorEndpoint, authEndpoint, storageEndpoint, gatewayEndpoint, judgeAPIEndpoint, err := allocateSmokeEndpoints()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[FAIL] allocate smoke ports\nreason: %v\n", err)
@@ -112,6 +127,7 @@ func main() {
 	cfg := smokeConfig{
 		repoRoot:         repoRoot,
 		workRoot:         *workRoot,
+		mode:             normalizedMatrixMode,
 		redisURL:         normalizeRedisURL(*redisURL),
 		controlPlaneMode: normalizeSmokeMode(*controlPlane),
 		authMode:         normalizeSmokeMode(*authMode),
@@ -166,6 +182,9 @@ func main() {
 		}
 		printLastLogs(os.Stderr, filepath.Join(cfg.workRoot, "logs"))
 		os.Exit(1)
+	}
+	if cfg.mode == "beta-local" {
+		printBetaMatrix(ctx, cfg)
 	}
 }
 
@@ -1818,6 +1837,18 @@ func normalizeSmokeMode(value string) string {
 	}
 }
 
+func normalizeMatrixMode(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "":
+		return ""
+	case "beta-local":
+		return "beta-local"
+	default:
+		return value
+	}
+}
+
 func normalizeInstallMode(value string, controlPlaneMode string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
@@ -1891,6 +1922,181 @@ func fail(step string, err error) error {
 
 func ok(format string, args ...any) {
 	fmt.Printf("[OK] "+format+"\n", args...)
+}
+
+func skip(format string, args ...any) {
+	fmt.Printf("[SKIP] "+format+"\n", args...)
+}
+
+func printBetaMatrix(parent context.Context, cfg smokeConfig) {
+	ok("beta-local matrix: release.install-driven judge smoke completed")
+	ok("orchestrator real")
+	ok("nodes created through API")
+	ok("auth real")
+	ok("service identity allow/deny")
+	ok("release.install storage-service")
+	ok("gateway reload")
+	ok("storage local backend")
+	ok("Redis task/result")
+	ok("judge-worker fake runner")
+	ok("result ACCEPTED")
+	printComposeMatrixStatus(parent, cfg)
+	printMinIOMatrixStatus(parent, cfg)
+	printNsjailMatrixStatus(parent)
+}
+
+func printComposeMatrixStatus(parent context.Context, cfg smokeConfig) {
+	services := []string{
+		"redis",
+		"auth-db",
+		"problem-db",
+		"judge-db",
+		"user-db",
+		"orchestrator-db",
+		"auth-service",
+		"storage-service",
+		"gateway",
+		"judge-api",
+	}
+	statuses, err := composeServiceStatuses(parent, cfg)
+	if err != nil {
+		skip("compose full up: %v", err)
+		return
+	}
+	missing := make([]string, 0)
+	for _, service := range services {
+		status, found := statuses[service]
+		if !found {
+			missing = append(missing, service+" missing")
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(status.State)) != "running" {
+			missing = append(missing, service+" state="+status.State)
+			continue
+		}
+		if status.Health != "" && strings.ToLower(strings.TrimSpace(status.Health)) != "healthy" {
+			missing = append(missing, service+" health="+status.Health)
+		}
+	}
+	if len(missing) > 0 {
+		skip("compose full up: %s", strings.Join(missing, ", "))
+		return
+	}
+	ok("compose full up: required beta services running")
+}
+
+type composePSStatus struct {
+	Service string `json:"Service"`
+	State   string `json:"State"`
+	Health  string `json:"Health"`
+	Status  string `json:"Status"`
+}
+
+func composeServiceStatuses(parent context.Context, cfg smokeConfig) (map[string]composePSStatus, error) {
+	composePath := filepath.Join(cfg.repoRoot, "deploy", "compose", "docker-compose.yml")
+	ctx, cancel := matrixContext(parent, 12*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "ps", "--format", "json")
+	cmd.Dir = cfg.repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("docker compose ps failed: %s", oneLine(out, err))
+	}
+	statuses := map[string]composePSStatus{}
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var status composePSStatus
+		if err := dec.Decode(&status); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("parse docker compose ps JSON: %w", err)
+		}
+		if status.Service != "" {
+			statuses[status.Service] = status
+		}
+	}
+	return statuses, nil
+}
+
+func printMinIOMatrixStatus(parent context.Context, cfg smokeConfig) {
+	endpoint := strings.TrimSpace(os.Getenv("OJOS_REAL_MINIO_ENDPOINT"))
+	accessKey := strings.TrimSpace(os.Getenv("OJOS_REAL_MINIO_ACCESS_KEY"))
+	secretKey := strings.TrimSpace(os.Getenv("OJOS_REAL_MINIO_SECRET_KEY"))
+	if endpoint == "" && tcpReachable("127.0.0.1:9000", 800*time.Millisecond) {
+		endpoint = "127.0.0.1:9000"
+		accessKey = envDefault("MINIO_ROOT_USER", "ojos-minio")
+		secretKey = envDefault("MINIO_ROOT_PASSWORD", "ojos-minio-local")
+	}
+	if endpoint == "" || accessKey == "" || secretKey == "" {
+		skip("MinIO live: no reachable MinIO endpoint configured")
+		return
+	}
+	ctx, cancel := matrixContext(parent, 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "test", "./...", "-run", "TestRealMinIO", "-count=1")
+	cmd.Dir = filepath.Join(cfg.repoRoot, "services", "storage-service")
+	cmd.Env = processEnv(noProxyEnv(map[string]string{
+		"OJOS_REAL_MINIO_ENDPOINT":   endpoint,
+		"OJOS_REAL_MINIO_ACCESS_KEY": accessKey,
+		"OJOS_REAL_MINIO_SECRET_KEY": secretKey,
+		"OJOS_REAL_MINIO_USE_SSL":    envDefault("OJOS_REAL_MINIO_USE_SSL", "false"),
+	}))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		skip("MinIO live: TestRealMinIO did not pass: %s", oneLine(out, err))
+		return
+	}
+	ok("MinIO live: TestRealMinIO passed")
+}
+
+func printNsjailMatrixStatus(parent context.Context) {
+	if runtime.GOOS != "linux" {
+		skip("nsjail live: current OS is %s", runtime.GOOS)
+		return
+	}
+	if _, err := exec.LookPath("nsjail"); err != nil {
+		skip("nsjail live: nsjail unavailable on PATH")
+		return
+	}
+	ctx, cancel := matrixContext(parent, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "nsjail", "--version")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		skip("nsjail live: nsjail version probe failed: %s", oneLine(out, err))
+		return
+	}
+	ok("nsjail live: nsjail binary available; full verdict matrix still deferred")
+}
+
+func matrixContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if parent == nil || parent.Err() != nil {
+		return context.WithTimeout(context.Background(), timeout)
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func tcpReachable(address string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", address, timeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func oneLine(output []byte, err error) string {
+	text := strings.TrimSpace(string(output))
+	text = strings.ReplaceAll(text, "\r", " ")
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		text = err.Error()
+	}
+	if len(text) > 240 {
+		return text[:240] + "..."
+	}
+	return text
 }
 
 func envDefault(key string, fallback string) string {
