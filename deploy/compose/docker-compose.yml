@@ -86,6 +86,33 @@ services:
       - ../../services/orchestrator/migrations:/migrations:ro
     command: [ "-path", "/migrations", "-database", "${ORCHESTRATOR_DATABASE_URL:-postgres://postgres:ojos-orchestrator-local@orchestrator-db:5432/ojos_orchestrator?sslmode=disable}", "up" ]
 
+  orchestrator:
+    build:
+      context: ../..
+      dockerfile: services/orchestrator/backend/Dockerfile
+      args:
+        HTTP_PROXY: ${OJOS_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${OJOS_BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${OJOS_BUILD_NO_PROXY:-}
+        http_proxy: ${OJOS_BUILD_HTTP_PROXY:-}
+        https_proxy: ${OJOS_BUILD_HTTPS_PROXY:-}
+        no_proxy: ${OJOS_BUILD_NO_PROXY:-}
+    depends_on:
+      orchestrator-migrations:
+        condition: service_completed_successfully
+    environment:
+      ORCHESTRATOR_DATABASE_URL: ${ORCHESTRATOR_DATABASE_URL:-postgres://postgres:ojos-orchestrator-local@orchestrator-db:5432/ojos_orchestrator?sslmode=disable}
+      ORCHESTRATOR_RELEASE_PACKAGE_LOAD: "1"
+      ORCHESTRATOR_RELEASE_PACKAGE_ROOT: /workspace
+      ORCHESTRATOR_AUTH_PERMISSION_SYNC: "1"
+      AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
+      AUTH_SERVICE_ADMIN_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH: "0"
+    ports:
+      - "127.0.0.1:8090:8090"
+    expose:
+      - "8090"
+
   auth-service-migrations:
     image: migrate/migrate:v4.18.3
     depends_on:
@@ -162,15 +189,7 @@ services:
     depends_on:
       auth-service:
         condition: service_started
-      user-service:
-        condition: service_started
-      problem-service:
-        condition: service_started
-      judge-api:
-        condition: service_started
-      redis:
-        condition: service_started
-      jaeger:
+      orchestrator:
         condition: service_started
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -178,6 +197,8 @@ services:
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
       AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
+      ORCHESTRATOR_ENDPOINT: ${ORCHESTRATOR_ENDPOINT:-http://orchestrator:8090}
+      ORCHESTRATOR_NODE_ID: ${ORCHESTRATOR_NODE_ID:-child-node}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
     ports:
@@ -278,15 +299,9 @@ services:
         no_proxy: ${OJOS_BUILD_NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      judge-api-migrations:
-        condition: service_completed_successfully
+      judge-db:
+        condition: service_healthy
       redis:
-        condition: service_started
-      storage-service:
-        condition: service_started
-      problem-service:
-        condition: service_started
-      jaeger:
         condition: service_started
     expose:
       - "8082"
