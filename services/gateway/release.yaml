@@ -8,10 +8,14 @@ source:
   url: local://services/gateway
   checksum: ""
 runtime:
-  kind: image
+  kind: local-process
   image: ""
   binary: ""
   system_service: ""
+  command: go
+  args: ["run", ".", "-f", "${OJOS_GATEWAY_CONFIG}"]
+  working_dir: services/gateway
+  env: {}
 frontend:
   enabled: true
   route_prefix: "/"

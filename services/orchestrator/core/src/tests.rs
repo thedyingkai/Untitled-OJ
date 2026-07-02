@@ -1687,8 +1687,18 @@ fn release_install_executor_records_release_resources() {
     let root = repo_root();
     let service =
         validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
-    let release =
+    let mut release =
         validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    release.runtime = ReleaseRuntimeDecl {
+        kind: "image".to_string(),
+        image: String::new(),
+        binary: String::new(),
+        system_service: String::new(),
+        command: String::new(),
+        args: Vec::new(),
+        working_dir: String::new(),
+        env: BTreeMap::new(),
+    };
     let request = ActionRequest::new(
         "op-release-apply-with-resources",
         "release.install",
@@ -2807,8 +2817,18 @@ fn release_install_service_driver_execution_is_explicit_and_fail_fast() {
     let root = repo_root();
     let service =
         validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
-    let release =
+    let mut release =
         validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    release.runtime = ReleaseRuntimeDecl {
+        kind: "image".to_string(),
+        image: String::new(),
+        binary: String::new(),
+        system_service: String::new(),
+        command: String::new(),
+        args: Vec::new(),
+        working_dir: String::new(),
+        env: BTreeMap::new(),
+    };
     let request = ActionRequest::new(
         "op-release-install-driver-exec",
         "release.install",
@@ -2844,7 +2864,9 @@ fn release_install_service_driver_execution_is_explicit_and_fail_fast() {
     assert!(
         failed
             .error_message
-            .contains("fixed command failed to start")
+            .contains("fixed command failed to start"),
+        "unexpected release.install driver error: {}",
+        failed.error_message
     );
     assert!(
         store

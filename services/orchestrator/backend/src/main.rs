@@ -75,14 +75,29 @@ fn serve(bind: String, mut console: OrchestratorActionConsole) -> Result<()> {
     let listener = TcpListener::bind(&bind).with_context(|| format!("bind {bind}"))?;
     eprintln!("OJOS Orchestrator daemon listening on {bind}");
     for stream in listener.incoming() {
-        let mut stream = stream?;
-        let response = match read_http_request(&mut stream) {
-            Ok(request) => handle_api_request(&mut console, request),
-            Err(err) => ApiResponse::error(400, err.to_string()),
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("orchestrator daemon accept error: {err}");
+                continue;
+            }
         };
-        write_http_response(&mut stream, response)?;
+        if let Err(err) = handle_connection(&mut console, &mut stream) {
+            eprintln!("orchestrator daemon connection error: {err}");
+        }
     }
     Ok(())
+}
+
+fn handle_connection(
+    console: &mut OrchestratorActionConsole,
+    stream: &mut TcpStream,
+) -> Result<()> {
+    let response = match read_http_request(stream) {
+        Ok(request) => handle_api_request(console, request),
+        Err(err) => ApiResponse::error(400, err.to_string()),
+    };
+    write_http_response(stream, response)
 }
 
 fn handle_api_request(console: &mut OrchestratorActionConsole, request: ApiRequest) -> ApiResponse {

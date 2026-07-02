@@ -43,10 +43,10 @@ func (l *AdminQueueLogic) AdminQueue() (resp *types.AdminQueueResp, err error) {
 	}
 
 	resp = &types.AdminQueueResp{
-		TaskStream:    judgeSubmissionStream,
-		ResultStream:  judgeResultStream,
-		Group:         judgeConsumerGroup,
-		ConsumerGroup: judgeConsumerGroup,
+		TaskStream:    judgeTaskStreamName(),
+		ResultStream:  judgeResultStreamName(),
+		Group:         judgeConsumerGroupName(),
+		ConsumerGroup: judgeConsumerGroupName(),
 		ConsumerLag:   -1,
 		Lag:           -1,
 		RedisStatus:   "unavailable",
@@ -65,16 +65,16 @@ func enrichAdminQueueRedisStatus(ctx context.Context, client *redis.Client, resp
 		return
 	}
 	if resp.TaskStream == "" {
-		resp.TaskStream = judgeSubmissionStream
+		resp.TaskStream = judgeTaskStreamName()
 	}
 	if resp.ResultStream == "" {
-		resp.ResultStream = judgeResultStream
+		resp.ResultStream = judgeResultStreamName()
 	}
 	if resp.Group == "" {
-		resp.Group = judgeConsumerGroup
+		resp.Group = judgeConsumerGroupName()
 	}
 	if resp.ConsumerGroup == "" {
-		resp.ConsumerGroup = judgeConsumerGroup
+		resp.ConsumerGroup = judgeConsumerGroupName()
 	}
 	if resp.ConsumerLag == 0 && resp.Lag == 0 {
 		resp.ConsumerLag = -1
@@ -87,20 +87,20 @@ func enrichAdminQueueRedisStatus(ctx context.Context, client *redis.Client, resp
 		return
 	}
 
-	if info, err := client.XInfoStream(ctx, judgeSubmissionStream).Result(); err == nil {
+	if info, err := client.XInfoStream(ctx, resp.TaskStream).Result(); err == nil {
 		resp.StreamLength = info.Length
 		resp.LastId = info.LastGeneratedID
 		resp.RedisStatus = "ok"
 	}
-	if info, err := client.XInfoStream(ctx, judgeResultStream).Result(); err == nil {
+	if info, err := client.XInfoStream(ctx, resp.ResultStream).Result(); err == nil {
 		resp.ResultStreamLength = info.Length
 		resp.ResultLastId = info.LastGeneratedID
 		resp.RedisStatus = "ok"
 	}
-	if groups, err := client.XInfoGroups(ctx, judgeSubmissionStream).Result(); err == nil {
+	if groups, err := client.XInfoGroups(ctx, resp.TaskStream).Result(); err == nil {
 		resp.RedisStatus = "ok"
 		for _, group := range groups {
-			if group.Name != judgeConsumerGroup {
+			if group.Name != resp.Group {
 				continue
 			}
 			resp.ConsumerCount = group.Consumers
@@ -113,7 +113,7 @@ func enrichAdminQueueRedisStatus(ctx context.Context, client *redis.Client, resp
 		}
 	}
 
-	if consumers, err := client.XInfoConsumers(ctx, judgeSubmissionStream, judgeConsumerGroup).Result(); err == nil {
+	if consumers, err := client.XInfoConsumers(ctx, resp.TaskStream, resp.Group).Result(); err == nil {
 		resp.RedisStatus = "ok"
 		resp.Consumers = make([]types.AdminQueueConsumer, 0, len(consumers))
 		for _, consumer := range consumers {
@@ -129,7 +129,7 @@ func enrichAdminQueueRedisStatus(ctx context.Context, client *redis.Client, resp
 		}
 	}
 
-	if pending, err := client.XPending(ctx, judgeSubmissionStream, judgeConsumerGroup).Result(); err == nil {
+	if pending, err := client.XPending(ctx, resp.TaskStream, resp.Group).Result(); err == nil {
 		resp.RedisStatus = "ok"
 		resp.PendingCount = pending.Count
 		resp.PendingLowestId = pending.Lower
@@ -138,8 +138,8 @@ func enrichAdminQueueRedisStatus(ctx context.Context, client *redis.Client, resp
 			if items, err := client.XPendingExt(
 				ctx,
 				&redis.XPendingExtArgs{
-					Stream: judgeSubmissionStream,
-					Group:  judgeConsumerGroup,
+					Stream: resp.TaskStream,
+					Group:  resp.Group,
 					Start:  "-",
 					End:    "+",
 					Count:  1,

@@ -58,15 +58,19 @@ type smokeConfig struct {
 	releaseSource    string
 	storagePackage   string
 	judgeAPIPackage  string
+	taskStream       string
+	resultStream     string
 	serviceToken     string
 	workerToken      string
 	gatewayAdminJWT  string
 	composeUserJWT   string
 	orchestrator     endpoint
 	auth             endpoint
+	authServiceStart endpoint
 	storage          endpoint
 	storageProvider  endpoint
 	gateway          endpoint
+	gatewayStart     endpoint
 	judgeAPI         endpoint
 	timeout          time.Duration
 	cleanStreams     bool
@@ -174,7 +178,33 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[FAIL] release source\nreason: unsupported release source %q\n", normalizedReleaseSource)
 		os.Exit(1)
 	}
+	smokeTaskStream := strings.TrimSpace(envDefault("OJOS_SMOKE_JUDGE_TASK_STREAM", ""))
+	smokeResultStream := strings.TrimSpace(envDefault("OJOS_SMOKE_JUDGE_RESULT_STREAM", ""))
+	if smokeTaskStream == "" {
+		if normalizedMatrixMode == "beta-local" {
+			smokeTaskStream = taskStream + ":beta-local"
+		} else {
+			smokeTaskStream = taskStream
+		}
+	}
+	if smokeResultStream == "" {
+		if normalizedMatrixMode == "beta-local" {
+			smokeResultStream = resultStream + ":beta-local"
+		} else {
+			smokeResultStream = resultStream
+		}
+	}
 	orchestratorEndpoint, authEndpoint, storageEndpoint, gatewayEndpoint, judgeAPIEndpoint, err := allocateSmokeEndpoints()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[FAIL] allocate smoke ports\nreason: %v\n", err)
+		os.Exit(1)
+	}
+	authServiceStartEndpoint, err := freeEndpoint()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[FAIL] allocate smoke ports\nreason: %v\n", err)
+		os.Exit(1)
+	}
+	gatewayStartEndpoint, err := freeEndpoint()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[FAIL] allocate smoke ports\nreason: %v\n", err)
 		os.Exit(1)
@@ -185,6 +215,8 @@ func main() {
 		storageEndpoint = endpoint{host: "127.0.0.1", port: 8085}
 		gatewayEndpoint = endpoint{host: "127.0.0.1", port: 8080}
 		judgeAPIEndpoint = endpoint{host: "127.0.0.1", port: 8082}
+		authServiceStartEndpoint = authEndpoint
+		gatewayStartEndpoint = gatewayEndpoint
 	}
 	smokeServiceToken := serviceToken
 	smokeWorkerToken := workerToken
@@ -203,13 +235,17 @@ func main() {
 		releaseSource:    normalizedReleaseSource,
 		storagePackage:   *storagePackage,
 		judgeAPIPackage:  *judgeAPIPackage,
+		taskStream:       smokeTaskStream,
+		resultStream:     smokeResultStream,
 		serviceToken:     smokeServiceToken,
 		workerToken:      smokeWorkerToken,
 		orchestrator:     orchestratorEndpoint,
 		auth:             authEndpoint,
+		authServiceStart: authServiceStartEndpoint,
 		storage:          storageEndpoint,
 		storageProvider:  storageEndpoint,
 		gateway:          gatewayEndpoint,
+		gatewayStart:     gatewayStartEndpoint,
 		judgeAPI:         judgeAPIEndpoint,
 		timeout:          *timeout,
 		cleanStreams:     *cleanStreams,
@@ -291,6 +327,12 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	if err != nil {
 		return fail("storage-service config", err)
 	}
+	if _, err := writeAuthConfigForEndpoint(cfg, serviceStartAuthConfigPath(cfg), cfg.authServiceStart, "auth-service-local-process-smoke"); err != nil {
+		return fail("auth-service local-process config", err)
+	}
+	if _, err := writeGatewayConfigForEndpoint(cfg, serviceStartGatewayConfigPath(cfg), cfg.gatewayStart, "gateway-local-process-smoke"); err != nil {
+		return fail("gateway local-process config", err)
+	}
 
 	redisClient, err := connectRedis(ctx, cfg.redisURL)
 	if err != nil {
@@ -298,7 +340,7 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	defer redisClient.Close()
 	if cfg.cleanStreams {
-		if err := redisClient.Del(ctx, taskStream, resultStream).Err(); err != nil {
+		if err := redisClient.Del(ctx, cfg.taskStream, cfg.resultStream).Err(); err != nil {
 			return fail("redis streams cleaned", err)
 		}
 	}
@@ -457,7 +499,10 @@ func run(ctx context.Context, cfg smokeConfig) error {
 			"-caller-node-id", childNodeID,
 			"-submissions-root", filepath.Join(cfg.workRoot, "submissions"),
 		},
-		env: noProxyEnv(nil),
+		env: noProxyEnv(map[string]string{
+			"OJOS_JUDGE_TASK_STREAM":   cfg.taskStream,
+			"OJOS_JUDGE_RESULT_STREAM": cfg.resultStream,
+		}),
 	})
 	if err != nil {
 		return fail("judge-api start", err)
@@ -483,7 +528,7 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("source stored through internal resolver")
 
-	taskID, err := findTaskEntry(ctx, redisClient, submissionID)
+	taskID, err := findTaskEntry(ctx, redisClient, cfg, submissionID)
 	if err != nil {
 		return fail("redis task written", err)
 	}
@@ -503,7 +548,7 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("worker consumed task")
 
-	pending, err := pendingCount(ctx, redisClient)
+	pending, err := pendingCount(ctx, redisClient, cfg)
 	if err != nil {
 		return fail("worker consumed task acked", err)
 	}
@@ -515,7 +560,7 @@ func run(ctx context.Context, cfg smokeConfig) error {
 		return err
 	}
 
-	resultID, resultStatus, err := findResultEntry(ctx, redisClient, submissionID)
+	resultID, resultStatus, err := findResultEntry(ctx, redisClient, cfg, submissionID)
 	if err != nil {
 		return fail("result written", err)
 	}
@@ -557,6 +602,12 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("service identity observed: judge-api and judge-worker")
 
+	if cfg.mode == "beta-local" && cfg.controlPlaneMode == "real" && cfg.installMode == "release-install" {
+		if err := verifyMainServiceLocalProcessStarts(ctx, cfg); err != nil {
+			return err
+		}
+	}
+
 	fmt.Printf("[OK] smoke summary: submission_id=%d task_entry_id=%s result_entry_id=%s status=%s\n", submissionID, taskID, resultID, status)
 	fmt.Printf("[OK] smoke logs: %s\n", filepath.Join(cfg.workRoot, "logs"))
 	return nil
@@ -569,7 +620,7 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 	}
 	defer redisClient.Close()
 	if cfg.cleanStreams {
-		if err := redisClient.Del(ctx, taskStream, resultStream).Err(); err != nil {
+		if err := redisClient.Del(ctx, cfg.taskStream, cfg.resultStream).Err(); err != nil {
 			return fail("compose redis streams cleaned", err)
 		}
 	}
@@ -657,14 +708,14 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("compose source stored through internal resolver")
 
-	taskID, err := findTaskEntry(ctx, redisClient, submissionID)
+	taskID, err := findTaskEntry(ctx, redisClient, cfg, submissionID)
 	if err != nil {
 		return fail("compose redis task written", err)
 	}
 	cfg.lastTaskID = taskID
 	ok("compose redis task written: %s", taskID)
 
-	resultID, resultStatus, err := findResultEntry(ctx, redisClient, submissionID)
+	resultID, resultStatus, err := findResultEntry(ctx, redisClient, cfg, submissionID)
 	if err != nil {
 		return fail("compose result written", err)
 	}
@@ -674,7 +725,7 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("compose result written: %s", resultID)
 
-	pending, err := pendingCount(ctx, redisClient)
+	pending, err := pendingCount(ctx, redisClient, cfg)
 	if err != nil {
 		return fail("compose worker consumed task acked", err)
 	}
@@ -714,7 +765,7 @@ func startWorker(ctx context.Context, cfg smokeConfig) (*childProcess, error) {
 		"OJOS_ARTIFACT_CACHE_DIR":        filepath.Join(cfg.workRoot, "worker-cache"),
 		"OJOS_SUPPORTED_LANGUAGES":       "cpp17",
 		"OJOS_REDIS_URL":                 cfg.redisURL,
-		"OJOS_JUDGE_TASK_STREAM":         taskStream,
+		"OJOS_JUDGE_TASK_STREAM":         cfg.taskStream,
 		"OJOS_JUDGE_CONSUMER_GROUP":      consumerGroup,
 		"OJOS_INTERNAL_GATEWAY_URL":      cfg.gateway.baseURL(),
 		"OJOS_STORAGE_OBJECT_GET_API_ID": "storage.object.get",
@@ -755,6 +806,8 @@ func startRealOrchestrator(ctx context.Context, cfg smokeConfig) (*childProcess,
 			"GATEWAY_ADMIN_TOKEN":                      cfg.gatewayAdminJWT,
 			"GATEWAY_NODE_ID":                          childNodeID,
 			"OJOS_STORAGE_SERVICE_CONFIG":              storageConfigPath(cfg),
+			"OJOS_AUTH_SERVICE_CONFIG":                 serviceStartAuthConfigPath(cfg),
+			"OJOS_GATEWAY_CONFIG":                      serviceStartGatewayConfigPath(cfg),
 			"OJOS_STORAGE_ROOT":                        filepath.Join(cfg.workRoot, "storage"),
 			"OJOS_STORAGE_BUCKETS":                     "submissions,problems,judge-artifacts",
 			"OJOS_LOCAL_PROCESS_STATE_DIR":             filepath.Join(cfg.workRoot, "local-process"),
@@ -1104,6 +1157,96 @@ func installComposeCallerIdentities(ctx context.Context, cfg smokeConfig) error 
 	return nil
 }
 
+func verifyMainServiceLocalProcessStarts(ctx context.Context, cfg smokeConfig) error {
+	probes := []struct {
+		serviceName string
+		endpoint    endpoint
+	}{
+		{serviceName: "auth-service", endpoint: cfg.authServiceStart},
+		{serviceName: "gateway", endpoint: cfg.gatewayStart},
+	}
+	for _, probe := range probes {
+		operationID := fmt.Sprintf("op-smoke-%s-local-process-start", probe.serviceName)
+		endpointID := fmt.Sprintf("%s:%d:%s", probe.endpoint.host, probe.endpoint.port, probe.serviceName)
+		body := map[string]any{
+			"operation_id":             operationID,
+			"host_ip":                  probe.endpoint.host,
+			"endpoint":                 endpointID,
+			"gateway_node_id":          childNodeID,
+			"execute_service_driver":   true,
+			"external_service_running": false,
+		}
+		var installResp struct {
+			ActionResult struct {
+				ActionID    string `json:"action_id"`
+				Status      string `json:"status"`
+				Message     string `json:"message"`
+				OperationID string `json:"operation_id"`
+				Error       string `json:"error"`
+			} `json:"action_result"`
+		}
+		if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.orchestrator.baseURL()+"/releases/"+probe.serviceName+"/install", body, map[string]string{}, &installResp); err != nil {
+			return fail("release.install service_start "+probe.serviceName, err)
+		}
+		if installResp.ActionResult.ActionID != "release.install" {
+			return fail("release.install service_start "+probe.serviceName, fmt.Errorf("unexpected action_id %q", installResp.ActionResult.ActionID))
+		}
+		if !strings.EqualFold(strings.ReplaceAll(installResp.ActionResult.Status, "_", ""), "succeeded") {
+			return fail("release.install service_start "+probe.serviceName, fmt.Errorf("unexpected status %q operation_id=%s error=%s message=%s", installResp.ActionResult.Status, installResp.ActionResult.OperationID, installResp.ActionResult.Error, installResp.ActionResult.Message))
+		}
+		pid, err := releaseInstallDriverPID(ctx, cfg, operationID)
+		if err != nil {
+			return fail("release.install service_start "+probe.serviceName, err)
+		}
+		if err := waitHealth(ctx, probe.endpoint.baseURL()+"/health"); err != nil {
+			return fail("release.install service_start "+probe.serviceName, err)
+		}
+		ok("release.install service_start %s local-process pid=%d", probe.serviceName, pid)
+		if err := rollbackReleaseInstall(ctx, cfg, operationID, "release.install rollback stopped "+probe.serviceName); err != nil {
+			return err
+		}
+		if err := waitEndpointUnavailable(ctx, probe.endpoint.baseURL()+"/health", probe.serviceName); err != nil {
+			return fail("release.install rollback stopped "+probe.serviceName, err)
+		}
+		ok("release.install rollback stopped %s", probe.serviceName)
+	}
+	return nil
+}
+
+func releaseInstallDriverPID(ctx context.Context, cfg smokeConfig, operationID string) (uint64, error) {
+	var resp struct {
+		Logs []struct {
+			StepID string         `json:"step_id"`
+			Data   map[string]any `json:"data"`
+		} `json:"logs"`
+	}
+	target := cfg.orchestrator.baseURL() + "/operations/" + operationID + "/logs"
+	if err := doJSONWithHeaders(ctx, http.MethodGet, target, nil, map[string]string{}, &resp); err != nil {
+		return 0, err
+	}
+	for _, log := range resp.Logs {
+		if log.StepID != "driver:release.install" {
+			continue
+		}
+		status, _ := log.Data["status"].(string)
+		if !strings.EqualFold(status, "SUCCEEDED") {
+			return 0, fmt.Errorf("driver status is %q", status)
+		}
+		switch raw := log.Data["pid"].(type) {
+		case float64:
+			if raw > 0 {
+				return uint64(raw), nil
+			}
+		case json.Number:
+			pid, err := raw.Int64()
+			if err == nil && pid > 0 {
+				return uint64(pid), nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("driver pid log not found for %s", operationID)
+}
+
 func reloadGatewayFromComposeSmoke(ctx context.Context, cfg smokeConfig) error {
 	var resp struct {
 		Status     string `json:"status"`
@@ -1152,6 +1295,17 @@ func verifyRouteMissing(ctx context.Context, cfg smokeConfig, apiID string) erro
 }
 
 func rollbackStorageReleaseInstall(ctx context.Context, cfg smokeConfig) error {
+	if err := rollbackReleaseInstall(ctx, cfg, "op-smoke-storage-release-install", "release.install rollback stopped storage-service"); err != nil {
+		return err
+	}
+	if err := waitStorageUnavailable(ctx, cfg.storage.baseURL()+"/health"); err != nil {
+		return fail("release.install rollback stopped storage-service", err)
+	}
+	ok("release.install rollback stopped storage-service")
+	return nil
+}
+
+func rollbackReleaseInstall(ctx context.Context, cfg smokeConfig, operationID string, stepName string) error {
 	var resp struct {
 		ActionResult struct {
 			ActionID    string `json:"action_id"`
@@ -1161,18 +1315,14 @@ func rollbackStorageReleaseInstall(ctx context.Context, cfg smokeConfig) error {
 			Message     string `json:"message"`
 		} `json:"action_result"`
 	}
-	target := cfg.orchestrator.baseURL() + "/operations/op-smoke-storage-release-install/rollback"
+	target := cfg.orchestrator.baseURL() + "/operations/" + operationID + "/rollback"
 	if err := doJSONWithHeaders(ctx, http.MethodPost, target, map[string]any{}, map[string]string{}, &resp); err != nil {
-		return fail("release.install rollback stopped storage-service", err)
+		return fail(stepName, err)
 	}
 	normalizedStatus := strings.ToLower(strings.ReplaceAll(resp.ActionResult.Status, "_", ""))
 	if normalizedStatus != "succeeded" && normalizedStatus != "rolledback" {
-		return fail("release.install rollback stopped storage-service", fmt.Errorf("unexpected rollback status %q operation_id=%s error=%s message=%s", resp.ActionResult.Status, resp.ActionResult.OperationID, resp.ActionResult.Error, resp.ActionResult.Message))
+		return fail(stepName, fmt.Errorf("unexpected rollback status %q operation_id=%s error=%s message=%s", resp.ActionResult.Status, resp.ActionResult.OperationID, resp.ActionResult.Error, resp.ActionResult.Message))
 	}
-	if err := waitStorageUnavailable(ctx, cfg.storage.baseURL()+"/health"); err != nil {
-		return fail("release.install rollback stopped storage-service", err)
-	}
-	ok("release.install rollback stopped storage-service")
 	return nil
 }
 
@@ -1673,12 +1823,15 @@ func storageConfigPath(cfg smokeConfig) string {
 }
 
 func writeGatewayConfig(cfg smokeConfig) (string, error) {
-	path := filepath.Join(cfg.workRoot, "config", "gateway.yaml")
+	return writeGatewayConfigForEndpoint(cfg, filepath.Join(cfg.workRoot, "config", "gateway.yaml"), cfg.gateway, "gateway-smoke")
+}
+
+func writeGatewayConfigForEndpoint(cfg smokeConfig, path string, target endpoint, name string) (string, error) {
 	authEndpoint := cfg.orchestrator.baseURL()
 	if cfg.authMode == "real" {
 		authEndpoint = cfg.auth.baseURL()
 	}
-	content := fmt.Sprintf(`Name: gateway-smoke
+	content := fmt.Sprintf(`Name: %s
 Host: %s
 Port: %d
 Database:
@@ -1705,7 +1858,7 @@ Orchestrator:
   NodeID: %s
 AuthService:
   Endpoint: %s
-`, cfg.gateway.host, cfg.gateway.port,
+`, name, target.host, target.port,
 		yamlString(cfg.redisURL),
 		yamlString(filepath.Join(cfg.workRoot, "problems")),
 		yamlString(filepath.Join(cfg.workRoot, "submissions")),
@@ -1717,8 +1870,11 @@ AuthService:
 }
 
 func writeAuthConfig(cfg smokeConfig) (string, error) {
-	path := filepath.Join(cfg.workRoot, "config", "auth.yaml")
-	content := fmt.Sprintf(`Name: auth-service-smoke
+	return writeAuthConfigForEndpoint(cfg, filepath.Join(cfg.workRoot, "config", "auth.yaml"), cfg.auth, "auth-service-smoke")
+}
+
+func writeAuthConfigForEndpoint(cfg smokeConfig, path string, target endpoint, name string) (string, error) {
+	content := fmt.Sprintf(`Name: %s
 Host: %s
 Port: %d
 Database:
@@ -1730,8 +1886,16 @@ Jwt:
   ExpireHours: 24
 InternalAuth:
   Token: %s
-`, cfg.auth.host, cfg.auth.port, yamlString(cfg.serviceToken))
+`, name, target.host, target.port, yamlString(cfg.serviceToken))
 	return path, os.WriteFile(path, []byte(content), 0o644)
+}
+
+func serviceStartAuthConfigPath(cfg smokeConfig) string {
+	return filepath.Join(cfg.workRoot, "config", "auth-service-local-process.yaml")
+}
+
+func serviceStartGatewayConfigPath(cfg smokeConfig) string {
+	return filepath.Join(cfg.workRoot, "config", "gateway-local-process.yaml")
 }
 
 type processSpec struct {
@@ -1999,7 +2163,7 @@ func verifyQueueStatusAPIViaGateway(ctx context.Context, cfg smokeConfig) error 
 	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.gateway.baseURL()+"/api/judge/admin/queue/status", nil, composeAdminHeaders(cfg), &resp); err != nil {
 		return fail("compose queue status API returned pending/lag", err)
 	}
-	if resp.TaskStream != taskStream || resp.ResultStream != resultStream || resp.Group != consumerGroup {
+	if resp.TaskStream != cfg.taskStream || resp.ResultStream != cfg.resultStream || resp.Group != consumerGroup {
 		return fail("compose queue status API returned pending/lag", fmt.Errorf("unexpected stream identity: %#v", resp))
 	}
 	if resp.PendingCount != 0 {
@@ -2216,12 +2380,12 @@ func doStatus(ctx context.Context, method string, target string, body any, heade
 	return resp.StatusCode, data, nil
 }
 
-func findTaskEntry(ctx context.Context, client *redis.Client, submissionID int64) (string, error) {
+func findTaskEntry(ctx context.Context, client *redis.Client, cfg smokeConfig, submissionID int64) (string, error) {
 	wantSubmission := strconv.FormatInt(submissionID, 10)
 	wantTask := "sub-" + wantSubmission
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		entries, err := client.XRange(ctx, taskStream, "-", "+").Result()
+		entries, err := client.XRange(ctx, cfg.taskStream, "-", "+").Result()
 		if err != nil {
 			return "", err
 		}
@@ -2237,11 +2401,11 @@ func findTaskEntry(ctx context.Context, client *redis.Client, submissionID int64
 	return "", fmt.Errorf("task entry not found for submission %d", submissionID)
 }
 
-func findResultEntry(ctx context.Context, client *redis.Client, submissionID int64) (string, string, error) {
+func findResultEntry(ctx context.Context, client *redis.Client, cfg smokeConfig, submissionID int64) (string, string, error) {
 	wantSubmission := strconv.FormatInt(submissionID, 10)
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		entries, err := client.XRange(ctx, resultStream, "-", "+").Result()
+		entries, err := client.XRange(ctx, cfg.resultStream, "-", "+").Result()
 		if err != nil {
 			return "", "", err
 		}
@@ -2257,8 +2421,8 @@ func findResultEntry(ctx context.Context, client *redis.Client, submissionID int
 	return "", "", fmt.Errorf("result entry not found for submission %d", submissionID)
 }
 
-func pendingCount(ctx context.Context, client *redis.Client) (int64, error) {
-	value, err := client.Do(ctx, "XPENDING", taskStream, consumerGroup).Result()
+func pendingCount(ctx context.Context, client *redis.Client, cfg smokeConfig) (int64, error) {
+	value, err := client.Do(ctx, "XPENDING", cfg.taskStream, consumerGroup).Result()
 	if err != nil {
 		return 0, err
 	}
@@ -2305,7 +2469,7 @@ func verifyQueueStatusAPI(ctx context.Context, cfg smokeConfig) error {
 	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.judgeAPI.baseURL()+"/judge/admin/queue/status", nil, headers, &resp); err != nil {
 		return fail("redis queue status API returned pending/lag", err)
 	}
-	if resp.TaskStream != taskStream || resp.ResultStream != resultStream || resp.Group != consumerGroup {
+	if resp.TaskStream != cfg.taskStream || resp.ResultStream != cfg.resultStream || resp.Group != consumerGroup {
 		return fail("redis queue status API returned pending/lag", fmt.Errorf("unexpected stream identity: %#v", resp))
 	}
 	if resp.RedisStatus != "ok" && resp.RedisStatus != "partial" {
@@ -2412,6 +2576,10 @@ func waitProcessHealth(ctx context.Context, proc *childProcess, target string) e
 }
 
 func waitStorageUnavailable(ctx context.Context, target string) error {
+	return waitEndpointUnavailable(ctx, target, "storage-service")
+}
+
+func waitEndpointUnavailable(ctx context.Context, target string, serviceName string) error {
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
@@ -2430,7 +2598,7 @@ func waitStorageUnavailable(ctx context.Context, target string) error {
 			return ctx.Err()
 		}
 	}
-	return errors.New("storage-service still responds after rollback")
+	return fmt.Errorf("%s still responds after rollback", serviceName)
 }
 
 func waitFile(ctx context.Context, path string) error {
@@ -2961,6 +3129,8 @@ func printBetaMatrix(parent context.Context, cfg smokeConfig) {
 	}
 	ok("release.install storage-service")
 	ok("release.install service_start storage-service local-process")
+	ok("release.install service_start auth-service local-process")
+	ok("release.install service_start gateway local-process")
 	ok("gateway reload orchestrator-driven")
 	ok("storage backend %s", cfg.storageBackend)
 	ok("Redis task/result")

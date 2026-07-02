@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,27 @@ const judgeSubmissionStreamMaxLen int64 = 10000
 const judgeSubmissionStream = "ojos:judge:task"
 const judgeResultStream = "ojos:judge:result"
 const judgeConsumerGroup = "judge-worker"
+
+func judgeTaskStreamName() string {
+	if value := strings.TrimSpace(os.Getenv("OJOS_JUDGE_TASK_STREAM")); value != "" {
+		return value
+	}
+	return judgeSubmissionStream
+}
+
+func judgeResultStreamName() string {
+	if value := strings.TrimSpace(os.Getenv("OJOS_JUDGE_RESULT_STREAM")); value != "" {
+		return value
+	}
+	return judgeResultStream
+}
+
+func judgeConsumerGroupName() string {
+	if value := strings.TrimSpace(os.Getenv("OJOS_JUDGE_CONSUMER_GROUP")); value != "" {
+		return value
+	}
+	return judgeConsumerGroup
+}
 
 func publishJudgeSignal(
 	ctx context.Context,
@@ -40,7 +62,7 @@ func publishJudgeTaskEvent(
 	return svcCtx.Redis.XAdd(
 		ctx,
 		&redis.XAddArgs{
-			Stream: judgeSubmissionStream,
+			Stream: judgeTaskStreamName(),
 			MaxLen: judgeSubmissionStreamMaxLen,
 			Approx: true,
 			Values: judgeTaskEventValues(eventType, producer, submissionID, time.Now().UTC()),
@@ -49,7 +71,7 @@ func publishJudgeTaskEvent(
 }
 
 func ensureJudgeTaskConsumerGroup(ctx context.Context, svcCtx *svc.ServiceContext) error {
-	err := svcCtx.Redis.XGroupCreateMkStream(ctx, judgeSubmissionStream, judgeConsumerGroup, "$").Err()
+	err := svcCtx.Redis.XGroupCreateMkStream(ctx, judgeTaskStreamName(), judgeConsumerGroupName(), "$").Err()
 	if err == nil || strings.Contains(err.Error(), "BUSYGROUP") {
 		return nil
 	}
@@ -66,7 +88,7 @@ func publishJudgeResultEvent(
 	return svcCtx.Redis.XAdd(
 		ctx,
 		&redis.XAddArgs{
-			Stream: judgeResultStream,
+			Stream: judgeResultStreamName(),
 			MaxLen: judgeSubmissionStreamMaxLen,
 			Approx: true,
 			Values: judgeResultEventValues(taskID, workerID, req, time.Now().UTC()),
