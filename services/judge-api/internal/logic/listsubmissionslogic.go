@@ -60,9 +60,13 @@ func (l *ListSubmissionsLogic) ListSubmissions(req *types.ListSubmissionsReq) (r
 		return nil, err
 	}
 
-	canViewAll, err := sharedperm.HasUserPermission(
+	permissions := l.svcCtx.ActivePermissionChecker()
+	if permissions == nil {
+		return nil, errors.New("permission checker is not configured")
+	}
+
+	canViewAll, err := permissions.HasUserPermission(
 		l.ctx,
-		l.svcCtx.DB,
 		user.UserID,
 		"submission.view.all",
 		sharedperm.SystemScope(),
@@ -73,9 +77,8 @@ func (l *ListSubmissionsLogic) ListSubmissions(req *types.ListSubmissionsReq) (r
 
 	canViewProblem := false
 	if req.ProblemId > 0 && !canViewAll {
-		canViewProblem, err = sharedperm.HasUserPermission(
+		canViewProblem, err = permissions.HasUserPermission(
 			l.ctx,
-			l.svcCtx.DB,
 			user.UserID,
 			"problem.manage.data",
 			sharedperm.Scope{Type: "problem", ID: req.ProblemId},

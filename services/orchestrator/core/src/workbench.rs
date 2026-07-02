@@ -289,7 +289,6 @@ pub(crate) fn load_operation_workbench_context_with_database_url(
     repo_root: &Path,
     database_url: Option<String>,
 ) -> Result<OperationWorkbenchContext> {
-    let mut warnings = Vec::new();
     let schemas = crate::load_shared_schemas(repo_root)?;
     if let Some(database_url) = database_url {
         return PgOrchestratorStore::new(database_url.clone())
@@ -303,6 +302,14 @@ pub(crate) fn load_operation_workbench_context_with_database_url(
                 ))
             });
     }
+    load_operation_workbench_context_from_repo(repo_root)
+}
+
+pub(crate) fn load_operation_workbench_context_from_repo(
+    repo_root: &Path,
+) -> Result<OperationWorkbenchContext> {
+    let mut warnings = Vec::new();
+    let schemas = crate::load_shared_schemas(repo_root)?;
     let services = load_service_manifests(repo_root, &mut warnings)?;
     let releases = load_service_releases(repo_root, &mut warnings)?;
     let templates = load_templates(repo_root, &mut warnings)?;

@@ -11,6 +11,10 @@ Redis:
 Jaeger:
   Endpoint: ojos-jaeger:4317
 
+AuthService:
+  Endpoint: ""
+  AdminToken: ""
+
 Storage:
   SubmissionsRoot: /data/ojos/submissions
   # Legacy compatibility only. Default runtime path is InternalGatewayEndpoint + api_id.

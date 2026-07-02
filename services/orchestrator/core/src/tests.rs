@@ -6446,6 +6446,84 @@ fn orchestrator_entrypoints_require_reachable_persistent_store_when_database_url
 }
 
 #[test]
+fn repo_manifest_registry_sync_seeds_only_services_and_releases() {
+    let root = repo_root();
+    let context = load_operation_workbench_context(&root)
+        .expect("workbench context")
+        .with_memory_store();
+    let mut store = MemoryOrchestratorStore::new();
+
+    crate::dispatcher::sync_repo_manifest_registry_to_store(&mut store, &context)
+        .expect("sync repo manifest registry");
+
+    assert!(
+        store
+            .get_service("storage-service")
+            .expect("get storage service")
+            .is_some(),
+        "storage-service service.yaml should be synced into registry"
+    );
+    assert!(
+        store
+            .service_releases()
+            .iter()
+            .any(|release| release.service_name == "storage-service"),
+        "storage-service release.yaml should be synced into registry"
+    );
+    assert!(
+        store.host_services().is_empty(),
+        "manifest registry sync must not create runtime HostService records"
+    );
+    assert!(
+        store.endpoints().is_empty(),
+        "manifest registry sync must not create runtime Endpoint records"
+    );
+    assert!(
+        store.service_api_surfaces().is_empty(),
+        "manifest registry sync must not register API surfaces before release.install"
+    );
+}
+
+#[test]
+fn memory_cache_node_load_is_parent_first() {
+    let mut store = MemoryOrchestratorStore::new();
+    let child = NodeRecord {
+        node_id: "child-node".to_string(),
+        host_ip: "127.0.0.2".to_string(),
+        parent_node_id: "root-node".to_string(),
+        role: "node".to_string(),
+        labels: serde_json::json!({}),
+        status: "running".to_string(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let root = NodeRecord {
+        node_id: "root-node".to_string(),
+        host_ip: "127.0.0.1".to_string(),
+        parent_node_id: String::new(),
+        role: "root".to_string(),
+        labels: serde_json::json!({}),
+        status: "running".to_string(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+
+    crate::dispatcher::upsert_nodes_parent_first(&mut store, vec![child, root])
+        .expect("nodes should load parent-first even when input is child-first");
+
+    assert!(store.get_node("root-node").expect("root node").is_some());
+    assert!(store.get_node("child-node").expect("child node").is_some());
+    assert_eq!(
+        store
+            .ancestors_of("child-node")
+            .expect("child ancestors")
+            .first()
+            .map(|node| node.node_id.as_str()),
+        Some("root-node")
+    );
+}
+
+#[test]
 fn operation_workbench_session_seed_persists_planned_and_confirmed_state() {
     let root = repo_root();
     let context = load_operation_workbench_context(&root)

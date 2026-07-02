@@ -24,9 +24,13 @@ func requireSubmissionViewPermission(
 		return nil
 	}
 
-	ok, err := sharedperm.HasUserPermission(
+	checker := svcCtx.ActivePermissionChecker()
+	if checker == nil {
+		return errors.New("permission checker is not configured")
+	}
+
+	ok, err := checker.HasUserPermission(
 		ctx,
-		svcCtx.DB,
 		user.UserID,
 		"submission.view.all",
 		sharedperm.SystemScope(),
@@ -38,9 +42,8 @@ func requireSubmissionViewPermission(
 		return nil
 	}
 
-	return sharedperm.RequireUserPermission(
+	return checker.RequireUserPermission(
 		ctx,
-		svcCtx.DB,
 		user.UserID,
 		"problem.manage.data",
 		sharedperm.Scope{Type: "problem", ID: submission.ProblemID},
@@ -57,9 +60,13 @@ func requireSubmissionDebugPermission(
 		return errors.New("unauthorized")
 	}
 
-	ok, err := sharedperm.HasUserPermission(
+	checker := svcCtx.ActivePermissionChecker()
+	if checker == nil {
+		return errors.New("permission checker is not configured")
+	}
+
+	ok, err := checker.HasUserPermission(
 		ctx,
-		svcCtx.DB,
 		user.UserID,
 		"submission.view.all",
 		sharedperm.SystemScope(),
@@ -71,9 +78,8 @@ func requireSubmissionDebugPermission(
 		return nil
 	}
 
-	return sharedperm.RequireUserPermission(
+	return checker.RequireUserPermission(
 		ctx,
-		svcCtx.DB,
 		user.UserID,
 		"problem.manage.data",
 		sharedperm.Scope{Type: "problem", ID: submission.ProblemID},

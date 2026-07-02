@@ -20,7 +20,7 @@ use crate::{
 use crate::{OperationWorkbenchContext, OrchestratorView, SharedSchemas};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -524,7 +524,7 @@ impl OrchestratorActionConsole {
     pub fn load(repo_root: impl Into<PathBuf>) -> Result<Self> {
         let repo_root = repo_root.into();
         let context = load_operation_workbench_context(&repo_root)?;
-        Self::from_context(context)
+        Self::from_context(context, Some(&repo_root))
     }
 
     #[cfg(test)]
@@ -537,10 +537,10 @@ impl OrchestratorActionConsole {
             &repo_root,
             database_url,
         )?;
-        Self::from_context(context)
+        Self::from_context(context, Some(&repo_root))
     }
 
-    fn from_context(context: OperationWorkbenchContext) -> Result<Self> {
+    fn from_context(context: OperationWorkbenchContext, repo_root: Option<&Path>) -> Result<Self> {
         let schemas = context.schemas.clone();
         let store_mode = context
             .persistent_database_url()
@@ -549,6 +549,17 @@ impl OrchestratorActionConsole {
             })
             .unwrap_or(ConsoleStoreMode::Memory);
         let memory_store = memory_store_from_context(&context)?;
+        if let ConsoleStoreMode::Persistent { database_url } = &store_mode {
+            let mut store = PgOrchestratorStore::new(database_url.clone())
+                .map_err(persistent_store_unavailable)?;
+            let repo_context = if let Some(repo_root) = repo_root {
+                crate::workbench::load_operation_workbench_context_from_repo(repo_root)?
+            } else {
+                context.clone().with_memory_store()
+            };
+            sync_repo_manifest_registry_to_store(&mut store, &repo_context)
+                .map_err(persistent_store_unavailable)?;
+        }
         Ok(Self {
             schemas,
             memory_store,
@@ -1170,12 +1181,7 @@ fn memory_store_from_context(
     context: &OperationWorkbenchContext,
 ) -> Result<MemoryOrchestratorStore> {
     let mut store = MemoryOrchestratorStore::new();
-    for service in &context.services {
-        store.put_service(service.clone())?;
-    }
-    for release in &context.releases {
-        store.upsert_service_release(service_release_record(release)?)?;
-    }
+    sync_repo_manifest_registry_to_store(&mut store, context)?;
     for endpoint in &context.endpoints {
         store.put_endpoint(endpoint.clone())?;
     }
@@ -1186,6 +1192,19 @@ fn memory_store_from_context(
         store.put_topology(topology.clone())?;
     }
     Ok(store)
+}
+
+pub(crate) fn sync_repo_manifest_registry_to_store(
+    store: &mut impl OrchestratorStore,
+    context: &OperationWorkbenchContext,
+) -> Result<()> {
+    for service in &context.services {
+        store.put_service(service.clone())?;
+    }
+    for release in &context.releases {
+        store.upsert_service_release(service_release_record(release)?)?;
+    }
+    Ok(())
 }
 
 fn memory_store_from_store<S: OrchestratorStore>(store: &S) -> Result<MemoryOrchestratorStore> {
@@ -1220,9 +1239,7 @@ fn memory_store_from_store<S: OrchestratorStore>(store: &S) -> Result<MemoryOrch
     for config in store.list_rendered_service_configs()? {
         memory.upsert_rendered_service_config(config)?;
     }
-    for node in store.list_nodes()? {
-        memory.upsert_node(node)?;
-    }
+    upsert_nodes_parent_first(&mut memory, store.list_nodes()?)?;
     for api in store.list_service_api_surfaces()? {
         memory.upsert_service_api_surface(api)?;
     }
@@ -1251,6 +1268,39 @@ fn memory_store_from_store<S: OrchestratorStore>(store: &S) -> Result<MemoryOrch
         memory.put_topology(topology)?;
     }
     Ok(memory)
+}
+
+pub(crate) fn upsert_nodes_parent_first(
+    memory: &mut MemoryOrchestratorStore,
+    nodes: Vec<crate::NodeRecord>,
+) -> Result<()> {
+    let mut pending = nodes;
+    pending.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    while !pending.is_empty() {
+        let mut next = Vec::new();
+        let mut progressed = false;
+        for node in pending {
+            let parent = node.parent_node_id.trim();
+            if parent.is_empty() || memory.get_node(parent)?.is_some() {
+                memory.upsert_node(node)?;
+                progressed = true;
+            } else {
+                next.push(node);
+            }
+        }
+        if !progressed {
+            let blocked = next
+                .iter()
+                .map(|node| format!("{} -> {}", node.node_id, node.parent_node_id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(OrchestratorError::Dependency(format!(
+                "node tree could not be loaded parent-first: {blocked}"
+            )));
+        }
+        pending = next;
+    }
+    Ok(())
 }
 
 fn seed_smoke_control_plane_into_store<S: OrchestratorStore>(

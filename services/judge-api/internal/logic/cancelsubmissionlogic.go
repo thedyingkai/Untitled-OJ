@@ -49,9 +49,12 @@ func (l *CancelSubmissionLogic) CancelSubmission(req *types.CancelSubmissionReq)
 		return nil, err
 	}
 
-	if err := sharedperm.RequireUserPermission(
+	permissions := l.svcCtx.ActivePermissionChecker()
+	if permissions == nil {
+		return nil, errors.New("permission checker is not configured")
+	}
+	if err := permissions.RequireUserPermission(
 		l.ctx,
-		l.svcCtx.DB,
 		user.UserID,
 		"problem.manage.data",
 		sharedperm.Scope{Type: "problem", ID: submission.ProblemID},

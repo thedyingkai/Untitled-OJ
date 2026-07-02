@@ -198,6 +198,7 @@ services:
       AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
       AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
       ORCHESTRATOR_ENDPOINT: ${ORCHESTRATOR_ENDPOINT:-http://orchestrator:8090}
+      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:-ojos-local-internal}
       ORCHESTRATOR_NODE_ID: ${ORCHESTRATOR_NODE_ID:-child-node}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
@@ -228,6 +229,8 @@ services:
         condition: service_started
     expose:
       - "8081"
+    ports:
+      - "127.0.0.1:8081:8081"
     environment:
       DATABASE_URL: ${AUTH_DATABASE_URL:-postgres://postgres:ojos-auth-local@auth-db:5432/ojos_auth?sslmode=disable}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
@@ -272,6 +275,8 @@ services:
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     expose:
       - "8085"
+    ports:
+      - "127.0.0.1:8085:8085"
     depends_on:
       minio:
         condition: service_started
@@ -305,10 +310,14 @@ services:
         condition: service_started
     expose:
       - "8082"
+    ports:
+      - "127.0.0.1:8082:8082"
     environment:
       DATABASE_URL: ${JUDGE_DATABASE_URL:-postgres://postgres:ojos-judge-local@judge-db:5432/ojos_judge?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
+      AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
+      AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
       OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
       OJOS_INTERNAL_GATEWAY_ENDPOINT: http://gateway:8080

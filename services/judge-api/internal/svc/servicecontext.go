@@ -68,18 +68,6 @@ type PermissionChecker interface {
 	HasUserPermission(ctx context.Context, userID int64, permissionCode string, scope sharedperm.Scope) (bool, error)
 }
 
-type databasePermissionChecker struct {
-	db *pgxpool.Pool
-}
-
-func (p databasePermissionChecker) RequireUserPermission(ctx context.Context, userID int64, permissionCode string, scope sharedperm.Scope) error {
-	return sharedperm.RequireUserPermission(ctx, p.db, userID, permissionCode, scope)
-}
-
-func (p databasePermissionChecker) HasUserPermission(ctx context.Context, userID int64, permissionCode string, scope sharedperm.Scope) (bool, error) {
-	return sharedperm.HasUserPermission(ctx, p.db, userID, permissionCode, scope)
-}
-
 func (s *ServiceContext) ActiveSubmissionRepo() SubmissionRepository {
 	if s == nil {
 		return nil
@@ -162,6 +150,10 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	}
 
 	repo := repository.New(db)
+	permissionChecker := newAuthServicePermissionChecker(c.AuthService.Endpoint, c.AuthService.AdminToken)
+	if permissionChecker == nil {
+		permissionChecker = databasePermissionChecker{db: db}
+	}
 	return &ServiceContext{
 		Config: c,
 
@@ -172,7 +164,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		Repo:           repo,
 		SubmissionRepo: repo,
 		WorkerRepo:     repo,
-		Permission:     databasePermissionChecker{db: db},
+		Permission:     permissionChecker,
 		Redis:          redisClient,
 
 		UserContextMiddleware: middleware.NewUserContextMiddleware().Handle,
@@ -193,6 +185,12 @@ func applyEnvOverrides(c *config.Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("JAEGER_ENDPOINT")); value != "" {
 		c.Jaeger.Endpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("AUTH_SERVICE_ENDPOINT")); value != "" {
+		c.AuthService.Endpoint = value
+	}
+	if value := firstEnv("AUTH_SERVICE_ADMIN_TOKEN", "AUTH_INTERNAL_TOKEN"); value != "" {
+		c.AuthService.AdminToken = value
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_SUBMISSIONS_ROOT")); value != "" {
 		c.Storage.SubmissionsRoot = value

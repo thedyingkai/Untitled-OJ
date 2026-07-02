@@ -12,6 +12,7 @@ type Config struct {
 	Redis        RedisConfig
 	Jaeger       JaegerConfig
 	Storage      StorageConfig
+	AuthService  AuthServiceConfig
 	Submission   SubmissionConfig
 	Languages    LanguagesConfig
 	WorkerAuth   WorkerAuthConfig
@@ -28,6 +29,11 @@ type RedisConfig struct {
 
 type JaegerConfig struct {
 	Endpoint string
+}
+
+type AuthServiceConfig struct {
+	Endpoint   string `json:",optional"`
+	AdminToken string `json:",optional"`
 }
 
 type StorageConfig struct {

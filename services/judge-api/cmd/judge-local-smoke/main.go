@@ -52,10 +52,14 @@ type smokeConfig struct {
 	authMode         string
 	installMode      string
 	storageBackend   string
+	serviceToken     string
+	workerToken      string
 	gatewayAdminJWT  string
+	composeUserJWT   string
 	orchestrator     endpoint
 	auth             endpoint
 	storage          endpoint
+	storageProvider  endpoint
 	gateway          endpoint
 	judgeAPI         endpoint
 	timeout          time.Duration
@@ -72,6 +76,13 @@ type endpoint struct {
 
 func (e endpoint) baseURL() string {
 	return fmt.Sprintf("http://%s:%d", e.host, e.port)
+}
+
+func storageProviderEndpoint(cfg smokeConfig) endpoint {
+	if strings.TrimSpace(cfg.storageProvider.host) != "" && cfg.storageProvider.port > 0 {
+		return cfg.storageProvider
+	}
+	return cfg.storage
 }
 
 type stepError struct {
@@ -110,7 +121,7 @@ func main() {
 		*workRoot = filepath.Join(repoRoot, ".smoke", "judge-local")
 	}
 	normalizedMatrixMode := normalizeMatrixMode(*mode)
-	if normalizedMatrixMode != "" && normalizedMatrixMode != "beta-local" {
+	if normalizedMatrixMode != "" && normalizedMatrixMode != "beta-local" && normalizedMatrixMode != "compose" {
 		fmt.Fprintf(os.Stderr, "[FAIL] smoke mode\nreason: unsupported matrix mode %q\n", normalizedMatrixMode)
 		os.Exit(1)
 	}
@@ -120,6 +131,14 @@ func main() {
 		*installMode = "release-install"
 		if *timeout < 240*time.Second {
 			*timeout = 240 * time.Second
+		}
+	}
+	if normalizedMatrixMode == "compose" {
+		*controlPlane = "real"
+		*authMode = "real"
+		*installMode = "release-install"
+		if *timeout < 300*time.Second {
+			*timeout = 300 * time.Second
 		}
 	}
 	normalizedStorageBackend := normalizeStorageBackend(*storageBackend)
@@ -132,6 +151,19 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[FAIL] allocate smoke ports\nreason: %v\n", err)
 		os.Exit(1)
 	}
+	if normalizedMatrixMode == "compose" {
+		orchestratorEndpoint = endpoint{host: "127.0.0.1", port: 8090}
+		authEndpoint = endpoint{host: "127.0.0.1", port: 8081}
+		storageEndpoint = endpoint{host: "127.0.0.1", port: 8085}
+		gatewayEndpoint = endpoint{host: "127.0.0.1", port: 8080}
+		judgeAPIEndpoint = endpoint{host: "127.0.0.1", port: 8082}
+	}
+	smokeServiceToken := serviceToken
+	smokeWorkerToken := workerToken
+	if normalizedMatrixMode == "compose" {
+		smokeServiceToken = envDefault("AUTH_INTERNAL_TOKEN", "ojos-local-internal")
+		smokeWorkerToken = envDefault("OJOS_WORKER_TOKEN", "ojos-local-worker")
+	}
 	cfg := smokeConfig{
 		repoRoot:         repoRoot,
 		workRoot:         *workRoot,
@@ -140,9 +172,12 @@ func main() {
 		controlPlaneMode: normalizeSmokeMode(*controlPlane),
 		authMode:         normalizeSmokeMode(*authMode),
 		storageBackend:   normalizedStorageBackend,
+		serviceToken:     smokeServiceToken,
+		workerToken:      smokeWorkerToken,
 		orchestrator:     orchestratorEndpoint,
 		auth:             authEndpoint,
 		storage:          storageEndpoint,
+		storageProvider:  storageEndpoint,
 		gateway:          gatewayEndpoint,
 		judgeAPI:         judgeAPIEndpoint,
 		timeout:          *timeout,
@@ -172,7 +207,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[FAIL] install mode\nreason: release-install mode requires -control-plane real\n")
 		os.Exit(1)
 	}
-	adminJWT, err := sharedjwt.Generate("smoke", 1, "smoke-admin", []string{"admin"}, 24)
+	gatewayJWTSecret := "smoke"
+	if normalizedMatrixMode == "compose" {
+		gatewayJWTSecret = envDefault("JWT_SECRET", "ojos-local-jwt")
+	}
+	adminJWT, err := sharedjwt.Generate(gatewayJWTSecret, 1, "smoke-admin", []string{"admin"}, 24)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[FAIL] gateway admin token\nreason: %v\n", err)
 		os.Exit(1)
@@ -182,12 +221,18 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
 	defer cancel()
 
-	if err := run(ctx, cfg); err != nil {
+	var runErr error
+	if cfg.mode == "compose" {
+		runErr = runCompose(ctx, cfg)
+	} else {
+		runErr = run(ctx, cfg)
+	}
+	if runErr != nil {
 		var step stepError
-		if errors.As(err, &step) {
+		if errors.As(runErr, &step) {
 			fmt.Fprintf(os.Stderr, "[FAIL] %s\nreason: %v\n", step.step, step.err)
 		} else {
-			fmt.Fprintf(os.Stderr, "[FAIL] smoke\nreason: %v\n", err)
+			fmt.Fprintf(os.Stderr, "[FAIL] smoke\nreason: %v\n", runErr)
 		}
 		printLastLogs(os.Stderr, filepath.Join(cfg.workRoot, "logs"))
 		os.Exit(1)
@@ -369,8 +414,8 @@ func run(ctx context.Context, cfg smokeConfig) error {
 			"-port", strconv.Itoa(cfg.judgeAPI.port),
 			"-redis", cfg.redisURL,
 			"-internal-gateway", cfg.gateway.baseURL(),
-			"-worker-token", workerToken,
-			"-service-token", serviceToken,
+			"-worker-token", cfg.workerToken,
+			"-service-token", cfg.serviceToken,
 			"-caller-node-id", childNodeID,
 			"-submissions-root", filepath.Join(cfg.workRoot, "submissions"),
 		},
@@ -479,11 +524,151 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	return nil
 }
 
+func runCompose(ctx context.Context, cfg smokeConfig) error {
+	redisClient, err := connectRedis(ctx, cfg.redisURL)
+	if err != nil {
+		return fail("compose redis connected", err)
+	}
+	defer redisClient.Close()
+	if cfg.cleanStreams {
+		if err := redisClient.Del(ctx, taskStream, resultStream).Err(); err != nil {
+			return fail("compose redis streams cleaned", err)
+		}
+	}
+	ok("compose redis connected")
+
+	healthChecks := []struct {
+		name string
+		url  string
+	}{
+		{name: "compose gateway health", url: cfg.gateway.baseURL() + "/health"},
+		{name: "compose auth-service health", url: cfg.auth.baseURL() + "/health"},
+		{name: "compose storage-service health", url: cfg.storage.baseURL() + "/health"},
+		{name: "compose judge-api health", url: cfg.judgeAPI.baseURL() + "/health"},
+		{name: "compose orchestrator health", url: cfg.orchestrator.baseURL() + "/health"},
+	}
+	for _, check := range healthChecks {
+		if err := waitHealth(ctx, check.url); err != nil {
+			return fail(check.name, err)
+		}
+		ok(check.name)
+	}
+
+	storageIP, err := composeServiceIP(ctx, cfg, "storage-service")
+	if err != nil {
+		return fail("compose storage-service container endpoint", err)
+	}
+	cfg.storageProvider = endpoint{host: storageIP, port: 8085}
+	ok("compose storage provider endpoint: %s", storageProviderEndpoint(cfg).baseURL())
+
+	if err := seedRealNodeTree(ctx, cfg); err != nil {
+		return err
+	}
+	storageEndpointID, err := installStorageReleaseCompose(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if err := composeRestartService(ctx, cfg, "judge-worker"); err != nil {
+		return fail("compose judge-worker container prepared", err)
+	}
+	ok("compose judge-worker container prepared")
+	if err := installComposeCallerIdentities(ctx, cfg); err != nil {
+		return err
+	}
+	if err := reloadGatewayFromComposeSmoke(ctx, cfg); err != nil {
+		return err
+	}
+	if err := waitGatewayRoute(ctx, cfg, "storage.object.put", storageEndpointID); err != nil {
+		return fail("compose gateway route reload completed", err)
+	}
+	ok("compose gateway route reload completed")
+
+	if err := verifyStorageBackend(ctx, cfg); err != nil {
+		return err
+	}
+	if err := verifyStorageLifecycleThroughResolver(ctx, cfg); err != nil {
+		return err
+	}
+
+	if err := ensureComposeJudgeProblemFixture(ctx, cfg); err != nil {
+		return fail("compose judge problem fixture", err)
+	}
+	ok("compose judge problem fixture: problem_id=1001")
+
+	userID, userJWT, err := ensureComposeSmokeUser(ctx, cfg)
+	if err != nil {
+		return fail("compose auth user login", err)
+	}
+	cfg.composeUserJWT = userJWT
+	ok("compose auth user login: user_id=%d", userID)
+
+	if err := composeRestartService(ctx, cfg, "judge-worker"); err != nil {
+		return fail("compose judge-worker restarted after stream reset", err)
+	}
+	ok("compose judge-worker restarted after stream reset")
+
+	submissionID, err := createSubmissionViaGateway(ctx, cfg)
+	if err != nil {
+		return fail("compose submission created through gateway", err)
+	}
+	ok("compose submission created through gateway: %d", submissionID)
+
+	sourceKey := fmt.Sprintf("%d-source-main.cpp", submissionID)
+	if err := waitStorageObject(ctx, cfg, "submissions", sourceKey, submissionSourceCode); err != nil {
+		return fail("compose source stored through internal resolver", err)
+	}
+	ok("compose source stored through internal resolver")
+
+	taskID, err := findTaskEntry(ctx, redisClient, submissionID)
+	if err != nil {
+		return fail("compose redis task written", err)
+	}
+	cfg.lastTaskID = taskID
+	ok("compose redis task written: %s", taskID)
+
+	resultID, resultStatus, err := findResultEntry(ctx, redisClient, submissionID)
+	if err != nil {
+		return fail("compose result written", err)
+	}
+	cfg.lastResultID = resultID
+	if resultStatus != "ACCEPTED" {
+		return fail("compose result written", fmt.Errorf("unexpected result status %q", resultStatus))
+	}
+	ok("compose result written: %s", resultID)
+
+	pending, err := pendingCount(ctx, redisClient)
+	if err != nil {
+		return fail("compose worker consumed task acked", err)
+	}
+	if pending != 0 {
+		return fail("compose worker consumed task acked", fmt.Errorf("pending count is %d", pending))
+	}
+	ok("compose worker consumed task acked")
+
+	status, err := waitSubmissionStatusViaGateway(ctx, cfg, submissionID)
+	if err != nil {
+		return fail("compose result query returned ACCEPTED", err)
+	}
+	if status != "ACCEPTED" {
+		return fail("compose result query returned ACCEPTED", fmt.Errorf("unexpected status %q", status))
+	}
+	if err := querySubmissionCasesViaGateway(ctx, cfg, submissionID); err != nil {
+		return fail("compose result query returned ACCEPTED", err)
+	}
+	ok("compose result query returned ACCEPTED")
+	if err := verifyQueueStatusAPIViaGateway(ctx, cfg); err != nil {
+		return err
+	}
+
+	fmt.Printf("[OK] compose smoke summary: submission_id=%d task_entry_id=%s result_entry_id=%s status=%s worker=compose runner=fake reload=smoke-driven\n", submissionID, taskID, resultID, status)
+	return nil
+}
+
 func startWorker(ctx context.Context, cfg smokeConfig) (*childProcess, error) {
 	env := noProxyEnv(map[string]string{
 		"LANGUAGES_CONFIG":               filepath.Join(cfg.repoRoot, "services", "judge-worker", "config", "languages.yaml"),
 		"OJOS_JUDGE_API_URL":             cfg.judgeAPI.baseURL(),
-		"OJOS_WORKER_TOKEN":              workerToken,
+		"OJOS_WORKER_TOKEN":              cfg.workerToken,
 		"OJOS_WORKER_ID":                 workerEndpointID,
 		"OJOS_WORKER_NAME":               "smoke-judge-worker",
 		"OJOS_MAX_CONCURRENCY":           "1",
@@ -496,7 +681,7 @@ func startWorker(ctx context.Context, cfg smokeConfig) (*childProcess, error) {
 		"OJOS_INTERNAL_GATEWAY_URL":      cfg.gateway.baseURL(),
 		"OJOS_STORAGE_OBJECT_GET_API_ID": "storage.object.get",
 		"OJOS_STORAGE_OBJECT_PUT_API_ID": "storage.object.put",
-		"OJOS_SERVICE_TOKEN":             serviceToken,
+		"OJOS_SERVICE_TOKEN":             cfg.serviceToken,
 		"OJOS_CALLER_NODE_ID":            childNodeID,
 		"OJOS_RUNNER_MODE":               "fake",
 		"OJOS_WORKER_SMOKE_ONCE":         "1",
@@ -526,7 +711,7 @@ func startRealOrchestrator(ctx context.Context, cfg smokeConfig) (*childProcess,
 			"ORCHESTRATOR_RELEASE_PACKAGE_ROOT":        cfg.repoRoot,
 			"ORCHESTRATOR_AUTH_PERMISSION_SYNC":        "1",
 			"AUTH_SERVICE_ENDPOINT":                    cfg.auth.baseURL(),
-			"AUTH_SERVICE_ADMIN_TOKEN":                 serviceToken,
+			"AUTH_SERVICE_ADMIN_TOKEN":                 cfg.serviceToken,
 			"ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH":       "1",
 			"GATEWAY_ENDPOINT":                         cfg.gateway.baseURL(),
 			"GATEWAY_ADMIN_TOKEN":                      cfg.gatewayAdminJWT,
@@ -553,16 +738,17 @@ func startRealAuthService(ctx context.Context, cfg smokeConfig) (*childProcess, 
 		args:    []string{"go", "run", ".", "-f", authCfg},
 		env: noProxyEnv(map[string]string{
 			"OJOS_SMOKE_MODE":     "1",
-			"AUTH_INTERNAL_TOKEN": serviceToken,
+			"AUTH_INTERNAL_TOKEN": cfg.serviceToken,
 		}),
 	})
 }
 
 func seedRealOrchestrator(ctx context.Context, cfg smokeConfig) error {
-	endpointID := fmt.Sprintf("%s:%d:%s", cfg.storage.host, cfg.storage.port, storageService)
+	provider := storageProviderEndpoint(cfg)
+	endpointID := fmt.Sprintf("%s:%d:%s", provider.host, provider.port, storageService)
 	body := map[string]any{
 		"root_node_id":         rootNodeID,
-		"root_host_ip":         cfg.storage.host,
+		"root_host_ip":         provider.host,
 		"child_node_id":        childNodeID,
 		"child_host_ip":        "127.0.0.2",
 		"storage_service_name": storageService,
@@ -595,10 +781,14 @@ func seedRealOrchestrator(ctx context.Context, cfg smokeConfig) error {
 }
 
 func seedRealNodeTree(ctx context.Context, cfg smokeConfig) error {
+	existing, err := existingNodeIDs(ctx, cfg)
+	if err != nil {
+		return fail("nodes created through API", err)
+	}
 	nodes := []map[string]any{
 		{
 			"node_id":        rootNodeID,
-			"host_ip":        cfg.storage.host,
+			"host_ip":        storageProviderEndpoint(cfg).host,
 			"parent_node_id": "",
 			"role":           "root",
 			"labels": map[string]any{
@@ -618,6 +808,10 @@ func seedRealNodeTree(ctx context.Context, cfg smokeConfig) error {
 		},
 	}
 	for _, body := range nodes {
+		nodeID, _ := body["node_id"].(string)
+		if existing[nodeID] {
+			continue
+		}
 		var resp struct {
 			Node struct {
 				NodeID string `json:"node_id"`
@@ -649,12 +843,40 @@ func seedRealNodeTree(ctx context.Context, cfg smokeConfig) error {
 	return nil
 }
 
+func existingNodeIDs(ctx context.Context, cfg smokeConfig) (map[string]bool, error) {
+	var tree struct {
+		Nodes []struct {
+			NodeID string `json:"node_id"`
+		} `json:"nodes"`
+	}
+	status, body, err := doStatus(ctx, http.MethodGet, cfg.orchestrator.baseURL()+"/nodes", nil, map[string]string{})
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return map[string]bool{}, nil
+	}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("GET /nodes returned %d: %s", status, strings.TrimSpace(string(body)))
+	}
+	if err := json.Unmarshal(body, &tree); err != nil {
+		return nil, err
+	}
+	existing := map[string]bool{}
+	for _, node := range tree.Nodes {
+		if strings.TrimSpace(node.NodeID) != "" {
+			existing[node.NodeID] = true
+		}
+	}
+	return existing, nil
+}
+
 func verifyStorageRouteAbsentBeforeInstall(ctx context.Context, cfg smokeConfig) error {
 	if err := verifyRouteMissing(ctx, cfg, "storage.object.get"); err != nil {
 		return fail("release.install before route absent", err)
 	}
 	status, body, err := doStatus(ctx, http.MethodGet, cfg.gateway.baseURL()+"/internal/apis/storage.object.get/submissions/pre-install.txt", nil, map[string]string{
-		"Authorization":         "Bearer " + serviceToken,
+		"Authorization":         "Bearer " + cfg.serviceToken,
 		"X-OJOS-Caller-Service": judgeAPIService,
 		"X-OJOS-Node-Id":        childNodeID,
 	})
@@ -669,10 +891,11 @@ func verifyStorageRouteAbsentBeforeInstall(ctx context.Context, cfg smokeConfig)
 }
 
 func installStorageRelease(ctx context.Context, cfg smokeConfig) (string, error) {
-	endpointID := fmt.Sprintf("%s:%d:%s", cfg.storage.host, cfg.storage.port, storageService)
+	provider := storageProviderEndpoint(cfg)
+	endpointID := fmt.Sprintf("%s:%d:%s", provider.host, provider.port, storageService)
 	body := map[string]any{
 		"operation_id":             "op-smoke-storage-release-install",
-		"host_ip":                  cfg.storage.host,
+		"host_ip":                  provider.host,
 		"endpoint":                 endpointID,
 		"gateway_node_id":          childNodeID,
 		"execute_service_driver":   true,
@@ -746,6 +969,103 @@ func installJudgeCallerIdentities(ctx context.Context, cfg smokeConfig) error {
 	return nil
 }
 
+func installStorageReleaseCompose(ctx context.Context, cfg smokeConfig) (string, error) {
+	provider := storageProviderEndpoint(cfg)
+	endpointID := fmt.Sprintf("%s:%d:%s", provider.host, provider.port, storageService)
+	body := map[string]any{
+		"operation_id":             fmt.Sprintf("op-compose-storage-release-install-%d", time.Now().UnixNano()),
+		"host_ip":                  provider.host,
+		"endpoint":                 endpointID,
+		"gateway_node_id":          childNodeID,
+		"execute_service_driver":   false,
+		"external_service_running": true,
+	}
+	var installResp struct {
+		ActionResult struct {
+			ActionID    string `json:"action_id"`
+			Status      string `json:"status"`
+			Message     string `json:"message"`
+			OperationID string `json:"operation_id"`
+			Error       string `json:"error"`
+		} `json:"action_result"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.orchestrator.baseURL()+"/releases/"+storageService+"/install", body, map[string]string{}, &installResp); err != nil {
+		return "", fail("compose release.install storage-service", err)
+	}
+	if installResp.ActionResult.ActionID != "release.install" {
+		return "", fail("compose release.install storage-service", fmt.Errorf("unexpected action_id %q", installResp.ActionResult.ActionID))
+	}
+	if !strings.EqualFold(strings.ReplaceAll(installResp.ActionResult.Status, "_", ""), "succeeded") {
+		return "", fail("compose release.install storage-service", fmt.Errorf("unexpected status %q operation_id=%s error=%s message=%s", installResp.ActionResult.Status, installResp.ActionResult.OperationID, installResp.ActionResult.Error, installResp.ActionResult.Message))
+	}
+	ok("compose release.install storage-service")
+	if err := verifyRealOrchestratorRoutes(ctx, cfg, endpointID); err != nil {
+		return "", err
+	}
+	return endpointID, nil
+}
+
+func installComposeCallerIdentities(ctx context.Context, cfg smokeConfig) error {
+	installs := []struct {
+		serviceName string
+		port        int
+	}{
+		{serviceName: judgeAPIService, port: 8082},
+		{serviceName: workerService, port: 9101},
+	}
+	for _, item := range installs {
+		hostIP, err := composeServiceIP(ctx, cfg, item.serviceName)
+		if err != nil {
+			return fail("compose release.install service identities", err)
+		}
+		endpointID := fmt.Sprintf("%s:%d:%s", hostIP, item.port, item.serviceName)
+		body := map[string]any{
+			"operation_id":             fmt.Sprintf("op-compose-%s-identity-install-%d", item.serviceName, time.Now().UnixNano()),
+			"host_ip":                  hostIP,
+			"endpoint":                 endpointID,
+			"gateway_node_id":          childNodeID,
+			"execute_service_driver":   false,
+			"external_service_running": true,
+		}
+		var installResp struct {
+			ActionResult struct {
+				ActionID    string `json:"action_id"`
+				Status      string `json:"status"`
+				Message     string `json:"message"`
+				OperationID string `json:"operation_id"`
+				Error       string `json:"error"`
+			} `json:"action_result"`
+		}
+		if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.orchestrator.baseURL()+"/releases/"+item.serviceName+"/install", body, map[string]string{}, &installResp); err != nil {
+			return fail("compose release.install service identities", err)
+		}
+		if installResp.ActionResult.ActionID != "release.install" {
+			return fail("compose release.install service identities", fmt.Errorf("%s unexpected action_id %q", item.serviceName, installResp.ActionResult.ActionID))
+		}
+		if !strings.EqualFold(strings.ReplaceAll(installResp.ActionResult.Status, "_", ""), "succeeded") {
+			return fail("compose release.install service identities", fmt.Errorf("%s unexpected status %q operation_id=%s error=%s message=%s", item.serviceName, installResp.ActionResult.Status, installResp.ActionResult.OperationID, installResp.ActionResult.Error, installResp.ActionResult.Message))
+		}
+	}
+	ok("compose release.install service identities: judge-api and judge-worker")
+	return nil
+}
+
+func reloadGatewayFromComposeSmoke(ctx context.Context, cfg smokeConfig) error {
+	var resp struct {
+		Status     string `json:"status"`
+		RouteCount int    `json:"route_count"`
+	}
+	headers := map[string]string{"Authorization": "Bearer " + cfg.gatewayAdminJWT}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.gateway.baseURL()+"/api/admin/orchestrator/routes/reload", map[string]any{}, headers, &resp); err != nil {
+		return fail("compose gateway reload smoke-driven", err)
+	}
+	if !strings.EqualFold(resp.Status, "reloaded") {
+		return fail("compose gateway reload smoke-driven", fmt.Errorf("unexpected status %q", resp.Status))
+	}
+	ok("compose gateway reload smoke-driven: routes=%d", resp.RouteCount)
+	return nil
+}
+
 func verifyRealOrchestratorRoutes(ctx context.Context, cfg smokeConfig, endpointID string) error {
 	var table routeTableResponse
 	target := cfg.orchestrator.baseURL() + "/internal/orchestrator/nodes/" + childNodeID + "/routes?include_upstream=true"
@@ -757,7 +1077,7 @@ func verifyRealOrchestratorRoutes(ctx context.Context, cfg smokeConfig, endpoint
 		if route == nil {
 			return fail("child effective routes loaded from real orchestrator", fmt.Errorf("missing route %s", want))
 		}
-		if route.ProviderNodeID != rootNodeID || route.ProviderEndpoint != endpointID || route.UpstreamBase != cfg.storage.baseURL() {
+		if route.ProviderNodeID != rootNodeID || route.ProviderEndpoint != endpointID || route.UpstreamBase != storageProviderEndpoint(cfg).baseURL() {
 			return fail("child effective routes loaded from real orchestrator", fmt.Errorf("route %s resolved to provider=%s endpoint=%s upstream=%s", want, route.ProviderNodeID, route.ProviderEndpoint, route.UpstreamBase))
 		}
 	}
@@ -809,7 +1129,7 @@ func waitGatewayRoute(ctx context.Context, cfg smokeConfig, apiID string, endpoi
 		status, body, err := doStatus(ctx, http.MethodPut, cfg.gateway.baseURL()+"/internal/apis/"+apiID+"/submissions/reload-probe.txt", map[string]string{
 			"probe": "release-install-gateway-reload",
 		}, map[string]string{
-			"Authorization":         "Bearer " + serviceToken,
+			"Authorization":         "Bearer " + cfg.serviceToken,
 			"X-OJOS-Caller-Service": judgeAPIService,
 			"X-OJOS-Node-Id":        childNodeID,
 		})
@@ -877,7 +1197,7 @@ func verifyStorageLifecycleThroughResolver(ctx context.Context, cfg smokeConfig)
 	key := fmt.Sprintf("beta-%s-%d.txt", cfg.storageBackend, time.Now().UnixNano())
 	body := "beta storage lifecycle via internal resolver\n"
 	headers := map[string]string{
-		"Authorization":         "Bearer " + serviceToken,
+		"Authorization":         "Bearer " + cfg.serviceToken,
 		"X-OJOS-Caller-Service": judgeAPIService,
 		"X-OJOS-Node-Id":        childNodeID,
 	}
@@ -926,7 +1246,7 @@ func verifyStorageLifecycleThroughResolver(ctx context.Context, cfg smokeConfig)
 
 func waitStorageObject(ctx context.Context, cfg smokeConfig, bucket string, key string, wantSubstring string) error {
 	headers := map[string]string{
-		"Authorization":         "Bearer " + serviceToken,
+		"Authorization":         "Bearer " + cfg.serviceToken,
 		"X-OJOS-Caller-Service": judgeAPIService,
 		"X-OJOS-Node-Id":        childNodeID,
 	}
@@ -956,7 +1276,7 @@ func waitStorageObject(ctx context.Context, cfg smokeConfig, bucket string, key 
 }
 
 func verifyRealAuth(ctx context.Context, cfg smokeConfig) error {
-	allowed, status, err := permissionCheck(ctx, cfg.auth.baseURL(), serviceToken, judgeAPIService, "storage.object.put", "storage.object.write")
+	allowed, status, err := permissionCheck(ctx, cfg.auth.baseURL(), cfg.serviceToken, judgeAPIService, "storage.object.put", "storage.object.write")
 	if err != nil {
 		return fail("permission-check allowed service caller", err)
 	}
@@ -974,7 +1294,7 @@ func verifyRealAuth(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("permission-check rejected missing token")
 
-	allowed, status, err = permissionCheck(ctx, cfg.auth.baseURL(), serviceToken, judgeAPIService, "storage.object.delete", "storage.object.delete")
+	allowed, status, err = permissionCheck(ctx, cfg.auth.baseURL(), cfg.serviceToken, judgeAPIService, "storage.object.delete", "storage.object.delete")
 	if err != nil {
 		return fail("permission-check denied missing permission", err)
 	}
@@ -983,7 +1303,7 @@ func verifyRealAuth(ctx context.Context, cfg smokeConfig) error {
 	}
 	ok("permission-check denied missing permission")
 
-	allowed, status, err = permissionCheck(ctx, cfg.auth.baseURL(), serviceToken, "fake-worker", "storage.object.get", "storage.object.read")
+	allowed, status, err = permissionCheck(ctx, cfg.auth.baseURL(), cfg.serviceToken, "fake-worker", "storage.object.get", "storage.object.read")
 	if err != nil {
 		return fail("permission-check denied unknown service", err)
 	}
@@ -1014,7 +1334,7 @@ func verifyStoragePermissionsRegistered(ctx context.Context, cfg smokeConfig) er
 			ServiceCode string `json:"service_code"`
 		} `json:"data"`
 	}
-	headers := map[string]string{"Authorization": "Bearer " + serviceToken}
+	headers := map[string]string{"Authorization": "Bearer " + cfg.serviceToken}
 	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.auth.baseURL()+"/auth/admin/permissions", nil, headers, &resp); err != nil {
 		return fail("storage permissions registered into auth-service", err)
 	}
@@ -1042,7 +1362,7 @@ func verifyStoragePermissionsRegistered(ctx context.Context, cfg smokeConfig) er
 
 func verifyGatewayAuthBoundaries(ctx context.Context, cfg smokeConfig) error {
 	headers := map[string]string{
-		"Authorization":         "Bearer " + serviceToken,
+		"Authorization":         "Bearer " + cfg.serviceToken,
 		"X-OJOS-Caller-Service": judgeAPIService,
 		"X-OJOS-Node-Id":        childNodeID,
 	}
@@ -1356,7 +1676,7 @@ Jwt:
   ExpireHours: 24
 InternalAuth:
   Token: %s
-`, cfg.auth.host, cfg.auth.port, yamlString(serviceToken))
+`, cfg.auth.host, cfg.auth.port, yamlString(cfg.serviceToken))
 	return path, os.WriteFile(path, []byte(content), 0o644)
 }
 
@@ -1542,6 +1862,216 @@ func querySubmissionCases(ctx context.Context, cfg smokeConfig, submissionID int
 		return fmt.Errorf("unexpected case status %q", resp.Cases[0].Status)
 	}
 	return nil
+}
+
+func createSubmissionViaGateway(ctx context.Context, cfg smokeConfig) (int64, error) {
+	body := map[string]any{
+		"problem_id": int64(1001),
+		"language":   "cpp17",
+		"code":       submissionSourceCode,
+	}
+	var resp struct {
+		SubmissionID int64  `json:"submission_id"`
+		Status       string `json:"status"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.gateway.baseURL()+"/api/judge/submissions", body, composeUserHeaders(cfg), &resp); err != nil {
+		return 0, err
+	}
+	if resp.SubmissionID <= 0 {
+		return 0, fmt.Errorf("invalid submission id: %d", resp.SubmissionID)
+	}
+	return resp.SubmissionID, nil
+}
+
+func waitSubmissionStatusViaGateway(ctx context.Context, cfg smokeConfig, submissionID int64) (string, error) {
+	deadline := time.Now().Add(30 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		var resp struct {
+			Status string `json:"status"`
+		}
+		err := doJSONWithHeaders(ctx, http.MethodGet, fmt.Sprintf("%s/api/judge/submissions/%d", cfg.gateway.baseURL(), submissionID), nil, composeUserHeaders(cfg), &resp)
+		if err == nil {
+			last = resp.Status
+			if isTerminalStatus(resp.Status) {
+				return resp.Status, nil
+			}
+		}
+		if wait(ctx, 300*time.Millisecond) != nil {
+			return "", ctx.Err()
+		}
+	}
+	return "", fmt.Errorf("submission %d did not finish, last status=%q", submissionID, last)
+}
+
+func querySubmissionCasesViaGateway(ctx context.Context, cfg smokeConfig, submissionID int64) error {
+	var resp struct {
+		Cases []struct {
+			Status string `json:"status"`
+		} `json:"cases"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodGet, fmt.Sprintf("%s/api/judge/submissions/%d/cases", cfg.gateway.baseURL(), submissionID), nil, composeUserHeaders(cfg), &resp); err != nil {
+		return err
+	}
+	if len(resp.Cases) == 0 {
+		return errors.New("result cases are empty")
+	}
+	if resp.Cases[0].Status != "ACCEPTED" {
+		return fmt.Errorf("unexpected case status %q", resp.Cases[0].Status)
+	}
+	return nil
+}
+
+func verifyQueueStatusAPIViaGateway(ctx context.Context, cfg smokeConfig) error {
+	var resp struct {
+		TaskStream        string `json:"task_stream"`
+		ResultStream      string `json:"result_stream"`
+		Group             string `json:"group"`
+		PendingCount      int64  `json:"pending_count"`
+		ConsumerLag       int64  `json:"consumer_lag"`
+		Lag               int64  `json:"lag"`
+		ConsumerCount     int64  `json:"consumer_count"`
+		LastID            string `json:"last_id"`
+		ResultLastID      string `json:"result_last_id"`
+		PendingOldestIdle int64  `json:"pending_oldest_idle_ms"`
+		RedisStatus       string `json:"redis_status"`
+		Consumers         []struct {
+			Name       string `json:"name"`
+			Pending    int64  `json:"pending"`
+			IdleMs     int64  `json:"idle_ms"`
+			InactiveMs int64  `json:"inactive_ms"`
+		} `json:"consumers"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.gateway.baseURL()+"/api/judge/admin/queue/status", nil, composeAdminHeaders(cfg), &resp); err != nil {
+		return fail("compose queue status API returned pending/lag", err)
+	}
+	if resp.TaskStream != taskStream || resp.ResultStream != resultStream || resp.Group != consumerGroup {
+		return fail("compose queue status API returned pending/lag", fmt.Errorf("unexpected stream identity: %#v", resp))
+	}
+	if resp.PendingCount != 0 {
+		return fail("compose queue status API returned pending/lag", fmt.Errorf("expected zero pending after ack, got %d", resp.PendingCount))
+	}
+	if resp.ConsumerCount == 0 || len(resp.Consumers) == 0 {
+		return fail("compose queue status API returned pending/lag", fmt.Errorf("expected at least one consumer: %#v", resp))
+	}
+	lag := resp.Lag
+	if lag < 0 {
+		lag = resp.ConsumerLag
+	}
+	ok("compose queue status API returned pending=%d lag=%d consumers=%d", resp.PendingCount, lag, len(resp.Consumers))
+	return nil
+}
+
+func ensureComposeJudgeProblemFixture(ctx context.Context, cfg smokeConfig) error {
+	hostPackageDir := filepath.Join(cfg.repoRoot, "storage", "problems", "compose-smoke-1001")
+	if err := os.MkdirAll(filepath.Join(hostPackageDir, "tests"), 0o755); err != nil {
+		return err
+	}
+	files := map[string]string{
+		filepath.Join(hostPackageDir, "problem.yaml"):        "id: 1001\nslug: compose-smoke-1001\ntitle: Compose Smoke\n",
+		filepath.Join(hostPackageDir, "tests", "cases.yaml"): "- case_no: 1\n  input: 001.in\n  answer: 001.out\n",
+		filepath.Join(hostPackageDir, "tests", "001.in"):     "1 1\n",
+		filepath.Join(hostPackageDir, "tests", "001.out"):    "2\n",
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return err
+		}
+	}
+
+	if err := composeCommand(ctx, cfg, 90*time.Second, "run", "--rm", "judge-api-migrations"); err != nil {
+		return err
+	}
+
+	sql := `
+INSERT INTO problems(id, package_dir, status, visibility, created_by)
+VALUES(1001, '/data/ojos/problems/compose-smoke-1001', 'ready', 'public', 1)
+ON CONFLICT(id) DO UPDATE SET
+    package_dir = EXCLUDED.package_dir,
+    status = EXCLUDED.status,
+    visibility = EXCLUDED.visibility,
+    created_by = EXCLUDED.created_by,
+    updated_at = NOW();
+`
+	return composeCommand(ctx, cfg, 20*time.Second, "exec", "-T", "judge-db", "psql", "-U", "postgres", "-d", "ojos_judge", "-c", sql)
+}
+
+func ensureComposeSmokeUser(ctx context.Context, cfg smokeConfig) (int64, string, error) {
+	username := "compose-smoke"
+	password := "compose-smoke-password"
+	registerBody := map[string]any{
+		"username": username,
+		"email":    "compose-smoke@example.test",
+		"password": password,
+	}
+	var registerResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			UserID int64 `json:"user_id"`
+		} `json:"data"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.auth.baseURL()+"/auth/register", registerBody, nil, &registerResp); err != nil {
+		return 0, "", err
+	}
+	if registerResp.Code != 0 && !strings.Contains(strings.ToLower(registerResp.Msg), "already exists") {
+		return 0, "", fmt.Errorf("register compose user failed: code=%d msg=%s", registerResp.Code, registerResp.Msg)
+	}
+
+	loginBody := map[string]any{
+		"username": username,
+		"password": password,
+	}
+	var loginResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Token  string `json:"token"`
+			UserID int64  `json:"user_id"`
+		} `json:"data"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.auth.baseURL()+"/auth/login", loginBody, nil, &loginResp); err != nil {
+		return 0, "", err
+	}
+	if loginResp.Code != 0 {
+		return 0, "", fmt.Errorf("login compose user failed: code=%d msg=%s", loginResp.Code, loginResp.Msg)
+	}
+	if strings.TrimSpace(loginResp.Data.Token) == "" || loginResp.Data.UserID <= 0 {
+		return 0, "", fmt.Errorf("invalid compose user login response: user_id=%d token_empty=%t", loginResp.Data.UserID, strings.TrimSpace(loginResp.Data.Token) == "")
+	}
+	return loginResp.Data.UserID, loginResp.Data.Token, nil
+}
+
+func composeCommand(parent context.Context, cfg smokeConfig, timeout time.Duration, args ...string) error {
+	composePath := filepath.Join(cfg.repoRoot, "deploy", "compose", "docker-compose.yml")
+	ctx, cancel := matrixContext(parent, timeout)
+	defer cancel()
+	commandArgs := append([]string{"compose", "-f", composePath}, args...)
+	cmd := exec.CommandContext(ctx, "docker", commandArgs...)
+	cmd.Dir = cfg.repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker %s failed: %s", strings.Join(commandArgs, " "), oneLine(out, err))
+	}
+	return nil
+}
+
+func composeUserHeaders(cfg smokeConfig) map[string]string {
+	token := strings.TrimSpace(cfg.composeUserJWT)
+	if token == "" {
+		token, _ = sharedjwt.Generate(envDefault("JWT_SECRET", "ojos-local-jwt"), 7, "compose-smoke", []string{"user"}, 1)
+	}
+	return map[string]string{
+		"Authorization":  "Bearer " + token,
+		"X-OJOS-Node-Id": childNodeID,
+	}
+}
+
+func composeAdminHeaders(cfg smokeConfig) map[string]string {
+	return map[string]string{
+		"Authorization":  "Bearer " + cfg.gatewayAdminJWT,
+		"X-OJOS-Node-Id": childNodeID,
+	}
 }
 
 func doJSON(ctx context.Context, method string, target string, body any, out any) error {
@@ -2024,6 +2554,8 @@ func normalizeMatrixMode(value string) string {
 		return ""
 	case "beta-local":
 		return "beta-local"
+	case "compose":
+		return "compose"
 	default:
 		return value
 	}
@@ -2217,6 +2749,59 @@ func composeServiceStatuses(parent context.Context, cfg smokeConfig) (map[string
 		}
 	}
 	return statuses, nil
+}
+
+func composeServiceIP(parent context.Context, cfg smokeConfig, service string) (string, error) {
+	composePath := filepath.Join(cfg.repoRoot, "deploy", "compose", "docker-compose.yml")
+	ctx, cancel := matrixContext(parent, 20*time.Second)
+	defer cancel()
+	ps := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "ps", "-q", service)
+	ps.Dir = cfg.repoRoot
+	out, err := ps.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("docker compose ps -q %s failed: %s", service, oneLine(out, err))
+	}
+	containerID := strings.TrimSpace(string(out))
+	if containerID == "" {
+		return "", fmt.Errorf("compose service %s has no container id", service)
+	}
+	first := strings.Fields(containerID)[0]
+	inspect := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}", first)
+	inspect.Dir = cfg.repoRoot
+	out, err = inspect.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("docker inspect %s failed: %s", service, oneLine(out, err))
+	}
+	ip := strings.TrimSpace(string(out))
+	if net.ParseIP(ip) == nil {
+		return "", fmt.Errorf("compose service %s returned invalid ip %q", service, ip)
+	}
+	return ip, nil
+}
+
+func composeRestartService(parent context.Context, cfg smokeConfig, service string) error {
+	composePath := filepath.Join(cfg.repoRoot, "deploy", "compose", "docker-compose.yml")
+	ctx, cancel := matrixContext(parent, 240*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d", "--force-recreate", service)
+	cmd.Dir = cfg.repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker compose restart %s failed: %s", service, oneLine(out, err))
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		statuses, err := composeServiceStatuses(parent, cfg)
+		if err == nil {
+			if status, ok := statuses[service]; ok && strings.EqualFold(strings.TrimSpace(status.State), "running") {
+				return nil
+			}
+		}
+		if wait(parent, 500*time.Millisecond) != nil {
+			return parent.Err()
+		}
+	}
+	return fmt.Errorf("compose service %s did not reach running state", service)
 }
 
 func printMinIOMatrixStatus(parent context.Context, cfg smokeConfig) {
