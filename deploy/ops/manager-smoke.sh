@@ -5,6 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 run_id="${OJOS_MANAGER_SMOKE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 evidence_dir="${OJOS_EVIDENCE_DIR:-$repo_root/artifacts/manager-smoke/$run_id}"
+mkdir -p "$evidence_dir"
+evidence_dir="$(cd "$evidence_dir" && pwd)"
 mkdir -p "$evidence_dir/logs" "$evidence_dir/responses"
 log_file="$evidence_dir/logs/manager-smoke.log"
 exec > >(tee -a "$log_file") 2>&1
@@ -52,6 +54,27 @@ command -v cargo >/dev/null 2>&1 || { echo "[ENV-BLOCKED] cargo" >&2; exit 127; 
 command -v curl >/dev/null 2>&1 || { echo "[ENV-BLOCKED] curl" >&2; exit 127; }
 command -v jq >/dev/null 2>&1 || { echo "[ENV-BLOCKED] jq" >&2; exit 127; }
 
+api() {
+  local method="$1"
+  local path="$2"
+  local body="${3:-}"
+  local out="$4"
+  local status_code
+  if [[ "$method" == "GET" ]]; then
+    status_code="$(curl -sS -o "$out" -w '%{http_code}' "$base_url$path")"
+  else
+    status_code="$(curl -sS -o "$out" -w '%{http_code}' -X "$method" \
+      -H 'Content-Type: application/json' \
+      --data "$body" \
+      "$base_url$path")"
+  fi
+  if [[ ! "$status_code" =~ ^2 ]]; then
+    echo "API $method $path failed with HTTP $status_code" >&2
+    cat "$out" >&2 || true
+    return 1
+  fi
+}
+
 (
   cd "$repo_root"
   cargo run -q -p ojos-orchestrator-daemon -- --repo-root "$repo_root" --bind "127.0.0.1:$port"
@@ -69,18 +92,25 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 
-curl -fsS "$base_url/health" >"$evidence_dir/responses/health.json"
-curl -fsS "$base_url/services" >"$evidence_dir/responses/services.json"
-curl -fsS "$base_url/endpoints" >"$evidence_dir/responses/endpoints.json"
-curl -fsS "$base_url/operations" >"$evidence_dir/responses/operations.json"
+api GET /health "" "$evidence_dir/responses/health.json"
+api POST /endpoints '{
+    "operation_id": "op-manager-smoke-endpoint",
+    "endpoint": "127.0.0.1:19092:gateway",
+    "service_id": "gateway",
+    "protocol": "http",
+    "health_path": "/health"
+  }' "$evidence_dir/responses/endpoint-create.json"
+api GET /services "" "$evidence_dir/responses/services.json"
+api GET /endpoints "" "$evidence_dir/responses/endpoints.json"
+api GET /operations "" "$evidence_dir/responses/operations.json"
 
 jq -e '.services | length > 0' "$evidence_dir/responses/services.json" >/dev/null
 jq -e '.endpoints | length > 0' "$evidence_dir/responses/endpoints.json" >/dev/null
 jq -e '.operations | length > 0' "$evidence_dir/responses/operations.json" >/dev/null
 
 operation_id="$(jq -r '.operations[0].operation_id' "$evidence_dir/responses/operations.json")"
-curl -fsS "$base_url/operations/$operation_id" >"$evidence_dir/responses/operation-detail.json"
-curl -fsS "$base_url/operations/$operation_id/logs" >"$evidence_dir/responses/operation-logs.json"
+api GET "/operations/$operation_id" "" "$evidence_dir/responses/operation-detail.json"
+api GET "/operations/$operation_id/logs" "" "$evidence_dir/responses/operation-logs.json"
 jq -e '.operation.operation_id != ""' "$evidence_dir/responses/operation-detail.json" >/dev/null
 jq -e '.logs != null' "$evidence_dir/responses/operation-logs.json" >/dev/null
 

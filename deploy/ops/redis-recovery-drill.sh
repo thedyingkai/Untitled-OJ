@@ -5,6 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 run_id="${OJOS_REDIS_DRILL_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 evidence_dir="${OJOS_EVIDENCE_DIR:-$repo_root/artifacts/redis-recovery-drill/$run_id}"
+mkdir -p "$evidence_dir"
+evidence_dir="$(cd "$evidence_dir" && pwd)"
 mkdir -p "$evidence_dir/logs"
 log_file="$evidence_dir/logs/redis-recovery-drill.log"
 exec > >(tee -a "$log_file") 2>&1
@@ -16,6 +18,10 @@ result_stream="ojos:judge:result:drill:$run_id"
 group="ojos-judge-workers"
 status="failed"
 start_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+docker_exec() {
+  MSYS2_ARG_CONV_EXCL='*' docker exec "$@"
+}
 
 finish() {
   local rc=$?
@@ -56,15 +62,15 @@ command -v jq >/dev/null 2>&1 || { echo "[ENV-BLOCKED] jq" >&2; exit 127; }
 
 docker run -d --name "$container" "$redis_image" redis-server --appendonly yes >/dev/null
 for _ in $(seq 1 60); do
-  if docker exec "$container" redis-cli ping >/dev/null 2>&1; then
+  if docker_exec "$container" redis-cli ping >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
-docker exec "$container" redis-cli ping >/dev/null
+docker_exec "$container" redis-cli ping >/dev/null
 
 redis() {
-  docker exec "$container" redis-cli "$@"
+  docker_exec "$container" redis-cli "$@"
 }
 
 redis XGROUP CREATE "$stream" "$group" 0 MKSTREAM >/dev/null
@@ -81,12 +87,12 @@ pending_after="$(redis XPENDING "$stream" "$group" | awk 'NR==1 {print $1}')"
 
 docker restart "$container" >/dev/null
 for _ in $(seq 1 60); do
-  if docker exec "$container" redis-cli ping >/dev/null 2>&1; then
+  if docker_exec "$container" redis-cli ping >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
-docker exec "$container" redis-cli ping >/dev/null
+docker_exec "$container" redis-cli ping >/dev/null
 result_len="$(redis XLEN "$result_stream" | tr -d '[:space:]')"
 [[ "$result_len" == "1" ]]
 

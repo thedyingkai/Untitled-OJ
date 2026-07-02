@@ -6,6 +6,8 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 
 run_id="${OJOS_STAGING_DRILL_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 evidence_dir="${OJOS_EVIDENCE_DIR:-$repo_root/artifacts/staging-drill/$run_id}"
+mkdir -p "$evidence_dir"
+evidence_dir="$(cd "$evidence_dir" && pwd)"
 responses_dir="$evidence_dir/responses"
 logs_dir="$evidence_dir/logs"
 mkdir -p "$responses_dir" "$logs_dir"
@@ -31,8 +33,9 @@ network="ojos-staging-drill-$run_id"
 pg_container="ojos-staging-drill-postgres-$run_id"
 minio_container="ojos-staging-drill-minio-$run_id"
 orchestrator_pid=""
-work_root="$evidence_dir/work"
-work_repo="$work_root/repo"
+work_root="${OJOS_STAGING_DRILL_WORK_DIR:-}"
+work_root_created="0"
+work_repo=""
 
 pg_user="ojos_drill"
 pg_password="OjosDrillPg_0123456789abcdef"
@@ -60,6 +63,18 @@ sha256_file() {
     sha256sum "$1" | awk '{print $1}'
   else
     shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+docker_exec() {
+  MSYS2_ARG_CONV_EXCL='*' docker exec "$@"
+}
+
+host_mount_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
   fi
 }
 
@@ -129,6 +144,13 @@ cleanup() {
   collect_container_logs
   docker rm -f "$pg_container" "$minio_container" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
+  if [[ "$work_root_created" == "1" && -n "$work_root" && "${OJOS_DRILL_KEEP_WORKDIR:-0}" != "1" ]]; then
+    case "$work_root" in
+      /tmp/ojos-staging-drill-* | /var/tmp/ojos-staging-drill-*)
+        rm -rf "$work_root"
+        ;;
+    esac
+  fi
 }
 
 finish() {
@@ -176,25 +198,25 @@ docker run -d \
   "$postgres_image" >/dev/null
 
 for _ in $(seq 1 60); do
-  if docker exec "$pg_container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null 2>&1; then
+  if docker_exec "$pg_container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
-docker exec "$pg_container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null
+docker_exec "$pg_container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null
 
 pg_port="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$pg_container")"
 orchestrator_database_url="postgres://$pg_user:$pg_password@127.0.0.1:$pg_port/$orchestrator_db?sslmode=disable"
 
 psql_drill() {
-  docker exec -e "PGPASSWORD=$pg_password" "$pg_container" \
+  docker_exec -e "PGPASSWORD=$pg_password" "$pg_container" \
     psql -v ON_ERROR_STOP=1 -U "$pg_user" -d "$pg_db" "$@"
 }
 
 psql_db() {
   local db="$1"
   shift
-  docker exec -e "PGPASSWORD=$pg_password" "$pg_container" \
+  docker_exec -e "PGPASSWORD=$pg_password" "$pg_container" \
     psql -v ON_ERROR_STOP=1 -U "$pg_user" -d "$db" "$@"
 }
 
@@ -204,7 +226,7 @@ psql_drill -c "INSERT INTO staging_drill_rows(id, payload, marker) VALUES (1, 'a
 
 mkdir -p "$evidence_dir/postgres"
 backup_filename="$evidence_dir/postgres/staging-drill.dump"
-docker exec -e "PGPASSWORD=$pg_password" "$pg_container" \
+docker_exec -e "PGPASSWORD=$pg_password" "$pg_container" \
   pg_dump -U "$pg_user" -d "$pg_db" -Fc -f /tmp/staging-drill.dump
 docker cp "$pg_container:/tmp/staging-drill.dump" "$backup_filename"
 backup_checksum="$(sha256_file "$backup_filename")"
@@ -212,7 +234,7 @@ backup_checksum="$(sha256_file "$backup_filename")"
 psql_drill -c "DELETE FROM staging_drill_rows;"
 psql_drill -c "CREATE DATABASE $pg_restore_db;"
 docker cp "$backup_filename" "$pg_container:/tmp/staging-drill-restore.dump"
-docker exec -e "PGPASSWORD=$pg_password" "$pg_container" \
+docker_exec -e "PGPASSWORD=$pg_password" "$pg_container" \
   pg_restore -U "$pg_user" -d "$pg_restore_db" /tmp/staging-drill-restore.dump
 restored_row_count="$(psql_db "$pg_restore_db" -tAc "SELECT count(*) FROM staging_drill_rows;")"
 restored_row_checksum="$(psql_db "$pg_restore_db" -tAc "SELECT md5(string_agg(id || ':' || payload || ':' || marker, ',' ORDER BY id)) FROM staging_drill_rows;")"
@@ -230,10 +252,15 @@ mc_config="$evidence_dir/mc-config"
 mkdir -p "$mc_config" "$evidence_dir/minio-src" "$evidence_dir/minio-backup" "$evidence_dir/minio-restore"
 
 mc() {
-  docker run --rm \
+  local mc_config_mount
+  local evidence_mount
+  mc_config_mount="$(host_mount_path "$mc_config")"
+  evidence_mount="$(host_mount_path "$evidence_dir")"
+  MSYS2_ARG_CONV_EXCL='*' docker run --rm \
     --network "$network" \
-    -v "$mc_config:/root/.mc" \
-    -v "$evidence_dir:/evidence" \
+    -v "$mc_config_mount:/root/.mc" \
+    -v "$evidence_mount:/evidence" \
+    --workdir /evidence \
     "$mc_image" "$@"
 }
 
@@ -247,15 +274,23 @@ mc alias set drill "http://$minio_container:9000" "$minio_access" "$minio_secret
 mc mb --ignore-existing "drill/$minio_bucket"
 printf 'OJOS staging drill object %s\n' "$run_id" >"$evidence_dir/minio-src/sample.txt"
 object_source_checksum="$(sha256_file "$evidence_dir/minio-src/sample.txt")"
-mc cp /evidence/minio-src/sample.txt "drill/$minio_bucket/$restored_object_key"
-mc cp "drill/$minio_bucket/$restored_object_key" /evidence/minio-backup/sample.txt
+mc cp minio-src/sample.txt "drill/$minio_bucket/$restored_object_key"
+mc cp "drill/$minio_bucket/$restored_object_key" minio-backup/sample.txt
 mc rm "drill/$minio_bucket/$restored_object_key"
-mc cp /evidence/minio-backup/sample.txt "drill/$minio_bucket/$restored_object_key"
-mc cp "drill/$minio_bucket/$restored_object_key" /evidence/minio-restore/sample.txt
+mc cp minio-backup/sample.txt "drill/$minio_bucket/$restored_object_key"
+mc cp "drill/$minio_bucket/$restored_object_key" minio-restore/sample.txt
 restored_object_checksum="$(sha256_file "$evidence_dir/minio-restore/sample.txt")"
 [[ "$restored_object_checksum" == "$object_source_checksum" ]]
 
 echo "preparing disposable repo copy for release v1/v2 drill"
+if [[ -z "$work_root" ]]; then
+  work_root="$(mktemp -d "${TMPDIR:-/tmp}/ojos-staging-drill-$run_id.XXXXXX")"
+  work_root_created="1"
+else
+  mkdir -p "$work_root"
+  work_root="$(cd "$work_root" && pwd)"
+fi
+work_repo="$work_root/repo"
 mkdir -p "$work_repo"
 (
   cd "$repo_root"
@@ -270,7 +305,7 @@ mkdir -p "$work_repo"
   tar -xf -
 )
 
-docker exec -e "PGPASSWORD=$pg_password" "$pg_container" \
+docker_exec -e "PGPASSWORD=$pg_password" "$pg_container" \
   createdb -U "$pg_user" "$orchestrator_db"
 docker cp "$repo_root/services/orchestrator/migrations/000001_orchestrator_schema.up.sql" "$pg_container:/tmp/orchestrator-schema.sql"
 psql_db "$orchestrator_db" -f /tmp/orchestrator-schema.sql
@@ -302,18 +337,24 @@ api() {
   local path="$2"
   local body="${3:-}"
   local out="$4"
+  local status_code
   if [[ "$method" == "GET" ]]; then
-    curl -fsS "$base_url$path" | tee "$out" >/dev/null
+    status_code="$(curl -sS -o "$out" -w '%{http_code}' "$base_url$path")"
   else
-    curl -fsS -X "$method" \
+    status_code="$(curl -sS -o "$out" -w '%{http_code}' -X "$method" \
       -H 'Content-Type: application/json' \
       --data "$body" \
-      "$base_url$path" | tee "$out" >/dev/null
+      "$base_url$path")"
+  fi
+  if [[ ! "$status_code" =~ ^2 ]]; then
+    echo "API $method $path failed with HTTP $status_code" >&2
+    cat "$out" >&2 || true
+    return 1
   fi
 }
 
 api POST /nodes '{"node_id":"root-node","host_ip":"127.0.0.1","parent_node_id":"","role":"root","labels":{"drill":"staging"},"status":"running"}' "$responses_dir/node-root.json"
-api POST /nodes '{"node_id":"child-node","host_ip":"127.0.0.1","parent_node_id":"root-node","role":"node","labels":{"drill":"staging"},"status":"running"}' "$responses_dir/node-child.json"
+api POST /nodes '{"node_id":"child-node","host_ip":"127.0.0.2","parent_node_id":"root-node","role":"node","labels":{"drill":"staging"},"status":"running"}' "$responses_dir/node-child.json"
 
 api POST /releases/storage-service/install '{
   "operation_id": "op-drill-storage-v1",
@@ -341,7 +382,9 @@ jq -n \
   --arg version "0.1.0" \
   '{service: $service, version: $version, status: $status}' >"$responses_dir/release-v1-state.json"
 
+service_file="$work_repo/services/judge-api/service.yaml"
 release_file="$work_repo/services/judge-api/release.yaml"
+sed -i '0,/version: 0.1.0/s//version: 0.1.1/' "$service_file"
 sed -i '0,/version: 0.1.0/s//version: 0.1.1/' "$release_file"
 sed -i '/  - judge.worker.status/a\  - judge.drill.rollback' "$release_file"
 awk '
@@ -361,6 +404,71 @@ awk '
   { print }
 ' "$release_file" >"$release_file.tmp"
 mv "$release_file.tmp" "$release_file"
+
+psql_db "$orchestrator_db" -tAc "SELECT manifest::text FROM services WHERE service_id = 'judge-api';" \
+  >"$responses_dir/judge-v1-service-manifest.json"
+jq '.version = "0.1.1"' \
+  "$responses_dir/judge-v1-service-manifest.json" >"$responses_dir/judge-v2-service-manifest.json"
+docker cp "$responses_dir/judge-v2-service-manifest.json" "$pg_container:/tmp/judge-v2-service-manifest.json"
+psql_db "$orchestrator_db" -c "
+  UPDATE services
+  SET version = '0.1.1',
+      manifest = pg_read_file('/tmp/judge-v2-service-manifest.json')::jsonb
+  WHERE service_id = 'judge-api';
+"
+
+psql_db "$orchestrator_db" -tAc "SELECT manifest::text FROM service_releases WHERE service_name = 'judge-api' AND version = '0.1.0';" \
+  >"$responses_dir/judge-v1-release-manifest.json"
+jq '
+  .version = "0.1.1"
+  | .permissions = ((.permissions // []) + ["judge.drill.rollback"] | unique)
+  | .apis = ((.apis // []) + [{
+      api_id: "judge.drill.rollback",
+      protocol: "http",
+      port_name: "http",
+      path_prefix: "/api/judge/drill",
+      methods: ["GET"],
+      visibility: "descendants",
+      auth_mode: "user",
+      permission: "judge.drill.rollback",
+      version: "v1",
+      stability: "experimental"
+    }])
+' "$responses_dir/judge-v1-release-manifest.json" >"$responses_dir/judge-v2-release-manifest.json"
+docker cp "$responses_dir/judge-v2-release-manifest.json" "$pg_container:/tmp/judge-v2-release-manifest.json"
+psql_db "$orchestrator_db" -c "
+  UPDATE service_releases
+  SET version = '0.1.1',
+      release_url = 'local://services/judge-api?drill=v2',
+      manifest = pg_read_file('/tmp/judge-v2-release-manifest.json')::jsonb,
+      checksum = ''
+  WHERE service_name = 'judge-api' AND version = '0.1.0';
+"
+
+echo "restarting disposable orchestrator to load release v2 manifest"
+kill "$orchestrator_pid" >/dev/null 2>&1 || true
+wait "$orchestrator_pid" >/dev/null 2>&1 || true
+orchestrator_pid=""
+(
+  cd "$repo_root"
+  ORCHESTRATOR_DATABASE_URL="$orchestrator_database_url" \
+  ORCHESTRATOR_AUTH_PERMISSION_SYNC=1 \
+  cargo run -q -p ojos-orchestrator-daemon -- --repo-root "$work_repo" --bind "127.0.0.1:$orchestrator_port"
+) >>"$logs_dir/orchestrator-daemon.log" 2>&1 &
+orchestrator_pid="$!"
+
+for _ in $(seq 1 120); do
+  if curl -fsS "$base_url/health" >/dev/null 2>&1; then
+    break
+  fi
+  if ! kill -0 "$orchestrator_pid" >/dev/null 2>&1; then
+    echo "orchestrator daemon exited early after v2 manifest reload" >&2
+    cat "$logs_dir/orchestrator-daemon.log" >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
+curl -fsS "$base_url/health" >"$responses_dir/health-after-v2-reload.json"
 
 api POST /releases/judge-api/install '{
   "operation_id": "op-drill-judge-v2",

@@ -23,6 +23,7 @@ log/
 compose-logs.txt
 compose-ps.txt
 tokens.local.json
+/artifacts/
 
 # Temporary files and caches
 .tmp/

@@ -5,6 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 run_id="${OJOS_ALERT_DRILL_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 evidence_dir="${OJOS_EVIDENCE_DIR:-$repo_root/artifacts/alert-firing-drill/$run_id}"
+mkdir -p "$evidence_dir"
+evidence_dir="$(cd "$evidence_dir" && pwd)"
 mkdir -p "$evidence_dir/logs" "$evidence_dir/config" "$evidence_dir/webhook"
 log_file="$evidence_dir/logs/alert-firing-drill.log"
 exec > >(tee -a "$log_file") 2>&1
@@ -18,6 +20,18 @@ webhook_port="${OJOS_ALERT_DRILL_WEBHOOK_PORT:-19094}"
 status="failed"
 start_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 webhook_pid=""
+
+docker_run() {
+  MSYS2_ARG_CONV_EXCL='*' docker run "$@"
+}
+
+host_mount_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
 
 finish() {
   local rc=$?
@@ -129,22 +143,23 @@ PY
 webhook_pid="$!"
 
 docker network create "$network" >/dev/null
-docker run -d \
+docker_run -d \
   --name "$alertmanager" \
   --network "$network" \
+  --network-alias alertmanager \
   --add-host=host.docker.internal:host-gateway \
   -p 127.0.0.1::9093 \
-  -v "$evidence_dir/config/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
+  -v "$(host_mount_path "$evidence_dir/config/alertmanager.yml"):/etc/alertmanager/alertmanager.yml:ro" \
   "$alertmanager_image" \
   --config.file=/etc/alertmanager/alertmanager.yml \
   --storage.path=/alertmanager >/dev/null
 
-docker run -d \
+docker_run -d \
   --name "$prometheus" \
   --network "$network" \
   -p 127.0.0.1::9090 \
-  -v "$evidence_dir/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
-  -v "$evidence_dir/config/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+  -v "$(host_mount_path "$evidence_dir/config/prometheus.yml"):/etc/prometheus/prometheus.yml:ro" \
+  -v "$(host_mount_path "$evidence_dir/config/alerts.yml"):/etc/prometheus/alerts.yml:ro" \
   "$prometheus_image" \
   --config.file=/etc/prometheus/prometheus.yml \
   --storage.tsdb.path=/prometheus >/dev/null
@@ -168,7 +183,14 @@ done
 jq -e '.data.groups[].rules[] | select(.name == "OJOSDrillAlwaysFiring" and .state == "firing")' "$evidence_dir/prometheus-rules.json" >/dev/null
 
 am_port="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "9093/tcp") 0).HostPort}}' "$alertmanager")"
-curl -fsS "http://127.0.0.1:$am_port/api/v2/alerts" >"$evidence_dir/alertmanager-alerts.json" || true
+for _ in $(seq 1 60); do
+  curl -fsS "http://127.0.0.1:$am_port/api/v2/alerts" >"$evidence_dir/alertmanager-alerts.json" || true
+  if jq -e '.[] | select(.labels.alertname == "OJOSDrillAlwaysFiring")' "$evidence_dir/alertmanager-alerts.json" >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+jq -e '.[] | select(.labels.alertname == "OJOSDrillAlwaysFiring")' "$evidence_dir/alertmanager-alerts.json" >/dev/null
 
 for _ in $(seq 1 60); do
   if [[ -s "$evidence_dir/webhook/alert.json" ]]; then

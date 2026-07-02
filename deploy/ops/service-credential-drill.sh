@@ -5,6 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 run_id="${OJOS_CREDENTIAL_DRILL_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 evidence_dir="${OJOS_EVIDENCE_DIR:-$repo_root/artifacts/service-credential-drill/$run_id}"
+mkdir -p "$evidence_dir"
+evidence_dir="$(cd "$evidence_dir" && pwd)"
 mkdir -p "$evidence_dir/logs"
 log_file="$evidence_dir/logs/service-credential-drill.log"
 exec > >(tee -a "$log_file") 2>&1
@@ -32,11 +34,17 @@ sha256_text() {
   fi
 }
 
+docker_exec() {
+  MSYS2_ARG_CONV_EXCL='*' docker exec "$@"
+}
+
 finish() {
   local rc=$?
   [[ $rc -eq 0 ]] && status="passed" || status="failed"
   docker logs "$container" >"$evidence_dir/logs/postgres.log" 2>&1 || true
-  docker rm -f "$container" >/dev/null 2>&1 || true
+  if [[ "${OJOS_DRILL_KEEP_CONTAINERS:-0}" != "1" ]]; then
+    docker rm -f "$container" >/dev/null 2>&1 || true
+  fi
   jq -n \
     --arg status "$status" \
     --arg start_ts "$start_ts" \
@@ -73,15 +81,15 @@ docker run -d \
   "$postgres_image" >/dev/null
 
 for _ in $(seq 1 60); do
-  if docker exec "$container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null 2>&1; then
+  if docker_exec "$container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
-docker exec "$container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null
+docker_exec "$container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null
 
 psql() {
-  docker exec -e "PGPASSWORD=$pg_password" "$container" \
+  docker_exec -i -e "PGPASSWORD=$pg_password" "$container" \
     psql -v ON_ERROR_STOP=1 -U "$pg_user" -d "$pg_db" "$@"
 }
 
@@ -95,10 +103,14 @@ valid_token="service-valid-token-$run_id"
 expired_token="service-expired-token-$run_id"
 revoked_token="service-revoked-token-$run_id"
 wrong_token="service-wrong-token-$run_id"
+no_grant_token="service-no-grant-token-$run_id"
+rollback_token="service-rollback-token-$run_id"
 valid_hash="$(sha256_text "$valid_token")"
 expired_hash="$(sha256_text "$expired_token")"
 revoked_hash="$(sha256_text "$revoked_token")"
 wrong_hash="$(sha256_text "$wrong_token")"
+no_grant_hash="$(sha256_text "$no_grant_token")"
+rollback_hash="$(sha256_text "$rollback_token")"
 
 psql <<SQL
 INSERT INTO permissions(code, service_code, name, description)
@@ -117,8 +129,8 @@ VALUES
   ('judge-api', '$valid_hash', 'valid', TRUE, NOW() + INTERVAL '1 hour', NULL),
   ('judge-api', '$expired_hash', 'expired', TRUE, NOW() - INTERVAL '1 hour', NULL),
   ('judge-api', '$revoked_hash', 'revoked', FALSE, NOW() + INTERVAL '1 hour', NOW()),
-  ('no-grant-service', '$valid_hash', 'valid', TRUE, NOW() + INTERVAL '1 hour', NULL),
-  ('revoked-by-rollback', '$valid_hash', 'valid', TRUE, NOW() + INTERVAL '1 hour', NULL)
+  ('no-grant-service', '$no_grant_hash', 'valid', TRUE, NOW() + INTERVAL '1 hour', NULL),
+  ('revoked-by-rollback', '$rollback_hash', 'valid', TRUE, NOW() + INTERVAL '1 hour', NULL)
 ON CONFLICT(service_code, token_hash) DO UPDATE
 SET enabled = EXCLUDED.enabled,
     expires_at = EXCLUDED.expires_at,
@@ -172,11 +184,11 @@ expired_deny="$(can_use judge-api storage.object.read storage.object.get "$expir
 revoked_deny="$(can_use judge-api storage.object.read storage.object.get "$revoked_hash")"
 unknown_deny="$(can_use unknown-service storage.object.read storage.object.get "$valid_hash")"
 wrong_deny="$(can_use judge-api storage.object.read storage.object.get "$wrong_hash")"
-no_grant_deny="$(can_use no-grant-service storage.object.read storage.object.get "$valid_hash")"
+no_grant_deny="$(can_use no-grant-service storage.object.read storage.object.get "$no_grant_hash")"
 last_used="$(psql -tAc "SELECT COALESCE(to_char(last_used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '') FROM service_credentials WHERE service_code = 'judge-api' AND token_hash = '$valid_hash';")"
 
-psql -c "UPDATE service_credentials SET enabled = FALSE, revoked_at = NOW(), updated_at = NOW() WHERE service_code = 'revoked-by-rollback' AND token_hash = '$valid_hash';"
-rollback_revoke_deny="$(can_use revoked-by-rollback storage.object.read storage.object.get "$valid_hash")"
+psql -c "UPDATE service_credentials SET enabled = FALSE, revoked_at = NOW(), updated_at = NOW() WHERE service_code = 'revoked-by-rollback' AND token_hash = '$rollback_hash';"
+rollback_revoke_deny="$(can_use revoked-by-rollback storage.object.read storage.object.get "$rollback_hash")"
 
 {
   echo '['
