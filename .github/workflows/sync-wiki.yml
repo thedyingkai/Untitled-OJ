@@ -34,28 +34,27 @@ jobs:
           rm -rf .wiki-src
           mkdir -p .wiki-src
           cp -R docs/. .wiki-src/
-
           cp README.md .wiki-src/Home.md
 
           cat > .wiki-src/_Sidebar.md <<'EOF'
           # OJOS Wiki
 
-          - [首页](Home)
-          - [Service 规范](spec/service-spec)
-          - [Set 规范](spec/set-spec)
-          - [Endpoint / Link](spec/endpoint-link-spec)
+          - [Home](Home)
+          - [Service spec](spec/service-spec)
+          - [Set spec](spec/set-spec)
+          - [Endpoint link spec](spec/endpoint-link-spec)
 
           ## Orchestrator
-          - [需求](orchestrator/requirements)
-          - [边界](orchestrator/boundary)
-          - [Action Model](orchestrator/action-model)
-          - [GUI / TUI 等价性](orchestrator/gui-tui-parity)
-          - [Topology](orchestrator/topology-model)
-          - [Operation](orchestrator/operation-model)
-          - [数据库](orchestrator/database)
+          - [Requirements](orchestrator/requirements)
+          - [Boundary](orchestrator/boundary)
+          - [Action model](orchestrator/action-model)
+          - [GUI/TUI parity](orchestrator/gui-tui-parity)
+          - [Topology model](orchestrator/topology-model)
+          - [Operation model](orchestrator/operation-model)
+          - [Database](orchestrator/database)
 
-          ## 历史区
-          旧文档保存在仓库的 docs-temp/，不作为正式 Wiki 来源。
+          ## Notes
+          Historical documents stay in the repository under docs-temp/ and are not synced as formal wiki source.
           EOF
 
       - name: Push mirror to wiki
@@ -72,7 +71,7 @@ jobs:
 
           rm -rf .wiki-repo
           if ! git clone "$wiki_url" .wiki-repo; then
-            echo "GitHub Wiki 仓库不可访问。请确认仓库已启用 Wiki，并配置可写 token。"
+            echo "GitHub Wiki is not reachable. Enable Wiki for the repository or configure a writable WIKI_PUSH_TOKEN."
             exit 1
           fi
 
@@ -83,7 +82,7 @@ jobs:
           git add -A
 
           if git diff --cached --quiet; then
-            echo "Wiki 已经是最新内容，无需推送。"
+            echo "Wiki is already up to date."
             exit 0
           fi
 
