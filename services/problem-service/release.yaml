@@ -25,6 +25,9 @@ migrations:
   - version: "000001_problem_schema"
     path: services/problem-service/migrations/000001_problem_schema.up.sql
     checksum: sha256:bfdcf08fa7f85176bac3dba33de52de209a202ff584474a7aedb2461498a4dc4
+  - version: "000002_problem_content_limits"
+    path: services/problem-service/migrations/000002_problem_content_limits.up.sql
+    checksum: sha256:bc8859278465da7294ee84727a1af09daea01b22e1fc1a30ecafceb56d5c2813
 permissions:
   - problem.view
   - problem.create
@@ -39,6 +42,12 @@ routes:
     target_type: endpoint-group
     target: problem-service[*]
     permission: public
+required_apis:
+  - storage.object.put
+service_identity:
+  service_name: problem-service
+  allowed_apis:
+    - storage.object.put
 apis:
   - api_id: problem.problem.read
     protocol: http

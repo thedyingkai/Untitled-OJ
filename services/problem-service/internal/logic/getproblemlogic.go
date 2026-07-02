@@ -39,10 +39,7 @@ func (l *GetProblemLogic) GetProblem(req *types.GetProblemReq) (resp *types.GetP
 		return nil, errors.New("invalid problem id")
 	}
 
-	canViewPrivate, err := l.svcCtx.Repo.CanViewPrivateProblems(l.ctx, user.UserID)
-	if err != nil {
-		return nil, err
-	}
+	canViewPrivate := userCanViewPrivateProblems(user)
 
 	p, err := l.svcCtx.Repo.GetProblemVisibleToUser(l.ctx, req.Id, user.UserID, canViewPrivate)
 	if err != nil {

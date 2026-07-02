@@ -21,19 +21,27 @@ type AddTestCaseResp struct {
 }
 
 type CreateProblemReq struct {
-	Title         string `json:"title"`
-	Slug          string `json:"slug,optional"`
-	Statement     string `json:"statement,optional"`
-	TimeLimitMs   int    `json:"time_limit_ms,optional"`
-	MemoryLimitMb int    `json:"memory_limit_mb,optional"`
-	ProblemType   string `json:"problem_type,optional"`
-	Visibility    string `json:"visibility,optional"`
-	Difficulty    string `json:"difficulty,optional"`
-	Tags          string `json:"tags,optional"`
+	ProblemNo      string                 `json:"problem_no,optional"`
+	Title          string                 `json:"title"`
+	Slug           string                 `json:"slug,optional"`
+	Statement      string                 `json:"statement,optional"`
+	Solution       string                 `json:"solution,optional"`
+	TimeLimitMs    int                    `json:"time_limit_ms,optional"`
+	MemoryLimitMb  int                    `json:"memory_limit_mb,optional"`
+	LanguageLimits []ProblemLanguageLimit `json:"language_limits,optional"`
+	Runner         ProblemComponentInput  `json:"runner,optional"`
+	Checker        ProblemComponentInput  `json:"checker,optional"`
+	Validator      ProblemComponentInput  `json:"validator,optional"`
+	Scorer         ProblemComponentInput  `json:"scorer,optional"`
+	ProblemType    string                 `json:"problem_type,optional"`
+	Visibility     string                 `json:"visibility,optional"`
+	Difficulty     string                 `json:"difficulty,optional"`
+	Tags           string                 `json:"tags,optional"`
 }
 
 type CreateProblemResp struct {
 	ProblemId int64  `json:"problem_id"`
+	ProblemNo string `json:"problem_no"`
 	Slug      string `json:"slug"`
 }
 
@@ -125,6 +133,7 @@ type PackageLimits struct {
 
 type PackageSummary struct {
 	Schema         string           `json:"schema"`
+	ProblemNo      string           `json:"problem_no"`
 	Slug           string           `json:"slug"`
 	Title          string           `json:"title"`
 	ProblemType    string           `json:"problem_type"`
@@ -140,6 +149,7 @@ type PackageSummary struct {
 	Limits         PackageLimits    `json:"limits"`
 	Runner         PackageComponent `json:"runner"`
 	Checker        PackageComponent `json:"checker"`
+	Validator      PackageComponent `json:"validator"`
 	Scorer         PackageComponent `json:"scorer"`
 }
 
@@ -158,23 +168,43 @@ type PackageValidationResult struct {
 }
 
 type ProblemItem struct {
-	Id             int64           `json:"id"`
-	Slug           string          `json:"slug"`
-	Title          string          `json:"title"`
-	Statement      string          `json:"statement"`
-	ProblemType    string          `json:"problem_type"`
-	Visibility     string          `json:"visibility"`
-	ManifestSha256 string          `json:"manifest_sha256"`
-	SourceFormat   string          `json:"source_format"`
-	Status         string          `json:"status"`
-	Difficulty     string          `json:"difficulty"`
-	Tags           string          `json:"tags"`
-	TimeLimitMs    int             `json:"time_limit_ms"`
-	MemoryLimitMb  int             `json:"memory_limit_mb"`
-	CreatedBy      int64           `json:"created_by"`
-	CreatedAt      string          `json:"created_at"`
-	UpdatedAt      string          `json:"updated_at"`
-	Samples        []ProblemSample `json:"samples,optional"`
+	Id              int64                  `json:"id"`
+	ProblemNo       string                 `json:"problem_no"`
+	Slug            string                 `json:"slug"`
+	Title           string                 `json:"title"`
+	Statement       string                 `json:"statement"`
+	StatementFormat string                 `json:"statement_format"`
+	Solution        string                 `json:"solution"`
+	SolutionFormat  string                 `json:"solution_format"`
+	ProblemType     string                 `json:"problem_type"`
+	Visibility      string                 `json:"visibility"`
+	ManifestSha256  string                 `json:"manifest_sha256"`
+	SourceFormat    string                 `json:"source_format"`
+	Status          string                 `json:"status"`
+	Difficulty      string                 `json:"difficulty"`
+	Tags            string                 `json:"tags"`
+	TimeLimitMs     int                    `json:"time_limit_ms"`
+	MemoryLimitMb   int                    `json:"memory_limit_mb"`
+	LanguageLimits  []ProblemLanguageLimit `json:"language_limits"`
+	CreatedBy       int64                  `json:"created_by"`
+	CreatedAt       string                 `json:"created_at"`
+	UpdatedAt       string                 `json:"updated_at"`
+	Samples         []ProblemSample        `json:"samples,optional"`
+}
+
+type ProblemComponentInput struct {
+	Type       string   `json:"type,optional"`
+	Name       string   `json:"name,optional"`
+	Language   string   `json:"language,optional"`
+	SourcePath string   `json:"source_path,optional"`
+	SourceCode string   `json:"source_code,optional"`
+	Args       []string `json:"args,optional"`
+}
+
+type ProblemLanguageLimit struct {
+	Language      string `json:"language"`
+	TimeLimitMs   int    `json:"time_limit_ms"`
+	MemoryLimitMb int    `json:"memory_limit_mb"`
 }
 
 type ProblemSample struct {
@@ -196,16 +226,23 @@ type TestCaseItem struct {
 }
 
 type UpdateProblemReq struct {
-	Id            int64  `path:"id"`
-	Title         string `json:"title,optional"`
-	Statement     string `json:"statement,optional"`
-	TimeLimitMs   int    `json:"time_limit_ms,optional"`
-	MemoryLimitMb int    `json:"memory_limit_mb,optional"`
-	ProblemType   string `json:"problem_type,optional"`
-	Visibility    string `json:"visibility,optional"`
-	Difficulty    string `json:"difficulty,optional"`
-	Tags          string `json:"tags,optional"`
-	Status        string `json:"status,optional"`
+	Id             int64                  `path:"id"`
+	ProblemNo      string                 `json:"problem_no,optional"`
+	Title          string                 `json:"title,optional"`
+	Statement      string                 `json:"statement,optional"`
+	Solution       string                 `json:"solution,optional"`
+	TimeLimitMs    int                    `json:"time_limit_ms,optional"`
+	MemoryLimitMb  int                    `json:"memory_limit_mb,optional"`
+	LanguageLimits []ProblemLanguageLimit `json:"language_limits,optional"`
+	Runner         ProblemComponentInput  `json:"runner,optional"`
+	Checker        ProblemComponentInput  `json:"checker,optional"`
+	Validator      ProblemComponentInput  `json:"validator,optional"`
+	Scorer         ProblemComponentInput  `json:"scorer,optional"`
+	ProblemType    string                 `json:"problem_type,optional"`
+	Visibility     string                 `json:"visibility,optional"`
+	Difficulty     string                 `json:"difficulty,optional"`
+	Tags           string                 `json:"tags,optional"`
+	Status         string                 `json:"status,optional"`
 }
 
 type UpdateTestCaseReq struct {

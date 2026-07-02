@@ -121,6 +121,27 @@ func applyEnvOverrides(c *config.Config) {
 	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEMS_ROOT")); value != "" {
 		c.Storage.ProblemsRoot = value
 	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_SERVICE_URL")); value != "" {
+		c.Storage.ServiceEndpoint = value
+	}
+	if value := firstEnv("OJOS_INTERNAL_GATEWAY_ENDPOINT", "OJOS_INTERNAL_GATEWAY_URL"); value != "" {
+		c.Storage.InternalGatewayEndpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_PUT_API_ID")); value != "" {
+		c.Storage.PutApiID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEM_STORAGE_BUCKET")); value != "" {
+		c.Storage.Bucket = value
+	}
+	if value := firstEnv("OJOS_PROBLEM_SERVICE_TOKEN", "OJOS_SERVICE_TOKEN", "AUTH_INTERNAL_TOKEN"); value != "" {
+		c.Storage.ServiceToken = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_CALLER_SERVICE")); value != "" {
+		c.Storage.CallerService = value
+	}
+	if value := firstEnv("OJOS_CALLER_NODE_ID", "OJOS_NODE_ID"); value != "" {
+		c.Storage.CallerNodeID = value
+	}
 }
 
 func firstEnv(keys ...string) string {

@@ -28,7 +28,14 @@ type JaegerConfig struct {
 }
 
 type StorageConfig struct {
-	ProblemsRoot string
+	ProblemsRoot            string
+	ServiceEndpoint         string `json:",optional"`
+	InternalGatewayEndpoint string `json:",optional"`
+	PutApiID                string `json:",optional"`
+	Bucket                  string `json:",optional"`
+	ServiceToken            string `json:",optional"`
+	CallerService           string `json:",optional"`
+	CallerNodeID            string `json:",optional"`
 }
 
 type InternalAuthConfig struct {

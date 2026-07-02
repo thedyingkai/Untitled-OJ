@@ -20,47 +20,75 @@ func New(db *pgxpool.Pool) *Repository {
 }
 
 type Problem struct {
-	ID             int64
-	Slug           string
-	Title          string
-	Statement      string
-	ProblemType    string
-	Visibility     string
-	PackageDir     string
-	ManifestPath   string
-	ManifestSha256 string
-	SourceFormat   string
-	Status         string
-	Difficulty     string
-	Tags           []string
-	TimeLimitMs    int
-	MemoryLimitMb  int
-	CreatedBy      int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID              int64
+	ProblemNo       string
+	Slug            string
+	Title           string
+	Statement       string
+	StatementFormat string
+	Solution        string
+	SolutionFormat  string
+	ProblemType     string
+	Visibility      string
+	PackageDir      string
+	ManifestPath    string
+	ManifestSha256  string
+	SourceFormat    string
+	Status          string
+	Difficulty      string
+	Tags            []string
+	TimeLimitMs     int
+	MemoryLimitMb   int
+	LanguageLimits  []ProblemLanguageLimit
+	CreatedBy       int64
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type ProblemLanguageLimit struct {
+	Language      string
+	TimeLimitMs   int
+	MemoryLimitMb int
 }
 
 type CreateProblemArg struct {
-	Title         string
-	Statement     string
-	ProblemType   string
-	Visibility    string
-	Difficulty    string
-	Tags          []string
-	TimeLimitMs   int
-	MemoryLimitMb int
-	CreatedBy     int64
+	ProblemNo       string
+	Title           string
+	Statement       string
+	StatementFormat string
+	Solution        string
+	SolutionFormat  string
+	ProblemType     string
+	Visibility      string
+	Difficulty      string
+	Tags            []string
+	TimeLimitMs     int
+	MemoryLimitMb   int
+	LanguageLimits  []ProblemLanguageLimit
+	CreatedBy       int64
 }
 
-func (r *Repository) InsertProblem(ctx context.Context, arg CreateProblemArg) (int64, error) {
+func (r *Repository) InsertProblem(ctx context.Context, arg CreateProblemArg) (int64, string, error) {
 	var id int64
+	statementFormat := strings.TrimSpace(arg.StatementFormat)
+	if statementFormat == "" {
+		statementFormat = "markdown+latex"
+	}
+	solutionFormat := strings.TrimSpace(arg.SolutionFormat)
+	if solutionFormat == "" {
+		solutionFormat = "markdown+latex"
+	}
 
 	err := r.db.QueryRow(
 		ctx,
 		`
 INSERT INTO problems(
+    problem_no,
     title,
     statement,
+    statement_format,
+    solution,
+    solution_format,
     problem_type,
     visibility,
     time_limit_ms,
@@ -73,11 +101,15 @@ INSERT INTO problems(
     created_at,
     updated_at
 )
-VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'draft', 'ojos', $9, NOW(), NOW())
+VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'draft', 'ojos', $13, NOW(), NOW())
 RETURNING id
 `,
+		arg.ProblemNo,
 		arg.Title,
 		arg.Statement,
+		statementFormat,
+		arg.Solution,
+		solutionFormat,
 		arg.ProblemType,
 		arg.Visibility,
 		arg.TimeLimitMs,
@@ -86,8 +118,22 @@ RETURNING id
 		arg.Tags,
 		arg.CreatedBy,
 	).Scan(&id)
+	if err != nil {
+		return 0, "", err
+	}
 
-	return id, err
+	problemNo := strings.TrimSpace(arg.ProblemNo)
+	if problemNo == "" {
+		problemNo = fmt.Sprintf("P%d", id)
+		if _, err := r.db.Exec(ctx, `UPDATE problems SET problem_no = $2 WHERE id = $1`, id, problemNo); err != nil {
+			return 0, "", err
+		}
+	}
+	if err := r.ReplaceProblemLanguageLimits(ctx, id, arg.LanguageLimits); err != nil {
+		return 0, "", err
+	}
+
+	return id, problemNo, nil
 }
 
 func (r *Repository) UpdateProblemPackage(
@@ -122,8 +168,10 @@ WHERE id = $1
 func (r *Repository) UpdateProblem(
 	ctx context.Context,
 	id int64,
+	problemNo string,
 	title string,
 	statement string,
+	solution string,
 	problemType string,
 	visibility string,
 	status string,
@@ -138,22 +186,26 @@ func (r *Repository) UpdateProblem(
 		`
 UPDATE problems
 SET
-    title = COALESCE(NULLIF($2, ''), title),
-    statement = COALESCE(NULLIF($3, ''), statement),
-    problem_type = COALESCE(NULLIF($4, ''), problem_type),
-    visibility = COALESCE(NULLIF($5, ''), visibility),
-    status = COALESCE(NULLIF($6, ''), status),
-    difficulty = COALESCE(NULLIF($7, ''), difficulty),
-    tags = CASE WHEN $8::text[] IS NULL THEN tags ELSE $8::text[] END,
-    time_limit_ms = CASE WHEN $9 > 0 THEN $9 ELSE time_limit_ms END,
-    memory_limit_mb = CASE WHEN $10 > 0 THEN $10 ELSE memory_limit_mb END,
-    manifest_sha256 = COALESCE(NULLIF($11, ''), manifest_sha256),
+    problem_no = COALESCE(NULLIF($2, ''), problem_no),
+    title = COALESCE(NULLIF($3, ''), title),
+    statement = COALESCE(NULLIF($4, ''), statement),
+    solution = COALESCE(NULLIF($5, ''), solution),
+    problem_type = COALESCE(NULLIF($6, ''), problem_type),
+    visibility = COALESCE(NULLIF($7, ''), visibility),
+    status = COALESCE(NULLIF($8, ''), status),
+    difficulty = COALESCE(NULLIF($9, ''), difficulty),
+    tags = CASE WHEN $10::text[] IS NULL THEN tags ELSE $10::text[] END,
+    time_limit_ms = CASE WHEN $11 > 0 THEN $11 ELSE time_limit_ms END,
+    memory_limit_mb = CASE WHEN $12 > 0 THEN $12 ELSE memory_limit_mb END,
+    manifest_sha256 = COALESCE(NULLIF($13, ''), manifest_sha256),
     updated_at = NOW()
 WHERE id = $1
 `,
 		id,
+		problemNo,
 		title,
 		statement,
+		solution,
 		problemType,
 		visibility,
 		status,
@@ -166,6 +218,55 @@ WHERE id = $1
 	return err
 }
 
+func (r *Repository) ReplaceProblemLanguageLimits(ctx context.Context, problemID int64, limits []ProblemLanguageLimit) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	if _, err := tx.Exec(ctx, `DELETE FROM problem_language_limits WHERE problem_id = $1`, problemID); err != nil {
+		return err
+	}
+
+	for _, limit := range limits {
+		language := strings.ToLower(strings.TrimSpace(limit.Language))
+		if language == "" {
+			continue
+		}
+		_, err := tx.Exec(
+			ctx,
+			`
+INSERT INTO problem_language_limits(
+    problem_id,
+    language,
+    time_limit_ms,
+    memory_limit_mb,
+    created_at,
+    updated_at
+)
+VALUES($1, $2, $3, $4, NOW(), NOW())
+ON CONFLICT(problem_id, language)
+DO UPDATE SET
+    time_limit_ms = EXCLUDED.time_limit_ms,
+    memory_limit_mb = EXCLUDED.memory_limit_mb,
+    updated_at = NOW()
+`,
+			problemID,
+			language,
+			limit.TimeLimitMs,
+			limit.MemoryLimitMb,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (r *Repository) GetProblem(ctx context.Context, id int64) (*Problem, error) {
 	var p Problem
 
@@ -174,9 +275,13 @@ func (r *Repository) GetProblem(ctx context.Context, id int64) (*Problem, error)
 		`
 SELECT
     id,
+    COALESCE(problem_no, ''),
     COALESCE(slug, ''),
     title,
     COALESCE(statement, ''),
+    COALESCE(statement_format, 'markdown+latex'),
+    COALESCE(solution, ''),
+    COALESCE(solution_format, 'markdown+latex'),
     COALESCE(problem_type, 'traditional'),
     COALESCE(visibility, 'private'),
     COALESCE(package_dir, ''),
@@ -197,9 +302,13 @@ WHERE id = $1
 		id,
 	).Scan(
 		&p.ID,
+		&p.ProblemNo,
 		&p.Slug,
 		&p.Title,
 		&p.Statement,
+		&p.StatementFormat,
+		&p.Solution,
+		&p.SolutionFormat,
 		&p.ProblemType,
 		&p.Visibility,
 		&p.PackageDir,
@@ -217,6 +326,9 @@ WHERE id = $1
 	)
 
 	if err != nil {
+		return nil, err
+	}
+	if err := r.attachLanguageLimits(ctx, []*Problem{&p}); err != nil {
 		return nil, err
 	}
 
@@ -267,9 +379,13 @@ func (r *Repository) ListProblems(ctx context.Context, filter ListProblemsFilter
 		fmt.Sprintf(`
 SELECT
     id,
+    COALESCE(problem_no, ''),
     COALESCE(slug, ''),
     title,
     COALESCE(statement, ''),
+    COALESCE(statement_format, 'markdown+latex'),
+    COALESCE(solution, ''),
+    COALESCE(solution_format, 'markdown+latex'),
     COALESCE(problem_type, 'traditional'),
     COALESCE(visibility, 'private'),
     COALESCE(package_dir, ''),
@@ -301,9 +417,13 @@ LIMIT $%d OFFSET $%d
 		var p Problem
 		if err := rows.Scan(
 			&p.ID,
+			&p.ProblemNo,
 			&p.Slug,
 			&p.Title,
 			&p.Statement,
+			&p.StatementFormat,
+			&p.Solution,
+			&p.SolutionFormat,
 			&p.ProblemType,
 			&p.Visibility,
 			&p.PackageDir,
@@ -327,6 +447,13 @@ LIMIT $%d OFFSET $%d
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
+	ptrs := make([]*Problem, 0, len(problems))
+	for i := range problems {
+		ptrs = append(ptrs, &problems[i])
+	}
+	if err := r.attachLanguageLimits(ctx, ptrs); err != nil {
+		return nil, 0, err
+	}
 
 	return problems, total, nil
 }
@@ -347,9 +474,13 @@ func (r *Repository) GetProblemVisibleToUser(
 	query := fmt.Sprintf(`
 SELECT
     id,
+    COALESCE(problem_no, ''),
     COALESCE(slug, ''),
     title,
     COALESCE(statement, ''),
+    COALESCE(statement_format, 'markdown+latex'),
+    COALESCE(solution, ''),
+    COALESCE(solution_format, 'markdown+latex'),
     COALESCE(problem_type, 'traditional'),
     COALESCE(visibility, 'private'),
     COALESCE(package_dir, ''),
@@ -372,9 +503,13 @@ FROM problems
 	var p Problem
 	err := r.db.QueryRow(ctx, query, args...).Scan(
 		&p.ID,
+		&p.ProblemNo,
 		&p.Slug,
 		&p.Title,
 		&p.Statement,
+		&p.StatementFormat,
+		&p.Solution,
+		&p.SolutionFormat,
 		&p.ProblemType,
 		&p.Visibility,
 		&p.PackageDir,
@@ -393,60 +528,66 @@ FROM problems
 	if err != nil {
 		return nil, err
 	}
+	if err := r.attachLanguageLimits(ctx, []*Problem{&p}); err != nil {
+		return nil, err
+	}
 
 	return &p, nil
 }
 
 func (r *Repository) CanViewPrivateProblems(ctx context.Context, userID int64) (bool, error) {
-	var ok bool
+	return false, nil
+}
 
-	err := r.db.QueryRow(
+func (r *Repository) attachLanguageLimits(ctx context.Context, problems []*Problem) error {
+	if len(problems) == 0 {
+		return nil
+	}
+
+	byID := make(map[int64]*Problem, len(problems))
+	ids := make([]int64, 0, len(problems))
+	for _, problem := range problems {
+		if problem == nil {
+			continue
+		}
+		byID[problem.ID] = problem
+		ids = append(ids, problem.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	rows, err := r.db.Query(
 		ctx,
 		`
-SELECT EXISTS (
-    SELECT 1
-    FROM user_roles ur
-    JOIN roles r ON r.id = ur.role_id
-    WHERE ur.user_id = $1
-      AND r.name = 'super_admin'
-
-    UNION ALL
-
-    SELECT 1
-    FROM user_roles ur
-    JOIN role_permissions rp ON rp.role_id = ur.role_id
-    WHERE ur.user_id = $1
-      AND rp.permission_code IN ('system.admin', 'problem.view.private')
-
-    UNION ALL
-
-    SELECT 1
-    FROM role_bindings rb
-    JOIN role_permissions rp ON rp.role_id = rb.role_id
-    WHERE rb.principal_type = 'user'
-      AND rb.principal_id = $1
-      AND rb.scope_type = 'system'
-      AND rb.scope_id = 0
-      AND rp.permission_code IN ('system.admin', 'problem.view.private')
-      AND (rb.expires_at IS NULL OR rb.expires_at > NOW())
-
-    UNION ALL
-
-    SELECT 1
-    FROM permission_assignments pa
-    WHERE pa.principal_type = 'user'
-      AND pa.principal_id = $1
-      AND pa.scope_type = 'system'
-      AND pa.scope_id = 0
-      AND pa.effect = 'allow'
-      AND pa.permission_code IN ('system.admin', 'problem.view.private')
-      AND (pa.expires_at IS NULL OR pa.expires_at > NOW())
-)
+SELECT problem_id, language, time_limit_ms, memory_limit_mb
+FROM problem_language_limits
+WHERE problem_id = ANY($1)
+ORDER BY problem_id, language
 `,
-		userID,
-	).Scan(&ok)
+		ids,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
 
-	return ok, err
+	for rows.Next() {
+		var problemID int64
+		var limit ProblemLanguageLimit
+		if err := rows.Scan(
+			&problemID,
+			&limit.Language,
+			&limit.TimeLimitMs,
+			&limit.MemoryLimitMb,
+		); err != nil {
+			return err
+		}
+		if problem := byID[problemID]; problem != nil {
+			problem.LanguageLimits = append(problem.LanguageLimits, limit)
+		}
+	}
+	return rows.Err()
 }
 
 func buildProblemListWhere(filter ListProblemsFilter) (string, []any) {
@@ -456,41 +597,12 @@ func buildProblemListWhere(filter ListProblemsFilter) (string, []any) {
     visibility = 'public'
     OR created_by = $1
     OR $2::boolean
-    OR EXISTS (
-        SELECT 1
-        FROM role_bindings rb
-        JOIN role_permissions rp ON rp.role_id = rb.role_id
-        WHERE rb.principal_type = 'user'
-          AND rb.principal_id = $1
-          AND rb.scope_type = 'problem'
-          AND rb.scope_id = problems.id
-          AND rp.permission_code IN (
-              'problem.view',
-              'problem.view.private',
-              'problem.edit',
-              'problem.manage.data',
-              'problem.manage.asset',
-              'problem.delete'
-          )
-          AND (rb.expires_at IS NULL OR rb.expires_at > NOW())
-    )
-    OR EXISTS (
-        SELECT 1
-        FROM permission_assignments pa
-        WHERE pa.principal_type = 'user'
-          AND pa.principal_id = $1
-          AND pa.scope_type = 'problem'
-          AND pa.scope_id = problems.id
-          AND pa.effect = 'allow'
-          AND pa.permission_code IN ('problem.view', 'problem.view.private')
-          AND (pa.expires_at IS NULL OR pa.expires_at > NOW())
-    )
 )`,
 	}
 
 	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
 		args = append(args, "%"+keyword+"%")
-		clauses = append(clauses, fmt.Sprintf(`(title ILIKE $%d OR slug ILIKE $%d)`, len(args), len(args)))
+		clauses = append(clauses, fmt.Sprintf(`(title ILIKE $%d OR slug ILIKE $%d OR problem_no ILIKE $%d)`, len(args), len(args), len(args)))
 	}
 
 	if visibility := strings.TrimSpace(filter.Visibility); visibility != "" {
@@ -519,44 +631,7 @@ func nullableTags(tags []string) any {
 }
 
 func (r *Repository) BindProblemOwner(ctx context.Context, userID int64, problemID int64) error {
-	_, err := r.db.Exec(
-		ctx,
-		`
-INSERT INTO role_bindings(
-    principal_type,
-    principal_id,
-    role_id,
-    scope_type,
-    scope_id,
-    granted_by_type,
-    granted_by_id,
-    created_at
-)
-SELECT
-    'user',
-    $1,
-    roles.id,
-    'problem',
-    $2,
-    'user',
-    $1,
-    NOW()
-FROM roles
-WHERE roles.name = 'problem_owner'
-  AND NOT EXISTS (
-      SELECT 1
-      FROM role_bindings rb
-      WHERE rb.principal_type = 'user'
-        AND rb.principal_id = $1
-        AND rb.role_id = roles.id
-        AND rb.scope_type = 'problem'
-        AND rb.scope_id = $2
-  )
-`,
-		userID,
-		problemID,
-	)
-	return err
+	return nil
 }
 
 func (r *Repository) UpsertProblemFiles(ctx context.Context, problemID int64, files []packagefs.IndexedFile) error {
@@ -626,56 +701,7 @@ func (r *Repository) DeleteProblem(ctx context.Context, problemID int64) error {
 		_ = tx.Rollback(ctx)
 	}()
 
-	var submissionCount int64
-	if err := tx.QueryRow(
-		ctx,
-		`SELECT COUNT(*) FROM submissions WHERE problem_id = $1`,
-		problemID,
-	).Scan(&submissionCount); err != nil {
-		return err
-	}
-
-	if submissionCount > 0 {
-		return fmt.Errorf("problem has submissions, refuse to delete: %d", submissionCount)
-	}
-
 	if _, err := tx.Exec(ctx, `DELETE FROM problem_files WHERE problem_id = $1`, problemID); err != nil {
-		return err
-	}
-
-	if _, err := tx.Exec(
-		ctx,
-		`
-DELETE FROM role_bindings
-WHERE scope_type = 'problem'
-  AND scope_id = $1
-`,
-		problemID,
-	); err != nil {
-		return err
-	}
-
-	if _, err := tx.Exec(
-		ctx,
-		`
-DELETE FROM permission_assignments
-WHERE scope_type = 'problem'
-  AND scope_id = $1
-`,
-		problemID,
-	); err != nil {
-		return err
-	}
-
-	if _, err := tx.Exec(
-		ctx,
-		`
-DELETE FROM resource_edges
-WHERE (parent_type = 'problem' AND parent_id = $1)
-   OR (child_type = 'problem' AND child_id = $1)
-`,
-		problemID,
-	); err != nil {
 		return err
 	}
 
@@ -699,13 +725,9 @@ func (r *Repository) IsProblemOwner(ctx context.Context, userID int64, problemID
 		`
 SELECT EXISTS (
     SELECT 1
-    FROM role_bindings rb
-    JOIN roles r ON r.id = rb.role_id
-    WHERE rb.principal_type = 'user'
-      AND rb.principal_id = $1
-      AND rb.scope_type = 'problem'
-      AND rb.scope_id = $2
-      AND r.name = 'problem_owner'
+    FROM problems
+    WHERE created_by = $1
+      AND id = $2
 )
 `,
 		userID,

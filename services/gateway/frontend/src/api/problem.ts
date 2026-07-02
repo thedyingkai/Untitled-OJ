@@ -26,7 +26,7 @@ export function getProblem(id: number): Promise<ProblemDetailResponse> {
   return apiClient.get<ProblemDetailResponse>(`/problem/problems/${id}`)
 }
 
-export function createProblem(payload: ProblemFormInput): Promise<{ problem_id: number; slug: string }> {
+export function createProblem(payload: ProblemFormInput): Promise<{ problem_id: number; problem_no: string; slug: string }> {
   return apiClient.post('/problem/problems', payload)
 }
 

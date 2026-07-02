@@ -10,10 +10,9 @@ import (
 
 	"ojos-problem-service/internal/packagefs"
 	"ojos-problem-service/internal/repository"
+	problemstorage "ojos-problem-service/internal/storage"
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
-	"ojos-shared/security/authctx"
-	"ojos-shared/security/permission"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -33,18 +32,8 @@ func NewCreateProblemLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Cre
 }
 
 func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *types.CreateProblemResp, err error) {
-	user, ok := authctx.FromContext(l.ctx)
-	if !ok || user == nil || user.UserID <= 0 {
-		return nil, errors.New("unauthorized")
-	}
-
-	if err := permission.RequireUserPermission(
-		l.ctx,
-		l.svcCtx.DB,
-		user.UserID,
-		"problem.create",
-		permission.SystemScope(),
-	); err != nil {
+	user, err := requireSystemProblemPermission(l.ctx, l.svcCtx, "problem.create")
+	if err != nil {
 		return nil, err
 	}
 
@@ -54,6 +43,10 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 	}
 
 	if err := validateSlug(req.Slug); err != nil {
+		return nil, err
+	}
+	problemNo, err := normalizeProblemNo(req.ProblemNo)
+	if err != nil {
 		return nil, err
 	}
 
@@ -80,24 +73,37 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 	if err := validateLimits(timeLimitMs, memoryLimitMb, false); err != nil {
 		return nil, err
 	}
+	languageLimits, packageLanguageLimits, err := normalizeLanguageLimits(req.LanguageLimits, timeLimitMs, memoryLimitMb)
+	if err != nil {
+		return nil, err
+	}
+	components, err := normalizeComponents(req.Runner, req.Checker, req.Validator, req.Scorer)
+	if err != nil {
+		return nil, err
+	}
 
 	difficulty, err := normalizeDifficulty(req.Difficulty)
 	if err != nil {
 		return nil, err
 	}
 
-	problemID, err := l.svcCtx.Repo.InsertProblem(
+	problemID, problemNo, err := l.svcCtx.Repo.InsertProblem(
 		l.ctx,
 		repository.CreateProblemArg{
-			Title:         title,
-			Statement:     strings.TrimSpace(req.Statement),
-			ProblemType:   problemType,
-			Visibility:    visibility,
-			Difficulty:    difficulty,
-			Tags:          parseTags(req.Tags),
-			TimeLimitMs:   timeLimitMs,
-			MemoryLimitMb: memoryLimitMb,
-			CreatedBy:     user.UserID,
+			ProblemNo:       problemNo,
+			Title:           title,
+			Statement:       strings.TrimSpace(req.Statement),
+			StatementFormat: packagefs.ContentFormatMarkdownLatex,
+			Solution:        strings.TrimSpace(req.Solution),
+			SolutionFormat:  packagefs.ContentFormatMarkdownLatex,
+			ProblemType:     problemType,
+			Visibility:      visibility,
+			Difficulty:      difficulty,
+			Tags:            parseTags(req.Tags),
+			TimeLimitMs:     timeLimitMs,
+			MemoryLimitMb:   memoryLimitMb,
+			LanguageLimits:  languageLimits,
+			CreatedBy:       user.UserID,
 		},
 	)
 	if err != nil {
@@ -105,15 +111,19 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 	}
 
 	pkg, err := packagefs.CreateInitialPackage(packagefs.CreateProblemArgs{
-		Root:          l.svcCtx.Config.Storage.ProblemsRoot,
-		ID:            problemID,
-		Slug:          req.Slug,
-		Title:         title,
-		Statement:     req.Statement,
-		ProblemType:   problemType,
-		Visibility:    visibility,
-		TimeLimitMs:   timeLimitMs,
-		MemoryLimitMb: memoryLimitMb,
+		Root:           l.svcCtx.Config.Storage.ProblemsRoot,
+		ID:             problemID,
+		ProblemNo:      problemNo,
+		Slug:           req.Slug,
+		Title:          title,
+		Statement:      req.Statement,
+		Solution:       req.Solution,
+		ProblemType:    problemType,
+		Visibility:     visibility,
+		TimeLimitMs:    timeLimitMs,
+		MemoryLimitMb:  memoryLimitMb,
+		LanguageLimits: packageLanguageLimits,
+		Components:     components,
 	})
 	if err != nil {
 		return nil, err
@@ -139,7 +149,12 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 		return nil, err
 	}
 
-	if err := l.svcCtx.Repo.UpsertProblemFiles(l.ctx, problemID, pkg.Files); err != nil {
+	files, err := problemstorage.SyncProblemFiles(l.ctx, l.svcCtx.Config.Storage, problemID, pkg.Files)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := l.svcCtx.Repo.UpsertProblemFiles(l.ctx, problemID, files); err != nil {
 		return nil, err
 	}
 
@@ -149,6 +164,7 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 
 	return &types.CreateProblemResp{
 		ProblemId: problemID,
+		ProblemNo: problemNo,
 		Slug:      slug,
 	}, nil
 }

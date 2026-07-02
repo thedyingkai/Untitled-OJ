@@ -9,10 +9,10 @@ import (
 	"strings"
 
 	"ojos-problem-service/internal/packagefs"
+	"ojos-problem-service/internal/repository"
+	problemstorage "ojos-problem-service/internal/storage"
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
-	"ojos-shared/security/authctx"
-	"ojos-shared/security/permission"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -32,38 +32,38 @@ func NewUpdateProblemLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Upd
 }
 
 func (l *UpdateProblemLogic) UpdateProblem(req *types.UpdateProblemReq) (resp *types.GetProblemResp, err error) {
-	user, ok := authctx.FromContext(l.ctx)
-	if !ok || user == nil || user.UserID <= 0 {
-		return nil, errors.New("unauthorized")
-	}
-
 	if req.Id <= 0 {
 		return nil, errors.New("invalid problem id")
 	}
 
 	if strings.TrimSpace(req.Title) == "" &&
+		strings.TrimSpace(req.ProblemNo) == "" &&
 		strings.TrimSpace(req.Statement) == "" &&
+		strings.TrimSpace(req.Solution) == "" &&
 		strings.TrimSpace(req.ProblemType) == "" &&
 		strings.TrimSpace(req.Visibility) == "" &&
 		strings.TrimSpace(req.Status) == "" &&
 		strings.TrimSpace(req.Difficulty) == "" &&
 		strings.TrimSpace(req.Tags) == "" &&
+		req.LanguageLimits == nil &&
+		!componentInputProvided(req.Runner) &&
+		!componentInputProvided(req.Checker) &&
+		!componentInputProvided(req.Validator) &&
+		!componentInputProvided(req.Scorer) &&
 		req.TimeLimitMs == 0 &&
 		req.MemoryLimitMb == 0 {
 		return nil, errors.New("empty update")
 	}
 
-	if err := permission.RequireUserPermission(
-		l.ctx,
-		l.svcCtx.DB,
-		user.UserID,
-		"problem.edit",
-		permission.Scope{Type: "problem", ID: req.Id},
-	); err != nil {
+	if _, err := requireProblemPermission(l.ctx, l.svcCtx, "problem.edit", req.Id); err != nil {
 		return nil, err
 	}
 
 	p, err := l.svcCtx.Repo.GetProblem(l.ctx, req.Id)
+	if err != nil {
+		return nil, err
+	}
+	problemNo, err := normalizeProblemNo(req.ProblemNo)
 	if err != nil {
 		return nil, err
 	}
@@ -103,16 +103,41 @@ func (l *UpdateProblemLogic) UpdateProblem(req *types.UpdateProblemReq) (resp *t
 	if err := validateLimits(req.TimeLimitMs, req.MemoryLimitMb, true); err != nil {
 		return nil, err
 	}
+	effectiveTimeLimitMs := p.TimeLimitMs
+	if req.TimeLimitMs > 0 {
+		effectiveTimeLimitMs = req.TimeLimitMs
+	}
+	effectiveMemoryLimitMb := p.MemoryLimitMb
+	if req.MemoryLimitMb > 0 {
+		effectiveMemoryLimitMb = req.MemoryLimitMb
+	}
+	var languageLimitsForRepo []repository.ProblemLanguageLimit
+	var languageLimitsForPackage []packagefs.LanguageLimit
+	shouldReplaceLanguageLimits := req.LanguageLimits != nil || req.TimeLimitMs > 0 || req.MemoryLimitMb > 0
+	if shouldReplaceLanguageLimits {
+		languageLimitsForRepo, languageLimitsForPackage, err = normalizeLanguageLimits(req.LanguageLimits, effectiveTimeLimitMs, effectiveMemoryLimitMb)
+		if err != nil {
+			return nil, err
+		}
+	}
+	components, err := normalizeComponents(req.Runner, req.Checker, req.Validator, req.Scorer)
+	if err != nil {
+		return nil, err
+	}
 
 	manifestSha, files, err := packagefs.UpdateManifest(
 		p.PackageDir,
+		problemNo,
 		strings.TrimSpace(req.Title),
 		strings.TrimSpace(req.Statement),
+		strings.TrimSpace(req.Solution),
 		problemType,
 		visibility,
 		status,
 		req.TimeLimitMs,
 		req.MemoryLimitMb,
+		languageLimitsForPackage,
+		components,
 	)
 	if err != nil {
 		return nil, err
@@ -121,8 +146,10 @@ func (l *UpdateProblemLogic) UpdateProblem(req *types.UpdateProblemReq) (resp *t
 	if err := l.svcCtx.Repo.UpdateProblem(
 		l.ctx,
 		req.Id,
+		problemNo,
 		strings.TrimSpace(req.Title),
 		strings.TrimSpace(req.Statement),
+		strings.TrimSpace(req.Solution),
 		problemType,
 		visibility,
 		status,
@@ -134,7 +161,16 @@ func (l *UpdateProblemLogic) UpdateProblem(req *types.UpdateProblemReq) (resp *t
 	); err != nil {
 		return nil, err
 	}
+	if shouldReplaceLanguageLimits {
+		if err := l.svcCtx.Repo.ReplaceProblemLanguageLimits(l.ctx, req.Id, languageLimitsForRepo); err != nil {
+			return nil, err
+		}
+	}
 
+	files, err = problemstorage.SyncProblemFiles(l.ctx, l.svcCtx.Config.Storage, req.Id, files)
+	if err != nil {
+		return nil, err
+	}
 	if err := l.svcCtx.Repo.UpsertProblemFiles(l.ctx, req.Id, files); err != nil {
 		return nil, err
 	}

@@ -8,10 +8,9 @@ import (
 	"errors"
 
 	"ojos-problem-service/internal/packagefs"
+	problemstorage "ojos-problem-service/internal/storage"
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
-	"ojos-shared/security/authctx"
-	"ojos-shared/security/permission"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -31,22 +30,14 @@ func NewUpdateTestCaseLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Up
 }
 
 func (l *UpdateTestCaseLogic) UpdateTestCase(req *types.UpdateTestCaseReq) (resp *types.UpdateTestCaseResp, err error) {
-	user, ok := authctx.FromContext(l.ctx)
-	if !ok || user == nil || user.UserID <= 0 {
-		return nil, errors.New("unauthorized")
+	if _, err := requireProblemPermission(l.ctx, l.svcCtx, "problem.manage.data", req.ProblemId); err != nil {
+		return nil, err
 	}
-
-	if req.ProblemId <= 0 || req.CaseNo <= 0 {
+	if req.CaseNo <= 0 {
 		return nil, errors.New("invalid request")
 	}
 
-	if err := permission.RequireUserPermission(
-		l.ctx,
-		l.svcCtx.DB,
-		user.UserID,
-		"problem.manage.data",
-		permission.Scope{Type: "problem", ID: req.ProblemId},
-	); err != nil {
+	if err := validateLimits(req.TimeLimitMs, req.MemoryLimitMb, true); err != nil {
 		return nil, err
 	}
 
@@ -71,7 +62,11 @@ func (l *UpdateTestCaseLogic) UpdateTestCase(req *types.UpdateTestCaseReq) (resp
 		return nil, err
 	}
 
-	if err := l.svcCtx.Repo.UpsertProblemFiles(l.ctx, req.ProblemId, result.Files); err != nil {
+	files, err := problemstorage.SyncProblemFiles(l.ctx, l.svcCtx.Config.Storage, req.ProblemId, result.Files)
+	if err != nil {
+		return nil, err
+	}
+	if err := l.svcCtx.Repo.UpsertProblemFiles(l.ctx, req.ProblemId, files); err != nil {
 		return nil, err
 	}
 

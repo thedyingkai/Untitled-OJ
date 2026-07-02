@@ -11,7 +11,6 @@ import (
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
 	"ojos-shared/security/authctx"
-	"ojos-shared/security/permission"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -51,13 +50,7 @@ func (l *DeleteProblemLogic) DeleteProblem(req *types.DeleteProblemReq) (resp *t
 	}
 
 	if !isOwner {
-		if err := permission.RequireUserPermission(
-			l.ctx,
-			l.svcCtx.DB,
-			user.UserID,
-			"problem.delete",
-			permission.Scope{Type: "problem", ID: req.Id},
-		); err != nil {
+		if !userHasProblemPermission(user, "problem.delete") {
 			return nil, errors.New("forbidden: only problem owner or problem manager can delete this problem")
 		}
 	}

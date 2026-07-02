@@ -10,8 +10,6 @@ import (
 	"ojos-problem-service/internal/packagefs"
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
-	"ojos-shared/security/authctx"
-	"ojos-shared/security/permission"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -31,23 +29,11 @@ func NewDeleteTestCaseLogic(ctx context.Context, svcCtx *svc.ServiceContext) *De
 }
 
 func (l *DeleteTestCaseLogic) DeleteTestCase(req *types.DeleteTestCaseReq) (resp *types.DeleteTestCaseResp, err error) {
-	user, ok := authctx.FromContext(l.ctx)
-	if !ok || user == nil || user.UserID <= 0 {
-		return nil, errors.New("unauthorized")
-	}
-
-	if req.ProblemId <= 0 || req.CaseNo <= 0 {
-		return nil, errors.New("invalid request")
-	}
-
-	if err := permission.RequireUserPermission(
-		l.ctx,
-		l.svcCtx.DB,
-		user.UserID,
-		"problem.manage.data",
-		permission.Scope{Type: "problem", ID: req.ProblemId},
-	); err != nil {
+	if _, err := requireProblemPermission(l.ctx, l.svcCtx, "problem.manage.data", req.ProblemId); err != nil {
 		return nil, err
+	}
+	if req.CaseNo <= 0 {
+		return nil, errors.New("invalid request")
 	}
 
 	p, err := l.svcCtx.Repo.GetProblem(l.ctx, req.ProblemId)

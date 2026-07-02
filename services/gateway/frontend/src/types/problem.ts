@@ -10,9 +10,13 @@ export type ProblemType =
 
 export interface ProblemItem {
   id: number
+  problem_no: string
   slug: string
   title: string
   statement: string
+  statement_format: 'markdown+latex'
+  solution: string
+  solution_format: 'markdown+latex'
   problem_type: ProblemType
   visibility: ProblemVisibility
   status: ProblemStatus
@@ -20,12 +24,28 @@ export interface ProblemItem {
   tags: string
   time_limit_ms: number
   memory_limit_mb: number
+  language_limits: ProblemLanguageLimit[]
   created_by: number
   created_at: string
   updated_at: string
   manifest_sha256?: string
   source_format?: string
   samples?: ProblemSample[]
+}
+
+export interface ProblemLanguageLimit {
+  language: string
+  time_limit_ms: number
+  memory_limit_mb: number
+}
+
+export interface ProblemComponentInput {
+  type?: 'builtin' | 'custom'
+  name?: string
+  language?: string
+  source_path?: string
+  source_code?: string
+  args?: string[]
 }
 
 export interface ProblemSample {
@@ -44,11 +64,18 @@ export interface ProblemDetailResponse {
 }
 
 export interface ProblemFormInput {
+  problem_no?: string
   title: string
   slug?: string
   statement?: string
+  solution?: string
   time_limit_ms?: number
   memory_limit_mb?: number
+  language_limits?: ProblemLanguageLimit[]
+  runner?: ProblemComponentInput
+  checker?: ProblemComponentInput
+  validator?: ProblemComponentInput
+  scorer?: ProblemComponentInput
   problem_type?: ProblemType
   visibility?: ProblemVisibility
   difficulty?: ProblemDifficulty
@@ -88,6 +115,7 @@ export interface PackageLimits {
 
 export interface PackageSummary {
   schema: string
+  problem_no: string
   slug: string
   title: string
   problem_type: string
@@ -103,6 +131,7 @@ export interface PackageSummary {
   limits: PackageLimits
   runner: PackageComponent
   checker: PackageComponent
+  validator: PackageComponent
   scorer: PackageComponent
 }
 

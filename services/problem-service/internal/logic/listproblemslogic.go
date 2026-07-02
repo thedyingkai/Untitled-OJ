@@ -11,7 +11,6 @@ import (
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
 	"ojos-shared/security/authctx"
-	"ojos-shared/security/permission"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -36,20 +35,10 @@ func (l *ListProblemsLogic) ListProblems(req *types.ListProblemsReq) (resp *type
 		return nil, errors.New("unauthorized")
 	}
 
-	if err := permission.RequireUserPermission(
-		l.ctx,
-		l.svcCtx.DB,
-		user.UserID,
-		"problem.view",
-		permission.SystemScope(),
-	); err != nil {
-		return nil, err
+	if !userHasProblemPermission(user, "problem.view") {
+		return nil, errors.New("forbidden: missing problem.view")
 	}
-
-	canViewPrivate, err := l.svcCtx.Repo.CanViewPrivateProblems(l.ctx, user.UserID)
-	if err != nil {
-		return nil, err
-	}
+	canViewPrivate := userCanViewPrivateProblems(user)
 
 	problems, total, err := l.svcCtx.Repo.ListProblems(
 		l.ctx,

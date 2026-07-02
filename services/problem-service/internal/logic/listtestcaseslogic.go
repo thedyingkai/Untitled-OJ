@@ -5,13 +5,10 @@ package logic
 
 import (
 	"context"
-	"errors"
 
 	"ojos-problem-service/internal/packagefs"
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
-	"ojos-shared/security/authctx"
-	"ojos-shared/security/permission"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -31,22 +28,7 @@ func NewListTestCasesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Lis
 }
 
 func (l *ListTestCasesLogic) ListTestCases(req *types.ListTestCasesReq) (resp *types.ListTestCasesResp, err error) {
-	user, ok := authctx.FromContext(l.ctx)
-	if !ok || user == nil || user.UserID <= 0 {
-		return nil, errors.New("unauthorized")
-	}
-
-	if req.ProblemId <= 0 {
-		return nil, errors.New("invalid problem id")
-	}
-
-	if err := permission.RequireUserPermission(
-		l.ctx,
-		l.svcCtx.DB,
-		user.UserID,
-		"problem.manage.data",
-		permission.Scope{Type: "problem", ID: req.ProblemId},
-	); err != nil {
+	if _, err := requireProblemPermission(l.ctx, l.svcCtx, "problem.manage.data", req.ProblemId); err != nil {
 		return nil, err
 	}
 

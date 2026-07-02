@@ -10,23 +10,40 @@ import (
 
 func convertProblem(p repository.Problem) types.ProblemItem {
 	return types.ProblemItem{
-		Id:             p.ID,
-		Slug:           p.Slug,
-		Title:          p.Title,
-		Statement:      p.Statement,
-		ProblemType:    p.ProblemType,
-		Visibility:     p.Visibility,
-		ManifestSha256: p.ManifestSha256,
-		SourceFormat:   p.SourceFormat,
-		Status:         p.Status,
-		Difficulty:     p.Difficulty,
-		Tags:           strings.Join(p.Tags, ","),
-		TimeLimitMs:    p.TimeLimitMs,
-		MemoryLimitMb:  p.MemoryLimitMb,
-		CreatedBy:      p.CreatedBy,
-		CreatedAt:      p.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-		UpdatedAt:      p.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		Id:              p.ID,
+		ProblemNo:       p.ProblemNo,
+		Slug:            p.Slug,
+		Title:           p.Title,
+		Statement:       p.Statement,
+		StatementFormat: p.StatementFormat,
+		Solution:        p.Solution,
+		SolutionFormat:  p.SolutionFormat,
+		ProblemType:     p.ProblemType,
+		Visibility:      p.Visibility,
+		ManifestSha256:  p.ManifestSha256,
+		SourceFormat:    p.SourceFormat,
+		Status:          p.Status,
+		Difficulty:      p.Difficulty,
+		Tags:            strings.Join(p.Tags, ","),
+		TimeLimitMs:     p.TimeLimitMs,
+		MemoryLimitMb:   p.MemoryLimitMb,
+		LanguageLimits:  convertProblemLanguageLimits(p.LanguageLimits),
+		CreatedBy:       p.CreatedBy,
+		CreatedAt:       p.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		UpdatedAt:       p.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	}
+}
+
+func convertProblemLanguageLimits(limits []repository.ProblemLanguageLimit) []types.ProblemLanguageLimit {
+	items := make([]types.ProblemLanguageLimit, 0, len(limits))
+	for _, limit := range limits {
+		items = append(items, types.ProblemLanguageLimit{
+			Language:      limit.Language,
+			TimeLimitMs:   limit.TimeLimitMs,
+			MemoryLimitMb: limit.MemoryLimitMb,
+		})
+	}
+	return items
 }
 
 func convertCase(c packagefs.CaseRecord) types.TestCaseItem {
@@ -58,6 +75,7 @@ func convertSamples(samples []packagefs.SampleRecord) []types.ProblemSample {
 func convertPackageSummary(summary packagefs.PackageSummary) types.PackageSummary {
 	return types.PackageSummary{
 		Schema:         summary.Schema,
+		ProblemNo:      summary.ProblemNo,
 		Slug:           summary.Slug,
 		Title:          summary.Title,
 		ProblemType:    summary.Type,
@@ -73,6 +91,7 @@ func convertPackageSummary(summary packagefs.PackageSummary) types.PackageSummar
 		Limits:         convertPackageLimits(summary.Limits),
 		Runner:         convertPackageComponent(summary.Runner),
 		Checker:        convertPackageComponent(summary.Checker),
+		Validator:      convertPackageComponent(summary.Validator),
 		Scorer:         convertPackageComponent(summary.Scorer),
 	}
 }

@@ -37,6 +37,7 @@ type PackageLimitsSummary struct {
 
 type PackageSummary struct {
 	Schema         string
+	ProblemNo      string
 	Slug           string
 	Title          string
 	Type           string
@@ -52,6 +53,7 @@ type PackageSummary struct {
 	Limits         PackageLimitsSummary
 	Runner         PackageComponentSummary
 	Checker        PackageComponentSummary
+	Validator      PackageComponentSummary
 	Scorer         PackageComponentSummary
 }
 
@@ -98,6 +100,7 @@ func InspectPackage(packageDir string) (*PackageInspection, error) {
 	manifestLoaded := inspector.readYAML("problem.yaml", &manifest)
 	if manifestLoaded {
 		summary.Schema = manifest.Schema
+		summary.ProblemNo = manifest.ProblemNo
 		summary.Slug = manifest.Slug
 		summary.Title = manifest.Title
 		summary.Type = manifest.Type
@@ -108,15 +111,10 @@ func InspectPackage(packageDir string) (*PackageInspection, error) {
 		summary.Limits = summarizeLimits(manifest.Limits)
 
 		inspector.validateManifest(manifest)
-		summary.Runner = inspector.validateComponent("runner", manifest.Runner, map[string]bool{
-			"traditional-runner": true,
-		})
-		summary.Checker = inspector.validateComponent("checker", manifest.Checker, map[string]bool{
-			"default-trim-checker": true,
-		})
-		summary.Scorer = inspector.validateComponent("scorer", manifest.Scorer, map[string]bool{
-			"default-sum-scorer": true,
-		})
+		summary.Runner = inspector.validateComponent("runner", manifest.Runner, allowedBuiltinRunners())
+		summary.Checker = inspector.validateComponent("checker", manifest.Checker, allowedBuiltinCheckers())
+		summary.Validator = inspector.validateComponent("validator", manifest.Validator, allowedBuiltinValidators())
+		summary.Scorer = inspector.validateComponent("scorer", manifest.Scorer, allowedBuiltinScorers())
 	} else if inspector.exists("cases.yaml") || inspector.exists("test_cases.yaml") {
 		inspector.addError("legacy_format", "legacy package format is not accepted", "")
 	}
@@ -167,6 +165,9 @@ func (i *packageInspector) validateManifest(manifest ProblemManifest) {
 	if strings.TrimSpace(manifest.Title) == "" {
 		i.addError("empty_title", "problem.yaml title is required", "problem.yaml")
 	}
+	if strings.TrimSpace(manifest.ProblemNo) == "" {
+		i.addError("empty_problem_no", "problem.yaml problem_no is required", "problem.yaml")
+	}
 	if !oneOf(manifest.Type, "traditional", "interactive", "communication", "output_only", "heuristic") {
 		i.addError("invalid_type", "problem.yaml type is invalid", "problem.yaml")
 	}
@@ -201,8 +202,20 @@ func (i *packageInspector) validateManifest(manifest ProblemManifest) {
 		}
 		i.validateRelativeExistingFile("statement_file", path, "problem.yaml")
 	}
+	if manifest.Statement.Format != "" && manifest.Statement.Format != ContentFormatMarkdownLatex {
+		i.addError("invalid_statement_format", "statement.format must be markdown+latex", "problem.yaml")
+	}
 	if manifest.Statement.AssetsDir != "" {
 		i.validateRelativePath("statement_assets", manifest.Statement.AssetsDir, "problem.yaml")
+	}
+	if manifest.Tutorial.Format != "" && manifest.Tutorial.Format != ContentFormatMarkdownLatex {
+		i.addError("invalid_tutorial_format", "tutorial.format must be markdown+latex", "problem.yaml")
+	}
+	for locale, path := range manifest.Tutorial.Files {
+		if strings.TrimSpace(locale) == "" {
+			i.addError("empty_tutorial_locale", "tutorial locale is empty", "problem.yaml")
+		}
+		i.validateRelativeExistingFile("tutorial_file", path, "problem.yaml")
 	}
 	if manifest.Tutorial.Std.Path != "" {
 		i.validateRelativeExistingFile("tutorial_std", manifest.Tutorial.Std.Path, "problem.yaml")
@@ -332,7 +345,48 @@ func (i *packageInspector) validateComponent(kind string, ref ComponentRef, allo
 	if config.Type == "builtin" && config.Name != "" && !allowedBuiltin[config.Name] {
 		i.addError("unsupported_"+kind, fmt.Sprintf("unsupported builtin %s: %s", kind, config.Name), configPath)
 	}
+	if config.Type == "custom" {
+		source, ok := config.Config["source"].(string)
+		if !ok || strings.TrimSpace(source) == "" {
+			i.addError("missing_"+kind+"_source", kind+" custom component requires config.source", configPath)
+		} else {
+			i.validateRelativeExistingFile(kind+"_source", source, configPath)
+		}
+	}
 	return summary
+}
+
+func allowedBuiltinRunners() map[string]bool {
+	return map[string]bool{
+		"traditional-runner":   true,
+		"interactive-runner":   true,
+		"communication-runner": true,
+		"output-only-runner":   true,
+		"heuristic-runner":     true,
+	}
+}
+
+func allowedBuiltinCheckers() map[string]bool {
+	return map[string]bool{
+		"default-trim-checker":  true,
+		"interactive-checker":   true,
+		"communication-checker": true,
+		"output-only-checker":   true,
+		"heuristic-checker":     true,
+	}
+}
+
+func allowedBuiltinValidators() map[string]bool {
+	return map[string]bool{
+		"default-input-validator": true,
+	}
+}
+
+func allowedBuiltinScorers() map[string]bool {
+	return map[string]bool{
+		"default-sum-scorer": true,
+		"heuristic-scorer":   true,
+	}
 }
 
 func (i *packageInspector) validateLimit(name string, timeMs int, memoryMb int, path string) {
