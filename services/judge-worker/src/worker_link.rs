@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,10 +12,12 @@ use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::config::LanguagesConfig;
+use crate::cgroup::CgroupRun;
+use crate::config::{LanguageConfig, LanguagesConfig};
 use crate::judge::judge_artifacts;
 use crate::problem_package::load_problem_package;
 use crate::result::ResultFile;
+use crate::sandbox::nsjail_available;
 
 #[derive(Debug, Clone)]
 pub struct WorkerLinkConfig {
@@ -37,6 +40,7 @@ pub struct WorkerLinkConfig {
     pub service_token: Option<String>,
     pub caller_node_id: Option<String>,
     pub runner_mode: String,
+    pub allow_fake_runner: bool,
     pub smoke_once: bool,
 }
 
@@ -92,7 +96,14 @@ impl WorkerLinkConfig {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let runner_mode = env_or("OJOS_RUNNER_MODE", || "nsjail".to_string());
+        let runner_mode =
+            normalize_runner_mode(&env_or("OJOS_RUNNER_MODE", || "nsjail".to_string()))?;
+        let allow_fake_runner = env_bool("OJOS_ALLOW_FAKE_RUNNER");
+        if runner_mode == "fake" && !allow_fake_runner {
+            return Err(anyhow!(
+                "OJOS_RUNNER_MODE=fake requires OJOS_ALLOW_FAKE_RUNNER=1; fake runner is development-only and is refused by default"
+            ));
+        }
         let smoke_once = env_bool("OJOS_WORKER_SMOKE_ONCE");
 
         Ok(Self {
@@ -115,6 +126,7 @@ impl WorkerLinkConfig {
             service_token,
             caller_node_id,
             runner_mode,
+            allow_fake_runner,
             smoke_once,
         })
     }
@@ -132,6 +144,12 @@ fn internal_api_url(gateway_url: &str, api_id: &str, path: &str) -> String {
 
 pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
     let config = Arc::new(WorkerLinkConfig::from_env(&languages)?);
+    validate_runtime_preflight(&config, &languages).await?;
+    info!(
+        runner_mode = %config.runner_mode,
+        supported_languages = ?config.supported_languages,
+        "worker runtime preflight passed"
+    );
     if let Some(gateway_url) = &config.internal_gateway_url {
         info!(
             gateway_url = %gateway_url,
@@ -274,18 +292,25 @@ async fn execute_task(
         .await;
     });
 
-    let result = if config.runner_mode == "fake" {
-        fake_judge_artifacts(task.submission_id, &package_dir, &result_dir).await
-    } else {
-        judge_artifacts(
-            languages,
-            task.submission_id,
-            &task.language,
-            &source_path,
-            &package_dir,
-            &result_dir,
-        )
-        .await
+    let result = match config.runner_mode.as_str() {
+        "fake" if config.allow_fake_runner => {
+            fake_judge_artifacts(task.submission_id, &package_dir, &result_dir).await
+        }
+        "fake" => Err(anyhow!(
+            "fake runner refused: set OJOS_ALLOW_FAKE_RUNNER=1 only for explicit development smoke runs"
+        )),
+        "nsjail" => {
+            judge_artifacts(
+                languages,
+                task.submission_id,
+                &task.language,
+                &source_path,
+                &package_dir,
+                &result_dir,
+            )
+            .await
+        }
+        other => Err(anyhow!("unsupported runner mode: {other}")),
     };
 
     let _ = heartbeat_stop.0.send(true);
@@ -362,7 +387,7 @@ async fn register_worker(client: &Client, config: &WorkerLinkConfig) -> Result<(
         worker_name: config.worker_name.clone(),
         hostname: std::env::var("HOSTNAME").unwrap_or_default(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        capabilities: vec!["nsjail".to_string(), "cgroup-v2".to_string()],
+        capabilities: worker_capabilities(config),
         supported_languages: config.supported_languages.clone(),
         max_concurrency: config.max_concurrency as i32,
     };
@@ -635,7 +660,7 @@ async fn claim_tasks(
 ) -> Result<Vec<WorkerTaskLease>> {
     let req = WorkerClaimTasksReq {
         worker_id: config.worker_id.clone(),
-        capabilities: vec!["nsjail".to_string(), "cgroup-v2".to_string()],
+        capabilities: worker_capabilities(config),
         supported_languages: config.supported_languages.clone(),
         available_slots: available_slots as i32,
         task_ids: stream_task_ids(pending_task_events),
@@ -643,6 +668,178 @@ async fn claim_tasks(
     let resp: WorkerClaimTasksResp =
         post_json(client, config, "/judge/worker/tasks/claim", &req).await?;
     Ok(resp.tasks)
+}
+
+fn worker_capabilities(config: &WorkerLinkConfig) -> Vec<String> {
+    match config.runner_mode.as_str() {
+        "fake" => vec!["fake-runner".to_string()],
+        _ => vec!["nsjail".to_string(), "cgroup-v2".to_string()],
+    }
+}
+
+async fn validate_runtime_preflight(
+    config: &WorkerLinkConfig,
+    languages: &LanguagesConfig,
+) -> Result<()> {
+    validate_runner_policy(config)?;
+    validate_supported_languages(config, languages)?;
+    ensure_writable_dir(&config.work_dir, "OJOS_WORK_DIR").await?;
+    ensure_writable_dir(&config.artifact_cache_dir, "OJOS_ARTIFACT_CACHE_DIR").await?;
+
+    if config.runner_mode == "fake" {
+        warn!(
+            "fake runner enabled by OJOS_ALLOW_FAKE_RUNNER; this mode is development-only and not production safe"
+        );
+        return Ok(());
+    }
+
+    validate_language_toolchain(config, languages)?;
+
+    if env_bool("OJOS_ALLOW_CGROUP_FALLBACK") {
+        return Err(anyhow!(
+            "OJOS_ALLOW_CGROUP_FALLBACK must be false for nsjail production workers"
+        ));
+    }
+    if !nsjail_available() {
+        return Err(anyhow!(
+            "nsjail binary is required for OJOS_RUNNER_MODE=nsjail and was not found on PATH"
+        ));
+    }
+
+    let _probe =
+        CgroupRun::create(64, 64).context("cgroup v2 preflight failed for nsjail runner")?;
+    Ok(())
+}
+
+fn validate_runner_policy(config: &WorkerLinkConfig) -> Result<()> {
+    match config.runner_mode.as_str() {
+        "nsjail" => Ok(()),
+        "fake" if config.allow_fake_runner => Ok(()),
+        "fake" => Err(anyhow!(
+            "fake runner refused: set OJOS_ALLOW_FAKE_RUNNER=1 only for explicit development smoke runs"
+        )),
+        other => Err(anyhow!("unsupported runner mode: {other}")),
+    }
+}
+
+fn validate_supported_languages(
+    config: &WorkerLinkConfig,
+    languages: &LanguagesConfig,
+) -> Result<()> {
+    if config.supported_languages.is_empty() {
+        return Err(anyhow!("OJOS_SUPPORTED_LANGUAGES resolved to an empty set"));
+    }
+    for language in &config.supported_languages {
+        if !languages.languages.contains_key(language) {
+            return Err(anyhow!(
+                "supported language {language:?} is not present in languages config"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_language_toolchain(
+    config: &WorkerLinkConfig,
+    languages: &LanguagesConfig,
+) -> Result<()> {
+    for language in &config.supported_languages {
+        let lang = languages
+            .get(language)
+            .ok_or_else(|| anyhow!("language {language:?} is not present in languages config"))?;
+        if lang.compile.enabled {
+            ensure_command_available(language, "compile", &lang.compile.command)?;
+        }
+        ensure_runtime_command_available(language, lang)?;
+    }
+    Ok(())
+}
+
+fn ensure_runtime_command_available(language: &str, lang: &LanguageConfig) -> Result<()> {
+    let command = lang.run.command.trim();
+    if generated_runtime_command(command) {
+        return Ok(());
+    }
+    ensure_command_available(language, "run", command)
+}
+
+fn ensure_command_available(language: &str, phase: &str, command: &str) -> Result<()> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err(anyhow!("{language} {phase} command must not be empty"));
+    }
+    if generated_runtime_command(command) {
+        return Ok(());
+    }
+    if command_available_on_path(command) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "{language} {phase} command {command:?} is not available on PATH"
+    ))
+}
+
+fn generated_runtime_command(command: &str) -> bool {
+    command.contains("{exe}") || command.contains("{source}") || command.contains("{workdir}")
+}
+
+fn command_available_on_path(command: &str) -> bool {
+    if command.contains('/') || command.contains('\\') {
+        return is_executable_file(Path::new(command));
+    }
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+    for dir in env::split_paths(&paths) {
+        let candidate = dir.join(command);
+        if is_executable_file(&candidate) {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            let pathext = env::var("PATHEXT").unwrap_or_else(|_| {
+                ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC".to_string()
+            });
+            for ext in pathext.split(';').filter(|ext| !ext.is_empty()) {
+                if is_executable_file(&dir.join(format!("{command}{ext}"))) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+async fn ensure_writable_dir(path: &Path, label: &str) -> Result<()> {
+    fs::create_dir_all(path)
+        .await
+        .with_context(|| format!("create {label} failed: {}", path.display()))?;
+    let probe = path.join(format!(
+        ".preflight-write-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    fs::write(&probe, b"ok")
+        .await
+        .with_context(|| format!("write {label} preflight probe failed: {}", path.display()))?;
+    fs::remove_file(&probe)
+        .await
+        .with_context(|| format!("remove {label} preflight probe failed: {}", probe.display()))?;
+    Ok(())
 }
 
 async fn lease_heartbeat_loop(
@@ -872,6 +1069,17 @@ where
     std::env::var(key).unwrap_or_else(|_| fallback())
 }
 
+fn normalize_runner_mode(raw: &str) -> Result<String> {
+    let mode = raw.trim().to_ascii_lowercase();
+    match mode.as_str() {
+        "nsjail" | "fake" => Ok(mode),
+        "" => Err(anyhow!("OJOS_RUNNER_MODE must not be empty")),
+        other => Err(anyhow!(
+            "unsupported OJOS_RUNNER_MODE {other:?}; supported values are nsjail and fake"
+        )),
+    }
+}
+
 fn format_error_chain(err: &anyhow::Error) -> String {
     err.chain()
         .map(ToString::to_string)
@@ -1026,10 +1234,62 @@ struct WorkerFailTaskResp {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{CompileConfig, LanguageConfig, RunConfig};
     use crate::result::{ResultCase, ResultFile};
+    use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+
+    fn test_worker_config(runner_mode: &str, allow_fake_runner: bool) -> WorkerLinkConfig {
+        WorkerLinkConfig {
+            worker_id: "worker-a".to_string(),
+            worker_name: "Worker A".to_string(),
+            judge_api_url: "http://judge-api:8082".to_string(),
+            worker_token: "worker-token".to_string(),
+            max_concurrency: 1,
+            work_dir: std::env::temp_dir().join(format!("ojos-worker-test-{}", Uuid::new_v4())),
+            artifact_cache_dir: std::env::temp_dir()
+                .join(format!("ojos-worker-cache-test-{}", Uuid::new_v4())),
+            supported_languages: vec!["cpp17".to_string()],
+            heartbeat_interval: Duration::from_secs(10),
+            task_lease_ttl: Duration::from_secs(45),
+            redis_url: None,
+            redis_task_stream: "ojos:judge:task".to_string(),
+            redis_consumer_group: "judge-worker".to_string(),
+            internal_gateway_url: None,
+            storage_api_get: "storage.object.get".to_string(),
+            storage_api_put: "storage.object.put".to_string(),
+            service_token: None,
+            caller_node_id: None,
+            runner_mode: runner_mode.to_string(),
+            allow_fake_runner,
+            smoke_once: false,
+        }
+    }
+
+    fn test_languages_config() -> LanguagesConfig {
+        LanguagesConfig {
+            languages: HashMap::from([(
+                "cpp17".to_string(),
+                LanguageConfig {
+                    source_file: "main.cpp".to_string(),
+                    exe_file: "main".to_string(),
+                    compile: CompileConfig {
+                        enabled: true,
+                        command: "definitely-not-a-real-compiler".to_string(),
+                        args: vec![],
+                        timeout_ms: 1000,
+                        memory_mb: Some(256),
+                    },
+                    run: RunConfig {
+                        command: "{exe}".to_string(),
+                        args: vec![],
+                    },
+                },
+            )]),
+        }
+    }
 
     #[test]
     fn redis_stream_task_events_extracts_ids_and_task_metadata_from_xreadgroup_response() {
@@ -1103,6 +1363,46 @@ mod tests {
     }
 
     #[test]
+    fn runner_policy_rejects_fake_without_explicit_allow() {
+        let config = test_worker_config("fake", false);
+
+        let err = validate_runner_policy(&config).expect_err("fake runner must be refused");
+
+        assert!(err.to_string().contains("fake runner refused"));
+    }
+
+    #[test]
+    fn fake_runner_does_not_claim_nsjail_capabilities() {
+        let config = test_worker_config("fake", true);
+
+        assert_eq!(
+            worker_capabilities(&config),
+            vec!["fake-runner".to_string()]
+        );
+    }
+
+    #[test]
+    fn nsjail_runner_claims_sandbox_capabilities() {
+        let config = test_worker_config("nsjail", false);
+
+        assert_eq!(
+            worker_capabilities(&config),
+            vec!["nsjail".to_string(), "cgroup-v2".to_string()]
+        );
+    }
+
+    #[test]
+    fn supported_languages_must_exist_in_languages_config() {
+        let mut config = test_worker_config("nsjail", false);
+        config.supported_languages = vec!["missing".to_string()];
+
+        let err = validate_supported_languages(&config, &test_languages_config())
+            .expect_err("unknown worker language must fail preflight");
+
+        assert!(err.to_string().contains("not present in languages config"));
+    }
+
+    #[test]
     fn worker_storage_access_uses_api_id_resolver_url() {
         let get = internal_api_url(
             "http://gateway:8080/",
@@ -1153,6 +1453,7 @@ mod tests {
             service_token: None,
             caller_node_id: None,
             runner_mode: "nsjail".to_string(),
+            allow_fake_runner: false,
             smoke_once: false,
         };
         let client = Client::builder()
@@ -1319,6 +1620,7 @@ mod tests {
             service_token: Some("internal-token".to_string()),
             caller_node_id: Some("child-node".to_string()),
             runner_mode: "fake".to_string(),
+            allow_fake_runner: true,
             smoke_once: false,
         };
         let client = Client::builder()

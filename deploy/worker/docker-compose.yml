@@ -1,9 +1,17 @@
 services:
   judge-worker:
     build:
-      context: ../../services
-      dockerfile: judge-worker/Dockerfile
+      context: ../..
+      dockerfile: services/judge-worker/Dockerfile
     restart: unless-stopped
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+      - SYS_CHROOT
+    privileged: true
+    cgroup: host
+    security_opt:
+      - apparmor=unconfined
     environment:
       LANGUAGES_CONFIG: config/languages.yaml
       OJOS_WORKER_ID: ${OJOS_WORKER_ID}
@@ -16,10 +24,14 @@ services:
       OJOS_SUPPORTED_LANGUAGES: ${OJOS_SUPPORTED_LANGUAGES:-cpp17,c11,python3,java17}
       OJOS_HEARTBEAT_INTERVAL: ${OJOS_HEARTBEAT_INTERVAL:-10}
       OJOS_TASK_LEASE_TTL: ${OJOS_TASK_LEASE_TTL:-60}
-      OJOS_ALLOW_CGROUP_FALLBACK: ${OJOS_ALLOW_CGROUP_FALLBACK:-true}
+      OJOS_RUNNER_MODE: ${OJOS_RUNNER_MODE:-nsjail}
+      OJOS_ALLOW_FAKE_RUNNER: ${OJOS_ALLOW_FAKE_RUNNER:-false}
+      OJOS_ALLOW_CGROUP_FALLBACK: ${OJOS_ALLOW_CGROUP_FALLBACK:-false}
+      OJOS_NSJAIL_NO_PIVOTROOT: ${OJOS_NSJAIL_NO_PIVOTROOT:-false}
       RUST_LOG: ${OJOS_LOG_LEVEL:-info}
     volumes:
       - worker-data:/var/lib/ojos-worker
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
 
 volumes:
   worker-data:

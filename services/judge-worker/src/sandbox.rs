@@ -752,7 +752,7 @@ mod tests {
             return;
         };
         if !Path::new("/bin/echo").exists() {
-            eprintln!("skipping nsjail echo smoke: /bin/echo is unavailable");
+            skip_or_panic("skipping nsjail echo smoke: /bin/echo is unavailable");
             return;
         }
 
@@ -773,7 +773,7 @@ mod tests {
             return;
         };
         if !command_available("g++") {
-            eprintln!("skipping nsjail C++ hello smoke: g++ is unavailable");
+            skip_or_panic("skipping nsjail C++ hello smoke: g++ is unavailable");
             let _ = fs::remove_dir_all(&work_dir).await;
             return;
         }
@@ -839,13 +839,15 @@ mod tests {
 
     async fn nsjail_live_work_dir(name: &str) -> Option<PathBuf> {
         if !cfg!(target_os = "linux") {
-            eprintln!("skipping nsjail {name} smoke: nsjail runner requires Linux/WSL");
+            skip_or_panic(&format!(
+                "skipping nsjail {name} smoke: nsjail runner requires Linux/WSL"
+            ));
             return None;
         }
         if !nsjail_available() {
-            eprintln!(
+            skip_or_panic(&format!(
                 "skipping nsjail {name} smoke: nsjail binary is unavailable; install nsjail in Linux/WSL and rerun cargo test"
-            );
+            ));
             return None;
         }
         let work_dir = std::env::temp_dir().join(format!(
@@ -883,12 +885,23 @@ mod tests {
         {
             Ok(output) => Some(output),
             Err(err) if nsjail_environment_error(&err.to_string()) => {
-                eprintln!("skipping nsjail live smoke: {err}");
+                skip_or_panic(&format!("skipping nsjail live smoke: {err}"));
                 let _ = fs::remove_dir_all(work_dir).await;
                 None
             }
             Err(err) => panic!("nsjail live smoke failed: {err}"),
         }
+    }
+
+    fn skip_or_panic(message: &str) {
+        if require_nsjail_live() {
+            panic!("{message}");
+        }
+        eprintln!("{message}");
+    }
+
+    fn require_nsjail_live() -> bool {
+        env_bool("OJOS_REQUIRE_NSJAIL_LIVE")
     }
 
     fn nsjail_environment_error(message: &str) -> bool {

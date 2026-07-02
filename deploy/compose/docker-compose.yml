@@ -357,6 +357,10 @@ services:
       - SYS_ADMIN
       - NET_ADMIN
       - SYS_CHROOT
+    privileged: true
+    cgroup: host
+    security_opt:
+      - apparmor=unconfined
     environment:
       LANGUAGES_CONFIG: config/languages.yaml
       OJOS_JUDGE_API_URL: http://judge-api:8082
@@ -366,7 +370,8 @@ services:
       OJOS_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OJOS_JUDGE_TASK_STREAM: ojos:judge:task
       OJOS_JUDGE_CONSUMER_GROUP: judge-worker
-      OJOS_RUNNER_MODE: ${OJOS_RUNNER_MODE:-fake}
+      OJOS_RUNNER_MODE: ${OJOS_RUNNER_MODE:-nsjail}
+      OJOS_ALLOW_FAKE_RUNNER: ${OJOS_ALLOW_FAKE_RUNNER:-false}
       OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
       OJOS_SERVICE_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
       OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
@@ -376,11 +381,12 @@ services:
       OJOS_SUPPORTED_LANGUAGES: cpp17,c11,python3,java17
       OJOS_HEARTBEAT_INTERVAL: 10
       OJOS_TASK_LEASE_TTL: 60
-      OJOS_ALLOW_CGROUP_FALLBACK: ${OJOS_ALLOW_CGROUP_FALLBACK:-true}
-      OJOS_NSJAIL_NO_PIVOTROOT: ${OJOS_NSJAIL_NO_PIVOTROOT:-true}
+      OJOS_ALLOW_CGROUP_FALLBACK: ${OJOS_ALLOW_CGROUP_FALLBACK:-false}
+      OJOS_NSJAIL_NO_PIVOTROOT: ${OJOS_NSJAIL_NO_PIVOTROOT:-false}
       RUST_LOG: info
     volumes:
       - worker-data:/var/lib/ojos-worker
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
 
   problem-service:
     build:

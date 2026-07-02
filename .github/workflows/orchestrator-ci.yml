@@ -61,6 +61,44 @@ jobs:
           cargo fmt --check
           cargo check
           cargo test
+      - name: Build nsjail for strict judge-worker live tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf \
+            bison \
+            flex \
+            gcc \
+            g++ \
+            git \
+            libnl-route-3-dev \
+            libprotobuf-dev \
+            libtool \
+            make \
+            openjdk-17-jdk \
+            pkg-config \
+            protobuf-compiler \
+            python3
+          git clone --depth=1 https://github.com/google/nsjail.git /tmp/nsjail
+          make -C /tmp/nsjail
+          sudo cp /tmp/nsjail/nsjail /usr/local/bin/nsjail
+          nsjail --version
+      - name: Strict judge-worker nsjail live tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd services/judge-worker
+          sudo -E env \
+            "PATH=$PATH" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            "CARGO_TARGET_DIR=/tmp/ojos-judge-worker-live-target" \
+            "OJOS_REQUIRE_NSJAIL_LIVE=1" \
+            "OJOS_ALLOW_CGROUP_FALLBACK=false" \
+            "OJOS_NSJAIL_NO_PIVOTROOT=false" \
+            cargo test nsjail_ -- --test-threads=1
 
   frontend-build:
     name: Gateway frontend build
@@ -78,6 +116,43 @@ jobs:
           npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
           npm audit --registry=https://registry.npmjs.org --audit-level=high
           npm run build
+
+  compose-policy:
+    name: Docker Compose production policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Judge worker compose defaults
+        shell: bash
+        env:
+          AUTH_POSTGRES_PASSWORD: static-compose-auth-password
+          AUTH_DATABASE_URL: postgres://postgres:static-compose-auth-password@auth-db:5432/ojos_auth?sslmode=disable
+          PROBLEM_POSTGRES_PASSWORD: static-compose-problem-password
+          PROBLEM_DATABASE_URL: postgres://postgres:static-compose-problem-password@problem-db:5432/ojos_problem?sslmode=disable
+          JUDGE_POSTGRES_PASSWORD: static-compose-judge-password
+          JUDGE_DATABASE_URL: postgres://postgres:static-compose-judge-password@judge-db:5432/ojos_judge?sslmode=disable
+          USER_POSTGRES_PASSWORD: static-compose-user-password
+          USER_DATABASE_URL: postgres://postgres:static-compose-user-password@user-db:5432/ojos_user?sslmode=disable
+          ORCHESTRATOR_POSTGRES_PASSWORD: static-compose-orchestrator-password
+          ORCHESTRATOR_DATABASE_URL: postgres://postgres:static-compose-orchestrator-password@orchestrator-db:5432/ojos_orchestrator?sslmode=disable
+          JWT_SECRET: static-compose-jwt-secret
+          AUTH_INTERNAL_TOKEN: static-compose-internal-token
+          OJOS_WORKER_TOKEN: static-compose-worker-token
+          MINIO_ROOT_USER: static-compose-minio-user
+          MINIO_ROOT_PASSWORD: static-compose-minio-password
+        run: |
+          set -euo pipefail
+          rendered="$(docker compose --env-file .env.example -f deploy/compose/docker-compose.yml config)"
+          printf '%s\n' "$rendered" >/tmp/ojos-compose-rendered.yml
+          if grep -q 'OJOS_RUNNER_MODE: fake' /tmp/ojos-compose-rendered.yml; then
+            echo "judge-worker must not default to fake runner" >&2
+            exit 1
+          fi
+          if grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: "true"' /tmp/ojos-compose-rendered.yml || grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: true' /tmp/ojos-compose-rendered.yml; then
+            echo "judge-worker must not default to cgroup fallback" >&2
+            exit 1
+          fi
+          docker compose --env-file .env.example -f deploy/compose/docker-compose.yml config --quiet
 
   orchestrator-model-checks:
     name: Orchestrator model checks
