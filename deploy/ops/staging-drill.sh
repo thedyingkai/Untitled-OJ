@@ -324,6 +324,9 @@ Storage:
     AccessKey: "$minio_access"
     SecretKey: "$minio_secret"
     UseSSL: false
+
+Jaeger:
+  Endpoint: ""
 YAML
 
 (
