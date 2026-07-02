@@ -141,8 +141,8 @@
     "workflow": "Ops Drills Nightly",
     "commit": "ab3a2e4",
     "local_status": "passed",
-    "local_evidence": "artifacts/redis-recovery-drill-local/manifest.json",
-    "evidence": "deploy/ops/redis-recovery-drill.sh verifies XPENDING, XAUTOCLAIM, XACK, result write, and AOF restart persistence; local recovery drill passed in artifacts/redis-recovery-drill-local"
+    "local_evidence": "artifacts/redis-recovery-drill-local-3/manifest.json",
+    "evidence": "deploy/ops/redis-recovery-drill.sh verifies XPENDING, XAUTOCLAIM, XACK, result write, AOF restart persistence, and judge-api /judge/admin/queue/status; local recovery drill passed in artifacts/redis-recovery-drill-local-3"
   },
   {
     "component": "MinIO",

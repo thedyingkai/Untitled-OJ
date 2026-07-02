@@ -19,7 +19,7 @@ This matrix separates proven gates, local drill evidence, and newly configured d
 | secret policy | ci | passed | Redis password and `.env.production.example` production fail-fast policy added; local `deploy/ops/ci-policy.sh` and Orchestrator CI passed. |
 | image build evidence | nightly | pending-first-run | Scheduled Docker build uploads image evidence. |
 | service credential lifecycle | nightly | pending-first-run; local passed | Allow/deny/revoke/expire matrix local evidence: `artifacts/service-credential-drill-local-3/manifest.json`. |
-| Redis recovery | nightly | pending-first-run; local passed | Pending/claim/AOF restart local evidence: `artifacts/redis-recovery-drill-local/manifest.json`. |
+| Redis recovery | nightly | pending-first-run; local passed | Pending/claim/AOF restart and judge-api queue status API local evidence: `artifacts/redis-recovery-drill-local-3/manifest.json`. |
 | MinIO sample restore | nightly | pending-first-run; local passed | Covered by staging drill MinIO object restore path: `artifacts/staging-drill-local-9/manifest.json`. |
 | load/soak | deferred | deferred | No real staging load/soak evidence yet. |
 
