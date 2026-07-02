@@ -217,6 +217,54 @@ func BindRole(
 	return writeAuditLog(ctx, db, actor, "role.bind", target, "", roleID, roleName, scope, "", nil)
 }
 
+func UnbindRole(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	actor Principal,
+	target Principal,
+	roleName string,
+	scope Scope,
+) error {
+	actor = normalizeActor(actor)
+	target = normalizePrincipal(target)
+	scope = normalizeScope(scope)
+	roleName = strings.TrimSpace(roleName)
+
+	if target.Type == "" || target.ID <= 0 {
+		return fmt.Errorf("invalid target principal")
+	}
+	if roleName == "" {
+		return fmt.Errorf("role name is empty")
+	}
+
+	roleID, err := getRoleIDByName(ctx, db, roleName)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(
+		ctx,
+		`
+		DELETE FROM role_bindings
+		WHERE principal_type = $1
+		  AND principal_id = $2
+		  AND role_id = $3
+		  AND scope_type = $4
+		  AND scope_id = $5
+		`,
+		target.Type,
+		target.ID,
+		roleID,
+		scope.Type,
+		scope.ID,
+	)
+	if err != nil {
+		return err
+	}
+
+	return writeAuditLog(ctx, db, actor, "role.unbind", target, "", roleID, roleName, scope, "", nil)
+}
+
 func AssignPermission(
 	ctx context.Context,
 	db *pgxpool.Pool,
@@ -288,6 +336,49 @@ func AssignPermission(
 	})
 }
 
+func RevokePermissionAssignment(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	actor Principal,
+	target Principal,
+	permissionCode string,
+	scope Scope,
+) error {
+	actor = normalizeActor(actor)
+	target = normalizePrincipal(target)
+	scope = normalizeScope(scope)
+	permissionCode = strings.TrimSpace(permissionCode)
+
+	if target.Type == "" || target.ID <= 0 {
+		return fmt.Errorf("invalid target principal")
+	}
+	if permissionCode == "" {
+		return fmt.Errorf("permission code is empty")
+	}
+
+	_, err := db.Exec(
+		ctx,
+		`
+		DELETE FROM permission_assignments
+		WHERE principal_type = $1
+		  AND principal_id = $2
+		  AND permission_code = $3
+		  AND scope_type = $4
+		  AND scope_id = $5
+		`,
+		target.Type,
+		target.ID,
+		permissionCode,
+		scope.Type,
+		scope.ID,
+	)
+	if err != nil {
+		return err
+	}
+
+	return writeAuditLog(ctx, db, actor, "permission.revoke", target, permissionCode, 0, "", scope, "", nil)
+}
+
 func AddResourceEdge(
 	ctx context.Context,
 	db *pgxpool.Pool,
@@ -316,6 +407,43 @@ func AddResourceEdge(
 		VALUES($1,$2,$3,$4,$5)
 		ON CONFLICT(parent_type, parent_id, child_type, child_id, relation)
 		DO NOTHING
+		`,
+		parent.Type,
+		parent.ID,
+		child.Type,
+		child.ID,
+		relation,
+	)
+	return err
+}
+
+func RemoveResourceEdge(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	parent Scope,
+	child Scope,
+	relation string,
+) error {
+	parent = normalizeScope(parent)
+	child = normalizeScope(child)
+	relation = strings.TrimSpace(relation)
+	if relation == "" {
+		relation = "contains"
+	}
+
+	if parent.Type == "" || child.Type == "" {
+		return fmt.Errorf("invalid resource edge")
+	}
+
+	_, err := db.Exec(
+		ctx,
+		`
+		DELETE FROM resource_edges
+		WHERE parent_type = $1
+		  AND parent_id = $2
+		  AND child_type = $3
+		  AND child_id = $4
+		  AND relation = $5
 		`,
 		parent.Type,
 		parent.ID,
@@ -434,6 +562,41 @@ func GrantRolePermission(
 		VALUES($1,$2)
 		ON CONFLICT(role_id, permission_code)
 		DO NOTHING
+		`,
+		roleID,
+		permissionCode,
+	)
+
+	return err
+}
+
+func RevokeRolePermission(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	roleName string,
+	permissionCode string,
+) error {
+	roleName = strings.TrimSpace(roleName)
+	permissionCode = strings.TrimSpace(permissionCode)
+
+	if roleName == "" {
+		return fmt.Errorf("role name is empty")
+	}
+	if permissionCode == "" {
+		return fmt.Errorf("permission code is empty")
+	}
+
+	roleID, err := getRoleIDByName(ctx, db, roleName)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(
+		ctx,
+		`
+		DELETE FROM role_permissions
+		WHERE role_id = $1
+		  AND permission_code = $2
 		`,
 		roleID,
 		permissionCode,
@@ -703,6 +866,22 @@ func writeAuditLog(
 	)
 
 	return err
+}
+
+func WriteAuditLog(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	actor Principal,
+	action string,
+	target Principal,
+	permissionCode string,
+	roleID int64,
+	roleName string,
+	scope Scope,
+	effect string,
+	metadata map[string]any,
+) error {
+	return writeAuditLog(ctx, db, normalizeActor(actor), strings.TrimSpace(action), normalizePrincipal(target), strings.TrimSpace(permissionCode), roleID, strings.TrimSpace(roleName), normalizeScope(scope), strings.TrimSpace(effect), metadata)
 }
 
 func normalizePrincipal(p Principal) Principal {

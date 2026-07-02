@@ -41,6 +41,9 @@ migrations:
   - version: "000008_service_credentials"
     path: services/auth-service/migrations/000008_service_credentials.up.sql
     checksum: sha256:4bc2991c93d7c2d76d73ddfe06870d462ebae68fc7902f7ba2a33e568d567ae5
+  - version: "000009_service_credentials_lifecycle"
+    path: services/auth-service/migrations/000009_service_credentials_lifecycle.up.sql
+    checksum: sha256:552f8303b22e9b18a55d4821c4ea3e49c40ef444e6e2256da523746ca86a109a
 permissions:
   - auth.admin
   - system.admin
