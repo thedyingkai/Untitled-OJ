@@ -409,6 +409,12 @@ services:
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
       OJOS_STORAGE_SERVICE_URL: http://storage-service:8085
+      OJOS_INTERNAL_GATEWAY_URL: http://gateway:8080
+      OJOS_STORAGE_OBJECT_PUT_API_ID: storage.object.put
+      OJOS_PROBLEM_STORAGE_BUCKET: problems
+      OJOS_SERVICE_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_CALLER_SERVICE: problem-service
+      OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
     volumes:
       - ../../storage/problems:/data/ojos/problems
 

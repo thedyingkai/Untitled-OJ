@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::config::LanguagesConfig;
 use crate::judge::judge_artifacts;
+use crate::problem_package::load_problem_package;
 use crate::result::ResultFile;
 
 #[derive(Debug, Clone)]
@@ -274,7 +275,7 @@ async fn execute_task(
     });
 
     let result = if config.runner_mode == "fake" {
-        fake_judge_artifacts(task.submission_id, &result_dir).await
+        fake_judge_artifacts(task.submission_id, &package_dir, &result_dir).await
     } else {
         judge_artifacts(
             languages,
@@ -302,34 +303,53 @@ async fn execute_task(
     Ok(())
 }
 
-async fn fake_judge_artifacts(submission_id: i64, result_dir: &Path) -> Result<ResultFile> {
-    let case_dir = result_dir.join("cases").join("001");
-    fs::create_dir_all(&case_dir).await?;
-    let stdout_path = case_dir.join("stdout.txt");
-    let stderr_path = case_dir.join("stderr.txt");
-    let checker_log_path = case_dir.join("checker.log");
-    fs::write(&stdout_path, "ok\n").await?;
-    fs::write(&stderr_path, "").await?;
-    fs::write(&checker_log_path, "fake runner accepted\n").await?;
+async fn fake_judge_artifacts(
+    submission_id: i64,
+    package_dir: &Path,
+    result_dir: &Path,
+) -> Result<ResultFile> {
+    let package = load_problem_package(&package_dir.to_string_lossy()).await?;
+    let mut cases = Vec::with_capacity(package.cases.len());
+    let mut score = 0;
+    for case in &package.cases {
+        let case_no = case.case_no.max(1);
+        let case_name = format!("{:03}", case_no);
+        let case_dir = result_dir.join("cases").join(&case_name);
+        fs::create_dir_all(&case_dir).await?;
+        let stdout_path = case_dir.join("stdout.txt");
+        let stderr_path = case_dir.join("stderr.txt");
+        let checker_log_path = case_dir.join("checker.log");
+        fs::write(&stdout_path, "ok\n").await?;
+        fs::write(&stderr_path, "").await?;
+        fs::write(
+            &checker_log_path,
+            format!("fake runner accepted case {}\n", case_no),
+        )
+        .await?;
 
-    let result = ResultFile {
-        submission_id,
-        status: "ACCEPTED".to_string(),
-        score: 100,
-        time_ms: 1,
-        memory_kb: 1024,
-        message: "accepted by fake runner".to_string(),
-        cases: vec![crate::result::ResultCase {
-            case_no: 1,
+        let case_score = case.score.max(0);
+        score += case_score;
+        cases.push(crate::result::ResultCase {
+            case_no,
             status: "ACCEPTED".to_string(),
-            score: 100,
+            score: case_score,
             time_ms: 1,
             memory_kb: 1024,
             stdout_path: stdout_path.to_string_lossy().to_string(),
             stderr_path: stderr_path.to_string_lossy().to_string(),
             checker_log_path: checker_log_path.to_string_lossy().to_string(),
             message: "accepted".to_string(),
-        }],
+        });
+    }
+
+    let result = ResultFile {
+        submission_id,
+        status: "ACCEPTED".to_string(),
+        score,
+        time_ms: 1,
+        memory_kb: 1024,
+        message: "accepted by fake runner with problem package cases".to_string(),
+        cases,
     };
     let text = serde_json::to_string_pretty(&result)?;
     fs::write(result_dir.join("result.json"), text).await?;
@@ -1357,8 +1377,11 @@ mod tests {
 
     #[tokio::test]
     async fn fake_runner_produces_accepted_result_artifacts() {
-        let result_dir = std::env::temp_dir().join(format!("ojos-fake-runner-{}", Uuid::new_v4()));
-        let result = fake_judge_artifacts(99, &result_dir)
+        let root = std::env::temp_dir().join(format!("ojos-fake-runner-{}", Uuid::new_v4()));
+        let package_dir = root.join("problem");
+        let result_dir = root.join("result");
+        create_fake_runner_problem_package(&package_dir);
+        let result = fake_judge_artifacts(99, &package_dir, &result_dir)
             .await
             .expect("fake runner result");
 
@@ -1371,7 +1394,64 @@ mod tests {
             .await
             .expect("fake stdout");
         assert_eq!(stdout, "ok\n");
-        let _ = fs::remove_dir_all(&result_dir).await;
+        let _ = fs::remove_dir_all(&root).await;
+    }
+
+    fn create_fake_runner_problem_package(root: &Path) {
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        write_test_file(
+            &root.join("problem.yaml"),
+            r#"
+schema: ojos.problem.v1
+id: 1
+slug: compose-smoke
+title: Compose Smoke
+type: traditional
+visibility: public
+status: ready
+limits:
+  default:
+    time_ms: 1000
+    memory_mb: 64
+  languages: {}
+runner:
+  config: runner.yaml
+checker:
+  config: checker.yaml
+scorer:
+  config: scorer.yaml
+tests:
+  root: tests
+  groups: tests/groups.yaml
+  cases: tests/cases.yaml
+"#,
+        );
+        write_test_file(
+            &root.join("runner.yaml"),
+            "type: builtin\nname: traditional-runner\nconfig: {}\n",
+        );
+        write_test_file(
+            &root.join("checker.yaml"),
+            "type: builtin\nname: default-trim-checker\nconfig: {}\n",
+        );
+        write_test_file(
+            &root.join("scorer.yaml"),
+            "type: builtin\nname: default-sum-scorer\nconfig: {}\n",
+        );
+        write_test_file(
+            &root.join("tests").join("groups.yaml"),
+            "groups:\n  - group_no: 0\n    score: 100\n    rule: sum\n",
+        );
+        write_test_file(
+            &root.join("tests").join("cases.yaml"),
+            "cases:\n  - case_no: 1\n    input: 001.in\n    answer: 001.ans\n    score: 100\n    group: 0\n    sample: true\n    hidden: false\n",
+        );
+        write_test_file(&root.join("tests").join("001.in"), "1 1\n");
+        write_test_file(&root.join("tests").join("001.ans"), "ok\n");
+    }
+
+    fn write_test_file(path: &Path, content: &str) {
+        std::fs::write(path, content.trim_start()).unwrap();
     }
 
     #[derive(Clone, Debug)]

@@ -38,6 +38,7 @@ const (
 	childNodeID          = "child-node"
 	rootNodeID           = "root-node"
 	storageService       = "storage-service"
+	problemService       = "problem-service"
 	workerService        = "judge-worker"
 	judgeAPIService      = "judge-api"
 	serviceToken         = "ojos-smoke-internal"
@@ -64,6 +65,7 @@ type smokeConfig struct {
 	workerToken      string
 	gatewayAdminJWT  string
 	composeUserJWT   string
+	composeProblemID int64
 	orchestrator     endpoint
 	auth             endpoint
 	authServiceStart endpoint
@@ -684,17 +686,19 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 		return err
 	}
 
-	if err := ensureComposeJudgeProblemFixture(ctx, cfg); err != nil {
-		return fail("compose judge problem fixture", err)
-	}
-	ok("compose judge problem fixture: problem_id=1001")
-
 	userID, userJWT, err := ensureComposeSmokeUser(ctx, cfg)
 	if err != nil {
 		return fail("compose auth user login", err)
 	}
 	cfg.composeUserJWT = userJWT
 	ok("compose auth user login: user_id=%d", userID)
+
+	problemID, err := ensureComposeJudgeProblemFixture(ctx, cfg, userID)
+	if err != nil {
+		return fail("compose problem-service testdata chain", err)
+	}
+	cfg.composeProblemID = problemID
+	ok("compose problem-service testdata chain: problem_id=%d", problemID)
 
 	if err := composeRestartService(ctx, cfg, "judge-worker"); err != nil {
 		return fail("compose judge-worker restarted after stream reset", err)
@@ -1124,6 +1128,7 @@ func installComposeCallerIdentities(ctx context.Context, cfg smokeConfig) error 
 	}{
 		{serviceName: judgeAPIService, port: 8082},
 		{serviceName: workerService, port: 9101},
+		{serviceName: problemService, port: 8083},
 	}
 	for _, item := range installs {
 		hostIP, err := composeServiceIP(ctx, cfg, item.serviceName)
@@ -1158,7 +1163,7 @@ func installComposeCallerIdentities(ctx context.Context, cfg smokeConfig) error 
 			return fail("compose release.install service identities", fmt.Errorf("%s unexpected status %q operation_id=%s error=%s message=%s", item.serviceName, installResp.ActionResult.Status, installResp.ActionResult.OperationID, installResp.ActionResult.Error, installResp.ActionResult.Message))
 		}
 	}
-	ok("compose release.install service identities: judge-api and judge-worker")
+	ok("compose release.install service identities: judge-api, judge-worker, and problem-service")
 	return nil
 }
 
@@ -2088,8 +2093,12 @@ func querySubmissionCases(ctx context.Context, cfg smokeConfig, submissionID int
 }
 
 func createSubmissionViaGateway(ctx context.Context, cfg smokeConfig) (int64, error) {
+	problemID := cfg.composeProblemID
+	if problemID <= 0 {
+		problemID = 1001
+	}
 	body := map[string]any{
-		"problem_id": int64(1001),
+		"problem_id": problemID,
 		"language":   "cpp17",
 		"code":       submissionSourceCode,
 	}
@@ -2185,38 +2194,83 @@ func verifyQueueStatusAPIViaGateway(ctx context.Context, cfg smokeConfig) error 
 	return nil
 }
 
-func ensureComposeJudgeProblemFixture(ctx context.Context, cfg smokeConfig) error {
-	hostPackageDir := filepath.Join(cfg.repoRoot, "storage", "problems", "compose-smoke-1001")
-	if err := os.MkdirAll(filepath.Join(hostPackageDir, "tests"), 0o755); err != nil {
-		return err
-	}
-	files := map[string]string{
-		filepath.Join(hostPackageDir, "problem.yaml"):        "id: 1001\nslug: compose-smoke-1001\ntitle: Compose Smoke\n",
-		filepath.Join(hostPackageDir, "tests", "cases.yaml"): "- case_no: 1\n  input: 001.in\n  answer: 001.out\n",
-		filepath.Join(hostPackageDir, "tests", "001.in"):     "1 1\n",
-		filepath.Join(hostPackageDir, "tests", "001.out"):    "2\n",
-	}
-	for path, content := range files {
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			return err
-		}
-	}
-
+func ensureComposeJudgeProblemFixture(ctx context.Context, cfg smokeConfig, userID int64) (int64, error) {
 	if err := composeCommand(ctx, cfg, 90*time.Second, "run", "--rm", "judge-api-migrations"); err != nil {
-		return err
+		return 0, err
 	}
 
-	sql := `
+	slug := fmt.Sprintf("compose-smoke-%d", time.Now().UnixNano())
+	createBody := map[string]any{
+		"title":           "Compose Smoke",
+		"slug":            slug,
+		"statement":       "Add two tokens and print ok for the smoke case.",
+		"visibility":      "public",
+		"time_limit_ms":   1000,
+		"memory_limit_mb": 256,
+	}
+	var createResp struct {
+		ProblemID int64  `json:"problem_id"`
+		Slug      string `json:"slug"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.gateway.baseURL()+"/api/problem/problems", createBody, composeUserHeaders(cfg), &createResp); err != nil {
+		return 0, err
+	}
+	if createResp.ProblemID <= 0 || strings.TrimSpace(createResp.Slug) == "" {
+		return 0, fmt.Errorf("invalid create problem response: %#v", createResp)
+	}
+	ok("compose problem-service created problem: problem_id=%d slug=%s", createResp.ProblemID, createResp.Slug)
+
+	testBody := map[string]any{
+		"case_no": 1,
+		"input":   "1 1\n",
+		"answer":  "ok\n",
+		"score":   100,
+		"sample":  true,
+	}
+	var testResp struct {
+		CaseNo int `json:"case_no"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, fmt.Sprintf("%s/api/problem/problems/%d/test-cases", cfg.gateway.baseURL(), createResp.ProblemID), testBody, composeUserHeaders(cfg), &testResp); err != nil {
+		return 0, err
+	}
+	if testResp.CaseNo != 1 {
+		return 0, fmt.Errorf("unexpected test case response: %#v", testResp)
+	}
+	ok("compose problem-service added test case: problem_id=%d case_no=%d", createResp.ProblemID, testResp.CaseNo)
+
+	if err := waitStorageObject(ctx, cfg, "problems", problemStorageObjectKey(createResp.ProblemID, "tests/001.in"), "1 1"); err != nil {
+		return 0, err
+	}
+	if err := waitStorageObject(ctx, cfg, "problems", problemStorageObjectKey(createResp.ProblemID, "tests/001.ans"), "ok"); err != nil {
+		return 0, err
+	}
+	ok("compose problem testdata stored through storage-service")
+
+	packageDir := "/data/ojos/problems/" + createResp.Slug
+	sql := fmt.Sprintf(`
 INSERT INTO problems(id, package_dir, status, visibility, created_by)
-VALUES(1001, '/data/ojos/problems/compose-smoke-1001', 'ready', 'public', 1)
+VALUES(%d, '%s', 'ready', 'public', %d)
 ON CONFLICT(id) DO UPDATE SET
     package_dir = EXCLUDED.package_dir,
     status = EXCLUDED.status,
     visibility = EXCLUDED.visibility,
     created_by = EXCLUDED.created_by,
     updated_at = NOW();
-`
-	return composeCommand(ctx, cfg, 20*time.Second, "exec", "-T", "judge-db", "psql", "-U", "postgres", "-d", "ojos_judge", "-c", sql)
+`, createResp.ProblemID, strings.ReplaceAll(packageDir, "'", "''"), userID)
+	if err := composeCommand(ctx, cfg, 20*time.Second, "exec", "-T", "judge-db", "psql", "-U", "postgres", "-d", "ojos_judge", "-c", sql); err != nil {
+		return 0, err
+	}
+	ok("compose judge-api problem metadata synced: problem_id=%d", createResp.ProblemID)
+	return createResp.ProblemID, nil
+}
+
+func problemStorageObjectKey(problemID int64, logicalPath string) string {
+	logicalPath = strings.Trim(strings.ReplaceAll(strings.TrimSpace(logicalPath), "\\", "/"), "/")
+	if logicalPath == "" {
+		logicalPath = "file"
+	}
+	replacer := strings.NewReplacer("/", "__", " ", "_", ":", "_")
+	return fmt.Sprintf("problem-%d-%s", problemID, replacer.Replace(logicalPath))
 }
 
 func ensureComposeSmokeUser(ctx context.Context, cfg smokeConfig) (int64, string, error) {
@@ -2262,7 +2316,35 @@ func ensureComposeSmokeUser(ctx context.Context, cfg smokeConfig) (int64, string
 	if strings.TrimSpace(loginResp.Data.Token) == "" || loginResp.Data.UserID <= 0 {
 		return 0, "", fmt.Errorf("invalid compose user login response: user_id=%d token_empty=%t", loginResp.Data.UserID, strings.TrimSpace(loginResp.Data.Token) == "")
 	}
+	if err := grantComposeUserRole(ctx, cfg, loginResp.Data.UserID, "problem_setter"); err != nil {
+		return 0, "", err
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.auth.baseURL()+"/auth/login", loginBody, nil, &loginResp); err != nil {
+		return 0, "", err
+	}
+	if loginResp.Code != 0 {
+		return 0, "", fmt.Errorf("login compose user after role grant failed: code=%d msg=%s", loginResp.Code, loginResp.Msg)
+	}
 	return loginResp.Data.UserID, loginResp.Data.Token, nil
+}
+
+func grantComposeUserRole(ctx context.Context, cfg smokeConfig, userID int64, role string) error {
+	body := map[string]any{
+		"user_id": userID,
+		"role":    role,
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.auth.baseURL()+"/auth/admin/users/roles", body, composeAdminHeaders(cfg), &resp); err != nil {
+		return err
+	}
+	if resp.Code != 0 {
+		return fmt.Errorf("grant compose user role failed: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	ok("compose auth user role granted: user_id=%d role=%s", userID, role)
+	return nil
 }
 
 func composeCommand(parent context.Context, cfg smokeConfig, timeout time.Duration, args ...string) error {
