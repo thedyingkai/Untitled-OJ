@@ -1306,6 +1306,12 @@ pub struct LocalReleasePackageLoader {
     max_package_bytes: usize,
 }
 
+struct LoadedReleasePackageSource {
+    text: String,
+    source_display: String,
+    checksum: String,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct DeferredGatewayRoutePublisher;
 
@@ -1996,7 +2002,7 @@ impl LocalReleasePackageLoader {
         Self::new(root)
     }
 
-    fn resolve_release_yaml(&self, source_url: &str) -> Result<PathBuf> {
+    fn resolve_release_source(&self, source_url: &str) -> Result<PathBuf> {
         let source_url = source_url.trim();
         if source_url.starts_with("http://") || source_url.starts_with("https://") {
             return Err(OrchestratorError::Blocked(
@@ -2008,11 +2014,7 @@ impl LocalReleasePackageLoader {
             .strip_prefix("file://")
             .or_else(|| source_url.strip_prefix("local://"))
             .unwrap_or(source_url);
-        let mut release_yaml = safe_child_path(&self.root, without_scheme)?;
-        if release_yaml.is_dir() {
-            release_yaml = release_yaml.join("release.yaml");
-        }
-        Ok(release_yaml)
+        safe_child_path(&self.root, without_scheme)
     }
 
     fn fetch_remote_release_package(&self, source_url: &str) -> Result<Vec<u8>> {
@@ -2054,12 +2056,58 @@ impl LocalReleasePackageLoader {
         Ok(body)
     }
 
-    fn load_remote_release_yaml(&self, source_url: &str) -> Result<String> {
+    fn load_remote_release_source(&self, source_url: &str) -> Result<LoadedReleasePackageSource> {
         let body = self.fetch_remote_release_package(source_url)?;
-        if release_package_source_is_yaml(source_url) || looks_like_yaml_manifest(&body) {
-            return release_yaml_text_from_bytes(&body, source_url, self.max_manifest_bytes);
+        let text = if release_package_source_is_yaml(source_url) || looks_like_yaml_manifest(&body)
+        {
+            release_yaml_text_from_bytes(&body, source_url, self.max_manifest_bytes)?
+        } else {
+            self.release_yaml_from_archive(source_url, &body)?
+        };
+        Ok(LoadedReleasePackageSource {
+            text,
+            source_display: source_url.to_string(),
+            checksum: sha256_checksum(&body),
+        })
+    }
+
+    fn load_local_release_source(&self, source_url: &str) -> Result<LoadedReleasePackageSource> {
+        let source = self.resolve_release_source(source_url)?;
+        let release_source = if source.is_dir() {
+            source.join("release.yaml")
+        } else {
+            source
+        };
+        let body = fs::read(&release_source).map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "read release package source {} failed: {err}",
+                release_source.display()
+            ))
+        })?;
+        if body.len() > self.max_package_bytes {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "release package exceeds {} bytes",
+                self.max_package_bytes
+            )));
         }
-        self.release_yaml_from_archive(source_url, &body)
+        let text = if release_package_source_is_zip(&release_source.display().to_string())
+            || release_package_source_is_tar(&release_source.display().to_string())
+            || looks_like_zip(&body)
+            || looks_like_gzip(&body)
+        {
+            self.release_yaml_from_archive(&release_source.display().to_string(), &body)?
+        } else {
+            release_yaml_text_from_bytes(
+                &body,
+                &release_source.display().to_string(),
+                self.max_manifest_bytes,
+            )?
+        };
+        Ok(LoadedReleasePackageSource {
+            text,
+            source_display: release_source.display().to_string(),
+            checksum: sha256_checksum(&body),
+        })
     }
 
     fn release_yaml_from_archive(&self, source_url: &str, body: &[u8]) -> Result<String> {
@@ -2116,6 +2164,19 @@ fn release_yaml_text_from_bytes(
             "release package manifest from {source_display} is not UTF-8: {err}"
         ))
     })
+}
+
+fn sha256_checksum(body: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(body))
+}
+
+fn expected_release_package_checksum(request: &ReleasePackageLoadRequest) -> Option<String> {
+    request
+        .expected_manifest
+        .as_ref()
+        .map(|manifest| manifest.source.checksum.trim())
+        .filter(|checksum| !checksum.is_empty())
+        .map(ToString::to_string)
 }
 
 fn release_package_source_is_yaml(source_url: &str) -> bool {
@@ -2341,35 +2402,30 @@ impl ReleasePackageLoader for LocalReleasePackageLoader {
         request: &ReleasePackageLoadRequest,
     ) -> Result<ReleasePackageLoadResult> {
         let source_url = request.source_url.trim();
-        let (text, source_display) =
-            if source_url.starts_with("http://") || source_url.starts_with("https://") {
-                (
-                    self.load_remote_release_yaml(source_url)?,
-                    source_url.to_string(),
-                )
-            } else {
-                let release_yaml = self.resolve_release_yaml(&request.source_url)?;
-                (
-                    fs::read_to_string(&release_yaml).map_err(|err| {
-                        OrchestratorError::Dependency(format!(
-                            "read release package manifest {} failed: {err}",
-                            release_yaml.display()
-                        ))
-                    })?,
-                    release_yaml.display().to_string(),
-                )
-            };
-        let loaded: ServiceReleaseManifest = serde_yaml::from_str(&text)?;
-        validate_service_release(&loaded)?;
-        if loaded.service_name != request.service_name || loaded.version != request.version {
+        let loaded = if source_url.starts_with("http://") || source_url.starts_with("https://") {
+            self.load_remote_release_source(source_url)?
+        } else {
+            self.load_local_release_source(&request.source_url)?
+        };
+        if let Some(expected_checksum) = expected_release_package_checksum(request) {
+            if loaded.checksum != expected_checksum {
+                return Err(OrchestratorError::InvalidManifest(format!(
+                    "release package checksum mismatch: expected {expected_checksum}, got {}",
+                    loaded.checksum
+                )));
+            }
+        }
+        let manifest: ServiceReleaseManifest = serde_yaml::from_str(&loaded.text)?;
+        validate_service_release(&manifest)?;
+        if manifest.service_name != request.service_name || manifest.version != request.version {
             return Err(OrchestratorError::InvalidManifest(format!(
                 "release package manifest {}@{} does not match requested {}@{}",
-                loaded.service_name, loaded.version, request.service_name, request.version
+                manifest.service_name, manifest.version, request.service_name, request.version
             )));
         }
         if let Some(expected) = request.expected_manifest.as_ref() {
             let expected_value = serde_json::to_value(expected)?;
-            let loaded_value = serde_json::to_value(&loaded)?;
+            let loaded_value = serde_json::to_value(&manifest)?;
             if expected_value != loaded_value {
                 return Err(OrchestratorError::InvalidManifest(
                     "loaded release package manifest differs from operation release_manifest"
@@ -2377,13 +2433,12 @@ impl ReleasePackageLoader for LocalReleasePackageLoader {
                 ));
             }
         }
-        let checksum = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
         Ok(ReleasePackageLoadResult {
             status: "loaded".to_string(),
-            message: format!("loaded release package manifest {source_display}"),
+            message: format!("loaded release package manifest {}", loaded.source_display),
             source_url: request.source_url.clone(),
             manifest_loaded: true,
-            checksum,
+            checksum: loaded.checksum,
         })
     }
 }

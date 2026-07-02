@@ -3490,6 +3490,101 @@ fn local_release_package_loader_fetches_http_zip_release_package() {
 }
 
 #[test]
+fn local_release_package_loader_fetches_local_zip_release_package() {
+    let root = repo_root();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let release_yaml =
+        fs::read_to_string(root.join("services/gateway/release.yaml")).expect("read release yaml");
+    let package = zip_release_package(&[("gateway-release/release.yaml", release_yaml.as_str())]);
+    let dir = tempdir().expect("release package tempdir");
+    fs::write(dir.path().join("gateway-release.zip"), &package).expect("write release package");
+
+    let result = LocalReleasePackageLoader::new(dir.path())
+        .load_release_package(&ReleasePackageLoadRequest {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            source_url: "gateway-release.zip".to_string(),
+            expected_manifest: Some(release),
+        })
+        .expect("local zip release package load");
+    assert_eq!(result.status, "loaded");
+    assert_eq!(result.source_url, "gateway-release.zip");
+    assert!(result.manifest_loaded);
+    assert_eq!(result.checksum, format!("sha256:{}", sha256_hex(&package)));
+}
+
+#[test]
+fn local_release_package_loader_rejects_archive_without_release_yaml() {
+    let root = repo_root();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let package = zip_release_package(&[("gateway-release/README.md", "missing manifest")]);
+    let dir = tempdir().expect("release package tempdir");
+    fs::write(dir.path().join("missing-release.zip"), &package).expect("write release package");
+
+    let err = LocalReleasePackageLoader::new(dir.path())
+        .load_release_package(&ReleasePackageLoadRequest {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            source_url: "missing-release.zip".to_string(),
+            expected_manifest: Some(release),
+        })
+        .expect_err("archive without release.yaml should fail");
+    assert!(err.to_string().contains("does not contain release.yaml"));
+}
+
+#[test]
+fn release_install_fails_on_release_package_checksum_mismatch() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
+    let mut release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let release_yaml =
+        fs::read_to_string(root.join("services/gateway/release.yaml")).expect("read release yaml");
+    let package = zip_release_package(&[("gateway-release/release.yaml", release_yaml.as_str())]);
+    let dir = tempdir().expect("release package tempdir");
+    fs::write(dir.path().join("gateway-release.zip"), &package).expect("write release package");
+    release.source.url = "gateway-release.zip".to_string();
+    release.source.checksum =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string();
+    let operation = release_install_operation_with_release(
+        "op-release-package-checksum-mismatch",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+    let err = OperationExecutor::with_runtime_provisioners_and_release_loader(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        LocalReleasePackageLoader::new(dir.path()),
+    )
+    .apply("op-release-package-checksum-mismatch")
+    .expect_err("checksum mismatch should fail install");
+    assert!(
+        err.to_string()
+            .contains("release package checksum mismatch")
+    );
+    let failed = store
+        .operation("op-release-package-checksum-mismatch")
+        .expect("stored operation");
+    assert_eq!(failed.status, OperationStatus::Failed);
+}
+
+#[test]
 fn local_release_package_loader_rejects_zip_path_traversal() {
     let root = repo_root();
     let release =
