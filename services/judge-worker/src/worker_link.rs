@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use reqwest::Client;
+use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry::trace::TraceContextExt;
+use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::env;
@@ -9,7 +11,8 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, info_span, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::cgroup::CgroupRun;
@@ -187,7 +190,13 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
             continue;
         }
 
-        let tasks = claim_tasks(&client, &config, available, &pending_task_events).await?;
+        let mut tasks = claim_tasks(&client, &config, available, &pending_task_events).await?;
+        let traceparents = traceparents_by_task_id(&pending_task_events);
+        for task in &mut tasks {
+            if task.traceparent.is_none() {
+                task.traceparent = traceparents.get(&task.task_id).cloned();
+            }
+        }
         if !pending_task_events.is_empty()
             && stream_wakeup
                 .ack_task_events(&stream_event_ids(&pending_task_events))
@@ -240,10 +249,38 @@ async fn execute_task(
     languages: Arc<LanguagesConfig>,
     task: WorkerTaskLease,
 ) -> Result<()> {
+    let span = info_span!(
+        "judge_worker.execute_task",
+        otel.name = "judge-worker execute task",
+        otel.kind = "consumer",
+        task_id = %task.task_id,
+        submission_id = task.submission_id,
+        language = %task.language,
+        traceparent_present = task.traceparent.is_some()
+    );
+    if let Some(parent_context) = task
+        .traceparent
+        .as_deref()
+        .and_then(trace_context_from_traceparent)
+    {
+        let _ = span.set_parent(parent_context);
+    }
+    execute_task_inner(client, config, languages, task)
+        .instrument(span)
+        .await
+}
+
+async fn execute_task_inner(
+    client: Client,
+    config: Arc<WorkerLinkConfig>,
+    languages: Arc<LanguagesConfig>,
+    task: WorkerTaskLease,
+) -> Result<()> {
     info!(
         task_id = %task.task_id,
         submission_id = task.submission_id,
         language = %task.language,
+        traceparent_present = task.traceparent.is_some(),
         "claimed worker task"
     );
 
@@ -264,8 +301,22 @@ async fn execute_task(
     fs::create_dir_all(&package_dir).await?;
     fs::create_dir_all(&result_dir).await?;
 
-    download_artifact(&client, &config, &task.source, &source_path).await?;
-    download_artifact(&client, &config, &task.problem_package, &package_zip).await?;
+    download_artifact(
+        &client,
+        &config,
+        &task.source,
+        &source_path,
+        task.traceparent.as_deref(),
+    )
+    .await?;
+    download_artifact(
+        &client,
+        &config,
+        &task.problem_package,
+        &package_zip,
+        task.traceparent.as_deref(),
+    )
+    .await?;
     unzip_safe(&package_zip, &package_dir)?;
 
     let heartbeat_stop = tokio::sync::watch::channel(false);
@@ -306,6 +357,14 @@ async fn execute_task(
 
     let _ = fs::remove_dir_all(&task_dir).await;
     Ok(())
+}
+
+fn trace_context_from_traceparent(traceparent: &str) -> Option<opentelemetry::Context> {
+    let mut carrier = std::collections::HashMap::new();
+    carrier.insert("traceparent".to_string(), traceparent.trim().to_string());
+    let propagator = opentelemetry_sdk::propagation::TraceContextPropagator::new();
+    let context = propagator.extract(&carrier);
+    context.span().span_context().is_valid().then_some(context)
 }
 
 async fn register_worker(client: &Client, config: &WorkerLinkConfig) -> Result<()> {
@@ -504,6 +563,7 @@ struct RedisTaskEvent {
     entry_id: String,
     task_id: Option<String>,
     submission_id: Option<i64>,
+    traceparent: Option<String>,
 }
 
 fn stream_event_ids(events: &[RedisTaskEvent]) -> Vec<String> {
@@ -514,6 +574,17 @@ fn stream_task_ids(events: &[RedisTaskEvent]) -> Vec<String> {
     events
         .iter()
         .filter_map(|event| event.task_id.clone())
+        .collect()
+}
+
+fn traceparents_by_task_id(events: &[RedisTaskEvent]) -> std::collections::HashMap<String, String> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let task_id = event.task_id.as_ref()?;
+            let traceparent = event.traceparent.as_ref()?;
+            Some((task_id.clone(), traceparent.clone()))
+        })
         .collect()
 }
 
@@ -553,6 +624,10 @@ fn redis_stream_task_event(value: &redis::Value) -> Option<RedisTaskEvent> {
             .iter()
             .find(|(key, _)| key == "submission_id")
             .and_then(|(_, value)| value.parse::<i64>().ok()),
+        traceparent: values
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("traceparent"))
+            .map(|(_, value)| value.clone()),
     })
 }
 
@@ -775,7 +850,15 @@ async fn lease_heartbeat_loop(
                     lease_version: task.lease_version,
                 };
                 let path = format!("/judge/worker/tasks/{}/heartbeat", task.task_id);
-                if let Err(err) = post_json::<_, WorkerTaskHeartbeatResp>(&client, &config, &path, &req).await {
+                if let Err(err) = post_json_with_trace::<_, WorkerTaskHeartbeatResp>(
+                    &client,
+                    &config,
+                    &path,
+                    &req,
+                    task.traceparent.as_deref(),
+                )
+                .await
+                {
                     warn!(task_id = %task.task_id, error = %err, "task heartbeat failed");
                     return;
                 }
@@ -817,7 +900,8 @@ async fn submit_result(
         cases,
     };
     let path = format!("/judge/worker/tasks/{}/result", task.task_id);
-    let resp: WorkerSubmitResultResp = post_json(client, config, &path, &req).await?;
+    let resp: WorkerSubmitResultResp =
+        post_json_with_trace(client, config, &path, &req, task.traceparent.as_deref()).await?;
     if !resp.accepted {
         return Err(anyhow!("judge-api rejected task result: {}", resp.status));
     }
@@ -840,7 +924,8 @@ async fn fail_task(
         retryable,
     };
     let path = format!("/judge/worker/tasks/{}/fail", task.task_id);
-    let _: WorkerFailTaskResp = post_json(client, config, &path, &req).await?;
+    let _: WorkerFailTaskResp =
+        post_json_with_trace(client, config, &path, &req, task.traceparent.as_deref()).await?;
     Ok(())
 }
 
@@ -849,11 +934,15 @@ async fn download_artifact(
     config: &WorkerLinkConfig,
     artifact: &WorkerArtifactRef,
     target: &Path,
+    traceparent: Option<&str>,
 ) -> Result<()> {
     let url = absolute_url(config, &artifact.url);
-    let mut request = client
-        .get(url)
-        .header("X-OJOS-Worker-Token", &config.worker_token);
+    let mut request = with_traceparent(
+        client
+            .get(url)
+            .header("X-OJOS-Worker-Token", &config.worker_token),
+        traceparent,
+    );
     if artifact.url.starts_with("/internal/apis/") {
         request = request.header("X-OJOS-Caller-Service", "judge-worker");
         if let Some(node_id) = &config.caller_node_id {
@@ -897,18 +986,42 @@ where
     T: Serialize + ?Sized,
     R: for<'de> Deserialize<'de>,
 {
-    let resp = client
-        .post(absolute_url(config, path))
-        .header("X-OJOS-Worker-Token", &config.worker_token)
-        .json(body)
-        .send()
-        .await?;
+    post_json_with_trace(client, config, path, body, None).await
+}
+
+async fn post_json_with_trace<T, R>(
+    client: &Client,
+    config: &WorkerLinkConfig,
+    path: &str,
+    body: &T,
+    traceparent: Option<&str>,
+) -> Result<R>
+where
+    T: Serialize + ?Sized,
+    R: for<'de> Deserialize<'de>,
+{
+    let resp = with_traceparent(
+        client
+            .post(absolute_url(config, path))
+            .header("X-OJOS-Worker-Token", &config.worker_token)
+            .json(body),
+        traceparent,
+    )
+    .send()
+    .await?;
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
         return Err(anyhow!("judge-api returned {}: {}", status, text));
     }
     serde_json::from_str(&text).with_context(|| format!("decode judge-api response: {}", text))
+}
+
+fn with_traceparent(request: RequestBuilder, traceparent: Option<&str>) -> RequestBuilder {
+    match traceparent.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => request.header("traceparent", value),
+        None => request,
+    }
 }
 
 fn absolute_url(config: &WorkerLinkConfig, path: &str) -> String {
@@ -1083,6 +1196,8 @@ struct WorkerTaskLease {
     lease_version: i32,
     source: WorkerArtifactRef,
     problem_package: WorkerArtifactRef,
+    #[serde(default)]
+    traceparent: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1217,6 +1332,10 @@ mod tests {
                         redis::Value::BulkString(b"sub-41".to_vec()),
                         redis::Value::BulkString(b"submission_id".to_vec()),
                         redis::Value::BulkString(b"41".to_vec()),
+                        redis::Value::BulkString(b"traceparent".to_vec()),
+                        redis::Value::BulkString(
+                            b"00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01".to_vec(),
+                        ),
                     ]),
                 ]),
                 redis::Value::Array(vec![
@@ -1243,6 +1362,16 @@ mod tests {
         );
         assert_eq!(events[0].submission_id, Some(41));
         assert_eq!(events[1].submission_id, Some(42));
+        assert_eq!(
+            events[0].traceparent.as_deref(),
+            Some("00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01")
+        );
+        assert_eq!(
+            traceparents_by_task_id(&events)
+                .get("sub-41")
+                .map(String::as_str),
+            Some("00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01")
+        );
     }
 
     #[test]
@@ -1377,6 +1506,9 @@ mod tests {
                 entry_id: "1720000000000-0".to_string(),
                 task_id: Some("sub-42".to_string()),
                 submission_id: Some(42),
+                traceparent: Some(
+                    "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01".to_string(),
+                ),
             }],
         )
         .await
@@ -1397,6 +1529,7 @@ mod tests {
                 size_bytes: artifact_body.len() as i64,
             },
             &artifact_target,
+            Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"),
         )
         .await
         .expect("download artifact");
@@ -1429,6 +1562,9 @@ mod tests {
                 sha256: String::new(),
                 size_bytes: 0,
             },
+            traceparent: Some(
+                "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01".to_string(),
+            ),
         };
         submit_result(
             &client,
@@ -1489,6 +1625,18 @@ mod tests {
         assert!(requests[4].body.contains("\"stdout\":\"ok\\n\""));
         assert!(requests[4].body.contains("\"checker_log\":\"matched\\n\""));
         assert!(requests[5].body.contains("\"message\":\"nsjail failed\""));
+        assert_eq!(
+            requests[3].header("traceparent"),
+            Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+        );
+        assert_eq!(
+            requests[4].header("traceparent"),
+            Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+        );
+        assert_eq!(
+            requests[5].header("traceparent"),
+            Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+        );
 
         let _ = fs::remove_dir_all(&config.work_dir).await;
         let _ = fs::remove_dir_all(&config.artifact_cache_dir).await;
@@ -1542,6 +1690,7 @@ mod tests {
                 size_bytes: artifact_body.len() as i64,
             },
             &target,
+            Some("00-cccccccccccccccccccccccccccccccc-dddddddddddddddd-01"),
         )
         .await
         .expect("download via gateway");
@@ -1564,6 +1713,10 @@ mod tests {
         assert_eq!(
             requests[0].header("x-ojos-worker-token"),
             Some("worker-token")
+        );
+        assert_eq!(
+            requests[0].header("traceparent"),
+            Some("00-cccccccccccccccccccccccccccccccc-dddddddddddddddd-01")
         );
 
         let downloaded = fs::read(&target).await.expect("read downloaded source");

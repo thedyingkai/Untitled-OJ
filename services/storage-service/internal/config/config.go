@@ -9,6 +9,11 @@ type Config struct {
 	rest.RestConf
 
 	Storage StorageConfig
+	Jaeger  JaegerConfig
+}
+
+type JaegerConfig struct {
+	Endpoint string
 }
 
 type StorageConfig struct {

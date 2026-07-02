@@ -290,6 +290,7 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-ojos-minio}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-ojos-minio-local}
       MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
     volumes:
       - storage-service-data:/data/ojos/storage
 
@@ -382,6 +383,7 @@ services:
       OJOS_TASK_LEASE_TTL: 60
       OJOS_ALLOW_CGROUP_FALLBACK: ${OJOS_ALLOW_CGROUP_FALLBACK:-false}
       OJOS_NSJAIL_NO_PIVOTROOT: ${OJOS_NSJAIL_NO_PIVOTROOT:-false}
+      JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       RUST_LOG: info
     volumes:
       - worker-data:/var/lib/ojos-worker

@@ -10,6 +10,9 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestJudgeTaskEventValuesDescribeRedisStreamTask(t *testing.T) {
@@ -59,6 +62,36 @@ func TestPublishJudgeSignalUsesTaskEventPayload(t *testing.T) {
 	}
 	if len(groups) != 1 || groups[0].Name != judgeConsumerGroup {
 		t.Fatalf("expected %s consumer group, got %#v", judgeConsumerGroup, groups)
+	}
+}
+
+func TestPublishJudgeTaskEventCarriesTraceContext(t *testing.T) {
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+		SpanID:     trace.SpanID{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18},
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithRemoteSpanContext(context.Background(), spanContext)
+
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	defer client.Close()
+
+	if err := publishJudgeTaskEvent(ctx, &svc.ServiceContext{Redis: client}, "submission.created", "judge-api-service", 43); err != nil {
+		t.Fatalf("publishJudgeTaskEvent returned error: %v", err)
+	}
+	entries, err := client.XRange(context.Background(), judgeSubmissionStream, "-", "+").Result()
+	if err != nil {
+		t.Fatalf("read redis stream: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one stream entry, got %d", len(entries))
+	}
+	if got := entries[0].Values["traceparent"]; got != "00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01" {
+		t.Fatalf("task event must carry traceparent, got %#v", entries[0].Values)
 	}
 }
 

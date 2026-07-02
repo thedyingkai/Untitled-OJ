@@ -11,6 +11,8 @@ import (
 	"ojos-judge-api/internal/types"
 
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 const judgeSubmissionStreamMaxLen int64 = 10000
@@ -65,7 +67,7 @@ func publishJudgeTaskEvent(
 			Stream: judgeTaskStreamName(),
 			MaxLen: judgeSubmissionStreamMaxLen,
 			Approx: true,
-			Values: judgeTaskEventValues(eventType, producer, submissionID, time.Now().UTC()),
+			Values: judgeTaskEventValuesFromContext(ctx, eventType, producer, submissionID, time.Now().UTC()),
 		},
 	).Err()
 }
@@ -97,12 +99,30 @@ func publishJudgeResultEvent(
 }
 
 func judgeTaskEventValues(eventType string, producer string, submissionID int64, now time.Time) map[string]any {
-	return map[string]any{
+	return judgeTaskEventValuesFromContext(context.Background(), eventType, producer, submissionID, now)
+}
+
+func judgeTaskEventValuesFromContext(ctx context.Context, eventType string, producer string, submissionID int64, now time.Time) map[string]any {
+	values := map[string]any{
 		"type":          eventType,
 		"producer":      producer,
 		"task_id":       deterministicTaskIDForStream(submissionID),
 		"submission_id": strconv.FormatInt(submissionID, 10),
 		"created_at":    now.Format(time.RFC3339Nano),
+	}
+	injectTraceContext(ctx, values)
+	return values
+}
+
+func injectTraceContext(ctx context.Context, values map[string]any) {
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	for key, value := range carrier {
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			values[key] = value
+		}
 	}
 }
 

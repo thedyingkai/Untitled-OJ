@@ -279,7 +279,7 @@ func validateLimits(timeLimitMs int, memoryLimitMb int, allowZero bool) error {
 func parseTags(raw string) []string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil
+		return []string{}
 	}
 
 	return parseTagList(raw)

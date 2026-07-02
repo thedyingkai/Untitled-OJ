@@ -47,6 +47,9 @@ migrations:
   - version: "000010_seed_service_permissions"
     path: services/auth-service/migrations/000010_seed_service_permissions.up.sql
     checksum: sha256:8188ae1ddc5cad7476ad1a84508a4ec7602d5317d9250f2de2211b68faf363db
+  - version: "000011_grant_problem_setter_create"
+    path: services/auth-service/migrations/000011_grant_problem_setter_create.up.sql
+    checksum: sha256:4802200f3bc8880c5d85c579148ee48fbf8a143d4aa9ba716b07e449a0aeedf9
 permissions:
   - auth.admin
   - system.admin

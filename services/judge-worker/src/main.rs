@@ -5,6 +5,7 @@ mod judge;
 mod problem_package;
 mod result;
 mod sandbox;
+mod telemetry;
 mod worker_link;
 
 use anyhow::{Context, Result};
@@ -16,7 +17,7 @@ use crate::worker_link::run_worker_link;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().json().init();
+    let telemetry = telemetry::init_tracing().context("initialize worker tracing failed")?;
 
     let languages_path =
         std::env::var("LANGUAGES_CONFIG").unwrap_or_else(|_| "config/languages.yaml".to_string());
@@ -32,5 +33,7 @@ async fn main() -> Result<()> {
         "judge-worker starting in worker-link mode"
     );
 
-    run_worker_link(languages).await
+    let result = run_worker_link(languages).await;
+    telemetry.shutdown();
+    result
 }

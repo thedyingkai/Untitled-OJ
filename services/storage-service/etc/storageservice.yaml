@@ -15,3 +15,6 @@ Storage:
     AccessKey: ojos
     SecretKey: ojos-local-dev
     UseSSL: false
+
+Jaeger:
+  Endpoint: ojos-jaeger:4317

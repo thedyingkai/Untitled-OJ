@@ -4,11 +4,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
+	sharedmw "ojos-shared/middleware"
 	"ojos-storage-service/internal/config"
 	"ojos-storage-service/internal/handler"
 	"ojos-storage-service/internal/svc"
@@ -25,11 +27,16 @@ func main() {
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
 	applyEnvOverrides(&c)
+	sharedmw.InstallHTTPErrorHandler()
 
 	server := rest.MustNewServer(c.RestConf)
 	defer server.Stop()
 
 	ctx := svc.NewServiceContext(c)
+	defer ctx.Close(context.Background())
+	server.Use(sharedmw.RecoveryMiddleware(ctx.Logger))
+	server.Use(sharedmw.LoggingMiddleware(ctx.Logger, ctx.Tracer))
+
 	handler.RegisterHandlers(server, ctx)
 
 	fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
@@ -60,6 +67,9 @@ func applyEnvOverrides(c *config.Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("MINIO_USE_SSL")); value != "" {
 		c.Storage.MinIO.UseSSL = parseBool(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("JAEGER_ENDPOINT")); value != "" {
+		c.Jaeger.Endpoint = value
 	}
 }
 
