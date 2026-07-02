@@ -1,6 +1,8 @@
 services:
   orchestrator-db:
     image: postgres:17
+    ports:
+      - "127.0.0.1:15432:5432"
     environment:
       POSTGRES_USER: ${ORCHESTRATOR_POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${ORCHESTRATOR_POSTGRES_PASSWORD:-ojos-orchestrator-local}
@@ -391,3 +393,4 @@ volumes:
   minio-data:
   storage-service-data:
   worker-data:
+

@@ -1,11 +1,17 @@
 use orchestrator_core::{
-    Endpoint, EndpointDecl, Link, LogView, OperationLogRecord, OperationStatus, OrchestratorStore,
-    PgOrchestratorStore, RuntimeMode, ServiceHealthDecl, ServiceManifest, ServiceProvides,
-    ServiceRequires, ServiceRuntimeDecl, ServiceSecurityDecl, SourceDecl, TopologySnapshot,
-    build_diagnostic_report, build_topology, parse_endpoint_id, plan_operation,
+    DeferredAuthPermissionRegistrar, DeferredRedisResourceProvisioner,
+    DeferredReleasePackageLoader, DeferredStorageResourceProvisioner, Endpoint, EndpointDecl, Link,
+    LocalSqlMigrationRunner, LogView, OperationExecutor, OperationLogRecord, OperationStatus,
+    OrchestratorStore, PgOrchestratorStore, ReleaseBackendDecl, ReleaseFrontendDecl,
+    ReleaseMigrationDecl, ReleaseObservabilityDecl, ReleaseRuntimeDecl, ReleaseServiceIdentityDecl,
+    ReleaseSourceDecl, RuntimeMode, ServiceHealthDecl, ServiceManifest, ServiceProvides,
+    ServiceReleaseManifest, ServiceRequires, ServiceRuntimeDecl, ServiceSecurityDecl, SourceDecl,
+    StaticEndpointProbe, TopologySnapshot, build_diagnostic_report, build_topology,
+    confirm_operation, parse_endpoint_id, plan_operation, release_install_operation_with_release,
 };
 use postgres::{Client, NoTls};
 use serde_json::json;
+use std::fs;
 
 #[test]
 #[ignore = "requires a migrated PostgreSQL database and ORCHESTRATOR_DATABASE_URL"]
@@ -254,6 +260,171 @@ fn pg_store_persists_core_objects_and_reads_them_back() {
     );
 }
 
+#[test]
+#[ignore = "requires migrated PostgreSQL, ORCHESTRATOR_DATABASE_URL, and explicit migration_live filter"]
+fn migration_live_postgres_release_install_pipeline_records_real_statuses() {
+    let suffix = unique_suffix();
+    let database_url = std::env::var(PgOrchestratorStore::ENV_NAME)
+        .expect("ORCHESTRATOR_DATABASE_URL should be set");
+    let temp = tempfile::tempdir().expect("temp migration root");
+    let mut store =
+        PgOrchestratorStore::from_env().expect("ORCHESTRATOR_DATABASE_URL should be set");
+
+    let service_name = format!("migration-live-{suffix}");
+    let table = sql_identifier(&format!("{service_name}-objects"));
+    let service = service_manifest(service_name.clone(), 19080 + port_offset(&suffix));
+    let migration_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {table} (id INT PRIMARY KEY);\nINSERT INTO {table} (id) VALUES (1) ON CONFLICT DO NOTHING;\n"
+    );
+    let migration = write_live_migration(temp.path(), &service_name, "0001", &migration_sql, false);
+    let release = release_for_service(&service, vec![migration]);
+
+    apply_live_release_install(
+        &mut store,
+        &format!("op-{service_name}-first"),
+        &service,
+        &release,
+        temp.path(),
+        &database_url,
+        false,
+    )
+    .expect("first live migration install");
+    assert_eq!(
+        table_row_count(&database_url, &table),
+        1,
+        "migration SQL should apply to real Postgres"
+    );
+    let records = records_for_service(&store, &service_name);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, "applied");
+
+    apply_live_release_install(
+        &mut store,
+        &format!("op-{service_name}-second"),
+        &service,
+        &release,
+        temp.path(),
+        &database_url,
+        false,
+    )
+    .expect("repeat install should skip applied migration");
+    assert_eq!(
+        table_row_count(&database_url, &table),
+        1,
+        "repeat install must not re-run already-applied migration"
+    );
+    let logs = store
+        .list_operation_logs(&format!("op-{service_name}-second"))
+        .expect("second operation logs");
+    assert!(logs.iter().any(|log| {
+        log.step_id == format!("migrations:{service_name}")
+            && log.data.get("runner").and_then(serde_json::Value::as_str) == Some("already-applied")
+    }));
+
+    let mut mismatched = release.clone();
+    mismatched.migrations[0].checksum = "len:1".to_string();
+    let err = apply_live_release_install(
+        &mut store,
+        &format!("op-{service_name}-checksum-mismatch"),
+        &service,
+        &mismatched,
+        temp.path(),
+        &database_url,
+        false,
+    )
+    .expect_err("checksum mismatch should fail");
+    assert!(
+        err.to_string().contains("already applied with checksum"),
+        "unexpected checksum mismatch error: {err}"
+    );
+
+    let destructive_service_name = format!("migration-live-destructive-{suffix}");
+    let destructive_table = sql_identifier(&format!("{destructive_service_name}-objects"));
+    let destructive_service = service_manifest(
+        destructive_service_name.clone(),
+        19180 + port_offset(&suffix),
+    );
+    let destructive_sql = format!("CREATE TABLE IF NOT EXISTS {destructive_table} (id INT);\n");
+    let destructive_migration = write_live_migration(
+        temp.path(),
+        &destructive_service_name,
+        "0001",
+        &destructive_sql,
+        true,
+    );
+    let destructive_release =
+        release_for_service(&destructive_service, vec![destructive_migration]);
+    let err = apply_live_release_install(
+        &mut store,
+        &format!("op-{destructive_service_name}-blocked"),
+        &destructive_service,
+        &destructive_release,
+        temp.path(),
+        &database_url,
+        false,
+    )
+    .expect_err("destructive migration should require explicit allowance");
+    assert!(
+        err.to_string().contains("destructive migration"),
+        "unexpected destructive migration error: {err}"
+    );
+    assert_eq!(
+        records_for_service(&store, &destructive_service_name)[0].status,
+        "failed"
+    );
+    apply_live_release_install(
+        &mut store,
+        &format!("op-{destructive_service_name}-allowed"),
+        &destructive_service,
+        &destructive_release,
+        temp.path(),
+        &database_url,
+        true,
+    )
+    .expect("explicitly allowed destructive migration should apply");
+    assert_eq!(
+        records_for_service(&store, &destructive_service_name)[0].status,
+        "applied"
+    );
+
+    let failed_service_name = format!("migration-live-failed-{suffix}");
+    let failed_service =
+        service_manifest(failed_service_name.clone(), 19280 + port_offset(&suffix));
+    let failed_migration = write_live_migration(
+        temp.path(),
+        &failed_service_name,
+        "0001",
+        "THIS IS NOT SQL;\n",
+        false,
+    );
+    let failed_release = release_for_service(&failed_service, vec![failed_migration]);
+    apply_live_release_install(
+        &mut store,
+        &format!("op-{failed_service_name}"),
+        &failed_service,
+        &failed_release,
+        temp.path(),
+        &database_url,
+        false,
+    )
+    .expect_err("invalid SQL should fail");
+    assert_eq!(
+        records_for_service(&store, &failed_service_name)[0].status,
+        "failed"
+    );
+
+    cleanup_live_migration(
+        &database_url,
+        &[
+            &service_name,
+            &destructive_service_name,
+            &failed_service_name,
+        ],
+        &[&table, &destructive_table],
+        &format!("op-migration-live-{suffix}"),
+    );
+}
+
 fn service_manifest(id: String, port: u16) -> ServiceManifest {
     ServiceManifest {
         schema_version: 1,
@@ -295,6 +466,193 @@ fn service_manifest(id: String, port: u16) -> ServiceManifest {
             interval_seconds: 10,
         },
         resources: json!({}),
+    }
+}
+
+fn release_for_service(
+    service: &ServiceManifest,
+    migrations: Vec<ReleaseMigrationDecl>,
+) -> ServiceReleaseManifest {
+    ServiceReleaseManifest {
+        schema_version: 1,
+        service_name: service.id.clone(),
+        version: service.version.clone(),
+        description: "Live migration integration release".to_string(),
+        service_type: service.kind.clone(),
+        source: ReleaseSourceDecl {
+            kind: "local".to_string(),
+            url: format!("local://services/{}", service.id),
+            checksum: String::new(),
+        },
+        runtime: ReleaseRuntimeDecl {
+            kind: "local-process".to_string(),
+            image: String::new(),
+            binary: String::new(),
+            system_service: String::new(),
+            command: "sleep".to_string(),
+            args: vec!["1".to_string()],
+            working_dir: String::new(),
+            env: Default::default(),
+        },
+        frontend: ReleaseFrontendDecl::default(),
+        backend: ReleaseBackendDecl {
+            protocol: service.endpoint.protocol.clone(),
+            port: service.endpoint.default_port,
+            health_path: service.endpoint.health_path.clone(),
+        },
+        migrations,
+        permissions: Vec::new(),
+        routes: Vec::new(),
+        apis: Vec::new(),
+        redis: Vec::new(),
+        storage: Vec::new(),
+        dependencies: Vec::new(),
+        required_apis: Vec::new(),
+        service_identity: ReleaseServiceIdentityDecl::default(),
+        config_schema: json!({}),
+        secrets: Vec::new(),
+        observability: ReleaseObservabilityDecl::default(),
+    }
+}
+
+fn write_live_migration(
+    root: &std::path::Path,
+    service_name: &str,
+    version: &str,
+    sql: &str,
+    destructive: bool,
+) -> ReleaseMigrationDecl {
+    let relative = format!("services/{service_name}/migrations/{version}.sql");
+    let path = root.join(&relative);
+    fs::create_dir_all(path.parent().expect("migration parent")).expect("migration dir");
+    fs::write(&path, sql).expect("write migration sql");
+    ReleaseMigrationDecl {
+        version: version.to_string(),
+        path: relative,
+        checksum: format!("len:{}", sql.as_bytes().len()),
+        destructive,
+    }
+}
+
+fn apply_live_release_install(
+    store: &mut PgOrchestratorStore,
+    operation_id: &str,
+    service: &ServiceManifest,
+    release: &ServiceReleaseManifest,
+    migration_root: &std::path::Path,
+    database_url: &str,
+    allow_destructive: bool,
+) -> orchestrator_core::Result<orchestrator_core::Operation> {
+    let operation = release_install_operation_with_release(
+        operation_id,
+        service,
+        Some(release),
+        &[],
+        "127.0.0.1",
+        None,
+        json!({
+            "external_service_running": true,
+            "allow_destructive_migrations": allow_destructive
+        }),
+    )
+    .and_then(|operation| confirm_operation(&operation))?;
+    store.create_operation(operation)?;
+    OperationExecutor::with_runtime_provisioners_and_release_loader(
+        store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        LocalSqlMigrationRunner::new(migration_root).with_database_url(database_url),
+        DeferredReleasePackageLoader,
+    )
+    .apply(operation_id)
+}
+
+fn records_for_service(
+    store: &PgOrchestratorStore,
+    service_name: &str,
+) -> Vec<orchestrator_core::ServiceMigrationRecord> {
+    store
+        .list_service_migration_records()
+        .expect("list migration records")
+        .into_iter()
+        .filter(|record| record.service_name == service_name)
+        .collect()
+}
+
+fn table_row_count(database_url: &str, table: &str) -> i64 {
+    let mut client = Client::connect(database_url, NoTls).expect("connect live migration db");
+    let query = format!("SELECT COUNT(*) FROM {table}");
+    client
+        .query_one(&query, &[])
+        .expect("count migrated rows")
+        .get(0)
+}
+
+fn sql_identifier(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>()
+}
+
+fn cleanup_live_migration(
+    database_url: &str,
+    service_names: &[&str],
+    tables: &[&str],
+    _operation_prefix: &str,
+) {
+    let Ok(mut client) = Client::connect(database_url, NoTls) else {
+        return;
+    };
+    for table in tables {
+        let _ = client.batch_execute(&format!("DROP TABLE IF EXISTS {table}"));
+    }
+    for service_name in service_names {
+        let operation_prefix = format!("op-{service_name}%");
+        let operation_ids = client
+            .query(
+                "SELECT operation_id FROM orchestrator_operations WHERE operation_id LIKE $1 OR target_id = $2",
+                &[&operation_prefix, service_name],
+            )
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| row.get::<_, String>(0))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for operation_id in operation_ids {
+            let _ = client.execute(
+                "DELETE FROM orchestrator_operation_logs WHERE operation_id = $1",
+                &[&operation_id],
+            );
+            let _ = client.execute(
+                "DELETE FROM orchestrator_operation_locks WHERE operation_id = $1",
+                &[&operation_id],
+            );
+            let _ = client.execute(
+                "DELETE FROM orchestrator_operations WHERE operation_id = $1",
+                &[&operation_id],
+            );
+        }
+        let _ = client.execute(
+            "DELETE FROM service_migration_records WHERE service_name = $1",
+            &[service_name],
+        );
+        let _ = client.execute(
+            "DELETE FROM host_services WHERE service_name = $1",
+            &[service_name],
+        );
+        let _ = client.execute(
+            "DELETE FROM services WHERE service_id = $1",
+            &[service_name],
+        );
+        let endpoint_like = format!("%:{service_name}");
+        let _ = client.execute(
+            "DELETE FROM service_endpoints WHERE endpoint LIKE $1",
+            &[&endpoint_like],
+        );
     }
 }
 

@@ -87,7 +87,7 @@ ON CONFLICT (service_id) DO UPDATE SET
     DatabaseStatement {
         name: "service_endpoints.upsert",
         sql: r#"
-INSERT INTO service_endpoints (endpoint, service_id, ip, port, service_name, host_ip, protocol, health_path, health, reachable, display_name, note, config, updated_at)
+INSERT INTO service_endpoints (endpoint, service_id, ip, port, service_name, host_ip, protocol, health_path, status, reachable, display_name, note, config, updated_at)
 VALUES ($1, $2, $3, $4, $5, $3, $6, $7, $8, $9, $10, $11, $12, NOW())
 ON CONFLICT (endpoint) DO UPDATE SET
     service_id = EXCLUDED.service_id,
@@ -97,7 +97,7 @@ ON CONFLICT (endpoint) DO UPDATE SET
     host_ip = EXCLUDED.host_ip,
     protocol = EXCLUDED.protocol,
     health_path = EXCLUDED.health_path,
-    health = EXCLUDED.health,
+    status = EXCLUDED.status,
     reachable = EXCLUDED.reachable,
     display_name = EXCLUDED.display_name,
     note = EXCLUDED.note,
@@ -814,14 +814,14 @@ impl OrchestratorStore for PgOrchestratorStore {
     }
 
     fn list_endpoints(&self) -> Result<Vec<Endpoint>> {
-        self.query("SELECT endpoint, service_id, protocol, health_path, health, reachable, display_name, note, config, created_at::TEXT, updated_at::TEXT FROM service_endpoints ORDER BY endpoint", &[])?
+        self.query("SELECT endpoint, service_id, protocol, health_path, status, reachable, display_name, note, config, created_at::TEXT, updated_at::TEXT FROM service_endpoints ORDER BY endpoint", &[])?
             .into_iter()
             .map(endpoint_from_row)
             .collect()
     }
 
     fn get_endpoint(&self, endpoint: &str) -> Result<Option<Endpoint>> {
-        let mut rows = self.query("SELECT endpoint, service_id, protocol, health_path, health, reachable, display_name, note, config, created_at::TEXT, updated_at::TEXT FROM service_endpoints WHERE endpoint = $1", &[&endpoint])?;
+        let mut rows = self.query("SELECT endpoint, service_id, protocol, health_path, status, reachable, display_name, note, config, created_at::TEXT, updated_at::TEXT FROM service_endpoints WHERE endpoint = $1", &[&endpoint])?;
         rows.pop().map(endpoint_from_row).transpose()
     }
 
@@ -832,7 +832,7 @@ impl OrchestratorStore for PgOrchestratorStore {
             OrchestratorError::InvalidManifest("endpoint port is invalid".to_string())
         })?;
         self.execute(
-            "INSERT INTO service_endpoints (endpoint, service_id, ip, port, service_name, host_ip, protocol, health_path, health, reachable, display_name, note, config, updated_at) VALUES ($1, $2, $3, $4, $5, $3, $6, $7, $8, $9, $10, $11, $12, NOW()) ON CONFLICT (endpoint) DO UPDATE SET service_id = EXCLUDED.service_id, ip = EXCLUDED.ip, port = EXCLUDED.port, service_name = EXCLUDED.service_name, host_ip = EXCLUDED.host_ip, protocol = EXCLUDED.protocol, health_path = EXCLUDED.health_path, health = EXCLUDED.health, reachable = EXCLUDED.reachable, display_name = EXCLUDED.display_name, note = EXCLUDED.note, config = EXCLUDED.config, updated_at = NOW()",
+            "INSERT INTO service_endpoints (endpoint, service_id, ip, port, service_name, host_ip, protocol, health_path, status, reachable, display_name, note, config, updated_at) VALUES ($1, $2, $3, $4, $5, $3, $6, $7, $8, $9, $10, $11, $12, NOW()) ON CONFLICT (endpoint) DO UPDATE SET service_id = EXCLUDED.service_id, ip = EXCLUDED.ip, port = EXCLUDED.port, service_name = EXCLUDED.service_name, host_ip = EXCLUDED.host_ip, protocol = EXCLUDED.protocol, health_path = EXCLUDED.health_path, status = EXCLUDED.status, reachable = EXCLUDED.reachable, display_name = EXCLUDED.display_name, note = EXCLUDED.note, config = EXCLUDED.config, updated_at = NOW()",
             &[
                 &endpoint.endpoint,
                 &endpoint.service_id,
@@ -885,7 +885,7 @@ impl OrchestratorStore for PgOrchestratorStore {
         reachable: bool,
     ) -> Result<()> {
         validate_endpoint_id(endpoint)?;
-        self.execute("UPDATE service_endpoints SET health = $2, reachable = $3, updated_at = NOW() WHERE endpoint = $1", &[&endpoint, &health, &reachable])?;
+        self.execute("UPDATE service_endpoints SET status = $2, reachable = $3, updated_at = NOW() WHERE endpoint = $1", &[&endpoint, &health, &reachable])?;
         Ok(())
     }
 
