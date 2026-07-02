@@ -50,7 +50,7 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Staging Drill",
-    "commit": "3454ea1",
+    "commit": "ca6065a",
     "local_status": "passed",
     "local_evidence": "artifacts/staging-drill-local-10/manifest.json",
     "evidence": "deploy/ops/staging-drill.sh writes manifest/logs/responses/checksums and .github/workflows/staging-drill.yml uploads artifacts; local real restore verified in artifacts/staging-drill-local-10 including storage-service readback checksum"
@@ -70,10 +70,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Ops Drills Nightly",
-    "commit": "3454ea1",
+    "commit": "ca6065a",
     "local_status": "passed",
-    "local_evidence": "artifacts/manager-smoke-local-3/manifest.json",
-    "evidence": "deploy/ops/manager-smoke.sh probes orchestrator health/services/endpoints/operations and records manager_auth=deferred, manager_mode=read-only/dev-ops beta; local operator smoke passed in artifacts/manager-smoke-local-3"
+    "local_evidence": "artifacts/manager-smoke-local-7/manifest.json",
+    "evidence": "deploy/ops/manager-smoke.sh probes orchestrator health/services/endpoints/operations and records manager_auth=deferred, manager_mode=read-only/dev-ops beta; local operator smoke passed in artifacts/manager-smoke-local-7"
   },
   {
     "component": "Jaeger/observability",
@@ -81,10 +81,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Ops Drills Nightly",
-    "commit": "3454ea1",
+    "commit": "ca6065a",
     "local_status": "passed",
-    "local_evidence": "artifacts/alert-firing-drill-local-3/manifest.json",
-    "evidence": "deploy/ops/alert-firing-drill.sh verifies OJOSDrillAlwaysFiring reaches Alertmanager webhook; local alert firing drill passed in artifacts/alert-firing-drill-local-3"
+    "local_evidence": "artifacts/alert-firing-drill-local-6/manifest.json",
+    "evidence": "deploy/ops/alert-firing-drill.sh verifies OJOSDrillAlwaysFiring reaches Alertmanager webhook; local alert firing drill passed in artifacts/alert-firing-drill-local-6"
   },
   {
     "component": "Jaeger/observability",
@@ -134,8 +134,8 @@
     "workflow": "Ops Drills Nightly",
     "commit": "3454ea1",
     "local_status": "passed",
-    "local_evidence": "artifacts/service-credential-drill-local-3/manifest.json",
-    "evidence": "deploy/ops/service-credential-drill.sh applies real auth migrations and verifies allow/deny/revoke/expire matrix; local lifecycle drill passed in artifacts/service-credential-drill-local-3"
+    "local_evidence": "artifacts/service-credential-drill-local-5/manifest.json",
+    "evidence": "deploy/ops/service-credential-drill.sh applies real auth migrations and verifies allow/deny/revoke/expire matrix; local lifecycle drill passed in artifacts/service-credential-drill-local-5"
   },
   {
     "component": "Redis",
@@ -143,10 +143,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Ops Drills Nightly",
-    "commit": "3454ea1",
+    "commit": "ca6065a",
     "local_status": "passed",
-    "local_evidence": "artifacts/redis-recovery-drill-local-3/manifest.json",
-    "evidence": "deploy/ops/redis-recovery-drill.sh verifies XPENDING, XAUTOCLAIM, XACK, result write, AOF restart persistence, and judge-api /judge/admin/queue/status; local recovery drill passed in artifacts/redis-recovery-drill-local-3"
+    "local_evidence": "artifacts/redis-recovery-drill-local-6/manifest.json",
+    "evidence": "deploy/ops/redis-recovery-drill.sh verifies XPENDING, XAUTOCLAIM, XACK, result write, AOF restart persistence, and judge-api /judge/admin/queue/status; local recovery drill passed in artifacts/redis-recovery-drill-local-6"
   },
   {
     "component": "MinIO",
@@ -154,7 +154,7 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Staging Drill",
-    "commit": "3454ea1",
+    "commit": "ca6065a",
     "local_status": "passed",
     "local_evidence": "artifacts/staging-drill-local-10/manifest.json",
     "evidence": "deploy/ops/staging-drill.sh backs up, deletes, restores, and checksums a MinIO sample object; local sample object restore passed in artifacts/staging-drill-local-10 and storage-service readback checksum matched"

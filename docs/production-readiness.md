@@ -13,13 +13,13 @@ This matrix separates proven gates, local drill evidence, and newly configured d
 | sandbox hardening | ci | passed | seccomp policy, mount whitelist, cgroup policy, runtime lock, and live nsjail tests. |
 | staging backup/restore/rollback | nightly | pending-first-run; local passed | `deploy/ops/staging-drill.sh`, `Staging Drill` workflow. Local real restore verified: `artifacts/staging-drill-local-10/manifest.json`. |
 | gateway browser E2E | ci | passed | Playwright test with trace/screenshot/video artifacts; local and Orchestrator CI passed. |
-| manager GUI/TUI operator smoke | nightly | pending-first-run; local passed | `deploy/ops/manager-smoke.sh` records `manager_auth=deferred` and read-only/dev-ops beta mode. Local evidence: `artifacts/manager-smoke-local-3/manifest.json`. |
-| alert firing | nightly | pending-first-run; local passed | Prometheus + Alertmanager webhook drill. Local evidence: `artifacts/alert-firing-drill-local-3/manifest.json`. |
+| manager GUI/TUI operator smoke | nightly | pending-first-run; local passed | `deploy/ops/manager-smoke.sh` records `manager_auth=deferred` and read-only/dev-ops beta mode. Local evidence: `artifacts/manager-smoke-local-7/manifest.json`. |
+| alert firing | nightly | pending-first-run; local passed | Prometheus + Alertmanager webhook drill. Local evidence: `artifacts/alert-firing-drill-local-6/manifest.json`. |
 | trace E2E | nightly | pending-first-run; local passed | `deploy/ops/trace-e2e-drill.sh` queries Jaeger for gateway-service, judge-api-service, storage-service, and judge-worker. Local evidence: `artifacts/trace-e2e-drill-local-9/manifest.json`. |
 | secret policy | ci | passed | Redis password and `.env.production.example` production fail-fast policy added; local `deploy/ops/ci-policy.sh` and Orchestrator CI passed. |
 | image build evidence | nightly | pending-first-run | Scheduled Docker build uploads image evidence. |
-| service credential lifecycle | nightly | pending-first-run; local passed | Allow/deny/revoke/expire matrix local evidence: `artifacts/service-credential-drill-local-3/manifest.json`. |
-| Redis recovery | nightly | pending-first-run; local passed | Pending/claim/AOF restart and judge-api queue status API local evidence: `artifacts/redis-recovery-drill-local-3/manifest.json`. |
+| service credential lifecycle | nightly | pending-first-run; local passed | Allow/deny/revoke/expire matrix local evidence: `artifacts/service-credential-drill-local-5/manifest.json`. |
+| Redis recovery | nightly | pending-first-run; local passed | Pending/claim/AOF restart and judge-api queue status API local evidence: `artifacts/redis-recovery-drill-local-6/manifest.json`. |
 | MinIO sample restore | nightly | pending-first-run; local passed | Covered by staging drill MinIO object restore plus storage-service readback: `artifacts/staging-drill-local-10/manifest.json`. |
 | load/soak | nightly | pending-first-run; local passed | `deploy/ops/basic-load-soak.sh` covers auth login, problem list, storage put/get, judge submit, and result query. Local evidence: `artifacts/basic-load-soak-local-2/manifest.json`. |
 
