@@ -5,8 +5,8 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "6107be0",
-    "evidence": "OJOS_REAL_REDIS_URL is set in .github/workflows/orchestrator-ci.yml and Go tests include services/judge-api/internal/logic/redis_real_smoke_test.go"
+    "commit": "afb48b6",
+    "evidence": "OJOS_REAL_REDIS_URL is set in .github/workflows/orchestrator-ci.yml and Go tests include services/judge-api/internal/logic/redis_real_smoke_test.go; Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638537"
   },
   {
     "component": "storage-service",
@@ -14,17 +14,17 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "6107be0",
-    "evidence": "Orchestrator CI starts minio/minio:RELEASE.2025-09-07T16-13-09Z and runs storage-service MinIO real integration"
+    "commit": "afb48b6",
+    "evidence": "Orchestrator CI starts minio/minio:RELEASE.2025-09-07T16-13-09Z and runs storage-service MinIO real integration; Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638537"
   },
   {
     "component": "deploy/ops",
     "capability": "docker e2e production gate",
     "status": "passed",
-    "gate": "nightly",
+    "gate": "ci",
     "workflow": "Orchestrator Docker E2E",
-    "commit": "6107be0",
-    "evidence": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28607098095"
+    "commit": "afb48b6",
+    "evidence": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638574"
   },
   {
     "component": "judge-worker",
@@ -32,8 +32,8 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "6107be0",
-    "evidence": "Strict judge-worker nsjail live tests run with OJOS_REQUIRE_NSJAIL_LIVE=1"
+    "commit": "afb48b6",
+    "evidence": "Strict judge-worker nsjail live tests run with OJOS_REQUIRE_NSJAIL_LIVE=1; Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638537"
   },
   {
     "component": "judge-worker",
@@ -41,8 +41,8 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "6107be0",
-    "evidence": "services/judge-worker/src/sandbox.rs tests cover seccomp policy, mount whitelist, timeout, output limit, runtime error, and C/C++ live smoke when nsjail is required"
+    "commit": "afb48b6",
+    "evidence": "services/judge-worker/src/sandbox.rs tests cover seccomp policy, mount whitelist, timeout, output limit, runtime error, and C/C++ live smoke when nsjail is required; Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638537"
   },
   {
     "component": "deploy/ops",
@@ -50,17 +50,26 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Staging Drill",
-    "commit": "working-tree",
+    "commit": "afb48b6",
     "evidence": "deploy/ops/staging-drill.sh writes manifest/logs/responses/checksums and .github/workflows/staging-drill.yml uploads artifacts"
   },
   {
     "component": "gateway frontend",
     "capability": "browser E2E",
-    "status": "pending-first-run",
+    "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "working-tree",
-    "evidence": "services/gateway/frontend/tests/e2e/gateway.spec.ts with Playwright trace/screenshot/video artifacts; local npm run test:e2e passed before first CI run"
+    "commit": "afb48b6",
+    "evidence": "services/gateway/frontend/tests/e2e/gateway.spec.ts with Playwright trace/screenshot/video artifacts; local npm run test:e2e passed and Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638537"
+  },
+  {
+    "component": "manager GUI/TUI",
+    "capability": "minimum operator smoke",
+    "status": "pending-first-run",
+    "gate": "nightly",
+    "workflow": "Ops Drills Nightly",
+    "commit": "afb48b6",
+    "evidence": "deploy/ops/manager-smoke.sh probes orchestrator health/services/endpoints/operations and records manager_auth=deferred, manager_mode=read-only/dev-ops beta"
   },
   {
     "component": "Jaeger/observability",
@@ -68,7 +77,7 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Ops Drills Nightly",
-    "commit": "working-tree",
+    "commit": "afb48b6",
     "evidence": "deploy/ops/alert-firing-drill.sh verifies OJOSDrillAlwaysFiring reaches Alertmanager webhook"
   },
   {
@@ -77,17 +86,17 @@
     "status": "deferred",
     "gate": "deferred",
     "workflow": "",
-    "commit": "working-tree",
+    "commit": "afb48b6",
     "evidence": "No completed Jaeger query drill yet for gateway -> judge-api -> storage-service -> Redis/worker -> storage-service -> judge-api result"
   },
   {
     "component": "deploy/ops",
     "capability": "secret policy",
-    "status": "pending-first-run",
+    "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "working-tree",
-    "evidence": "deploy/ops/secret-check.sh now requires Redis password and .env.production.example is separate from dev .env.example; local deploy/ops/ci-policy.sh passed before first CI run"
+    "commit": "afb48b6",
+    "evidence": "deploy/ops/secret-check.sh now requires Redis password and .env.production.example is separate from dev .env.example; local deploy/ops/ci-policy.sh passed and Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638537"
   },
   {
     "component": "deploy/ops",
@@ -95,7 +104,7 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Orchestrator Docker E2E",
-    "commit": "working-tree",
+    "commit": "afb48b6",
     "evidence": "Scheduled Docker image build now uploads artifacts/image-build/image-build-evidence.json"
   },
   {
@@ -104,7 +113,7 @@
     "status": "deferred",
     "gate": "deferred",
     "workflow": "",
-    "commit": "working-tree",
+    "commit": "afb48b6",
     "evidence": "No completed real staging load/soak run yet; must not be called capacity testing"
   },
   {
@@ -113,7 +122,7 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Ops Drills Nightly",
-    "commit": "working-tree",
+    "commit": "afb48b6",
     "evidence": "deploy/ops/service-credential-drill.sh applies real auth migrations and verifies allow/deny/revoke/expire matrix"
   },
   {
@@ -122,7 +131,7 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Ops Drills Nightly",
-    "commit": "working-tree",
+    "commit": "afb48b6",
     "evidence": "deploy/ops/redis-recovery-drill.sh verifies XPENDING, XAUTOCLAIM, XACK, result write, and AOF restart persistence"
   },
   {
@@ -131,7 +140,7 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Staging Drill",
-    "commit": "working-tree",
+    "commit": "afb48b6",
     "evidence": "deploy/ops/staging-drill.sh backs up, deletes, restores, and checksums a MinIO sample object"
   }
 ]

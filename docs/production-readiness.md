@@ -6,17 +6,21 @@ This matrix separates proven gates from newly configured drills that still need 
 
 | Capability | Gate | Status | Evidence |
 | --- | --- | --- | --- |
-| Redis live integration | ci | passed | Orchestrator CI sets `OJOS_REAL_REDIS_URL` and runs Go Redis live tests. |
-| MinIO live integration | ci | passed | Orchestrator CI starts pinned MinIO and runs storage-service real integration. |
-| Docker E2E | nightly | passed | Orchestrator Docker E2E: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28607098095`. |
+| Redis live integration | ci | passed | Orchestrator CI: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638537`. |
+| MinIO live integration | ci | passed | Orchestrator CI: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638537`. |
+| Docker E2E | ci | passed | Orchestrator Docker E2E: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638574`. |
 | nsjail verdict matrix | ci | passed | Strict judge-worker nsjail live tests require real nsjail. |
 | sandbox hardening | ci | passed | seccomp policy, mount whitelist, cgroup policy, runtime lock, and live nsjail tests. |
 | staging backup/restore/rollback | nightly | pending-first-run | `deploy/ops/staging-drill.sh`, `Staging Drill` workflow. |
-| gateway browser E2E | ci | pending-first-run | Playwright test with trace/screenshot/video artifacts; local `npm run test:e2e` passed before first CI run. |
+| gateway browser E2E | ci | passed | Playwright test with trace/screenshot/video artifacts; local and Orchestrator CI passed. |
+| manager GUI/TUI operator smoke | nightly | pending-first-run | `deploy/ops/manager-smoke.sh` records `manager_auth=deferred` and read-only/dev-ops beta mode. |
 | alert firing | nightly | pending-first-run | Prometheus + Alertmanager webhook drill. |
 | trace E2E | deferred | deferred | No completed Jaeger query drill yet. |
-| secret policy | ci | pending-first-run | Redis password and `.env.production.example` production fail-fast policy added; local `deploy/ops/ci-policy.sh` passed before first CI run. |
+| secret policy | ci | passed | Redis password and `.env.production.example` production fail-fast policy added; local `deploy/ops/ci-policy.sh` and Orchestrator CI passed. |
 | image build evidence | nightly | pending-first-run | Scheduled Docker build uploads image evidence. |
+| service credential lifecycle | nightly | pending-first-run | Allow/deny/revoke/expire matrix script added. |
+| Redis recovery | nightly | pending-first-run | Pending/claim/AOF restart drill script added. |
+| MinIO sample restore | nightly | pending-first-run | Covered by staging drill MinIO object restore path. |
 | load/soak | deferred | deferred | No real staging load/soak evidence yet. |
 
 ## Secret Lifecycle
