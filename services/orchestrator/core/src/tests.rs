@@ -2321,6 +2321,8 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
         ("storage-service", "services/storage-service/service.yaml"),
         ("judge-api", "services/judge-api/service.yaml"),
         ("judge-worker", "services/judge-worker/service.yaml"),
+        ("problem-service", "services/problem-service/service.yaml"),
+        ("user-service", "services/user-service/service.yaml"),
         ("gateway", "services/gateway/service.yaml"),
     ];
     let services = service_paths
@@ -2567,6 +2569,7 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
         ("gateway", "gateway.health"),
         ("gateway", "gateway.routes.reload"),
         ("judge-api", "judge.queue.status"),
+        ("problem-service", "problem.problem.read"),
     ] {
         assert!(
             api_surfaces
@@ -2579,7 +2582,13 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
         store.service_frontend_entries().len() >= total_frontend,
         "frontend registry should contain at least every enabled frontend entry"
     );
-    for service_name in ["auth-service", "gateway", "judge-api"] {
+    for service_name in [
+        "auth-service",
+        "gateway",
+        "judge-api",
+        "problem-service",
+        "user-service",
+    ] {
         assert!(
             store
                 .service_frontend_entries()
@@ -2609,6 +2618,13 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
             .iter()
             .any(|permission| permission.service_name == "judge-api"
                 && permission.permission_key == "judge.submit")
+    );
+    assert!(
+        store
+            .service_permission_records()
+            .iter()
+            .any(|permission| permission.service_name == "problem-service"
+                && permission.permission_key == "problem.view")
     );
     assert_eq!(store.service_redis_resources().len(), total_redis);
     assert!(
