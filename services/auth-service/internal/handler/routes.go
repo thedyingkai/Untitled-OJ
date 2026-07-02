@@ -49,6 +49,21 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				},
 				{
 					Method:  http.MethodPost,
+					Path:    "/admin/permission-assignments",
+					Handler: assignPermissionHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/permission-assignments",
+					Handler: listPermissionAssignmentsHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodDelete,
+					Path:    "/admin/permission-assignments",
+					Handler: revokePermissionHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
 					Path:    "/admin/permission-check",
 					Handler: permissionCheckHandler(serverCtx),
 				},
@@ -56,6 +71,16 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 					Method:  http.MethodGet,
 					Path:    "/admin/permissions",
 					Handler: listPermissionsHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/permissions",
+					Handler: upsertPermissionHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodDelete,
+					Path:    "/admin/permissions",
+					Handler: deletePermissionHandler(serverCtx),
 				},
 				{
 					Method:  http.MethodPost,
@@ -68,9 +93,89 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 					Handler: removeProblemRoleHandler(serverCtx),
 				},
 				{
+					Method:  http.MethodPost,
+					Path:    "/admin/resource-edges",
+					Handler: addResourceEdgeHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/resource-edges",
+					Handler: listResourceEdgesHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodDelete,
+					Path:    "/admin/resource-edges",
+					Handler: removeResourceEdgeHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/role-bindings",
+					Handler: bindRoleHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/role-bindings",
+					Handler: listRoleBindingsHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodDelete,
+					Path:    "/admin/role-bindings",
+					Handler: unbindRoleHandler(serverCtx),
+				},
+				{
 					Method:  http.MethodGet,
 					Path:    "/admin/roles",
 					Handler: listRolesHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/roles",
+					Handler: upsertRoleHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodDelete,
+					Path:    "/admin/roles",
+					Handler: deleteRoleHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/role-permissions",
+					Handler: grantRolePermissionHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodDelete,
+					Path:    "/admin/role-permissions",
+					Handler: revokeRolePermissionHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/resource-types",
+					Handler: upsertResourceTypeHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/resource-types",
+					Handler: listResourceTypesHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodDelete,
+					Path:    "/admin/resource-types",
+					Handler: deleteResourceTypeHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/services/:service_code/identity",
+					Handler: getServiceIdentityHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/services/:service_code/credentials",
+					Handler: addServiceCredentialHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/services/:service_code/credentials/revoke",
+					Handler: revokeServiceCredentialHandler(serverCtx),
 				},
 				{
 					Method:  http.MethodPost,

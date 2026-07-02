@@ -45,6 +45,52 @@ type PermissionListItem struct {
 	Description string
 }
 
+type ResourceTypeListItem struct {
+	Code        string
+	ServiceCode string
+	Name        string
+	Description string
+	CreatedAt   string
+}
+
+type RoleBindingListItem struct {
+	ID            int64
+	PrincipalType string
+	PrincipalID   int64
+	Role          string
+	ScopeType     string
+	ScopeID       int64
+	GrantedByType string
+	GrantedByID   int64
+	ExpiresAt     string
+	CreatedAt     string
+}
+
+type PermissionAssignmentListItem struct {
+	ID             int64
+	PrincipalType  string
+	PrincipalID    int64
+	PermissionCode string
+	ScopeType      string
+	ScopeID        int64
+	Effect         string
+	Reason         string
+	GrantedByType  string
+	GrantedByID    int64
+	ExpiresAt      string
+	CreatedAt      string
+}
+
+type ResourceEdgeListItem struct {
+	ID         int64
+	ParentType string
+	ParentID   int64
+	ChildType  string
+	ChildID    int64
+	Relation   string
+	CreatedAt  string
+}
+
 type ServicePermissionInput struct {
 	Code        string
 	Name        string
@@ -57,15 +103,46 @@ type ServiceRoleBindingInput struct {
 }
 
 type ServiceIdentityInput struct {
-	ServiceCode     string
-	AllowedAPIs     []string
-	Grants          []ServiceIdentityGrantInput
-	CredentialToken string
+	ServiceCode         string
+	AllowedAPIs         []string
+	Grants              []ServiceIdentityGrantInput
+	CredentialToken     string
+	CredentialExpiresAt *time.Time
 }
 
 type ServiceIdentityGrantInput struct {
 	APIID          string
 	PermissionCode string
+}
+
+type ServiceCredentialInput struct {
+	Token     string
+	ExpiresAt *time.Time
+}
+
+type ServiceCredentialListItem struct {
+	ServiceCode string
+	TokenHint   string
+	Enabled     bool
+	CreatedAt   string
+	UpdatedAt   string
+	ExpiresAt   string
+	RevokedAt   string
+	LastUsedAt  string
+}
+
+type ServiceGrantListItem struct {
+	APIID               string
+	PermissionCode      string
+	ProviderServiceCode string
+	Enabled             bool
+}
+
+type ServiceIdentityDetails struct {
+	ServiceCode string
+	Enabled     bool
+	Grants      []ServiceGrantListItem
+	Credentials []ServiceCredentialListItem
 }
 
 type AuditListItem struct {
@@ -158,7 +235,213 @@ ORDER BY service_code, code
 	return items, rows.Err()
 }
 
-func (r *AdminRepository) RegisterServicePermissions(ctx context.Context, serviceCode string, permissions []ServicePermissionInput, bindings []ServiceRoleBindingInput, identity *ServiceIdentityInput) ([]string, error) {
+func (r *AdminRepository) ListResourceTypes(ctx context.Context) ([]ResourceTypeListItem, error) {
+	rows, err := r.db.Query(ctx, `
+SELECT
+    code,
+    service_code,
+    name,
+    description,
+    to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+FROM resource_types
+ORDER BY service_code, code
+LIMIT 500
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ResourceTypeListItem, 0)
+	for rows.Next() {
+		var item ResourceTypeListItem
+		if err := rows.Scan(&item.Code, &item.ServiceCode, &item.Name, &item.Description, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *AdminRepository) ListRoleBindings(ctx context.Context) ([]RoleBindingListItem, error) {
+	rows, err := r.db.Query(ctx, `
+SELECT
+    rb.id,
+    rb.principal_type,
+    rb.principal_id,
+    r.name,
+    rb.scope_type,
+    rb.scope_id,
+    rb.granted_by_type,
+    rb.granted_by_id,
+    COALESCE(to_char(rb.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), ''),
+    to_char(rb.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+FROM role_bindings rb
+JOIN roles r ON r.id = rb.role_id
+ORDER BY rb.id DESC
+LIMIT 500
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]RoleBindingListItem, 0)
+	for rows.Next() {
+		var item RoleBindingListItem
+		if err := rows.Scan(&item.ID, &item.PrincipalType, &item.PrincipalID, &item.Role, &item.ScopeType, &item.ScopeID, &item.GrantedByType, &item.GrantedByID, &item.ExpiresAt, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *AdminRepository) ListPermissionAssignments(ctx context.Context) ([]PermissionAssignmentListItem, error) {
+	rows, err := r.db.Query(ctx, `
+SELECT
+    id,
+    principal_type,
+    principal_id,
+    permission_code,
+    scope_type,
+    scope_id,
+    effect,
+    reason,
+    granted_by_type,
+    granted_by_id,
+    COALESCE(to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), ''),
+    to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+FROM permission_assignments
+ORDER BY id DESC
+LIMIT 500
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]PermissionAssignmentListItem, 0)
+	for rows.Next() {
+		var item PermissionAssignmentListItem
+		if err := rows.Scan(&item.ID, &item.PrincipalType, &item.PrincipalID, &item.PermissionCode, &item.ScopeType, &item.ScopeID, &item.Effect, &item.Reason, &item.GrantedByType, &item.GrantedByID, &item.ExpiresAt, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *AdminRepository) ListResourceEdges(ctx context.Context) ([]ResourceEdgeListItem, error) {
+	rows, err := r.db.Query(ctx, `
+SELECT
+    id,
+    parent_type,
+    parent_id,
+    child_type,
+    child_id,
+    relation,
+    to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+FROM resource_edges
+ORDER BY id DESC
+LIMIT 500
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ResourceEdgeListItem, 0)
+	for rows.Next() {
+		var item ResourceEdgeListItem
+		if err := rows.Scan(&item.ID, &item.ParentType, &item.ParentID, &item.ChildType, &item.ChildID, &item.Relation, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *AdminRepository) UpsertRole(ctx context.Context, actorID int64, name string, serviceCode string, description string, isSystem bool) error {
+	name = strings.TrimSpace(name)
+	serviceCode = strings.TrimSpace(serviceCode)
+	if serviceCode == "" {
+		serviceCode = "core"
+	}
+	description = strings.TrimSpace(description)
+	if name == "" {
+		return errors.New("role name is required")
+	}
+	_, err := r.db.Exec(ctx, `
+INSERT INTO roles(name, service_code, description, is_system)
+VALUES($1, $2, $3, $4)
+ON CONFLICT(name)
+DO UPDATE SET service_code = EXCLUDED.service_code,
+              description = EXCLUDED.description,
+              is_system = EXCLUDED.is_system
+`, name, serviceCode, description, isSystem)
+	if err != nil {
+		return err
+	}
+	return permission.WriteAuditLog(ctx, r.db, permission.UserPrincipal(actorID), "role.upsert", permission.Principal{Type: "role", ID: 0}, "", 0, name, permission.SystemScope(), "", map[string]any{
+		"role":         name,
+		"service_code": serviceCode,
+		"is_system":    isSystem,
+	})
+}
+
+func (r *AdminRepository) DeleteRole(ctx context.Context, actorID int64, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("role name is required")
+	}
+	tag, err := r.db.Exec(ctx, `
+DELETE FROM roles
+WHERE name = $1
+  AND is_system = FALSE
+`, name)
+	if err != nil {
+		return err
+	}
+	return permission.WriteAuditLog(ctx, r.db, permission.UserPrincipal(actorID), "role.delete", permission.Principal{Type: "role", ID: 0}, "", 0, name, permission.SystemScope(), "", map[string]any{
+		"role": name,
+		"rows": tag.RowsAffected(),
+	})
+}
+
+func (r *AdminRepository) DeletePermission(ctx context.Context, actorID int64, code string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return errors.New("permission code is required")
+	}
+	tag, err := r.db.Exec(ctx, `
+DELETE FROM permissions
+WHERE code = $1
+`, code)
+	if err != nil {
+		return err
+	}
+	return permission.WriteAuditLog(ctx, r.db, permission.UserPrincipal(actorID), "permission.delete", permission.Principal{Type: "permission", ID: 0}, code, 0, "", permission.SystemScope(), "", map[string]any{
+		"permission": code,
+		"rows":       tag.RowsAffected(),
+	})
+}
+
+func (r *AdminRepository) DeleteResourceType(ctx context.Context, actorID int64, code string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return errors.New("resource type code is required")
+	}
+	tag, err := r.db.Exec(ctx, `
+DELETE FROM resource_types
+WHERE code = $1
+`, code)
+	if err != nil {
+		return err
+	}
+	return permission.WriteAuditLog(ctx, r.db, permission.UserPrincipal(actorID), "resource_type.delete", permission.Principal{Type: "resource_type", ID: 0}, "", 0, "", permission.SystemScope(), "", map[string]any{
+		"resource_type": code,
+		"rows":          tag.RowsAffected(),
+	})
+}
+
+func (r *AdminRepository) RegisterServicePermissions(ctx context.Context, actorID int64, serviceCode string, permissions []ServicePermissionInput, bindings []ServiceRoleBindingInput, identity *ServiceIdentityInput) ([]string, error) {
 	serviceCode = strings.TrimSpace(serviceCode)
 	if serviceCode == "" {
 		return nil, errors.New("service_code is required")
@@ -251,9 +534,16 @@ DO NOTHING
 	}
 
 	if !serviceIdentityEmpty(identity) {
-		if err := r.registerServiceIdentity(ctx, tx, serviceCode, identity); err != nil {
+		if err := r.registerServiceIdentity(ctx, tx, actorID, serviceCode, identity); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := writeAuditTx(ctx, tx, actorID, "service.permissions.register", serviceCode, "", "", "", map[string]any{
+		"permissions": registered,
+		"bindings":    len(bindings),
+	}); err != nil {
+		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -262,7 +552,7 @@ DO NOTHING
 	return registered, nil
 }
 
-func (r *AdminRepository) DeleteServicePermissions(ctx context.Context, serviceCode string) (int64, error) {
+func (r *AdminRepository) DeleteServicePermissions(ctx context.Context, actorID int64, serviceCode string) (int64, error) {
 	serviceCode = strings.TrimSpace(serviceCode)
 	if serviceCode == "" {
 		return 0, errors.New("service_code is required")
@@ -285,6 +575,11 @@ DELETE FROM permissions
 WHERE service_code = $1
 `, serviceCode)
 	if err != nil {
+		return 0, err
+	}
+	if err := writeAuditTx(ctx, tx, actorID, "service.permissions.delete", serviceCode, "", "", "", map[string]any{
+		"deleted": tag.RowsAffected(),
+	}); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -316,12 +611,227 @@ SELECT EXISTS (
       AND si.enabled
       AND sc.enabled
       AND sc.token_hash = $4
+      AND sc.revoked_at IS NULL
+      AND (sc.expires_at IS NULL OR sc.expires_at > NOW())
       AND spg.enabled
       AND spg.permission_code = $2
       AND ($3 = '' OR spg.api_id = $3)
 )
 `, serviceCode, permissionCode, apiID, tokenHash).Scan(&ok)
-	return ok, err
+	if err != nil {
+		return false, err
+	}
+	action := "service.permission_check.deny"
+	if ok {
+		action = "service.permission_check.allow"
+		if _, err := r.db.Exec(ctx, `
+UPDATE service_credentials
+SET last_used_at = NOW(), updated_at = NOW()
+WHERE service_code = $1
+  AND token_hash = $2
+`, serviceCode, tokenHash); err != nil {
+			return false, err
+		}
+	}
+	if err := r.writeServiceAudit(ctx, action, serviceCode, permissionCode, apiID, map[string]any{
+		"allowed": ok,
+	}); err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
+func (r *AdminRepository) ListServiceIdentity(ctx context.Context, serviceCode string) (ServiceIdentityDetails, error) {
+	serviceCode = strings.TrimSpace(serviceCode)
+	if serviceCode == "" {
+		return ServiceIdentityDetails{}, errors.New("service_code is required")
+	}
+	var details ServiceIdentityDetails
+	err := r.db.QueryRow(ctx, `
+SELECT service_code, enabled
+FROM service_identities
+WHERE service_code = $1
+`, serviceCode).Scan(&details.ServiceCode, &details.Enabled)
+	if err != nil {
+		return ServiceIdentityDetails{}, err
+	}
+	credentials, err := r.ListServiceCredentials(ctx, serviceCode)
+	if err != nil {
+		return ServiceIdentityDetails{}, err
+	}
+	grants, err := r.ListServiceGrants(ctx, serviceCode)
+	if err != nil {
+		return ServiceIdentityDetails{}, err
+	}
+	details.Credentials = credentials
+	details.Grants = grants
+	return details, nil
+}
+
+func (r *AdminRepository) ListServiceCredentials(ctx context.Context, serviceCode string) ([]ServiceCredentialListItem, error) {
+	serviceCode = strings.TrimSpace(serviceCode)
+	if serviceCode == "" {
+		return nil, errors.New("service_code is required")
+	}
+	rows, err := r.db.Query(ctx, `
+SELECT
+    service_code,
+    token_hint,
+    enabled,
+    to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    COALESCE(to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), ''),
+    COALESCE(to_char(revoked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), ''),
+    COALESCE(to_char(last_used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '')
+FROM service_credentials
+WHERE service_code = $1
+ORDER BY created_at DESC
+`, serviceCode)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ServiceCredentialListItem, 0)
+	for rows.Next() {
+		var item ServiceCredentialListItem
+		if err := rows.Scan(&item.ServiceCode, &item.TokenHint, &item.Enabled, &item.CreatedAt, &item.UpdatedAt, &item.ExpiresAt, &item.RevokedAt, &item.LastUsedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *AdminRepository) ListServiceGrants(ctx context.Context, serviceCode string) ([]ServiceGrantListItem, error) {
+	serviceCode = strings.TrimSpace(serviceCode)
+	if serviceCode == "" {
+		return nil, errors.New("service_code is required")
+	}
+	rows, err := r.db.Query(ctx, `
+SELECT api_id, permission_code, provider_service_code, enabled
+FROM service_permission_grants
+WHERE caller_service_code = $1
+ORDER BY api_id, permission_code
+`, serviceCode)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ServiceGrantListItem, 0)
+	for rows.Next() {
+		var item ServiceGrantListItem
+		if err := rows.Scan(&item.APIID, &item.PermissionCode, &item.ProviderServiceCode, &item.Enabled); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *AdminRepository) AddServiceCredential(ctx context.Context, actorID int64, serviceCode string, input ServiceCredentialInput) (ServiceCredentialListItem, error) {
+	serviceCode = strings.TrimSpace(serviceCode)
+	tokenHash := serviceCredentialTokenHash(input.Token)
+	if serviceCode == "" {
+		return ServiceCredentialListItem{}, errors.New("service_code is required")
+	}
+	if tokenHash == "" {
+		return ServiceCredentialListItem{}, errors.New("credential token is required")
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return ServiceCredentialListItem{}, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+	if _, err := tx.Exec(ctx, `
+INSERT INTO service_identities(service_code, enabled, updated_at)
+VALUES($1, TRUE, NOW())
+ON CONFLICT(service_code)
+DO UPDATE SET enabled = TRUE, updated_at = NOW()
+`, serviceCode); err != nil {
+		return ServiceCredentialListItem{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO service_credentials(service_code, token_hash, token_hint, enabled, expires_at, revoked_at, updated_at)
+VALUES($1, $2, $3, TRUE, $4, NULL, NOW())
+ON CONFLICT(service_code, token_hash)
+DO UPDATE SET token_hint = EXCLUDED.token_hint,
+              enabled = TRUE,
+              expires_at = EXCLUDED.expires_at,
+              revoked_at = NULL,
+              updated_at = NOW()
+`, serviceCode, tokenHash, serviceCredentialTokenHint(input.Token), input.ExpiresAt); err != nil {
+		return ServiceCredentialListItem{}, err
+	}
+	if err := writeAuditTx(ctx, tx, actorID, "service.credential.create", serviceCode, "", "", "", map[string]any{
+		"token_hint": serviceCredentialTokenHint(input.Token),
+		"expires_at": input.ExpiresAt,
+	}); err != nil {
+		return ServiceCredentialListItem{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ServiceCredentialListItem{}, err
+	}
+	return r.getServiceCredentialByHash(ctx, serviceCode, tokenHash)
+}
+
+func (r *AdminRepository) RevokeServiceCredential(ctx context.Context, actorID int64, serviceCode string, token string, tokenHash string, reason string) error {
+	serviceCode = strings.TrimSpace(serviceCode)
+	tokenHash = strings.TrimSpace(tokenHash)
+	if tokenHash == "" {
+		tokenHash = serviceCredentialTokenHash(token)
+	}
+	if serviceCode == "" {
+		return errors.New("service_code is required")
+	}
+	if tokenHash == "" {
+		return errors.New("credential token or token_hash is required")
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+	tag, err := tx.Exec(ctx, `
+UPDATE service_credentials
+SET enabled = FALSE,
+    revoked_at = COALESCE(revoked_at, NOW()),
+    updated_at = NOW()
+WHERE service_code = $1
+  AND token_hash = $2
+`, serviceCode, tokenHash)
+	if err != nil {
+		return err
+	}
+	if err := writeAuditTx(ctx, tx, actorID, "service.credential.revoke", serviceCode, "", "", "", map[string]any{
+		"rows":   tag.RowsAffected(),
+		"reason": strings.TrimSpace(reason),
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *AdminRepository) getServiceCredentialByHash(ctx context.Context, serviceCode string, tokenHash string) (ServiceCredentialListItem, error) {
+	var item ServiceCredentialListItem
+	err := r.db.QueryRow(ctx, `
+SELECT
+    service_code,
+    token_hint,
+    enabled,
+    to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    COALESCE(to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), ''),
+    COALESCE(to_char(revoked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), ''),
+    COALESCE(to_char(last_used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '')
+FROM service_credentials
+WHERE service_code = $1
+  AND token_hash = $2
+`, serviceCode, tokenHash).Scan(&item.ServiceCode, &item.TokenHint, &item.Enabled, &item.CreatedAt, &item.UpdatedAt, &item.ExpiresAt, &item.RevokedAt, &item.LastUsedAt)
+	return item, err
 }
 
 func (r *AdminRepository) UserEffectivePermissions(ctx context.Context, userID int64, scopeType string, scopeID int64) ([]string, error) {
@@ -492,10 +1002,13 @@ func serviceIdentityEmpty(identity *ServiceIdentityInput) bool {
 	if len(identity.AllowedAPIs) > 0 || len(identity.Grants) > 0 {
 		return false
 	}
+	if strings.TrimSpace(identity.CredentialToken) != "" {
+		return false
+	}
 	return true
 }
 
-func (r *AdminRepository) registerServiceIdentity(ctx context.Context, tx pgx.Tx, serviceCode string, identity *ServiceIdentityInput) error {
+func (r *AdminRepository) registerServiceIdentity(ctx context.Context, tx pgx.Tx, actorID int64, serviceCode string, identity *ServiceIdentityInput) error {
 	identityCode := strings.TrimSpace(identity.ServiceCode)
 	if identityCode == "" {
 		identityCode = serviceCode
@@ -520,11 +1033,21 @@ DO UPDATE SET enabled = TRUE, updated_at = NOW()
 	}
 	if tokenHash := serviceCredentialTokenHash(identity.CredentialToken); tokenHash != "" {
 		if _, err := tx.Exec(ctx, `
-INSERT INTO service_credentials(service_code, token_hash, token_hint, enabled, updated_at)
-VALUES($1, $2, $3, TRUE, NOW())
+INSERT INTO service_credentials(service_code, token_hash, token_hint, enabled, expires_at, revoked_at, updated_at)
+VALUES($1, $2, $3, TRUE, $4, NULL, NOW())
 ON CONFLICT(service_code, token_hash)
-DO UPDATE SET token_hint = EXCLUDED.token_hint, enabled = TRUE, updated_at = NOW()
-`, serviceCode, tokenHash, serviceCredentialTokenHint(identity.CredentialToken)); err != nil {
+DO UPDATE SET token_hint = EXCLUDED.token_hint,
+              enabled = TRUE,
+              expires_at = EXCLUDED.expires_at,
+              revoked_at = NULL,
+              updated_at = NOW()
+`, serviceCode, tokenHash, serviceCredentialTokenHint(identity.CredentialToken), identity.CredentialExpiresAt); err != nil {
+			return err
+		}
+		if err := writeAuditTx(ctx, tx, actorID, "service.credential.upsert", serviceCode, "", "", "", map[string]any{
+			"token_hint": serviceCredentialTokenHint(identity.CredentialToken),
+			"expires_at": identity.CredentialExpiresAt,
+		}); err != nil {
 			return err
 		}
 	}
@@ -562,8 +1085,33 @@ DO UPDATE SET provider_service_code = EXCLUDED.provider_service_code, enabled = 
 `, serviceCode, apiID, permissionCode, providerService); err != nil {
 			return err
 		}
+		if err := writeAuditTx(ctx, tx, actorID, "service.grant.upsert", serviceCode, permissionCode, apiID, providerService, nil); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (r *AdminRepository) writeServiceAudit(ctx context.Context, action string, serviceCode string, permissionCode string, apiID string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if strings.TrimSpace(apiID) != "" {
+		metadata["api_id"] = strings.TrimSpace(apiID)
+	}
+	return permission.WriteAuditLog(
+		ctx,
+		r.db,
+		permission.Principal{Type: permission.PrincipalService, ID: 0},
+		action,
+		permission.Principal{Type: permission.PrincipalService, ID: 0},
+		permissionCode,
+		0,
+		"",
+		permission.SystemScope(),
+		"",
+		withServiceMetadata(serviceCode, metadata),
+	)
 }
 
 func serviceCredentialTokenHash(token string) string {
@@ -596,6 +1144,44 @@ DO UPDATE SET service_code = EXCLUDED.service_code
 RETURNING id
 `, roleName, serviceCode, "release role for "+serviceCode).Scan(&roleID)
 	return roleID, err
+}
+
+func writeAuditTx(ctx context.Context, tx pgx.Tx, actorID int64, action string, serviceCode string, permissionCode string, apiID string, providerService string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if strings.TrimSpace(apiID) != "" {
+		metadata["api_id"] = strings.TrimSpace(apiID)
+	}
+	if strings.TrimSpace(providerService) != "" {
+		metadata["provider_service"] = strings.TrimSpace(providerService)
+	}
+	metadata = withServiceMetadata(serviceCode, metadata)
+	_, err := tx.Exec(ctx, `
+INSERT INTO permission_audit_logs(
+    actor_type,
+    actor_id,
+    action,
+    target_type,
+    target_id,
+    permission_code,
+    scope_type,
+    scope_id,
+    metadata
+)
+VALUES('user', $1, $2, 'service', 0, $3, 'system', 0, $4)
+`, actorID, strings.TrimSpace(action), strings.TrimSpace(permissionCode), metadata)
+	return err
+}
+
+func withServiceMetadata(serviceCode string, metadata map[string]any) map[string]any {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if serviceCode = strings.TrimSpace(serviceCode); serviceCode != "" {
+		metadata["service_code"] = serviceCode
+	}
+	return metadata
 }
 
 func hasUserPermissionForScope(ctx context.Context, db *pgxpool.Pool, userID int64, permissionCode string, scopeType string, scopeID int64) (bool, error) {

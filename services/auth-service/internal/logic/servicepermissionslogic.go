@@ -28,14 +28,16 @@ func NewServicePermissionsLogic(ctx context.Context, svcCtx *svc.ServiceContext)
 }
 
 func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissionsReq) (*types.ServicePermissionsResp, error) {
-	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
+	actorID, err := requireAdmin(l.ctx, l.svcCtx)
+	if err != nil {
 		return nil, err
 	}
 	serviceCode := strings.TrimSpace(req.ServiceCode)
 	if serviceCode == "" {
 		return nil, errors.New("service_code is required")
 	}
-	credentialToken, _ := middleware.TokenFromContext(l.ctx)
+	authToken, _ := middleware.TokenFromContext(l.ctx)
+	credentialToken := credentialTokenFromRegistration(req, authToken)
 	if l.svcCtx.SmokeAuth != nil {
 		permissions := make([]svc.SmokePermission, 0, len(req.Permissions))
 		for _, item := range req.Permissions {
@@ -72,8 +74,11 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 			Permissions: binding.Permissions,
 		})
 	}
-	identity := repositoryIdentityFromRequest(req, credentialToken)
-	registered, err := l.svcCtx.AdminRepo.RegisterServicePermissions(l.ctx, serviceCode, permissions, bindings, identity)
+	identity, err := repositoryIdentityFromRequest(req, credentialToken)
+	if err != nil {
+		return nil, err
+	}
+	registered, err := l.svcCtx.AdminRepo.RegisterServicePermissions(l.ctx, actorID, serviceCode, permissions, bindings, identity)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +99,8 @@ func smokeIdentityFromRequest(req *types.RegisterServicePermissionsReq, credenti
 	}
 	if strings.TrimSpace(req.ServiceIdentity.ServiceName) == "" &&
 		len(req.ServiceIdentity.AllowedApis) == 0 &&
-		len(req.ServiceIdentity.Grants) == 0 {
+		len(req.ServiceIdentity.Grants) == 0 &&
+		strings.TrimSpace(req.ServiceIdentity.CredentialToken) == "" {
 		return nil
 	}
 	grants := make([]svc.SmokeServiceIdentityGrant, 0, len(req.ServiceIdentity.Grants))
@@ -112,14 +118,15 @@ func smokeIdentityFromRequest(req *types.RegisterServicePermissionsReq, credenti
 	}
 }
 
-func repositoryIdentityFromRequest(req *types.RegisterServicePermissionsReq, credentialToken string) *repository.ServiceIdentityInput {
+func repositoryIdentityFromRequest(req *types.RegisterServicePermissionsReq, credentialToken string) (*repository.ServiceIdentityInput, error) {
 	if req == nil {
-		return nil
+		return nil, nil
 	}
 	if strings.TrimSpace(req.ServiceIdentity.ServiceName) == "" &&
 		len(req.ServiceIdentity.AllowedApis) == 0 &&
-		len(req.ServiceIdentity.Grants) == 0 {
-		return nil
+		len(req.ServiceIdentity.Grants) == 0 &&
+		strings.TrimSpace(req.ServiceIdentity.CredentialToken) == "" {
+		return nil, nil
 	}
 	grants := make([]repository.ServiceIdentityGrantInput, 0, len(req.ServiceIdentity.Grants))
 	for _, grant := range req.ServiceIdentity.Grants {
@@ -128,16 +135,22 @@ func repositoryIdentityFromRequest(req *types.RegisterServicePermissionsReq, cre
 			PermissionCode: grant.Permission,
 		})
 	}
-	return &repository.ServiceIdentityInput{
-		ServiceCode:     req.ServiceIdentity.ServiceName,
-		AllowedAPIs:     req.ServiceIdentity.AllowedApis,
-		Grants:          grants,
-		CredentialToken: credentialToken,
+	expiresAt, err := parseOptionalRFC3339(req.ServiceIdentity.CredentialExpiresAt)
+	if err != nil {
+		return nil, err
 	}
+	return &repository.ServiceIdentityInput{
+		ServiceCode:         req.ServiceIdentity.ServiceName,
+		AllowedAPIs:         req.ServiceIdentity.AllowedApis,
+		Grants:              grants,
+		CredentialToken:     credentialToken,
+		CredentialExpiresAt: expiresAt,
+	}, nil
 }
 
 func (l *ServicePermissionsLogic) Delete(req *types.DeleteServicePermissionsReq) (*types.ServicePermissionsResp, error) {
-	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
+	actorID, err := requireAdmin(l.ctx, l.svcCtx)
+	if err != nil {
 		return nil, err
 	}
 	serviceCode := strings.TrimSpace(req.ServiceCode)
@@ -153,7 +166,7 @@ func (l *ServicePermissionsLogic) Delete(req *types.DeleteServicePermissionsReq)
 			},
 		}, nil
 	}
-	deleted, err := l.svcCtx.AdminRepo.DeleteServicePermissions(l.ctx, serviceCode)
+	deleted, err := l.svcCtx.AdminRepo.DeleteServicePermissions(l.ctx, actorID, serviceCode)
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +179,64 @@ func (l *ServicePermissionsLogic) Delete(req *types.DeleteServicePermissionsReq)
 			Permissions: []string{},
 		},
 	}, nil
+}
+
+func (l *ServicePermissionsLogic) GetServiceIdentity(req *types.DeleteServicePermissionsReq) (*types.ServiceIdentityResp, error) {
+	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
+		return nil, err
+	}
+	if l.svcCtx.SmokeAuth != nil {
+		return nil, errors.New("service identity details are unavailable in smoke auth")
+	}
+	details, err := l.svcCtx.AdminRepo.ListServiceIdentity(l.ctx, strings.TrimSpace(req.ServiceCode))
+	if err != nil {
+		return nil, err
+	}
+	return &types.ServiceIdentityResp{
+		Code: 0,
+		Msg:  "success",
+		Data: serviceIdentityDataFromRepository(details),
+	}, nil
+}
+
+func (l *ServicePermissionsLogic) AddServiceCredential(req *types.ServiceCredentialReq) (*types.ServiceCredentialResp, error) {
+	actorID, err := requireAdmin(l.ctx, l.svcCtx)
+	if err != nil {
+		return nil, err
+	}
+	if l.svcCtx.SmokeAuth != nil {
+		return nil, errors.New("service credential lifecycle is unavailable in smoke auth")
+	}
+	expiresAt, err := parseOptionalRFC3339(req.ExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	item, err := l.svcCtx.AdminRepo.AddServiceCredential(l.ctx, actorID, strings.TrimSpace(req.ServiceCode), repository.ServiceCredentialInput{
+		Token:     req.Token,
+		ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &types.ServiceCredentialResp{
+		Code: 0,
+		Msg:  "success",
+		Data: serviceCredentialItemFromRepository(item),
+	}, nil
+}
+
+func (l *ServicePermissionsLogic) RevokeServiceCredential(req *types.RevokeServiceCredentialReq) (*types.AdminActionResp, error) {
+	actorID, err := requireAdmin(l.ctx, l.svcCtx)
+	if err != nil {
+		return nil, err
+	}
+	if l.svcCtx.SmokeAuth != nil {
+		return nil, errors.New("service credential lifecycle is unavailable in smoke auth")
+	}
+	if err := l.svcCtx.AdminRepo.RevokeServiceCredential(l.ctx, actorID, strings.TrimSpace(req.ServiceCode), req.Token, req.TokenHash, req.Reason); err != nil {
+		return nil, err
+	}
+	return okResp(), nil
 }
 
 func (l *ServicePermissionsLogic) UserEffective(req *types.UserEffectivePermissionsReq) (*types.UserEffectivePermissionsResp, error) {
@@ -190,4 +261,49 @@ func (l *ServicePermissionsLogic) UserEffective(req *types.UserEffectivePermissi
 			Permissions: permissions,
 		},
 	}, nil
+}
+
+func credentialTokenFromRegistration(req *types.RegisterServicePermissionsReq, fallback string) string {
+	if req == nil {
+		return fallback
+	}
+	if token := strings.TrimSpace(req.ServiceIdentity.CredentialToken); token != "" {
+		return token
+	}
+	return fallback
+}
+
+func serviceIdentityDataFromRepository(item repository.ServiceIdentityDetails) types.ServiceIdentityData {
+	grants := make([]types.ServiceGrantData, 0, len(item.Grants))
+	for _, grant := range item.Grants {
+		grants = append(grants, types.ServiceGrantData{
+			ApiId:               grant.APIID,
+			Permission:          grant.PermissionCode,
+			ProviderServiceCode: grant.ProviderServiceCode,
+			Enabled:             grant.Enabled,
+		})
+	}
+	credentials := make([]types.ServiceCredentialItem, 0, len(item.Credentials))
+	for _, credential := range item.Credentials {
+		credentials = append(credentials, serviceCredentialItemFromRepository(credential))
+	}
+	return types.ServiceIdentityData{
+		ServiceCode: item.ServiceCode,
+		Enabled:     item.Enabled,
+		Grants:      grants,
+		Credentials: credentials,
+	}
+}
+
+func serviceCredentialItemFromRepository(item repository.ServiceCredentialListItem) types.ServiceCredentialItem {
+	return types.ServiceCredentialItem{
+		ServiceCode: item.ServiceCode,
+		TokenHint:   item.TokenHint,
+		Enabled:     item.Enabled,
+		CreatedAt:   item.CreatedAt,
+		UpdatedAt:   item.UpdatedAt,
+		ExpiresAt:   item.ExpiresAt,
+		RevokedAt:   item.RevokedAt,
+		LastUsedAt:  item.LastUsedAt,
+	}
 }

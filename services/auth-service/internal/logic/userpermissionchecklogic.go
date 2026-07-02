@@ -103,6 +103,9 @@ func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionChec
 	if err != nil {
 		return nil, err
 	}
+	if err := auditUserPermissionCheck(l.ctx, l.svcCtx, claims.UserID, claims.UserID, strings.TrimSpace(req.Permission), permission.Scope{Type: scopeType, ID: req.ScopeId}, allowed, "user", strings.TrimSpace(req.ApiId)); err != nil {
+		return nil, err
+	}
 	return &types.PermissionCheckResp{
 		Code: 0,
 		Msg:  "success",

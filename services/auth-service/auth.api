@@ -102,6 +102,114 @@ type PermissionItem {
 	Description string `json:"description"`
 }
 
+type PermissionManageReq {
+	Code        string `json:"code"`
+	ServiceCode string `json:"service_code,optional"`
+	Name        string `json:"name,optional"`
+	Description string `json:"description,optional"`
+}
+
+type DeletePermissionReq {
+	Code string `json:"code"`
+}
+
+type ResourceTypeManageReq {
+	Code        string `json:"code"`
+	ServiceCode string `json:"service_code,optional"`
+	Name        string `json:"name,optional"`
+	Description string `json:"description,optional"`
+}
+
+type DeleteResourceTypeReq {
+	Code string `json:"code"`
+}
+
+type ResourceTypeItem {
+	Code        string `json:"code"`
+	ServiceCode string `json:"service_code"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	CreatedAt   string `json:"created_at"`
+}
+
+type ListResourceTypesResp {
+	Code int                `json:"code"`
+	Msg  string             `json:"msg"`
+	Data []ResourceTypeItem `json:"data"`
+}
+
+type RoleManageReq {
+	Name        string `json:"name"`
+	ServiceCode string `json:"service_code,optional"`
+	Description string `json:"description,optional"`
+	IsSystem    bool   `json:"is_system,optional"`
+}
+
+type DeleteRoleReq {
+	Name string `json:"name"`
+}
+
+type RolePermissionReq {
+	Role       string `json:"role"`
+	Permission string `json:"permission"`
+}
+
+type RoleBindingItem {
+	Id            int64  `json:"id"`
+	PrincipalType string `json:"principal_type"`
+	PrincipalId   int64  `json:"principal_id"`
+	Role          string `json:"role"`
+	ScopeType     string `json:"scope_type"`
+	ScopeId       int64  `json:"scope_id"`
+	GrantedByType string `json:"granted_by_type"`
+	GrantedById   int64  `json:"granted_by_id"`
+	ExpiresAt     string `json:"expires_at,optional"`
+	CreatedAt     string `json:"created_at"`
+}
+
+type ListRoleBindingsResp {
+	Code int               `json:"code"`
+	Msg  string            `json:"msg"`
+	Data []RoleBindingItem `json:"data"`
+}
+
+type PermissionAssignmentItem {
+	Id             int64  `json:"id"`
+	PrincipalType  string `json:"principal_type"`
+	PrincipalId    int64  `json:"principal_id"`
+	PermissionCode string `json:"permission_code"`
+	ScopeType      string `json:"scope_type"`
+	ScopeId        int64  `json:"scope_id"`
+	Effect         string `json:"effect"`
+	Reason         string `json:"reason"`
+	GrantedByType  string `json:"granted_by_type"`
+	GrantedById    int64  `json:"granted_by_id"`
+	ExpiresAt      string `json:"expires_at,optional"`
+	CreatedAt      string `json:"created_at"`
+}
+
+type ListPermissionAssignmentsResp {
+	Code int                        `json:"code"`
+	Msg  string                     `json:"msg"`
+	Data []PermissionAssignmentItem `json:"data"`
+}
+
+type ResourceEdgeItem {
+	Id         int64  `json:"id"`
+	ParentType string `json:"parent_type"`
+	ParentId   int64  `json:"parent_id"`
+	ChildType  string `json:"child_type"`
+	ChildId    int64  `json:"child_id"`
+	Relation   string `json:"relation"`
+	CreatedAt  string `json:"created_at"`
+}
+
+type ListResourceEdgesResp {
+	Code int                `json:"code"`
+	Msg  string             `json:"msg"`
+	Data []ResourceEdgeItem `json:"data"`
+}
+
 type ServicePermissionItem {
 	Code        string `json:"code"`
 	Name        string `json:"name,optional"`
@@ -119,9 +227,11 @@ type ServiceIdentityGrantItem {
 }
 
 type ServiceIdentityRegistration {
-	ServiceName string                     `json:"service_name,optional"`
-	AllowedApis []string                   `json:"allowed_apis,optional"`
-	Grants      []ServiceIdentityGrantItem `json:"grants,optional"`
+	ServiceName         string                     `json:"service_name,optional"`
+	AllowedApis         []string                   `json:"allowed_apis,optional"`
+	Grants              []ServiceIdentityGrantItem `json:"grants,optional"`
+	CredentialToken     string                     `json:"credential_token,optional"`
+	CredentialExpiresAt string                     `json:"credential_expires_at,optional"`
 }
 
 type RegisterServicePermissionsReq {
@@ -157,6 +267,34 @@ type ListPermissionsResp {
 type UserRoleReq {
 	UserId int64  `json:"user_id"`
 	Role   string `json:"role"`
+}
+
+type RoleBindingReq {
+	TargetType string `json:"target_type"`
+	TargetId   int64  `json:"target_id"`
+	Role       string `json:"role"`
+	ScopeType  string `json:"scope_type,optional"`
+	ScopeId    int64  `json:"scope_id,optional"`
+	ExpiresAt  string `json:"expires_at,optional"`
+}
+
+type PermissionAssignmentReq {
+	TargetType string `json:"target_type"`
+	TargetId   int64  `json:"target_id"`
+	Permission string `json:"permission"`
+	ScopeType  string `json:"scope_type,optional"`
+	ScopeId    int64  `json:"scope_id,optional"`
+	Effect     string `json:"effect,optional"`
+	Reason     string `json:"reason,optional"`
+	ExpiresAt  string `json:"expires_at,optional"`
+}
+
+type ResourceEdgeReq {
+	ParentType string `json:"parent_type"`
+	ParentId   int64  `json:"parent_id"`
+	ChildType  string `json:"child_type"`
+	ChildId    int64  `json:"child_id"`
+	Relation   string `json:"relation,optional"`
 }
 
 type ProblemRoleReq {
@@ -226,6 +364,56 @@ type ListAuditLogsResp {
 	Data []AuditLogItem `json:"data"`
 }
 
+type ServiceCredentialItem {
+	ServiceCode string `json:"service_code"`
+	TokenHint   string `json:"token_hint"`
+	Enabled     bool   `json:"enabled"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+	ExpiresAt   string `json:"expires_at,optional"`
+	RevokedAt   string `json:"revoked_at,optional"`
+	LastUsedAt  string `json:"last_used_at,optional"`
+}
+
+type ServiceGrantData {
+	ApiId               string `json:"api_id"`
+	Permission          string `json:"permission"`
+	ProviderServiceCode string `json:"provider_service_code"`
+	Enabled             bool   `json:"enabled"`
+}
+
+type ServiceIdentityData {
+	ServiceCode string                  `json:"service_code"`
+	Enabled     bool                    `json:"enabled"`
+	Grants      []ServiceGrantData      `json:"grants"`
+	Credentials []ServiceCredentialItem `json:"credentials"`
+}
+
+type ServiceIdentityResp {
+	Code int                 `json:"code"`
+	Msg  string              `json:"msg"`
+	Data ServiceIdentityData `json:"data"`
+}
+
+type ServiceCredentialReq {
+	ServiceCode string `path:"service_code"`
+	Token       string `json:"token"`
+	ExpiresAt   string `json:"expires_at,optional"`
+}
+
+type RevokeServiceCredentialReq {
+	ServiceCode string `path:"service_code"`
+	Token       string `json:"token,optional"`
+	TokenHash   string `json:"token_hash,optional"`
+	Reason      string `json:"reason,optional"`
+}
+
+type ServiceCredentialResp {
+	Code int                   `json:"code"`
+	Msg  string                `json:"msg"`
+	Data ServiceCredentialItem `json:"data"`
+}
+
 type ActionData {
 	Ok bool `json:"ok"`
 }
@@ -269,8 +457,35 @@ service auth {
 	@handler listRoles
 	get /admin/roles returns (ListRolesResp)
 
+	@handler upsertRole
+	post /admin/roles (RoleManageReq) returns (AdminActionResp)
+
+	@handler deleteRole
+	delete /admin/roles (DeleteRoleReq) returns (AdminActionResp)
+
+	@handler grantRolePermission
+	post /admin/role-permissions (RolePermissionReq) returns (AdminActionResp)
+
+	@handler revokeRolePermission
+	delete /admin/role-permissions (RolePermissionReq) returns (AdminActionResp)
+
 	@handler listPermissions
 	get /admin/permissions returns (ListPermissionsResp)
+
+	@handler upsertPermission
+	post /admin/permissions (PermissionManageReq) returns (AdminActionResp)
+
+	@handler deletePermission
+	delete /admin/permissions (DeletePermissionReq) returns (AdminActionResp)
+
+	@handler upsertResourceType
+	post /admin/resource-types (ResourceTypeManageReq) returns (AdminActionResp)
+
+	@handler listResourceTypes
+	get /admin/resource-types returns (ListResourceTypesResp)
+
+	@handler deleteResourceType
+	delete /admin/resource-types (DeleteResourceTypeReq) returns (AdminActionResp)
 
 	@handler registerServicePermissions
 	post /admin/services/:service_code/permissions (RegisterServicePermissionsReq) returns (ServicePermissionsResp)
@@ -283,6 +498,42 @@ service auth {
 
 	@handler removeUserRole
 	delete /admin/users/roles (UserRoleReq) returns (AdminActionResp)
+
+	@handler bindRole
+	post /admin/role-bindings (RoleBindingReq) returns (AdminActionResp)
+
+	@handler listRoleBindings
+	get /admin/role-bindings returns (ListRoleBindingsResp)
+
+	@handler unbindRole
+	delete /admin/role-bindings (RoleBindingReq) returns (AdminActionResp)
+
+	@handler assignPermission
+	post /admin/permission-assignments (PermissionAssignmentReq) returns (AdminActionResp)
+
+	@handler listPermissionAssignments
+	get /admin/permission-assignments returns (ListPermissionAssignmentsResp)
+
+	@handler revokePermission
+	delete /admin/permission-assignments (PermissionAssignmentReq) returns (AdminActionResp)
+
+	@handler addResourceEdge
+	post /admin/resource-edges (ResourceEdgeReq) returns (AdminActionResp)
+
+	@handler listResourceEdges
+	get /admin/resource-edges returns (ListResourceEdgesResp)
+
+	@handler removeResourceEdge
+	delete /admin/resource-edges (ResourceEdgeReq) returns (AdminActionResp)
+
+	@handler getServiceIdentity
+	get /admin/services/:service_code/identity returns (ServiceIdentityResp)
+
+	@handler addServiceCredential
+	post /admin/services/:service_code/credentials (ServiceCredentialReq) returns (ServiceCredentialResp)
+
+	@handler revokeServiceCredential
+	post /admin/services/:service_code/credentials/revoke (RevokeServiceCredentialReq) returns (AdminActionResp)
 
 	@handler userEffectivePermissions
 	get /admin/users/:user_id/effective-permissions (UserEffectivePermissionsReq) returns (UserEffectivePermissionsResp)

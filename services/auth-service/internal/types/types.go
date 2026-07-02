@@ -28,6 +28,56 @@ type AuditLogItem struct {
 	CreatedAt      string `json:"created_at"`
 }
 
+type RevokeServiceCredentialReq struct {
+	ServiceCode string `path:"service_code"`
+	Token       string `json:"token,optional"`
+	TokenHash   string `json:"token_hash,optional"`
+	Reason      string `json:"reason,optional"`
+}
+
+type ServiceCredentialItem struct {
+	ServiceCode string `json:"service_code"`
+	TokenHint   string `json:"token_hint"`
+	Enabled     bool   `json:"enabled"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+	ExpiresAt   string `json:"expires_at,optional"`
+	RevokedAt   string `json:"revoked_at,optional"`
+	LastUsedAt  string `json:"last_used_at,optional"`
+}
+
+type ServiceCredentialReq struct {
+	ServiceCode string `path:"service_code"`
+	Token       string `json:"token"`
+	ExpiresAt   string `json:"expires_at,optional"`
+}
+
+type ServiceCredentialResp struct {
+	Code int                   `json:"code"`
+	Msg  string                `json:"msg"`
+	Data ServiceCredentialItem `json:"data"`
+}
+
+type ServiceGrantData struct {
+	ApiId               string `json:"api_id"`
+	Permission          string `json:"permission"`
+	ProviderServiceCode string `json:"provider_service_code"`
+	Enabled             bool   `json:"enabled"`
+}
+
+type ServiceIdentityData struct {
+	ServiceCode string                  `json:"service_code"`
+	Enabled     bool                    `json:"enabled"`
+	Grants      []ServiceGrantData      `json:"grants"`
+	Credentials []ServiceCredentialItem `json:"credentials"`
+}
+
+type ServiceIdentityResp struct {
+	Code int                 `json:"code"`
+	Msg  string              `json:"msg"`
+	Data ServiceIdentityData `json:"data"`
+}
+
 type HealthData struct {
 	Service string `json:"service"`
 	Status  string `json:"status"`
@@ -57,10 +107,46 @@ type ListRolesResp struct {
 	Data []RoleItem `json:"data"`
 }
 
+type ListPermissionAssignmentsResp struct {
+	Code int                        `json:"code"`
+	Msg  string                     `json:"msg"`
+	Data []PermissionAssignmentItem `json:"data"`
+}
+
+type ListResourceEdgesResp struct {
+	Code int                `json:"code"`
+	Msg  string             `json:"msg"`
+	Data []ResourceEdgeItem `json:"data"`
+}
+
+type ListResourceTypesResp struct {
+	Code int                `json:"code"`
+	Msg  string             `json:"msg"`
+	Data []ResourceTypeItem `json:"data"`
+}
+
+type ListRoleBindingsResp struct {
+	Code int               `json:"code"`
+	Msg  string            `json:"msg"`
+	Data []RoleBindingItem `json:"data"`
+}
+
 type ListUsersResp struct {
 	Code int        `json:"code"`
 	Msg  string     `json:"msg"`
 	Data []UserItem `json:"data"`
+}
+
+type DeletePermissionReq struct {
+	Code string `json:"code"`
+}
+
+type DeleteResourceTypeReq struct {
+	Code string `json:"code"`
+}
+
+type DeleteRoleReq struct {
+	Name string `json:"name"`
 }
 
 type LoginData struct {
@@ -110,6 +196,28 @@ type PermissionItem struct {
 	Description string `json:"description"`
 }
 
+type PermissionAssignmentItem struct {
+	Id             int64  `json:"id"`
+	PrincipalType  string `json:"principal_type"`
+	PrincipalId    int64  `json:"principal_id"`
+	PermissionCode string `json:"permission_code"`
+	ScopeType      string `json:"scope_type"`
+	ScopeId        int64  `json:"scope_id"`
+	Effect         string `json:"effect"`
+	Reason         string `json:"reason"`
+	GrantedByType  string `json:"granted_by_type"`
+	GrantedById    int64  `json:"granted_by_id"`
+	ExpiresAt      string `json:"expires_at,optional"`
+	CreatedAt      string `json:"created_at"`
+}
+
+type PermissionManageReq struct {
+	Code        string `json:"code"`
+	ServiceCode string `json:"service_code,optional"`
+	Name        string `json:"name,optional"`
+	Description string `json:"description,optional"`
+}
+
 type ServicePermissionItem struct {
 	Code        string `json:"code"`
 	Name        string `json:"name,optional"`
@@ -127,9 +235,11 @@ type ServiceIdentityGrantItem struct {
 }
 
 type ServiceIdentityRegistration struct {
-	ServiceName string                     `json:"service_name,optional"`
-	AllowedApis []string                   `json:"allowed_apis,optional"`
-	Grants      []ServiceIdentityGrantItem `json:"grants,optional"`
+	ServiceName         string                     `json:"service_name,optional"`
+	AllowedApis         []string                   `json:"allowed_apis,optional"`
+	Grants              []ServiceIdentityGrantItem `json:"grants,optional"`
+	CredentialToken     string                     `json:"credential_token,optional"`
+	CredentialExpiresAt string                     `json:"credential_expires_at,optional"`
 }
 
 type RegisterServicePermissionsReq struct {
@@ -175,10 +285,29 @@ type UserEffectivePermissionsResp struct {
 	Data UserEffectivePermissionsData `json:"data"`
 }
 
+type PermissionAssignmentReq struct {
+	TargetType string `json:"target_type"`
+	TargetId   int64  `json:"target_id"`
+	Permission string `json:"permission"`
+	ScopeType  string `json:"scope_type,optional"`
+	ScopeId    int64  `json:"scope_id,optional"`
+	Effect     string `json:"effect,optional"`
+	Reason     string `json:"reason,optional"`
+	ExpiresAt  string `json:"expires_at,optional"`
+}
+
 type ProblemRoleReq struct {
 	UserId    int64  `json:"user_id"`
 	ProblemId int64  `json:"problem_id"`
 	Role      string `json:"role"`
+}
+
+type ResourceEdgeReq struct {
+	ParentType string `json:"parent_type"`
+	ParentId   int64  `json:"parent_id"`
+	ChildType  string `json:"child_type"`
+	ChildId    int64  `json:"child_id"`
+	Relation   string `json:"relation,optional"`
 }
 
 type ProfileData struct {
@@ -211,12 +340,71 @@ type RegisterResp struct {
 	Data RegisterData `json:"data,optional"`
 }
 
+type ResourceEdgeItem struct {
+	Id         int64  `json:"id"`
+	ParentType string `json:"parent_type"`
+	ParentId   int64  `json:"parent_id"`
+	ChildType  string `json:"child_type"`
+	ChildId    int64  `json:"child_id"`
+	Relation   string `json:"relation"`
+	CreatedAt  string `json:"created_at"`
+}
+
+type ResourceTypeManageReq struct {
+	Code        string `json:"code"`
+	ServiceCode string `json:"service_code,optional"`
+	Name        string `json:"name,optional"`
+	Description string `json:"description,optional"`
+}
+
+type ResourceTypeItem struct {
+	Code        string `json:"code"`
+	ServiceCode string `json:"service_code"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	CreatedAt   string `json:"created_at"`
+}
+
 type RoleItem struct {
 	Id          int64  `json:"id"`
 	Name        string `json:"name"`
 	ServiceCode string `json:"service_code"`
 	Description string `json:"description"`
 	IsSystem    bool   `json:"is_system"`
+}
+
+type RoleBindingReq struct {
+	TargetType string `json:"target_type"`
+	TargetId   int64  `json:"target_id"`
+	Role       string `json:"role"`
+	ScopeType  string `json:"scope_type,optional"`
+	ScopeId    int64  `json:"scope_id,optional"`
+	ExpiresAt  string `json:"expires_at,optional"`
+}
+
+type RoleBindingItem struct {
+	Id            int64  `json:"id"`
+	PrincipalType string `json:"principal_type"`
+	PrincipalId   int64  `json:"principal_id"`
+	Role          string `json:"role"`
+	ScopeType     string `json:"scope_type"`
+	ScopeId       int64  `json:"scope_id"`
+	GrantedByType string `json:"granted_by_type"`
+	GrantedById   int64  `json:"granted_by_id"`
+	ExpiresAt     string `json:"expires_at,optional"`
+	CreatedAt     string `json:"created_at"`
+}
+
+type RoleManageReq struct {
+	Name        string `json:"name"`
+	ServiceCode string `json:"service_code,optional"`
+	Description string `json:"description,optional"`
+	IsSystem    bool   `json:"is_system,optional"`
+}
+
+type RolePermissionReq struct {
+	Role       string `json:"role"`
+	Permission string `json:"permission"`
 }
 
 type UserItem struct {
