@@ -1608,6 +1608,58 @@ fn release_install_planner_uses_release_manifest() {
 }
 
 #[test]
+fn release_install_planner_uses_package_source_override() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/judge-api/service.yaml"))
+            .unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/judge-api/release.yaml")).unwrap();
+    let request = ActionRequest::new(
+        "op-release-package-install",
+        "release.install",
+        [
+            ("service_id".to_string(), "judge-api".to_string()),
+            ("host_ip".to_string(), "10.77.0.2".to_string()),
+            (
+                "release_url".to_string(),
+                "D:/tmp/judge-api-release.zip".to_string(),
+            ),
+            ("release_checksum".to_string(), "sha256:abc123".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let operation = plan_action_request_with_releases(
+        &request,
+        std::slice::from_ref(&service),
+        std::slice::from_ref(&release),
+        &[],
+        &[],
+        None,
+    )
+    .expect("release package install operation");
+
+    assert_eq!(
+        operation
+            .request
+            .get("release_manifest")
+            .and_then(|value| value.get("source"))
+            .and_then(|value| value.get("url"))
+            .and_then(serde_json::Value::as_str),
+        Some("D:/tmp/judge-api-release.zip")
+    );
+    assert_eq!(
+        operation
+            .request
+            .get("release_checksum")
+            .and_then(serde_json::Value::as_str),
+        Some("sha256:abc123")
+    );
+}
+
+#[test]
 fn release_aware_planner_requires_release_manifest_when_releases_are_loaded() {
     let root = repo_root();
     let service =
@@ -3468,6 +3520,7 @@ fn local_release_package_loader_fetches_http_release_yaml() {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
             source_url: url.clone(),
+            expected_checksum: None,
             expected_manifest: Some(release),
         })
         .expect("http release package load");
@@ -3501,6 +3554,7 @@ fn local_release_package_loader_fetches_http_zip_release_package() {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
             source_url: url.clone(),
+            expected_checksum: None,
             expected_manifest: Some(release),
         })
         .expect("http zip release package load");
@@ -3527,6 +3581,7 @@ fn local_release_package_loader_fetches_local_zip_release_package() {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
             source_url: "gateway-release.zip".to_string(),
+            expected_checksum: None,
             expected_manifest: Some(release),
         })
         .expect("local zip release package load");
@@ -3550,6 +3605,7 @@ fn local_release_package_loader_rejects_archive_without_release_yaml() {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
             source_url: "missing-release.zip".to_string(),
+            expected_checksum: None,
             expected_manifest: Some(release),
         })
         .expect_err("archive without release.yaml should fail");
@@ -3569,8 +3625,7 @@ fn release_install_fails_on_release_package_checksum_mismatch() {
     let dir = tempdir().expect("release package tempdir");
     fs::write(dir.path().join("gateway-release.zip"), &package).expect("write release package");
     release.source.url = "gateway-release.zip".to_string();
-    release.source.checksum =
-        "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string();
+    release.source.checksum = String::new();
     let operation = release_install_operation_with_release(
         "op-release-package-checksum-mismatch",
         &service,
@@ -3585,6 +3640,16 @@ fn release_install_fails_on_release_package_checksum_mismatch() {
 
     let mut store = MemoryOrchestratorStore::new();
     store.put_operation(operation).expect("put operation");
+    let mut operation = store
+        .operation("op-release-package-checksum-mismatch")
+        .expect("stored operation")
+        .clone();
+    operation.request["release_checksum"] = serde_json::json!(
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    );
+    store
+        .put_operation(operation)
+        .expect("put patched operation");
     let err = OperationExecutor::with_runtime_provisioners_and_release_loader(
         &mut store,
         StaticEndpointProbe,
@@ -3627,6 +3692,7 @@ fn local_release_package_loader_rejects_zip_path_traversal() {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
             source_url: url,
+            expected_checksum: None,
             expected_manifest: Some(release),
         })
         .expect_err("unsafe zip release package should fail load");
@@ -3660,6 +3726,7 @@ fn local_release_package_loader_fails_on_http_error() {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
             source_url: url,
+            expected_checksum: None,
             expected_manifest: Some(release),
         })
         .expect_err("http release package error should fail load");

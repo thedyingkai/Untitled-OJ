@@ -1576,6 +1576,14 @@ pub fn release_install_operation_with_release(
             "gateway_node_id": install_options
                 .get("gateway_node_id")
                 .and_then(Value::as_str)
+                .unwrap_or(""),
+            "release_url": install_options
+                .get("release_url")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            "release_checksum": install_options
+                .get("release_checksum")
+                .and_then(Value::as_str)
                 .unwrap_or("")
         }),
         serde_json::json!({

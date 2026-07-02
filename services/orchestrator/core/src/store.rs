@@ -1153,6 +1153,7 @@ pub struct ReleasePackageLoadRequest {
     pub service_name: String,
     pub version: String,
     pub source_url: String,
+    pub expected_checksum: Option<String>,
     pub expected_manifest: Option<ServiceReleaseManifest>,
 }
 
@@ -2172,11 +2173,19 @@ fn sha256_checksum(body: &[u8]) -> String {
 
 fn expected_release_package_checksum(request: &ReleasePackageLoadRequest) -> Option<String> {
     request
-        .expected_manifest
-        .as_ref()
-        .map(|manifest| manifest.source.checksum.trim())
+        .expected_checksum
+        .as_deref()
+        .map(str::trim)
         .filter(|checksum| !checksum.is_empty())
         .map(ToString::to_string)
+        .or_else(|| {
+            request
+                .expected_manifest
+                .as_ref()
+                .map(|manifest| manifest.source.checksum.trim())
+                .filter(|checksum| !checksum.is_empty())
+                .map(ToString::to_string)
+        })
 }
 
 fn release_package_source_is_yaml(source_url: &str) -> bool {
@@ -3344,11 +3353,13 @@ impl<
         &mut self,
         operation_id: &str,
         release: &ServiceReleaseManifest,
+        expected_checksum: Option<String>,
     ) -> Result<ReleasePackageLoadResult> {
         let request = ReleasePackageLoadRequest {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
             source_url: release.source.url.clone(),
+            expected_checksum,
             expected_manifest: Some(release.clone()),
         };
         let result = self.release_package_loader.load_release_package(&request)?;
@@ -4101,14 +4112,19 @@ impl<
                 let mut release_routes = Vec::new();
                 let mut api_surface_count = 0_usize;
                 let release_package_load = match release.as_ref() {
-                    Some(release) => {
-                        Some(self.load_release_package(&operation.operation_id, release)?)
-                    }
+                    Some(release) => Some(self.load_release_package(
+                        &operation.operation_id,
+                        release,
+                        release_install_checksum(operation),
+                    )?),
                     None => None,
                 };
                 if let Some(release) = release.as_ref() {
-                    self.store
-                        .upsert_service_release(service_release_record(release)?)?;
+                    let mut release_record = service_release_record(release)?;
+                    if let Some(checksum) = release_install_checksum(operation) {
+                        release_record.checksum = checksum;
+                    }
+                    self.store.upsert_service_release(release_record)?;
                     self.clear_release_resource_registries_for_install(&release.service_name)?;
                     let api_surfaces = service_api_surfaces_from_release(release)?;
                     for api in &api_surfaces {
@@ -5488,6 +5504,16 @@ fn release_manifest_from_operation(
             .map_err(OrchestratorError::Json),
         None => Ok(None),
     }
+}
+
+fn release_install_checksum(operation: &Operation) -> Option<String> {
+    operation
+        .request
+        .get("release_checksum")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn release_install_previous_state_from_operation(

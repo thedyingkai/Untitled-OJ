@@ -289,11 +289,14 @@ pub fn plan_action_request_with_releases(
             if releases.is_empty() {
                 release_install_operation(&request.operation_id, manifest, &installed)
             } else {
-                let release = find_release(releases, service_id)?;
+                let release = release_with_request_source_overrides(
+                    find_release(releases, service_id)?.clone(),
+                    request,
+                );
                 release_install_operation_with_release(
                     &request.operation_id,
                     manifest,
-                    Some(release),
+                    Some(&release),
                     &installed,
                     request.field("host_ip").unwrap_or("127.0.0.1"),
                     request.field("endpoint"),
@@ -555,6 +558,11 @@ fn release_install_options(request: &ActionRequest) -> Value {
             .or_else(|| request.field("existing_endpoint_running"))
             .is_some_and(truthy_field),
         "gateway_node_id": request.field("gateway_node_id").unwrap_or(""),
+        "release_url": request
+            .field("release_url")
+            .or_else(|| request.field("source_url"))
+            .unwrap_or(""),
+        "release_checksum": request.field("release_checksum").unwrap_or(""),
     })
 }
 
@@ -563,6 +571,21 @@ fn truthy_field(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+fn release_with_request_source_overrides(
+    mut release: ServiceReleaseManifest,
+    request: &ActionRequest,
+) -> ServiceReleaseManifest {
+    if let Some(source_url) = request
+        .field("release_url")
+        .or_else(|| request.field("source_url"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        release.source.url = source_url.to_string();
+    }
+    release
 }
 
 fn registry_resource_delete_operation(

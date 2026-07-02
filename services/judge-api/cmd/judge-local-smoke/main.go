@@ -1,13 +1,16 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -52,6 +55,9 @@ type smokeConfig struct {
 	authMode         string
 	installMode      string
 	storageBackend   string
+	releaseSource    string
+	storagePackage   string
+	judgeAPIPackage  string
 	serviceToken     string
 	workerToken      string
 	gatewayAdminJWT  string
@@ -66,12 +72,19 @@ type smokeConfig struct {
 	cleanStreams     bool
 	lastTaskID       string
 	lastResultID     string
+	releasePackages  map[string]releasePackageInfo
 	authStubCalls    *authCallRecorder
 }
 
 type endpoint struct {
 	host string
 	port int
+}
+
+type releasePackageInfo struct {
+	path      string
+	sourceURL string
+	checksum  string
 }
 
 func (e endpoint) baseURL() string {
@@ -100,15 +113,18 @@ func (e stepError) Unwrap() error {
 
 func main() {
 	var (
-		redisURL       = flag.String("redis", envDefault("OJOS_REAL_REDIS_URL", envDefault("REDIS_URL", "redis://127.0.0.1:6379/0")), "Redis URL for live smoke")
-		controlPlane   = flag.String("control-plane", envDefault("OJOS_SMOKE_CONTROL_PLANE", "stub"), "control plane mode: stub or real")
-		authMode       = flag.String("auth", envDefault("OJOS_SMOKE_AUTH", "stub"), "auth mode: stub or real")
-		installMode    = flag.String("install-mode", envDefault("OJOS_SMOKE_INSTALL_MODE", ""), "install mode: seed or release-install")
-		mode           = flag.String("mode", envDefault("OJOS_JUDGE_SMOKE_MODE", ""), "smoke matrix mode: beta-local")
-		storageBackend = flag.String("storage-backend", envDefault("OJOS_SMOKE_STORAGE_BACKEND", "local"), "storage backend for storage-service: local or minio")
-		workRoot       = flag.String("work-root", "", "smoke workspace; defaults to <repo>/.smoke/judge-local")
-		timeout        = flag.Duration("timeout", 90*time.Second, "overall smoke timeout")
-		cleanStreams   = flag.Bool("clean-streams", true, "delete judge task/result stream keys before the smoke")
+		redisURL        = flag.String("redis", envDefault("OJOS_REAL_REDIS_URL", envDefault("REDIS_URL", "redis://127.0.0.1:6379/0")), "Redis URL for live smoke")
+		controlPlane    = flag.String("control-plane", envDefault("OJOS_SMOKE_CONTROL_PLANE", "stub"), "control plane mode: stub or real")
+		authMode        = flag.String("auth", envDefault("OJOS_SMOKE_AUTH", "stub"), "auth mode: stub or real")
+		installMode     = flag.String("install-mode", envDefault("OJOS_SMOKE_INSTALL_MODE", ""), "install mode: seed or release-install")
+		mode            = flag.String("mode", envDefault("OJOS_JUDGE_SMOKE_MODE", ""), "smoke matrix mode: beta-local")
+		storageBackend  = flag.String("storage-backend", envDefault("OJOS_SMOKE_STORAGE_BACKEND", "local"), "storage backend for storage-service: local or minio")
+		releaseSource   = flag.String("release-source", envDefault("OJOS_SMOKE_RELEASE_SOURCE", ""), "release source for release.install: tree or package")
+		storagePackage  = flag.String("storage-release-package", envDefault("OJOS_STORAGE_RELEASE_PACKAGE", ""), "optional storage-service release package zip path")
+		judgeAPIPackage = flag.String("judge-api-release-package", envDefault("OJOS_JUDGE_API_RELEASE_PACKAGE", ""), "optional judge-api release package zip path")
+		workRoot        = flag.String("work-root", "", "smoke workspace; defaults to <repo>/.smoke/judge-local")
+		timeout         = flag.Duration("timeout", 90*time.Second, "overall smoke timeout")
+		cleanStreams    = flag.Bool("clean-streams", true, "delete judge task/result stream keys before the smoke")
 	)
 	flag.Parse()
 
@@ -146,6 +162,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[FAIL] storage backend\nreason: unsupported storage backend %q\n", normalizedStorageBackend)
 		os.Exit(1)
 	}
+	normalizedReleaseSource := normalizeReleaseSource(*releaseSource)
+	if normalizedReleaseSource == "" {
+		if normalizedMatrixMode == "beta-local" {
+			normalizedReleaseSource = "package"
+		} else {
+			normalizedReleaseSource = "tree"
+		}
+	}
+	if normalizedReleaseSource != "tree" && normalizedReleaseSource != "package" {
+		fmt.Fprintf(os.Stderr, "[FAIL] release source\nreason: unsupported release source %q\n", normalizedReleaseSource)
+		os.Exit(1)
+	}
 	orchestratorEndpoint, authEndpoint, storageEndpoint, gatewayEndpoint, judgeAPIEndpoint, err := allocateSmokeEndpoints()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[FAIL] allocate smoke ports\nreason: %v\n", err)
@@ -172,6 +200,9 @@ func main() {
 		controlPlaneMode: normalizeSmokeMode(*controlPlane),
 		authMode:         normalizeSmokeMode(*authMode),
 		storageBackend:   normalizedStorageBackend,
+		releaseSource:    normalizedReleaseSource,
+		storagePackage:   *storagePackage,
+		judgeAPIPackage:  *judgeAPIPackage,
 		serviceToken:     smokeServiceToken,
 		workerToken:      smokeWorkerToken,
 		orchestrator:     orchestratorEndpoint,
@@ -248,6 +279,13 @@ func run(ctx context.Context, cfg smokeConfig) error {
 	}
 	if err := prepareWorkRoot(cfg.workRoot); err != nil {
 		return fail("prepare smoke workspace", err)
+	}
+	if cfg.releaseSource == "package" {
+		packages, err := prepareReleasePackages(cfg)
+		if err != nil {
+			return fail("release package prepared", err)
+		}
+		cfg.releasePackages = packages
 	}
 	storageCfg, err := writeStorageConfig(cfg)
 	if err != nil {
@@ -901,6 +939,9 @@ func installStorageRelease(ctx context.Context, cfg smokeConfig) (string, error)
 		"execute_service_driver":   true,
 		"external_service_running": false,
 	}
+	if err := addRequiredReleasePackageFields(body, cfg, storageService); err != nil {
+		return "", fail("release.install storage-service", err)
+	}
 	var installResp struct {
 		ActionResult struct {
 			ActionID    string `json:"action_id"`
@@ -918,6 +959,9 @@ func installStorageRelease(ctx context.Context, cfg smokeConfig) (string, error)
 	}
 	if !strings.EqualFold(strings.ReplaceAll(installResp.ActionResult.Status, "_", ""), "succeeded") {
 		return "", fail("release.install storage-service", fmt.Errorf("unexpected status %q operation_id=%s error=%s message=%s", installResp.ActionResult.Status, installResp.ActionResult.OperationID, installResp.ActionResult.Error, installResp.ActionResult.Message))
+	}
+	if err := verifyReleasePackageInstall(ctx, cfg, "op-smoke-storage-release-install", storageService); err != nil {
+		return "", err
 	}
 	ok("release.install storage-service")
 
@@ -946,6 +990,11 @@ func installJudgeCallerIdentities(ctx context.Context, cfg smokeConfig) error {
 			"execute_service_driver":   false,
 			"external_service_running": true,
 		}
+		if item.serviceName == judgeAPIService {
+			if err := addRequiredReleasePackageFields(body, cfg, item.serviceName); err != nil {
+				return fail("release.install service identities", err)
+			}
+		}
 		var installResp struct {
 			ActionResult struct {
 				ActionID    string `json:"action_id"`
@@ -963,6 +1012,11 @@ func installJudgeCallerIdentities(ctx context.Context, cfg smokeConfig) error {
 		}
 		if !strings.EqualFold(strings.ReplaceAll(installResp.ActionResult.Status, "_", ""), "succeeded") {
 			return fail("release.install service identities", fmt.Errorf("%s unexpected status %q operation_id=%s error=%s message=%s", item.serviceName, installResp.ActionResult.Status, installResp.ActionResult.OperationID, installResp.ActionResult.Error, installResp.ActionResult.Message))
+		}
+		if item.serviceName == judgeAPIService {
+			if err := verifyReleasePackageInstall(ctx, cfg, "op-smoke-"+item.serviceName+"-identity-install", item.serviceName); err != nil {
+				return err
+			}
 		}
 	}
 	ok("release.install service identities: judge-api and judge-worker")
@@ -2535,6 +2589,234 @@ func noProxyEnv(overrides map[string]string) map[string]string {
 	return out
 }
 
+func prepareReleasePackages(cfg smokeConfig) (map[string]releasePackageInfo, error) {
+	packagesDir := filepath.Join(cfg.workRoot, "packages")
+	if err := os.MkdirAll(packagesDir, 0o755); err != nil {
+		return nil, err
+	}
+	specs := []struct {
+		serviceName string
+		outputPath  string
+	}{
+		{serviceName: storageService, outputPath: cfg.storagePackage},
+		{serviceName: judgeAPIService, outputPath: cfg.judgeAPIPackage},
+	}
+	packages := make(map[string]releasePackageInfo, len(specs))
+	for _, spec := range specs {
+		outputPath := strings.TrimSpace(spec.outputPath)
+		if outputPath == "" {
+			outputPath = filepath.Join(packagesDir, spec.serviceName+"-release.zip")
+		}
+		info, err := buildReleasePackage(cfg.repoRoot, spec.serviceName, outputPath)
+		if err != nil {
+			return nil, err
+		}
+		packages[spec.serviceName] = info
+		ok("release package prepared: %s checksum=%s", spec.serviceName, info.checksum)
+	}
+	return packages, nil
+}
+
+func buildReleasePackage(repoRoot string, serviceName string, outputPath string) (releasePackageInfo, error) {
+	serviceDir := filepath.Join(repoRoot, "services", serviceName)
+	releasePath := filepath.Join(serviceDir, "release.yaml")
+	if _, err := os.Stat(releasePath); err != nil {
+		return releasePackageInfo{}, err
+	}
+	absOutput, err := filepath.Abs(outputPath)
+	if err != nil {
+		return releasePackageInfo{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(absOutput), 0o755); err != nil {
+		return releasePackageInfo{}, err
+	}
+	relOutput, err := filepath.Rel(repoRoot, absOutput)
+	if err != nil {
+		return releasePackageInfo{}, err
+	}
+	if strings.HasPrefix(relOutput, ".."+string(filepath.Separator)) || relOutput == ".." || filepath.IsAbs(relOutput) {
+		return releasePackageInfo{}, fmt.Errorf("release package output must be under repo root for local loader: %s", absOutput)
+	}
+	sourceURL := filepath.ToSlash(relOutput)
+	releaseYAML, err := os.ReadFile(releasePath)
+	if err != nil {
+		return releasePackageInfo{}, err
+	}
+	rewrittenReleaseYAML := rewriteReleaseSource(string(releaseYAML), sourceURL)
+
+	out, err := os.Create(absOutput)
+	if err != nil {
+		return releasePackageInfo{}, err
+	}
+	zipWriter := zip.NewWriter(out)
+	closeErr := func() error {
+		if err := zipWriter.Close(); err != nil {
+			_ = out.Close()
+			return err
+		}
+		return out.Close()
+	}
+	if err := addZipBytes(zipWriter, filepath.ToSlash(filepath.Join(serviceName, "release.yaml")), []byte(rewrittenReleaseYAML)); err != nil {
+		_ = out.Close()
+		return releasePackageInfo{}, err
+	}
+	err = filepath.WalkDir(serviceDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == serviceDir {
+			return nil
+		}
+		rel, err := filepath.Rel(serviceDir, path)
+		if err != nil {
+			return err
+		}
+		if shouldSkipReleasePackageEntry(rel, entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if filepath.ToSlash(rel) == "release.yaml" {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		entryName := filepath.ToSlash(filepath.Join(serviceName, rel))
+		return addZipBytes(zipWriter, entryName, data)
+	})
+	if err != nil {
+		_ = out.Close()
+		return releasePackageInfo{}, err
+	}
+	if err := closeErr(); err != nil {
+		return releasePackageInfo{}, err
+	}
+	body, err := os.ReadFile(absOutput)
+	if err != nil {
+		return releasePackageInfo{}, err
+	}
+	sum := sha256.Sum256(body)
+	return releasePackageInfo{
+		path:      absOutput,
+		sourceURL: sourceURL,
+		checksum:  fmt.Sprintf("sha256:%x", sum),
+	}, nil
+}
+
+func rewriteReleaseSource(text string, sourceURL string) string {
+	lines := strings.Split(text, "\n")
+	inSource := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "source:" {
+			inSource = true
+			continue
+		}
+		if inSource && trimmed != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			inSource = false
+		}
+		if !inSource {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "url:"):
+			lines[i] = "  url: " + yamlString(sourceURL)
+		case strings.HasPrefix(trimmed, "checksum:"):
+			lines[i] = `  checksum: ""`
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func addZipBytes(writer *zip.Writer, name string, data []byte) error {
+	header := &zip.FileHeader{
+		Name:   filepath.ToSlash(name),
+		Method: zip.Deflate,
+	}
+	header.SetMode(0o644)
+	fileWriter, err := writer.CreateHeader(header)
+	if err != nil {
+		return err
+	}
+	_, err = fileWriter.Write(data)
+	return err
+}
+
+func shouldSkipReleasePackageEntry(rel string, entry fs.DirEntry) bool {
+	name := entry.Name()
+	if name == "" {
+		return true
+	}
+	switch name {
+	case ".git", ".smoke", "node_modules", "target", "dist", "build", ".next", ".turbo", ".cache", "tmp", "coverage":
+		return true
+	}
+	rel = filepath.ToSlash(rel)
+	return strings.HasPrefix(rel, ".smoke/")
+}
+
+func addRequiredReleasePackageFields(body map[string]any, cfg smokeConfig, serviceName string) error {
+	if cfg.releaseSource != "package" {
+		return nil
+	}
+	info, found := cfg.releasePackages[serviceName]
+	if !found {
+		return fmt.Errorf("release package for %s is not prepared", serviceName)
+	}
+	body["release_url"] = info.sourceURL
+	body["release_checksum"] = info.checksum
+	return nil
+}
+
+func verifyReleasePackageInstall(ctx context.Context, cfg smokeConfig, operationID string, serviceName string) error {
+	if cfg.releaseSource != "package" {
+		return nil
+	}
+	info, found := cfg.releasePackages[serviceName]
+	if !found {
+		return fail("release package install", fmt.Errorf("release package for %s is not prepared", serviceName))
+	}
+	var resp struct {
+		Logs []struct {
+			StepID string         `json:"step_id"`
+			Data   map[string]any `json:"data"`
+		} `json:"logs"`
+	}
+	target := cfg.orchestrator.baseURL() + "/operations/" + operationID + "/logs"
+	if err := doJSONWithHeaders(ctx, http.MethodGet, target, nil, map[string]string{}, &resp); err != nil {
+		return fail("release package install", err)
+	}
+	for _, log := range resp.Logs {
+		if log.StepID != "release-package:"+serviceName {
+			continue
+		}
+		status, _ := log.Data["status"].(string)
+		sourceURL, _ := log.Data["source_url"].(string)
+		checksum, _ := log.Data["checksum"].(string)
+		manifestLoaded, _ := log.Data["manifest_loaded"].(bool)
+		if status == "loaded" && sourceURL == info.sourceURL && checksum == info.checksum && manifestLoaded {
+			ok("release package loaded: %s", serviceName)
+			ok("release package checksum verified: %s", serviceName)
+			ok("release.install from package: %s path=%s", serviceName, info.path)
+			return nil
+		}
+	}
+	return fail("release package install", fmt.Errorf("%s package load log not found or mismatched: %#v", serviceName, resp.Logs))
+}
+
 func normalizeSmokeMode(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
@@ -2568,6 +2850,20 @@ func normalizeStorageBackend(value string) string {
 		return "local"
 	case "minio":
 		return "minio"
+	default:
+		return value
+	}
+}
+
+func normalizeReleaseSource(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "":
+		return ""
+	case "tree", "source-tree", "source":
+		return "tree"
+	case "package", "archive":
+		return "package"
 	default:
 		return value
 	}
@@ -2658,7 +2954,11 @@ func printBetaMatrix(parent context.Context, cfg smokeConfig) {
 	ok("nodes created through API")
 	ok("auth real")
 	ok("service identity allow/deny")
-	skip("release package install in smoke: source tree release.yaml")
+	if cfg.releaseSource == "package" {
+		ok("release package install in smoke")
+	} else {
+		skip("release package install in smoke: source tree release.yaml")
+	}
 	ok("release.install storage-service")
 	ok("release.install service_start storage-service local-process")
 	ok("gateway reload orchestrator-driven")
