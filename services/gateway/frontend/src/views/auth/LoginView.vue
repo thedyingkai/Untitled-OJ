@@ -51,7 +51,7 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <main class="auth-page">
+  <main class="auth-page" data-testid="login-page">
     <PageCard class="auth-card">
       <NSpace vertical size="large">
         <div class="auth-heading">
@@ -66,6 +66,7 @@ async function submit(): Promise<void> {
             <NInput
               v-model:value="form.username"
               autocomplete="username"
+              data-testid="login-username"
               placeholder="请输入用户名"
               size="large"
             />
@@ -75,13 +76,21 @@ async function submit(): Promise<void> {
               v-model:value="form.password"
               type="password"
               autocomplete="current-password"
+              data-testid="login-password"
               placeholder="密码"
               show-password-on="click"
               size="large"
               @keydown.enter.prevent="submit"
             />
           </NFormItem>
-          <NButton type="primary" block size="large" :loading="auth.loading" @click="submit">
+          <NButton
+            type="primary"
+            block
+            size="large"
+            :loading="auth.loading"
+            data-testid="login-submit"
+            @click="submit"
+          >
             登录
           </NButton>
         </NForm>

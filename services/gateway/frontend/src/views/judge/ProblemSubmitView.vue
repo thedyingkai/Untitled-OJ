@@ -120,7 +120,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="submit-page">
+  <div class="submit-page" data-testid="submission-page">
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && !problem" />
     <EmptyView v-else-if="!loading && !error && !problem" description="未找到题目" />
@@ -155,7 +155,13 @@ onMounted(() => {
                 <CodeEditor v-model="code" :language="language" :max-length="262144" />
               </NFormItem>
               <NSpace justify="end">
-                <NButton type="primary" :disabled="!canSubmit" :loading="submitting" @click="submit">
+                <NButton
+                  type="primary"
+                  :disabled="!canSubmit"
+                  :loading="submitting"
+                  data-testid="submit-solution"
+                  @click="submit"
+                >
                   提交
                 </NButton>
               </NSpace>

@@ -147,7 +147,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="problem-list-page">
+  <div class="problem-list-page" data-testid="problem-list-page">
     <OjosPageHeader
       title="题目"
       description="按难度、可见性和标签筛选题目，快速进入题面或提交入口。"

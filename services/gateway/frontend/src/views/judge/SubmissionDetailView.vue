@@ -147,7 +147,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="submission-detail-page">
+  <div class="submission-detail-page" data-testid="result-page">
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && !submission" />
     <EmptyView v-else-if="!loading && !error && !submission" description="未找到提交" />

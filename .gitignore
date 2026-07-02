@@ -14,6 +14,7 @@ desktop.ini
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # Logs and local tokens
 *.log
@@ -89,6 +90,8 @@ pnpm-debug.log*
 lerna-debug.log*
 dist-ssr
 *.local
+playwright-report/
+test-results/
 
 # OJOS packages and release artifacts
 *.ojosmod

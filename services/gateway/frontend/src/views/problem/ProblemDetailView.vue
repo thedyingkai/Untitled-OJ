@@ -61,7 +61,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="problem-detail-page">
+  <div class="problem-detail-page" data-testid="problem-detail-page">
     <ApiErrorAlert :error="error" />
     <LoadingView v-if="loading && !problem" />
     <EmptyView v-else-if="!loading && !error && !problem" description="未找到题目" />

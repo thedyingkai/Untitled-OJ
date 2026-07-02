@@ -192,6 +192,19 @@ jobs:
           npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
           npm audit --registry=https://registry.npmjs.org --audit-level=high
           npm run build
+      - name: Gateway frontend browser E2E
+        working-directory: services/gateway/frontend
+        run: |
+          npm run test:e2e:install
+          npm run test:e2e
+      - name: Upload gateway frontend E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-frontend-e2e
+          path: |
+            services/gateway/frontend/playwright-report
+            services/gateway/frontend/test-results
 
   compose-policy:
     name: Docker Compose production policy
