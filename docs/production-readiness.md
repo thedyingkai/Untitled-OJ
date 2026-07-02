@@ -6,9 +6,9 @@ This matrix separates proven gates, local drill evidence, and newly configured d
 
 | Capability | Gate | Status | Evidence |
 | --- | --- | --- | --- |
-| Redis live integration | ci | passed | Orchestrator CI: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638537`. |
-| MinIO live integration | ci | passed | Orchestrator CI: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638537`. |
-| Docker E2E | ci | passed | Orchestrator Docker E2E: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28611638574`. |
+| Redis live integration | ci | passed | Orchestrator CI: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28621889030`. |
+| MinIO live integration | ci | passed | Orchestrator CI: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28621889030`. |
+| Docker E2E | ci | passed | Orchestrator Docker E2E: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28621889035`. |
 | nsjail verdict matrix | ci | passed | Strict judge-worker nsjail live tests require real nsjail. |
 | sandbox hardening | ci | passed | seccomp policy, mount whitelist, cgroup policy, runtime lock, and live nsjail tests. |
 | staging backup/restore/rollback | nightly | pending-first-run; local passed | `deploy/ops/staging-drill.sh`, `Staging Drill` workflow. Local real restore verified: `artifacts/staging-drill-local-10/manifest.json`. |
