@@ -198,24 +198,55 @@ pub async fn run_case_in_sandbox(
     source_path: &Path,
     submission_dir: &Path,
     case_dir: &Path,
-    _stdin_path: &Path,
+    stdin_path: &Path,
     stdout_path: &Path,
     stderr_path: &Path,
     limit: &LimitConfig,
 ) -> Result<SandboxOutput> {
-    fs::create_dir_all(case_dir).await?;
+    run_language_program_in_sandbox(
+        lang,
+        source_path,
+        submission_dir,
+        case_dir,
+        Some(stdin_path),
+        stdout_path,
+        stderr_path,
+        limit,
+        &[],
+    )
+    .await
+}
+
+pub async fn run_language_program_in_sandbox(
+    lang: &LanguageConfig,
+    source_path: &Path,
+    program_dir: &Path,
+    work_dir: &Path,
+    stdin_path: Option<&Path>,
+    stdout_path: &Path,
+    stderr_path: &Path,
+    limit: &LimitConfig,
+    extra_args: &[String],
+) -> Result<SandboxOutput> {
+    fs::create_dir_all(work_dir).await?;
+    let inside_stdin = match stdin_path {
+        Some(path) => inside_work_file(path)?,
+        None => PathBuf::from("/dev/null"),
+    };
+    let inside_stdout = inside_work_file(stdout_path)?;
+    let inside_stderr = inside_work_file(stderr_path)?;
 
     if lang.exe_file.is_empty() {
         let source_name = source_path
             .file_name()
             .ok_or_else(|| anyhow!("source path has no file name"))?;
 
-        fs::copy(source_path, case_dir.join(source_name))
+        fs::copy(source_path, work_dir.join(source_name))
             .await
-            .context("copy script source to case dir failed")?;
+            .context("copy script source to work dir failed")?;
 
         let inside_source = PathBuf::from("/work").join(source_name);
-        let run_args: Vec<String> = lang
+        let mut run_args: Vec<String> = lang
             .run
             .args
             .iter()
@@ -229,6 +260,15 @@ pub async fn run_case_in_sandbox(
                 )
             })
             .collect();
+        run_args.extend(extra_args.iter().map(|arg| {
+            render_run_arg(
+                arg,
+                &inside_source,
+                Path::new(""),
+                Path::new("/work"),
+                limit.memory_mb,
+            )
+        }));
 
         let run_command = render_arg(
             &lang.run.command,
@@ -239,12 +279,15 @@ pub async fn run_case_in_sandbox(
 
         let shell = shell_command(&run_command, &run_args);
         let shell = format!(
-            "{} < /work/stdin.txt > /work/stdout.txt 2> /work/stderr.txt",
-            shell
+            "{} < {} > {} 2> {}",
+            shell,
+            shell_escape(&inside_stdin.to_string_lossy()),
+            shell_escape(&inside_stdout.to_string_lossy()),
+            shell_escape(&inside_stderr.to_string_lossy())
         );
 
         let output = run_nsjail_shell(
-            case_dir,
+            work_dir,
             &shell,
             None,
             None,
@@ -259,8 +302,8 @@ pub async fn run_case_in_sandbox(
         return attach_case_output(output, stdout_path, stderr_path).await;
     }
 
-    let build_exe = submission_dir.join("build").join(&lang.exe_file);
-    let case_exe = case_dir.join(&lang.exe_file);
+    let build_exe = program_dir.join("build").join(&lang.exe_file);
+    let case_exe = work_dir.join(&lang.exe_file);
 
     fs::copy(&build_exe, &case_exe)
         .await
@@ -276,7 +319,7 @@ pub async fn run_case_in_sandbox(
     }
 
     let inside_exe = PathBuf::from("/work").join(&lang.exe_file);
-    let run_args: Vec<String> = lang
+    let mut run_args: Vec<String> = lang
         .run
         .args
         .iter()
@@ -290,6 +333,15 @@ pub async fn run_case_in_sandbox(
             )
         })
         .collect();
+    run_args.extend(extra_args.iter().map(|arg| {
+        render_run_arg(
+            arg,
+            Path::new(""),
+            &inside_exe,
+            Path::new("/work"),
+            limit.memory_mb,
+        )
+    }));
 
     let run_command = render_arg(
         &lang.run.command,
@@ -300,12 +352,15 @@ pub async fn run_case_in_sandbox(
 
     let shell = shell_command(&run_command, &run_args);
     let shell = format!(
-        "{} < /work/stdin.txt > /work/stdout.txt 2> /work/stderr.txt",
-        shell
+        "{} < {} > {} 2> {}",
+        shell,
+        shell_escape(&inside_stdin.to_string_lossy()),
+        shell_escape(&inside_stdout.to_string_lossy()),
+        shell_escape(&inside_stderr.to_string_lossy())
     );
 
     let output = run_nsjail_shell(
-        case_dir,
+        work_dir,
         &shell,
         None,
         None,
@@ -318,6 +373,13 @@ pub async fn run_case_in_sandbox(
     .await?;
 
     attach_case_output(output, stdout_path, stderr_path).await
+}
+
+fn inside_work_file(path: &Path) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("path has no file name: {}", path.display()))?;
+    Ok(PathBuf::from("/work").join(file_name))
 }
 
 async fn run_nsjail_shell(

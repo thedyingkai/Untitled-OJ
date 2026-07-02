@@ -1,13 +1,19 @@
-use anyhow::{Context, Result};
-use std::path::Path;
+use anyhow::{Context, Result, anyhow};
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 
 use crate::checker::{default_trim_equal, truncate_message};
-use crate::config::LanguagesConfig;
-use crate::problem_package::{CaseRecord, load_problem_package};
+use crate::config::{LanguageConfig, LanguagesConfig};
+use crate::problem_package::{
+    CaseRecord, ComponentConfig, LimitConfig, LoadedProblemPackage, load_problem_package,
+};
 use crate::result::{ResultCase, ResultFile};
-use crate::sandbox::{SandboxStatus, compile_in_sandbox, run_case_in_sandbox, write_text};
+use crate::sandbox::{
+    SandboxOutput, SandboxStatus, compile_in_sandbox, run_case_in_sandbox,
+    run_language_program_in_sandbox, write_text,
+};
 
 pub async fn judge_artifacts(
     languages: Arc<LanguagesConfig>,
@@ -33,6 +39,8 @@ pub async fn judge_artifacts(
         });
     };
 
+    let components = prepare_components(languages.clone(), &package, result_dir).await?;
+
     if let Some(message) = compile_in_sandbox(lang, source_path, result_dir)
         .await
         .context("compile in sandbox failed")?
@@ -52,18 +60,24 @@ pub async fn judge_artifacts(
 
     let mut final_status = "ACCEPTED".to_string();
     let mut final_message = String::new();
-    let mut total_score = 0;
     let mut max_time_ms = 0;
     let mut max_memory_kb = 0;
     let mut case_results = Vec::new();
 
     for case in &package.cases {
-        let case_result =
-            run_one_artifact_case(lang, source_path, language, result_dir, &package, case).await?;
+        let case_result = run_one_artifact_case(
+            &languages,
+            lang,
+            source_path,
+            language,
+            result_dir,
+            &package,
+            &components,
+            case,
+        )
+        .await?;
 
-        if case_result.status == "ACCEPTED" {
-            total_score += case_result.score;
-        } else if final_status == "ACCEPTED" {
+        if case_result.status != "ACCEPTED" && final_status == "ACCEPTED" {
             final_status = case_result.status.clone();
             final_message = case_result.message.clone();
         }
@@ -73,6 +87,9 @@ pub async fn judge_artifacts(
 
         case_results.push(case_result);
     }
+
+    let total_score =
+        score_submission(&languages, result_dir, &package, &components, &case_results).await?;
 
     let result = ResultFile {
         submission_id,
@@ -88,12 +105,108 @@ pub async fn judge_artifacts(
     Ok(result)
 }
 
+#[derive(Debug, Clone)]
+struct PreparedComponents {
+    runner: Option<CustomComponentRuntime>,
+    checker: Option<CustomComponentRuntime>,
+    validator: Option<CustomComponentRuntime>,
+    scorer: Option<CustomComponentRuntime>,
+}
+
+#[derive(Debug, Clone)]
+struct CustomComponentRuntime {
+    kind: String,
+    config: ComponentConfig,
+    language: String,
+    source_path: PathBuf,
+    program_dir: PathBuf,
+}
+
+async fn prepare_components(
+    languages: Arc<LanguagesConfig>,
+    package: &LoadedProblemPackage,
+    result_dir: &Path,
+) -> Result<PreparedComponents> {
+    Ok(PreparedComponents {
+        runner: prepare_component(
+            languages.clone(),
+            package,
+            "runner",
+            &package.runner,
+            result_dir,
+        )
+        .await?,
+        checker: prepare_component(
+            languages.clone(),
+            package,
+            "checker",
+            &package.checker,
+            result_dir,
+        )
+        .await?,
+        validator: prepare_component(
+            languages.clone(),
+            package,
+            "validator",
+            &package.validator,
+            result_dir,
+        )
+        .await?,
+        scorer: prepare_component(languages, package, "scorer", &package.scorer, result_dir)
+            .await?,
+    })
+}
+
+async fn prepare_component(
+    languages: Arc<LanguagesConfig>,
+    package: &LoadedProblemPackage,
+    kind: &str,
+    config: &ComponentConfig,
+    result_dir: &Path,
+) -> Result<Option<CustomComponentRuntime>> {
+    if !config.is_custom() {
+        return Ok(None);
+    }
+
+    let language = config
+        .language()
+        .ok_or_else(|| anyhow!("custom {} component has no language", kind))?;
+    let Some(lang) = languages.get(&language) else {
+        return Err(anyhow!(
+            "custom {} component language is not configured: {}",
+            kind,
+            language
+        ));
+    };
+
+    let source_path = package.component_source_path(config)?;
+    let program_dir = result_dir.join("components").join(kind);
+    fs::create_dir_all(&program_dir).await?;
+
+    if let Some(message) = compile_in_sandbox(lang, &source_path, &program_dir)
+        .await
+        .with_context(|| format!("compile {} component failed", kind))?
+    {
+        return Err(anyhow!("compile {} component failed: {}", kind, message));
+    }
+
+    Ok(Some(CustomComponentRuntime {
+        kind: kind.to_string(),
+        config: config.clone(),
+        language,
+        source_path,
+        program_dir,
+    }))
+}
+
 async fn run_one_artifact_case(
-    lang: &crate::config::LanguageConfig,
+    languages: &LanguagesConfig,
+    lang: &LanguageConfig,
     source_path: &Path,
     language: &str,
     result_dir: &Path,
-    package: &crate::problem_package::LoadedProblemPackage,
+    package: &LoadedProblemPackage,
+    components: &PreparedComponents,
     case: &CaseRecord,
 ) -> Result<ResultCase> {
     let case_name = format!("{:03}", case.case_no);
@@ -118,113 +231,774 @@ async fn run_one_artifact_case(
         .with_context(|| format!("read input failed: {}", input_path.display()))?;
 
     fs::write(&stdin_path, input).await?;
+    make_world_readable(&stdin_path).await?;
+
+    let limit = package.limit_for(language, case);
+
+    if let Some(validator) = &components.validator {
+        if let Some(result) =
+            run_custom_validator(languages, validator, &case_dir, &input_path, &limit, case).await?
+        {
+            write_text(&checker_log_path, &result.message).await?;
+            return Ok(result.with_paths(stdout_path, stderr_path, checker_log_path));
+        }
+    }
+
+    let run_output = if let Some(runner) = &components.runner {
+        run_custom_runner(
+            languages,
+            runner,
+            source_path,
+            language,
+            lang,
+            result_dir,
+            &case_dir,
+            &input_path,
+            &answer_path,
+            &stdout_path,
+            &stderr_path,
+            &limit,
+        )
+        .await?
+    } else {
+        let sandbox_output = run_case_in_sandbox(
+            lang,
+            source_path,
+            result_dir,
+            &case_dir,
+            &stdin_path,
+            &stdout_path,
+            &stderr_path,
+            &limit,
+        )
+        .await
+        .context("run case in sandbox failed")?;
+        RunnerOutcome {
+            sandbox_output,
+            report: ComponentReport::default(),
+        }
+    };
+
+    let case_verdict = verdict_after_run(
+        &run_output.sandbox_output,
+        &run_output.report,
+        &stdout_path,
+        &answer_path,
+        &checker_log_path,
+        package,
+        components,
+        languages,
+        &case_dir,
+        &input_path,
+        &limit,
+        case,
+    )
+    .await?;
+
+    Ok(case_verdict.with_paths(stdout_path, stderr_path, checker_log_path))
+}
+
+#[derive(Debug, Clone, Default)]
+struct ComponentReport {
+    status: Option<String>,
+    score: Option<i32>,
+    message: Option<String>,
+    time_ms: Option<i32>,
+    memory_kb: Option<i32>,
+    accepted: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawComponentReport {
+    status: Option<String>,
+    verdict: Option<String>,
+    score: Option<i32>,
+    message: Option<String>,
+    time_ms: Option<i32>,
+    memory_kb: Option<i32>,
+    accepted: Option<bool>,
+}
+
+impl ComponentReport {
+    fn status_upper(&self) -> Option<String> {
+        self.status
+            .as_ref()
+            .map(|status| normalize_status(status))
+            .filter(|status| !status.is_empty())
+    }
+
+    fn accepted(&self) -> Option<bool> {
+        if let Some(accepted) = self.accepted {
+            return Some(accepted);
+        }
+        self.status_upper()
+            .map(|status| status == "ACCEPTED" || status == "OK")
+    }
+
+    fn message(&self) -> String {
+        self.message.clone().unwrap_or_default()
+    }
+}
+
+impl From<RawComponentReport> for ComponentReport {
+    fn from(raw: RawComponentReport) -> Self {
+        Self {
+            status: raw.status.or(raw.verdict),
+            score: raw.score,
+            message: raw.message,
+            time_ms: raw.time_ms,
+            memory_kb: raw.memory_kb,
+            accepted: raw.accepted,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RunnerOutcome {
+    sandbox_output: SandboxOutput,
+    report: ComponentReport,
+}
+
+#[derive(Debug)]
+struct CaseVerdict {
+    case_no: i32,
+    status: String,
+    score: i32,
+    time_ms: i32,
+    memory_kb: i32,
+    message: String,
+}
+
+impl CaseVerdict {
+    fn with_paths(
+        self,
+        stdout_path: PathBuf,
+        stderr_path: PathBuf,
+        checker_log_path: PathBuf,
+    ) -> ResultCase {
+        ResultCase {
+            case_no: self.case_no,
+            status: self.status,
+            score: self.score.clamp(0, 100),
+            time_ms: self.time_ms,
+            memory_kb: self.memory_kb,
+            stdout_path: path_string(&stdout_path),
+            stderr_path: path_string(&stderr_path),
+            checker_log_path: path_string(&checker_log_path),
+            message: self.message,
+        }
+    }
+}
+
+async fn verdict_after_run(
+    sandbox_output: &SandboxOutput,
+    runner_report: &ComponentReport,
+    stdout_path: &Path,
+    answer_path: &Path,
+    checker_log_path: &Path,
+    package: &LoadedProblemPackage,
+    components: &PreparedComponents,
+    languages: &LanguagesConfig,
+    case_dir: &Path,
+    input_path: &Path,
+    limit: &LimitConfig,
+    case: &CaseRecord,
+) -> Result<CaseVerdict> {
+    let mut verdict = verdict_from_sandbox(case, sandbox_output, runner_report);
+    if verdict.status != "ACCEPTED" {
+        write_text(checker_log_path, &verdict.message).await?;
+        return Ok(verdict);
+    }
+
+    if let Some(checker) = &components.checker {
+        verdict = run_custom_checker(
+            languages,
+            checker,
+            case_dir,
+            input_path,
+            answer_path,
+            stdout_path,
+            checker_log_path,
+            limit,
+            case,
+            sandbox_output,
+        )
+        .await?;
+        return Ok(verdict);
+    }
+
+    if builtin_checker_is_runner_authoritative(&package.checker) {
+        if let Some(accepted) = runner_report.accepted() {
+            if accepted {
+                let score = runner_report.score.unwrap_or(case.score);
+                write_text(checker_log_path, "accepted by runner\n").await?;
+                verdict.score = score;
+                verdict.message = runner_report.message();
+                verdict.status = "ACCEPTED".to_string();
+            } else {
+                let message =
+                    first_non_empty(&[runner_report.message(), "wrong answer".to_string()]);
+                write_text(checker_log_path, &message).await?;
+                verdict.status = runner_report
+                    .status_upper()
+                    .filter(|status| status != "OK" && status != "ACCEPTED")
+                    .unwrap_or_else(|| "WRONG_ANSWER".to_string());
+                verdict.score = runner_report.score.unwrap_or(0);
+                verdict.message = message;
+            }
+            return Ok(verdict);
+        }
+    }
+
+    if package.checker.is_builtin("default-trim-checker")
+        || package.checker.is_builtin("output-only-checker")
+    {
+        return run_default_trim_checker(
+            stdout_path,
+            answer_path,
+            checker_log_path,
+            case,
+            sandbox_output,
+            runner_report,
+        )
+        .await;
+    }
+
+    if package.checker.is_builtin("heuristic-checker") {
+        write_text(checker_log_path, "accepted; score delegated to scorer\n").await?;
+        verdict.score = runner_report.score.unwrap_or(case.score);
+        return Ok(verdict);
+    }
+
+    run_default_trim_checker(
+        stdout_path,
+        answer_path,
+        checker_log_path,
+        case,
+        sandbox_output,
+        runner_report,
+    )
+    .await
+}
+
+fn verdict_from_sandbox(
+    case: &CaseRecord,
+    sandbox_output: &SandboxOutput,
+    report: &ComponentReport,
+) -> CaseVerdict {
+    let status = report.status_upper();
+    let message = report.message();
+    let score = report.score.unwrap_or(case.score);
+    let time_ms = report.time_ms.unwrap_or(sandbox_output.time_ms);
+    let memory_kb = report.memory_kb.unwrap_or(sandbox_output.memory_kb);
+
+    if let Some(false) = report.accepted() {
+        return CaseVerdict {
+            case_no: case.case_no,
+            status: status
+                .filter(|status| status != "OK" && status != "ACCEPTED")
+                .unwrap_or_else(|| "WRONG_ANSWER".to_string()),
+            score: report.score.unwrap_or(0),
+            time_ms,
+            memory_kb,
+            message: first_non_empty(&[message, "wrong answer".to_string()]),
+        };
+    }
+
+    match sandbox_output.status {
+        SandboxStatus::Ok => CaseVerdict {
+            case_no: case.case_no,
+            status: status
+                .filter(|status| status != "OK")
+                .unwrap_or_else(|| "ACCEPTED".to_string()),
+            score,
+            time_ms,
+            memory_kb,
+            message,
+        },
+        SandboxStatus::TimeLimitExceeded => CaseVerdict {
+            case_no: case.case_no,
+            status: "TIME_LIMIT_EXCEEDED".to_string(),
+            score: 0,
+            time_ms: sandbox_output.time_ms,
+            memory_kb: sandbox_output.memory_kb,
+            message: "time limit exceeded".to_string(),
+        },
+        SandboxStatus::MemoryLimitExceeded => CaseVerdict {
+            case_no: case.case_no,
+            status: "MEMORY_LIMIT_EXCEEDED".to_string(),
+            score: 0,
+            time_ms: sandbox_output.time_ms,
+            memory_kb: sandbox_output.memory_kb,
+            message: "memory limit exceeded".to_string(),
+        },
+        SandboxStatus::OutputLimitExceeded => CaseVerdict {
+            case_no: case.case_no,
+            status: "OUTPUT_LIMIT_EXCEEDED".to_string(),
+            score: 0,
+            time_ms: sandbox_output.time_ms,
+            memory_kb: sandbox_output.memory_kb,
+            message: if sandbox_output.message.trim().is_empty() {
+                "output limit exceeded".to_string()
+            } else {
+                truncate_message(&sandbox_output.message)
+            },
+        },
+        SandboxStatus::RuntimeError => {
+            let user_stderr = String::from_utf8_lossy(&sandbox_output.stderr).to_string();
+            let message = if sandbox_output.message.trim().is_empty() {
+                if user_stderr.trim().is_empty() {
+                    "runtime error".to_string()
+                } else {
+                    truncate_message(&user_stderr)
+                }
+            } else {
+                truncate_message(&sandbox_output.message)
+            };
+            CaseVerdict {
+                case_no: case.case_no,
+                status: "RUNTIME_ERROR".to_string(),
+                score: 0,
+                time_ms: sandbox_output.time_ms,
+                memory_kb: sandbox_output.memory_kb,
+                message,
+            }
+        }
+    }
+}
+
+async fn run_default_trim_checker(
+    stdout_path: &Path,
+    answer_path: &Path,
+    checker_log_path: &Path,
+    case: &CaseRecord,
+    sandbox_output: &SandboxOutput,
+    runner_report: &ComponentReport,
+) -> Result<CaseVerdict> {
+    let actual = fs::read_to_string(stdout_path).await.unwrap_or_default();
+    let expected = fs::read_to_string(answer_path)
+        .await
+        .with_context(|| format!("read answer failed: {}", answer_path.display()))?;
+
+    if default_trim_equal(&actual, &expected) {
+        write_text(checker_log_path, "accepted\n").await?;
+        Ok(CaseVerdict {
+            case_no: case.case_no,
+            status: "ACCEPTED".to_string(),
+            score: runner_report.score.unwrap_or(case.score),
+            time_ms: runner_report.time_ms.unwrap_or(sandbox_output.time_ms),
+            memory_kb: runner_report.memory_kb.unwrap_or(sandbox_output.memory_kb),
+            message: runner_report.message(),
+        })
+    } else {
+        let log = format!(
+            "expected: {}\nactual: {}\n",
+            truncate_message(&expected),
+            truncate_message(&actual)
+        );
+        write_text(checker_log_path, &log).await?;
+        Ok(CaseVerdict {
+            case_no: case.case_no,
+            status: "WRONG_ANSWER".to_string(),
+            score: 0,
+            time_ms: runner_report.time_ms.unwrap_or(sandbox_output.time_ms),
+            memory_kb: runner_report.memory_kb.unwrap_or(sandbox_output.memory_kb),
+            message: "wrong answer".to_string(),
+        })
+    }
+}
+
+async fn run_custom_validator(
+    languages: &LanguagesConfig,
+    validator: &CustomComponentRuntime,
+    case_dir: &Path,
+    input_path: &Path,
+    limit: &LimitConfig,
+    case: &CaseRecord,
+) -> Result<Option<CaseVerdict>> {
+    let work_dir = case_dir.join("validator");
+    fs::create_dir_all(&work_dir).await?;
+    fs::copy(input_path, work_dir.join("input.txt")).await?;
+
+    let stdout = work_dir.join("validator.stdout.log");
+    let stderr = work_dir.join("validator.stderr.log");
+    let args = component_args(validator, &["input.txt"]);
+    let output = run_custom_component(
+        languages, validator, &work_dir, &stdout, &stderr, limit, args,
+    )
+    .await?;
+
+    if output.status == SandboxStatus::Ok {
+        return Ok(None);
+    }
+
+    let log = merged_component_log("validator", &output, &stdout, &stderr).await;
+    Ok(Some(CaseVerdict {
+        case_no: case.case_no,
+        status: "SYSTEM_ERROR".to_string(),
+        score: 0,
+        time_ms: output.time_ms,
+        memory_kb: output.memory_kb,
+        message: truncate_message(&log),
+    }))
+}
+
+async fn run_custom_runner(
+    languages: &LanguagesConfig,
+    runner: &CustomComponentRuntime,
+    source_path: &Path,
+    language: &str,
+    submission_lang: &LanguageConfig,
+    submission_dir: &Path,
+    case_dir: &Path,
+    input_path: &Path,
+    answer_path: &Path,
+    stdout_path: &Path,
+    stderr_path: &Path,
+    limit: &LimitConfig,
+) -> Result<RunnerOutcome> {
+    let work_dir = case_dir.join("runner");
+    fs::create_dir_all(&work_dir).await?;
+    fs::copy(input_path, work_dir.join("input.txt")).await?;
+    fs::copy(answer_path, work_dir.join("answer.txt")).await?;
+
+    let submission_path =
+        stage_submission_for_component(submission_lang, source_path, submission_dir, &work_dir)
+            .await?;
+    let component_stdout = work_dir.join("runner.stdout.log");
+    let component_stderr = work_dir.join("runner.stderr.log");
+    let contestant_stdout = work_dir.join("stdout.txt");
+    let contestant_stderr = work_dir.join("stderr.txt");
+    let report_path = work_dir.join("runner_result.json");
+
+    let protocol_args: Vec<&str> = vec![
+        "input.txt",
+        "answer.txt",
+        submission_path.as_str(),
+        "stdout.txt",
+        "stderr.txt",
+        "runner_result.json",
+        language,
+    ];
+    let args = component_args(runner, &protocol_args);
+    let output = run_custom_component(
+        languages,
+        runner,
+        &work_dir,
+        &component_stdout,
+        &component_stderr,
+        limit,
+        args,
+    )
+    .await?;
+
+    ensure_file(&contestant_stdout).await?;
+    ensure_file(&contestant_stderr).await?;
+    fs::copy(&contestant_stdout, stdout_path).await?;
+    fs::copy(&contestant_stderr, stderr_path).await?;
+
+    let report = parse_component_report_from_paths(&report_path, &component_stdout).await?;
+
+    Ok(RunnerOutcome {
+        sandbox_output: output,
+        report,
+    })
+}
+
+async fn run_custom_checker(
+    languages: &LanguagesConfig,
+    checker: &CustomComponentRuntime,
+    case_dir: &Path,
+    input_path: &Path,
+    answer_path: &Path,
+    stdout_path: &Path,
+    checker_log_path: &Path,
+    limit: &LimitConfig,
+    case: &CaseRecord,
+    sandbox_output: &SandboxOutput,
+) -> Result<CaseVerdict> {
+    let work_dir = case_dir.join("checker");
+    fs::create_dir_all(&work_dir).await?;
+    fs::copy(input_path, work_dir.join("input.txt")).await?;
+    fs::copy(answer_path, work_dir.join("answer.txt")).await?;
+    fs::copy(stdout_path, work_dir.join("output.txt")).await?;
+
+    let component_stdout = work_dir.join("checker.stdout.log");
+    let component_stderr = work_dir.join("checker.stderr.log");
+    let report_path = work_dir.join("checker_result.json");
+    let args = component_args(
+        checker,
+        &[
+            "input.txt",
+            "answer.txt",
+            "output.txt",
+            "checker_result.json",
+        ],
+    );
+    let output = run_custom_component(
+        languages,
+        checker,
+        &work_dir,
+        &component_stdout,
+        &component_stderr,
+        limit,
+        args,
+    )
+    .await?;
+
+    let report = parse_component_report_from_paths(&report_path, &component_stdout).await?;
+    let log = merged_component_log("checker", &output, &component_stdout, &component_stderr).await;
+    write_text(checker_log_path, &log).await?;
+
+    let accepted = match output.status {
+        SandboxStatus::Ok => report.accepted().unwrap_or(true),
+        _ => report.accepted().unwrap_or(false),
+    };
+
+    if accepted {
+        Ok(CaseVerdict {
+            case_no: case.case_no,
+            status: report
+                .status_upper()
+                .filter(|status| status != "OK")
+                .unwrap_or_else(|| "ACCEPTED".to_string()),
+            score: report.score.unwrap_or(case.score),
+            time_ms: report.time_ms.unwrap_or(sandbox_output.time_ms),
+            memory_kb: report.memory_kb.unwrap_or(sandbox_output.memory_kb),
+            message: report.message(),
+        })
+    } else {
+        Ok(CaseVerdict {
+            case_no: case.case_no,
+            status: report
+                .status_upper()
+                .filter(|status| status != "OK" && status != "ACCEPTED")
+                .unwrap_or_else(|| "WRONG_ANSWER".to_string()),
+            score: report.score.unwrap_or(0),
+            time_ms: report.time_ms.unwrap_or(sandbox_output.time_ms),
+            memory_kb: report.memory_kb.unwrap_or(sandbox_output.memory_kb),
+            message: first_non_empty(&[report.message(), "wrong answer".to_string()]),
+        })
+    }
+}
+
+async fn score_submission(
+    languages: &LanguagesConfig,
+    result_dir: &Path,
+    package: &LoadedProblemPackage,
+    components: &PreparedComponents,
+    cases: &[ResultCase],
+) -> Result<i32> {
+    if let Some(scorer) = &components.scorer {
+        let score = run_custom_scorer(languages, scorer, result_dir, package, cases).await?;
+        return Ok(score.clamp(0, 100));
+    }
+
+    Ok(cases
+        .iter()
+        .map(|case| case.score.max(0))
+        .sum::<i32>()
+        .min(100))
+}
+
+async fn run_custom_scorer(
+    languages: &LanguagesConfig,
+    scorer: &CustomComponentRuntime,
+    result_dir: &Path,
+    package: &LoadedProblemPackage,
+    cases: &[ResultCase],
+) -> Result<i32> {
+    let work_dir = result_dir.join("scorer");
+    fs::create_dir_all(&work_dir).await?;
+    let cases_path = work_dir.join("case_results.json");
+    let score_path = work_dir.join("score.json");
+    let payload = serde_json::json!({
+        "problem_type": &package.manifest.problem_type,
+        "max_score": 100,
+        "cases": cases,
+    });
+    fs::write(&cases_path, serde_json::to_vec_pretty(&payload)?).await?;
+
+    let stdout = work_dir.join("scorer.stdout.log");
+    let stderr = work_dir.join("scorer.stderr.log");
+    let limit = LimitConfig {
+        time_ms: package.manifest.limits.default.time_ms.max(1000),
+        memory_mb: package.manifest.limits.default.memory_mb.max(64),
+    };
+    let args = component_args(scorer, &["case_results.json", "score.json"]);
+    let output =
+        run_custom_component(languages, scorer, &work_dir, &stdout, &stderr, &limit, args).await?;
+
+    if output.status != SandboxStatus::Ok {
+        let log = merged_component_log("scorer", &output, &stdout, &stderr).await;
+        return Err(anyhow!("custom scorer failed: {}", truncate_message(&log)));
+    }
+
+    let report = parse_component_report_from_paths(&score_path, &stdout).await?;
+    if let Some(score) = report.score {
+        return Ok(score);
+    }
+
+    let stdout_text = fs::read_to_string(&stdout).await.unwrap_or_default();
+    parse_score_text(&stdout_text).ok_or_else(|| anyhow!("custom scorer did not produce a score"))
+}
+
+async fn run_custom_component(
+    languages: &LanguagesConfig,
+    component: &CustomComponentRuntime,
+    work_dir: &Path,
+    stdout: &Path,
+    stderr: &Path,
+    limit: &LimitConfig,
+    args: Vec<String>,
+) -> Result<SandboxOutput> {
+    let lang = languages
+        .get(&component.language)
+        .ok_or_else(|| anyhow!("component language missing: {}", component.language))?;
+    run_language_program_in_sandbox(
+        lang,
+        &component.source_path,
+        &component.program_dir,
+        work_dir,
+        None,
+        stdout,
+        stderr,
+        limit,
+        &args,
+    )
+    .await
+    .with_context(|| format!("run {} component failed", component.kind))
+}
+
+fn component_args(component: &CustomComponentRuntime, protocol_args: &[&str]) -> Vec<String> {
+    let mut args = component.config.args();
+    args.extend(protocol_args.iter().map(|arg| (*arg).to_string()));
+    args
+}
+
+async fn stage_submission_for_component(
+    lang: &LanguageConfig,
+    source_path: &Path,
+    submission_dir: &Path,
+    work_dir: &Path,
+) -> Result<String> {
+    if lang.exe_file.is_empty() {
+        let source_name = source_path
+            .file_name()
+            .ok_or_else(|| anyhow!("source path has no file name"))?;
+        fs::copy(source_path, work_dir.join(source_name)).await?;
+        return Ok(source_name.to_string_lossy().to_string());
+    }
+
+    let build_exe = submission_dir.join("build").join(&lang.exe_file);
+    let staged = work_dir.join(&lang.exe_file);
+    fs::copy(&build_exe, &staged)
+        .await
+        .with_context(|| format!("copy submission executable failed: {}", build_exe.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut perms = fs::metadata(&stdin_path).await?.permissions();
-        perms.set_mode(0o644);
-        fs::set_permissions(&stdin_path, perms).await?;
+        let mut perms = fs::metadata(&staged).await?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&staged, perms).await?;
     }
 
-    let limit = package.limit_for(language, case);
+    Ok(lang.exe_file.clone())
+}
 
-    let sandbox_output = run_case_in_sandbox(
-        lang,
-        source_path,
-        result_dir,
-        &case_dir,
-        &stdin_path,
-        &stdout_path,
-        &stderr_path,
-        &limit,
+async fn parse_component_report_from_paths(
+    report_path: &Path,
+    stdout_path: &Path,
+) -> Result<ComponentReport> {
+    if let Ok(text) = fs::read_to_string(report_path).await {
+        if let Some(report) = parse_component_report(&text) {
+            return Ok(report);
+        }
+    }
+    if let Ok(text) = fs::read_to_string(stdout_path).await {
+        if let Some(report) = parse_component_report(&text) {
+            return Ok(report);
+        }
+    }
+    Ok(ComponentReport::default())
+}
+
+fn parse_component_report(text: &str) -> Option<ComponentReport> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(raw) = serde_json::from_str::<RawComponentReport>(text) {
+        return Some(raw.into());
+    }
+    if let Some(score) = parse_score_text(text) {
+        return Some(ComponentReport {
+            score: Some(score),
+            ..ComponentReport::default()
+        });
+    }
+    None
+}
+
+fn parse_score_text(text: &str) -> Option<i32> {
+    text.trim().lines().next()?.trim().parse::<i32>().ok()
+}
+
+async fn merged_component_log(
+    name: &str,
+    output: &SandboxOutput,
+    stdout_path: &Path,
+    stderr_path: &Path,
+) -> String {
+    let stdout = fs::read_to_string(stdout_path).await.unwrap_or_default();
+    let stderr = fs::read_to_string(stderr_path).await.unwrap_or_default();
+    format!(
+        "{}_status: {:?}\n{}_message: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n",
+        name, output.status, name, output.message, stdout, stderr
     )
-    .await
-    .context("run case in sandbox failed")?;
+}
 
-    let status;
-    let score;
-    let message;
+fn builtin_checker_is_runner_authoritative(checker: &ComponentConfig) -> bool {
+    checker.is_builtin("interactive-checker")
+        || checker.is_builtin("communication-checker")
+        || checker.is_builtin("heuristic-checker")
+}
 
-    match sandbox_output.status {
-        SandboxStatus::Ok => {
-            let actual = String::from_utf8_lossy(&sandbox_output.stdout).to_string();
-            let expected = fs::read_to_string(&answer_path)
-                .await
-                .with_context(|| format!("read answer failed: {}", answer_path.display()))?;
+fn normalize_status(status: &str) -> String {
+    status
+        .trim()
+        .replace('-', "_")
+        .replace(' ', "_")
+        .to_ascii_uppercase()
+}
 
-            if default_trim_equal(&actual, &expected) {
-                status = "ACCEPTED".to_string();
-                score = case.score;
-                message = String::new();
-                write_text(&checker_log_path, "accepted\n").await?;
-            } else {
-                status = "WRONG_ANSWER".to_string();
-                score = 0;
-                message = "wrong answer".to_string();
+fn first_non_empty(values: &[String]) -> String {
+    values
+        .iter()
+        .find(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_default()
+}
 
-                let log = format!(
-                    "expected: {}\nactual: {}\n",
-                    truncate_message(&expected),
-                    truncate_message(&actual)
-                );
-                write_text(&checker_log_path, &log).await?;
-            }
-        }
-        SandboxStatus::TimeLimitExceeded => {
-            status = "TIME_LIMIT_EXCEEDED".to_string();
-            score = 0;
-            message = "time limit exceeded".to_string();
-            write_text(&checker_log_path, &message).await?;
-        }
-        SandboxStatus::MemoryLimitExceeded => {
-            status = "MEMORY_LIMIT_EXCEEDED".to_string();
-            score = 0;
-            message = "memory limit exceeded".to_string();
-            write_text(&checker_log_path, &message).await?;
-        }
-        SandboxStatus::OutputLimitExceeded => {
-            status = "OUTPUT_LIMIT_EXCEEDED".to_string();
-            score = 0;
-            message = if sandbox_output.message.trim().is_empty() {
-                "output limit exceeded".to_string()
-            } else {
-                truncate_message(&sandbox_output.message)
-            };
-            write_text(&checker_log_path, &message).await?;
-        }
-        SandboxStatus::RuntimeError => {
-            status = "RUNTIME_ERROR".to_string();
-            score = 0;
-
-            let user_stderr = String::from_utf8_lossy(&sandbox_output.stderr).to_string();
-
-            if sandbox_output.message.trim().is_empty() {
-                if user_stderr.trim().is_empty() {
-                    message = "runtime error".to_string();
-                } else {
-                    message = truncate_message(&user_stderr);
-                }
-            } else {
-                message = truncate_message(&sandbox_output.message);
-            }
-
-            write_text(&checker_log_path, &message).await?;
-        }
+async fn ensure_file(path: &Path) -> Result<()> {
+    if fs::metadata(path).await.is_err() {
+        fs::write(path, "").await?;
     }
+    Ok(())
+}
 
-    Ok(ResultCase {
-        case_no: case.case_no,
-        status,
-        score,
-        time_ms: sandbox_output.time_ms,
-        memory_kb: sandbox_output.memory_kb,
-        stdout_path: path_string(&stdout_path),
-        stderr_path: path_string(&stderr_path),
-        checker_log_path: path_string(&checker_log_path),
-        message,
-    })
+async fn make_world_readable(_path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = fs::metadata(_path).await?.permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(_path, perms).await?;
+    }
+    Ok(())
 }
 
 async fn write_local_result(result_dir: &Path, result: &ResultFile) -> Result<()> {

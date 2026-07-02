@@ -862,12 +862,7 @@ fn source_file_name(languages: &LanguagesConfig, language: &str) -> String {
     languages
         .get(language)
         .map(|lang| lang.source_file.clone())
-        .unwrap_or_else(|| match language {
-            "c11" => "main.c".to_string(),
-            "python3" => "main.py".to_string(),
-            "java17" => "Main.java".to_string(),
-            _ => "main.cpp".to_string(),
-        })
+        .unwrap_or_else(|| "source.txt".to_string())
 }
 
 fn env_or<F>(key: &str, fallback: F) -> String
@@ -1418,6 +1413,8 @@ runner:
   config: runner.yaml
 checker:
   config: checker.yaml
+validator:
+  config: validator.yaml
 scorer:
   config: scorer.yaml
 tests:
@@ -1433,6 +1430,10 @@ tests:
         write_test_file(
             &root.join("checker.yaml"),
             "type: builtin\nname: default-trim-checker\nconfig: {}\n",
+        );
+        write_test_file(
+            &root.join("validator.yaml"),
+            "type: builtin\nname: default-input-validator\nconfig: {}\n",
         );
         write_test_file(
             &root.join("scorer.yaml"),

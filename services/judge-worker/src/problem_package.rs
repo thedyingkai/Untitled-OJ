@@ -19,6 +19,7 @@ pub struct ProblemManifest {
     pub limits: ProblemLimits,
     pub runner: ComponentRef,
     pub checker: ComponentRef,
+    pub validator: ComponentRef,
     pub scorer: ComponentRef,
     pub tests: TestsRef,
 }
@@ -57,6 +58,51 @@ pub struct ComponentConfig {
 
     #[serde(default)]
     pub config: serde_yaml::Value,
+}
+
+impl ComponentConfig {
+    pub fn config_string(&self, key: &str) -> Option<String> {
+        let serde_yaml::Value::Mapping(map) = &self.config else {
+            return None;
+        };
+        map.get(&serde_yaml::Value::String(key.to_string()))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn args(&self) -> Vec<String> {
+        let serde_yaml::Value::Mapping(map) = &self.config else {
+            return Vec::new();
+        };
+        let Some(serde_yaml::Value::Sequence(args)) =
+            map.get(&serde_yaml::Value::String("args".to_string()))
+        else {
+            return Vec::new();
+        };
+        args.iter()
+            .filter_map(|value| value.as_str().map(ToString::to_string))
+            .collect()
+    }
+
+    pub fn source(&self) -> Option<String> {
+        self.config_string("source")
+    }
+
+    pub fn language(&self) -> Option<String> {
+        self.config_string("language").or_else(|| {
+            self.source()
+                .and_then(|source| infer_language_from_source(&source))
+        })
+    }
+
+    pub fn is_builtin(&self, name: &str) -> bool {
+        self.component_type == "builtin" && self.name == name
+    }
+
+    pub fn is_custom(&self) -> bool {
+        self.component_type == "custom"
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,6 +153,12 @@ pub struct LoadedProblemPackage {
     pub package_dir: PathBuf,
     pub manifest: ProblemManifest,
     pub cases: Vec<CaseRecord>,
+    #[allow(dead_code)]
+    pub groups: Vec<GroupRecord>,
+    pub runner: ComponentConfig,
+    pub checker: ComponentConfig,
+    pub validator: ComponentConfig,
+    pub scorer: ComponentConfig,
 }
 
 impl LoadedProblemPackage {
@@ -139,6 +191,13 @@ impl LoadedProblemPackage {
         let tests_root = safe_join(&self.package_dir, &self.manifest.tests.root)?;
         safe_join(&tests_root, &case.answer)
     }
+
+    pub fn component_source_path(&self, component: &ComponentConfig) -> Result<PathBuf> {
+        let source = component
+            .source()
+            .ok_or_else(|| anyhow!("custom component {} requires config.source", component.name))?;
+        safe_join(&self.package_dir, &source)
+    }
 }
 
 pub async fn load_problem_package(package_dir: &str) -> Result<LoadedProblemPackage> {
@@ -166,17 +225,59 @@ pub async fn load_problem_package(package_dir: &str) -> Result<LoadedProblemPack
         .await
         .context("load checker config failed")?;
 
+    let validator: ComponentConfig =
+        read_yaml(&safe_join(&package_dir, &manifest.validator.config)?)
+            .await
+            .context("load validator config failed")?;
+
     let scorer: ComponentConfig = read_yaml(&safe_join(&package_dir, &manifest.scorer.config)?)
         .await
         .context("load scorer config failed")?;
 
-    validate_component(&runner, "runner", "traditional-runner")?;
-    validate_component(&checker, "checker", "default-trim-checker")?;
-    validate_component(&scorer, "scorer", "default-sum-scorer")?;
+    validate_component(
+        &package_dir,
+        &runner,
+        "runner",
+        &[
+            "traditional-runner",
+            "interactive-runner",
+            "communication-runner",
+            "output-only-runner",
+            "heuristic-runner",
+        ],
+    )
+    .await?;
+    validate_component(
+        &package_dir,
+        &checker,
+        "checker",
+        &[
+            "default-trim-checker",
+            "interactive-checker",
+            "communication-checker",
+            "output-only-checker",
+            "heuristic-checker",
+        ],
+    )
+    .await?;
+    validate_component(
+        &package_dir,
+        &validator,
+        "validator",
+        &["default-input-validator"],
+    )
+    .await?;
+    validate_component(
+        &package_dir,
+        &scorer,
+        "scorer",
+        &["default-sum-scorer", "heuristic-scorer"],
+    )
+    .await?;
 
     let tests_root = safe_join(&package_dir, &manifest.tests.root)?;
 
-    let declared_groups = validate_groups(&package_dir, &manifest).await?;
+    let (declared_groups, groups) = validate_groups(&package_dir, &manifest).await?;
 
     let cases_path = safe_join(&package_dir, &manifest.tests.cases)?;
     let cases_file: CasesFile = read_yaml(&cases_path)
@@ -193,6 +294,11 @@ pub async fn load_problem_package(package_dir: &str) -> Result<LoadedProblemPack
         package_dir,
         manifest,
         cases: cases_file.cases,
+        groups,
+        runner,
+        checker,
+        validator,
+        scorer,
     })
 }
 
@@ -227,7 +333,10 @@ fn validate_manifest(manifest: &ProblemManifest) -> Result<()> {
         return Err(anyhow!("problem title is required"));
     }
 
-    if manifest.problem_type != "traditional" {
+    if !matches!(
+        manifest.problem_type.as_str(),
+        "traditional" | "interactive" | "communication" | "output_only" | "heuristic"
+    ) {
         return Err(anyhow!(
             "unsupported problem type: {}",
             manifest.problem_type
@@ -259,8 +368,13 @@ fn validate_manifest(manifest: &ProblemManifest) -> Result<()> {
     Ok(())
 }
 
-fn validate_component(component: &ComponentConfig, kind: &str, expected_name: &str) -> Result<()> {
-    if component.component_type != "builtin" {
+async fn validate_component(
+    package_dir: &Path,
+    component: &ComponentConfig,
+    kind: &str,
+    builtin_names: &[&str],
+) -> Result<()> {
+    if !matches!(component.component_type.as_str(), "builtin" | "custom") {
         return Err(anyhow!(
             "unsupported {} type: {}",
             kind,
@@ -268,13 +382,8 @@ fn validate_component(component: &ComponentConfig, kind: &str, expected_name: &s
         ));
     }
 
-    if component.name != expected_name {
-        return Err(anyhow!(
-            "unsupported {} name: {}, expected {}",
-            kind,
-            component.name,
-            expected_name
-        ));
+    if component.name.trim().is_empty() {
+        return Err(anyhow!("{} name is required", kind));
     }
 
     if matches!(component.config, serde_yaml::Value::Tagged(_)) {
@@ -284,14 +393,42 @@ fn validate_component(component: &ComponentConfig, kind: &str, expected_name: &s
         ));
     }
 
+    if component.component_type == "builtin" {
+        if !builtin_names.contains(&component.name.as_str()) {
+            return Err(anyhow!("unsupported {} name: {}", kind, component.name));
+        }
+        return Ok(());
+    }
+
+    let source = component
+        .source()
+        .ok_or_else(|| anyhow!("custom {} requires config.source", kind))?;
+    let source_path = safe_join(package_dir, &source)?;
+    let metadata = fs::metadata(&source_path)
+        .await
+        .with_context(|| format!("custom {} source not found: {}", kind, source))?;
+    if metadata.is_dir() {
+        return Err(anyhow!("custom {} source is a directory: {}", kind, source));
+    }
+
+    if component.language().is_none() {
+        return Err(anyhow!(
+            "custom {} requires config.language or a known source extension",
+            kind
+        ));
+    }
+
     Ok(())
 }
 
-async fn validate_groups(package_dir: &Path, manifest: &ProblemManifest) -> Result<HashSet<i32>> {
+async fn validate_groups(
+    package_dir: &Path,
+    manifest: &ProblemManifest,
+) -> Result<(HashSet<i32>, Vec<GroupRecord>)> {
     let mut declared = HashSet::new();
     let groups_path = manifest.tests.groups.trim();
     if groups_path.is_empty() {
-        return Ok(declared);
+        return Ok((declared, Vec::new()));
     }
 
     let groups_path = safe_join(package_dir, groups_path)?;
@@ -299,7 +436,7 @@ async fn validate_groups(package_dir: &Path, manifest: &ProblemManifest) -> Resu
         .await
         .with_context(|| format!("load groups.yaml failed: {}", groups_path.display()))?;
 
-    for group in groups_file.groups {
+    for group in &groups_file.groups {
         if group.group_no < 0 {
             return Err(anyhow!("invalid group_no: {}", group.group_no));
         }
@@ -324,7 +461,7 @@ async fn validate_groups(package_dir: &Path, manifest: &ProblemManifest) -> Resu
         }
     }
 
-    Ok(declared)
+    Ok((declared, groups_file.groups))
 }
 
 async fn validate_cases(
@@ -375,7 +512,22 @@ async fn validate_cases(
     Ok(())
 }
 
-fn safe_join(base: &Path, child: &str) -> Result<PathBuf> {
+fn infer_language_from_source(source: &str) -> Option<String> {
+    match Path::new(source)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("c") => Some("c11".to_string()),
+        Some("cpp") | Some("cc") | Some("cxx") => Some("cpp17".to_string()),
+        Some("java") => Some("java17".to_string()),
+        Some("py") => Some("python3".to_string()),
+        _ => None,
+    }
+}
+
+pub fn safe_join(base: &Path, child: &str) -> Result<PathBuf> {
     if child.trim().is_empty() {
         return Err(anyhow!("empty relative path"));
     }
@@ -402,7 +554,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_problem_package_accepts_valid_package_and_applies_case_limits() {
-        let package_dir = create_test_package();
+        let package_dir = create_test_package("traditional");
 
         let package = load_problem_package(package_dir.to_str().unwrap())
             .await
@@ -410,6 +562,7 @@ mod tests {
 
         assert_eq!(package.manifest.slug, "a-plus-b");
         assert_eq!(package.cases.len(), 1);
+        assert_eq!(package.validator.name, "default-input-validator");
 
         let limit = package.limit_for("python3", &package.cases[0]);
         assert_eq!(limit.time_ms, 1500);
@@ -421,8 +574,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_problem_package_accepts_all_declared_problem_types() {
+        for problem_type in [
+            "traditional",
+            "interactive",
+            "communication",
+            "output_only",
+            "heuristic",
+        ] {
+            let package_dir = create_test_package(problem_type);
+            load_problem_package(package_dir.to_str().unwrap())
+                .await
+                .unwrap_or_else(|err| panic!("{problem_type} should load: {err:#}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn load_problem_package_accepts_custom_components() {
+        let package_dir = create_test_package("interactive");
+        stdfs::create_dir_all(package_dir.join("runner")).unwrap();
+        stdfs::create_dir_all(package_dir.join("checker")).unwrap();
+        write_file(
+            &package_dir.join("runner").join("runner.py"),
+            "print('runner')\n",
+        );
+        write_file(
+            &package_dir.join("checker").join("checker.cpp"),
+            "int main(){return 0;}\n",
+        );
+        write_file(
+            &package_dir.join("runner.yaml"),
+            r#"
+type: custom
+name: two-process-runner
+config:
+  language: python3
+  source: runner/runner.py
+  args:
+    - --pipe
+"#,
+        );
+        write_file(
+            &package_dir.join("checker.yaml"),
+            r#"
+type: custom
+name: strict-checker
+config:
+  source: checker/checker.cpp
+"#,
+        );
+
+        let package = load_problem_package(package_dir.to_str().unwrap())
+            .await
+            .expect("custom component package should load");
+
+        assert!(package.runner.is_custom());
+        assert_eq!(package.runner.language().as_deref(), Some("python3"));
+        assert_eq!(package.checker.language().as_deref(), Some("cpp17"));
+    }
+
+    #[tokio::test]
     async fn load_problem_package_rejects_case_path_traversal() {
-        let package_dir = create_test_package();
+        let package_dir = create_test_package("traditional");
         write_file(
             &package_dir.join("tests").join("cases.yaml"),
             r#"
@@ -447,7 +660,7 @@ cases:
 
     #[tokio::test]
     async fn load_problem_package_rejects_missing_answer() {
-        let package_dir = create_test_package();
+        let package_dir = create_test_package("traditional");
         stdfs::remove_file(package_dir.join("tests").join("001.ans")).unwrap();
 
         let err = load_problem_package(package_dir.to_str().unwrap())
@@ -462,7 +675,7 @@ cases:
 
     #[tokio::test]
     async fn load_problem_package_rejects_invalid_component_config() {
-        let package_dir = create_test_package();
+        let package_dir = create_test_package("traditional");
         write_file(
             &package_dir.join("checker.yaml"),
             r#"
@@ -482,19 +695,40 @@ config: {}
         );
     }
 
-    fn create_test_package() -> PathBuf {
+    fn create_test_package(problem_type: &str) -> PathBuf {
         let unique = uuid::Uuid::new_v4();
         let root = std::env::temp_dir().join(format!("ojos-worker-package-test-{unique}"));
         stdfs::create_dir_all(root.join("tests")).unwrap();
 
+        let runner = match problem_type {
+            "interactive" => "interactive-runner",
+            "communication" => "communication-runner",
+            "output_only" => "output-only-runner",
+            "heuristic" => "heuristic-runner",
+            _ => "traditional-runner",
+        };
+        let checker = match problem_type {
+            "interactive" => "interactive-checker",
+            "communication" => "communication-checker",
+            "output_only" => "output-only-checker",
+            "heuristic" => "heuristic-checker",
+            _ => "default-trim-checker",
+        };
+        let scorer = if problem_type == "heuristic" {
+            "heuristic-scorer"
+        } else {
+            "default-sum-scorer"
+        };
+
         write_file(
             &root.join("problem.yaml"),
-            r#"
+            &format!(
+                r#"
 schema: ojos.problem.v1
 id: 1
 slug: a-plus-b
 title: A+B
-type: traditional
+type: {problem_type}
 visibility: public
 status: ready
 limits:
@@ -509,38 +743,57 @@ runner:
   config: runner.yaml
 checker:
   config: checker.yaml
+validator:
+  config: validator.yaml
 scorer:
   config: scorer.yaml
 tests:
   root: tests
   groups: tests/groups.yaml
   cases: tests/cases.yaml
-"#,
+"#
+            ),
         );
 
         write_file(
             &root.join("runner.yaml"),
-            r#"
+            &format!(
+                r#"
 type: builtin
-name: traditional-runner
-config: {}
-"#,
+name: {runner}
+config: {{}}
+"#
+            ),
         );
         write_file(
             &root.join("checker.yaml"),
+            &format!(
+                r#"
+type: builtin
+name: {checker}
+config:
+  trim_trailing_spaces: true
+  ignore_trailing_blank_lines: true
+"#
+            ),
+        );
+        write_file(
+            &root.join("validator.yaml"),
             r#"
 type: builtin
-name: default-trim-checker
+name: default-input-validator
 config: {}
 "#,
         );
         write_file(
             &root.join("scorer.yaml"),
-            r#"
+            &format!(
+                r#"
 type: builtin
-name: default-sum-scorer
-config: {}
-"#,
+name: {scorer}
+config: {{}}
+"#
+            ),
         );
         write_file(
             &root.join("tests").join("groups.yaml"),

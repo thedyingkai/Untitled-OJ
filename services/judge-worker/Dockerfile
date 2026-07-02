@@ -41,6 +41,12 @@ COPY services/judge-worker ./judge-worker
 
 WORKDIR /app/judge-worker
 
+RUN mkdir -p /opt/ojos/default-components \
+    && g++ default-components/default_runner.cpp -O2 -pipe -std=c++17 -o /opt/ojos/default-components/default-runner \
+    && g++ default-components/default_validator.cpp -O2 -pipe -std=c++17 -o /opt/ojos/default-components/default-validator \
+    && g++ default-components/default_checker.cpp -O2 -pipe -std=c++17 -o /opt/ojos/default-components/default-checker \
+    && g++ default-components/default_scorer.cpp -O2 -pipe -std=c++17 -o /opt/ojos/default-components/default-scorer
+
 RUN cargo build --release
 
 CMD ["./target/release/judge-worker"]
