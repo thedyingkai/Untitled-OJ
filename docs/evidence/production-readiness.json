@@ -5,8 +5,8 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "3454ea1",
-    "evidence": "OJOS_REAL_REDIS_URL is set in .github/workflows/orchestrator-ci.yml and Go tests include services/judge-api/internal/logic/redis_real_smoke_test.go; Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28621889030"
+    "commit": "e123059",
+    "evidence": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077"
   },
   {
     "component": "storage-service",
@@ -14,8 +14,8 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "3454ea1",
-    "evidence": "Orchestrator CI starts minio/minio:RELEASE.2025-09-07T16-13-09Z and runs storage-service MinIO real integration; Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28621889030"
+    "commit": "e123059",
+    "evidence": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077"
   },
   {
     "component": "deploy/ops",
@@ -23,8 +23,8 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator Docker E2E",
-    "commit": "3454ea1",
-    "evidence": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28621889035"
+    "commit": "e123059",
+    "evidence": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416062"
   },
   {
     "component": "judge-worker",
@@ -32,8 +32,8 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "3454ea1",
-    "evidence": "Strict judge-worker nsjail live tests run with OJOS_REQUIRE_NSJAIL_LIVE=1; Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28621889030"
+    "commit": "e123059",
+    "evidence": "Strict judge-worker nsjail live tests run with OJOS_REQUIRE_NSJAIL_LIVE=1; CI passed in https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077"
   },
   {
     "component": "judge-worker",
@@ -41,8 +41,8 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "3454ea1",
-    "evidence": "services/judge-worker/src/sandbox.rs tests cover seccomp policy, mount whitelist, timeout, output limit, runtime error, and C/C++ live smoke when nsjail is required; Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28621889030"
+    "commit": "e123059",
+    "evidence": "seccomp, mount whitelist, timeout, output limit, runtime error, and live C/C++/Java/Python verdict matrix in https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077"
   },
   {
     "component": "deploy/ops",
@@ -50,10 +50,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Staging Drill",
-    "commit": "ca6065a",
+    "commit": "853423a",
     "local_status": "passed",
-    "local_evidence": "artifacts/staging-drill-local-10/manifest.json",
-    "evidence": "deploy/ops/staging-drill.sh writes manifest/logs/responses/checksums and .github/workflows/staging-drill.yml uploads artifacts; local real restore verified in artifacts/staging-drill-local-10 including storage-service readback checksum"
+    "local_evidence": "artifacts/rc-staging-drill-2/manifest.json",
+    "evidence": "Current RC local real restore verified, including PostgreSQL backup/restore, MinIO restore, storage-service readback, release upgrade and rollback."
   },
   {
     "component": "gateway frontend",
@@ -61,8 +61,8 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "3454ea1",
-    "evidence": "services/gateway/frontend/tests/e2e/gateway.spec.ts with Playwright trace/screenshot/video artifacts; local npm run test:e2e passed and Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28621889030"
+    "commit": "e123059",
+    "evidence": "Playwright browser E2E with failure artifacts configured; CI passed in https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077 and local RC run passed."
   },
   {
     "component": "manager GUI/TUI",
@@ -70,10 +70,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Ops Drills Nightly",
-    "commit": "ca6065a",
+    "commit": "853423a",
     "local_status": "passed",
-    "local_evidence": "artifacts/manager-smoke-local-7/manifest.json",
-    "evidence": "deploy/ops/manager-smoke.sh probes orchestrator health/services/endpoints/operations and records manager_auth=deferred, manager_mode=read-only/dev-ops beta; local operator smoke passed in artifacts/manager-smoke-local-7"
+    "local_evidence": "artifacts/rc-manager-smoke/manifest.json",
+    "evidence": "manager_auth=deferred and manager_mode=read-only/dev-ops beta are recorded."
   },
   {
     "component": "Jaeger/observability",
@@ -81,10 +81,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Ops Drills Nightly",
-    "commit": "ca6065a",
+    "commit": "853423a",
     "local_status": "passed",
-    "local_evidence": "artifacts/alert-firing-drill-local-6/manifest.json",
-    "evidence": "deploy/ops/alert-firing-drill.sh verifies OJOSDrillAlwaysFiring reaches Alertmanager webhook; local alert firing drill passed in artifacts/alert-firing-drill-local-6"
+    "local_evidence": "artifacts/rc-alert-firing-drill/manifest.json",
+    "evidence": "Prometheus rule OJOSDrillAlwaysFiring reached Alertmanager webhook locally."
   },
   {
     "component": "Jaeger/observability",
@@ -92,10 +92,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Orchestrator Docker E2E",
-    "commit": "3454ea1",
+    "commit": "853423a",
     "local_status": "passed",
-    "local_evidence": "artifacts/trace-e2e-drill-local-9/manifest.json",
-    "evidence": "deploy/ops/trace-e2e-drill.sh ran a real compose judge submission and queried Jaeger trace_id=35ec7aa59b46df1d46430e5b1c67134f with gateway-service, judge-api-service, storage-service, judge-worker, span_count=8, and judge-worker execute task native OTLP span"
+    "local_evidence": "artifacts/rc-trace-e2e-drill/manifest.json",
+    "evidence": "Real compose judge submission trace was visible in Jaeger with gateway-service, judge-api-service, storage-service, and judge-worker spans."
   },
   {
     "component": "deploy/ops",
@@ -103,8 +103,10 @@
     "status": "passed",
     "gate": "ci",
     "workflow": "Orchestrator CI",
-    "commit": "3454ea1",
-    "evidence": "deploy/ops/secret-check.sh now requires Redis password and .env.production.example is separate from dev .env.example; local deploy/ops/ci-policy.sh passed and Orchestrator CI passed https://github.com/thedyingkai/Untitled-OJ/actions/runs/28621889030"
+    "commit": "e123059",
+    "local_status": "passed",
+    "local_evidence": "deploy/ops/ci-policy.sh",
+    "evidence": "secret-check rejects missing or weak production secrets; CI passed in https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077 and local RC ci-policy passed."
   },
   {
     "component": "deploy/ops",
@@ -112,8 +114,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Orchestrator Docker E2E",
-    "commit": "3454ea1",
-    "evidence": "Scheduled Docker image build now uploads artifacts/image-build/image-build-evidence.json"
+    "commit": "853423a",
+    "local_status": "passed",
+    "local_evidence": "artifacts/rc-image-build/manifest.json",
+    "evidence": "Local RC compose build passed for orchestrator, gateway, auth-service, storage-service, judge-api, judge-worker, problem-service, and user-service. Remote scheduled image artifact is pending."
   },
   {
     "component": "deploy/ops",
@@ -121,10 +125,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Orchestrator Docker E2E",
-    "commit": "3454ea1",
+    "commit": "853423a",
     "local_status": "passed",
-    "local_evidence": "artifacts/basic-load-soak-local-2/manifest.json",
-    "evidence": "deploy/ops/basic-load-soak.sh local smoke passed with concurrency=20, request_count=41, success_rate=1.0, p95_ms=69.039, error_count=0, queue_pending_max=0, worker_processed_count=1; this is not a capacity test"
+    "local_evidence": "artifacts/rc-basic-load-soak/manifest.json",
+    "evidence": "Local RC smoke covered auth login, problem list, storage put/get, judge submit, and result query. This is not a capacity test."
   },
   {
     "component": "auth-service",
@@ -132,10 +136,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Ops Drills Nightly",
-    "commit": "3454ea1",
+    "commit": "853423a",
     "local_status": "passed",
-    "local_evidence": "artifacts/service-credential-drill-local-5/manifest.json",
-    "evidence": "deploy/ops/service-credential-drill.sh applies real auth migrations and verifies allow/deny/revoke/expire matrix; local lifecycle drill passed in artifacts/service-credential-drill-local-5"
+    "local_evidence": "artifacts/rc-service-credential-drill/manifest.json",
+    "evidence": "allow/deny/revoke/expire/last_used_at matrix passed locally."
   },
   {
     "component": "Redis",
@@ -143,10 +147,10 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Ops Drills Nightly",
-    "commit": "ca6065a",
+    "commit": "853423a",
     "local_status": "passed",
-    "local_evidence": "artifacts/redis-recovery-drill-local-6/manifest.json",
-    "evidence": "deploy/ops/redis-recovery-drill.sh verifies XPENDING, XAUTOCLAIM, XACK, result write, AOF restart persistence, and judge-api /judge/admin/queue/status; local recovery drill passed in artifacts/redis-recovery-drill-local-6"
+    "local_evidence": "artifacts/rc-redis-recovery-drill/manifest.json",
+    "evidence": "XPENDING, XAUTOCLAIM, XACK, result write, AOF restart persistence, and judge-api queue status passed locally."
   },
   {
     "component": "MinIO",
@@ -154,9 +158,9 @@
     "status": "pending-first-run",
     "gate": "nightly",
     "workflow": "Staging Drill",
-    "commit": "ca6065a",
+    "commit": "853423a",
     "local_status": "passed",
-    "local_evidence": "artifacts/staging-drill-local-10/manifest.json",
-    "evidence": "deploy/ops/staging-drill.sh backs up, deletes, restores, and checksums a MinIO sample object; local sample object restore passed in artifacts/staging-drill-local-10 and storage-service readback checksum matched"
+    "local_evidence": "artifacts/rc-staging-drill-2/manifest.json",
+    "evidence": "MinIO sample object backup/delete/restore/readback checksum matched locally."
   }
 ]

@@ -1,0 +1,112 @@
+{
+  "validated_code_commit": "853423a80d2ba20840867b4420a4f70da57b34af",
+  "evidence_commit": "checked-in evidence update; final exact hash is reported by git rev-parse HEAD",
+  "generated_at": "2026-07-03T06:10:00+08:00",
+  "verdict": "CONDITIONAL GO",
+  "p0_count": 0,
+  "engineering_maturity": 90,
+  "stable_production_readiness": 85,
+  "ci_workflows": [
+    {
+      "workflow": "Orchestrator CI",
+      "status": "passed",
+      "gate": "ci",
+      "commit": "e123059e8bd684d7f832b84eba8de6be01d237d5",
+      "url": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077"
+    },
+    {
+      "workflow": "Orchestrator Docker E2E",
+      "status": "passed",
+      "gate": "ci",
+      "commit": "e123059e8bd684d7f832b84eba8de6be01d237d5",
+      "url": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416062"
+    },
+    {
+      "workflow": "Staging Drill",
+      "status": "pending-first-run",
+      "gate": "nightly",
+      "commit": "853423a80d2ba20840867b4420a4f70da57b34af",
+      "url": "https://github.com/thedyingkai/Untitled-OJ/actions/workflows/staging-drill.yml"
+    },
+    {
+      "workflow": "Ops Drills Nightly",
+      "status": "pending-first-run",
+      "gate": "nightly",
+      "commit": "853423a80d2ba20840867b4420a4f70da57b34af",
+      "url": "https://github.com/thedyingkai/Untitled-OJ/actions/workflows/ops-drills-nightly.yml"
+    }
+  ],
+  "gates": [
+    {"gate": "cargo fmt --check", "status": "passed", "type": "local"},
+    {"gate": "cargo test --workspace", "status": "passed", "type": "local"},
+    {"gate": "auth-service go test ./...", "status": "passed", "type": "local"},
+    {"gate": "gateway go test ./...", "status": "passed", "type": "local"},
+    {"gate": "storage-service go test ./...", "status": "passed", "type": "local"},
+    {"gate": "judge-api go test ./...", "status": "passed", "type": "local"},
+    {"gate": "problem-service go test ./...", "status": "passed", "type": "local"},
+    {"gate": "user-service go test ./...", "status": "passed", "type": "local"},
+    {"gate": "judge-worker cargo test", "status": "passed", "type": "local"},
+    {"gate": "docker compose config", "status": "passed", "type": "local"},
+    {"gate": "gateway frontend npm run build", "status": "passed", "type": "local"},
+    {"gate": "gateway frontend npm run test:e2e", "status": "passed", "type": "local"},
+    {"gate": "git diff --check", "status": "passed", "type": "local"},
+    {"gate": "Redis live integration", "status": "passed", "type": "ci", "evidence": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077"},
+    {"gate": "MinIO live integration", "status": "passed", "type": "ci", "evidence": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077"},
+    {"gate": "orchestrator-docker-e2e", "status": "passed", "type": "ci", "evidence": "https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416062"},
+    {"gate": "nsjail verdict matrix", "status": "passed", "type": "ci/local"},
+    {"gate": "sandbox abuse tests", "status": "passed", "type": "ci/local"},
+    {"gate": "backup restore rollback drill", "status": "passed", "type": "local", "evidence": "artifacts/rc-staging-drill-2/manifest.json"},
+    {"gate": "browser E2E", "status": "passed", "type": "ci/local"},
+    {"gate": "alert firing drill", "status": "passed", "type": "local", "evidence": "artifacts/rc-alert-firing-drill/manifest.json"},
+    {"gate": "trace E2E", "status": "passed", "type": "local", "evidence": "artifacts/rc-trace-e2e-drill/manifest.json"},
+    {"gate": "production secret fail-fast", "status": "passed", "type": "ci/local"},
+    {"gate": "image build", "status": "passed", "type": "local", "evidence": "artifacts/rc-image-build/manifest.json"},
+    {"gate": "basic load/soak smoke", "status": "passed", "type": "local", "evidence": "artifacts/rc-basic-load-soak/manifest.json"}
+  ],
+  "module_readiness": [
+    {"module": "orchestrator-core/backend", "readiness": 91},
+    {"module": "judge-worker", "readiness": 92},
+    {"module": "judge-api", "readiness": 89},
+    {"module": "auth-service", "readiness": 88},
+    {"module": "gateway backend", "readiness": 87},
+    {"module": "gateway frontend", "readiness": 86},
+    {"module": "problem-service", "readiness": 85},
+    {"module": "storage-service", "readiness": 88},
+    {"module": "user-service", "readiness": 84},
+    {"module": "platform/shared", "readiness": 86},
+    {"module": "manager GUI", "readiness": 80},
+    {"module": "manager TUI", "readiness": 80},
+    {"module": "deploy/ops", "readiness": 86},
+    {"module": "PostgreSQL", "readiness": 90},
+    {"module": "Redis", "readiness": 87},
+    {"module": "MinIO", "readiness": 87},
+    {"module": "Jaeger/observability", "readiness": 84},
+    {"module": "sdk/sets/docs", "readiness": 83}
+  ],
+  "p0_p1": [
+    {"item": "RC docs made cargo test --workspace fail formal docs allowlist", "severity": "P0", "status": "fixed", "fix_commit": "RC evidence commit"},
+    {"item": "staging drill storage-service config missing Jaeger", "severity": "P1", "status": "fixed", "fix_commit": "853423a"},
+    {"item": "current nightly first-success artifacts pending", "severity": "P1", "status": "accepted-risk"},
+    {"item": "manager auth deferred", "severity": "P1", "status": "accepted-risk"},
+    {"item": "alert and trace coverage narrow", "severity": "P1", "status": "accepted-risk"},
+    {"item": "schema rollback unsupported", "severity": "P1", "status": "accepted-risk"},
+    {"item": "load/soak is short smoke only", "severity": "P1", "status": "accepted-risk"}
+  ],
+  "accepted_risks": [
+    "Nightly staging/ops/image/trace/load artifacts are pending first success after the RC fix.",
+    "Manager GUI/TUI are read-only/dev-ops beta with auth deferred.",
+    "Schema rollback is unsupported; app-level rollback only.",
+    "Alert firing covers one synthetic rule only.",
+    "Trace E2E covers one judge submission path.",
+    "Load/soak is not capacity evidence.",
+    "No HA/failover topology is claimed for this beta."
+  ],
+  "deferred_items": [
+    "Broaden browser E2E coverage.",
+    "Add more observability rules and dashboards.",
+    "Formal HA deployment and failover drill.",
+    "Longer load/soak and capacity envelope.",
+    "Manager auth and richer operator workflows.",
+    "MinIO lifecycle/policy hardening beyond sample restore."
+  ]
+}
