@@ -130,4 +130,15 @@ if [[ "${OJOS_SECRET_CHECK_REQUIRE_MONITORING:-0}" == "1" ]]; then
   require_secret GRAFANA_ADMIN_PASSWORD 32
 fi
 
+# Opt-in transport-security enforcement. Off by default so the current beta profile
+# (loopback-bound datastores, plaintext redis://, MINIO_USE_SSL=false) and ci-policy.sh
+# keep passing. Turning it on requires TLS-configured Redis and MinIO endpoints, which
+# depends on a PKI/cert decision that is still deferred.
+if [[ "${OJOS_SECRET_CHECK_REQUIRE_TLS:-0}" == "1" ]]; then
+  redis_url="$(value_for REDIS_URL)"
+  [[ "$redis_url" =~ ^rediss:// ]] || die "OJOS_SECRET_CHECK_REQUIRE_TLS=1 requires REDIS_URL to use the rediss:// (TLS) scheme"
+  minio_ssl="$(printf '%s' "$(value_for MINIO_USE_SSL)" | tr '[:upper:]' '[:lower:]')"
+  [[ "$minio_ssl" == "true" ]] || die "OJOS_SECRET_CHECK_REQUIRE_TLS=1 requires MINIO_USE_SSL=true"
+fi
+
 echo "secret-check: production secret policy passed"
