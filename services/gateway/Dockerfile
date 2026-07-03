@@ -1,4 +1,4 @@
-FROM golang:1.26.3
+FROM golang:1.26.4
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY

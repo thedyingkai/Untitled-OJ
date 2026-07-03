@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.3"
+          go-version: "1.26.4"
           cache-dependency-path: |
             platform/shared/go/go.sum
             services/auth-service/go.sum
@@ -81,6 +81,25 @@ jobs:
           for dir in "${modules[@]}"; do
             echo "::group::go test $dir"
             (cd "$dir" && go test ./...)
+            echo "::endgroup::"
+          done
+      - name: Scan Go modules for reachable vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          modules=(
+            platform/shared/go
+            services/auth-service
+            services/gateway
+            services/storage-service
+            services/problem-service
+            services/judge-api
+            services/user-service
+          )
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          for dir in "${modules[@]}"; do
+            echo "::group::govulncheck $dir"
+            (cd "$dir" && govulncheck ./...)
             echo "::endgroup::"
           done
 

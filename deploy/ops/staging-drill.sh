@@ -41,6 +41,7 @@ storage_service_pid=""
 work_root="${OJOS_STAGING_DRILL_WORK_DIR:-}"
 work_root_created="0"
 work_repo=""
+mc_config=""
 
 pg_user="ojos_drill"
 pg_password="OjosDrillPg_0123456789abcdef"
@@ -175,6 +176,13 @@ cleanup() {
         ;;
     esac
   fi
+  if [[ -n "$mc_config" ]]; then
+    case "$mc_config" in
+      /tmp/ojos-staging-mc-* | /var/tmp/ojos-staging-mc-* | "${RUNNER_TEMP:-/tmp}"/ojos-staging-mc-*)
+        rm -rf "$mc_config" >/dev/null 2>&1 || true
+        ;;
+    esac
+  fi
 }
 
 finish() {
@@ -275,7 +283,7 @@ docker run -d \
   "$minio_image" server /data --console-address ":9001" >/dev/null
 minio_port="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "9000/tcp") 0).HostPort}}' "$minio_container")"
 
-mc_config="$evidence_dir/mc-config"
+mc_config="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ojos-staging-mc-$run_id"
 mkdir -p "$mc_config" "$evidence_dir/minio-src" "$evidence_dir/minio-backup" "$evidence_dir/minio-restore"
 
 mc() {
