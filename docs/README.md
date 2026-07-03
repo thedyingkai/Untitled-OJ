@@ -38,6 +38,10 @@
 - [Staging 备份/恢复/回滚演练](evidence/staging-drill.md) —— 演练说明。
 - [机器可读证据](evidence/) —— `production-readiness.json`、`release-candidate.json`（数据，不作正文）。
 
+## 发布与上手
+
+- [v0.1.0 Alpha 快速上手](alpha-quickstart.md) —— 下载运行编排器可执行文件、按 service 看效果、拉取 service 下载。
+
 ## 完成度与未完成事项
 
 - [项目完成度总结](completeness-summary.md) —— 逐模块完成度、功能用法、对标生产的缺陷。

@@ -1,0 +1,113 @@
+name: Release Alpha
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-alpha-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: ubuntu-latest
+            platform: linux-x64
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build orchestrator binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.platform }}" = "windows-x64" ]; then
+            # Windows ships all three binaries, including the GUI.
+            cargo build --release
+          else
+            # Linux ships daemon + TUI only; the GUI (eframe) needs desktop
+            # system libraries that are out of scope for the alpha.
+            cargo build --release -p ojos-orchestrator-daemon -p ojos-orchestrator-tui
+          fi
+
+      - name: Package alpha artifacts
+        shell: bash
+        env:
+          OJOS_ALPHA_VERSION: ${{ github.ref_name }}
+          OJOS_ALPHA_PLATFORM: ${{ matrix.platform }}
+          OJOS_ALPHA_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
+        run: bash deploy/release/pack-alpha.sh
+
+      - name: Upload platform bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-${{ matrix.platform }}
+          path: |
+            dist/ojos-orchestrator-*-${{ matrix.platform }}.zip
+            dist/ojos-orchestrator-*-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+
+      # The per-service release packages are platform-independent; publish the
+      # copies built on Linux (single, reproducible set) to avoid tar metadata
+      # differences between runners.
+      - name: Upload service packages
+        if: matrix.platform == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: service-packages
+          path: dist/services/**
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+
+      - name: Show gathered assets
+        shell: bash
+        run: find release-assets -type f | sort
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          cat >"$notes" <<EOF
+          OJOS Orchestrator ${{ github.ref_name }} —— alpha 预发布。
+
+          资产：
+          - \`ojos-orchestrator-${{ github.ref_name }}-windows-x64.zip\` —— Windows 编排器（daemon / GUI / TUI）+ 运行时数据。
+          - \`ojos-orchestrator-${{ github.ref_name }}-linux-x64.tar.gz\` —— Linux 编排器（daemon / TUI）+ 运行时数据。
+          - \`ojos-service-<name>-${{ github.ref_name }}.tar.gz\` + \`manifest.json\` —— 可被编排器拉取下载的各 service 发布包及其 sha256。
+
+          用法见仓库 \`docs/alpha-quickstart.md\`（下载运行编排器、按 service 看效果、拉取 service 下载）。
+          EOF
+          mapfile -t assets < <(find release-assets -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name 'manifest.json' \) | sort)
+          echo "publishing ${#assets[@]} assets"
+          gh release create "${{ github.ref_name }}" "${assets[@]}" \
+            --repo "${{ github.repository }}" \
+            --title "OJOS Orchestrator ${{ github.ref_name }}" \
+            --notes-file "$notes" \
+            --prerelease
