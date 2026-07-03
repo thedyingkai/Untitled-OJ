@@ -3590,6 +3590,74 @@ fn local_release_package_loader_fetches_http_zip_release_package() {
 }
 
 #[test]
+fn local_release_package_loader_follows_redirect_to_zip_release_package() {
+    // GitHub release asset URLs answer with a 302 to a storage host; the loader must
+    // follow the redirect and download the real archive.
+    let root = repo_root();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let release_yaml =
+        fs::read_to_string(root.join("services/gateway/release.yaml")).expect("read release yaml");
+    let package = zip_release_package(&[("gateway-release/release.yaml", release_yaml.as_str())]);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind release package listener");
+    let addr = listener.local_addr().expect("release package addr");
+    let redirect_url = format!("http://{addr}/download/gateway-release.zip");
+    let final_path = "/storage/gateway-release.zip";
+    let final_url = format!("http://{addr}{final_path}");
+
+    let handle = thread::spawn({
+        let package = package.clone();
+        move || {
+            // First connection: 302 redirect (Connection: close forces a fresh
+            // connection). Second connection: serve the zip archive.
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept release package request");
+                let mut buffer = [0_u8; 1024];
+                let read = stream
+                    .read(&mut buffer)
+                    .expect("read release package request");
+                // Match the requested path against raw bytes (no lossy decoding).
+                let requested_final = buffer[..read]
+                    .windows(final_path.len())
+                    .any(|window| window == final_path.as_bytes());
+                if requested_final {
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        package.len()
+                    );
+                    stream
+                        .write_all(headers.as_bytes())
+                        .expect("write zip headers");
+                    stream.write_all(&package).expect("write zip body");
+                    break;
+                }
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {final_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write redirect response");
+            }
+        }
+    });
+
+    let result = LocalReleasePackageLoader::new(&root)
+        .load_release_package(&ReleasePackageLoadRequest {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            source_url: redirect_url.clone(),
+            expected_checksum: None,
+            expected_manifest: Some(release),
+        })
+        .expect("redirected release package load");
+    handle.join().expect("release package listener thread");
+    assert_eq!(result.status, "loaded");
+    assert_eq!(result.source_url, redirect_url);
+    assert!(result.manifest_loaded);
+    assert!(result.checksum.starts_with("sha256:"));
+}
+
+#[test]
 fn local_release_package_loader_fetches_local_zip_release_package() {
     let root = repo_root();
     let release =

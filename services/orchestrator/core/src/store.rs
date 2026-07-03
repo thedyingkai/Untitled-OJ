@@ -1293,6 +1293,11 @@ pub struct LocalSqlMigrationRunner {
 #[derive(Debug, Default, Clone)]
 pub struct DeferredReleasePackageLoader;
 
+/// Maximum HTTP redirects followed when downloading a remote release package.
+/// GitHub release asset URLs redirect once to a storage host; a small bound keeps
+/// that working without allowing unbounded redirect chains.
+const RELEASE_PACKAGE_MAX_REDIRECTS: u32 = 5;
+
 #[derive(Debug, Default, Clone)]
 pub struct ConfiguredReleasePackageLoader {
     load_enabled: bool,
@@ -2022,7 +2027,10 @@ impl LocalReleasePackageLoader {
         let agent: Agent = Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .http_status_as_error(false)
-            .max_redirects(0)
+            // Follow a bounded number of redirects: GitHub release asset URLs
+            // (…/releases/download/…) answer with a 302 to a storage host, so a
+            // zero-redirect fetch would reject the download as a non-2xx status.
+            .max_redirects(RELEASE_PACKAGE_MAX_REDIRECTS)
             .proxy(None)
             .build()
             .into();
