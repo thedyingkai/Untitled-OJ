@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"time"
 
 	"ojos-auth-service/internal/config"
 	"ojos-auth-service/internal/handler"
@@ -28,7 +29,11 @@ func main() {
 	sharedmw.InstallHTTPErrorHandler()
 
 	svcCtx := svc.NewServiceContext(c)
-	defer svcCtx.Close(context.Background())
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		svcCtx.Close(ctx)
+	}()
 
 	server := rest.MustNewServer(c.RestConf)
 	defer server.Stop()

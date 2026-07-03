@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	sharedmw "ojos-shared/middleware"
 	"ojos-storage-service/internal/config"
@@ -33,7 +34,11 @@ func main() {
 	defer server.Stop()
 
 	ctx := svc.NewServiceContext(c)
-	defer ctx.Close(context.Background())
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ctx.Close(shutdownCtx)
+	}()
 	server.Use(sharedmw.RecoveryMiddleware(ctx.Logger))
 	server.Use(sharedmw.LoggingMiddleware(ctx.Logger, ctx.Tracer))
 

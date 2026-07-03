@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -170,6 +171,13 @@ func TestMinIOObjectStoreLifecycleWithFakeS3(t *testing.T) {
 	}
 	if headRec.Body.Len() != 0 {
 		t.Fatalf("head should not write body")
+	}
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancelledReq := httptest.NewRequest(http.MethodGet, "/objects/submissions/42/main.cpp", nil).WithContext(cancelledCtx)
+	if err := objectStore.Serve(httptest.NewRecorder(), cancelledReq, "submissions", "42/main.cpp"); err == nil {
+		t.Fatalf("serve should propagate request cancellation")
 	}
 
 	if err := objectStore.Delete("submissions", "42/main.cpp"); err != nil {

@@ -146,7 +146,7 @@ func (s *MinIOObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket,
 	if err := s.ensureConfiguredBucket(bucket); err != nil {
 		return err
 	}
-	meta, _ := s.Metadata(bucket, key)
+	meta, _ := s.metadata(r.Context(), bucket, key)
 	if meta.ContentType != "" {
 		w.Header().Set("Content-Type", meta.ContentType)
 	}
@@ -159,7 +159,7 @@ func (s *MinIOObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket,
 		}
 		return nil
 	}
-	object, err := s.client.GetObject(context.Background(), bucket, key, minio.GetObjectOptions{})
+	object, err := s.client.GetObject(r.Context(), bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		return err
 	}
@@ -180,6 +180,10 @@ func (s *MinIOObjectStore) Delete(bucket, key string) error {
 }
 
 func (s *MinIOObjectStore) Metadata(bucket, key string) (types.ObjectMetadata, error) {
+	return s.metadata(context.Background(), bucket, key)
+}
+
+func (s *MinIOObjectStore) metadata(ctx context.Context, bucket, key string) (types.ObjectMetadata, error) {
 	key, err := cleanObjectKey(key)
 	if err != nil {
 		return types.ObjectMetadata{}, err
@@ -187,7 +191,7 @@ func (s *MinIOObjectStore) Metadata(bucket, key string) (types.ObjectMetadata, e
 	if err := s.ensureConfiguredBucket(bucket); err != nil {
 		return types.ObjectMetadata{}, err
 	}
-	info, err := s.client.StatObject(context.Background(), bucket, key, minio.StatObjectOptions{})
+	info, err := s.client.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
