@@ -157,6 +157,20 @@ jobs:
           cargo fmt --check
           cargo check
           cargo test
+      - name: Audit Rust dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked --version 0.22.2
+          # eframe 0.31 pulls quick-xml 0.30/0.39 through Linux desktop
+          # accessibility and Wayland dependencies. The compatible eframe
+          # upgrade currently fails to compile on Windows due to wgpu 29's
+          # windows crate version split. Keep these two advisories explicit
+          # while failing on every newly reported vulnerability.
+          cargo audit \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
+          cargo audit --file services/judge-worker/Cargo.lock
       - name: Build nsjail for strict judge-worker live tests
         shell: bash
         env:
