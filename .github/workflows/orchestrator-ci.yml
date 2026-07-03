@@ -25,10 +25,18 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26.3"
+          cache-dependency-path: |
+            platform/shared/go/go.sum
+            services/auth-service/go.sum
+            services/gateway/go.sum
+            services/storage-service/go.sum
+            services/problem-service/go.sum
+            services/judge-api/go.sum
+            services/user-service/go.sum
       - name: Start MinIO live integration service
         shell: bash
         env:
@@ -94,7 +102,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -180,8 +188,8 @@ jobs:
     name: Gateway frontend build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: npm
@@ -199,7 +207,7 @@ jobs:
           npm run test:e2e
       - name: Upload gateway frontend E2E artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gateway-frontend-e2e
           path: |
@@ -210,7 +218,7 @@ jobs:
     name: Docker Compose production policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Judge worker compose defaults
         shell: bash
         env:
@@ -251,7 +259,7 @@ jobs:
     name: Orchestrator model checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Run Orchestrator model checks
         shell: bash

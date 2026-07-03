@@ -49,14 +49,22 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26.3"
-      - uses: actions/setup-node@v4
+          cache-dependency-path: |
+            platform/shared/go/go.sum
+            services/auth-service/go.sum
+            services/gateway/go.sum
+            services/storage-service/go.sum
+            services/problem-service/go.sum
+            services/judge-api/go.sum
+            services/user-service/go.sum
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: npm
@@ -293,7 +301,7 @@ jobs:
             }' >artifacts/image-build/image-build-evidence.json
       - name: Upload Docker image build evidence
         if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true')) }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: docker-image-build-evidence
           path: artifacts/image-build
@@ -318,7 +326,7 @@ jobs:
         run: bash deploy/ops/basic-load-soak.sh
       - name: Upload runtime drill evidence
         if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true')) }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: docker-runtime-drill-evidence
           path: |
