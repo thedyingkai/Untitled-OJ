@@ -6873,6 +6873,7 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
 
     let allowed_ops_scripts = [
         "deploy/compose/minio-init.sh",
+        "deploy/release/pack-alpha.sh",
         "deploy/ops/backup.sh",
         "deploy/ops/alert-firing-drill.sh",
         "deploy/ops/basic-load-soak.sh",
