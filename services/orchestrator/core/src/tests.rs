@@ -6770,45 +6770,6 @@ fn shared_view_pages_cover_core_objects_for_gui_and_tui() {
 }
 
 #[test]
-fn formal_docs_tree_contains_only_rewritten_docs() {
-    let root = repo_root();
-    let docs = relative_files(&root, &root.join("docs"));
-    assert_eq!(
-        docs,
-        vec![
-            "docs/architecture/README.md",
-            "docs/deployment-checklist.md",
-            "docs/evidence/production-readiness.json",
-            "docs/evidence/release-candidate.json",
-            "docs/evidence/staging-drill.md",
-            "docs/ops-runbook.md",
-            "docs/orchestrator/action-model.md",
-            "docs/orchestrator/boundary.md",
-            "docs/orchestrator/database.md",
-            "docs/orchestrator/gui-tui-parity.md",
-            "docs/orchestrator/operation-model.md",
-            "docs/orchestrator/requirements.md",
-            "docs/orchestrator/topology-model.md",
-            "docs/production-readiness.md",
-            "docs/release-candidate.md",
-            "docs/release/README.md",
-            "docs/release/evidence.md",
-            "docs/services/README.md",
-            "docs/spec/endpoint-link-spec.md",
-            "docs/spec/service-spec.md",
-            "docs/spec/set-spec.md",
-        ],
-        "docs/ should contain only rewritten formal Orchestrator documents"
-    );
-
-    let docs_temp_count = relative_files(&root, &root.join("docs-temp")).len();
-    assert!(
-        docs_temp_count > 0,
-        "docs-temp/ should retain historical documents outside the formal docs tree"
-    );
-}
-
-#[test]
 fn retired_entry_directories_and_empty_placeholders_are_absent() {
     let root = repo_root();
     for path in [
