@@ -33,29 +33,69 @@ jobs:
 
           rm -rf .wiki-src
           mkdir -p .wiki-src
-          cp -R docs/. .wiki-src/
+
+          # GitHub wiki (gollum) keys every page by a FLAT slug (its basename),
+          # so nested paths like docs/orchestrator/boundary.md are served as the
+          # page "orchestrator-boundary" only if we flatten them ourselves.
+          # Flatten docs/<dir>/<name>.md -> <Dir>-<Name>.md at the wiki root and
+          # generate the sidebar from the same slugs so links never 404.
+
+          # slug_for <docs-relative-path-without-extension> -> Capitalized-Hyphen slug
+          slug_for() {
+            local rel="$1"
+            local IFS='/'
+            local out="" part
+            for part in $rel; do
+              # capitalize first letter of each path segment, keep the rest
+              local head="${part:0:1}"
+              local tail="${part:1}"
+              head="$(printf '%s' "$head" | tr '[:lower:]' '[:upper:]')"
+              if [ -n "$out" ]; then
+                out="${out}-${head}${tail}"
+              else
+                out="${head}${tail}"
+              fi
+            done
+            printf '%s' "$out"
+          }
+
+          # README.md -> Home page. The in-repo docs/README.md index is skipped:
+          # the wiki sidebar below IS the index, so a second "README" page would be
+          # redundant.
           cp README.md .wiki-src/Home.md
 
-          cat > .wiki-src/_Sidebar.md <<'EOF'
-          # OJOS Wiki
+          # Copy every docs/*.md (except the index) to a flat, unique wiki page.
+          declare -a pages=()
+          while IFS= read -r -d '' src; do
+            rel="${src#docs/}"          # e.g. orchestrator/boundary.md
+            [ "$rel" = "README.md" ] && continue
+            rel_noext="${rel%.md}"      # e.g. orchestrator/boundary
+            slug="$(slug_for "$rel_noext")"
+            cp "$src" ".wiki-src/${slug}.md"
+            pages+=("${rel_noext}=${slug}")
+          done < <(find docs -type f -name '*.md' -print0 | sort -z)
 
-          - [Home](Home)
-          - [Service spec](spec/service-spec)
-          - [Set spec](spec/set-spec)
-          - [Endpoint link spec](spec/endpoint-link-spec)
-
-          ## Orchestrator
-          - [Requirements](orchestrator/requirements)
-          - [Boundary](orchestrator/boundary)
-          - [Action model](orchestrator/action-model)
-          - [GUI/TUI parity](orchestrator/gui-tui-parity)
-          - [Topology model](orchestrator/topology-model)
-          - [Operation model](orchestrator/operation-model)
-          - [Database](orchestrator/database)
-
-          ## Notes
-          Historical documents stay in the repository under docs-temp/ and are not synced as formal wiki source.
-          EOF
+          # Generate the sidebar from the actual page slugs so it can never drift.
+          # Links use the exact flat slug produced above, so they never 404.
+          # The human title is each doc's first "# " heading (Chinese), which
+          # keeps the sidebar readable and in sync with the page content.
+          {
+            echo "# OJOS Wiki"
+            echo
+            echo "- [首页](Home)"
+            for entry in "${pages[@]}"; do
+              rel_noext="${entry%%=*}"
+              slug="${entry#*=}"
+              title="$(sed -n 's/^# //p' ".wiki-src/${slug}.md" | head -n 1)"
+              if [ -z "$title" ]; then
+                # fall back to the last path segment if a doc has no H1
+                title="${rel_noext##*/}"
+                title="${title//-/ }"
+                title="${title//_/ }"
+              fi
+              echo "- [${title}](${slug})"
+            done
+          } > .wiki-src/_Sidebar.md
 
       - name: Push mirror to wiki
         shell: bash

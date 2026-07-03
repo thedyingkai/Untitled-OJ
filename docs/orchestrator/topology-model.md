@@ -1,8 +1,8 @@
-# Topology Model
+# Topology 模型
 
-Topology is the Orchestrator view of currently known services and runtime connectivity.
+Topology 是编排器对当前已知服务与运行时连通性的视图。
 
-It is built from:
+它由以下对象构建：
 
 ```text
 Service
@@ -13,17 +13,18 @@ LogView
 DiagnosticReport
 ```
 
-Local deployment templates may seed preview endpoints and links when no persistent store is configured, but templates are not formal topology objects.
+在未配置持久化 store 时，本地部署模板可以播种预览用的 endpoint 和 link，但模板不是正式拓扑对象。
 
-Endpoint identity is `ip:port:service-name`. Link identity is endpoint-to-endpoint:
+Endpoint 身份是 `ip:port:service-name`。Link 身份是 endpoint 到 endpoint：
 
 ```text
 source endpoint -> target endpoint
 ```
 
-`GET /topology` is rebuilt from the current store. It must reflect Endpoint and Link changes written through action dispatch. The daemon must not return stale startup context in place of the store-backed topology.
+`GET /topology` 从当前 store 重建。它必须反映通过 action dispatch 写入的 Endpoint 与 Link 变更。daemon
+不得用陈旧的启动上下文替代 store-backed 的拓扑。
 
-Endpoint health values are:
+Endpoint 健康值为：
 
 ```text
 healthy
@@ -33,9 +34,9 @@ unreachable
 unknown
 ```
 
-Link health is derived from source endpoint, target endpoint, target reachability, protocol family, auth mode, scope, and optional latency.
+Link 健康由 source endpoint、target endpoint、target 可达性、协议族、认证模式、scope 以及可选延迟派生。
 
-Relevant evidence:
+相关证据：
 
 ```text
 daemon_topology_reflects_endpoint_link_mutations

@@ -65,8 +65,11 @@ orchestrator
 
 ## 文档
 
-正式文档位于 `docs/`：
+正式文档位于 `docs/`，完整索引见 [docs/README.md](docs/README.md)：
 
+- [文档索引](docs/README.md)
+- [项目完成度总结](docs/completeness-summary.md)
+- [未完成事项](docs/unfinished/README.md)
 - [Service 规范](docs/spec/service-spec.md)
 - [Set 规范](docs/spec/set-spec.md)
 - [Endpoint / Link 规范](docs/spec/endpoint-link-spec.md)
@@ -77,6 +80,8 @@ orchestrator
 - [Topology 模型](docs/orchestrator/topology-model.md)
 - [Operation 模型](docs/orchestrator/operation-model.md)
 - [Orchestrator 数据库](docs/orchestrator/database.md)
+- [部署清单](docs/ops/deployment-checklist.md)
+- [运维手册](docs/ops/ops-runbook.md)
 - [可核对证据](docs/release/evidence.md)
 
-历史文档位于 `docs-temp/`，不作为当前正式架构依据。
+历史/废弃文档已从仓库删除，其架构结论已并入[项目完成度总结](docs/completeness-summary.md)。

@@ -1,40 +1,41 @@
-# Orchestrator Boundary
+# 编排器边界
 
-OJOS Orchestrator is a service orchestrator, not the OJ business backend and not the Gateway frontend.
+OJOS Orchestrator 是服务编排器，不是 OJ 业务后端，也不是 Gateway 前端。
 
 ## Gateway
 
-Gateway is a service. It handles business traffic, auth middleware, request routing, unified errors, and health reporting.
+Gateway 是一个 Service。它负责业务流量、认证中间件、请求路由、统一错误和健康上报。
 
-Gateway does not install services, manage endpoints or links, mutate topology, execute operations, or become the control plane.
+Gateway 不安装服务、不管理 endpoint 或 link、不改动拓扑、不执行 operation，也不充当控制平面。
 
-## Gateway Frontend
+## Gateway 前端
 
-Gateway frontend is the OJ site UI: problems, submissions, judging results, and ordinary administration views.
+Gateway 前端是 OJ 站点 UI：题目、提交、判题结果，以及普通管理视图。
 
-Gateway frontend does not install services, manage endpoints or links, mutate topology, execute operations, or act as Orchestrator.
+Gateway 前端不安装服务、不管理 endpoint 或 link、不改动拓扑、不执行 operation，也不充当编排器。
 
-## Orchestrator Daemon
+## Orchestrator daemon
 
-Orchestrator daemon is the HTTP API entry point for Orchestrator.
+Orchestrator daemon 是编排器的 HTTP API 入口。
 
-It may:
+它可以：
 
 ```text
-read ORCHESTRATOR_DATABASE_URL or use local memory store context
-expose service release, service, endpoint, link, operation, topology, log, and diagnostic APIs
-convert write requests into core ActionRequest values
-delegate execution to OrchestratorActionDispatcher
-read operation state, operation logs, topology, and diagnostic reports
+读取 ORCHESTRATOR_DATABASE_URL，或使用本地内存 store 上下文
+暴露 service release、service、endpoint、link、operation、topology、log 和 diagnostic API
+把写请求转换为 core 的 ActionRequest 值
+把执行委托给 OrchestratorActionDispatcher
+读取 operation 状态、operation 日志、拓扑和诊断报告
 ```
 
-It must not proxy OJ business traffic, serve Gateway frontend pages, execute arbitrary shell, bypass the GUI/TUI core action schema, or introduce an extra runtime instance object.
+它不得代理 OJ 业务流量、不得服务 Gateway 前端页面、不得执行任意 shell、不得绕过 GUI/TUI 的 core
+action schema，也不得引入额外的运行时实例对象。
 
-## Root Role
+## Root 角色
 
-Root is an Orchestrator runtime role, not a separate rootd program. Node and standalone are also roles of the same Orchestrator program.
+Root 是编排器的一种运行时角色，不是独立的 rootd 程序。Node 与 standalone 也是同一个编排器程序的角色。
 
-Root information is represented by configuration, authority policy, and topology start points:
+Root 信息由配置、授权策略和拓扑起点表示：
 
 ```text
 topology.root_host
@@ -44,6 +45,7 @@ authority.root_endpoint
 authority.exposure_policy
 ```
 
-## OJ Business Boundary
+## OJ 业务边界
 
-Problems, submissions, contests, users, permissions business logic, announcements, training, clarifications, printing, and rankings belong inside managed services, not inside Orchestrator core.
+题目、提交、比赛、用户、权限业务逻辑、公告、训练、Clarification、打印和滚榜，属于被管理的服务内部，
+不属于编排器 core。

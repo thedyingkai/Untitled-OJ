@@ -1,10 +1,11 @@
-# Action Model
+# Action 模型
 
-GUI, TUI, and backend entry points use the same action registry, form schema, plan schema, result schema, and error schema.
+GUI、TUI 和后端入口使用同一套 action 注册表、form schema、plan schema、result schema 和 error schema。
 
-Formal actions come from `platform/schemas/orchestrator/actions.yaml` and are validated by `services/orchestrator/core/src/action.rs`.
+正式 action 来自 `platform/schemas/orchestrator/actions.yaml`，由 `services/orchestrator/core/src/action.rs`
+校验。
 
-Actions are organized by abstraction layer. Each formal layer must expose CRUD-style actions:
+Action 按抽象层组织。每个正式层都必须暴露 CRUD 风格的 action：
 
 ```text
 release
@@ -26,56 +27,61 @@ log
 diagnostic
 ```
 
-Every layer has `create`, `list`, `get`, `update`, and `delete`. Domain-specific verbs such as `validate`, `install`, `apply`, `health.check`, `query`, or `export` are allowed only as extra actions on top of that CRUD base.
+每一层都有 `create`、`list`、`get`、`update`、`delete`。像 `validate`、`install`、`apply`、
+`health.check`、`query`、`export` 这样的领域动词，只允许作为 CRUD 基础之上的额外 action 出现。
 
-`service-name[*]` is not a formal table, entity, or action layer. It is only a query over currently running endpoints with the same service name. The daemon may keep legacy `/sets/{id}/expand` and `/sets/{id}/apply` HTTP routes as gone/compatibility responses, but `set.expand` and `set.apply` are not catalog actions.
+`service-name[*]` 不是正式表、实体或 action 层。它只是对同名运行中 endpoint 的查询。daemon 可以保留
+遗留的 `/sets/{id}/expand` 和 `/sets/{id}/apply` HTTP 路由并返回「已废弃/兼容」响应，但 `set.expand`
+和 `set.apply` 不是目录 action。
 
-Endpoint identity is always:
+Endpoint 身份始终是：
 
 ```text
 ip:port:service-name
 ```
 
-No `instance-id` is introduced.
+不引入 `instance-id`。
 
-## Execution Contract
+## 执行契约
 
-`ActionRequest` values may be produced by GUI, TUI, or backend HTTP handlers, but operation plans must be produced by core. Entry layers must not assemble plans, mutate operation state machines, or bypass the core executor.
+`ActionRequest` 值可以由 GUI、TUI 或后端 HTTP handler 产生，但 operation 计划必须由 core 产生。入口层
+不得自行组装计划、不得改动 operation 状态机、不得绕过 core 执行器。
 
-`services/orchestrator/core/src/dispatcher.rs` is the single action dispatcher. It reads the action schema, builds an `Operation`, writes the store when the action is supported, invokes fixed executor paths where available, and returns an `ActionDispatchResult`.
+`services/orchestrator/core/src/dispatcher.rs` 是唯一的 action dispatcher。它读取 action schema、构建
+`Operation`、在 action 受支持时写入 store、在可用处调用固定执行路径，并返回 `ActionDispatchResult`。
 
-Every dispatch result has an explicit capability status:
+每个 dispatch 结果都有明确的能力状态：
 
 ```text
-REAL          performed a real probe or real read and persisted observable results
-STORE_BACKED  wrote Store, Operation, OperationLog, or view metadata without external execution
-UNSUPPORTED   cannot currently perform the requested mutation and must not be shown as success
-READONLY      computed or read data without mutating core objects
+REAL          执行了真实探测或真实读取，并持久化了可观测结果
+STORE_BACKED  写入了 Store、Operation、OperationLog 或视图元数据，但没有外部执行
+UNSUPPORTED   当前无法执行所请求的变更，且不得显示为成功
+READONLY      计算或读取了数据，但没有改动 core 对象
 ```
 
-Unsupported catalog actions are never routed through a fake success path.
+不受支持的目录 action 绝不会走假成功路径。
 
-## Current Capability Matrix
+## 当前能力矩阵
 
-| Layer | Representative actions | Status |
+| 层 | 代表性 action | 状态 |
 | --- | --- | --- |
-| release | `release.create/list/get/update/delete`, `release.validate`, `release.install` | CRUD plus install path; install is store-backed |
-| service | `service.create/list/get/update/delete`, `service.start/stop/restart/enable/disable`, `service.health.check` | CRUD is cataloged; lifecycle mutations remain unsupported until a safe driver binding exists |
-| endpoint | `endpoint.create/list/get/update/delete`, `endpoint.health.check` | store-backed CRUD; health check can be real |
-| link | `link.create/list/get/update/delete`, `link.health.check` | store-backed CRUD; health check can be real |
-| topology | `topology.create/list/get/update/delete`, `topology.validate`, `topology.apply`, `topology.export` | read/validate/export supported; unsupported mutations are explicit |
-| operation | `operation.create/list/get/update/delete`, `operation.confirm`, `operation.apply`, `operation.rollback`, `operation.cancel` | store-backed operation state machine |
-| log | `log.create/list/get/update/delete`, `log.query` | log view CRUD and operation log queries |
-| diagnostic | `diagnostic.create/list/get/update/delete`, `diagnostic.export` | store-backed reports and exports |
-| host/route/frontend/migration/permission/redis/storage/config/secret | CRUD base | cataloged with explicit unsupported/read-only capability until backing stores are implemented |
+| release | `release.create/list/get/update/delete`、`release.validate`、`release.install` | CRUD 加 install 路径；install 是 store-backed |
+| service | `service.create/list/get/update/delete`、`service.start/stop/restart/enable/disable`、`service.health.check` | CRUD 已入目录；生命周期变更在有安全 driver 绑定前保持 UNSUPPORTED |
+| endpoint | `endpoint.create/list/get/update/delete`、`endpoint.health.check` | store-backed CRUD；健康检查可为真实 |
+| link | `link.create/list/get/update/delete`、`link.health.check` | store-backed CRUD；健康检查可为真实 |
+| topology | `topology.create/list/get/update/delete`、`topology.validate`、`topology.apply`、`topology.export` | 读/校验/导出受支持；不受支持的变更是显式的 |
+| operation | `operation.create/list/get/update/delete`、`operation.confirm`、`operation.apply`、`operation.rollback`、`operation.cancel` | store-backed operation 状态机 |
+| log | `log.create/list/get/update/delete`、`log.query` | LogView CRUD 与 operation 日志查询 |
+| diagnostic | `diagnostic.create/list/get/update/delete`、`diagnostic.export` | store-backed 报告与导出 |
+| host/route/frontend/migration/permission/redis/storage/config/secret | CRUD 基础 | 已入目录，能力显式为 UNSUPPORTED/READONLY，直到实现后端 store |
 
-Diagnostic reports include action capability evidence so `STORE_BACKED` and `UNSUPPORTED` paths are not confused with `REAL` execution.
+诊断报告包含 action 能力证据，因此 `STORE_BACKED` 和 `UNSUPPORTED` 路径不会与 `REAL` 执行混淆。
 
-## Backend API
+## 后端 API
 
-The orchestrator backend converts HTTP requests into `ActionRequest` and calls the same dispatcher used by GUI and TUI.
+编排器后端把 HTTP 请求转换为 `ActionRequest`，并调用与 GUI、TUI 相同的 dispatcher。
 
-Current write/read entry points are:
+当前写/读入口为：
 
 ```text
 POST /actions
@@ -100,13 +106,15 @@ GET  /diagnostics/{report_id}.json
 GET  /diagnostics/{report_id}.md
 ```
 
-`GET /topology` is rebuilt from the current store state: services, endpoints, links, operations, log views, and diagnostic reports. Formal service-set persistence is not part of the store.
+`GET /topology` 从当前 store 状态重建：services、endpoints、links、operations、log views 和 diagnostic
+reports。正式的 service-set 持久化不属于 store。
 
-## Driver Boundary
+## Driver 边界
 
-Drivers accept only fixed actions. Arbitrary shell, arbitrary script paths, user-provided command strings, and remote root shells are outside the action model.
+Driver 只接受固定 action。任意 shell、任意脚本路径、用户提供的命令字符串和远程 root shell 都在 action
+模型之外。
 
-The current fixed drivers are:
+当前固定 driver 为：
 
 ```text
 LocalProcessDriver
@@ -114,4 +122,5 @@ DockerComposeDriver
 ExternalEndpointDriver
 ```
 
-Driver capabilities are lower-level implementation details. The action console still reports unsupported service lifecycle commands as `UNSUPPORTED` until the project has a safe binding for starting, stopping, and deleting services.
+Driver 能力属于更底层的实现细节。在项目拥有启动、停止和删除服务的安全绑定之前，action console 仍将不受
+支持的服务生命周期命令报告为 `UNSUPPORTED`。

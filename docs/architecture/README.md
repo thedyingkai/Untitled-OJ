@@ -1,8 +1,8 @@
-# Architecture Docs
+# 架构文档
 
-The current architecture is service-release-first.
+当前架构是 service-release-first（以服务发布为先）。
 
-Formal Orchestrator objects are:
+正式编排器对象为：
 
 ```text
 ServiceRelease
@@ -24,8 +24,9 @@ LogView
 DiagnosticReport
 ```
 
-The runtime endpoint identity is `ip:port:service-name`.
+运行时 endpoint 身份是 `ip:port:service-name`。
 
-`service-name[*]` is a derived query over running endpoints. Local deployment templates are read-only helpers and are not formal runtime objects.
+`service-name[*]` 是对运行中 endpoint 的派生查询。本地部署模板是只读辅助材料，不是正式运行时对象。
 
-Gateway and Gateway frontend are services, not the Orchestrator control plane. GUI and TUI are formal management entry points and must stay capability-equivalent through core.
+Gateway 与 Gateway 前端是 Service，不是编排器控制平面。GUI 与 TUI 是正式管理入口，必须通过 core 保持
+能力等价。

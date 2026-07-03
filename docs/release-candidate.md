@@ -1,125 +1,134 @@
-# Release Candidate Evidence
+# 发布候选证据
 
-## Verdict
+## 判定
 
-CONDITIONAL GO for the first production candidate / beta release.
+首个生产候选 / beta 发布：CONDITIONAL GO（有条件放行）。
 
-Reason: P0 is zero after the staging drill config fix and the RC formal-docs allowlist fix. Core CI, Docker E2E, nsjail verdict matrix, sandbox abuse tests, browser E2E, secret policy, local staging recovery, local observability drills, local trace E2E, local image build, and local basic load/soak all pass. The release remains conditional because the newly fixed nightly staging/ops/image/trace/load gates still need their first successful remote artifacts after `853423a`.
+理由：修复 staging 演练配置和 RC 正式文档白名单后，P0 为零。核心 CI、Docker E2E、nsjail verdict 矩阵、
+沙箱滥用测试、浏览器 E2E、密钥策略、本地 staging 恢复、本地可观测性演练、本地 trace E2E、本地镜像构建
+和本地 basic load/soak 全部通过。发布仍为有条件，因为新修复的 nightly staging/ops/image/trace/load 门禁
+在 `853423a` 之后仍需首次成功的远端 artifact。
 
-## Candidate
+## 候选
 
-| Field | Value |
+| 字段 | 值 |
 | --- | --- |
-| Validated code commit | `853423a80d2ba20840867b4420a4f70da57b34af` |
-| Evidence commit | this checked-in evidence update; final exact hash is reported by `git rev-parse HEAD` |
-| Generated on | 2026-07-03 Asia/Shanghai |
-| Recommendation | CONDITIONAL GO |
-| P0 count | 0 |
-| Stable production scope | beta / first production candidate, not full HA capacity release |
+| 已验证代码 commit | `853423a80d2ba20840867b4420a4f70da57b34af` |
+| 证据 commit | 本次入库的证据更新；最终精确 hash 由 `git rev-parse HEAD` 报告 |
+| 生成时间 | 2026-07-03 Asia/Shanghai |
+| 建议 | CONDITIONAL GO |
+| P0 数量 | 0 |
+| 稳定生产范围 | beta / 首个生产候选，非完整 HA 容量发布 |
 
-## Gate Matrix
+## 门禁矩阵
 
-| Gate | Result | Type | Evidence |
+| 门禁 | 结果 | 类型 | 证据 |
 | --- | --- | --- | --- |
-| `cargo fmt --check` | passed | local | RC local run |
-| `cargo test --workspace` | passed | local | 31 daemon, 12 GUI, 9 TUI, 176 core, pg integration all passed after adding the RC docs to the formal docs allowlist |
-| Go tests: auth-service | passed | local | `go test ./...` |
-| Go tests: gateway | passed | local | `go test ./...` |
-| Go tests: storage-service | passed | local | `go test ./...` |
-| Go tests: judge-api | passed | local | `go test ./...` |
-| Go tests: problem-service | passed | local | `go test ./...` |
-| Go tests: user-service | passed | local | `go test ./...` |
-| judge-worker cargo test | passed | local | 25 tests, including nsjail matrix and sandbox abuse tests |
-| Docker Compose config | passed | local | `docker compose -f deploy/compose/docker-compose.yml config --quiet` |
-| gateway frontend build | passed | local | `npm run build` |
-| gateway browser E2E | passed | local / ci | local `npm run test:e2e`; CI `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077` |
-| `git diff --check` | passed | local | RC local run |
-| Redis live integration | passed | ci | `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077` |
-| MinIO live integration | passed | ci | `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077` |
-| Orchestrator Docker E2E | passed | ci | `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416062` |
-| nsjail verdict matrix | passed | ci / local | CI and local judge-worker tests |
-| sandbox abuse tests | passed | ci / local | CI and local judge-worker tests |
-| production secret fail-fast | passed | ci / local | CI and local `deploy/ops/ci-policy.sh` |
-| backup -> restore -> rollback drill | pending-first-run; local passed | nightly / local | `artifacts/rc-staging-drill-2/manifest.json` |
-| service credential lifecycle | pending-first-run; local passed | nightly / local | `artifacts/rc-service-credential-drill/manifest.json` |
-| Redis recovery drill | pending-first-run; local passed | nightly / local | `artifacts/rc-redis-recovery-drill/manifest.json` |
-| MinIO restore drill | pending-first-run; local passed | nightly / local | `artifacts/rc-staging-drill-2/manifest.json` |
-| alert firing drill | pending-first-run; local passed | nightly / local | `artifacts/rc-alert-firing-drill/manifest.json` |
-| trace E2E | pending-first-run; local passed | docker-e2e scheduled / local | `artifacts/rc-trace-e2e-drill/manifest.json` |
-| image build | pending-first-run; local passed | docker-e2e scheduled / local | `artifacts/rc-image-build/manifest.json` |
-| basic load/soak smoke | pending-first-run; local passed | docker-e2e scheduled / local | `artifacts/rc-basic-load-soak/manifest.json` |
+| `cargo fmt --check` | 通过 | 本地 | RC 本地运行 |
+| `cargo test --workspace` | 通过 | 本地 | 31 daemon、12 GUI、9 TUI、176 core、pg 集成全部通过（当时把 RC 文档加入正式文档白名单后）|
+| Go 测试：auth-service | 通过 | 本地 | `go test ./...` |
+| Go 测试：gateway | 通过 | 本地 | `go test ./...` |
+| Go 测试：storage-service | 通过 | 本地 | `go test ./...` |
+| Go 测试：judge-api | 通过 | 本地 | `go test ./...` |
+| Go 测试：problem-service | 通过 | 本地 | `go test ./...` |
+| Go 测试：user-service | 通过 | 本地 | `go test ./...` |
+| judge-worker cargo test | 通过 | 本地 | 25 个测试，含 nsjail 矩阵和沙箱滥用测试 |
+| Docker Compose config | 通过 | 本地 | `docker compose -f deploy/compose/docker-compose.yml config --quiet` |
+| gateway 前端构建 | 通过 | 本地 | `npm run build` |
+| gateway 浏览器 E2E | 通过 | 本地 / ci | 本地 `npm run test:e2e`；CI `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077` |
+| `git diff --check` | 通过 | 本地 | RC 本地运行 |
+| Redis live 集成 | 通过 | ci | `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077` |
+| MinIO live 集成 | 通过 | ci | `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077` |
+| Orchestrator Docker E2E | 通过 | ci | `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416062` |
+| nsjail verdict 矩阵 | 通过 | ci / 本地 | CI 与本地 judge-worker 测试 |
+| 沙箱滥用测试 | 通过 | ci / 本地 | CI 与本地 judge-worker 测试 |
+| 生产密钥 fail-fast | 通过 | ci / 本地 | CI 与本地 `deploy/ops/ci-policy.sh` |
+| 备份 -> 恢复 -> 回滚演练 | pending-first-run；本地通过 | nightly / 本地 | `artifacts/rc-staging-drill-2/manifest.json` |
+| service 凭据生命周期 | pending-first-run；本地通过 | nightly / 本地 | `artifacts/rc-service-credential-drill/manifest.json` |
+| Redis 恢复演练 | pending-first-run；本地通过 | nightly / 本地 | `artifacts/rc-redis-recovery-drill/manifest.json` |
+| MinIO 恢复演练 | pending-first-run；本地通过 | nightly / 本地 | `artifacts/rc-staging-drill-2/manifest.json` |
+| 告警触发演练 | pending-first-run；本地通过 | nightly / 本地 | `artifacts/rc-alert-firing-drill/manifest.json` |
+| trace E2E | pending-first-run；本地通过 | docker-e2e scheduled / 本地 | `artifacts/rc-trace-e2e-drill/manifest.json` |
+| 镜像构建 | pending-first-run；本地通过 | docker-e2e scheduled / 本地 | `artifacts/rc-image-build/manifest.json` |
+| basic load/soak 冒烟 | pending-first-run；本地通过 | docker-e2e scheduled / 本地 | `artifacts/rc-basic-load-soak/manifest.json` |
 
-## Module Readiness
+## 模块就绪度
 
-| Module | Readiness | Notes |
+| 模块 | 就绪度 | 说明 |
 | --- | ---: | --- |
-| orchestrator-core/backend | 91% | CI, pg integration, release install/rollback model, registry route checks pass |
-| judge-worker | 92% | nsjail matrix and abuse tests pass; not a formal sandbox proof |
-| judge-api | 89% | Redis task queue, trace propagation, worker result path covered |
-| auth-service | 88% | permission seed and credential lifecycle evidence present |
-| gateway backend | 87% | proxy/auth/route checks pass |
-| gateway frontend | 86% | browser E2E exists but minimal |
-| problem-service | 85% | package validation and storage integration covered |
-| storage-service | 88% | local/MinIO paths and tracing covered |
-| user-service | 84% | basic service tests pass; smaller production surface |
-| platform/shared | 86% | reused logging/tracing/middleware |
-| manager GUI | 80% | operator smoke only; auth deferred |
-| manager TUI | 80% | operator smoke only; auth deferred |
-| deploy/ops | 86% | local drills pass; remote nightly first-success pending |
-| PostgreSQL | 90% | live integration and backup/restore evidence |
-| Redis | 87% | live integration and local recovery drill evidence |
-| MinIO | 87% | live integration and local restore/readback evidence |
-| Jaeger/observability | 84% | local alert and trace drills pass; coverage still narrow |
-| sdk/sets/docs | 83% | release docs/checklists present; ongoing operator polish remains |
+| orchestrator-core/backend | 91% | CI、pg 集成、release install/rollback 模型、注册表路由检查通过 |
+| judge-worker | 92% | nsjail 矩阵与滥用测试通过；非形式化沙箱证明 |
+| judge-api | 89% | Redis 任务队列、trace 传播、worker 结果路径已覆盖 |
+| auth-service | 88% | 权限播种与凭据生命周期证据齐备 |
+| gateway backend | 87% | proxy/auth/route 检查通过 |
+| gateway frontend | 86% | 存在浏览器 E2E 但很少 |
+| problem-service | 85% | 包校验与存储集成已覆盖 |
+| storage-service | 88% | 本地/MinIO 路径与 tracing 已覆盖 |
+| user-service | 84% | 基本服务测试通过；生产面较小 |
+| platform/shared | 86% | 复用日志/tracing/中间件 |
+| manager GUI | 80% | 仅 operator 冒烟；auth deferred |
+| manager TUI | 80% | 仅 operator 冒烟；auth deferred |
+| deploy/ops | 86% | 本地演练通过；远端 nightly 首次成功待定 |
+| PostgreSQL | 90% | live 集成与备份/恢复证据 |
+| Redis | 87% | live 集成与本地恢复演练证据 |
+| MinIO | 87% | live 集成与本地恢复/回读证据 |
+| Jaeger/可观测性 | 84% | 本地告警与 trace 演练通过；覆盖仍窄 |
+| sdk/sets/docs | 83% | 发布文档/清单齐备；operator 打磨仍在进行 |
 
-Engineering Maturity: 90%.
-Stable Production Readiness: 85%.
+工程成熟度：90%。
+稳定生产就绪度：85%。
 
-Engineering maturity measures code structure, tests, contracts, and operational tooling. Stable production readiness discounts maturity for unproven remote drills, HA/capacity gaps, and accepted operational risks.
+工程成熟度衡量代码结构、测试、契约和运维工具。稳定生产就绪度在成熟度基础上，对未验证的远端演练、
+HA/容量缺口和已接受的运维风险进行折减。
 
-## P0/P1 Status
+## P0/P1 状态
 
-| Item | Severity | Status | Fix / risk |
+| 项 | 级别 | 状态 | 修复 / 风险 |
 | --- | --- | --- | --- |
-| main CI red | P0 | cleared | CI passed at `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077` |
-| compose production profile cannot config | P0 | cleared | local compose config passed |
-| secret fail-fast weak defaults | P0 | cleared | `deploy/ops/ci-policy.sh` passed |
-| judge-worker verdict matrix / sandbox abuse | P0 | cleared | CI and local tests passed |
-| RC docs made `cargo test --workspace` fail formal docs allowlist | P0 | fixed | formal docs allowlist updated for RC evidence docs |
-| staging drill storage-service config missing Jaeger | P1 | fixed | `853423a` |
-| current nightly first-success artifacts pending | P1 | accepted risk | local current RC drills passed; wait for scheduled artifacts before GA |
-| manager auth deferred | P1 | accepted risk | beta read-only/dev-ops mode only |
-| alert/trace coverage narrow | P1 | accepted risk | one firing rule and one judge trace path only |
-| schema rollback unsupported | P1 | accepted risk | app-level rollback only |
-| load/soak is short smoke | P1 | accepted risk | not capacity evidence; opt-in p95 ceiling added (`OJOS_LOAD_MAX_P95_MS`) |
-| orchestrator daemon control-plane unauthenticated | P1 | hardened | internal token now enforced on internal + mutating routes (fail-open when unset); see Post-RC Beta Hardening |
-| MinIO storage-service used root credentials | P1 | hardened | scoped least-privilege user + bucket policy + lifecycle via `minio-init`; see Post-RC Beta Hardening |
+| main CI red | P0 | 已清除 | CI 在 `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077` 通过 |
+| compose 生产 profile 无法 config | P0 | 已清除 | 本地 compose config 通过 |
+| 密钥 fail-fast 弱默认 | P0 | 已清除 | `deploy/ops/ci-policy.sh` 通过 |
+| judge-worker verdict 矩阵 / 沙箱滥用 | P0 | 已清除 | CI 与本地测试通过 |
+| RC 文档使 `cargo test --workspace` 违反正式文档白名单 | P0 | 已修复 | 正式文档白名单已为 RC 证据文档更新 |
+| staging 演练 storage-service 配置缺 Jaeger | P1 | 已修复 | `853423a` |
+| 当前 nightly 首次成功 artifact 待定 | P1 | 已接受风险 | 本地当前 RC 演练通过；GA 前等待 scheduled artifact |
+| manager auth deferred | P1 | 已接受风险 | 仅 beta 只读/dev-ops 模式 |
+| alert/trace 覆盖窄 | P1 | 已接受风险 | 仅一条触发规则和一条判题 trace 路径 |
+| schema rollback 不支持 | P1 | 已接受风险 | 仅应用层回滚 |
+| load/soak 是短冒烟 | P1 | 已接受风险 | 非容量证据；已加入可选 p95 上限（`OJOS_LOAD_MAX_P95_MS`）|
+| orchestrator daemon 控制面无鉴权 | P1 | 已加固 | 现对 internal + 变更路由强制 internal token（未设时 fail-open）；见「RC 后 beta 加固」|
+| MinIO storage-service 使用 root 凭据 | P1 | 已加固 | 通过 `minio-init` 提供 scoped 最小权限用户 + bucket 策略 + 生命周期；见「RC 后 beta 加固」|
 
-## Accepted Risks
+## 已接受风险
 
-- Nightly staging/ops/image/trace/load artifacts are pending first success after `853423a`; local RC evidence is available.
-- Manager GUI/TUI are read-only/dev-ops beta with auth deferred.
-- Schema rollback is unsupported; release rollback is app-level.
-- Alert firing covers one synthetic rule only.
-- Trace E2E covers the judge submission path, with Redis boundary represented by metadata/link semantics.
-- Load/soak is a short smoke, not capacity planning.
-- No HA/failover topology is claimed for this beta.
+- nightly staging/ops/image/trace/load artifact 在 `853423a` 之后待首次成功；本地 RC 证据可用。
+- Manager GUI/TUI 为只读/dev-ops beta，auth deferred。
+- Schema 回滚不支持；release 回滚是应用层的。
+- 告警触发仅覆盖一条合成规则。
+- Trace E2E 覆盖判题提交路径，Redis 边界由元数据/link 语义表示。
+- Load/soak 是短冒烟，非容量规划。
+- 本 beta 不声称任何 HA/failover 拓扑。
 
-## Deferred Items
+## 延期项
 
-- P2: broaden browser E2E coverage beyond minimal login/problem/submission/result paths.
-- P2: add more observability rules and dashboards.
-- P2: formal HA deployment pattern and failover drill.
-- P2: longer load/soak and capacity envelope (baseline mechanics now present via `OJOS_LOAD_MAX_P95_MS`; the SLA numbers remain a decision).
-- P1 (accepted risk): full manager auth model — operator identity, RBAC, and audit — beyond the daemon internal-token gate; richer operator workflows.
-- P2: end-to-end Redis/MinIO TLS — requires a PKI/cert decision. Enforcement is wired behind `OJOS_SECRET_CHECK_REQUIRE_TLS` (off by default) pending certs.
-- P3: quick-xml `RUSTSEC-2026-0194/0195` — transitive via eframe 0.31's Linux desktop/Wayland stack; the compatible eframe upgrade currently fails to compile on Windows (wgpu 29 `windows` crate split). Allowlisted in the Rust audit gate; revisit on an eframe release.
+- P2：把浏览器 E2E 覆盖扩展到最小 login/problem/submission/result 路径之外。
+- P2：增加更多可观测性规则与看板。
+- P2：正式 HA 部署模式与 failover 演练。
+- P2：更长的 load/soak 与容量包络（基础机制已通过 `OJOS_LOAD_MAX_P95_MS` 提供；SLA 数值仍待决策）。
+- P1（已接受风险）：完整 manager auth 模型 —— operator 身份、RBAC 和审计 —— 超出 daemon internal-token 门禁；更丰富的 operator 流程。
+- P2：端到端 Redis/MinIO TLS —— 需要 PKI/证书决策。强制已接入 `OJOS_SECRET_CHECK_REQUIRE_TLS`（默认关），待证书。
+- P3：quick-xml `RUSTSEC-2026-0194/0195` —— 经 eframe 0.31 的 Linux 桌面/Wayland 栈传递引入；兼容的 eframe 升级当前在 Windows 上编译失败（wgpu 29 的 `windows` crate 版本分裂）。已在 Rust audit 门禁中列入白名单；待 eframe 新版本再处理。
 
-## Post-RC Beta Hardening
+## RC 后 beta 加固
 
-These landed after the `853423a` RC snapshot and are verified locally. Remote first-success artifacts are still tracked as pending (see Accepted Risks).
+以下内容在 `853423a` RC 快照之后落地，已本地验证。远端首次成功 artifact 仍记为待定（见「已接受风险」）。
 
-- Orchestrator daemon control-plane now enforces `ORCHESTRATOR_INTERNAL_TOKEN` (sent by the gateway as `x-ojos-orchestrator-token`) on all mutating routes plus the `internal/*` snapshot/route reads and the per-node effective route table. Fail-open when the token is unset (dev and ops drills), fail-closed once set. `GET /health` stays open. Unit-tested.
-- MinIO: storage-service no longer uses the root account. A one-shot `minio-init` service creates the buckets, a scoped policy limited to those buckets and the object verbs storage-service uses, the scoped service user, and a 30-day lifecycle expiry on the artifact buckets. Verified end-to-end against a real MinIO: the scoped user can read/write/delete configured-bucket objects but is denied create-bucket, unlisted-bucket writes, and admin actions.
-- `secret-check.sh` gained `OJOS_SECRET_CHECK_REQUIRE_TLS=1` (off by default) to require `rediss://` and `MINIO_USE_SSL=true` once TLS endpoints exist.
-- `basic-load-soak.sh` gained an opt-in `OJOS_LOAD_MAX_P95_MS` latency ceiling recorded in `metrics.json` and enforced only when set.
+- Orchestrator daemon 控制面现对所有变更路由，以及 `internal/*` snapshot/route 读取和 per-node 有效路由表，
+  强制 `ORCHESTRATOR_INTERNAL_TOKEN`（gateway 以 `x-ojos-orchestrator-token` 发送）。未设 token 时 fail-open
+  （dev 与 ops 演练），设置后 fail-closed。`GET /health` 保持开放。已单元测试。
+- MinIO：storage-service 不再使用 root 账户。一次性 `minio-init` 服务创建 bucket、一个仅限这些 bucket 与
+  storage-service 所用对象动词的 scoped 策略、scoped service 用户，以及 artifact bucket 上 30 天生命周期过期。
+  已对真实 MinIO 端到端验证：scoped 用户能读/写/删配置内 bucket 对象，但被拒绝建桶、写未列桶和 admin 动作。
+- `secret-check.sh` 新增 `OJOS_SECRET_CHECK_REQUIRE_TLS=1`（默认关），在存在 TLS 端点后要求 `rediss://` 与
+  `MINIO_USE_SSL=true`。
+- `basic-load-soak.sh` 新增可选 `OJOS_LOAD_MAX_P95_MS` 延迟上限，记录在 `metrics.json`，仅设置时强制。

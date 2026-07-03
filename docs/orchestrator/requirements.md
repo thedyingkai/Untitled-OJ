@@ -1,8 +1,8 @@
-# Orchestrator Requirements
+# 编排器需求
 
-The product name is OJOS Orchestrator.
+产品名称为 OJOS Orchestrator（OJOS 编排器）。
 
-Orchestrator manages these formal layers:
+编排器管理以下正式层：
 
 ```text
 ServiceRelease
@@ -24,14 +24,20 @@ LogView
 DiagnosticReport
 ```
 
-Every formal action layer exposes CRUD-style actions. Extra verbs such as `validate`, `install`, `apply`, `health.check`, `query`, and `export` are layer-specific additions, not substitutes for CRUD coverage.
+每个正式 action 层都暴露 CRUD 风格的 action。像 `validate`、`install`、`apply`、`health.check`、
+`query`、`export` 这样的额外动词是特定层的补充，不能替代对 CRUD 的完整覆盖。
 
-The basic install unit is a service release. A service release may carry backend, frontend, migration, permission, route, Redis, storage, config, secret, dependency, and observability declarations.
+最小安装单元是 service release（服务发布）。一个 service release 可以携带后端、前端、迁移、权限、
+路由、Redis、存储、配置、密钥、依赖和可观测性声明。
 
-Endpoint identity is always `ip:port:service-name`. `instance-id` is not part of the model.
+Endpoint 身份始终是 `ip:port:service-name`。模型中不存在 `instance-id`。
 
-`service-name[*]` is a derived query over running endpoints with the same service name. Local deployment templates may be shown as read-only helper material, but they are not formal store objects and do not have formal actions.
+`service-name[*]` 是对同名运行中 endpoint 的派生查询。本地部署模板可以作为只读辅助材料展示，但它们
+不是正式 store 对象，也没有正式 action。
 
-The formal entry points are Orchestrator GUI, Orchestrator TUI, and Orchestrator daemon. All three must call the same `services/orchestrator/core` and `platform/schemas/orchestrator` contracts. Differences are interaction or transport shape only, not capability.
+正式入口为 Orchestrator GUI、Orchestrator TUI 和 Orchestrator daemon。三者必须调用同一套
+`services/orchestrator/core` 与 `platform/schemas/orchestrator` 契约，差别只能是交互形态或传输形态，
+不能是能力差异。
 
-Orchestrator does not implement OJ business features such as problems, submissions, users, contests, training, clarifications, printing, ranking, or site administration. Those features belong to managed services.
+编排器不实现 OJ 业务功能，如题目、提交、用户、比赛、训练、Clarification、打印、滚榜或站点管理。这些
+功能属于被管理的具体 Service。

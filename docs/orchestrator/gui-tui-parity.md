@@ -1,8 +1,8 @@
-# GUI / TUI Parity
+# GUI / TUI 等价性
 
-`manager/gui` and `manager/tui` are equivalent management entry points. They differ only in interaction style, not in orchestration capability.
+`manager/gui` 和 `manager/tui` 是等价的管理入口。它们只在交互形态上不同，编排能力上不能有差异。
 
-Both use:
+两者都使用：
 
 ```text
 services/orchestrator/core
@@ -13,23 +13,27 @@ platform/schemas/orchestrator/results.yaml
 platform/schemas/orchestrator/errors.yaml
 ```
 
-Both browse the same store-backed objects: service releases, services, endpoints, links, topology, operations, log views, and diagnostic reports. The Template page is only a read-only view of local deployment templates; `service-name[*]` is a derived endpoint query, not a formal action layer.
+两者浏览相同的 store-backed 对象：service releases、services、endpoints、links、topology、operations、
+log views 和 diagnostic reports。Template 页面只是本地部署模板的只读视图；`service-name[*]` 是派生的
+endpoint 查询，不是正式 action 层。
 
-Both call `OrchestratorActionConsole`, which delegates to `OrchestratorActionDispatcher`. GUI buttons and TUI shortcuts submit the same `ActionRequest` shape. Results show `REAL`, `STORE_BACKED`, `UNSUPPORTED`, or `READONLY`, then reload the store-backed view.
+两者都调用 `OrchestratorActionConsole`，后者委托给 `OrchestratorActionDispatcher`。GUI 按钮和 TUI 快捷键
+提交相同形态的 `ActionRequest`。结果显示 `REAL`、`STORE_BACKED`、`UNSUPPORTED` 或 `READONLY`，然后重新
+加载 store-backed 视图。
 
-## Exposed Actions
+## 暴露的 action
 
-GUI exposes:
+GUI 暴露：
 
 ```text
-Endpoint page: create, update, delete, health check
-Link page: create, update, delete, health check
-Operation page: confirm, apply, rollback, logs
-Diagnostics page: create report, export JSON, export Markdown
-Action workbench: every catalog action from the shared CRUD-layer registry
+Endpoint 页面：create、update、delete、health check
+Link 页面：create、update、delete、health check
+Operation 页面：confirm、apply、rollback、logs
+Diagnostics 页面：create report、export JSON、export Markdown
+Action workbench：共享 CRUD 层注册表中的每一个目录 action
 ```
 
-TUI exposes equivalent shortcuts:
+TUI 暴露等价的快捷键：
 
 ```text
 Endpoint Actions: e create / E update / x delete / h health check
@@ -38,19 +42,23 @@ Operation Actions: c confirm / a apply / u rollback / o logs
 Diagnostics: d create / D export markdown
 ```
 
-There are no formal deployment-template actions in either entry point.
+两个入口都没有正式的部署模板 action。
 
-## Store Selection
+## Store 选择
 
-Without `ORCHESTRATOR_DATABASE_URL`, the entries build a local view from repository manifests and use `MemoryOrchestratorStore` for demo workbench operations.
+在没有 `ORCHESTRATOR_DATABASE_URL` 时，入口从仓库 manifest 构建本地视图，并使用 `MemoryOrchestratorStore`
+做演示 workbench 操作。
 
-With `ORCHESTRATOR_DATABASE_URL`, `load_orchestrator_view`, `OperationWorkbenchContext`, and `OrchestratorActionConsole` use `PgOrchestratorStore`. If the database is unavailable, the entry returns an error instead of falling back to repository fixtures.
+在设置了 `ORCHESTRATOR_DATABASE_URL` 时，`load_orchestrator_view`、`OperationWorkbenchContext` 和
+`OrchestratorActionConsole` 使用 `PgOrchestratorStore`。如果数据库不可用，入口返回错误，而不是回退到仓库
+fixture。
 
-The workbench is also selected by core. It plans, confirms, applies, rolls back, writes operation logs, and refreshes view state through the same store abstraction used by backend actions.
+workbench 同样由 core 选择。它通过与后端 action 相同的 store 抽象来计划、确认、应用、回滚、写 operation
+日志并刷新视图状态。
 
-GUI/TUI do not contain OJ business backend features, do not act as Gateway, and do not bypass the core action dispatcher.
+GUI/TUI 不包含 OJ 业务后端功能、不充当 Gateway、也不绕过 core action dispatcher。
 
-## Evidence
+## 证据
 
 ```text
 gui_exposes_dispatcher_backed_actions

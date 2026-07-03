@@ -1,46 +1,48 @@
-# Production Readiness Evidence
+# 生产就绪证据
 
-This matrix separates proven gates, local drill evidence, and newly configured drills that still need their first remote run.
+本矩阵区分已证明的门禁、本地演练证据，以及仍需首次远端运行的新配置演练。
 
-Release candidate freeze validated code commit: `853423a80d2ba20840867b4420a4f70da57b34af`.
+发布候选冻结的已验证代码 commit：`853423a80d2ba20840867b4420a4f70da57b34af`。
 
-## Current Evidence
+## 当前证据
 
-| Capability | Gate | Status | Evidence |
+| 能力 | 门禁 | 状态 | 证据 |
 | --- | --- | --- | --- |
-| Redis live integration | ci | passed | Orchestrator CI: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077`. |
-| MinIO live integration | ci | passed | Orchestrator CI: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077`. |
-| Docker E2E | ci | passed | Orchestrator Docker E2E: `https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416062`. |
-| nsjail verdict matrix | ci | passed | Strict judge-worker nsjail live tests require real nsjail. |
-| sandbox hardening | ci | passed | seccomp policy, mount whitelist, cgroup policy, runtime lock, and live nsjail tests. |
-| staging backup/restore/rollback | nightly | pending-first-run; local passed | `deploy/ops/staging-drill.sh`, `Staging Drill` workflow. Current RC local real restore verified: `artifacts/rc-staging-drill-2/manifest.json`. |
-| gateway browser E2E | ci | passed | Playwright test with trace/screenshot/video artifacts; local and Orchestrator CI passed. |
-| manager GUI/TUI operator smoke | nightly | pending-first-run; local passed | `deploy/ops/manager-smoke.sh` records `manager_auth=deferred` and read-only/dev-ops beta mode. Current RC local evidence: `artifacts/rc-manager-smoke/manifest.json`. |
-| alert firing | nightly | pending-first-run; local passed | Prometheus + Alertmanager webhook drill. Current RC local evidence: `artifacts/rc-alert-firing-drill/manifest.json`. |
-| trace E2E | docker-e2e scheduled | pending-first-run; local passed | `deploy/ops/trace-e2e-drill.sh` queries Jaeger for gateway-service, judge-api-service, storage-service, and judge-worker. Runs in the scheduled/dispatched `Orchestrator Docker E2E` workflow. Current RC local evidence: `artifacts/rc-trace-e2e-drill/manifest.json`. |
-| secret policy | ci | passed | Redis password and `.env.production.example` production fail-fast policy added; local `deploy/ops/ci-policy.sh` and Orchestrator CI passed. Optional TLS enforcement available via `OJOS_SECRET_CHECK_REQUIRE_TLS=1`. |
-| image build evidence | docker-e2e scheduled | pending-first-run; local passed | Scheduled Docker build uploads image evidence in the `Orchestrator Docker E2E` workflow. Current RC local image build evidence: `artifacts/rc-image-build/manifest.json`. |
-| service credential lifecycle | nightly | pending-first-run; local passed | Allow/deny/revoke/expire matrix current RC local evidence: `artifacts/rc-service-credential-drill/manifest.json`. |
-| Redis recovery | nightly | pending-first-run; local passed | Pending/claim/AOF restart and judge-api queue status API current RC local evidence: `artifacts/rc-redis-recovery-drill/manifest.json`. |
-| MinIO sample restore | nightly | pending-first-run; local passed | Covered by staging drill MinIO object restore plus storage-service readback: `artifacts/rc-staging-drill-2/manifest.json`. |
-| load/soak | docker-e2e scheduled | pending-first-run; local passed | `deploy/ops/basic-load-soak.sh` covers auth login, problem list, storage put/get, judge submit, and result query; opt-in p95 ceiling via `OJOS_LOAD_MAX_P95_MS`. Runs in the `Orchestrator Docker E2E` workflow. Current RC local evidence: `artifacts/rc-basic-load-soak/manifest.json`. |
+| Redis live 集成 | ci | 通过 | Orchestrator CI：`https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077`。 |
+| MinIO live 集成 | ci | 通过 | Orchestrator CI：`https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416077`。 |
+| Docker E2E | ci | 通过 | Orchestrator Docker E2E：`https://github.com/thedyingkai/Untitled-OJ/actions/runs/28623416062`。 |
+| nsjail verdict 矩阵 | ci | 通过 | 严格的 judge-worker nsjail live 测试要求真实 nsjail。 |
+| 沙箱加固 | ci | 通过 | seccomp 策略、mount 白名单、cgroup 策略、runtime lock 和 live nsjail 测试。 |
+| staging 备份/恢复/回滚 | nightly | pending-first-run；本地通过 | `deploy/ops/staging-drill.sh`、`Staging Drill` workflow。当前 RC 本地真实恢复已验证：`artifacts/rc-staging-drill-2/manifest.json`。 |
+| gateway 浏览器 E2E | ci | 通过 | 带 trace/截图/视频产物的 Playwright 测试；本地与 Orchestrator CI 通过。 |
+| manager GUI/TUI operator 冒烟 | nightly | pending-first-run；本地通过 | `deploy/ops/manager-smoke.sh` 记录 `manager_auth=deferred` 和只读/dev-ops beta 模式。当前 RC 本地证据：`artifacts/rc-manager-smoke/manifest.json`。 |
+| 告警触发 | nightly | pending-first-run；本地通过 | Prometheus + Alertmanager webhook 演练。当前 RC 本地证据：`artifacts/rc-alert-firing-drill/manifest.json`。 |
+| trace E2E | docker-e2e scheduled | pending-first-run；本地通过 | `deploy/ops/trace-e2e-drill.sh` 向 Jaeger 查询 gateway-service、judge-api-service、storage-service 和 judge-worker。在 scheduled/dispatched 的 `Orchestrator Docker E2E` workflow 中运行。当前 RC 本地证据：`artifacts/rc-trace-e2e-drill/manifest.json`。 |
+| 密钥策略 | ci | 通过 | 增加了 Redis 密码和 `.env.production.example` 生产 fail-fast 策略；本地 `deploy/ops/ci-policy.sh` 和 Orchestrator CI 通过。可选 TLS 强制通过 `OJOS_SECRET_CHECK_REQUIRE_TLS=1` 提供。 |
+| 镜像构建证据 | docker-e2e scheduled | pending-first-run；本地通过 | Scheduled Docker 构建在 `Orchestrator Docker E2E` workflow 中上传镜像证据。当前 RC 本地镜像构建证据：`artifacts/rc-image-build/manifest.json`。 |
+| service 凭据生命周期 | nightly | pending-first-run；本地通过 | allow/deny/revoke/expire 矩阵当前 RC 本地证据：`artifacts/rc-service-credential-drill/manifest.json`。 |
+| Redis 恢复 | nightly | pending-first-run；本地通过 | pending/claim/AOF 重启和 judge-api 队列状态 API 当前 RC 本地证据：`artifacts/rc-redis-recovery-drill/manifest.json`。 |
+| MinIO 样本恢复 | nightly | pending-first-run；本地通过 | 由 staging 演练 MinIO 对象恢复加 storage-service 回读覆盖：`artifacts/rc-staging-drill-2/manifest.json`。 |
+| load/soak | docker-e2e scheduled | pending-first-run；本地通过 | `deploy/ops/basic-load-soak.sh` 覆盖 auth 登录、题目列表、存储 put/get、判题提交和结果查询；可选 p95 上限通过 `OJOS_LOAD_MAX_P95_MS`。在 `Orchestrator Docker E2E` workflow 中运行。当前 RC 本地证据：`artifacts/rc-basic-load-soak/manifest.json`。 |
 
-## Secret Lifecycle
+## 密钥生命周期
 
-| Secret | Dev default | Production policy | Rotation |
+| 密钥 | Dev 默认 | 生产策略 | 轮换 |
 | --- | --- | --- | --- |
-| `JWT_SECRET` | empty in `.env.example` | required, min 32, weak values rejected | supported by env/secret manager restart |
-| `AUTH_INTERNAL_TOKEN` | empty in `.env.example` | required, min 32 | supported by env/secret manager restart |
-| `ORCHESTRATOR_INTERNAL_TOKEN` | empty in `.env.example` | required, min 32 | supported by env/secret manager restart |
-| `OJOS_WORKER_TOKEN` | empty in `.env.example` | required, min 32 | supported by env/secret manager restart |
-| DB passwords | empty in `.env.example` | each service DB password required, DB URL must not use superuser | supported by DB credential rotation plus service restart |
-| `REDIS_PASSWORD` | `DEV_ONLY_redis_password_not_for_production` | required, min 20, Redis URL must include password | supported by Redis/service restart |
-| `MINIO_ROOT_PASSWORD` | empty in `.env.example` | required, min 32 | supported by MinIO credential rotation |
-| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | empty in `.env.example` | required, access min 8, secret min 32 | supported by MinIO credential rotation |
+| `JWT_SECRET` | `.env.example` 中为空 | 必需，至少 32，拒绝弱值 | 由 env/密钥管理器重启支持 |
+| `AUTH_INTERNAL_TOKEN` | `.env.example` 中为空 | 必需，至少 32 | 由 env/密钥管理器重启支持 |
+| `ORCHESTRATOR_INTERNAL_TOKEN` | `.env.example` 中为空 | 必需，至少 32 | 由 env/密钥管理器重启支持 |
+| `OJOS_WORKER_TOKEN` | `.env.example` 中为空 | 必需，至少 32 | 由 env/密钥管理器重启支持 |
+| DB 密码 | `.env.example` 中为空 | 每个服务 DB 密码必需，DB URL 不得用超级用户 | 由 DB 凭据轮换加服务重启支持 |
+| `REDIS_PASSWORD` | `DEV_ONLY_redis_password_not_for_production` | 必需，至少 20，Redis URL 必须含密码 | 由 Redis/服务重启支持 |
+| `MINIO_ROOT_PASSWORD` | `.env.example` 中为空 | 必需，至少 32 | 由 MinIO 凭据轮换支持 |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | `.env.example` 中为空 | 必需，access 至少 8，secret 至少 32 | 由 MinIO 凭据轮换支持 |
 
-## Remaining Evidence Gaps
+## 剩余证据缺口
 
-- Current RC P0 count is zero after fixing the staging-drill storage-service config and the formal docs allowlist for RC evidence documents.
-- Newly added nightly drills have current RC local passing evidence, but still need first successful GitHub Actions artifacts after `853423a` before their gate status can be promoted from `pending-first-run` to `passed`.
-- Trace E2E currently proves a real local compose submission through Jaeger with a Redis metadata boundary and a native judge-worker OTLP consumer span; it still needs the first scheduled `Orchestrator Docker E2E` artifact.
-- Basic load/soak is a smoke test only; it is not a capacity test and still needs the first scheduled `Orchestrator Docker E2E` artifact.
+- 修复 staging 演练 storage-service 配置和 RC 证据文档的正式文档白名单后，当前 RC 的 P0 数量为零。
+- 新增的 nightly 演练有当前 RC 本地通过证据，但在 `853423a` 之后仍需首次成功的 GitHub Actions artifact，
+  其门禁状态才能从 `pending-first-run` 提升为 `passed`。
+- Trace E2E 当前证明了一次通过 Jaeger 的真实本地 compose 提交，带 Redis 元数据边界和一个 judge-worker 原生
+  OTLP consumer span；它仍需首个 scheduled 的 `Orchestrator Docker E2E` artifact。
+- Basic load/soak 只是冒烟测试，不是容量测试，仍需首个 scheduled 的 `Orchestrator Docker E2E` artifact。
