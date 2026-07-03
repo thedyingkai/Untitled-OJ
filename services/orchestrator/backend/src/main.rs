@@ -117,6 +117,15 @@ fn route_api_request(
         .unwrap_or("");
     let segments = path_segments(path)?;
     let segment_refs = segments.iter().map(String::as_str).collect::<Vec<_>>();
+    internal_token_check(
+        request.method.as_str(),
+        segment_refs.as_slice(),
+        request
+            .headers
+            .get(ORCHESTRATOR_INTERNAL_TOKEN_HEADER)
+            .map(String::as_str),
+        configured_internal_token().as_deref(),
+    )?;
     match (request.method.as_str(), segment_refs.as_slice()) {
         ("POST", ["api", "node", "services", "install"]) => {
             require_node_token(&request)?;
@@ -1193,6 +1202,51 @@ fn require_node_token(request: &ApiRequest) -> Result<()> {
     }
 }
 
+const ORCHESTRATOR_INTERNAL_TOKEN_HEADER: &str = "x-ojos-orchestrator-token";
+
+/// Control-plane routes that must present the orchestrator internal token when one is
+/// configured. Every mutating request is guarded, plus the internal snapshot/route reads
+/// and the per-node effective route table. `GET /health` and the other read-only,
+/// non-internal GETs stay open so the Prometheus scrape and the compose healthcheck keep
+/// working without a token.
+fn requires_internal_token(method: &str, segments: &[&str]) -> bool {
+    if method != "GET" {
+        return true;
+    }
+    matches!(segments, ["internal", ..] | ["nodes", _, "routes"])
+}
+
+/// Enforces the orchestrator internal token on control-plane routes. Fail-open when no
+/// token is configured (dev and the ops drills run the daemon without a token); fail-closed
+/// once `ORCHESTRATOR_INTERNAL_TOKEN` is set, which production requires via secret-check.
+/// The gateway already sends this token as `x-ojos-orchestrator-token`.
+fn internal_token_check(
+    method: &str,
+    segments: &[&str],
+    header_token: Option<&str>,
+    expected: Option<&str>,
+) -> Result<()> {
+    let Some(expected) = expected.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if !requires_internal_token(method, segments) {
+        return Ok(());
+    }
+    match header_token.map(str::trim) {
+        Some(actual) if actual == expected => Ok(()),
+        _ => Err(anyhow!(
+            "orchestrator control-plane request is unauthorized"
+        )),
+    }
+}
+
+fn configured_internal_token() -> Option<String> {
+    std::env::var("ORCHESTRATOR_INTERNAL_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn write_http_response(stream: &mut TcpStream, response: ApiResponse) -> Result<()> {
     let body = response_json(response.body)?;
     let status_text = match response.status {
@@ -1429,6 +1483,108 @@ mod tests {
                 .unwrap_or("")
                 .contains("unauthorized")
         );
+    }
+
+    #[test]
+    fn internal_token_check_is_fail_open_when_unconfigured() {
+        // No token configured (dev and the ops drills run the daemon without a token):
+        // every route is permitted so nothing regresses.
+        assert!(internal_token_check("POST", &["endpoints"], None, None).is_ok());
+        assert!(
+            internal_token_check("GET", &["internal", "orchestrator", "snapshot"], None, None)
+                .is_ok()
+        );
+        // Whitespace-only token counts as unconfigured.
+        assert!(internal_token_check("POST", &["endpoints"], None, Some("   ")).is_ok());
+    }
+
+    #[test]
+    fn internal_token_check_guards_mutations_and_internal_reads() {
+        let expected = Some("orch-secret");
+        // Mutations require a matching token.
+        assert!(internal_token_check("POST", &["endpoints"], None, expected).is_err());
+        assert!(internal_token_check("POST", &["endpoints"], Some("wrong"), expected).is_err());
+        assert!(
+            internal_token_check("POST", &["endpoints"], Some("orch-secret"), expected).is_ok()
+        );
+        assert!(
+            internal_token_check(
+                "DELETE",
+                &["releases", "judge-api"],
+                Some("orch-secret"),
+                expected
+            )
+            .is_ok()
+        );
+        // Internal snapshot/route reads require the token (the gateway already sends it).
+        assert!(
+            internal_token_check(
+                "GET",
+                &["internal", "orchestrator", "snapshot"],
+                None,
+                expected
+            )
+            .is_err()
+        );
+        assert!(
+            internal_token_check(
+                "GET",
+                &["internal", "orchestrator", "snapshot"],
+                Some("orch-secret"),
+                expected
+            )
+            .is_ok()
+        );
+        // The per-node effective route table read is guarded too.
+        assert!(
+            internal_token_check("GET", &["nodes", "node-1", "routes"], None, expected).is_err()
+        );
+        assert!(
+            internal_token_check(
+                "GET",
+                &["nodes", "node-1", "routes"],
+                Some("orch-secret"),
+                expected
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn internal_token_check_leaves_health_and_readonly_open() {
+        let expected = Some("orch-secret");
+        // Health must stay open: Prometheus scrape and the compose healthcheck send no token.
+        assert!(internal_token_check("GET", &["health"], None, expected).is_ok());
+        // Other read-only, non-internal GETs are not guarded.
+        assert!(internal_token_check("GET", &["services"], None, expected).is_ok());
+        assert!(internal_token_check("GET", &["nodes"], None, expected).is_ok());
+        assert!(internal_token_check("GET", &["nodes", "node-1"], None, expected).is_ok());
+        assert!(internal_token_check("GET", &["releases"], None, expected).is_ok());
+    }
+
+    #[test]
+    fn internal_token_check_trims_surrounding_whitespace() {
+        let expected = Some(" orch-secret ");
+        assert!(
+            internal_token_check("POST", &["endpoints"], Some(" orch-secret "), expected).is_ok()
+        );
+    }
+
+    #[test]
+    fn requires_internal_token_classifies_routes() {
+        assert!(requires_internal_token("POST", &["endpoints"]));
+        assert!(requires_internal_token("PATCH", &["links", "a", "b"]));
+        assert!(requires_internal_token(
+            "GET",
+            &["internal", "orchestrator", "routes"]
+        ));
+        assert!(requires_internal_token(
+            "GET",
+            &["nodes", "node-1", "routes"]
+        ));
+        assert!(!requires_internal_token("GET", &["health"]));
+        assert!(!requires_internal_token("GET", &["services"]));
+        assert!(!requires_internal_token("GET", &["nodes", "node-1"]));
     }
 
     #[test]
