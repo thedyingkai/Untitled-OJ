@@ -90,23 +90,32 @@
     {"item": "manager auth deferred", "severity": "P1", "status": "accepted-risk"},
     {"item": "alert and trace coverage narrow", "severity": "P1", "status": "accepted-risk"},
     {"item": "schema rollback unsupported", "severity": "P1", "status": "accepted-risk"},
-    {"item": "load/soak is short smoke only", "severity": "P1", "status": "accepted-risk"}
+    {"item": "load/soak is short smoke only", "severity": "P1", "status": "accepted-risk", "note": "opt-in p95 ceiling added via OJOS_LOAD_MAX_P95_MS"},
+    {"item": "orchestrator daemon control-plane unauthenticated", "severity": "P1", "status": "hardened", "note": "internal token enforced on internal + mutating routes; fail-open when unset"},
+    {"item": "MinIO storage-service used root credentials", "severity": "P1", "status": "hardened", "note": "scoped least-privilege user + bucket policy + lifecycle via minio-init"}
   ],
   "accepted_risks": [
     "Nightly staging/ops/image/trace/load artifacts are pending first success after the RC fix.",
-    "Manager GUI/TUI are read-only/dev-ops beta with auth deferred.",
+    "Manager GUI/TUI are read-only/dev-ops beta; the daemon internal-token gate is a down payment, but the full operator identity/RBAC/audit model is deferred.",
     "Schema rollback is unsupported; app-level rollback only.",
     "Alert firing covers one synthetic rule only.",
     "Trace E2E covers one judge submission path.",
     "Load/soak is not capacity evidence.",
     "No HA/failover topology is claimed for this beta."
   ],
+  "post_rc_beta_hardening": [
+    "Orchestrator daemon enforces ORCHESTRATOR_INTERNAL_TOKEN (x-ojos-orchestrator-token) on mutating and internal/* routes; fail-open when unset, GET /health open; unit-tested.",
+    "MinIO minio-init provisions a scoped service user, a bucket-limited policy, and a 30-day artifact lifecycle; storage-service no longer uses root; verified end-to-end against a real MinIO.",
+    "secret-check.sh OJOS_SECRET_CHECK_REQUIRE_TLS=1 requires rediss:// and MINIO_USE_SSL=true (off by default).",
+    "basic-load-soak.sh OJOS_LOAD_MAX_P95_MS opt-in p95 latency ceiling recorded in metrics.json."
+  ],
   "deferred_items": [
     "Broaden browser E2E coverage.",
     "Add more observability rules and dashboards.",
     "Formal HA deployment and failover drill.",
-    "Longer load/soak and capacity envelope.",
-    "Manager auth and richer operator workflows.",
-    "MinIO lifecycle/policy hardening beyond sample restore."
+    "Longer load/soak and capacity envelope (baseline mechanics present; SLA numbers remain a decision).",
+    "Full manager auth model (operator identity, RBAC, audit) beyond the daemon internal-token gate.",
+    "End-to-end Redis/MinIO TLS pending a PKI/cert decision (enforcement wired behind OJOS_SECRET_CHECK_REQUIRE_TLS).",
+    "quick-xml RUSTSEC-2026-0194/0195 transitive via eframe 0.31; blocked by a Windows eframe/wgpu 29 compile conflict; allowlisted in the Rust audit gate."
   ]
 }

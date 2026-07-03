@@ -17,13 +17,13 @@ Release candidate freeze validated code commit: `853423a80d2ba20840867b4420a4f70
 | gateway browser E2E | ci | passed | Playwright test with trace/screenshot/video artifacts; local and Orchestrator CI passed. |
 | manager GUI/TUI operator smoke | nightly | pending-first-run; local passed | `deploy/ops/manager-smoke.sh` records `manager_auth=deferred` and read-only/dev-ops beta mode. Current RC local evidence: `artifacts/rc-manager-smoke/manifest.json`. |
 | alert firing | nightly | pending-first-run; local passed | Prometheus + Alertmanager webhook drill. Current RC local evidence: `artifacts/rc-alert-firing-drill/manifest.json`. |
-| trace E2E | nightly | pending-first-run; local passed | `deploy/ops/trace-e2e-drill.sh` queries Jaeger for gateway-service, judge-api-service, storage-service, and judge-worker. Current RC local evidence: `artifacts/rc-trace-e2e-drill/manifest.json`. |
-| secret policy | ci | passed | Redis password and `.env.production.example` production fail-fast policy added; local `deploy/ops/ci-policy.sh` and Orchestrator CI passed. |
-| image build evidence | nightly | pending-first-run; local passed | Scheduled Docker build uploads image evidence. Current RC local image build evidence: `artifacts/rc-image-build/manifest.json`. |
+| trace E2E | docker-e2e scheduled | pending-first-run; local passed | `deploy/ops/trace-e2e-drill.sh` queries Jaeger for gateway-service, judge-api-service, storage-service, and judge-worker. Runs in the scheduled/dispatched `Orchestrator Docker E2E` workflow. Current RC local evidence: `artifacts/rc-trace-e2e-drill/manifest.json`. |
+| secret policy | ci | passed | Redis password and `.env.production.example` production fail-fast policy added; local `deploy/ops/ci-policy.sh` and Orchestrator CI passed. Optional TLS enforcement available via `OJOS_SECRET_CHECK_REQUIRE_TLS=1`. |
+| image build evidence | docker-e2e scheduled | pending-first-run; local passed | Scheduled Docker build uploads image evidence in the `Orchestrator Docker E2E` workflow. Current RC local image build evidence: `artifacts/rc-image-build/manifest.json`. |
 | service credential lifecycle | nightly | pending-first-run; local passed | Allow/deny/revoke/expire matrix current RC local evidence: `artifacts/rc-service-credential-drill/manifest.json`. |
 | Redis recovery | nightly | pending-first-run; local passed | Pending/claim/AOF restart and judge-api queue status API current RC local evidence: `artifacts/rc-redis-recovery-drill/manifest.json`. |
 | MinIO sample restore | nightly | pending-first-run; local passed | Covered by staging drill MinIO object restore plus storage-service readback: `artifacts/rc-staging-drill-2/manifest.json`. |
-| load/soak | nightly | pending-first-run; local passed | `deploy/ops/basic-load-soak.sh` covers auth login, problem list, storage put/get, judge submit, and result query. Current RC local evidence: `artifacts/rc-basic-load-soak/manifest.json`. |
+| load/soak | docker-e2e scheduled | pending-first-run; local passed | `deploy/ops/basic-load-soak.sh` covers auth login, problem list, storage put/get, judge submit, and result query; opt-in p95 ceiling via `OJOS_LOAD_MAX_P95_MS`. Runs in the `Orchestrator Docker E2E` workflow. Current RC local evidence: `artifacts/rc-basic-load-soak/manifest.json`. |
 
 ## Secret Lifecycle
 

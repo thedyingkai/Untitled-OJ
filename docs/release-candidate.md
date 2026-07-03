@@ -45,9 +45,9 @@ Reason: P0 is zero after the staging drill config fix and the RC formal-docs all
 | Redis recovery drill | pending-first-run; local passed | nightly / local | `artifacts/rc-redis-recovery-drill/manifest.json` |
 | MinIO restore drill | pending-first-run; local passed | nightly / local | `artifacts/rc-staging-drill-2/manifest.json` |
 | alert firing drill | pending-first-run; local passed | nightly / local | `artifacts/rc-alert-firing-drill/manifest.json` |
-| trace E2E | pending-first-run; local passed | nightly / local | `artifacts/rc-trace-e2e-drill/manifest.json` |
-| image build | pending-first-run; local passed | nightly / local | `artifacts/rc-image-build/manifest.json` |
-| basic load/soak smoke | pending-first-run; local passed | nightly / local | `artifacts/rc-basic-load-soak/manifest.json` |
+| trace E2E | pending-first-run; local passed | docker-e2e scheduled / local | `artifacts/rc-trace-e2e-drill/manifest.json` |
+| image build | pending-first-run; local passed | docker-e2e scheduled / local | `artifacts/rc-image-build/manifest.json` |
+| basic load/soak smoke | pending-first-run; local passed | docker-e2e scheduled / local | `artifacts/rc-basic-load-soak/manifest.json` |
 
 ## Module Readiness
 
@@ -91,7 +91,9 @@ Engineering maturity measures code structure, tests, contracts, and operational 
 | manager auth deferred | P1 | accepted risk | beta read-only/dev-ops mode only |
 | alert/trace coverage narrow | P1 | accepted risk | one firing rule and one judge trace path only |
 | schema rollback unsupported | P1 | accepted risk | app-level rollback only |
-| load/soak is short smoke | P1 | accepted risk | not capacity evidence |
+| load/soak is short smoke | P1 | accepted risk | not capacity evidence; opt-in p95 ceiling added (`OJOS_LOAD_MAX_P95_MS`) |
+| orchestrator daemon control-plane unauthenticated | P1 | hardened | internal token now enforced on internal + mutating routes (fail-open when unset); see Post-RC Beta Hardening |
+| MinIO storage-service used root credentials | P1 | hardened | scoped least-privilege user + bucket policy + lifecycle via `minio-init`; see Post-RC Beta Hardening |
 
 ## Accepted Risks
 
@@ -108,6 +110,16 @@ Engineering maturity measures code structure, tests, contracts, and operational 
 - P2: broaden browser E2E coverage beyond minimal login/problem/submission/result paths.
 - P2: add more observability rules and dashboards.
 - P2: formal HA deployment pattern and failover drill.
-- P2: longer load/soak and capacity envelope.
-- P3: manager auth and richer operator workflows.
-- P3: MinIO lifecycle/policy hardening beyond sample restore.
+- P2: longer load/soak and capacity envelope (baseline mechanics now present via `OJOS_LOAD_MAX_P95_MS`; the SLA numbers remain a decision).
+- P1 (accepted risk): full manager auth model — operator identity, RBAC, and audit — beyond the daemon internal-token gate; richer operator workflows.
+- P2: end-to-end Redis/MinIO TLS — requires a PKI/cert decision. Enforcement is wired behind `OJOS_SECRET_CHECK_REQUIRE_TLS` (off by default) pending certs.
+- P3: quick-xml `RUSTSEC-2026-0194/0195` — transitive via eframe 0.31's Linux desktop/Wayland stack; the compatible eframe upgrade currently fails to compile on Windows (wgpu 29 `windows` crate split). Allowlisted in the Rust audit gate; revisit on an eframe release.
+
+## Post-RC Beta Hardening
+
+These landed after the `853423a` RC snapshot and are verified locally. Remote first-success artifacts are still tracked as pending (see Accepted Risks).
+
+- Orchestrator daemon control-plane now enforces `ORCHESTRATOR_INTERNAL_TOKEN` (sent by the gateway as `x-ojos-orchestrator-token`) on all mutating routes plus the `internal/*` snapshot/route reads and the per-node effective route table. Fail-open when the token is unset (dev and ops drills), fail-closed once set. `GET /health` stays open. Unit-tested.
+- MinIO: storage-service no longer uses the root account. A one-shot `minio-init` service creates the buckets, a scoped policy limited to those buckets and the object verbs storage-service uses, the scoped service user, and a 30-day lifecycle expiry on the artifact buckets. Verified end-to-end against a real MinIO: the scoped user can read/write/delete configured-bucket objects but is denied create-bucket, unlisted-bucket writes, and admin actions.
+- `secret-check.sh` gained `OJOS_SECRET_CHECK_REQUIRE_TLS=1` (off by default) to require `rediss://` and `MINIO_USE_SSL=true` once TLS endpoints exist.
+- `basic-load-soak.sh` gained an opt-in `OJOS_LOAD_MAX_P95_MS` latency ceiling recorded in `metrics.json` and enforced only when set.
