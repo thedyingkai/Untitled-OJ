@@ -23,6 +23,10 @@ run_smoke="${OJOS_LOAD_DRILL_RUN_SMOKE:-1}"
 concurrency="${OJOS_LOAD_CONCURRENCY:-20}"
 request_count="${OJOS_LOAD_REQUESTS:-40}"
 min_success_rate="${OJOS_LOAD_MIN_SUCCESS_RATE:-0.95}"
+# Opt-in p95 latency ceiling in milliseconds. Empty by default so the smoke keeps its
+# single success-rate gate; set it (with raised concurrency/requests) to start turning
+# this smoke into a capacity baseline.
+max_p95_ms="${OJOS_LOAD_MAX_P95_MS:-}"
 redis_password="${REDIS_PASSWORD:-DEV_ONLY_redis_password_not_for_production}"
 redis_url="${REDIS_URL:-redis://:$redis_password@127.0.0.1:6379/0}"
 status="failed"
@@ -414,11 +418,13 @@ jq \
   --arg queue_pending_max "$queue_pending_max" \
   --arg worker_processed_count "$worker_processed_count" \
   --arg min_success_rate "$min_success_rate" \
+  --arg max_p95_ms "$max_p95_ms" \
   '. + {
     queue_pending_max: ($queue_pending_max | tonumber),
     worker_processed_count: ($worker_processed_count | tonumber),
     threshold: {
-      min_success_rate: ($min_success_rate | tonumber)
+      min_success_rate: ($min_success_rate | tonumber),
+      max_p95_ms: (if $max_p95_ms == "" then null else ($max_p95_ms | tonumber) end)
     }
   }' "$evidence_dir/responses/metrics.json" >"$evidence_dir/responses/metrics.tmp.json"
 mv "$evidence_dir/responses/metrics.tmp.json" "$evidence_dir/responses/metrics.json"
@@ -430,3 +436,10 @@ error_count="$(jq -r '.error_count' "$evidence_dir/responses/metrics.json")"
 jq -e --arg min_success_rate "$min_success_rate" \
   '.success_rate >= ($min_success_rate | tonumber)' \
   "$evidence_dir/responses/metrics.json" >/dev/null
+
+# Opt-in p95 latency ceiling: only enforced when OJOS_LOAD_MAX_P95_MS is set.
+if [[ -n "$max_p95_ms" ]]; then
+  jq -e --arg max_p95_ms "$max_p95_ms" \
+    '.p95_ms <= ($max_p95_ms | tonumber)' \
+    "$evidence_dir/responses/metrics.json" >/dev/null
+fi
