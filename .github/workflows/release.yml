@@ -28,19 +28,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11"
+          cache: npm
+          cache-dependency-path: manager/web/package-lock.json
 
       - name: Build orchestrator binaries
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ matrix.platform }}" = "windows-x64" ]; then
-            # Windows ships all three binaries, including the GUI.
-            cargo build --release
-          else
-            # Linux ships daemon + TUI only; the GUI (eframe) needs desktop
-            # system libraries that are out of scope for the alpha.
-            cargo build --release -p ojos-orchestrator-daemon -p ojos-orchestrator-tui
-          fi
+          # egui GUI 已删除；两个平台都只出 daemon + TUI，图形入口是 daemon 托管的 Web UI。
+          cargo build --release -p ojos-orchestrator-daemon -p ojos-orchestrator-tui
+
+      # Web UI 是编排器的图形主入口，bundle 必须带上它的构建产物，
+      # 否则解压运行后打开 8090 只有引导页。
+      - name: Build orchestrator Web UI
+        shell: bash
+        working-directory: manager/web
+        run: |
+          set -euo pipefail
+          npm ci --registry=https://registry.npmjs.org
+          npm run typecheck
+          npm run build
+          test -f dist/index.html
 
       - name: Package alpha artifacts
         shell: bash
@@ -98,10 +109,11 @@ jobs:
           OJOS Orchestrator ${{ github.ref_name }} —— alpha 预发布。
 
           资产：
-          - \`ojos-orchestrator-${{ github.ref_name }}-windows-x64.zip\` —— Windows 编排器（daemon / GUI / TUI）+ 运行时数据。
-          - \`ojos-orchestrator-${{ github.ref_name }}-linux-x64.tar.gz\` —— Linux 编排器（daemon / TUI）+ 运行时数据。
+          - \`ojos-orchestrator-${{ github.ref_name }}-windows-x64.zip\` —— Windows 编排器（daemon / TUI）+ Web UI + 运行时数据。
+          - \`ojos-orchestrator-${{ github.ref_name }}-linux-x64.tar.gz\` —— Linux 编排器（daemon / TUI）+ Web UI + 运行时数据。
           - \`ojos-service-<name>-${{ github.ref_name }}.tar.gz\` + \`manifest.json\` —— 可被编排器拉取下载的各 service 发布包及其 sha256。
 
+          启动 daemon 后浏览器打开 \`http://127.0.0.1:8090/\` 即是图形主入口。
           用法见仓库 \`docs/alpha-quickstart.md\`（下载运行编排器、按 service 看效果、拉取 service 下载）。
           EOF
           mapfile -t assets < <(find release-assets -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name 'manifest.json' \) | sort)

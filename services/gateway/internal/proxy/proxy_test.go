@@ -538,6 +538,9 @@ func TestServiceProxyInternalAPIResolverUsesServiceCallerIdentity(t *testing.T) 
 		if r.Header.Get("X-OJOS-Caller-Service") != "judge-worker" {
 			t.Fatalf("caller service header should be forwarded to provider: %#v", r.Header)
 		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("service credential must be stripped before unrelated provider, got %q", got)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer upstream.Close()
@@ -641,6 +644,133 @@ func TestServiceProxyReloadMakesNewInternalAPIAvailable(t *testing.T) {
 	rp.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("api should be available after reload, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestServiceProxyInternalAPIWithoutTailKeepsServiceCallerCredential(t *testing.T) {
+	var gotPath string
+	var gotAuth string
+	var gotBody string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotBody = string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	route := ancestorStorageRoute("auth.user.permission.check", http.MethodPost, upstream.URL, true)
+	route.Prefix = "/auth/admin/permission-check"
+	route.ProviderService = "auth-service"
+	route.ProviderEndpoint = "127.0.0.1:8081:auth-service"
+	route.OwnerServiceID = "auth-service"
+	route.ServiceID = "auth-service"
+	route.TargetService = "auth-service"
+	route.AuthMode = "service"
+	route.RequiredPermission = "auth.permission.check"
+	rp.SetRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{route}, CanProxy: true})
+	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, caller PermissionCheckCaller, permission string) (bool, error) {
+		return true, nil
+	})
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/internal/apis/auth.user.permission.check",
+		bytes.NewBufferString(`{"user_id":42,"permission":"judge.submit"}`),
+	)
+	req.Header.Set("X-OJOS-Node-Id", "child-node")
+	req.Header.Set("X-OJOS-Caller-Service", "user-service")
+	req.Header.Set("Authorization", "Bearer service-token")
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if gotPath != "/auth/admin/permission-check" {
+		t.Fatalf("api_id call without tail must not gain a trailing slash, got %q", gotPath)
+	}
+	if gotAuth != "Bearer service-token" {
+		t.Fatalf("service caller credential must reach the provider, got %q", gotAuth)
+	}
+	if gotBody != `{"user_id":42,"permission":"judge.submit"}` {
+		t.Fatalf("unexpected forwarded body %q", gotBody)
+	}
+}
+
+func TestServiceProxyPermissionAPINonAuthProviderDropsServiceCredential(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	route := ancestorStorageRoute("auth.user.permission.check", http.MethodPost, upstream.URL, true)
+	route.Prefix = "/auth/admin/permission-check"
+	route.AuthMode = "service"
+	route.RequiredPermission = "auth.permission.check"
+	rp.SetRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{route}, CanProxy: true})
+	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, caller PermissionCheckCaller, permission string) (bool, error) {
+		return true, nil
+	})
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/internal/apis/auth.user.permission.check",
+		bytes.NewBufferString(`{"user_id":42,"permission":"judge.submit"}`),
+	)
+	req.Header.Set("X-OJOS-Node-Id", "child-node")
+	req.Header.Set("X-OJOS-Caller-Service", "user-service")
+	req.Header.Set("Authorization", "Bearer service-token")
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if gotAuth != "" {
+		t.Fatalf("non-auth-service provider must not receive the service credential, got %q", gotAuth)
+	}
+}
+
+func TestServiceProxyRejectsPublicPermissionForServiceAuth(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	route := ancestorStorageRoute("storage.object.get", http.MethodGet, upstream.URL, true)
+	route.AuthMode = "service"
+	route.RequiredPermission = "public"
+	rp.SetRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{route}, CanProxy: true})
+	rp.SetPermissionChecker(func(ctx context.Context, authHeader string, caller PermissionCheckCaller, permission string) (bool, error) {
+		t.Fatal("invalid service/public route must fail before permission checking")
+		return true, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/apis/storage.object.get", nil)
+	req.Header.Set("X-OJOS-Node-Id", "child-node")
+	req.Header.Set("X-OJOS-Caller-Service", "forged-service")
+	req.Header.Set("Authorization", "Bearer forged-token")
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected fail-closed 500, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamCalled {
+		t.Fatal("invalid service/public route must not reach the provider")
 	}
 }
 

@@ -89,7 +89,17 @@ REDIS_URL=redis://:RedisProd_0123456789abcdef012345@redis:6379/0
 JWT_SECRET=JwtProd_0123456789abcdef0123456789abcdef
 AUTH_INTERNAL_TOKEN=AuthIntProd_0123456789abcdef0123456789
 ORCHESTRATOR_INTERNAL_TOKEN=OrchIntProd_0123456789abcdef0123456789
+ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM=1
+ORCHESTRATOR_NODE_DISPATCH=1
+ORCHESTRATOR_NODE_ENDPOINT=http://node.internal:8091
+ORCHESTRATOR_NODE_TOKEN=NodeDispatchProd_0123456789abcdef012345
 OJOS_WORKER_TOKEN=WorkerAuthProd_0123456789abcdef01234567
+OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT=http://gateway:8080
+OJOS_AUTH_PERMISSION_CHECK_API_ID=auth.user.permission.check
+OJOS_USER_SERVICE_TOKEN=UserSvcProd_0123456789abcdef0123456789
+OJOS_PROBLEM_SERVICE_TOKEN=ProblemSvcProd_0123456789abcdef0123456
+OJOS_JUDGE_API_SERVICE_TOKEN=JudgeApiSvcProd_0123456789abcdef012345
+OJOS_JUDGE_WORKER_SERVICE_TOKEN=JudgeWorkerSvcProd_0123456789abcdef01
 
 MINIO_ROOT_USER=prodminioaccess
 MINIO_ROOT_PASSWORD=MinioRootProd_0123456789abcdef012345
@@ -120,11 +130,58 @@ EOF
 
 OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$strong_env" "$bash_bin" "$script_dir/secret-check.sh"
 
+missing_node_token_env="$(mktemp)"
+missing_node_endpoint_env="$(mktemp)"
+driver_without_host_env="$(mktemp)"
+reused_node_token_env="$(mktemp)"
+reused_service_token_env="$(mktemp)"
+trap 'rm -f "$strong_env" "$missing_node_token_env" "$missing_node_endpoint_env" "$driver_without_host_env" "$reused_node_token_env" "$reused_service_token_env"' EXIT
+grep -v '^ORCHESTRATOR_NODE_TOKEN=' "$strong_env" >"$missing_node_token_env"
+if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$missing_node_token_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-missing-node-token.log 2>&1; then
+  echo "ops-ci: enabled node dispatch unexpectedly passed without ORCHESTRATOR_NODE_TOKEN" >&2
+  exit 1
+fi
+grep -v '^ORCHESTRATOR_NODE_ENDPOINT=' "$strong_env" >"$missing_node_endpoint_env"
+if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$missing_node_endpoint_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-missing-node-endpoint.log 2>&1; then
+  echo "ops-ci: enabled node dispatch unexpectedly passed without ORCHESTRATOR_NODE_ENDPOINT" >&2
+  exit 1
+fi
+cp "$strong_env" "$driver_without_host_env"
+printf '\nORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER=1\n' >>"$driver_without_host_env"
+if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$driver_without_host_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-missing-node-host.log 2>&1; then
+  echo "ops-ci: enabled node driver unexpectedly passed without ORCHESTRATOR_NODE_HOST_IP" >&2
+  exit 1
+fi
+sed 's/^ORCHESTRATOR_NODE_TOKEN=.*/ORCHESTRATOR_NODE_TOKEN=OrchIntProd_0123456789abcdef0123456789/' \
+  "$strong_env" >"$reused_node_token_env"
+if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$reused_node_token_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-reused-node-token.log 2>&1; then
+  echo "ops-ci: node dispatch unexpectedly accepted a reused control-plane token" >&2
+  exit 1
+fi
+sed 's/^OJOS_PROBLEM_SERVICE_TOKEN=.*/OJOS_PROBLEM_SERVICE_TOKEN=UserSvcProd_0123456789abcdef0123456789/' \
+  "$strong_env" >"$reused_service_token_env"
+if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$reused_service_token_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-reused-service-token.log 2>&1; then
+  echo "ops-ci: secret policy unexpectedly accepted a reused service token" >&2
+  exit 1
+fi
+
 rendered="$(mktemp)"
-trap 'rm -f "$strong_env" "$rendered"' EXIT
+trap 'rm -f "$strong_env" "$missing_node_token_env" "$missing_node_endpoint_env" "$driver_without_host_env" "$reused_node_token_env" "$reused_service_token_env" "$rendered"' EXIT
 docker compose --env-file "$strong_env" -f "$repo_root/deploy/compose/docker-compose.yml" config >"$rendered"
 grep -q 'OJOS_RUNNER_MODE: nsjail' "$rendered" || {
   echo "ops-ci: judge-worker must render with OJOS_RUNNER_MODE=nsjail" >&2
+  exit 1
+}
+grep -Eq "ORCHESTRATOR_NODE_DISPATCH: [\"']?1[\"']?$" "$rendered" || {
+  echo "ops-ci: orchestrator node dispatch flag was not passed through Compose" >&2
+  exit 1
+}
+grep -q 'ORCHESTRATOR_NODE_ENDPOINT: http://node.internal:8091' "$rendered" || {
+  echo "ops-ci: orchestrator node endpoint was not passed through Compose" >&2
+  exit 1
+}
+grep -q 'ORCHESTRATOR_NODE_TOKEN: NodeDispatchProd_0123456789abcdef012345' "$rendered" || {
+  echo "ops-ci: orchestrator node token was not passed through Compose" >&2
   exit 1
 }
 runner_lines="$(grep 'OJOS_RUNNER_MODE:' "$rendered" || true)"

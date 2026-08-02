@@ -96,12 +96,61 @@ require_redis_url() {
   fi
 }
 
+require_enabled_flag() {
+  local name="$1"
+  local value
+  value="$(printf '%s' "$(value_for "$name")" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    1|true|yes|on) ;;
+    *) die "$name must be enabled in production" ;;
+  esac
+}
+
+flag_is_enabled() {
+  local value
+  value="$(printf '%s' "$(value_for "$1")" | tr '[:upper:]' '[:lower:]')"
+  [[ "$value" =~ ^(1|true|yes|on)$ ]]
+}
+
+require_distinct_secret() {
+  local name="$1"
+  shift
+  local value
+  value="$(value_for "$name")"
+  local other_name other_value
+  for other_name in "$@"; do
+    other_value="$(value_for "$other_name")"
+    if [[ -n "$other_value" && "$value" == "$other_value" ]]; then
+      die "$name must not reuse $other_name"
+    fi
+  done
+}
+
+require_all_distinct_secrets() {
+  local names=("$@")
+  local index other_index value other_value
+  for ((index = 0; index < ${#names[@]}; index += 1)); do
+    value="$(value_for "${names[$index]}")"
+    for ((other_index = index + 1; other_index < ${#names[@]}; other_index += 1)); do
+      other_value="$(value_for "${names[$other_index]}")"
+      if [[ -n "$value" && "$value" == "$other_value" ]]; then
+        die "${names[$index]} must not reuse ${names[$other_index]}"
+      fi
+    done
+  done
+}
+
 load_env_file
 
 require_secret JWT_SECRET 32
 require_secret AUTH_INTERNAL_TOKEN 32
 require_secret ORCHESTRATOR_INTERNAL_TOKEN 32
+require_enabled_flag ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM
 require_secret OJOS_WORKER_TOKEN 32
+require_secret OJOS_USER_SERVICE_TOKEN 32
+require_secret OJOS_PROBLEM_SERVICE_TOKEN 32
+require_secret OJOS_JUDGE_API_SERVICE_TOKEN 32
+require_secret OJOS_JUDGE_WORKER_SERVICE_TOKEN 32
 require_secret REDIS_PASSWORD 20
 require_secret MINIO_ROOT_USER 8
 require_secret MINIO_ROOT_PASSWORD 32
@@ -113,12 +162,51 @@ require_secret JUDGE_POSTGRES_PASSWORD 20
 require_secret USER_POSTGRES_PASSWORD 20
 require_secret ORCHESTRATOR_POSTGRES_PASSWORD 20
 
+# 身份边界不同的 token 必须使用不同的值。长度足够并不能阻止一个泄漏的
+# service token 被拿去调用内部管理接口，因此生产预检在这里直接拒绝复用。
+require_all_distinct_secrets \
+  JWT_SECRET \
+  AUTH_INTERNAL_TOKEN \
+  ORCHESTRATOR_INTERNAL_TOKEN \
+  OJOS_WORKER_TOKEN \
+  OJOS_USER_SERVICE_TOKEN \
+  OJOS_PROBLEM_SERVICE_TOKEN \
+  OJOS_JUDGE_API_SERVICE_TOKEN \
+  OJOS_JUDGE_WORKER_SERVICE_TOKEN
+
 require_database_url AUTH_DATABASE_URL
 require_database_url PROBLEM_DATABASE_URL
 require_database_url JUDGE_DATABASE_URL
 require_database_url USER_DATABASE_URL
 require_database_url ORCHESTRATOR_DATABASE_URL
 require_redis_url REDIS_URL
+
+if flag_is_enabled ORCHESTRATOR_NODE_DISPATCH \
+  || flag_is_enabled ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER; then
+  require_secret ORCHESTRATOR_NODE_TOKEN 32
+  require_distinct_secret ORCHESTRATOR_NODE_TOKEN \
+    JWT_SECRET \
+    ORCHESTRATOR_INTERNAL_TOKEN \
+    AUTH_INTERNAL_TOKEN \
+    OJOS_WORKER_TOKEN \
+    OJOS_USER_SERVICE_TOKEN \
+    OJOS_PROBLEM_SERVICE_TOKEN \
+    OJOS_JUDGE_API_SERVICE_TOKEN \
+    OJOS_JUDGE_WORKER_SERVICE_TOKEN
+fi
+
+if flag_is_enabled ORCHESTRATOR_NODE_DISPATCH; then
+  node_endpoint="$(value_for ORCHESTRATOR_NODE_ENDPOINT)"
+  [[ "$node_endpoint" =~ ^https?://[^[:space:]]+$ ]] \
+    || die "ORCHESTRATOR_NODE_ENDPOINT must be an http(s) URL when node dispatch is enabled"
+  reject_weak_value ORCHESTRATOR_NODE_ENDPOINT "$node_endpoint"
+fi
+
+if flag_is_enabled ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER; then
+  node_host_ip="$(value_for ORCHESTRATOR_NODE_HOST_IP)"
+  [[ -n "$node_host_ip" ]] || die "ORCHESTRATOR_NODE_HOST_IP is required when node driver execution is enabled"
+  reject_weak_value ORCHESTRATOR_NODE_HOST_IP "$node_host_ip"
+fi
 
 if [[ "${OJOS_SECRET_CHECK_REQUIRE_ALERTS:-0}" == "1" ]]; then
   alert_url="$(value_for OJOS_ALERT_WEBHOOK_URL)"

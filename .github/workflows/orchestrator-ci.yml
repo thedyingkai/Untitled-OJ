@@ -162,14 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo install cargo-audit --locked --version 0.22.2
-          # eframe 0.31 pulls quick-xml 0.30/0.39 through Linux desktop
-          # accessibility and Wayland dependencies. The compatible eframe
-          # upgrade currently fails to compile on Windows due to wgpu 29's
-          # windows crate version split. Keep these two advisories explicit
-          # while failing on every newly reported vulnerability.
-          cargo audit \
-            --ignore RUSTSEC-2026-0194 \
-            --ignore RUSTSEC-2026-0195
+          cargo audit
           cargo audit --file services/judge-worker/Cargo.lock
       - name: Build nsjail for strict judge-worker live tests
         shell: bash
@@ -246,6 +239,25 @@ jobs:
           path: |
             services/gateway/frontend/playwright-report
             services/gateway/frontend/test-results
+
+  orchestrator-web-build:
+    name: Orchestrator Web UI build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11"
+          cache: npm
+          cache-dependency-path: manager/web/package-lock.json
+      - name: Build orchestrator Web UI
+        working-directory: manager/web
+        run: |
+          set -euo pipefail
+          npm ci --registry=https://registry.npmjs.org
+          npm run typecheck
+          npm run build
+          test -f dist/index.html
 
   compose-policy:
     name: Docker Compose production policy

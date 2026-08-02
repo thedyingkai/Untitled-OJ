@@ -17,16 +17,32 @@ type contextKey string
 const ClaimsContextKey contextKey = "auth_claims"
 const TokenContextKey contextKey = "auth_token"
 
+const delegatedPermissionCheckAPI = "auth.user.permission.check"
+const delegatedPermissionCheckPermission = "auth.permission.check"
+
+type ServiceRouteAuthorizer func(
+	context.Context,
+	string,
+	string,
+	string,
+	string,
+) (bool, error)
+
 type AuthMiddleware struct {
-	secret        string
-	internalToken string
+	secret                 string
+	internalToken          string
+	serviceRouteAuthorizer ServiceRouteAuthorizer
 }
 
-func NewAuthMiddleware(secret string, internalToken string) *AuthMiddleware {
-	return &AuthMiddleware{
+func NewAuthMiddleware(secret string, internalToken string, authorizers ...ServiceRouteAuthorizer) *AuthMiddleware {
+	middleware := &AuthMiddleware{
 		secret:        secret,
 		internalToken: strings.TrimSpace(internalToken),
 	}
+	if len(authorizers) > 0 {
+		middleware.serviceRouteAuthorizer = authorizers[0]
+	}
+	return middleware
 }
 
 func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
@@ -61,6 +77,13 @@ func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		if claims, ok := m.authorizeServiceRoute(r, tokenString); ok {
+			ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
+			ctx = context.WithValue(ctx, TokenContextKey, tokenString)
+			next(w, r.WithContext(ctx))
+			return
+		}
+
 		claims, err := token.Parse(m.secret, tokenString)
 		if err != nil {
 			writeAuthError(w, 40104, "invalid or expired token")
@@ -71,6 +94,50 @@ func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 		ctx = context.WithValue(ctx, TokenContextKey, tokenString)
 
 		next(w, r.WithContext(ctx))
+	}
+}
+
+func (m *AuthMiddleware) authorizeServiceRoute(r *http.Request, tokenString string) (*token.Claims, bool) {
+	if r == nil || r.Method != http.MethodPost {
+		return nil, false
+	}
+	callerService := strings.TrimSpace(r.Header.Get("X-OJOS-Caller-Service"))
+	if callerService == "" {
+		return nil, false
+	}
+
+	switch r.URL.Path {
+	case "/auth/permission-check":
+		// UserPermissionCheckLogic validates the credential, caller identity,
+		// api_id and requested grant together. The middleware only carries the
+		// opaque token into that check.
+		return &token.Claims{
+			UserID:   0,
+			Username: "service:" + callerService,
+			Roles:    []string{"service"},
+		}, true
+	case "/auth/admin/permission-check":
+		if strings.TrimSpace(r.Header.Get("X-OJOS-Api-Id")) != delegatedPermissionCheckAPI ||
+			m.serviceRouteAuthorizer == nil {
+			return nil, false
+		}
+		allowed, err := m.serviceRouteAuthorizer(
+			r.Context(),
+			callerService,
+			tokenString,
+			delegatedPermissionCheckAPI,
+			delegatedPermissionCheckPermission,
+		)
+		if err != nil || !allowed {
+			return nil, false
+		}
+		return &token.Claims{
+			UserID:   0,
+			Username: "service:" + callerService,
+			Roles:    []string{"internal"},
+		}, true
+	default:
+		return nil, false
 	}
 }
 

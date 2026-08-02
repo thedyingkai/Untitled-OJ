@@ -6,8 +6,17 @@ Database:
   Url: ""
 
 AuthService:
+  # Fallback route. Only used while InternalGatewayEndpoint is empty.
   Endpoint: ""
   AdminToken: ""
+  # Preferred route: the orchestrator resolves PermissionCheckApiID into an
+  # effective route and the gateway forwards the call. Set this (or
+  # OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT) to leave the direct route behind.
+  InternalGatewayEndpoint: ""
+  PermissionCheckApiID: auth.user.permission.check
+  CallerService: user-service
+  CallerNodeID: ""
+  ServiceToken: ""
 
 Storage:
   ProfilesRoot: /data/ojos/users

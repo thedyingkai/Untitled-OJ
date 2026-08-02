@@ -348,7 +348,7 @@ func (p *ServiceProxy) matchInternalAPIRoute(apiID string, method string) (route
 				internalAPIPrefix+"/"+apiID,
 				internalAPIPrefix+"/"+apiID,
 				cleanPrefix(route.Prefix),
-				false,
+				forwardServiceCallerAuthorization(apiID, providerService, route.AuthMode),
 				p.internalSigner,
 				p.log,
 			),
@@ -406,6 +406,11 @@ func (p *ServiceProxy) serveRoute(w http.ResponseWriter, r *http.Request, route 
 	authMode := route.authMode
 	if route.requiredPermission != "" && normalizeServiceAuthMode(authMode) == authModePublic {
 		authMode = authModeUser
+	}
+	if normalizeServiceAuthMode(authMode) == authModeService &&
+		normalizeRequiredPermission(route.requiredPermission) == "" {
+		writeJSONError(w, http.StatusInternalServerError, 50004, "service route requires a non-public permission")
+		return
 	}
 	caller, claims, ok := p.authenticateRequest(w, r, authMode, route)
 	if !ok {
@@ -742,7 +747,14 @@ func newReverseProxy(
 				upstreamPath = strings.TrimPrefix(upstreamPath, stripPrefix)
 			}
 			if rewritePrefix != "" {
-				upstreamPath = singleJoiningSlash(rewritePrefix, upstreamPath)
+				// An api_id call with no trailing segments (a plain POST carrying
+				// a JSON body) leaves nothing to join, and joining would append a
+				// stray trailing slash to the upstream path.
+				if upstreamPath == "" || upstreamPath == "/" {
+					upstreamPath = rewritePrefix
+				} else {
+					upstreamPath = singleJoiningSlash(rewritePrefix, upstreamPath)
+				}
 			}
 			if upstreamPath == "" {
 				upstreamPath = "/"
@@ -833,6 +845,15 @@ func newReverseProxy(
 			ResponseHeaderTimeout: 15 * time.Second,
 		},
 	}
+}
+
+// Only auth-service needs the original service credential so it can verify the
+// caller a second time before answering a delegated user-permission query.
+// Forwarding the bearer to unrelated providers would expose a reusable secret.
+func forwardServiceCallerAuthorization(apiID string, providerService string, authMode string) bool {
+	return strings.TrimSpace(apiID) == "auth.user.permission.check" &&
+		strings.TrimSpace(providerService) == "auth-service" &&
+		normalizeServiceAuthMode(authMode) == authModeService
 }
 
 func shouldForwardStaticAuthorization(prefix string) bool {

@@ -8,9 +8,11 @@
 #   - dist/<bundle>/                                       (staged platform bundle)
 #   - dist/<bundle>.(zip|tar.gz)                           (the archived bundle)
 #
-# The bundle contains the orchestrator binaries plus the runtime data the daemon/GUI
-# read at --repo-root: platform/schemas/orchestrator, services/*/{service,release}.yaml,
-# and sets/. Cross-platform: Git Bash on Windows and Linux CI.
+# The bundle contains the orchestrator binaries, the Web UI build output
+# (manager/web/dist, served by the daemon at /), plus the runtime data the
+# daemon/TUI read at --repo-root: platform/schemas/orchestrator,
+# services/*/{service,release}.yaml, and sets/.
+# Cross-platform: Git Bash on Windows and Linux CI.
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,7 +92,7 @@ bundle="$dist/$bundle_name"
 mkdir -p "$bundle" "$bundle/platform/schemas" "$bundle/services" "$bundle/sets"
 
 copied_bin=0
-for b in ojos-orchestrator-daemon ojos-orchestrator-gui ojos-orchestrator-tui; do
+for b in ojos-orchestrator-daemon ojos-orchestrator-tui; do
   if [ -f "target/release/$b.exe" ]; then
     cp "target/release/$b.exe" "$bundle/"
     copied_bin=$((copied_bin + 1))
@@ -104,8 +106,23 @@ if [ "$copied_bin" -eq 0 ]; then
   exit 1
 fi
 
+# Web UI: the daemon serves <repo-root>/manager/web/dist at /, so the bundle must
+# carry the build output. Without it, opening 8090 only shows the bootstrap page.
+if [ ! -f manager/web/dist/index.html ]; then
+  echo "pack-alpha: no Web UI build output in manager/web/dist; run 'cd manager/web && npm ci && npm run build' first" >&2
+  exit 1
+fi
+mkdir -p "$bundle/manager/web"
+cp -R manager/web/dist "$bundle/manager/web/dist"
+
 cp -R platform/schemas/orchestrator "$bundle/platform/schemas/orchestrator"
 [ -d sets ] && cp -R sets/. "$bundle/sets/" 2>/dev/null || true
+# Default OJOS_STORE_INDEX_URL is the repo-relative store/index.json; ship it so the
+# Web UI store page works out of the box in the bundle.
+if [ -f store/index.json ]; then
+  mkdir -p "$bundle/store"
+  cp store/index.json "$bundle/store/index.json"
+fi
 for svc_dir in services/*/; do
   name="$(basename "$svc_dir")"
   if [ -f "$svc_dir/service.yaml" ] || [ -f "$svc_dir/release.yaml" ]; then
@@ -118,14 +135,33 @@ done
 cat >"$bundle/README.txt" <<TXT
 OJOS Orchestrator $version ($platform) —— alpha
 
-在本目录直接运行编排器（--repo-root . 会读取同目录的 platform/、services/、sets/）：
+在本目录直接运行编排器（--repo-root . 会读取同目录的 platform/、services/、sets/、store/、
+manager/web/dist）：
 
   ojos-orchestrator-daemon  --repo-root . --bind 127.0.0.1:8090
-  ojos-orchestrator-gui     --repo-root .
   ojos-orchestrator-tui     --repo-root .
 
-查看它管理的 services：  curl http://127.0.0.1:8090/services
-健康检查：              curl http://127.0.0.1:8090/health
+图形主入口（Web UI）：daemon 启动后用浏览器打开
+
+  http://127.0.0.1:8090/
+
+本 bundle 已内置 Web UI 构建产物（manager/web/dist），无需另行构建或部署；
+产物目录可用 daemon 的 --web-root 覆盖。
+
+命令行入口：
+  查看它管理的 services：  curl http://127.0.0.1:8090/services
+  健康检查：              curl http://127.0.0.1:8090/health
+
+【重要】数据持久化：未设置 ORCHESTRATOR_DATABASE_URL 时编排器使用内存 store，
+daemon 一退出，所有拓扑 / Endpoint / Link / Operation 记录全部丢失。要保留数据必须
+先建库并指向它（schema 见仓库 services/orchestrator/migrations/）：
+
+  ORCHESTRATOR_DATABASE_URL=postgres://user:pass@127.0.0.1:5432/ojos_orchestrator?sslmode=disable \\
+    ojos-orchestrator-daemon --repo-root . --bind 127.0.0.1:8090
+
+【重要】访问控制：未设置 ORCHESTRATOR_INTERNAL_TOKEN 时 daemon 对所有 API fail-open
+（任何能访问该端口的人都能改拓扑）。除本机试用外，请设置该变量，并在请求头
+x-ojos-orchestrator-token 中携带同一个值（Web UI 首次访问会提示输入）。
 
 拉取 service 下载（从 URL 拉取 release 包并注册）：
   设置 ORCHESTRATOR_RELEASE_PACKAGE_LOAD=1 再启动 daemon，然后：

@@ -76,6 +76,32 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		c.Jwt.Secret,
 		c.Jwt.ExpireHours,
 	)
+	serviceRouteAuthorizer := func(
+		ctx context.Context,
+		serviceCode string,
+		credentialToken string,
+		apiID string,
+		permissionCode string,
+	) (bool, error) {
+		if smokeAuth != nil {
+			return smokeAuth.ServiceCallerCanUsePermission(
+				serviceCode,
+				permissionCode,
+				apiID,
+				credentialToken,
+			), nil
+		}
+		if adminRepo == nil {
+			return false, nil
+		}
+		return adminRepo.ServiceCallerCanUsePermission(
+			ctx,
+			serviceCode,
+			permissionCode,
+			apiID,
+			credentialToken,
+		)
+	}
 
 	return &ServiceContext{
 		Config: c,
@@ -88,8 +114,12 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		AdminRepo:   adminRepo,
 		AuthService: authService,
 
-		AuthMiddleware: authmw.NewAuthMiddleware(c.Jwt.Secret, c.InternalAuth.Token).Handle,
-		SmokeAuth:      smokeAuth,
+		AuthMiddleware: authmw.NewAuthMiddleware(
+			c.Jwt.Secret,
+			c.InternalAuth.Token,
+			serviceRouteAuthorizer,
+		).Handle,
+		SmokeAuth: smokeAuth,
 	}
 }
 

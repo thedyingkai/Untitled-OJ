@@ -144,7 +144,7 @@ onMounted(() => void load())
   <div class="service-status-page">
     <OjosPageHeader
       :title="pageTitle"
-      description="Web Shell 只读展示 Service 状态、健康和操作记录。Service 启停、连接和拓扑变更由 OJOS Orchestrator GUI/TUI 处理。"
+      description="Web Shell 只读展示 Service 状态、健康和操作记录。Service 启停、连接和拓扑变更由 OJOS Orchestrator Web/TUI 处理。"
       eyebrow="只读 Service 状态"
     />
 

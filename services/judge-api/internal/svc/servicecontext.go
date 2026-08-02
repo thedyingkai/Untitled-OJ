@@ -154,9 +154,8 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		Repo:           repo,
 		SubmissionRepo: repo,
 		WorkerRepo:     repo,
-		Permission: sharedperm.NewUserChecker(
-			c.AuthService.Endpoint,
-			c.AuthService.AdminToken,
+		Permission: sharedperm.NewUserCheckerWithConfig(
+			permissionCheckerConfig(c),
 			db,
 		),
 		Redis: redisClient,
@@ -167,6 +166,20 @@ func NewServiceContext(c config.Config) *ServiceContext {
 			internalVerifier,
 		).Handle,
 		WorkerAuthMiddleware: middleware.NewWorkerAuthMiddleware(c.WorkerAuth.Token).Handle,
+	}
+}
+
+// permissionCheckerConfig keeps the routing decision in one place: gateway +
+// api_id first, direct auth-service address only as a fallback.
+func permissionCheckerConfig(c config.Config) sharedperm.RemoteCheckerConfig {
+	return sharedperm.RemoteCheckerConfig{
+		InternalGatewayEndpoint: c.AuthService.InternalGatewayEndpoint,
+		ApiID:                   c.AuthService.PermissionCheckApiID,
+		CallerService:           c.AuthService.CallerService,
+		CallerNodeID:            c.AuthService.CallerNodeID,
+		ServiceToken:            c.AuthService.ServiceToken,
+		AuthServiceEndpoint:     c.AuthService.Endpoint,
+		AuthServiceAdminToken:   c.AuthService.AdminToken,
 	}
 }
 
@@ -215,6 +228,26 @@ func applyEnvOverrides(c *config.Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_SERVICE_TOKEN")); value != "" {
 		c.Storage.ServiceToken = value
+	}
+	// Deliberately a dedicated variable rather than reusing
+	// OJOS_INTERNAL_GATEWAY_ENDPOINT (which already drives the storage client):
+	// switching the permission check onto the gateway also requires a service
+	// credential and a service permission grant, so it must be an explicit
+	// opt-in per deployment.
+	if value := strings.TrimSpace(os.Getenv("OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT")); value != "" {
+		c.AuthService.InternalGatewayEndpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_AUTH_PERMISSION_CHECK_API_ID")); value != "" {
+		c.AuthService.PermissionCheckApiID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_CALLER_SERVICE")); value != "" {
+		c.AuthService.CallerService = value
+	}
+	if value := firstEnv("OJOS_CALLER_NODE_ID", "OJOS_NODE_ID"); value != "" {
+		c.AuthService.CallerNodeID = value
+	}
+	if value := firstEnv("OJOS_JUDGE_API_SERVICE_TOKEN", "OJOS_SERVICE_TOKEN"); value != "" {
+		c.AuthService.ServiceToken = value
 	}
 }
 

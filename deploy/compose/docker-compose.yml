@@ -102,8 +102,17 @@ services:
         condition: service_completed_successfully
     environment:
       ORCHESTRATOR_DATABASE_URL: ${ORCHESTRATOR_DATABASE_URL:-postgres://postgres:ojos-orchestrator-local@orchestrator-db:5432/ojos_orchestrator?sslmode=disable}
+      # 服务端门禁令牌：未配置时 daemon fail-open（任何人都能改拓扑）。必须与 gateway
+      # 侧的同名变量取同一个值；生产用 .env.production.example 里的强随机值覆盖。
+      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:-ojos-local-internal}
       ORCHESTRATOR_RELEASE_PACKAGE_LOAD: "1"
+      ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM: ${ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM:-1}
       ORCHESTRATOR_RELEASE_PACKAGE_ROOT: /workspace
+      ORCHESTRATOR_NODE_DISPATCH: ${ORCHESTRATOR_NODE_DISPATCH:-0}
+      ORCHESTRATOR_NODE_ENDPOINT: ${ORCHESTRATOR_NODE_ENDPOINT:-}
+      ORCHESTRATOR_NODE_TOKEN: ${ORCHESTRATOR_NODE_TOKEN:-}
+      ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER: ${ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER:-0}
+      ORCHESTRATOR_NODE_HOST_IP: ${ORCHESTRATOR_NODE_HOST_IP:-}
       ORCHESTRATOR_AUTH_PERMISSION_SYNC: "1"
       AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
       AUTH_SERVICE_ADMIN_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
@@ -112,6 +121,14 @@ services:
       - "127.0.0.1:8090:8090"
     expose:
       - "8090"
+    # GET /health 是唯一免令牌的路由，健康检查无需携带 ORCHESTRATOR_INTERNAL_TOKEN。
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:8090/health || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
 
   auth-service-migrations:
     image: migrate/migrate:v4.18.3
@@ -210,7 +227,7 @@ services:
       auth-service:
         condition: service_started
       orchestrator:
-        condition: service_started
+        condition: service_healthy
     environment:
       REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
@@ -282,6 +299,10 @@ services:
       DATABASE_URL: ${USER_DATABASE_URL:-postgres://postgres:ojos-user-local@user-db:5432/ojos_user?sslmode=disable}
       AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
       AUTH_SERVICE_ADMIN_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT: ${OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT:-}
+      OJOS_AUTH_PERMISSION_CHECK_API_ID: ${OJOS_AUTH_PERMISSION_CHECK_API_ID:-auth.user.permission.check}
+      OJOS_USER_SERVICE_TOKEN: ${OJOS_USER_SERVICE_TOKEN:-}
+      OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
 
   storage-service:
     build:
@@ -343,13 +364,16 @@ services:
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
       AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT: ${OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT:-}
+      OJOS_AUTH_PERMISSION_CHECK_API_ID: ${OJOS_AUTH_PERMISSION_CHECK_API_ID:-auth.user.permission.check}
+      OJOS_JUDGE_API_SERVICE_TOKEN: ${OJOS_JUDGE_API_SERVICE_TOKEN:-ojos-local-internal}
       OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
       OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
       OJOS_INTERNAL_GATEWAY_ENDPOINT: http://gateway:8080
       OJOS_STORAGE_OBJECT_GET_API_ID: storage.object.get
       OJOS_STORAGE_OBJECT_PUT_API_ID: storage.object.put
       OJOS_STORAGE_OBJECT_HEAD_API_ID: storage.object.head
-      OJOS_SERVICE_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_SERVICE_TOKEN: ${OJOS_JUDGE_API_SERVICE_TOKEN:-ojos-local-internal}
       OJOS_CALLER_SERVICE: judge-api
       OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
     volumes:
@@ -395,7 +419,8 @@ services:
       OJOS_JUDGE_CONSUMER_GROUP: judge-worker
       OJOS_RUNNER_MODE: ${OJOS_RUNNER_MODE:-nsjail}
       OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
-      OJOS_SERVICE_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_JUDGE_WORKER_SERVICE_TOKEN: ${OJOS_JUDGE_WORKER_SERVICE_TOKEN:-ojos-local-internal}
+      OJOS_SERVICE_TOKEN: ${OJOS_JUDGE_WORKER_SERVICE_TOKEN:-ojos-local-internal}
       OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
       OJOS_MAX_CONCURRENCY: 1
       OJOS_WORK_DIR: /var/lib/ojos-worker/work
@@ -440,12 +465,15 @@ services:
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
       AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
       AUTH_SERVICE_ADMIN_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT: ${OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT:-}
+      OJOS_AUTH_PERMISSION_CHECK_API_ID: ${OJOS_AUTH_PERMISSION_CHECK_API_ID:-auth.user.permission.check}
+      OJOS_PROBLEM_SERVICE_TOKEN: ${OJOS_PROBLEM_SERVICE_TOKEN:-ojos-local-internal}
       OJOS_PROBLEMS_ROOT: /data/ojos/problems
       OJOS_STORAGE_SERVICE_URL: http://storage-service:8085
       OJOS_INTERNAL_GATEWAY_URL: http://gateway:8080
       OJOS_STORAGE_OBJECT_PUT_API_ID: storage.object.put
       OJOS_PROBLEM_STORAGE_BUCKET: problems
-      OJOS_SERVICE_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_SERVICE_TOKEN: ${OJOS_PROBLEM_SERVICE_TOKEN:-ojos-local-internal}
       OJOS_CALLER_SERVICE: problem-service
       OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
     volumes:
@@ -460,4 +488,3 @@ volumes:
   minio-data:
   storage-service-data:
   worker-data:
-

@@ -155,7 +155,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(fmt % args)
 
-http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+# Alertmanager runs in a Docker network and reaches the host through
+# host.docker.internal. Binding only to loopback makes that connection fail on
+# Linux runners even though the host-side curl checks still work.
+http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
 PY
 webhook_pid="$!"
 

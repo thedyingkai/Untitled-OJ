@@ -26,6 +26,11 @@ jobs:
             services/problem-service/go.sum
             services/judge-api/go.sum
             services/user-service/go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11"
+          cache: npm
+          cache-dependency-path: manager/web/package-lock.json
       - name: Service credential lifecycle drill
         shell: bash
         env:

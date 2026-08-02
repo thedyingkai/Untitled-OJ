@@ -18,7 +18,14 @@ need_cmd docker
 need_cmd "$bash_bin"
 
 monitoring_file="${OJOS_MONITORING_COMPOSE_FILE:-$repo_root/deploy/ops/monitoring/docker-compose.yml}"
-if [[ -f "$monitoring_file" ]]; then
+skip_monitoring_checks="$(printf '%s' "${OJOS_SKIP_MONITORING_CHECKS:-0}" | tr '[:upper:]' '[:lower:]')"
+case "$skip_monitoring_checks" in
+  1|true|yes|on) skip_monitoring_checks=1 ;;
+  0|false|no|off) skip_monitoring_checks=0 ;;
+  *) die "OJOS_SKIP_MONITORING_CHECKS must be a boolean" ;;
+esac
+if [[ "$skip_monitoring_checks" != "1" ]]; then
+  [[ -f "$monitoring_file" ]] || die "monitoring compose file does not exist: $monitoring_file"
   export OJOS_SECRET_CHECK_REQUIRE_ALERTS="${OJOS_SECRET_CHECK_REQUIRE_ALERTS:-1}"
   export OJOS_SECRET_CHECK_REQUIRE_MONITORING="${OJOS_SECRET_CHECK_REQUIRE_MONITORING:-1}"
 fi
@@ -53,7 +60,7 @@ fi
 
 docker compose "${compose_args[@]}" config --quiet
 
-if [[ -f "$monitoring_file" ]]; then
+if [[ "$skip_monitoring_checks" != "1" ]]; then
   monitoring_args=(-f "$monitoring_file")
   if [[ -n "${OJOS_ENV_FILE:-}" ]]; then
     monitoring_args=(--env-file "$OJOS_ENV_FILE" "${monitoring_args[@]}")

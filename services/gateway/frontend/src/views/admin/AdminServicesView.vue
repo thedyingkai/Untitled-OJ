@@ -82,7 +82,7 @@ onMounted(() => void load())
   <div class="services-page">
     <OjosPageHeader
       title="Service 状态"
-      description="Web Shell 仅展示 Orchestrator 生成的 Service 只读快照和运行状态；安装、删除、热插拔与 Link 配置由 OJOS Orchestrator GUI/TUI 完成。"
+      description="Web Shell 仅展示 Orchestrator 生成的 Service 只读快照和运行状态；安装、删除、热插拔与 Link 配置由 OJOS Orchestrator Web/TUI 完成。"
       eyebrow="只读视图"
     >
       <template #actions>

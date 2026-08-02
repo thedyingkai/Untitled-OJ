@@ -92,6 +92,10 @@ func (c *Client) HasSystemPermission(ctx context.Context, authHeader string, cal
 	if strings.TrimSpace(authHeader) != "" {
 		req.Header.Set("Authorization", strings.TrimSpace(authHeader))
 	}
+	if (strings.EqualFold(caller.Type, "service") || strings.EqualFold(caller.Type, "internal")) &&
+		strings.TrimSpace(caller.Service) != "" {
+		req.Header.Set("X-OJOS-Caller-Service", strings.TrimSpace(caller.Service))
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

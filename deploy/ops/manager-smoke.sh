@@ -31,7 +31,7 @@ finish() {
     --arg start_ts "$start_ts" \
     --arg end_ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{
-      drill: "manager-gui-tui-operator-smoke",
+      drill: "manager-web-tui-operator-smoke",
       status: $status,
       start_timestamp: $start_ts,
       end_timestamp: $end_ts,
@@ -44,7 +44,7 @@ finish() {
       }
     }' >"$evidence_dir/manifest.json" || true
   if [[ $rc -eq 0 ]]; then
-    echo "[OK] manager GUI/TUI have minimum operator smoke"
+    echo "[OK] manager Web UI/TUI passed the minimum operator smoke"
   else
     echo "[FAILED] manager smoke failed; evidence=$evidence_dir" >&2
   fi
@@ -70,6 +70,16 @@ EOF
 need_cmd cargo
 need_cmd curl
 need_cmd jq
+need_cmd node
+need_cmd npm
+
+(
+  cd "$repo_root/manager/web"
+  npm ci --no-audit --no-fund
+  npm run typecheck
+  npm run build
+  test -f dist/index.html
+)
 
 api() {
   local method="$1"
@@ -110,6 +120,18 @@ for _ in $(seq 1 120); do
 done
 
 api GET /health "" "$evidence_dir/responses/health.json"
+api GET / "" "$evidence_dir/responses/web-index.html"
+grep -Fq '<div id="app"></div>' "$evidence_dir/responses/web-index.html"
+web_asset_path="$(
+  grep -oE 'src="/assets/[^"]+"' "$evidence_dir/responses/web-index.html" \
+    | head -n 1 \
+    | cut -d'"' -f2
+)"
+if [[ -z "$web_asset_path" ]]; then
+  echo "Web UI entry asset was not found in the rendered index" >&2
+  exit 1
+fi
+api GET "$web_asset_path" "" "$evidence_dir/responses/web-entry.js"
 api POST /endpoints '{
     "operation_id": "op-manager-smoke-endpoint",
     "endpoint": "127.0.0.1:19092:gateway",
@@ -138,5 +160,4 @@ else
   echo "bad endpoint reported error as expected" >"$evidence_dir/responses/bad-endpoint.txt"
 fi
 
-cargo test -p ojos-orchestrator-gui gui_loads_shared_operation_workbench_from_core
 cargo test -p ojos-orchestrator-tui tui_loads_shared_orchestrator_view_from_core

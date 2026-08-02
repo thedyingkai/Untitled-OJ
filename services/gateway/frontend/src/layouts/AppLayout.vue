@@ -151,7 +151,7 @@ onMounted(() => void loadServiceMenus())
         </div>
       </div>
       <NMenu :options="menuOptions" :value="selectedKey" :default-expanded-keys="expandedKeys" />
-      <div class="sider-footer">安装、连接、启停和拓扑变更由 OJOS Orchestrator GUI/TUI 处理。</div>
+      <div class="sider-footer">安装、连接、启停和拓扑变更由 OJOS Orchestrator Web/TUI 处理。</div>
     </NLayoutSider>
 
     <NLayout class="app-main">
