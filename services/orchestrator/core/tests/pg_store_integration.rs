@@ -373,6 +373,13 @@ fn migration_live_postgres_release_install_pipeline_records_real_statuses() {
         records_for_service(&store, &destructive_service_name)[0].status,
         "failed"
     );
+    OperationExecutor::new(&mut store)
+        .rollback(&format!("op-{destructive_service_name}-blocked"))
+        .expect("rollback blocked destructive migration install before retry");
+    assert!(
+        records_for_service(&store, &destructive_service_name).is_empty(),
+        "rollback should remove the failed migration record before retry"
+    );
     apply_live_release_install(
         &mut store,
         &format!("op-{destructive_service_name}-allowed"),
