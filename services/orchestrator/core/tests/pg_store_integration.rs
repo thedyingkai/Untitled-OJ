@@ -1,14 +1,13 @@
 use orchestrator_core::{
     DeferredAuthPermissionRegistrar, DeferredRedisResourceProvisioner,
-    DeferredReleasePackageLoader, DeferredStorageResourceProvisioner, Endpoint, EndpointDecl,
-    EndpointHealthResult, EndpointProbe, Link, LocalSqlMigrationRunner, LogView, OperationExecutor,
-    OperationLogRecord, OperationStatus, OrchestratorStore, PgOrchestratorStore,
-    ReleaseBackendDecl, ReleaseFrontendDecl, ReleaseMigrationDecl, ReleaseObservabilityDecl,
-    ReleaseRuntimeDecl, ReleaseServiceIdentityDecl, ReleaseSourceDecl, RuntimeMode,
-    ServiceHealthDecl, ServiceManifest, ServiceProvides, ServiceReleaseManifest, ServiceRequires,
-    ServiceRuntimeDecl, ServiceSecurityDecl, SourceDecl, TopologySnapshot, build_diagnostic_report,
-    build_topology, confirm_operation, parse_endpoint_id, plan_operation,
-    release_install_operation_with_release,
+    DeferredReleasePackageLoader, DeferredStorageResourceProvisioner, Endpoint, EndpointDecl, Link,
+    LocalSqlMigrationRunner, LogView, OperationExecutor, OperationLogRecord, OperationStatus,
+    OrchestratorStore, PgOrchestratorStore, ReleaseBackendDecl, ReleaseFrontendDecl,
+    ReleaseMigrationDecl, ReleaseObservabilityDecl, ReleaseRuntimeDecl, ReleaseServiceIdentityDecl,
+    ReleaseSourceDecl, RuntimeMode, ServiceHealthDecl, ServiceManifest, ServiceProvides,
+    ServiceReleaseManifest, ServiceRequires, ServiceRuntimeDecl, ServiceSecurityDecl, SourceDecl,
+    StaticEndpointProbe, TopologySnapshot, build_diagnostic_report, build_topology,
+    confirm_operation, parse_endpoint_id, plan_operation, release_install_operation_with_release,
 };
 use postgres::{Client, NoTls};
 use serde_json::json;
@@ -553,7 +552,6 @@ fn apply_live_release_install(
         "127.0.0.1",
         None,
         json!({
-            "external_service_running": true,
             "allow_destructive_migrations": allow_destructive
         }),
     )
@@ -561,7 +559,7 @@ fn apply_live_release_install(
     store.create_operation(operation)?;
     OperationExecutor::with_runtime_provisioners_and_release_loader(
         store,
-        HealthyMigrationEndpointProbe,
+        StaticEndpointProbe,
         DeferredAuthPermissionRegistrar,
         DeferredRedisResourceProvisioner,
         DeferredStorageResourceProvisioner,
@@ -569,22 +567,6 @@ fn apply_live_release_install(
         DeferredReleasePackageLoader,
     )
     .apply(operation_id)
-}
-
-#[derive(Debug, Default, Clone)]
-struct HealthyMigrationEndpointProbe;
-
-impl EndpointProbe for HealthyMigrationEndpointProbe {
-    fn probe(&self, endpoint: &Endpoint) -> orchestrator_core::Result<EndpointHealthResult> {
-        Ok(EndpointHealthResult {
-            endpoint: endpoint.endpoint.clone(),
-            health: "healthy".to_string(),
-            reachable: true,
-            latency_ms: Some(0),
-            message: "migration integration fixture reports the external service healthy"
-                .to_string(),
-        })
-    }
 }
 
 fn records_for_service(
