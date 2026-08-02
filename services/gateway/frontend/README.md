@@ -1,5 +1,19 @@
-# Frontend
+# Gateway 业务前端
 
-该目录实现 Web Shell 业务 UI。Web Shell 是 Service，不是 OJOS Orchestrator。
+这个目录是 OJ 站点的业务 UI，使用 Vue、Vite、Pinia 和 Naive UI。它通过 Gateway 调用登录、题目、提交和结果等业务 API。
 
-Web Shell 通过 Gateway 访问业务 API，只读展示必要的 Service 状态和 Topology 信息；安装、连接、拓扑变更和 Operation apply 由 Orchestrator GUI/TUI 负责。
+它不属于 Orchestrator 控制面。安装、Link、拓扑和 Operation 由 `manager/web` 或 TUI 管理；业务前端不能直接修改这些对象。
+
+常用命令：
+
+```bash
+npm ci
+npm run build
+npm run test:e2e
+```
+
+Playwright E2E 需要先安装 Chromium：
+
+```bash
+npm run test:e2e:install
+```

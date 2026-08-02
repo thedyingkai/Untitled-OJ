@@ -1,17 +1,10 @@
 # 发布文档
 
-本目录记录发布门禁、发布证据和已知限制。
+本目录保存可核对的实现证据和版本变更记录。生产放行结论在上一级目录维护，避免把测试索引、历史记录和当前门禁混成一份文档。
 
-发布前需核对：
+- [evidence.md](evidence.md)：代码入口、测试名与证据边界。
+- [refactor-2026-07.md](refactor-2026-07.md)：2026-07 Web 控制面重构的改动和未完成项。
+- [../production-readiness.md](../production-readiness.md)：远端 workflow、密钥策略和生产缺口。
+- [../release-candidate.md](../release-candidate.md)：当前候选判定。
 
-- 正式文档结构。
-- Service release 与 service manifest。
-- Endpoint 与 link 行为。
-- 分层 CRUD action 注册表。
-- 编排器数据库 schema。
-- GUI/TUI/daemon 等价性。
-- 测试与人工证据。
-- 无真实密钥或仅限本地的路径。
-- 无被跟踪的构建产物。
-
-当前证据见 [evidence.md](evidence.md)。
+发布时必须把证据绑定到精确 commit。历史 run、开发机输出和当前候选的 GitHub Actions artifact 应分别标注。

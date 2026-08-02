@@ -1,6 +1,6 @@
 # 部署清单
 
-本清单用于首个生产候选 / beta 部署。按顺序执行，遇到任何失败的 P0/P1 项即停止。
+本清单用于 beta 或首个受控生产候选。按顺序执行；P0/P1 项失败时停止放量。
 
 ## 环境要求
 
@@ -11,6 +11,7 @@
 - MinIO `RELEASE.2025-09-07T16-13-09Z` 或兼容的 S3 端点。
 - judge-worker 镜像中提供 `nsjail`；主机必须支持所配置的 cgroup/seccomp/mount 策略。
 - 运维脚本工具链：`bash`、`curl`、`jq`、`docker`、`pg_dump`、`pg_restore`、`redis-cli`、`mc`、`sha256sum`。
+- 从源码构建 Web UI 时使用 Node.js 24.11；CI 和 Dockerfile 采用同一版本。
 - 在企业代理后运行本地演练或健康探测时，配置 `NO_PROXY=localhost,127.0.0.1,::1`。
 
 ## 密钥配置
@@ -22,13 +23,26 @@
 - `JWT_SECRET`：至少 32 字符。
 - `AUTH_INTERNAL_TOKEN`：至少 32 字符。
 - `ORCHESTRATOR_INTERNAL_TOKEN`：至少 32 字符。
+- 启用 `ORCHESTRATOR_NODE_DISPATCH` 时：设置 `ORCHESTRATOR_NODE_ENDPOINT` 和独立的 `ORCHESTRATOR_NODE_TOKEN`；缺少派发地址，生产预检会失败。
+- 启用 `ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER` 时：配置本机 `ORCHESTRATOR_NODE_HOST_IP`，请求目标必须与它一致。请求已授权 driver、但目标 Node 没打开该上限时，安装会失败；只有未授权 driver 的请求可以只登记元数据。
+- `ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM=1`：生产环境强制校验 release 包。
 - `OJOS_WORKER_TOKEN`：至少 32 字符。
+- `OJOS_USER_SERVICE_TOKEN`、`OJOS_PROBLEM_SERVICE_TOKEN`、`OJOS_JUDGE_API_SERVICE_TOKEN`、`OJOS_JUDGE_WORKER_SERVICE_TOKEN`：每个调用方独立签发，至少 32 字符；不能彼此复用，也不能复用 JWT、内部或 worker token。
 - `AUTH_POSTGRES_PASSWORD`、`PROBLEM_POSTGRES_PASSWORD`、`JUDGE_POSTGRES_PASSWORD`、`USER_POSTGRES_PASSWORD`、`ORCHESTRATOR_POSTGRES_PASSWORD`：至少 20 字符。
-- `AUTH_DATABASE_URL`、`PROBLEM_DATABASE_URL`、`JUDGE_DATABASE_URL`、`USER_DATABASE_URL`、`ORCHESTRATOR_DATABASE_URL`：密码认证的 PostgreSQL URL，不使用 `postgres` 超级用户。
+- `AUTH_DATABASE_URL`、`PROBLEM_DATABASE_URL`、`JUDGE_DATABASE_URL`、`USER_DATABASE_URL`、`ORCHESTRATOR_DATABASE_URL`：密码认证的 PostgreSQL URL，不使用默认 `postgres` 用户。预检无法识别其它被授予 `rolsuper` 的角色，上线前还要查询 `pg_roles` 核对。
 - `REDIS_PASSWORD` 和 `REDIS_URL`：密码认证的 Redis URL。
 - `MINIO_ROOT_USER`、`MINIO_ROOT_PASSWORD`、`MINIO_ACCESS_KEY`、`MINIO_SECRET_KEY`。
-- 监控 profile：启用监控时需要 `OJOS_ALERT_WEBHOOK_URL` 和 `GRAFANA_ADMIN_PASSWORD`。
+- 标准 preflight 会检查仓库内默认监控 Compose，因此要求 `OJOS_ALERT_WEBHOOK_URL` 和 `GRAFANA_ADMIN_PASSWORD`。明确不部署监控时，设置 `OJOS_SKIP_MONITORING_CHECKS=1`；否则自定义监控 Compose 路径缺失会直接失败，避免路径拼错后悄悄跳过检查。
 - 可选的传输安全强制：设置 `OJOS_SECRET_CHECK_REQUIRE_TLS=1` 时，`REDIS_URL` 必须为 `rediss://`，`MINIO_USE_SSL` 必须为 `true`（默认关闭，取决于 PKI/证书决策）。
+
+不要把 `AUTH_INTERNAL_TOKEN` 当作业务服务凭据。经 Gateway 的用户权限校验使用
+`OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT` 和前三个 `OJOS_*_SERVICE_TOKEN`；judge-worker 的独立 token
+用于访问 storage API。Compose 会显式把这些变量注入对应容器，不会从根 `.env` 自动继承未声明变量。迁移
+`000012_grant_service_permission_check` 只登记 identity 和 grant，不签发 token；上线前应通过
+`POST /auth/admin/services/{service_code}/credentials` 分别签发并写入密钥管理系统。
+
+启用 `ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH=1` 时，还要设置 `GATEWAY_ENDPOINT`、`GATEWAY_ADMIN_TOKEN` 和
+`GATEWAY_NODE_ID`。缺少 Node ID 时，空路由表强制刷新会被拒绝。
 
 预检：
 
@@ -61,6 +75,10 @@ docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-comp
 docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-compose.yml up -d
 ```
 
+Compose 会直接启动业务服务。最小 orchestrator 镜像不含业务源码、Compose 文件或 Docker CLI，不能在容器内
+代替 Compose 启动其他服务。若要使用编排器的 LocalProcess/DockerCompose 生命周期驱动，应从完整源码工作区运行，
+或显式挂载审核过的运行资产和 Docker 访问能力。
+
 ## 迁移步骤
 
 显式运行迁移服务：
@@ -88,7 +106,8 @@ curl -fsS http://127.0.0.1:8082/health
 curl -fsS http://127.0.0.1:8085/health
 ```
 
-然后通过已部署的 gateway 或该环境现有的 compose 冒烟命令跑一次判题冒烟。
+再检查 `http://127.0.0.1:8090/` 能返回 Web UI，通过 Gateway 跑一次登录、服务权限和判题冒烟。控制面 API
+请求需携带 `x-ojos-orchestrator-token`。
 
 ## 回滚步骤
 
@@ -99,10 +118,18 @@ OJOS_ENV_FILE=/etc/ojos/production.env \
 ORCHESTRATOR_URL=https://orchestrator.example.com \
 OJOS_ROLLBACK_OPERATION_ID=op-release-install-YYYYMMDD \
 OJOS_CONFIRM_ROLLBACK=rollback-op-release-install-YYYYMMDD \
+OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1 \
 deploy/ops/rollback-drill.sh
 ```
 
-如需 schema 回滚，请停止并使用备份/恢复。当前 release 回滚是应用层的；schema 回滚不支持。
+`OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1` 会让脚本再次传入 `execute_service_driver=true`，授权固定的
+本地进程或 Compose 回滚动作。只回滚 store 记录时不要设置它。schema、Redis、对象存储和 auth-service
+外部副作用没有通用自动回滚；这类恢复应停止放量，并按备份或服务专用补偿步骤处理。
+
+若要按 Service 发起 `release.rollback`，改用 `OJOS_ROLLBACK_SERVICE`，并保留 driver 授权。可选的
+`OJOS_ROLLBACK_TARGET_OPERATION_ID` 用来锁定原安装 Operation；未指定时可用
+`OJOS_ROLLBACK_RELEASE_VERSION` 限定版本。它们的完整示例见 [运维脚本说明](../../deploy/ops/README.md)。
+`OJOS_ROLLBACK_OPERATION_ID` 与 `OJOS_ROLLBACK_SERVICE` 不得同时设置。
 
 ## 备份 / 恢复
 

@@ -1,20 +1,21 @@
-# 项目完成度总结
+# 项目状态总结
 
-本文件给出 OJOS Orchestrator 平台的整体完成度、逐模块状态、功能用法，以及对标真实生产部署的缺陷。
-所有结论尽量绑定代码位置（`文件:行`）与已有证据文档，完成度百分比给出区间并注明依据，不虚高。
+本文按代码、测试和远端运行记录说明当前能力，不再用主观百分比代替证据。
 
-- 已验证代码基线：`main`（当前 HEAD）。
-- 现有自评（见 [发布候选证据](release-candidate.md)）：判定 **CONDITIONAL GO**，工程成熟度 90%，
-  稳定生产就绪度 85%。
-- 适用范围：**beta / 首个生产候选**，不是完整 HA 容量发布。
+- 当前工作分支包含 Web 控制面、商店、生命周期和内部服务鉴权重构，尚未形成新 tag。
+- 已发布的 `v0.1.0-alpha` 是历史版本，仍使用原生 GUI。
+- 远端 `main` 的最新可核对提交为 `875586f`。它的 staging 演练成功，但不能证明当前未合并分支已经通过。
+- 当前定位仍是 beta / 受控生产候选，不是 HA 或容量发布。
 
 ## 1. 总体
 
 ### 技术栈
 
 - **Rust workspace**（根 `Cargo.toml`）：成员为 `services/orchestrator/core`、`services/orchestrator/backend`、
-  `manager/gui`、`manager/tui`；`judge-worker` 作为独立 crate 被 `exclude`。edition 2024。关键依赖：
-  `eframe 0.31`（GUI）、`ratatui 0.30` + `crossterm 0.29`（TUI）、`clap 4`、`serde_yaml 0.9`。
+  `manager/tui`；`judge-worker` 作为独立 crate 被 `exclude`。edition 2024。关键依赖：
+  `ratatui 0.30` + `crossterm 0.29`（TUI）、`clap 4`、`serde_yaml 0.9`、`ureq 3.3`（release 包与商店索引拉取）。
+- **Web UI**（`manager/web`，不在 Rust workspace 内）：Vue 3 + TypeScript + Vite + Pinia，画布为零依赖自研组件；
+  产物 `manager/web/dist` 由 daemon 静态托管，交付链见 [Web UI 与插件商店](orchestrator/web-ui.md)。
 - **Go 服务**（go-zero/goctl 脚手架，各 `go.mod` 均 `replace ojos-shared => ../../platform/shared/go`）：
   auth-service、gateway、judge-api、problem-service、storage-service、user-service。
 - **judge-worker**：独立 Rust crate（tokio、reqwest、sha2、nsjail）。
@@ -30,25 +31,18 @@ Service；OJ 业务（题目、提交、判题、用户等）由各具体 Servic
 Service / Set / Endpoint / Link / Operation / Topology / LogView / DiagnosticReport，Endpoint 身份固定为
 `ip:port:service-name`，不存在 `instance-id`。
 
-## 2. 逐模块完成度
+## 2. 模块状态
 
-完成度区间依据：RC 自评 + 实现深度 + 测试类型 + 已知生产缺陷综合加权。
-
-| 模块 | 做什么 | 关键文件 | 完成度 | 测试类型 | 主要生产缺陷 |
-| --- | --- | --- | ---: | --- | --- |
-| orchestrator-core + daemon | 控制平面：模型/校验/计划/执行/回滚/诊断 | `core/src/store.rs`、`database.rs`、`dispatcher.rs`、`backend/src/main.rs` | 88–91% | 单元 + pg live 集成 + daemon 单元 | daemon 单线程阻塞、PgStore NoTls 无池化、7 个 provisioner 默认 Deferred、node-side rollback 未实现 |
-| judge-worker | nsjail 沙箱内编译+运行+判题 | `worker_link.rs`、`sandbox.rs`、`judge.rs`、`cgroup.rs` | 88–92% | 25 测试含 nsjail live 矩阵 + 滥用 | 需 privileged 宿主；非形式化沙箱证明 |
-| judge-api | 提交流程、Redis 队列、结果查询 | `logic/createsubmissionlogic.go`、`logic/queue_signal.go` | 87–89% | 单元 + Redis live 冒烟 | 依赖 Redis Streams 单实例 |
-| auth-service | 登录/注册、RBAC、service 凭据生命周期 | `handler/`、`platform/shared/go/security/permission/permission.go` | 85–88% | 单元 + 权限冒烟 + 凭据 nightly | 凭据生命周期 nightly 首次成功待定 |
-| gateway backend | 反向代理 + 认证网关 + 路由表消费 + admin | `internal/proxy/proxy.go`、`orchestrator/snapshot/client.go` | 84–87% | 单元 + 浏览器 E2E | 路由表依赖 orchestrator snapshot |
-| gateway frontend | OJ 业务 SPA | `services/gateway/frontend/src/` | 77–86% | Playwright（2 条，很少）| E2E 覆盖窄，admin/异常路径回归风险 |
-| storage-service | local + MinIO 双后端对象存储 | `internal/store/object_store.go`、`minio_store.go` | 82–88% | 单元 + MinIO live 集成 | 默认 local 后端；端到端 TLS 待 PKI |
-| problem-service | 题目/用例/题目包校验 | `internal/packagefs/packagefs.go` | 82–85% | 单元含 path traversal | handler/repository 覆盖较弱 |
-| user-service | 用户资料/偏好/统计 | `internal/handler/`、`store/profile_store.go` | 74–84% | 单元 + 权限 | 生产面较小，多为薄逻辑 |
-| manager GUI/TUI | 运维工具，直驱控制平面 | `manager/gui/src/main.rs`、`manager/tui/src/main.rs` | 70–80% | GUI 12 / TUI 9 单元 | **无认证**（in-process 直驱 core 库），仅 beta 只读/dev-ops |
-| platform/shared | 共享 Go 库 + orchestrator schemas | `platform/shared/go/security/*`、`platform/schemas/orchestrator/*` | 82–86% | 单元 | 无依赖漏洞门禁（已在 CI 增补 govulncheck/cargo-audit）|
-| sdk/templates/sets | service manifest 模板；sets 已降级 | `sdk/service-sdk/`、`services/*/service.yaml` | 80–83% | 契约测试 | 无代码级 SDK；sets 概念降级为派生查询（daemon 返回 HTTP 410）|
-| deploy/compose+ops | 单机全栈 + 演练工具 | `deploy/compose/docker-compose.yml`、`deploy/ops/*.sh` | 68–86% | ci-policy + nightly 演练 | 单机无 HA；多个 nightly 门禁 pending-first-run |
+| 模块 | 已实现并有测试覆盖 | 主要限制 |
+| --- | --- | --- |
+| orchestrator core + daemon | 模型、schema 校验、Operation、PG/内存 store、Web 静态托管、32 工作线程 + 64 连接队列 | PgStore 无连接池且使用 NoTls；HTTP/1.1 每请求关闭连接；console 全局互斥 |
+| 生命周期与商店 | 多版本 release 选择、包校验、Service/Host 启停、运行前态回滚、实际安装记录 | 本地/Compose 驱动需要交付物另外提供运行资产；外部资源没有通用补偿 |
+| auth-service + gateway | 用户/JWT、服务凭据、权限检查、有效 API 路由、精确的 bearer 转发边界 | Gateway 内部请求签名尚未启用；权限路由切换仍需逐服务配置凭据 |
+| judge-api + judge-worker | Redis Streams 队列、nsjail 判题、结果回传、恢复演练 | Redis 单实例；worker 需要 Linux、cgroup v2 和高权限容器 |
+| problem/user/storage 服务 | 题目包、用户资料、local/MinIO 存储及内部 Gateway 客户端 | handler 与异常路径测试深度不一；对象存储 TLS 取决于部署 PKI |
+| Web UI + TUI | 拓扑、商店、Service/Operation 生命周期、Link、日志；共用 core | TUI 进程内调用，没有独立 operator 身份；Web UI 的认证粒度只有控制面共享令牌 |
+| Gateway frontend | OJ SPA、类型检查、构建和少量 Playwright E2E | E2E 数量少，管理与失败路径覆盖不足 |
+| 部署与演练 | Compose、预检、备份恢复、staging、凭据、Redis、告警、trace、load 脚本 | 单机无 HA；部分远端门禁仍需在当前分支重新跑通 |
 
 ### 关键技术实现手段
 
@@ -56,7 +50,7 @@ Service / Set / Endpoint / Link / Operation / Topology / LogView / DiagnosticRep
   `installing→dispatching→running` → upsert release record + API surface + route → migrations →
   permission 注册 + auth 注册 → frontend entry → Redis/storage 资源开通 → node dispatch → driver action →
   健康等待 → gateway route 发布。回滚由 `release.rollback` + 前态捕获实现。
-- **能力状态机**：每个 action dispatch 结果标注 `REAL / STORE_BACKED / UNSUPPORTED / READONLY`，不受支持的
+- **能力状态机**：每个 action dispatch 结果标注 `REAL / RUNTIME_PIPELINE / STORE_BACKED / UNSUPPORTED / READONLY`，不受支持的
   动作绝不走假成功路径（见 [Action 模型](orchestrator/action-model.md)）。
 - **权限模型**（`platform/shared/go/security/permission/permission.go`）：principal（user/team/group/service）
   + scope 递归资源边继承（CTE 深度 16）+ allow/deny 且 **deny 优先** + super_admin 短路 + 审计日志 + 过期。
@@ -64,8 +58,8 @@ Service / Set / Endpoint / Link / Operation / Topology / LogView / DiagnosticRep
   校验、body-hash 绑定。
 - **判题沙箱**（`judge-worker/src/sandbox.rs`）：nsjail chroot + uid/gid 10001 + seccomp（阻断网络/内核逃逸
   syscall）+ cgroup v2 内存峰值/OOM 检测 + 只读绑定挂载白名单 + rlimit + 输出上限。
-- **控制面 token 门禁**（`backend/src/main.rs`）：`ORCHESTRATOR_INTERNAL_TOKEN` 未设时 fail-open，设置后对
-  变更路由与 `internal/*` 读取 fail-closed，`GET /health` 恒开。
+- **控制面 token 门禁**（`backend/src/auth.rs`）：未设置 `ORCHESTRATOR_INTERNAL_TOKEN` 时不认证；设置后
+  除 `GET /health` 和静态文件外，所有 API 都要求 `x-ojos-orchestrator-token`。
 - **MinIO 最小权限**（`deploy/compose/minio-init.sh`）：一次性 init 创建 bucket + scoped 用户 + bucket 策略
   + 30 天生命周期，storage-service 以 scoped 用户而非 root 连接。
 
@@ -87,15 +81,15 @@ REST 入口见 [Action 模型 · 后端 API](orchestrator/action-model.md)，如
 `GET /topology`、`GET /operations/{id}/logs`。生产环境需设置 `ORCHESTRATOR_INTERNAL_TOKEN`，请求带
 `x-ojos-orchestrator-token` 头。
 
-### 管理入口 GUI / TUI
+### 管理入口 Web UI / TUI
 
 ```bash
-cargo run -p ojos-orchestrator-gui -- --repo-root .
+# Web UI：构建 manager/web 后启动 daemon，浏览器访问 http://127.0.0.1:8090/
 cargo run -p ojos-orchestrator-tui -- --repo-root .
 ```
 
-设置 `ORCHESTRATOR_DATABASE_URL` 时使用持久化 store；否则用内存 store 做演示。GUI/TUI 能力等价，见
-[GUI / TUI 等价性](orchestrator/gui-tui-parity.md)。
+设置 `ORCHESTRATOR_DATABASE_URL` 时使用持久化 store；否则用内存 store 做演示。入口分工见
+[入口形态与能力边界](orchestrator/gui-tui-parity.md)，Web UI 详见 [Web UI 与插件商店](orchestrator/web-ui.md)。
 
 ### 判题
 
@@ -115,37 +109,36 @@ deploy/ops/staging-drill.sh                                            # 备份/
 
 完整部署与排障见 [部署清单](ops/deployment-checklist.md) 与 [运维手册](ops/ops-runbook.md)。
 
-## 4. 对标实际生产部署的缺陷
-
-以下缺陷均可从代码/配置直接观察，是当前 beta 与"完整生产"之间的差距：
+## 4. 生产缺口
 
 1. **单实例数据存储，无 HA**：`deploy/compose/docker-compose.yml` 每个 DB / Redis / MinIO 均单节点单副本，
    无 replica/cluster/sentinel/failover。
 2. **orchestrator PgStore 无连接池、NoTls**：`core/src/database.rs` `Client::connect(..., NoTls)`，且每次
    操作新建连接（`dispatcher.rs`），无池化。
-3. **daemon 单线程阻塞**：`backend/src/main.rs` 顺序处理连接 + `Connection: close`，无并发/无 keep-alive。
-4. **控制面认证 fail-open**：未配置 `ORCHESTRATOR_INTERNAL_TOKEN` 时放行一切（仅配置后 fail-closed）；
-   node-token 同样未配置即放行。
-5. **manager 无认证**：GUI/TUI in-process 直驱控制平面库，无 operator 身份/RBAC/审计。
-6. **provisioner 默认 Deferred（no-op）**：`core/src/store.rs` 七个能力默认返回 "not configured"；生产必须
-   显式配置 env 启用，否则迁移/资源开通/route 发布静默跳过。
-7. **node-side rollback 未实现**：`dispatcher.rs` 明确 "node-side service install rollback is not implemented"。
-8. **真实 driver 执行默认关闭**：仅当 action 带 `execute_service_driver=true` 才真正启动进程。
-9. **schema rollback 不支持**：仅应用层回滚。
-10. **Redis/MinIO 端到端 TLS 未落地**：强制为 opt-in 且默认关；compose Redis 明文 + 弱默认密码。
-11. **judge-worker 需 privileged 宿主**：compose 要求 privileged/SYS_ADMIN/cgroup host/apparmor unconfined
+3. **daemon 仍会串行化多数 core 访问**：网络层已有工作线程池和有界队列，`GET /health` 使用启动快照，不再等待全局锁；其它 `OrchestratorActionConsole` API、下载和外部命令仍由同一个 `Mutex` 串行。响应使用 `Connection: close`，没有 keep-alive。
+4. **控制面认证默认关闭**：未配置 `ORCHESTRATOR_INTERNAL_TOKEN` 时放行一切（配置后才 fail-closed）；
+   metadata-only node 入口的专用 token 也保留开发期 fail-open。Node 一旦允许真实 driver，则节点 token 与控制面 token 都必须配置并同时匹配。请求已经授权 driver、但 Node 没打开执行上限时会失败，不会退回 metadata-only。
+5. **operator 身份模型未完成**：TUI 进程内调用 core；Web UI 只有共享控制面令牌，没有独立身份、RBAC 或会话审计。
+6. **外部 provisioner 默认 Deferred**：迁移、Redis、存储、auth 注册、包加载、路由发布和 Node dispatch
+   都要显式开关与端点。结果会记录 deferred/skipped，但不会完成外部动作。
+7. **运行资产不在最小交付物中**：daemon 镜像和 bundle 不含业务源码、Compose 文件或 Docker CLI。
+8. **真实 driver 默认关闭**：实际启停和相应回滚都要逐次传 `execute_service_driver=true`；纯元数据 `release.install` 可以不授权。
+9. **schema 与外部资源回滚不完整**：store 快照可恢复，数据库 schema、Redis、存储和 auth-service 副作用
+   需要备份或服务专用补偿。
+10. **Redis/MinIO 端到端 TLS 未落地**：强制策略为 opt-in；示例 Compose 仍以单机开发拓扑为主。
+11. **judge-worker 需要高权限宿主**：Compose 要求 privileged/SYS_ADMIN/cgroup host/apparmor unconfined
     （nsjail 硬需求）。
-12. **nightly drills 均 pending-first-run**：staging/credential/redis-recovery/alert/trace/image/load 尚无
-    远端 CI 首次成功 artifact。
-13. **可观测性覆盖窄**：仅一条告警规则和一条判题 trace 路径；load/soak 仅冒烟非容量测试。
+12. **远端门禁不是全绿**：`875586f` 的 staging 已成功；同期 Ops Drills 在告警 webhook 失败，Docker E2E
+    在 Gateway 前端依赖审计失败。本分支已修正这两个原因，但要以推送后的运行结果为准。
+13. **可观测性覆盖窄**：告警和 trace 演练路径有限；load/soak 是冒烟，不是容量测试。
 
 ## 5. 未完成事项
 
 详见 [未完成事项](unfinished/README.md)。摘要：完整 manager 认证模型、HA/failover 拓扑与容量 SLA、
 Redis/MinIO 端到端 TLS、远端 nightly/staging 首次成功 artifact，以及若干代码质量项。
 
-## 6. 结论
+## 6. 使用判断
 
-当前项目在正确性、核心架构和主 CI 上较扎实（HEAD 的 CI、Docker E2E、真实 Redis/MinIO、强制 nsjail 均通过），
-适合 **beta** 与**受控的 limited production**（受控流量 + 人工备份检查 + 网络隔离 + 明确 accepted risk），
-**不适合 GA**——nightly/staging 首次成功 artifact、HA、容量和部分关键安全策略尚未闭环。
+当前代码适合 beta 和受控验证环境。若用于有限生产，应至少配置独立数据库、强令牌、release checksum、网络隔离、
+人工备份核对和明确的回滚手册。HA、容量、operator RBAC、连接池、端到端 TLS 与完整远端门禁收口前，不应按 GA
+发布。

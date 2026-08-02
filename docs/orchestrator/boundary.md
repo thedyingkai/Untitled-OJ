@@ -1,10 +1,10 @@
 # 编排器边界
 
-OJOS Orchestrator 是服务编排器，不是 OJ 业务后端，也不是 Gateway 前端。
+OJOS Orchestrator 管理服务，不承载 OJ 业务请求。
 
 ## Gateway
 
-Gateway 是一个 Service。它负责业务流量、认证中间件、请求路由、统一错误和健康上报。
+Gateway 是一个被管理的 Service，负责业务流量、认证中间件、请求路由、统一错误和健康上报。
 
 Gateway 不安装服务、不管理 endpoint 或 link、不改动拓扑、不执行 operation，也不充当控制平面。
 
@@ -16,24 +16,25 @@ Gateway 前端不安装服务、不管理 endpoint 或 link、不改动拓扑、
 
 ## Orchestrator daemon
 
-Orchestrator daemon 是编排器的 HTTP API 入口。
+Orchestrator daemon 提供控制面 HTTP API，并托管 `manager/web/dist`。它不会托管 Gateway frontend。
 
 它可以：
 
 ```text
-读取 ORCHESTRATOR_DATABASE_URL，或使用本地内存 store 上下文
+读取 ORCHESTRATOR_DATABASE_URL，未设置时使用内存 store
 暴露 service release、service、endpoint、link、operation、topology、log 和 diagnostic API
 把写请求转换为 core 的 ActionRequest 值
 把执行委托给 OrchestratorActionDispatcher
 读取 operation 状态、operation 日志、拓扑和诊断报告
 ```
 
-它不得代理 OJ 业务流量、不得服务 Gateway 前端页面、不得执行任意 shell、不得绕过 GUI/TUI 的 core
-action schema，也不得引入额外的运行时实例对象。
+daemon 不代理 OJ 业务流量，也不接受任意 shell 或用户提供的命令。`LocalProcessDriver` 和
+`DockerComposeDriver` 只能执行发布契约中声明的固定运行方式，而且请求必须显式设置
+`execute_service_driver=true`。Web UI、TUI 和 HTTP 调用都不能绕过 core action schema。
 
 ## Root 角色
 
-Root 是编排器的一种运行时角色，不是独立的 rootd 程序。Node 与 standalone 也是同一个编排器程序的角色。
+Root 是编排器节点角色，不是独立的 rootd 程序。Node 与 standalone 也是同一个程序的角色。
 
 Root 信息由配置、授权策略和拓扑起点表示：
 
@@ -47,5 +48,5 @@ authority.exposure_policy
 
 ## OJ 业务边界
 
-题目、提交、比赛、用户、权限业务逻辑、公告、训练、Clarification、打印和滚榜，属于被管理的服务内部，
-不属于编排器 core。
+题目、提交、比赛、用户、权限业务逻辑、公告、训练、Clarification、打印和滚榜属于业务 Service，不进入
+编排器 core 或数据库。

@@ -1,6 +1,6 @@
 # 运维手册
 
-本手册用于生产候选 / beta 运维。优先做只读检查。破坏性操作仅在明确确认下使用。
+本手册用于 beta 和受控生产候选。先做只读检查；删除、恢复和运行时驱动操作都需要明确确认。
 
 ## 健康
 
@@ -32,7 +32,9 @@ export no_proxy="$NO_PROXY"
 查询编排器路由：
 
 ```bash
-curl -fsS "$ORCHESTRATOR_URL/nodes/child-node/routes?include_upstream=true" | jq .
+curl -fsS \
+  -H "x-ojos-orchestrator-token: $ORCHESTRATOR_INTERNAL_TOKEN" \
+  "$ORCHESTRATOR_URL/nodes/child-node/routes?include_upstream=true" | jq .
 ```
 
 确认预期的 `api_id`、目标服务和所需权限都存在。如果路由缺失，检查服务的 `release.yaml`、重新安装 release，
@@ -47,7 +49,10 @@ psql "$AUTH_DATABASE_URL" -c "select code from permissions order by code;"
 psql "$AUTH_DATABASE_URL" -c "select role_id, permission_code from role_permissions order by permission_code;"
 ```
 
-如果某个服务权限缺失，确认 release install 注册了权限，并检查 auth-service 迁移状态。
+如果某个服务权限缺失，确认 release install 注册了权限，并检查 auth-service 迁移状态。经 Gateway 调用
+`auth.user.permission.check` 时，还要核对调用方自己的 service credential、`X-OJOS-Caller-Service`、
+`X-OJOS-Node-Id` 和 API grant。Gateway 只会把 bearer 转发给这一条 auth-service API，不会转发给 storage
+等其他提供方。
 
 ## Redis 队列积压
 
@@ -152,10 +157,18 @@ OJOS_ENV_FILE=/etc/ojos/production.env \
 ORCHESTRATOR_URL="$ORCHESTRATOR_URL" \
 OJOS_ROLLBACK_OPERATION_ID="$OPERATION_ID" \
 OJOS_CONFIRM_ROLLBACK="rollback-$OPERATION_ID" \
+OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1 \
 deploy/ops/rollback-drill.sh
 ```
 
-回滚后，验证 host service 状态、endpoint 状态、API surface、有效路由、权限、凭据/授权和健康。
+`OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1` 会授权执行固定的本地进程或 Compose 回滚动作。仅回滚 store 记录时
+不要设置它。运行前先确认当前真实进程状态和运行资产齐全；运行后检查 HostService、Endpoint、
+DeployedServiceApi、有效路由、权限和健康。schema 与外部资源副作用需按备份或专用补偿恢复。
+
+脚本也支持按 Service 发起 `release.rollback`：设置 `OJOS_ROLLBACK_SERVICE`，再用
+`OJOS_ROLLBACK_TARGET_OPERATION_ID` 精确指定原安装，或用 `OJOS_ROLLBACK_RELEASE_VERSION` 限定版本。
+Release 模式必须设置 `OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1`。它与 `OJOS_ROLLBACK_OPERATION_ID`
+互斥，示例见 [运维脚本说明](../../deploy/ops/README.md)。
 
 ## 备份 / 恢复
 
@@ -218,5 +231,6 @@ OJOS_ENV_FILE=/etc/ojos/production.env deploy/ops/secret-check.sh
 - localhost 数据库 URL：使用生产数据库端点；
 - Redis URL 无密码：添加密码认证的 URL；
 - PostgreSQL 超级用户：创建最小权限 service 用户。
+- `ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM` 不是 `1`：生产环境启用 release checksum 强制校验。
 
 修改密钥后，重启受影响的服务并重跑预检。

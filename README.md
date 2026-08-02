@@ -1,13 +1,15 @@
 # OJOS Orchestrator
 
-OJOS Orchestrator（OJOS 编排器）是面向 OJOS 服务体系的服务编排产品。它负责导入、校验、规划、安装、连接、启停、观测和诊断 Service。
+OJOS Orchestrator（OJOS 编排器）是 OJOS 的服务控制面。它负责导入服务契约、生成变更计划、维护连接与运行状态，并提供观测和诊断入口。
 
-它不是 OJ 网站后台，也不实现题库、提交、比赛、用户、公告、训练、Clarification、打印或滚榜。这些能力都属于具体 Service；编排器只处理 Service 之间的安装计划、连接关系、运行状态和拓扑视图。
+它不实现题库、提交、比赛、用户、公告、训练、Clarification、打印或滚榜。这些业务属于具体 Service；编排器只管理 Service 及其发布、端点、连接、操作记录和拓扑。
 
 ## 核心对象
 
-正式核心对象只有：
+理解运行时行为时，最常用的对象有：
 
+- ServiceRelease：可校验、导入和安装的服务发布契约。
+- Host：运行 Service 的主机或节点。
 - Service：最小可安装、可启停、可连接、可观测的功能单元。
 - Set：推荐部署组合，只描述组成和默认关系，不作为运行时对象。
 - Endpoint：运行中 Service 的唯一连接身份，格式固定为 `ip:port:service-name`。
@@ -19,9 +21,52 @@ OJOS Orchestrator（OJOS 编排器）是面向 OJOS 服务体系的服务编排�
 
 ## 正式入口
 
-正式入口包括 Orchestrator GUI、Orchestrator TUI 和 Orchestrator daemon。三者使用同一套 `services/orchestrator/core` 和 `platform/schemas/orchestrator`，能力必须一致，差别只能是交互形态或传输形态。
+正式入口包括 Orchestrator Web UI（daemon 内嵌托管）、Orchestrator TUI 和 Orchestrator daemon HTTP API。三者使用同一套 `services/orchestrator/core` 和 `platform/schemas/orchestrator`。
+
+- **Web UI**（`manager/web`）：主入口，提供拓扑编辑、商店、服务生命周期和操作审计。daemon 直接托管构建产物。
+- **TUI**（`manager/tui`）：无浏览器的服务器场景使用。
+- **daemon**（`services/orchestrator/backend`）：提供 HTTP API 和静态文件服务，使用固定大小的工作线程池处理连接。
+
+原 egui GUI 已删除，由 Web UI 取代。
+
+### 快速开始
+
+```bash
+# Node.js 需要 ^22.18.0 或 >=24.11.0。
+cd manager/web
+npm ci
+npm run typecheck
+npm run build
+cd ../..
+
+# 启动 daemon；开发环境未设置数据库时使用内存 store。
+cargo run -p ojos-orchestrator-daemon -- --repo-root . --bind 127.0.0.1:8090
+
+# 打开浏览器。
+# http://127.0.0.1:8090/
+```
+
+`GET /health` 不需要令牌。设置 `ORCHESTRATOR_INTERNAL_TOKEN` 后，其余 API 都要携带
+`x-ojos-orchestrator-token`；未设置时控制面不做认证，只适合本机开发。需要保留拓扑和 Operation 时，还要设置
+`ORCHESTRATOR_DATABASE_URL`。
 
 Gateway 是业务流量入口 Service，不是控制面。Gateway frontend 是 OJ 业务 UI，不是 Orchestrator 入口。
+
+## 插件商店
+
+编排器本体不内置业务模块。商店从索引或 GitHub Release 导入 zip、tar.gz 或 `release.yaml`：
+
+- 商店索引：`OJOS_STORE_INDEX_URL` 指向索引 JSON（GitHub raw 地址或仓库内相对路径，默认 `store/index.json`）。
+- GitHub 安装：在 Web UI 中输入 `owner/repo`，选择 Release 资产；`OJOS_GITHUB_TOKEN` 可用于提升 API 配额或访问私有仓库。
+- 打包模块：`deploy/release/pack-service-package.sh <service>` 生成可上传到 GitHub Release 的模块包。
+- 相关 API：`GET /store/index`、`GET /store/github/releases?repo=…`、`POST /store/import`、`POST /store/install`。
+
+当前服务包主要携带契约和迁移文件，不等于可运行二进制或镜像。`LocalProcessDriver` 和
+`DockerComposeDriver` 还需要源码、命令或 Compose 文件等运行资产；最小 daemon 镜像和历史 alpha bundle
+不包含这些资产。若服务已经由外部系统启动，可在安装请求中传
+`external_service_running=true` 登记它；端点必须真实可达，而且不能覆盖仍可能在运行的旧部署。该选项与
+`execute_service_driver=true` 互斥，登记后运行时所有者是 `external`，本控制面不会用本地 driver 启停或删除它。
+另一种做法是把经过审核的运行目录显式挂载进运行环境，再使用固定 driver。
 
 ## 数据库边界
 
@@ -76,12 +121,15 @@ orchestrator
 - [Orchestrator 需求](docs/orchestrator/requirements.md)
 - [Orchestrator 边界](docs/orchestrator/boundary.md)
 - [Action 模型](docs/orchestrator/action-model.md)
-- [GUI / TUI 等价性](docs/orchestrator/gui-tui-parity.md)
+- [入口形态与能力边界](docs/orchestrator/gui-tui-parity.md)
+- [Web UI 与插件商店](docs/orchestrator/web-ui.md)
 - [Topology 模型](docs/orchestrator/topology-model.md)
 - [Operation 模型](docs/orchestrator/operation-model.md)
 - [Orchestrator 数据库](docs/orchestrator/database.md)
 - [部署清单](docs/ops/deployment-checklist.md)
 - [运维手册](docs/ops/ops-runbook.md)
 - [可核对证据](docs/release/evidence.md)
+- [2026-07 重构记录](docs/release/refactor-2026-07.md)
 
-历史/废弃文档已从仓库删除，其架构结论已并入[项目完成度总结](docs/completeness-summary.md)。
+`v0.1.0-alpha` 是 2026-07-03 发布的历史版本，仍使用原生 GUI，不包含当前 Web UI。下载说明见
+[历史 Alpha 快速上手](docs/alpha-quickstart.md)。

@@ -1,23 +1,36 @@
 # v0.1.0 Alpha 快速上手
 
-本 alpha 提供**可执行文件形态的编排器**（daemon / GUI / TUI），可以直接运行查看它管理的 service，并能
-**从 URL 拉取 service 发布包**并注册。
+这份说明只对应 2026-07-03 发布的 `v0.1.0-alpha`。该版本提供 daemon、TUI 和原生 GUI；当前源码已经删除
+原生 GUI，改用 daemon 托管的 Web UI。不要用本文判断当前分支的入口或功能。
 
-> 边界说明（如实标注）：拉取下载的是**服务契约 `release.yaml`**（下载 + sha256 校验 + 注册 service /
-> endpoint / route / permission），**不是**服务的可运行二进制/镜像。判题需要 Linux + nsjail 环境，见文末。
+该版本可以从 URL 下载服务发布包，校验 SHA-256，并注册 Service、Endpoint、Route 和 Permission。发布包只含
+服务契约，不含服务二进制或镜像。
 
 ## 1. 下载与解压
 
 从 [GitHub Release](https://github.com/thedyingkai/Untitled-OJ/releases) 下载对应平台的 bundle：
 
-- Windows：`ojos-orchestrator-v0.1.0-alpha-windows-x64.zip`（含 daemon / GUI / TUI）
-- Linux：`ojos-orchestrator-v0.1.0-alpha-linux-x64.tar.gz`（含 daemon / TUI；Linux 不含 GUI）
+- Windows：`ojos-orchestrator-v0.1.0-alpha-windows-x64.zip`（daemon / GUI / TUI）
+- Linux：`ojos-orchestrator-v0.1.0-alpha-linux-x64.tar.gz`（daemon / TUI，不含 GUI）
 
-解压后进入该目录。目录内同时包含 `platform/`、`services/`、`sets/` 运行时数据，因此下面用 `--repo-root .`。
+解压后进入 bundle 目录。`platform/`、`services/` 和 `sets/` 是 daemon 读取的契约数据，因此下面使用
+`--repo-root .`。发布页的 `manifest.json` 可用于核对每个资产的 SHA-256。
 
 ## 2. 运行编排器，按 service 看效果
 
 不需要数据库：未设置 `ORCHESTRATOR_DATABASE_URL` 时编排器使用内存 store。
+
+> **数据会丢**：内存 store 只存在于进程中。daemon 退出后，拓扑、Endpoint、Link 和 Operation 记录都会消失。
+> 要保留数据必须配 `ORCHESTRATOR_DATABASE_URL` 指向一个已建表的 PostgreSQL（schema 见
+> `services/orchestrator/migrations/`）：
+>
+> ```bash
+> ORCHESTRATOR_DATABASE_URL=postgres://user:pass@127.0.0.1:5432/ojos_orchestrator?sslmode=disable \
+>   ojos-orchestrator-daemon --repo-root . --bind 127.0.0.1:8090
+> ```
+>
+> 远程使用时还应设置 `ORCHESTRATOR_INTERNAL_TOKEN`，调用受保护接口时在
+> `x-ojos-orchestrator-token` 请求头中携带同值。
 
 ```bash
 # daemon（HTTP 控制面）
@@ -30,19 +43,18 @@ curl http://127.0.0.1:8090/health
 curl http://127.0.0.1:8090/services
 ```
 
-图形 / 终端入口（能力与 daemon 等价，见 [GUI / TUI 等价性](orchestrator/gui-tui-parity.md)）：
+Windows bundle 的图形入口和两个平台的终端入口如下：
 
 ```bash
-ojos-orchestrator-gui --repo-root .    # 原生 GUI（仅 Windows bundle 提供）
-ojos-orchestrator-tui --repo-root .    # 终端 TUI
+ojos-orchestrator-gui --repo-root .    # 仅 Windows bundle
+ojos-orchestrator-tui --repo-root .
 ```
 
-在 GUI/TUI 里可浏览 Service、Endpoint、Link、Topology、Operation，并执行 action。
+GUI 和 TUI 可以浏览 Service、Endpoint、Link、Topology、Operation，并执行该版本支持的 action。
 
-## 3. 拉取 service 下载
+## 3. 下载并注册服务契约
 
-编排器可从 URL 拉取 service 发布包（zip / tar.gz），校验 sha256 后注册该 service。该能力默认关闭，需要开启
-开关：
+编排器可从 URL 拉取 zip 或 tar.gz，校验 SHA-256 后注册服务。该能力默认关闭：
 
 ```bash
 # 开启 release 包加载后启动 daemon
@@ -66,13 +78,13 @@ curl -X POST http://127.0.0.1:8090/releases/gateway/install \
 `Endpoint:...:gateway`、`Route:...`、`Permission:...` 等，表示该 service 已被拉取并注册。之后
 `curl http://127.0.0.1:8090/services` 可看到它。
 
-> 实现说明：编排器的下载器支持 http/https（含一次重定向，兼容 GitHub Release 资源 URL），有 15s 超时、
-> 64MiB 上限、sha256 校验和严格的 manifest 一致性校验。
+下载器支持 HTTP/HTTPS，最多跟随 5 次重定向，超时为 15 秒，压缩包上限为 64 MiB，并校验 SHA-256 与 manifest
+一致性。
 
 ## 4. 已知边界（alpha）
 
-- 拉取注册的是服务契约（`release.yaml`），不下载/运行服务二进制或镜像。
+- 拉取注册的是服务契约（`release.yaml`），不会下载或运行服务二进制、镜像。
 - 判题（judge-worker）需要 **Linux + nsjail + cgroup v2 + 特权容器**，Windows 桌面上多半跑不起来；作为
   Linux Docker 镜像使用（`services/judge-worker/Dockerfile`）。
-- 完整平台部署、数据播种与浏览器 OJ 站点见 [部署清单](ops/deployment-checklist.md) 与
-  [项目完成度总结](completeness-summary.md)。
+- 当前分支的 Web UI、商店和生命周期说明见 [Web UI 与插件商店](orchestrator/web-ui.md)。完整平台部署见
+  [部署清单](ops/deployment-checklist.md)。

@@ -1,8 +1,6 @@
-# Staging 备份/恢复/回滚演练
+# Staging 备份、恢复与回滚演练
 
-状态：nightly 可执行演练。
-
-`deploy/ops/staging-drill.sh` 使用一次性 Docker 资源，不触碰生产数据。
+`deploy/ops/staging-drill.sh` 是 nightly 的一次性演练，不连接生产资源。
 
 它验证：
 
@@ -25,7 +23,14 @@
 - `minio-backup/sample.txt`
 - `minio-restore/sample.txt`
 
-当前远端门禁分类：`pending-first-run`。
+最近一次已核对的远端成功运行：
 
-当 `deploy/ops/staging-drill.sh` 以 0 退出时，其 manifest 记录 `staging drill = real restore verified`
-（staging 演练 = 真实恢复已验证）。
+- workflow：`Staging Drill`
+- run：[`30717233049`](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30717233049)
+- commit：`875586ff92324d8d936d71f35c24cb0f1ad494f5`
+- 时间：2026-08-01 20:33 UTC
+
+这条记录只证明上述 `main` 提交。当前 Web、生命周期和鉴权重构必须在推送后重新运行，不能沿用这条成功记录。
+
+脚本以 0 退出时，manifest 会记录 `staging drill = real restore verified`。发布判断还应同时核对对应 run 的
+artifact 与 commit，不能只看文档中的状态文字。
