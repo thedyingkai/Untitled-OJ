@@ -9,3 +9,4 @@ clap.workspace = true
 orchestrator-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }

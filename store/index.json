@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "name": "OJOS 官方模块索引",
+  "description": "OJOS Orchestrator 插件商店的默认索引。编排器本体不内置任何业务模块；每个条目要么给出 repo（GitHub 仓库，从 Release 资产安装），要么给出 source_url（直接可安装的 release 包源）。",
+  "updated_at": "2026-07-29",
+  "modules": [
+    {
+      "id": "gateway",
+      "name": "Gateway",
+      "description": "业务流量入口与反向代理，聚合各服务路由并承载 OJ 前端。",
+      "kind": "gateway",
+      "tags": ["core", "ingress"],
+      "repo": "",
+      "source_url": "services/gateway",
+      "checksum": "sha256:7b76372922e00af05fbbd438761bd2b669a65020a1ad292f56b0d60fd9fbdb35"
+    },
+    {
+      "id": "auth-service",
+      "name": "Auth Service",
+      "description": "认证与令牌服务：登录、会话、服务身份与权限校验。",
+      "kind": "backend-api",
+      "tags": ["core", "auth"],
+      "repo": "",
+      "source_url": "services/auth-service",
+      "checksum": "sha256:5a8b022407cee92bc53e55ab1bbdc757473482384482344ea2a0a4c10644cde4"
+    },
+    {
+      "id": "user-service",
+      "name": "User Service",
+      "description": "用户资料与账号管理。",
+      "kind": "backend-api",
+      "tags": ["core", "user"],
+      "repo": "",
+      "source_url": "services/user-service",
+      "checksum": "sha256:b47efab6aa274af3bf5955f3db067a18e759faf14d81d71a4fd2d866819a7475"
+    },
+    {
+      "id": "problem-service",
+      "name": "Problem Service",
+      "description": "题库与测试数据包管理。",
+      "kind": "backend-api",
+      "tags": ["oj", "problem"],
+      "repo": "",
+      "source_url": "services/problem-service",
+      "checksum": "sha256:941bbefc9bf1d22ab4ed909fd42f88b9c6b8b459b23838098a687c2ecb859299"
+    },
+    {
+      "id": "judge-api",
+      "name": "Judge API",
+      "description": "评测提交接入、排队与结果查询 API。",
+      "kind": "backend-api",
+      "tags": ["oj", "judge"],
+      "repo": "",
+      "source_url": "services/judge-api",
+      "checksum": "sha256:c5bde22e12e1cfda24a593500381e634b7dd4ef4e6db68a5dc77bd8308243945"
+    },
+    {
+      "id": "judge-worker",
+      "name": "Judge Worker",
+      "description": "沙箱评测执行器，消费评测队列并回写结果。",
+      "kind": "backend-worker",
+      "tags": ["oj", "judge", "sandbox"],
+      "repo": "",
+      "source_url": "services/judge-worker",
+      "checksum": "sha256:394e71808b29499c1f50da0f06552df3138292d6170b6d38ed6e3ca4b60197eb"
+    },
+    {
+      "id": "storage-service",
+      "name": "Storage Service",
+      "description": "对象存储访问层，统一封装桶与预签名。",
+      "kind": "storage",
+      "tags": ["core", "storage"],
+      "repo": "",
+      "source_url": "services/storage-service",
+      "checksum": "sha256:b24616bf4a13460b6112fbb7b1dcaf85b4339e7d0d05abffb8130fa40b161e00"
+    },
+    {
+      "id": "postgresql",
+      "name": "PostgreSQL",
+      "description": "关系数据库（外部托管型 Service）。",
+      "kind": "database",
+      "tags": ["infra"],
+      "repo": "",
+      "source_url": "services/postgresql",
+      "checksum": "sha256:1016b1bcfd39296aa2eeb21e01e998ae80c001d584fd53bd042d48cbc259c012"
+    },
+    {
+      "id": "redis",
+      "name": "Redis",
+      "description": "缓存与队列（外部托管型 Service）。",
+      "kind": "cache",
+      "tags": ["infra"],
+      "repo": "",
+      "source_url": "services/redis",
+      "checksum": "sha256:590b4d74ad832c0544168d435bebb0a7e679a74ea9dd8b1089845f19a8bfc258"
+    },
+    {
+      "id": "minio",
+      "name": "MinIO",
+      "description": "S3 兼容对象存储（外部托管型 Service）。",
+      "kind": "storage",
+      "tags": ["infra"],
+      "repo": "",
+      "source_url": "services/minio",
+      "checksum": "sha256:91e53663869dc59ff55909b7fb8e6d8f37d85afa75ddac655fc191bf80f49714"
+    },
+    {
+      "id": "jaeger",
+      "name": "Jaeger",
+      "description": "分布式追踪采集与查询。",
+      "kind": "external",
+      "tags": ["infra", "observability"],
+      "repo": "",
+      "source_url": "services/jaeger",
+      "checksum": "sha256:5eba7f7c6b4ab57e09a74bff97d1f532592e8ef5df18328dae200a5c705fb7d7"
+    }
+  ]
+}

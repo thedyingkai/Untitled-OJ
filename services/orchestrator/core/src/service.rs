@@ -840,12 +840,21 @@ pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> 
             "release api visibility is invalid",
         )?;
         ensure(
-            matches!(
-                api.auth_mode.as_str(),
-                "public" | "user" | "service" | "internal"
-            ),
+            matches!(api.auth_mode.as_str(), "public" | "user" | "service"),
             "release api auth_mode is invalid",
         )?;
+        if api.auth_mode == "service" {
+            ensure(
+                api.permission != "public",
+                "release service-auth api permission must not be public",
+            )?;
+        }
+        if api.api_id == "auth.user.permission.check" {
+            ensure(
+                release.service_name == "auth-service",
+                "auth.user.permission.check is reserved for auth-service",
+            )?;
+        }
         if api.permission != "public" {
             ensure(
                 release
@@ -1707,10 +1716,6 @@ pub fn release_delete_operation(
                 {
                     "action": "delete_release_record",
                     "target": target_id
-                },
-                {
-                    "action": "clear_release_registry_resources",
-                    "target": service_name
                 }
             ],
             "requires_confirmation": true
@@ -1718,7 +1723,7 @@ pub fn release_delete_operation(
         serde_json::json!({
             "steps": [
                 {
-                    "action": "restore_previous_release_registry",
+                    "action": "restore_deleted_release_records",
                     "target": service_name
                 }
             ]
@@ -1768,9 +1773,7 @@ pub fn release_rollback_operation(
             ],
             "requires_confirmation": true
         }),
-        serde_json::json!({
-            "steps": []
-        }),
+        serde_json::Value::Null,
     )
 }
 
@@ -1779,15 +1782,31 @@ pub fn service_lifecycle_operation(
     action: &str,
     service_id: impl AsRef<str>,
 ) -> Result<Operation> {
+    service_lifecycle_operation_with_release(operation_id, action, service_id, None, None, None)
+}
+
+/// 与 `service_lifecycle_operation` 相同，但把该服务的 release manifest / endpoint / host_ip
+/// 一并写进 operation.request。executor 的 `execute_service_driver_action` 需要
+/// `request["release_manifest"]["runtime"]` 才能驱动 local-process 服务；缺少这段声明时
+/// service.start 对 local-process 服务必然失败。release 为 None 时退化为旧行为，
+/// request 里不会出现 release_manifest 键，保持向后兼容。
+pub fn service_lifecycle_operation_with_release(
+    operation_id: impl Into<String>,
+    action: &str,
+    service_id: impl AsRef<str>,
+    release: Option<&ServiceReleaseManifest>,
+    endpoint: Option<&str>,
+    host_ip: Option<&str>,
+) -> Result<Operation> {
     let service_id = service_id.as_ref().trim();
     ensure(!service_id.is_empty(), "service_id is required")?;
     let (step, rollback_step, requires_confirmation) = match action {
         "service.enable" => ("enable_service", "disable_service", true),
         "service.disable" => ("disable_service", "enable_service", true),
-        "service.start" => ("start_service", "stop_service", false),
-        "service.stop" => ("stop_service", "start_service", true),
+        "service.start" => ("start_service", "restore_previous_service_state", false),
+        "service.stop" => ("stop_service", "restore_previous_service_state", true),
         "service.restart" => ("restart_service", "restore_previous_service_state", true),
-        "service.delete" => ("delete_service", "restore_service", true),
+        "service.delete" => ("delete_service", "restore_previous_service_state", true),
         _ => {
             return Err(OrchestratorError::InvalidManifest(format!(
                 "unsupported service lifecycle action {action}"
@@ -1795,14 +1814,39 @@ pub fn service_lifecycle_operation(
         }
     };
 
+    let mut request = serde_json::Map::new();
+    request.insert(
+        "service_id".to_string(),
+        serde_json::Value::String(service_id.to_string()),
+    );
+    if let Some(endpoint) = endpoint.map(str::trim).filter(|value| !value.is_empty()) {
+        validate_endpoint_id(endpoint)?;
+        validate_endpoint_service_name(endpoint, service_id)?;
+        request.insert(
+            "endpoint".to_string(),
+            serde_json::Value::String(endpoint.to_string()),
+        );
+    }
+    if let Some(host_ip) = host_ip.map(str::trim).filter(|value| !value.is_empty()) {
+        request.insert(
+            "host_ip".to_string(),
+            serde_json::Value::String(host_ip.to_string()),
+        );
+    }
+    if let Some(release) = release {
+        validate_service_release(release)?;
+        request.insert(
+            "release_manifest".to_string(),
+            serde_json::to_value(release)?,
+        );
+    }
+
     plan_operation(
         operation_id,
         action,
         "Service",
         service_id,
-        serde_json::json!({
-            "service_id": service_id,
-        }),
+        serde_json::Value::Object(request),
         serde_json::json!({
             "steps": [
                 {
@@ -1821,6 +1865,77 @@ pub fn service_lifecycle_operation(
             ]
         }),
     )
+}
+
+/// host.start / host.stop：对一台主机上所有已登记服务做批量启停。
+/// `service_names` 是计划期已知的服务清单（可为空）：为空时只记一条聚合步骤，
+/// executor 在 apply 时按 HostService 表重新枚举，保证以库里的登记为准。
+pub fn host_lifecycle_operation(
+    operation_id: impl Into<String>,
+    action: &str,
+    host_ip: impl AsRef<str>,
+    service_names: &[String],
+) -> Result<Operation> {
+    let host_ip = host_ip.as_ref().trim();
+    ensure(!host_ip.is_empty(), "host_ip is required")?;
+    let (step, requires_confirmation) = match action {
+        "host.start" => ("start_service", false),
+        "host.stop" => ("stop_service", true),
+        _ => {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "unsupported host lifecycle action {action}"
+            )));
+        }
+    };
+    let mut services = service_names
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    services.sort();
+    services.dedup();
+
+    plan_operation(
+        operation_id,
+        action,
+        "Host",
+        host_ip,
+        serde_json::json!({
+            "host_ip": host_ip,
+            "services": services,
+        }),
+        serde_json::json!({
+            "steps": host_lifecycle_steps(host_ip, step, &services),
+            "requires_confirmation": requires_confirmation
+        }),
+        serde_json::json!({
+            "steps": host_lifecycle_steps(
+                host_ip,
+                "restore_previous_service_state",
+                &services,
+            )
+        }),
+    )
+}
+
+fn host_lifecycle_steps(host_ip: &str, step: &str, services: &[String]) -> Vec<serde_json::Value> {
+    if services.is_empty() {
+        return vec![serde_json::json!({
+            "action": step,
+            "target": host_ip,
+            "host_ip": host_ip
+        })];
+    }
+    services
+        .iter()
+        .map(|service| {
+            serde_json::json!({
+                "action": step,
+                "target": service,
+                "host_ip": host_ip
+            })
+        })
+        .collect()
 }
 
 pub fn endpoint_create_operation(
@@ -1987,6 +2102,7 @@ pub fn link_create_operation(
             "protocol": link.protocol,
             "auth_mode": link.auth_mode,
             "scope": link.scope,
+            "enabled": link.enabled,
             "config_ref": link.config_ref,
             "secret_ref": link.secret_ref,
             "policy": link.policy,
@@ -2033,6 +2149,7 @@ pub fn link_update_operation(
             "protocol": link.protocol,
             "auth_mode": link.auth_mode,
             "scope": link.scope,
+            "enabled": link.enabled,
             "config_ref": link.config_ref,
             "secret_ref": link.secret_ref,
             "policy": link.policy,
@@ -2092,6 +2209,63 @@ pub fn link_delete_operation(operation_id: impl Into<String>, link: &Link) -> Re
                 {
                     "action": "restore_previous_link",
                     "target": link_operation_target(link)
+                }
+            ]
+        }),
+    )
+}
+
+/// Link 启停（link.enable / link.disable）走与其它 Link 动作一致的 Operation 链：
+/// plan -> confirm -> apply -> rollback（反向步骤）。
+pub fn link_toggle_operation(
+    operation_id: impl Into<String>,
+    action: &str,
+    source_endpoint: impl AsRef<str>,
+    target_endpoint: impl AsRef<str>,
+    enabled: bool,
+) -> Result<Operation> {
+    let source_endpoint = source_endpoint.as_ref();
+    let target_endpoint = target_endpoint.as_ref();
+    validate_endpoint_id(source_endpoint)?;
+    validate_endpoint_id(target_endpoint)?;
+    ensure(
+        source_endpoint != target_endpoint,
+        "link source and target must be different endpoints",
+    )?;
+    let step = match action {
+        "link.enable" => "enable_link",
+        "link.disable" => "disable_link",
+        _ => {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "unsupported link toggle action {action}"
+            )));
+        }
+    };
+    let target_id = format!("{source_endpoint} -> {target_endpoint}");
+    plan_operation(
+        operation_id,
+        action,
+        "Link",
+        target_id.clone(),
+        serde_json::json!({
+            "source_endpoint": source_endpoint,
+            "target_endpoint": target_endpoint,
+            "enabled": enabled,
+        }),
+        serde_json::json!({
+            "steps": [
+                {
+                    "action": step,
+                    "target": target_id
+                }
+            ],
+            "requires_confirmation": true
+        }),
+        serde_json::json!({
+            "steps": [
+                {
+                    "action": "restore_previous_link",
+                    "target": target_id
                 }
             ]
         }),

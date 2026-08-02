@@ -75,6 +75,7 @@ fn pg_store_persists_core_objects_and_reads_them_back() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: "api".to_string(),
+        enabled: true,
         health: "unknown".to_string(),
         latency_ms: None,
         config_ref: String::new(),
@@ -529,7 +530,7 @@ fn write_live_migration(
     ReleaseMigrationDecl {
         version: version.to_string(),
         path: relative,
-        checksum: format!("len:{}", sql.as_bytes().len()),
+        checksum: format!("len:{}", sql.len()),
         destructive,
     }
 }
@@ -705,6 +706,8 @@ fn require_pg_live() -> bool {
         .unwrap_or(false)
 }
 
+// Cleanup keeps each independently named fixture explicit at the call site.
+#[allow(clippy::too_many_arguments)]
 fn cleanup(
     database_url: &str,
     store: &mut PgOrchestratorStore,

@@ -11,7 +11,7 @@ use crate::{
     load_operation_workbench_context_from_store, load_orchestrator_view_from_store,
     operation_log_record, operation_step_log_record, plan_action_request, plan_operation,
     start_operation, succeed_operation, validate_endpoint, validate_host_service,
-    validate_service_manifest,
+    validate_service_manifest, validate_service_release,
 };
 use crate::{
     ConfiguredAuthPermissionRegistrar, ConfiguredMigrationRunner,
@@ -48,7 +48,8 @@ impl ActionCapabilityStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActionMatrixEntry {
     pub action_id: String,
-    pub gui_entry: bool,
+    #[serde(alias = "gui_entry")]
+    pub web_entry: bool,
     pub tui_entry: bool,
     pub writes_store: bool,
     pub creates_operation: bool,
@@ -151,7 +152,7 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe + Clone> OrchestratorActionDispa
         self.store.append_operation_log(operation_log_record(
             &operation.operation_id,
             "info",
-            format!("action {} planned by GUI/TUI console", operation.action),
+            format!("action {} planned by Web/TUI console", operation.action),
         ))?;
 
         let requires_confirmation = operation
@@ -210,16 +211,14 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe + Clone> OrchestratorActionDispa
                     .store
                     .get_operation(&operation.operation_id)?
                     .unwrap_or(operation);
-                let capability = if is_service_lifecycle_action(&operation.action) {
-                    ActionCapabilityStatus::Unsupported
-                } else {
-                    capability_for_action(&operation.action)
-                };
+                // 执行失败就如实报 FAILED，并保留该 action 真实的 capability：
+                // 把失败改写成 UNSUPPORTED 会让调用方以为「功能没做」而不是「这次执行炸了」，
+                // 反而掩盖了错误。真正不支持的 action 在 dispatch() 入口就短路了，走不到这里。
                 self.result_for_operation(
                     &operation,
                     "FAILED",
                     "Action 执行失败",
-                    capability,
+                    capability_for_action(&operation.action),
                     Vec::new(),
                 )
                 .map(|mut result| {
@@ -325,7 +324,7 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe + Clone> OrchestratorActionDispa
         self.store.append_operation_log(operation_log_record(
             &confirmed.operation_id,
             "info",
-            "operation confirmed by GUI/TUI console",
+            "operation confirmed by Web/TUI console",
         ))?;
         self.result_for_operation(
             &confirmed,
@@ -341,6 +340,23 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe + Clone> OrchestratorActionDispa
         request: &ActionRequest,
     ) -> Result<ActionDispatchResult> {
         let operation_id = request.require_field("operation_id")?;
+        // apply 是一次新的权限边界。调用方在这里授权驱动时，把事实写回
+        // Operation，后续回滚才能知道原执行是否真的启动过运行时。
+        if request.field("execute_service_driver") == Some("true") {
+            let mut operation = self.store.get_operation(operation_id)?.ok_or_else(|| {
+                OrchestratorError::Dependency(format!("operation {operation_id} not found"))
+            })?;
+            operation
+                .request
+                .as_object_mut()
+                .ok_or_else(|| {
+                    OrchestratorError::Dependency(format!(
+                        "operation {operation_id} request must be a JSON object"
+                    ))
+                })?
+                .insert("execute_service_driver".to_string(), Value::Bool(true));
+            self.store.update_operation(operation)?;
+        }
         let mut executor = OperationExecutor::with_runtime_provisioners(
             self.store,
             self.endpoint_probe.clone(),
@@ -393,7 +409,7 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe + Clone> OrchestratorActionDispa
         self.store.append_operation_log(operation_log_record(
             &cancelled.operation_id,
             "info",
-            "operation cancelled by GUI/TUI console",
+            "operation cancelled by Web/TUI console",
         ))?;
         self.result_for_operation(
             &cancelled,
@@ -409,13 +425,26 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe + Clone> OrchestratorActionDispa
         request: &ActionRequest,
     ) -> Result<ActionDispatchResult> {
         let operation_id = request.require_field("operation_id")?;
-        let mut executor = OperationExecutor::new(self.store);
+        // 回滚与 apply 必须使用同一组运行时适配器。否则生命周期回滚会落到
+        // DeferredGatewayRoutePublisher，且 local/container 驱动始终处于禁用状态，
+        // 即使调用方明确传了 execute_service_driver=true 也只能得到 PLANNED。
+        let mut executor = OperationExecutor::with_runtime_provisioners(
+            self.store,
+            self.endpoint_probe.clone(),
+            ConfiguredAuthPermissionRegistrar::from_env(),
+            ConfiguredRedisResourceProvisioner::from_env(),
+            ConfiguredStorageResourceProvisioner::from_env(),
+            ConfiguredMigrationRunner::from_env(),
+        );
+        if request.field("execute_service_driver") == Some("true") {
+            executor = executor.with_service_driver_execution_enabled();
+        }
         match executor.rollback(operation_id) {
             Ok(operation) => self.result_for_operation(
                 &operation,
                 "ROLLED_BACK",
                 "Operation 已回滚",
-                ActionCapabilityStatus::StoreBacked,
+                capability_for_action(&operation.action),
                 changed_objects_from_result(&operation.result),
             ),
             Err(err) => {
@@ -575,6 +604,49 @@ impl OrchestratorActionConsole {
         &self.warnings
     }
 
+    pub fn action_form(&self, action: &str) -> Option<&crate::ActionFormSchema> {
+        self.schemas.form_for(action)
+    }
+
+    /// 市场导入：从外部 release 包源（GitHub Release 资产、任意 URL、本地路径）
+    /// 拉取 release.yaml，合成并注册 Service + Release 契约。
+    /// 注册完成后即可通过 `release.install` 动作安装该 Service。
+    /// `package_root` 是包缓存与本地相对路径解析的根目录（通常为 repo root）。
+    pub fn import_external_release(
+        &mut self,
+        package_root: &Path,
+        source_url: &str,
+        expected_checksum: Option<&str>,
+    ) -> Result<crate::ExternalReleaseImport> {
+        let loader = crate::LocalReleasePackageLoader::new(package_root);
+        let fetched = loader.fetch_release_source(source_url)?;
+        if let Some(expected) = expected_checksum
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            && fetched.checksum != expected
+        {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "release package checksum mismatch: expected {expected}, got {}",
+                fetched.checksum
+            )));
+        }
+        let mut import = crate::external_release_import_from_yaml(
+            &fetched.release_yaml,
+            source_url,
+            &fetched.checksum,
+        )?;
+        if self.uses_persistent_store() {
+            let mut store = self.persistent_store()?;
+            crate::register_external_release_into_store(&mut store, &mut import)
+                .map_err(persistent_store_unavailable)?;
+            self.memory_store =
+                memory_store_from_store(&store).map_err(persistent_store_unavailable)?;
+        } else {
+            crate::register_external_release_into_store(&mut self.memory_store, &mut import)?;
+        }
+        Ok(import)
+    }
+
     fn persistent_store(&self) -> Result<PgOrchestratorStore> {
         match &self.store_mode {
             ConsoleStoreMode::Memory => Err(OrchestratorError::Dependency(
@@ -675,6 +747,16 @@ impl OrchestratorActionConsole {
             return store.list_services().map_err(persistent_store_unavailable);
         }
         self.memory_store.list_services()
+    }
+
+    pub fn host_services(&self) -> Result<Vec<crate::HostService>> {
+        if self.uses_persistent_store() {
+            let store = self.persistent_store()?;
+            return store
+                .list_host_services()
+                .map_err(persistent_store_unavailable);
+        }
+        self.memory_store.list_host_services()
     }
 
     pub fn endpoints(&self) -> Result<Vec<crate::Endpoint>> {
@@ -878,7 +960,7 @@ pub fn action_matrix() -> Vec<ActionMatrixEntry> {
             let capability_status = capability_for_action(descriptor.action);
             ActionMatrixEntry {
                 action_id: descriptor.action.to_string(),
-                gui_entry: true,
+                web_entry: true,
                 tui_entry: true,
                 writes_store: writes_store(descriptor.action, capability_status),
                 creates_operation: true,
@@ -893,14 +975,23 @@ pub fn action_matrix() -> Vec<ActionMatrixEntry> {
 pub fn capability_for_action(action: &str) -> ActionCapabilityStatus {
     match action {
         "endpoint.health.check" | "link.health.check" => ActionCapabilityStatus::Real,
-        "release.install" => ActionCapabilityStatus::RuntimePipeline,
+        // host.start / host.stop 走 executor：真的调驱动启停进程，再回写
+        // HostService/DeployedServiceApi 状态并刷新 gateway 路由。
+        // service.start / service.stop / service.restart 是同一条链路的单服务版本
+        // （store.rs 的 apply_service_lifecycle），host.* 只是按 HostService 把它批量展开。
+        // service.delete 同样先跑驱动动作，成功后才从 store 摘除 Service。
+        "release.install" | "release.rollback" | "host.start" | "host.stop" | "service.start"
+        | "service.stop" | "service.restart" | "service.delete" => {
+            ActionCapabilityStatus::RuntimePipeline
+        }
         "endpoint.create"
         | "endpoint.update"
         | "endpoint.delete"
         | "link.create"
         | "link.update"
         | "link.delete"
-        | "operation.create"
+        | "link.enable"
+        | "link.disable"
         | "operation.confirm"
         | "operation.apply"
         | "operation.cancel"
@@ -912,7 +1003,6 @@ pub fn capability_for_action(action: &str) -> ActionCapabilityStatus {
         | "release.create"
         | "release.update"
         | "release.delete"
-        | "release.rollback"
         | "route.create"
         | "route.update"
         | "route.delete"
@@ -979,16 +1069,14 @@ pub fn capability_for_action(action: &str) -> ActionCapabilityStatus {
         | "log.get"
         | "diagnostic.list"
         | "diagnostic.get" => ActionCapabilityStatus::Readonly,
-        "service.start" | "service.stop" | "service.restart" | "service.enable"
-        | "service.disable" | "service.delete" | "host.create" | "host.update" | "host.delete"
+        "service.enable" | "service.disable" | "host.create" | "host.update" | "host.delete"
         | "host.health.check" | "service.create" | "service.update" | "route.apply"
         | "frontend.publish" | "migration.apply" | "migration.rollback" | "permission.sync"
         | "redis.apply" | "storage.apply" | "config.render" | "secret.create" | "secret.update"
         | "secret.delete" | "secret.distribute" | "topology.create" | "topology.update"
-        | "topology.delete" | "topology.apply" | "operation.update" | "operation.delete"
-        | "log.update" | "log.delete" | "diagnostic.update" | "diagnostic.delete" => {
-            ActionCapabilityStatus::Unsupported
-        }
+        | "topology.delete" | "topology.apply" | "operation.create" | "operation.update"
+        | "operation.delete" | "log.update" | "log.delete" | "diagnostic.update"
+        | "diagnostic.delete" => ActionCapabilityStatus::Unsupported,
         _ => ActionCapabilityStatus::Unsupported,
     }
 }
@@ -1314,7 +1402,7 @@ fn seed_smoke_control_plane_into_store<S: OrchestratorStore>(
             "smoke storage endpoint service-name must match storage_service_name".to_string(),
         ));
     }
-    if endpoint_identity.host.to_string() != seed.root_host_ip {
+    if endpoint_identity.host != seed.root_host_ip {
         return Err(OrchestratorError::InvalidManifest(
             "smoke storage endpoint host must match root_host_ip".to_string(),
         ));
@@ -1521,6 +1609,32 @@ fn accept_node_service_install_into_store<S: OrchestratorStore>(
     validate_service_manifest(&request.service)?;
     validate_host_service(&request.host_service)?;
     validate_endpoint(&request.endpoint)?;
+    if let Some(release) = request.release.as_ref() {
+        validate_service_release(release)?;
+        if release.service_name != request.service.id {
+            return Err(OrchestratorError::InvalidManifest(
+                "node install release service_name must match service id".to_string(),
+            ));
+        }
+        if release.version != request.service.version {
+            return Err(OrchestratorError::InvalidManifest(
+                "node install release version must match service version".to_string(),
+            ));
+        }
+        if release.service_type != request.service.kind {
+            return Err(OrchestratorError::InvalidManifest(
+                "node install release service_type must match service kind".to_string(),
+            ));
+        }
+        if release.backend.protocol != request.service.endpoint.protocol
+            || release.backend.port != request.service.endpoint.default_port
+            || release.backend.health_path != request.service.endpoint.health_path
+        {
+            return Err(OrchestratorError::InvalidManifest(
+                "node install release backend must match service endpoint".to_string(),
+            ));
+        }
+    }
     if request.host_service.service_name != request.service.id {
         return Err(OrchestratorError::InvalidManifest(
             "node install host_service service_name must match service id".to_string(),
@@ -1537,7 +1651,7 @@ fn accept_node_service_install_into_store<S: OrchestratorStore>(
         ));
     }
     let identity = crate::parse_endpoint_id(&request.endpoint.endpoint)?;
-    if identity.host.to_string() != request.host_service.host_ip {
+    if identity.host != request.host_service.host_ip {
         return Err(OrchestratorError::InvalidManifest(
             "node install endpoint host must match host_service host_ip".to_string(),
         ));
@@ -1561,6 +1675,7 @@ fn accept_node_service_install_into_store<S: OrchestratorStore>(
             "endpoint": request.endpoint.endpoint,
             "host_ip": request.host_service.host_ip,
             "package_load": request.package_load,
+            "execute_service_driver": request.execute_service_driver,
         }),
     ))?;
 
@@ -1589,17 +1704,24 @@ fn accept_node_service_install_into_store<S: OrchestratorStore>(
     };
     let health = node_install_health_result(&endpoint, driver_result.as_ref())?;
     if let Some(driver_result) = driver_result.as_ref() {
-        host_service.status = crate::store::release_install_host_status(
-            Some(&NodeServiceDispatchResult {
-                status: "accepted".to_string(),
-                message: String::new(),
-                endpoint: endpoint.endpoint.clone(),
-                accepted: true,
-            }),
-            driver_result,
-            &health,
-        )
-        .to_string();
+        host_service.status =
+            if driver_result.status.eq_ignore_ascii_case("SUCCEEDED") && !health.reachable {
+                "failed".to_string()
+            } else {
+                crate::store::release_install_host_status(
+                    Some(&NodeServiceDispatchResult {
+                        status: "accepted".to_string(),
+                        message: String::new(),
+                        endpoint: endpoint.endpoint.clone(),
+                        accepted: true,
+                        driver_executed: true,
+                        driver_status: driver_result.status.clone(),
+                    }),
+                    driver_result,
+                    &health,
+                )
+                .to_string()
+            };
         endpoint.health = health.health.clone();
         endpoint.reachable = health.reachable;
         set_rendered_external_step(
@@ -1664,13 +1786,33 @@ fn accept_node_service_install_into_store<S: OrchestratorStore>(
             serde_json::json!({
                 "status": "deferred",
                 "execute_env": "ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER",
+                "request_authorized": request.execute_service_driver,
+                "node_execution_enabled": dispatcher_env_flag(
+                    "ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER"
+                ),
             }),
         ))?;
     }
     store.append_operation_log(node_health_log_record(&operation.operation_id, &health))?;
 
+    let driver_executed = driver_result.is_some();
+    let driver_status = driver_result
+        .as_ref()
+        .map(|driver| driver.status.clone())
+        .unwrap_or_else(|| "DEFERRED".to_string());
+    let driver_failed = driver_result
+        .as_ref()
+        .is_some_and(|driver| !driver.status.eq_ignore_ascii_case("SUCCEEDED"));
+    let health_failed = driver_result
+        .as_ref()
+        .is_some_and(|driver| driver.status.eq_ignore_ascii_case("SUCCEEDED") && !health.reachable);
+    let execution_failed = driver_failed || health_failed;
     let result = NodeServiceDispatchResult {
-        status: "accepted".to_string(),
+        status: if execution_failed {
+            "failed".to_string()
+        } else {
+            "accepted".to_string()
+        },
         message: node_install_message(
             &request.service.id,
             &host_service.host_ip,
@@ -1679,13 +1821,12 @@ fn accept_node_service_install_into_store<S: OrchestratorStore>(
         ),
         endpoint: endpoint.endpoint,
         accepted: true,
+        driver_executed,
+        driver_status,
     };
     let operation_result = serde_json::json!({
         "operation_id": operation.operation_id,
-        "status": if driver_result
-            .as_ref()
-            .is_some_and(|driver| driver.status == "FAILED")
-        {
+        "status": if execution_failed {
             "FAILED"
         } else {
             "SUCCEEDED"
@@ -1698,14 +1839,26 @@ fn accept_node_service_install_into_store<S: OrchestratorStore>(
         "driver": driver_result,
         "health": health,
     });
-    let finished = if let Some(driver) = driver_result
-        .as_ref()
-        .filter(|driver| driver.status == "FAILED")
-    {
-        crate::fail_operation(
-            &operation,
-            format!("node service driver failed: {}", driver.message),
-        )?
+    let finished = if execution_failed {
+        let error = if let Some(driver) = driver_result
+            .as_ref()
+            .filter(|driver| !driver.status.eq_ignore_ascii_case("SUCCEEDED"))
+        {
+            if driver.status.eq_ignore_ascii_case("FAILED") {
+                format!("node service driver failed: {}", driver.message)
+            } else {
+                format!(
+                    "node service driver did not succeed ({}): {}",
+                    driver.status, driver.message
+                )
+            }
+        } else {
+            format!(
+                "node service health failed for {}: {}; the runtime may still be running and must be stopped on this node before retrying",
+                request.endpoint.endpoint, health.message
+            )
+        };
+        crate::fail_operation(&operation, error)?
     } else {
         succeed_operation(&operation, operation_result.clone())?
     };
@@ -1747,6 +1900,8 @@ fn node_install_operation_from_request(request: &NodeServiceDispatchRequest) -> 
             "host_ip": request.host_service.host_ip,
             "node_mode": true,
             "package_load": request.package_load,
+            "execute_service_driver": request.execute_service_driver,
+            "release_manifest": request.release,
         }),
         serde_json::json!({
             "steps": [
@@ -1789,10 +1944,10 @@ fn node_driver_log_record(operation_id: &str, result: &DriverResult) -> Operatio
     operation_step_log_record(
         operation_id,
         "node-driver",
-        if result.status == "FAILED" {
-            "error"
-        } else {
+        if result.status.eq_ignore_ascii_case("SUCCEEDED") {
             "info"
+        } else {
+            "error"
         },
         format!(
             "node service driver returned {}: {}",
@@ -1848,22 +2003,60 @@ fn set_rendered_external_step(config: &mut Value, key: &str, value: Value) {
 fn node_install_driver_result(
     request: &NodeServiceDispatchRequest,
 ) -> Result<Option<DriverResult>> {
-    if !dispatcher_env_flag("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER") {
+    if !request.execute_service_driver {
         return Ok(None);
     }
-    let operation = plan_operation(
-        request.operation_id.clone(),
-        "release.install",
-        "ServiceRelease",
-        request.service.id.clone(),
-        serde_json::json!({
-            "service_id": request.service.id,
-            "endpoint": request.endpoint.endpoint,
-        }),
-        serde_json::json!({}),
-        serde_json::json!({}),
-    )?;
+    if !dispatcher_env_flag("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER") {
+        return Err(OrchestratorError::Blocked(
+            "node driver authorization was requested, but ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER is not enabled"
+                .to_string(),
+        ));
+    }
+    ensure_node_install_target_identity(request)?;
+    let operation = node_install_operation_from_request(request)?;
     crate::store::execute_service_driver_action(&request.service, &operation, true).map(Some)
+}
+
+fn ensure_node_install_target_identity(request: &NodeServiceDispatchRequest) -> Result<()> {
+    let configured_host = std::env::var("ORCHESTRATOR_NODE_HOST_IP")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            OrchestratorError::Blocked(
+                "node driver execution requires ORCHESTRATOR_NODE_HOST_IP".to_string(),
+            )
+        })?
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| {
+            OrchestratorError::Blocked(
+                "ORCHESTRATOR_NODE_HOST_IP must be a valid IP address".to_string(),
+            )
+        })?;
+    let request_host = request
+        .host_service
+        .host_ip
+        .trim()
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| {
+            OrchestratorError::Blocked(
+                "node install host_service.host_ip must be a valid IP address".to_string(),
+            )
+        })?;
+    let endpoint_host = crate::parse_endpoint_id(&request.endpoint.endpoint)?
+        .host
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| {
+            OrchestratorError::Blocked(
+                "node install endpoint host must be a valid IP address".to_string(),
+            )
+        })?;
+    if configured_host != request_host || configured_host != endpoint_host {
+        return Err(OrchestratorError::Blocked(format!(
+            "node install target identity mismatch: configured host {configured_host}, request host {request_host}, endpoint host {endpoint_host}"
+        )));
+    }
+    Ok(())
 }
 
 fn dispatcher_env_flag(name: &str) -> bool {
@@ -1888,11 +2081,35 @@ fn node_install_health_result(
             message: "node health probe deferred until driver execution is enabled".to_string(),
         });
     };
-    if driver_result.status == "SUCCEEDED" {
-        check_endpoint_health_with_probe(
-            endpoint,
-            &TcpEndpointProbe::new(Duration::from_millis(800)),
-        )
+    if driver_result.status.eq_ignore_ascii_case("SUCCEEDED") {
+        let attempts = std::env::var("ORCHESTRATOR_ENDPOINT_HEALTH_ATTEMPTS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(25)
+            .max(1);
+        let interval = Duration::from_millis(
+            std::env::var("ORCHESTRATOR_ENDPOINT_HEALTH_INTERVAL_MS")
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .unwrap_or(200),
+        );
+        let probe = TcpEndpointProbe::new(Duration::from_millis(800));
+        let mut last = None;
+        for attempt in 0..attempts {
+            let health = check_endpoint_health_with_probe(endpoint, &probe)?;
+            if health.reachable {
+                return Ok(health);
+            }
+            last = Some(health);
+            if attempt + 1 < attempts {
+                std::thread::sleep(interval);
+            }
+        }
+        last.ok_or_else(|| {
+            OrchestratorError::Dependency(
+                "node endpoint health wait produced no result".to_string(),
+            )
+        })
     } else {
         Ok(EndpointHealthResult {
             endpoint: endpoint.endpoint.clone(),
@@ -1914,6 +2131,12 @@ fn node_install_message(
     health: &EndpointHealthResult,
 ) -> String {
     match driver_result {
+        Some(driver) if driver.status.eq_ignore_ascii_case("SUCCEEDED") && !health.reachable => {
+            format!(
+                "node orchestrator started {service_id} on {host_ip}, but health is {}; the runtime may still be running and must be stopped on this node before retrying",
+                health.health
+            )
+        }
         Some(driver) => format!(
             "node orchestrator accepted {service_id} on {host_ip}; driver {}; health {}",
             driver.status, health.health
@@ -1940,7 +2163,7 @@ fn operation_result_status(operation: &Operation) -> String {
         .result
         .get("status")
         .and_then(Value::as_str)
-        .unwrap_or_else(|| match operation.status {
+        .unwrap_or(match operation.status {
             OperationStatus::Planned => "PLANNED",
             OperationStatus::AwaitingConfirmation => "AWAITING_CONFIRMATION",
             OperationStatus::Running => "RUNNING",
@@ -1992,8 +2215,18 @@ fn calls_executor(action: &str) -> bool {
             | "link.create"
             | "link.update"
             | "link.delete"
+            | "link.enable"
+            | "link.disable"
             | "link.health.check"
             | "release.install"
+            | "release.delete"
+            | "release.rollback"
+            | "host.start"
+            | "host.stop"
+            | "service.start"
+            | "service.stop"
+            | "service.restart"
+            | "service.delete"
             | "route.create"
             | "route.update"
             | "route.delete"
@@ -2024,16 +2257,15 @@ fn calls_executor(action: &str) -> bool {
     )
 }
 
-fn is_service_lifecycle_action(action: &str) -> bool {
-    matches!(
-        action,
-        "service.start"
-            | "service.stop"
-            | "service.restart"
-            | "service.enable"
-            | "service.disable"
-            | "service.delete"
-    )
+/// 仍未接通真实执行链的 Service 生命周期动作，目前只剩 enable/disable：
+/// 它们在 executor 里只跑一次驱动动作，不回写 HostService/DeployedServiceApi 状态，
+/// 也不刷新 gateway 路由，因此 capability 保持 Unsupported，并在 dispatch_unsupported
+/// 里给出比通用文案更准确的原因。
+///
+/// service.start / stop / restart / delete 已接入 RuntimePipeline：它们执行失败时
+/// 必须如实报 FAILED + RUNTIME_PIPELINE，不能再降级成 UNSUPPORTED 掩盖真实错误。
+fn is_unsupported_service_lifecycle_action(action: &str) -> bool {
+    matches!(action, "service.enable" | "service.disable")
 }
 
 fn filtered_service_releases(
@@ -2134,7 +2366,7 @@ fn service_release_record(
 }
 
 fn unsupported_reason(action: &str) -> &'static str {
-    if is_service_lifecycle_action(action) {
+    if is_unsupported_service_lifecycle_action(action) {
         "driver action is unsupported: 该 Service 生命周期动作尚未接入真实执行器"
     } else {
         "driver action is unsupported: 该 action 当前暂不支持真实执行，已阻止假成功路径"

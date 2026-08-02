@@ -3,6 +3,7 @@ mod database;
 mod dispatcher;
 mod executor;
 mod health;
+mod market;
 mod model;
 mod observability;
 mod planner;
@@ -34,6 +35,10 @@ pub use executor::{
 pub use health::{
     EndpointHealthResult, EndpointProbe, LinkHealthResult, StaticEndpointProbe, TcpEndpointProbe,
     check_endpoint_health_with_probe, check_link_health,
+};
+pub use market::{
+    ExternalReleaseImport, external_release_import_from_yaml, register_external_release_into_store,
+    release_source_kind_for_url, service_manifest_from_release,
 };
 pub use model::{
     DeployedServiceApi, DiagnosticFinding, DiagnosticReport, EffectiveApiRoute, Endpoint,
@@ -78,15 +83,17 @@ pub use service::{
     ServiceProvides, ServiceReleaseManifest, ServiceRequires, ServiceRuntimeDecl,
     ServiceSecurityDecl, ServiceUiDecl, SourceDecl, diagnostic_export_operation,
     endpoint_create_operation, endpoint_delete_operation, endpoint_health_check_operation,
-    endpoint_socket_addr, endpoint_update_operation, link_create_operation, link_delete_operation,
-    link_health_check_operation, link_update_operation, log_create_operation, log_query_operation,
+    endpoint_socket_addr, endpoint_update_operation, host_lifecycle_operation,
+    link_create_operation, link_delete_operation, link_health_check_operation,
+    link_toggle_operation, link_update_operation, log_create_operation, log_query_operation,
     parse_endpoint_id, preview_deployment_template, release_create_operation,
     release_delete_operation, release_install_operation, release_install_operation_with_release,
     release_rollback_operation, release_update_operation, service_health_check_operation,
-    service_lifecycle_operation, topology_apply_operation, validate_deployment_template,
-    validate_deployment_template_file, validate_deployment_template_references,
-    validate_endpoint_id, validate_endpoint_service_name, validate_service_manifest,
-    validate_service_manifest_file, validate_service_release, validate_service_release_file,
+    service_lifecycle_operation, service_lifecycle_operation_with_release,
+    topology_apply_operation, validate_deployment_template, validate_deployment_template_file,
+    validate_deployment_template_references, validate_endpoint_id, validate_endpoint_service_name,
+    validate_service_manifest, validate_service_manifest_file, validate_service_release,
+    validate_service_release_file,
 };
 pub use store::{
     AuthPermissionRegistrar, AuthPermissionRegistration, AuthPermissionRegistrationResult,
@@ -96,17 +103,17 @@ pub use store::{
     ConfiguredStorageResourceProvisioner, DeferredAuthPermissionRegistrar,
     DeferredGatewayRoutePublisher, DeferredMigrationRunner, DeferredNodeServiceDispatcher,
     DeferredRedisResourceProvisioner, DeferredReleasePackageLoader,
-    DeferredStorageResourceProvisioner, GatewayRoutePublishRequest, GatewayRoutePublishResult,
-    GatewayRoutePublisher, HttpAuthPermissionRegistrar, HttpGatewayRoutePublisher,
-    HttpNodeServiceDispatcher, HttpStorageResourceProvisioner, LocalReleasePackageLoader,
-    LocalSqlMigrationRunner, MemoryOrchestratorStore, MigrationExecutionRecord,
-    MigrationExecutionRequest, MigrationExecutionResult, MigrationRunner,
+    DeferredStorageResourceProvisioner, FetchedReleaseSource, GatewayRoutePublishRequest,
+    GatewayRoutePublishResult, GatewayRoutePublisher, HttpAuthPermissionRegistrar,
+    HttpGatewayRoutePublisher, HttpNodeServiceDispatcher, HttpStorageResourceProvisioner,
+    LocalReleasePackageLoader, LocalSqlMigrationRunner, MemoryOrchestratorStore,
+    MigrationExecutionRecord, MigrationExecutionRequest, MigrationExecutionResult, MigrationRunner,
     NodeServiceDispatchRequest, NodeServiceDispatchResult, NodeServiceDispatcher,
     OperationExecutor, OrchestratorStore, RedisProvisionRequest, RedisProvisionResult,
     RedisProvisionedResource, RedisResourceProvisioner, ReleasePackageLoadRequest,
     ReleasePackageLoadResult, ReleasePackageLoader, StorageProvisionRequest,
     StorageProvisionResult, StorageProvisionedResource, StorageResourceProvisioner,
-    TcpRedisResourceProvisioner,
+    TcpRedisResourceProvisioner, resolve_outbound_redirect, validate_outbound_url,
 };
 pub use view::{
     DiagnosticViewRow, EndpointViewRow, LinkViewRow, LogViewRow, OperationViewRow,

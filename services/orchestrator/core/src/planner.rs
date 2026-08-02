@@ -4,12 +4,14 @@ use crate::{
     ServiceMigrationRecord, ServicePermissionRecord, ServiceRedisResource, ServiceReleaseManifest,
     ServiceRoute, ServiceStorageResource, Topology, action_descriptor, diagnostic_export_operation,
     endpoint_create_operation, endpoint_delete_operation, endpoint_health_check_operation,
-    endpoint_update_operation, link_create_operation, link_delete_operation,
-    link_health_check_operation, link_update_operation, log_create_operation, log_query_operation,
-    parse_endpoint_id, plan_operation, release_create_operation, release_delete_operation,
-    release_install_operation, release_install_operation_with_release, release_rollback_operation,
-    release_update_operation, service_health_check_operation, service_lifecycle_operation,
-    topology_apply_operation, validate_endpoint_id, validate_endpoint_service_name,
+    endpoint_update_operation, host_lifecycle_operation, link_create_operation,
+    link_delete_operation, link_health_check_operation, link_toggle_operation,
+    link_update_operation, log_create_operation, log_query_operation, parse_endpoint_id,
+    plan_operation, release_create_operation, release_delete_operation, release_install_operation,
+    release_install_operation_with_release, release_rollback_operation, release_update_operation,
+    service_health_check_operation, service_lifecycle_operation,
+    service_lifecycle_operation_with_release, topology_apply_operation, validate_endpoint_id,
+    validate_endpoint_service_name,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -87,7 +89,9 @@ pub fn default_action_request(action: &str) -> Option<ActionRequest> {
             map([("host_ip", "127.0.0.1")])
         }
         "host.list" => BTreeMap::new(),
-        "host.delete" => map([("host_ip", "127.0.0.1"), ("confirm", "true")]),
+        "host.delete" | "host.start" | "host.stop" => {
+            map([("host_ip", "127.0.0.1"), ("confirm", "true")])
+        }
         "service.create" | "service.update" | "service.get" => map([("service_id", "gateway")]),
         "service.list" => BTreeMap::new(),
         "service.enable" | "service.disable" | "service.start" | "service.stop"
@@ -115,7 +119,7 @@ pub fn default_action_request(action: &str) -> Option<ActionRequest> {
             ("auth_mode", "internal"),
         ]),
         "link.list" => BTreeMap::new(),
-        "link.delete" => map([
+        "link.delete" | "link.enable" | "link.disable" => map([
             ("source_endpoint", "127.0.0.1:8080:gateway"),
             ("target_endpoint", "127.0.0.1:8083:problem-service"),
             ("confirm", "true"),
@@ -271,12 +275,18 @@ pub fn plan_action_request_with_releases(
     match request.action.as_str() {
         "release.create" => {
             let service_id = request.require_field("service_id")?;
-            let release = find_release(releases, service_id)?;
+            let version = request
+                .field("version")
+                .or_else(|| service_version(services, service_id));
+            let release = find_release(releases, service_id, version)?;
             release_create_operation(&request.operation_id, release, request.field("release_url"))
         }
         "release.update" => {
             let service_id = request.require_field("service_id")?;
-            let release = find_release(releases, service_id)?;
+            let version = request
+                .field("version")
+                .or_else(|| service_version(services, service_id));
+            let release = find_release(releases, service_id, version)?;
             release_update_operation(&request.operation_id, release, request.field("release_url"))
         }
         "release.install" => {
@@ -290,7 +300,12 @@ pub fn plan_action_request_with_releases(
                 release_install_operation(&request.operation_id, manifest, &installed)
             } else {
                 let release = release_with_request_source_overrides(
-                    find_release(releases, service_id)?.clone(),
+                    find_release(
+                        releases,
+                        service_id,
+                        request.field("version").or(Some(manifest.version.as_str())),
+                    )?
+                    .clone(),
                     request,
                 );
                 release_install_operation_with_release(
@@ -309,20 +324,65 @@ pub fn plan_action_request_with_releases(
             request.require_field("service_id")?,
             request.field("version"),
         ),
-        "release.rollback" => release_rollback_operation(
-            &request.operation_id,
-            request.require_field("service_id")?,
-            request.field("version"),
-            request
-                .field("target_operation_id")
-                .or_else(|| request.field("operation_id")),
+        "release.rollback" => attach_lifecycle_execution_options(
+            release_rollback_operation(
+                &request.operation_id,
+                request.require_field("service_id")?,
+                request.field("version"),
+                request
+                    .field("target_operation_id")
+                    .or_else(|| request.field("operation_id")),
+            )?,
+            request,
         ),
-        "service.enable" | "service.disable" | "service.start" | "service.stop"
-        | "service.restart" | "service.delete" => service_lifecycle_operation(
+        "service.start" | "service.stop" | "service.restart" | "service.delete" => {
+            let service_id = request.require_field("service_id")?;
+            // local-process 驱动需要 release_manifest。存在多个版本时，按当前
+            // Service 清单选定版本，不能依赖存储层排序。
+            let version = request
+                .field("version")
+                .or_else(|| service_version(services, service_id));
+            let release = if releases
+                .iter()
+                .any(|release| release.service_name == service_id)
+            {
+                Some(find_release(releases, service_id, version)?)
+            } else {
+                None
+            };
+            let endpoint = request
+                .field("endpoint")
+                .map(str::to_string)
+                .or_else(|| service_endpoint_id(endpoints, service_id, request.field("host_ip")));
+            attach_lifecycle_execution_options(
+                service_lifecycle_operation_with_release(
+                    &request.operation_id,
+                    &request.action,
+                    service_id,
+                    release,
+                    endpoint.as_deref(),
+                    request.field("host_ip"),
+                )?,
+                request,
+            )
+        }
+        "service.enable" | "service.disable" => service_lifecycle_operation(
             &request.operation_id,
             &request.action,
             request.require_field("service_id")?,
         ),
+        "host.start" | "host.stop" => {
+            let host_ip = request.require_field("host_ip")?;
+            attach_lifecycle_execution_options(
+                host_lifecycle_operation(
+                    &request.operation_id,
+                    &request.action,
+                    host_ip,
+                    &host_service_names(endpoints, host_ip),
+                )?,
+                request,
+            )
+        }
         "service.health.check" => service_health_check_operation(
             &request.operation_id,
             request.field("service_id").unwrap_or("all-services"),
@@ -334,7 +394,24 @@ pub fn plan_action_request_with_releases(
         }
         "endpoint.update" => {
             let endpoint = endpoint_from_request(request, false, endpoints)?;
-            endpoint_update_operation(&request.operation_id, &endpoint)
+            let mut operation = endpoint_update_operation(&request.operation_id, &endpoint)?;
+            let operation_request = operation
+                .request
+                .as_object_mut()
+                .expect("endpoint update request is a JSON object");
+            for field in [
+                "service_id",
+                "protocol",
+                "health_path",
+                "display_name",
+                "note",
+                "config",
+            ] {
+                if !request.fields.contains_key(field) {
+                    operation_request.remove(field);
+                }
+            }
+            Ok(operation)
         }
         "endpoint.delete" => {
             endpoint_delete_operation(&request.operation_id, request.require_field("endpoint")?)
@@ -349,12 +426,39 @@ pub fn plan_action_request_with_releases(
         }
         "link.update" => {
             let link = link_from_request(request)?;
-            link_update_operation(&request.operation_id, &link, endpoints)
+            let mut operation = link_update_operation(&request.operation_id, &link, endpoints)?;
+            // PATCH 只把调用方明确给出的字段写进 Operation。apply 时再从存储
+            // 合并当前 Link，避免缺省值覆盖协议、鉴权、引用或健康状态。
+            let operation_request = operation
+                .request
+                .as_object_mut()
+                .expect("link update request is a JSON object");
+            for field in [
+                "protocol",
+                "auth_mode",
+                "scope",
+                "enabled",
+                "config_ref",
+                "secret_ref",
+                "policy",
+            ] {
+                if !request.fields.contains_key(field) {
+                    operation_request.remove(field);
+                }
+            }
+            Ok(operation)
         }
         "link.delete" => {
             let link = link_from_request(request)?;
             link_delete_operation(&request.operation_id, &link)
         }
+        "link.enable" | "link.disable" => link_toggle_operation(
+            &request.operation_id,
+            &request.action,
+            request.require_field("source_endpoint")?,
+            request.require_field("target_endpoint")?,
+            request.action == "link.enable",
+        ),
         "link.health.check" => {
             let link = link_from_request(request)?;
             link_health_check_operation(&request.operation_id, &link)
@@ -564,6 +668,37 @@ fn release_install_options(request: &ActionRequest) -> Value {
             .unwrap_or(""),
         "release_checksum": request.field("release_checksum").unwrap_or(""),
     })
+}
+
+fn attach_lifecycle_execution_options(
+    mut operation: Operation,
+    request: &ActionRequest,
+) -> Result<Operation> {
+    let operation_request = operation.request.as_object_mut().ok_or_else(|| {
+        OrchestratorError::Dependency(format!(
+            "{} operation request must be a JSON object",
+            operation.action
+        ))
+    })?;
+    operation_request.insert(
+        "execute_service_driver".to_string(),
+        Value::Bool(
+            request
+                .field("execute_service_driver")
+                .is_some_and(truthy_field),
+        ),
+    );
+    if let Some(node_id) = request
+        .field("gateway_node_id")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        operation_request.insert(
+            "gateway_node_id".to_string(),
+            Value::String(node_id.to_string()),
+        );
+    }
+    Ok(operation)
 }
 
 fn truthy_field(value: &str) -> bool {
@@ -917,16 +1052,69 @@ fn find_service<'a>(
         })
 }
 
+/// 从已登记 Endpoint 里挑出该服务的 endpoint id；给定 host_ip 时只认该主机上的 endpoint。
+fn service_endpoint_id(
+    endpoints: &[Endpoint],
+    service_id: &str,
+    host_ip: Option<&str>,
+) -> Option<String> {
+    endpoints
+        .iter()
+        .filter(|endpoint| endpoint.service_id == service_id)
+        .find(|endpoint| match host_ip {
+            Some(host_ip) => {
+                parse_endpoint_id(&endpoint.endpoint).is_ok_and(|identity| identity.host == host_ip)
+            }
+            None => true,
+        })
+        .map(|endpoint| endpoint.endpoint.clone())
+}
+
+/// 计划期用 Endpoint 表推测该主机上的服务清单，只用于 plan.steps 预览；
+/// apply 时 executor 会按 HostService 表重新枚举，以库里的登记为准。
+fn host_service_names(endpoints: &[Endpoint], host_ip: &str) -> Vec<String> {
+    let mut names = endpoints
+        .iter()
+        .filter(|endpoint| {
+            parse_endpoint_id(&endpoint.endpoint).is_ok_and(|identity| identity.host == host_ip)
+        })
+        .map(|endpoint| endpoint.service_id.clone())
+        .filter(|service_id| !service_id.trim().is_empty())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn find_release<'a>(
     releases: &'a [ServiceReleaseManifest],
     service_id: &str,
+    version: Option<&str>,
 ) -> Result<&'a ServiceReleaseManifest> {
-    releases
+    let matches = releases
         .iter()
-        .find(|release| release.service_name == service_id)
-        .ok_or_else(|| {
-            OrchestratorError::Dependency(format!("missing ServiceRelease manifest {}", service_id))
+        .filter(|release| {
+            release.service_name == service_id
+                && version.is_none_or(|version| release.version == version)
         })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [release] => Ok(*release),
+        [] => Err(OrchestratorError::Dependency(match version {
+            Some(version) => format!("missing ServiceRelease manifest {service_id}@{version}"),
+            None => format!("missing ServiceRelease manifest {service_id}"),
+        })),
+        _ => Err(OrchestratorError::Dependency(format!(
+            "multiple ServiceRelease manifests found for {service_id}; version is required"
+        ))),
+    }
+}
+
+fn service_version<'a>(services: &'a [ServiceManifest], service_id: &str) -> Option<&'a str> {
+    services
+        .iter()
+        .find(|service| service.id == service_id)
+        .map(|service| service.version.as_str())
 }
 
 fn endpoint_from_request(
@@ -956,19 +1144,25 @@ fn endpoint_from_request(
             .unwrap_or("http")
             .to_string(),
         health_path: request
-            .field("health_path")
+            .fields
+            .get("health_path")
+            .map(String::as_str)
             .or_else(|| current.map(|item| item.health_path.as_str()))
             .unwrap_or("")
             .to_string(),
         health: "unknown".to_string(),
         reachable: false,
         display_name: request
-            .field("display_name")
+            .fields
+            .get("display_name")
+            .map(String::as_str)
             .or_else(|| current.map(|item| item.display_name.as_str()))
             .unwrap_or("")
             .to_string(),
         note: request
-            .field("note")
+            .fields
+            .get("note")
+            .map(String::as_str)
             .or_else(|| current.map(|item| item.note.as_str()))
             .unwrap_or("")
             .to_string(),
@@ -986,13 +1180,40 @@ fn link_from_request(request: &ActionRequest) -> Result<Link> {
     Ok(Link {
         source_endpoint: source_endpoint.to_string(),
         target_endpoint: target_endpoint.to_string(),
-        protocol: request.field("protocol").unwrap_or("http").to_string(),
-        auth_mode: request.field("auth_mode").unwrap_or("internal").to_string(),
-        scope: request.field("scope").unwrap_or("").to_string(),
+        protocol: request
+            .fields
+            .get("protocol")
+            .map(String::as_str)
+            .unwrap_or("http")
+            .to_string(),
+        auth_mode: request
+            .fields
+            .get("auth_mode")
+            .map(String::as_str)
+            .unwrap_or("internal")
+            .to_string(),
+        scope: request
+            .fields
+            .get("scope")
+            .map(String::as_str)
+            .unwrap_or("")
+            .to_string(),
+        // 表单字段是字符串，只有显式 "false" 才禁用，缺省保持启用。
+        enabled: request.field("enabled") != Some("false"),
         health: "unknown".to_string(),
         latency_ms: None,
-        config_ref: request.field("config_ref").unwrap_or("").to_string(),
-        secret_ref: request.field("secret_ref").unwrap_or("").to_string(),
+        config_ref: request
+            .fields
+            .get("config_ref")
+            .map(String::as_str)
+            .unwrap_or("")
+            .to_string(),
+        secret_ref: request
+            .fields
+            .get("secret_ref")
+            .map(String::as_str)
+            .unwrap_or("")
+            .to_string(),
         policy: json_field(request, "policy")?,
         created_at: String::new(),
         updated_at: String::new(),

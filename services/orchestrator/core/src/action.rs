@@ -301,6 +301,20 @@ pub const ACTION_CATALOG: &[ActionDescriptor] = &[
         "check host health"
     ),
     action!(
+        "host.start",
+        "Host",
+        Medium,
+        Planned,
+        "start every service registered on a host"
+    ),
+    action!(
+        "host.stop",
+        "Host",
+        High,
+        ConfirmedPlan,
+        "stop every service registered on a host"
+    ),
+    action!(
         "service.create",
         "Service",
         Medium,
@@ -412,6 +426,20 @@ pub const ACTION_CATALOG: &[ActionDescriptor] = &[
     action!("link.get", "Link", Low, ReadOnly, "read one link"),
     action!("link.update", "Link", High, ConfirmedPlan, "update a link"),
     action!("link.delete", "Link", High, ConfirmedPlan, "delete a link"),
+    action!(
+        "link.enable",
+        "Link",
+        Medium,
+        ConfirmedPlan,
+        "enable an endpoint link"
+    ),
+    action!(
+        "link.disable",
+        "Link",
+        High,
+        ConfirmedPlan,
+        "disable an endpoint link"
+    ),
     action!(
         "link.health.check",
         "Link",

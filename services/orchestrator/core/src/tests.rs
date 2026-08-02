@@ -7,7 +7,7 @@ use std::net::TcpListener;
 #[cfg(windows)]
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -314,6 +314,69 @@ fn valid_release_for_service(service: &ServiceManifest) -> ServiceReleaseManifes
         secrets: Vec::new(),
         observability: ReleaseObservabilityDecl::default(),
     }
+}
+
+fn put_runtime_owner_fixture(
+    store: &mut MemoryOrchestratorStore,
+    service_id: &str,
+    host_ip: &str,
+    port: u16,
+    status: &str,
+    runtime_owner: Option<&str>,
+) -> (ServiceManifest, ServiceReleaseManifest, String) {
+    let mut service = valid_service();
+    service.id = service_id.to_string();
+    service.name = service_id.to_string();
+    service.endpoint.default_port = port;
+    let release = valid_release_for_service(&service);
+    let endpoint = format!("{host_ip}:{port}:{service_id}");
+    let labels = runtime_owner
+        .map(|owner| serde_json::json!({"runtime_owner": owner}))
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    store.put_service(service.clone()).expect("put service");
+    store
+        .upsert_service_release(ServiceRelease {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            release_url: release.source.url.clone(),
+            manifest: serde_json::to_value(&release).expect("release manifest"),
+            checksum: String::new(),
+            created_at: String::new(),
+        })
+        .expect("put release");
+    store
+        .upsert_host_service(HostService {
+            host_ip: host_ip.to_string(),
+            service_name: service.id.clone(),
+            version: service.version.clone(),
+            status: status.to_string(),
+            config: serde_json::json!({}),
+            labels,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put host service");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: endpoint.clone(),
+            service_id: service.id.clone(),
+            protocol: service.endpoint.protocol.clone(),
+            health_path: service.endpoint.health_path.clone(),
+            health: if status == "running" {
+                "healthy".to_string()
+            } else {
+                "unknown".to_string()
+            },
+            reachable: status == "running",
+            display_name: service.name.clone(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+    (service, release, endpoint)
 }
 
 fn seed_storage_identity_api_surfaces(store: &mut MemoryOrchestratorStore) {
@@ -914,6 +977,30 @@ fn service_release_api_surface_validation_rules_are_enforced() {
         err.to_string()
             .contains("release api permission must be declared")
     );
+
+    let mut public_service_api = release.clone();
+    public_service_api.apis[0].permission = "public".to_string();
+    let err = validate_service_release(&public_service_api)
+        .expect_err("service-auth api must require a declared permission");
+    assert!(
+        err.to_string()
+            .contains("release service-auth api permission must not be public")
+    );
+
+    let mut reserved_api = release.clone();
+    reserved_api.apis[0].api_id = "auth.user.permission.check".to_string();
+    let err = validate_service_release(&reserved_api)
+        .expect_err("permission-check api must remain owned by auth-service");
+    assert!(
+        err.to_string()
+            .contains("auth.user.permission.check is reserved for auth-service")
+    );
+
+    let mut unavailable_internal_auth = release.clone();
+    unavailable_internal_auth.apis[0].auth_mode = "internal".to_string();
+    let err = validate_service_release(&unavailable_internal_auth)
+        .expect_err("internal auth is not available to release API surfaces");
+    assert!(err.to_string().contains("release api auth_mode is invalid"));
 
     let mut invalid_visibility = release;
     invalid_visibility.apis[0].visibility = "siblings".to_string();
@@ -1610,6 +1697,44 @@ fn release_install_planner_uses_release_manifest() {
 }
 
 #[test]
+fn release_install_planner_selects_service_manifest_version() {
+    let root = repo_root();
+    let service =
+        validate_service_manifest_file(&root, Path::new("services/judge-api/service.yaml"))
+            .unwrap();
+    let release =
+        validate_service_release_file(&root, Path::new("services/judge-api/release.yaml")).unwrap();
+    let mut old_release = release.clone();
+    old_release.version = "0.0.1".to_string();
+    let request = ActionRequest::new(
+        "op-release-versioned-install",
+        "release.install",
+        [("service_id".to_string(), service.id.clone())]
+            .into_iter()
+            .collect(),
+    );
+
+    let operation = plan_action_request_with_releases(
+        &request,
+        std::slice::from_ref(&service),
+        &[old_release, release.clone()],
+        &[],
+        &[],
+        None,
+    )
+    .expect("release-aware install should select the service manifest version");
+
+    assert_eq!(
+        operation
+            .request
+            .get("release_manifest")
+            .and_then(|value| value.get("version"))
+            .and_then(serde_json::Value::as_str),
+        Some(release.version.as_str())
+    );
+}
+
+#[test]
 fn release_install_planner_uses_package_source_override() {
     let root = repo_root();
     let service =
@@ -2189,6 +2314,8 @@ fn release_install_runtime_pipeline_result_reports_configured_runtime_success() 
             message: "recorded by configured runtime pipeline test".to_string(),
             endpoint: "127.0.0.1:8082:judge-api".to_string(),
             accepted: true,
+            driver_executed: false,
+            driver_status: "DEFERRED".to_string(),
         },
     };
 
@@ -2546,6 +2673,8 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
                         message: format!("recorded stack node dispatch for {service_name}"),
                         endpoint: endpoint.clone(),
                         accepted: true,
+                        driver_executed: false,
+                        driver_status: "DEFERRED".to_string(),
                     },
                 },
             )
@@ -2945,12 +3074,15 @@ fn release_install_loads_local_release_package_when_loader_is_configured() {
 }
 
 #[test]
-fn release_install_dispatches_to_node_when_dispatcher_is_configured() {
+fn release_install_delegates_driver_to_node_without_local_double_execution() {
     let root = repo_root();
     let service =
         validate_service_manifest_file(&root, Path::new("services/gateway/service.yaml")).unwrap();
-    let release =
+    let mut release =
         validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    release.runtime.command = "ojos-node-delegation-local-driver-must-not-run".to_string();
+    release.runtime.args.clear();
+    release.runtime.working_dir = ".".to_string();
     let operation = release_install_operation_with_release(
         "op-release-node-dispatch",
         &service,
@@ -2958,7 +3090,7 @@ fn release_install_dispatches_to_node_when_dispatcher_is_configured() {
         &[],
         "10.77.0.2",
         None,
-        serde_json::json!({}),
+        serde_json::json!({"execute_service_driver": true}),
     )
     .and_then(|operation| confirm_operation(&operation))
     .expect("confirmed release install");
@@ -2971,6 +3103,8 @@ fn release_install_dispatches_to_node_when_dispatcher_is_configured() {
             message: "recorded by test node dispatcher".to_string(),
             endpoint: "http://node-orchestrator.test".to_string(),
             accepted: true,
+            driver_executed: true,
+            driver_status: "SUCCEEDED".to_string(),
         },
     };
     let mut store = MemoryOrchestratorStore::new();
@@ -2978,7 +3112,7 @@ fn release_install_dispatches_to_node_when_dispatcher_is_configured() {
 
     OperationExecutor::with_runtime_provisioners_release_loader_and_node_dispatcher(
         &mut store,
-        StaticEndpointProbe,
+        HealthyEndpointProbe,
         DeferredAuthPermissionRegistrar,
         DeferredRedisResourceProvisioner,
         DeferredStorageResourceProvisioner,
@@ -2986,11 +3120,16 @@ fn release_install_dispatches_to_node_when_dispatcher_is_configured() {
         DeferredReleasePackageLoader,
         dispatcher,
     )
+    .with_service_driver_execution_enabled()
     .apply("op-release-node-dispatch")
     .expect("apply release install with node dispatch");
 
     let calls = calls.lock().expect("node dispatch calls");
     assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].execute_service_driver,
+        "the operation-scoped authorization must reach the node dispatcher"
+    );
     assert_eq!(calls[0].service.id, "gateway");
     assert_eq!(calls[0].host_service.host_ip, "10.77.0.2");
     assert_eq!(calls[0].endpoint.endpoint, "10.77.0.2:8080:gateway");
@@ -3030,6 +3169,23 @@ fn release_install_dispatches_to_node_when_dispatcher_is_configured() {
             .and_then(serde_json::Value::as_bool),
         Some(true)
     );
+    assert_eq!(
+        host_service
+            .config
+            .get("external_steps")
+            .and_then(|steps| steps.get("service_start"))
+            .and_then(serde_json::Value::as_str),
+        Some("SUCCEEDED"),
+        "an accepted node dispatch must suppress control-plane local driver execution"
+    );
+    assert_eq!(
+        host_service
+            .labels
+            .get("runtime_owner")
+            .and_then(serde_json::Value::as_str),
+        Some("node"),
+        "the control plane must persist that lifecycle execution belongs to the node"
+    );
     let logs = store.operation_logs("op-release-node-dispatch");
     assert!(logs.iter().any(|log| {
         log.step_id == "node-dispatch:gateway"
@@ -3039,6 +3195,16 @@ fn release_install_dispatches_to_node_when_dispatcher_is_configured() {
                 .get("accepted")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
+            && log
+                .data
+                .get("driver_executed")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            && log
+                .data
+                .get("driver_status")
+                .and_then(serde_json::Value::as_str)
+                == Some("SUCCEEDED")
     }));
     assert!(logs.iter().any(|log| {
         log.step_id == "install-pipeline:gateway"
@@ -3048,6 +3214,13 @@ fn release_install_dispatches_to_node_when_dispatcher_is_configured() {
                 .and_then(serde_json::Value::as_str)
                 == Some("dispatched")
     }));
+
+    drop(calls);
+    let rollback_error = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
+        .rollback("op-release-node-dispatch")
+        .expect_err("node-owned install rollback must not fall through to a local driver");
+    assert!(rollback_error.to_string().contains("node-owned runtime"));
 }
 
 #[test]
@@ -3077,6 +3250,8 @@ fn release_install_fails_when_configured_node_dispatch_fails() {
             message: "node service driver failed".to_string(),
             endpoint: "10.77.0.3:8080:gateway".to_string(),
             accepted: true,
+            driver_executed: true,
+            driver_status: "FAILED".to_string(),
         },
     };
     let mut store = MemoryOrchestratorStore::new();
@@ -3119,6 +3294,456 @@ fn release_install_fails_when_configured_node_dispatch_fails() {
             && log.level == "error"
             && log.message.contains("node dispatch failed")
     }));
+}
+
+#[test]
+fn release_install_requires_truthful_node_driver_execution_evidence() {
+    for (operation_id, request_execution, driver_executed, expected_error) in [
+        (
+            "op-node-missed-authorized-execution",
+            true,
+            false,
+            "did not execute the authorized service driver",
+        ),
+        (
+            "op-node-unauthorized-execution",
+            false,
+            true,
+            "without per-operation authorization",
+        ),
+    ] {
+        let service = valid_service();
+        let release = valid_release_for_service(&service);
+        let operation = release_install_operation_with_release(
+            operation_id,
+            &service,
+            Some(&release),
+            &[],
+            "10.77.0.9",
+            None,
+            serde_json::json!({"execute_service_driver": request_execution}),
+        )
+        .and_then(|operation| confirm_operation(&operation))
+        .expect("confirmed release install");
+        let dispatcher = RecordingNodeServiceDispatcher {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            result: NodeServiceDispatchResult {
+                status: "accepted".to_string(),
+                message: "synthetic node evidence".to_string(),
+                endpoint: "10.77.0.9:18080:demo-api".to_string(),
+                accepted: true,
+                driver_executed,
+                driver_status: if driver_executed {
+                    "SUCCEEDED".to_string()
+                } else {
+                    "DEFERRED".to_string()
+                },
+            },
+        };
+        let mut store = MemoryOrchestratorStore::new();
+        store.put_operation(operation).expect("put operation");
+
+        let error =
+            OperationExecutor::with_runtime_provisioners_release_loader_and_node_dispatcher(
+                &mut store,
+                HealthyEndpointProbe,
+                DeferredAuthPermissionRegistrar,
+                DeferredRedisResourceProvisioner,
+                DeferredStorageResourceProvisioner,
+                DeferredMigrationRunner,
+                DeferredReleasePackageLoader,
+                dispatcher,
+            )
+            .with_service_driver_execution_enabled()
+            .apply(operation_id)
+            .expect_err("untruthful node execution evidence must fail closed");
+        assert!(
+            error.to_string().contains(expected_error),
+            "unexpected node evidence error: {error}"
+        );
+    }
+}
+
+#[test]
+fn release_install_fails_when_node_driver_succeeds_but_health_never_recovers() {
+    let service = valid_service();
+    let release = valid_release_for_service(&service);
+    let operation = release_install_operation_with_release(
+        "op-node-driver-unhealthy",
+        &service,
+        Some(&release),
+        &[],
+        "10.77.0.10",
+        None,
+        serde_json::json!({"execute_service_driver": true}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed release install");
+    let dispatcher = RecordingNodeServiceDispatcher {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        result: NodeServiceDispatchResult {
+            status: "accepted".to_string(),
+            message: "node driver exited successfully".to_string(),
+            endpoint: "10.77.0.10:18080:demo-api".to_string(),
+            accepted: true,
+            driver_executed: true,
+            driver_status: "SUCCEEDED".to_string(),
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+
+    let error = OperationExecutor::with_runtime_provisioners_release_loader_and_node_dispatcher(
+        &mut store,
+        StaticEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        dispatcher,
+    )
+    .with_service_driver_execution_enabled()
+    .apply("op-node-driver-unhealthy")
+    .expect_err("node driver success without reachable health must fail closed");
+
+    let message = error.to_string();
+    assert!(message.contains("service_start health failed"));
+    assert!(message.contains("node runtime may still be running"));
+    assert_eq!(
+        store
+            .operation("op-node-driver-unhealthy")
+            .expect("failed operation")
+            .status,
+        OperationStatus::Failed
+    );
+}
+
+#[test]
+fn node_owned_release_upgrade_is_blocked_before_local_driver_or_node_dispatch() {
+    let mut store = MemoryOrchestratorStore::new();
+    let (old_service, old_release, _) = put_runtime_owner_fixture(
+        &mut store,
+        "remote-upgrade",
+        "10.88.0.2",
+        18_090,
+        "running",
+        Some("node"),
+    );
+    let mut new_service = old_service.clone();
+    new_service.version = "0.2.0".to_string();
+    let mut new_release = old_release;
+    new_release.version = new_service.version.clone();
+    let operation = release_install_operation_with_release(
+        "op-node-owned-upgrade",
+        &new_service,
+        Some(&new_release),
+        &[],
+        "10.88.0.2",
+        None,
+        serde_json::json!({"execute_service_driver": true}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed remote upgrade");
+    store.put_operation(operation).expect("put operation");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = RecordingNodeServiceDispatcher {
+        calls: Arc::clone(&calls),
+        result: NodeServiceDispatchResult {
+            status: "accepted".to_string(),
+            message: "must not be reached".to_string(),
+            endpoint: "10.88.0.2:18090:remote-upgrade".to_string(),
+            accepted: true,
+            driver_executed: true,
+            driver_status: "SUCCEEDED".to_string(),
+        },
+    };
+
+    let error = OperationExecutor::with_runtime_provisioners_release_loader_and_node_dispatcher(
+        &mut store,
+        HealthyEndpointProbe,
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        dispatcher,
+    )
+    .with_service_driver_execution_enabled()
+    .apply("op-node-owned-upgrade")
+    .expect_err("remote upgrade stop is not implemented");
+    assert!(error.to_string().contains("node-owned runtime"));
+    assert!(calls.lock().expect("node calls").is_empty());
+    assert_eq!(
+        store
+            .get_service("remote-upgrade")
+            .expect("get old service")
+            .expect("old service remains")
+            .version,
+        "0.1.0"
+    );
+}
+
+#[test]
+fn node_owned_service_and_host_lifecycle_actions_fail_closed() {
+    for (index, action) in ["service.start", "host.stop"].into_iter().enumerate() {
+        let mut store = MemoryOrchestratorStore::new();
+        let service_id = format!("remote-lifecycle-{index}");
+        put_runtime_owner_fixture(
+            &mut store,
+            &service_id,
+            "10.88.0.3",
+            18_100 + index as u16,
+            "running",
+            Some("node"),
+        );
+        let operation = if action.starts_with("host.") {
+            host_lifecycle_operation(
+                format!("op-node-owned-lifecycle-{index}"),
+                action,
+                "10.88.0.3",
+                std::slice::from_ref(&service_id),
+            )
+        } else {
+            service_lifecycle_operation(
+                format!("op-node-owned-lifecycle-{index}"),
+                action,
+                &service_id,
+            )
+        }
+        .expect("lifecycle operation");
+        let operation = confirm_if_required(operation);
+        let operation_id = operation.operation_id.clone();
+        store.put_operation(operation).expect("put operation");
+
+        let error = OperationExecutor::new(&mut store)
+            .with_service_driver_execution_enabled()
+            .apply(&operation_id)
+            .expect_err("node lifecycle must not run the control-plane driver");
+        assert!(error.to_string().contains("node-owned runtime"));
+        assert_eq!(
+            store
+                .get_host_service("10.88.0.3", &service_id)
+                .expect("get host service")
+                .expect("host service remains")
+                .status,
+            "running"
+        );
+    }
+}
+
+#[test]
+fn external_running_install_uses_real_probe_and_bypasses_runtime_dispatch() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind external runtime");
+    let port = listener
+        .local_addr()
+        .expect("external runtime address")
+        .port();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept health probe");
+        let mut buffer = [0_u8; 1024];
+        let _ = stream.read(&mut buffer).expect("read health request");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .expect("write health response");
+    });
+
+    let mut service = valid_service();
+    service.id = "external-running".to_string();
+    service.name = "External Running".to_string();
+    service.endpoint.default_port = port;
+    let release = valid_release_for_service(&service);
+    let endpoint = format!("127.0.0.1:{port}:external-running");
+    let operation = release_install_operation_with_release(
+        "op-external-running-real-probe",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        Some(&endpoint),
+        serde_json::json!({"external_service_running": true}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed external registration");
+    let node_calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = RecordingNodeServiceDispatcher {
+        calls: Arc::clone(&node_calls),
+        result: NodeServiceDispatchResult {
+            status: "accepted".to_string(),
+            message: "external mode must bypass this dispatcher".to_string(),
+            endpoint: endpoint.clone(),
+            accepted: true,
+            driver_executed: true,
+            driver_status: "SUCCEEDED".to_string(),
+        },
+    };
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_runtime_provisioners_release_loader_and_node_dispatcher(
+        &mut store,
+        TcpEndpointProbe::new(Duration::from_millis(500)),
+        DeferredAuthPermissionRegistrar,
+        DeferredRedisResourceProvisioner,
+        DeferredStorageResourceProvisioner,
+        DeferredMigrationRunner,
+        DeferredReleasePackageLoader,
+        dispatcher,
+    )
+    .apply("op-external-running-real-probe")
+    .expect("healthy external runtime registration");
+    server.join().expect("external health server");
+
+    assert!(
+        node_calls.lock().expect("node calls").is_empty(),
+        "external mode must not dispatch runtime execution to a node"
+    );
+    let host_service = store
+        .get_host_service("127.0.0.1", "external-running")
+        .expect("read external host service")
+        .expect("external host service");
+    assert_eq!(host_service.status, "running");
+    assert_eq!(
+        host_service
+            .labels
+            .get("runtime_owner")
+            .and_then(serde_json::Value::as_str),
+        Some("external")
+    );
+    let endpoint_record = store
+        .get_endpoint(&endpoint)
+        .expect("read external endpoint")
+        .expect("external endpoint");
+    assert!(endpoint_record.reachable);
+    assert_eq!(endpoint_record.health, "healthy");
+    assert!(
+        store
+            .operation_logs("op-external-running-real-probe")
+            .iter()
+            .any(|log| {
+                log.step_id == "driver:release.install"
+                    && log.data.get("status").and_then(serde_json::Value::as_str)
+                        == Some("SUPPORTED")
+                    && log
+                        .data
+                        .get("command")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(Vec::is_empty)
+            })
+    );
+}
+
+#[test]
+fn external_running_install_rejects_driver_authorization() {
+    let service = valid_service();
+    let release = valid_release_for_service(&service);
+    let operation = release_install_operation_with_release(
+        "op-external-driver-mutual-exclusion",
+        &service,
+        Some(&release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({
+            "external_service_running": true,
+            "execute_service_driver": true
+        }),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed external install");
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+
+    let error = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
+        .apply("op-external-driver-mutual-exclusion")
+        .expect_err("external and driver execution flags must be mutually exclusive");
+    assert!(error.to_string().contains("mutually exclusive"));
+    assert!(store.services().is_empty());
+}
+
+#[test]
+fn external_running_install_cannot_replace_active_control_plane_runtime() {
+    let mut store = MemoryOrchestratorStore::new();
+    let (old_service, old_release, endpoint) = put_runtime_owner_fixture(
+        &mut store,
+        "external-upgrade-local",
+        "127.0.0.1",
+        18_120,
+        "running",
+        None,
+    );
+    let mut new_service = old_service.clone();
+    new_service.version = "0.2.0".to_string();
+    let mut new_release = old_release;
+    new_release.version = new_service.version.clone();
+    let operation = release_install_operation_with_release(
+        "op-external-upgrade-local",
+        &new_service,
+        Some(&new_release),
+        &[],
+        "127.0.0.1",
+        Some(&endpoint),
+        serde_json::json!({"external_service_running": true}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed external upgrade");
+    store.put_operation(operation).expect("put operation");
+
+    let error = OperationExecutor::with_endpoint_probe(&mut store, HealthyEndpointProbe)
+        .apply("op-external-upgrade-local")
+        .expect_err("external mode must not orphan a control-plane runtime");
+    assert!(error.to_string().contains("active existing deployment"));
+    assert_eq!(
+        store
+            .get_service("external-upgrade-local")
+            .expect("read old service")
+            .expect("old service remains")
+            .version,
+        "0.1.0"
+    );
+}
+
+#[test]
+fn external_running_install_cannot_replace_active_node_runtime() {
+    let mut store = MemoryOrchestratorStore::new();
+    let (old_service, old_release, endpoint) = put_runtime_owner_fixture(
+        &mut store,
+        "external-upgrade-node",
+        "10.88.0.4",
+        18_121,
+        "starting",
+        Some("node"),
+    );
+    let mut new_service = old_service.clone();
+    new_service.version = "0.2.0".to_string();
+    let mut new_release = old_release;
+    new_release.version = new_service.version.clone();
+    let operation = release_install_operation_with_release(
+        "op-external-upgrade-node",
+        &new_service,
+        Some(&new_release),
+        &[],
+        "10.88.0.4",
+        Some(&endpoint),
+        serde_json::json!({"external_service_running": true}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed external upgrade");
+    store.put_operation(operation).expect("put operation");
+
+    let error = OperationExecutor::with_endpoint_probe(&mut store, HealthyEndpointProbe)
+        .apply("op-external-upgrade-node")
+        .expect_err("external mode must not overwrite a node-owned runtime");
+    assert!(error.to_string().contains("active existing deployment"));
+    assert_eq!(
+        store
+            .get_host_service("10.88.0.4", "external-upgrade-node")
+            .expect("read node host service")
+            .expect("node host service remains")
+            .labels["runtime_owner"],
+        serde_json::json!("node")
+    );
 }
 
 #[test]
@@ -3291,7 +3916,7 @@ fn release_install_api_surface_only_release_triggers_gateway_reload() {
 
     OperationExecutor::with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
         &mut store,
-        StaticEndpointProbe,
+        HealthyEndpointProbe,
         DeferredAuthPermissionRegistrar,
         DeferredRedisResourceProvisioner,
         DeferredStorageResourceProvisioner,
@@ -3434,7 +4059,7 @@ fn release_install_fails_when_gateway_reload_fails() {
 
     let err = OperationExecutor::with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
         &mut store,
-        StaticEndpointProbe,
+        HealthyEndpointProbe,
         DeferredAuthPermissionRegistrar,
         DeferredRedisResourceProvisioner,
         DeferredStorageResourceProvisioner,
@@ -3464,6 +4089,199 @@ fn release_install_fails_when_gateway_reload_fails() {
             && log.level == "error"
             && log.message.contains("gateway route publish failed")
     }));
+}
+
+#[test]
+fn http_gateway_publisher_rejects_unscoped_route_table() {
+    let publisher = HttpGatewayRoutePublisher::new("http://127.0.0.1:1");
+    let request = GatewayRoutePublishRequest {
+        operation_id: "op-unscoped-route-publish".to_string(),
+        service_name: "judge-api".to_string(),
+        routes: Vec::new(),
+        effective_routes: Vec::new(),
+        node_id: String::new(),
+        api_count: 1,
+        force_reload: true,
+    };
+
+    let error = publisher
+        .publish_routes(&request)
+        .expect_err("unscoped route table must not reach gateway");
+    assert!(error.to_string().contains("requires gateway_node_id"));
+}
+
+#[test]
+fn http_node_dispatcher_forwards_driver_authorization_and_tokens() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind node dispatcher listener");
+    let endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("listener address")
+    );
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept node dispatch");
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).expect("read node dispatch");
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            if http_request_body_is_complete(&bytes) {
+                break;
+            }
+        }
+        let request = String::from_utf8(bytes)
+            .expect("node dispatch request must be UTF-8")
+            .to_ascii_lowercase();
+        assert!(request.contains("authorization: bearer node-secret"));
+        assert!(request.contains("x-ojos-orchestrator-token: control-secret"));
+        assert!(request.contains("\"execute_service_driver\":true"));
+        let body = r#"{"node_dispatch_result":{"status":"accepted","message":"node executed driver","endpoint":"127.0.0.1:18080:demo-api","accepted":true,"driver_executed":true,"driver_status":"SUCCEEDED"}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write node dispatch response");
+    });
+
+    let service = valid_service();
+    let release = valid_release_for_service(&service);
+    let endpoint_record = Endpoint {
+        endpoint: format!("127.0.0.1:{}:{}", service.endpoint.default_port, service.id),
+        service_id: service.id.clone(),
+        protocol: service.endpoint.protocol.clone(),
+        health_path: service.endpoint.health_path.clone(),
+        health: "unknown".to_string(),
+        reachable: false,
+        display_name: service.name.clone(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let request = NodeServiceDispatchRequest {
+        operation_id: "op-node-two-tokens".to_string(),
+        execute_service_driver: true,
+        service: service.clone(),
+        release: Some(release),
+        host_service: HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: service.id.clone(),
+            version: service.version.clone(),
+            status: "installing".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+        endpoint: endpoint_record,
+        rendered_config: serde_json::json!({}),
+        package_load: None,
+    };
+    let serialized = serde_json::to_value(&request).expect("serialize node dispatch request");
+    assert_eq!(
+        serialized
+            .get("execute_service_driver")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    let round_trip: NodeServiceDispatchRequest =
+        serde_json::from_value(serialized.clone()).expect("round-trip node dispatch request");
+    assert!(round_trip.execute_service_driver);
+    let mut legacy = serialized;
+    legacy
+        .as_object_mut()
+        .expect("node dispatch request is an object")
+        .remove("execute_service_driver");
+    let legacy: NodeServiceDispatchRequest =
+        serde_json::from_value(legacy).expect("legacy node dispatch request");
+    assert!(
+        !legacy.execute_service_driver,
+        "missing authorization must default to false"
+    );
+
+    let result = HttpNodeServiceDispatcher::new(endpoint)
+        .with_token("node-secret")
+        .with_control_token("control-secret")
+        .with_timeout(Duration::from_secs(2))
+        .dispatch_service(&request)
+        .expect("dispatch with both tokens");
+    assert!(result.accepted);
+    assert!(result.driver_executed);
+    assert_eq!(result.driver_status, "SUCCEEDED");
+    handle.join().expect("node dispatcher server");
+}
+
+#[test]
+fn http_node_dispatcher_rejects_empty_success_without_structured_driver_evidence() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind node dispatcher listener");
+    let dispatcher_endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("listener address")
+    );
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept node dispatch");
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).expect("read node dispatch");
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            if http_request_body_is_complete(&bytes) {
+                break;
+            }
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .expect("write empty node dispatch response");
+    });
+
+    let service = valid_service();
+    let release = valid_release_for_service(&service);
+    let request = NodeServiceDispatchRequest {
+        operation_id: "op-node-empty-evidence".to_string(),
+        execute_service_driver: true,
+        service: service.clone(),
+        release: Some(release),
+        host_service: HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: service.id.clone(),
+            version: service.version.clone(),
+            status: "dispatching".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+        endpoint: Endpoint {
+            endpoint: format!("127.0.0.1:{}:{}", service.endpoint.default_port, service.id),
+            service_id: service.id.clone(),
+            protocol: service.endpoint.protocol.clone(),
+            health_path: service.endpoint.health_path.clone(),
+            health: "unknown".to_string(),
+            reachable: false,
+            display_name: service.name,
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+        rendered_config: serde_json::json!({}),
+        package_load: None,
+    };
+
+    let error = HttpNodeServiceDispatcher::new(dispatcher_endpoint)
+        .with_timeout(Duration::from_secs(2))
+        .dispatch_service(&request)
+        .expect_err("empty 2xx must not invent successful node execution evidence");
+    handle.join().expect("node dispatcher server");
+    assert!(error.to_string().contains("structured execution evidence"));
 }
 
 #[test]
@@ -3540,6 +4358,8 @@ fn local_release_package_loader_fetches_http_release_yaml() {
     });
 
     let result = LocalReleasePackageLoader::new(&root)
+        // 测试桩跑在 127.0.0.1 上，显式放行 loopback（生产走环境变量，默认拒绝）。
+        .with_allow_private_source(true)
         .load_release_package(&ReleasePackageLoadRequest {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
@@ -3553,6 +4373,37 @@ fn local_release_package_loader_fetches_http_release_yaml() {
     assert_eq!(result.source_url, url);
     assert!(result.manifest_loaded);
     assert!(result.checksum.starts_with("sha256:"));
+}
+
+#[test]
+fn release_package_loader_enforces_required_checksum_for_every_entry_point() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let previous = std::env::var("ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM").ok();
+    unsafe {
+        std::env::set_var("ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM", "1");
+    }
+
+    let root = repo_root();
+    let release =
+        validate_service_release_file(&root, Path::new("services/gateway/release.yaml")).unwrap();
+    let request = ReleasePackageLoadRequest {
+        service_name: release.service_name.clone(),
+        version: release.version.clone(),
+        source_url: "services/gateway/release.yaml".to_string(),
+        expected_checksum: None,
+        expected_manifest: Some(release),
+    };
+    let error = LocalReleasePackageLoader::new(&root)
+        .load_release_package(&request)
+        .expect_err("required checksum must apply outside /store routes too");
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM", value),
+            None => std::env::remove_var("ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM"),
+        }
+    }
+    assert!(error.to_string().contains("checksum is required"));
 }
 
 #[test]
@@ -3574,6 +4425,8 @@ fn local_release_package_loader_fetches_http_zip_release_package() {
     });
 
     let result = LocalReleasePackageLoader::new(&root)
+        // 测试桩跑在 127.0.0.1 上，显式放行 loopback（生产走环境变量，默认拒绝）。
+        .with_allow_private_source(true)
         .load_release_package(&ReleasePackageLoadRequest {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
@@ -3642,6 +4495,8 @@ fn local_release_package_loader_follows_redirect_to_zip_release_package() {
     });
 
     let result = LocalReleasePackageLoader::new(&root)
+        // 测试桩跑在 127.0.0.1 上，显式放行 loopback（生产走环境变量，默认拒绝）。
+        .with_allow_private_source(true)
         .load_release_package(&ReleasePackageLoadRequest {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
@@ -3780,6 +4635,8 @@ fn local_release_package_loader_rejects_zip_path_traversal() {
     });
 
     let err = LocalReleasePackageLoader::new(&root)
+        // 测试桩跑在 127.0.0.1 上，显式放行 loopback（生产走环境变量，默认拒绝）。
+        .with_allow_private_source(true)
         .load_release_package(&ReleasePackageLoadRequest {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
@@ -3814,6 +4671,8 @@ fn local_release_package_loader_fails_on_http_error() {
     });
 
     let err = LocalReleasePackageLoader::new(&root)
+        // 测试桩跑在 127.0.0.1 上，显式放行 loopback（生产走环境变量，默认拒绝）。
+        .with_allow_private_source(true)
         .load_release_package(&ReleasePackageLoadRequest {
             service_name: release.service_name.clone(),
             version: release.version.clone(),
@@ -4017,7 +4876,7 @@ fn release_install_registers_service_identity_grants_with_auth_registrar() {
 
     OperationExecutor::with_endpoint_probe_and_auth_registrar(
         &mut store,
-        StaticEndpointProbe,
+        HealthyEndpointProbe,
         registrar,
     )
     .apply("op-release-service-identity-registration")
@@ -4312,6 +5171,8 @@ fn failed_release_install_rollback_removes_partial_pipeline_state() {
             message: "node runtime rejected install".to_string(),
             endpoint: "127.0.0.1:18080:demo-api".to_string(),
             accepted: true,
+            driver_executed: true,
+            driver_status: "FAILED".to_string(),
         },
     };
     let mut store = MemoryOrchestratorStore::new();
@@ -5211,7 +6072,7 @@ fn release_install_rollback_restores_previous_registry_resources() {
         host_ip: "127.0.0.1".to_string(),
         service_name: "gateway".to_string(),
         version: "0.0.9".to_string(),
-        status: "running".to_string(),
+        status: "stopped".to_string(),
         config: serde_json::json!({ "old": true }),
         labels: serde_json::json!({ "source": "old-release" }),
         created_at: String::new(),
@@ -5394,7 +6255,7 @@ fn release_install_rollback_restores_previous_registry_resources() {
 }
 
 #[test]
-fn release_delete_is_store_backed_and_rollback_restores_registry() {
+fn release_delete_store_backed_rollback_restores_release_record_only() {
     assert_eq!(
         capability_for_action("release.delete"),
         ActionCapabilityStatus::StoreBacked
@@ -5444,7 +6305,11 @@ fn release_delete_is_store_backed_and_rollback_restores_registry() {
             .unwrap()
             .is_none()
     );
-    assert!(store.service_routes().is_empty());
+    assert_eq!(
+        store.service_routes()[0].path,
+        "/demo",
+        "deleting a release record must not clear service runtime registries"
+    );
 
     let rolled_back = OperationExecutor::new(&mut store)
         .rollback("op-release-delete")
@@ -5460,10 +6325,188 @@ fn release_delete_is_store_backed_and_rollback_restores_registry() {
 }
 
 #[test]
+fn release_delete_historical_version_keeps_current_deployment_intact() {
+    let mut service = valid_service();
+    service.id = "multi-release".to_string();
+    service.name = "Multi Release".to_string();
+    service.version = "2.0.0".to_string();
+    let mut current_release = valid_release_for_service(&service);
+    current_release.version = "2.0.0".to_string();
+    let mut historical_release = current_release.clone();
+    historical_release.version = "1.0.0".to_string();
+    let record = |release: &ServiceReleaseManifest| ServiceRelease {
+        service_name: release.service_name.clone(),
+        version: release.version.clone(),
+        release_url: release.source.url.clone(),
+        manifest: serde_json::to_value(release).expect("release manifest"),
+        checksum: String::new(),
+        created_at: String::new(),
+    };
+    let operation =
+        release_delete_operation("op-delete-historical-release", &service.id, Some("1.0.0"))
+            .and_then(|operation| confirm_operation(&operation))
+            .expect("confirmed historical release delete");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_service(service.clone()).expect("put service");
+    store
+        .upsert_service_release(record(&historical_release))
+        .expect("put historical release");
+    store
+        .upsert_service_release(record(&current_release))
+        .expect("put current release");
+    store
+        .upsert_host_service(HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: service.id.clone(),
+            version: "2.0.0".to_string(),
+            status: "running".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put current deployment");
+    store
+        .upsert_service_route(ServiceRoute {
+            path: "/multi-release".to_string(),
+            method: "GET".to_string(),
+            target_type: "endpoint-group".to_string(),
+            target_service_name: service.id.clone(),
+            target_selector: serde_json::json!({"group": "multi-release[*]"}),
+            permission: "public".to_string(),
+            enabled: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put current route");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::new(&mut store)
+        .apply("op-delete-historical-release")
+        .expect("delete unreferenced historical release");
+    assert!(
+        store
+            .get_service_release(&service.id, "1.0.0")
+            .expect("read historical release")
+            .is_none()
+    );
+    assert!(
+        store
+            .get_service_release(&service.id, "2.0.0")
+            .expect("read current release")
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .get_host_service("127.0.0.1", &service.id)
+            .expect("read deployment")
+            .expect("current deployment")
+            .status,
+        "running"
+    );
+    assert_eq!(store.service_routes()[0].path, "/multi-release");
+
+    OperationExecutor::new(&mut store)
+        .rollback("op-delete-historical-release")
+        .expect("restore historical release record");
+    assert!(
+        store
+            .get_service_release(&service.id, "1.0.0")
+            .expect("read restored historical release")
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .get_host_service("127.0.0.1", &service.id)
+            .expect("read deployment after rollback")
+            .expect("current deployment after rollback")
+            .status,
+        "running"
+    );
+}
+
+#[test]
+fn release_rollback_target_uses_operation_timestamps_not_store_order() {
+    let mut store = MemoryOrchestratorStore::new();
+    let mut service = valid_service();
+    service.id = "timestamped-release".to_string();
+    service.name = "Timestamped Release".to_string();
+
+    let operation = |operation_id: &str, created_at: &str, updated_at: &str, version: &str| {
+        let mut service = service.clone();
+        service.version = version.to_string();
+        let mut release = valid_release_for_service(&service);
+        release.version = version.to_string();
+        let mut operation = release_install_operation_with_release(
+            operation_id,
+            &service,
+            Some(&release),
+            &[],
+            "127.0.0.1",
+            None,
+            serde_json::json!({}),
+        )
+        .expect("release install operation");
+        operation.status = OperationStatus::Succeeded;
+        operation.created_at = created_at.to_string();
+        operation.updated_at = updated_at.to_string();
+        operation
+    };
+
+    for operation in [
+        operation(
+            "zzz-old-by-id",
+            "2026-07-01T00:00:00Z",
+            "2026-07-01T01:00:00Z",
+            "1.0.0",
+        ),
+        operation(
+            "aaa-new-by-time",
+            "2026-07-03T00:00:00Z",
+            "2026-07-03T01:00:00Z",
+            "1.0.0",
+        ),
+        operation(
+            "mmm-middle",
+            "2026-07-02T00:00:00Z",
+            "2026-07-02T01:00:00Z",
+            "1.0.0",
+        ),
+        operation(
+            "bbb-other-version",
+            "2026-07-04T00:00:00Z",
+            "2026-07-04T01:00:00Z",
+            "2.0.0",
+        ),
+    ] {
+        store.put_operation(operation).expect("put operation");
+    }
+
+    let operations = store.list_operations().expect("list operations");
+    let latest = crate::store::latest_successful_release_install_operation(
+        &operations,
+        "timestamped-release",
+        Some("1.0.0"),
+    )
+    .expect("latest matching install");
+    assert_eq!(latest.operation_id, "aaa-new-by-time");
+    assert_eq!(
+        crate::store::latest_successful_release_install_operation(
+            &operations,
+            "timestamped-release",
+            Some("2.0.0"),
+        )
+        .map(|operation| operation.operation_id.as_str()),
+        Some("bbb-other-version")
+    );
+}
+
+#[test]
 fn release_rollback_dispatches_to_release_install_rollback() {
     assert_eq!(
         capability_for_action("release.rollback"),
-        ActionCapabilityStatus::StoreBacked
+        ActionCapabilityStatus::RuntimePipeline
     );
 
     let root = repo_root();
@@ -5512,6 +6555,7 @@ fn release_rollback_dispatches_to_release_install_rollback() {
     store.put_operation(rollback).expect("put rollback");
 
     let rolled_back = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
         .apply("op-release-rollback-action")
         .expect("apply release rollback");
     assert_eq!(rolled_back.status, OperationStatus::Succeeded);
@@ -5526,6 +6570,47 @@ fn release_rollback_dispatches_to_release_install_rollback() {
         .unwrap()
         .unwrap();
     assert_eq!(target.status, OperationStatus::RolledBack);
+}
+
+#[test]
+fn release_rollback_wrapper_cannot_claim_a_second_rollback() {
+    let mut operation = release_rollback_operation(
+        "op-release-rollback-wrapper",
+        "gateway",
+        Some("0.1.0"),
+        Some("op-release-install-target"),
+    )
+    .expect("release rollback wrapper");
+    operation.status = OperationStatus::Succeeded;
+
+    let mut store = MemoryOrchestratorStore::new();
+    store
+        .put_operation(operation.clone())
+        .expect("put current wrapper");
+    let current = OperationExecutor::new(&mut store)
+        .rollback("op-release-rollback-wrapper")
+        .expect_err("a release.rollback wrapper has no inverse rollback plan");
+    assert!(
+        current
+            .to_string()
+            .contains("rollback plan is not available")
+    );
+
+    operation.operation_id = "op-release-rollback-wrapper-legacy".to_string();
+    operation.rollback_plan = serde_json::json!({"steps": []});
+    store.put_operation(operation).expect("put legacy wrapper");
+    let legacy = OperationExecutor::new(&mut store)
+        .rollback("op-release-rollback-wrapper-legacy")
+        .expect_err("legacy wrappers must not fall through to fake rollback success");
+    assert!(legacy.to_string().contains("has no steps"));
+    assert_eq!(
+        store
+            .get_operation("op-release-rollback-wrapper-legacy")
+            .expect("read legacy wrapper")
+            .expect("legacy wrapper")
+            .status,
+        OperationStatus::Succeeded
+    );
 }
 
 #[test]
@@ -5588,6 +6673,7 @@ fn core_plans_service_endpoint_link_and_topology_operations() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: "api".to_string(),
+        enabled: true,
         health: "ok".to_string(),
         latency_ms: Some(2),
         config_ref: "config://gateway/judge-api".to_string(),
@@ -5685,7 +6771,7 @@ fn action_registry_contains_required_actions_and_no_forbidden_actions() {
     let actions = action_set(&root);
     assert!(
         value.get("forbidden_prefixes").is_none(),
-        "actions.yaml should only define shared GUI/TUI actions"
+        "actions.yaml should only define shared Web/TUI actions"
     );
 
     for prefix in FORMAL_ACTION_PREFIXES {
@@ -5864,6 +6950,7 @@ fn action_request_planner_creates_operation_previews() {
             protocol: "http".to_string(),
             auth_mode: "internal".to_string(),
             scope: "oj".to_string(),
+            enabled: true,
             health: "ok".to_string(),
             latency_ms: Some(1),
             config_ref: String::new(),
@@ -6072,6 +7159,7 @@ fn operation_workbench_builds_preview_for_every_action() {
             protocol: "http".to_string(),
             auth_mode: "internal".to_string(),
             scope: "oj".to_string(),
+            enabled: true,
             health: "ok".to_string(),
             latency_ms: Some(1),
             config_ref: String::new(),
@@ -6223,6 +7311,7 @@ fn operation_workbench_updates_fields_and_runs_step_by_step() {
             protocol: "http".to_string(),
             auth_mode: "internal".to_string(),
             scope: "oj".to_string(),
+            enabled: true,
             health: "ok".to_string(),
             latency_ms: Some(1),
             config_ref: String::new(),
@@ -6474,6 +7563,7 @@ fn operation_workbench_context_can_load_from_store_state() {
             protocol: "http".to_string(),
             auth_mode: "internal".to_string(),
             scope: "api".to_string(),
+            enabled: true,
             health: "healthy".to_string(),
             latency_ms: Some(2),
             config_ref: String::new(),
@@ -6544,6 +7634,9 @@ fn operation_workbench_context_applies_store_backed_core_actions() {
     let endpoint_session = context
         .build_session("endpoint.create")
         .expect("endpoint create session");
+    let endpoint_session = context
+        .update_field(&endpoint_session, "endpoint", "127.0.0.2:8080:gateway")
+        .expect("use an endpoint that is not already seeded by the workbench context");
     let endpoint_applied = context
         .apply(&endpoint_session)
         .expect("endpoint create should use context store");
@@ -6556,6 +7649,18 @@ fn operation_workbench_context_applies_store_backed_core_actions() {
     let link_session = context
         .build_session("link.create")
         .expect("link create session");
+    let mut link_request = link_session.workbench.request.clone();
+    link_request.fields.insert(
+        "source_endpoint".to_string(),
+        "127.0.0.1:8083:problem-service".to_string(),
+    );
+    link_request.fields.insert(
+        "target_endpoint".to_string(),
+        "127.0.0.1:8080:gateway".to_string(),
+    );
+    let link_session = context
+        .build_session_from_request(&link_request)
+        .expect("use registered endpoints in a direction that is not already linked");
     let link_confirmed = context.confirm(&link_session).expect("confirm link create");
     let link_applied = context
         .apply(&link_confirmed)
@@ -6724,7 +7829,7 @@ fn operation_workbench_session_seed_persists_planned_and_confirmed_state() {
 }
 
 #[test]
-fn shared_schemas_cover_gui_tui_contract() {
+fn shared_schemas_cover_web_tui_contract() {
     let root = repo_root();
     let schemas = load_shared_schemas(&root).expect("shared schemas should load");
     ensure_shared_schemas_loaded(&schemas).expect("shared schemas should be usable");
@@ -6874,6 +7979,7 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
     let allowed_ops_scripts = [
         "deploy/compose/minio-init.sh",
         "deploy/release/pack-alpha.sh",
+        "deploy/release/pack-service-package.sh",
         "deploy/ops/backup.sh",
         "deploy/ops/alert-firing-drill.sh",
         "deploy/ops/basic-load-soak.sh",
@@ -7052,6 +8158,17 @@ fn plan_result_and_error_schemas_cover_core_objects() {
             "results.yaml missing core object {object}"
         );
     }
+    let store_source =
+        fs::read_to_string(root.join("services/orchestrator/core/src/store.rs")).unwrap();
+    let changed_object_call =
+        regex::Regex::new(r#"changed_object\(\s*"([^"]+)""#).expect("changed_object regex");
+    for capture in changed_object_call.captures_iter(&store_source) {
+        let emitted = &capture[1];
+        assert!(
+            result_types.contains(emitted),
+            "results.yaml missing emitted changed object type {emitted}"
+        );
+    }
 
     let error_redaction = string_set(
         errors
@@ -7208,6 +8325,7 @@ fn topology_uses_endpoint_identity_without_machine_or_installation() {
             protocol: "http".to_string(),
             auth_mode: "internal".to_string(),
             scope: "oj".to_string(),
+            enabled: true,
             health: "unknown".to_string(),
             latency_ms: None,
             config_ref: String::new(),
@@ -7332,6 +8450,7 @@ fn topology_builder_validates_endpoint_and_link_identity() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: "api".to_string(),
+        enabled: true,
         health: "ok".to_string(),
         latency_ms: Some(2),
         config_ref: String::new(),
@@ -7380,6 +8499,7 @@ fn topology_rejects_unknown_link_endpoint() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: String::new(),
+        enabled: true,
         health: String::new(),
         latency_ms: None,
         config_ref: String::new(),
@@ -7490,6 +8610,7 @@ fn memory_store_enforces_endpoint_and_link_boundaries() {
             protocol: "http".to_string(),
             auth_mode: "internal".to_string(),
             scope: "api".to_string(),
+            enabled: true,
             health: "ok".to_string(),
             latency_ms: Some(1),
             config_ref: String::new(),
@@ -7700,6 +8821,43 @@ fn operation_apply_failure_writes_error_message() {
 }
 
 #[test]
+fn operation_apply_persists_runtime_driver_authorization_for_rollback() {
+    let mut store = MemoryOrchestratorStore::new();
+    let operation = confirm_operation(
+        &service_lifecycle_operation(
+            "op-apply-driver-authorization",
+            "service.start",
+            "missing-service",
+        )
+        .expect("lifecycle operation"),
+    )
+    .expect("confirm operation");
+    store.put_operation(operation).expect("put operation");
+
+    let result = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "operation.apply",
+            "op-apply-driver-authorization-request",
+            &[
+                ("operation_id", "op-apply-driver-authorization"),
+                ("execute_service_driver", "true"),
+            ],
+        ))
+        .expect("apply returns a formal failure result");
+    assert_eq!(result.status, "FAILED");
+    assert_eq!(
+        store
+            .operation("op-apply-driver-authorization")
+            .expect("persisted operation")
+            .request
+            .get("execute_service_driver")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "rollback authorization must be based on the apply that actually ran"
+    );
+}
+
+#[test]
 fn operation_rollback_updates_store() {
     let mut store = MemoryOrchestratorStore::new();
     let mut gateway = valid_service();
@@ -7728,6 +8886,185 @@ fn operation_rollback_updates_store() {
             .iter()
             .any(|record| record.step_id.starts_with("rollback:"))
     );
+}
+
+#[test]
+fn operation_rollback_rejects_empty_rollback_steps() {
+    let mut operation = plan_operation(
+        "op-empty-rollback-plan",
+        "operation.create",
+        "Operation",
+        "empty-rollback-plan",
+        serde_json::json!({}),
+        serde_json::json!({"steps": [{"action": "create"}]}),
+        serde_json::json!({"steps": []}),
+    )
+    .expect("operation with an empty rollback plan");
+    operation.status = OperationStatus::Succeeded;
+
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+    let error = OperationExecutor::new(&mut store)
+        .rollback("op-empty-rollback-plan")
+        .expect_err("an empty rollback plan must be unavailable");
+    assert!(error.to_string().contains("has no steps"));
+    assert_eq!(
+        store
+            .operation("op-empty-rollback-plan")
+            .expect("stored operation")
+            .status,
+        OperationStatus::Succeeded
+    );
+    assert!(
+        store.operation_logs("op-empty-rollback-plan").is_empty(),
+        "rejected rollback must not start or fabricate rollback work"
+    );
+}
+
+#[test]
+fn operation_rollback_rejects_unknown_action_with_declared_steps() {
+    let mut operation = plan_operation(
+        "op-unknown-rollback-mutation",
+        "legacy.unknown",
+        "LegacyObject",
+        "legacy-target",
+        serde_json::json!({}),
+        serde_json::json!({"steps": [{"action": "legacy_apply"}]}),
+        serde_json::json!({"steps": [{"action": "legacy_undo"}]}),
+    )
+    .expect("legacy operation with a declared rollback step");
+    operation.status = OperationStatus::Succeeded;
+
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+    let error = OperationExecutor::new(&mut store)
+        .rollback("op-unknown-rollback-mutation")
+        .expect_err("unknown rollback mutations must fail closed");
+    assert!(error.to_string().contains("has no rollback mutation"));
+    let stored = store
+        .operation("op-unknown-rollback-mutation")
+        .expect("stored operation");
+    assert_eq!(stored.status, OperationStatus::Succeeded);
+    assert!(stored.result.is_null());
+    assert!(
+        store
+            .operation_logs("op-unknown-rollback-mutation")
+            .iter()
+            .any(|record| record.level == "error"
+                && record.message.contains("has no rollback mutation")),
+        "fail-closed rollback should leave an explicit error log"
+    );
+}
+
+#[test]
+fn operation_apply_rejects_unknown_action_with_declared_steps() {
+    let operation = plan_operation(
+        "op-unknown-apply-mutation",
+        "legacy.unknown",
+        "LegacyObject",
+        "legacy-target",
+        serde_json::json!({}),
+        serde_json::json!({
+            "steps": [{"action": "legacy_apply"}],
+            "requires_confirmation": false
+        }),
+        serde_json::json!({"steps": [{"action": "legacy_undo"}]}),
+    )
+    .expect("legacy operation with a declared apply step");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_operation(operation).expect("put operation");
+    let error = OperationExecutor::new(&mut store)
+        .apply("op-unknown-apply-mutation")
+        .expect_err("unknown executor mutations must fail closed");
+    assert!(error.to_string().contains("has no executor mutation"));
+    let stored = store
+        .operation("op-unknown-apply-mutation")
+        .expect("stored operation");
+    assert_eq!(stored.status, OperationStatus::Failed);
+    assert!(stored.result.is_null());
+    assert!(
+        stored.error_message.contains("has no executor mutation"),
+        "apply failure must persist the fail-closed reason"
+    );
+    assert!(
+        !store
+            .operation_logs("op-unknown-apply-mutation")
+            .iter()
+            .any(|record| record.message.contains("succeeded")),
+        "unknown apply action must never emit success"
+    );
+}
+
+#[test]
+fn service_enable_disable_rollback_executes_authorized_inverse_driver_action() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+
+    for (index, (action, inverse_action)) in [
+        ("service.enable", "service.disable"),
+        ("service.disable", "service.enable"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut store = MemoryOrchestratorStore::new();
+        let service_id = format!("inverse-driver-{index}");
+        let (_service, release, endpoint) = put_local_process_lifecycle_fixture(
+            &mut store,
+            &service_id,
+            18_360 + index as u16,
+            "stopped",
+        );
+        let operation_id = format!("op-{}-{index}", action.replace('.', "-"));
+        let operation = service_lifecycle_operation_with_release(
+            &operation_id,
+            action,
+            &service_id,
+            Some(&release),
+            Some(&endpoint),
+            Some("127.0.0.1"),
+        )
+        .and_then(|operation| confirm_operation(&operation))
+        .expect("confirmed service enable/disable operation");
+        store.put_operation(operation).expect("put operation");
+
+        let applied = OperationExecutor::new(&mut store)
+            .with_service_driver_execution_enabled()
+            .apply(&operation_id)
+            .expect("apply service enable/disable operation");
+        assert_eq!(applied.status, OperationStatus::Succeeded);
+
+        let unauthorized = OperationExecutor::new(&mut store)
+            .rollback(&operation_id)
+            .expect_err("rollback must require fresh driver authorization");
+        assert!(
+            unauthorized
+                .to_string()
+                .contains("rollback requires execute_service_driver=true")
+        );
+
+        let rolled_back = OperationExecutor::new(&mut store)
+            .with_service_driver_execution_enabled()
+            .rollback(&operation_id)
+            .expect("authorized inverse driver rollback");
+        assert_eq!(rolled_back.status, OperationStatus::RolledBack);
+        assert!(
+            store
+                .operation_logs(&operation_id)
+                .iter()
+                .any(
+                    |record| record.step_id == format!("driver:{inverse_action}")
+                        && record
+                            .data
+                            .get("status")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("SUCCEEDED")
+                ),
+            "{action} rollback must execute and record {inverse_action}"
+        );
+    }
 }
 
 #[test]
@@ -7869,6 +9206,7 @@ fn operation_executor_logs_rollback_mutation_failure() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: "api".to_string(),
+        enabled: true,
         health: "unknown".to_string(),
         latency_ms: None,
         config_ref: String::new(),
@@ -8491,7 +9829,7 @@ fn operation_executor_mutates_core_store_objects() {
         .put_service(problem_api.clone())
         .expect("put problem-service service");
     let gateway_endpoint = Endpoint {
-        endpoint: "127.0.0.1:8080:gateway".to_string(),
+        endpoint: "127.0.0.2:8080:gateway".to_string(),
         service_id: "gateway".to_string(),
         protocol: "http".to_string(),
         health_path: "/health".to_string(),
@@ -8509,7 +9847,7 @@ fn operation_executor_mutates_core_store_objects() {
     OperationExecutor::new(&mut store)
         .apply("op-endpoint")
         .expect("apply endpoint");
-    assert!(store.endpoint("127.0.0.1:8080:gateway").is_some());
+    assert!(store.endpoint("127.0.0.2:8080:gateway").is_some());
 
     let problem_endpoint = Endpoint {
         endpoint: "127.0.0.1:8081:problem-service".to_string(),
@@ -8533,6 +9871,7 @@ fn operation_executor_mutates_core_store_objects() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: "oj".to_string(),
+        enabled: true,
         health: "unknown".to_string(),
         latency_ms: None,
         config_ref: String::new(),
@@ -8627,7 +9966,7 @@ fn action_dispatcher_routes_schema_actions() {
     for action in schemas.actions {
         assert!(
             matrix.iter().any(|entry| entry.action_id == action
-                && entry.gui_entry
+                && entry.web_entry
                 && entry.tui_entry
                 && !entry.action_id.contains("machine")),
             "missing matrix entry for {action}"
@@ -8636,12 +9975,48 @@ fn action_dispatcher_routes_schema_actions() {
 }
 
 #[test]
+fn operation_create_is_unsupported_without_a_real_target_mutation() {
+    assert_eq!(
+        capability_for_action("operation.create"),
+        ActionCapabilityStatus::Unsupported
+    );
+    let mut store = MemoryOrchestratorStore::new();
+    let result = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "operation.create",
+            "op-unsupported-operation-create",
+            &[
+                ("action", "release.install"),
+                ("target_type", "ServiceRelease"),
+                ("target_id", "gateway"),
+            ],
+        ))
+        .expect("unsupported result");
+    assert_eq!(result.status, "UNSUPPORTED");
+    assert_eq!(
+        result.capability_status,
+        ActionCapabilityStatus::Unsupported
+    );
+    assert!(result.changed_objects.is_empty());
+    assert_eq!(
+        store
+            .operation("op-unsupported-operation-create")
+            .expect("stored unsupported operation")
+            .status,
+        OperationStatus::Failed
+    );
+}
+
+#[test]
 fn action_result_marks_unsupported_without_success() {
+    // service.enable/disable 仍未接通真实执行链（只跑一次驱动动作，不回写运行状态），
+    // 用它守住「未接通的动作绝不报成功」这条底线；start/stop/restart/delete 已接入
+    // RuntimePipeline，改由下面的 service_start_reports_failure_* 用例覆盖。
     let mut store = dispatcher_store_with_services();
     let result = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
         .dispatch(request(
-            "service.start",
-            "op-unsupported-start",
+            "service.enable",
+            "op-unsupported-enable",
             &[("service_id", "gateway")],
         ))
         .expect("unsupported result");
@@ -8652,12 +10027,12 @@ fn action_result_marks_unsupported_without_success() {
     assert_eq!(result.status, "UNSUPPORTED");
     assert!(!result.message.contains("成功"));
     let operation = store
-        .operation("op-unsupported-start")
+        .operation("op-unsupported-enable")
         .expect("stored unsupported operation");
     assert_eq!(operation.status, OperationStatus::Failed);
     assert!(
         store
-            .operation_logs("op-unsupported-start")
+            .operation_logs("op-unsupported-enable")
             .iter()
             .any(|record| {
                 record.level == "warn"
@@ -8668,6 +10043,78 @@ fn action_result_marks_unsupported_without_success() {
                         .and_then(serde_json::Value::as_str)
                         == Some("UNSUPPORTED")
             })
+    );
+}
+
+#[test]
+fn service_start_reports_failure_instead_of_fake_success_or_unsupported() {
+    let mut store = dispatcher_store_with_services();
+
+    // 服务没装进 store：executor 在 ensure_service_exists 就拿到 Dependency 错误。
+    let missing =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "service.start",
+                "op-service-start-missing",
+                &[("service_id", "not-installed"), ("confirm", "true")],
+            ))
+            .expect("dispatch 应返回失败结果而不是 Err");
+    assert_eq!(
+        missing.capability_status,
+        ActionCapabilityStatus::RuntimePipeline,
+        "service.start 已接通真实执行链，失败也不能伪装成 UNSUPPORTED"
+    );
+    assert_eq!(missing.status, "FAILED");
+    assert!(
+        missing.error.contains("not-installed"),
+        "错误信息必须点名缺失的服务: {}",
+        missing.error
+    );
+    let operation = store
+        .operation("op-service-start-missing")
+        .expect("stored operation");
+    assert_eq!(operation.status, OperationStatus::Failed);
+
+    // 服务已登记但 container 驱动未开启真实执行：只会拿到 PLANNED 的固定命令，
+    // ensure_driver_result_succeeded 必须把它判成失败，而不是让 Operation 假成功。
+    store
+        .upsert_host_service(HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: "gateway".to_string(),
+            version: "0.1.0".to_string(),
+            status: "stopped".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put host service");
+    let blocked =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(request(
+                "service.start",
+                "op-service-start-blocked",
+                &[("service_id", "gateway"), ("confirm", "true")],
+            ))
+            .expect("dispatch 应返回失败结果而不是 Err");
+    assert_eq!(
+        blocked.capability_status,
+        ActionCapabilityStatus::RuntimePipeline
+    );
+    assert_eq!(blocked.status, "FAILED");
+    assert_eq!(
+        store
+            .operation("op-service-start-blocked")
+            .expect("stored operation")
+            .status,
+        OperationStatus::Failed
+    );
+    assert!(
+        store
+            .host_services()
+            .iter()
+            .all(|host_service| host_service.status == "stopped"),
+        "驱动没有真正启动服务时不得把 HostService 回写成 running"
     );
 }
 
@@ -8788,6 +10235,47 @@ fn endpoint_create_update_delete_and_health_write_store() {
         Some("updated")
     );
 
+    OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "endpoint.update",
+            "op-endpoint-partial-update-console",
+            &[
+                ("endpoint", "127.0.0.1:8080:gateway"),
+                ("note", "只更新备注"),
+                ("confirm", "true"),
+            ],
+        ))
+        .expect("partial endpoint update");
+    let partially_updated = store
+        .endpoint("127.0.0.1:8080:gateway")
+        .expect("partially updated endpoint");
+    assert_eq!(partially_updated.protocol, "tcp");
+    assert_eq!(partially_updated.health_path, "/ready");
+    assert_eq!(partially_updated.display_name, "Gateway TCP");
+    assert_eq!(partially_updated.note, "只更新备注");
+    assert_eq!(
+        partially_updated
+            .config
+            .get("region")
+            .and_then(serde_json::Value::as_str),
+        Some("updated"),
+        "PATCH omitting config must preserve the stored endpoint config"
+    );
+    OperationExecutor::new(&mut store)
+        .rollback("op-endpoint-partial-update-console")
+        .expect("partial endpoint update rollback");
+    let restored_after_update = store
+        .endpoint("127.0.0.1:8080:gateway")
+        .expect("endpoint restored after update rollback");
+    assert_eq!(restored_after_update.note, "更新后的 Endpoint");
+    assert_eq!(
+        restored_after_update
+            .config
+            .get("region")
+            .and_then(serde_json::Value::as_str),
+        Some("updated")
+    );
+
     let health = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
         .dispatch(request(
             "endpoint.health.check",
@@ -8817,6 +10305,21 @@ fn endpoint_create_update_delete_and_health_write_store() {
         ActionCapabilityStatus::StoreBacked
     );
     assert!(store.endpoint("127.0.0.1:8080:gateway").is_none());
+    OperationExecutor::new(&mut store)
+        .rollback("op-endpoint-delete-console")
+        .expect("endpoint delete rollback");
+    let restored_endpoint = store
+        .endpoint("127.0.0.1:8080:gateway")
+        .expect("deleted endpoint should be restored");
+    assert_eq!(restored_endpoint.protocol, "tcp");
+    assert_eq!(restored_endpoint.health, "unreachable");
+    assert_eq!(
+        restored_endpoint
+            .config
+            .get("region")
+            .and_then(serde_json::Value::as_str),
+        Some("updated")
+    );
 }
 
 #[test]
@@ -8907,6 +10410,67 @@ fn link_create_update_delete_and_health_write_store() {
             .auth_mode,
         "none"
     );
+    let updated_link = store
+        .get_link("127.0.0.1:8080:gateway", "127.0.0.1:8001:auth-service")
+        .expect("get updated link")
+        .expect("updated link");
+    assert_eq!(updated_link.config_ref, "config://gateway/auth-service");
+    assert_eq!(updated_link.secret_ref, "secret://gateway/auth-service");
+    assert_eq!(
+        updated_link
+            .policy
+            .get("required")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "PATCH omitting policy must preserve the stored link policy"
+    );
+
+    OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "link.update",
+            "op-link-partial-update-console",
+            &[
+                ("source_endpoint", "127.0.0.1:8080:gateway"),
+                ("target_endpoint", "127.0.0.1:8001:auth-service"),
+                ("scope", "partial-update"),
+                ("confirm", "true"),
+            ],
+        ))
+        .expect("partial link update");
+    let partially_updated_link = store
+        .get_link("127.0.0.1:8080:gateway", "127.0.0.1:8001:auth-service")
+        .expect("get partially updated link")
+        .expect("partially updated link");
+    assert_eq!(partially_updated_link.protocol, "http");
+    assert_eq!(partially_updated_link.auth_mode, "none");
+    assert_eq!(partially_updated_link.scope, "partial-update");
+    assert_eq!(
+        partially_updated_link.config_ref,
+        "config://gateway/auth-service"
+    );
+    assert_eq!(
+        partially_updated_link.secret_ref,
+        "secret://gateway/auth-service"
+    );
+    assert_eq!(
+        partially_updated_link
+            .policy
+            .get("required")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    OperationExecutor::new(&mut store)
+        .rollback("op-link-partial-update-console")
+        .expect("partial link update rollback");
+    assert_eq!(
+        store
+            .get_link("127.0.0.1:8080:gateway", "127.0.0.1:8001:auth-service")
+            .expect("get restored link")
+            .expect("restored link")
+            .scope,
+        "",
+        "link.update rollback must restore the exact previous metadata"
+    );
 
     let health = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
         .dispatch(request(
@@ -8926,7 +10490,7 @@ fn link_create_update_delete_and_health_write_store() {
             .expect("link")
             .health,
         "degraded",
-        "empty scope/auth policy should not be reported as fake healthy"
+        "rollback restored the empty scope, so health must not report fake success"
     );
 
     OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
@@ -8946,6 +10510,16 @@ fn link_create_update_delete_and_health_write_store() {
             .expect("get link")
             .is_none()
     );
+    OperationExecutor::new(&mut store)
+        .rollback("op-link-delete-console")
+        .expect("link delete rollback");
+    let restored_link = store
+        .get_link("127.0.0.1:8080:gateway", "127.0.0.1:8001:auth-service")
+        .expect("get restored deleted link")
+        .expect("deleted link should be restored");
+    assert_eq!(restored_link.config_ref, "config://gateway/auth-service");
+    assert_eq!(restored_link.secret_ref, "secret://gateway/auth-service");
+    assert_eq!(restored_link.health, "degraded");
 }
 
 #[derive(Clone, Copy)]
@@ -9346,7 +10920,7 @@ fn action_console_keeps_memory_store_changes_visible_after_refresh() {
         view.endpoints
             .iter()
             .any(|endpoint| endpoint.endpoint == "127.0.0.1:19000:gateway"),
-        "Memory store must keep GUI/TUI action results visible for the session"
+        "Memory store must keep Web/TUI action results visible for the session"
     );
     let context = console.context().expect("context");
     assert!(
@@ -9514,7 +11088,7 @@ fn compose_separates_orchestrator_and_service_databases() {
             .unwrap_or_else(|| panic!("compose missing service {database_service}"));
         let text = yaml_text(service);
         assert!(
-            text.contains(&format!("POSTGRES_DB: ${{")) && text.contains(database_name),
+            text.contains("POSTGRES_DB: ${") && text.contains(database_name),
             "{database_service} must initialize its own service database {database_name}"
         );
         assert!(
@@ -9817,6 +11391,7 @@ fn database_write_plan_maps_store_objects_to_formal_tables() {
             protocol: "http".to_string(),
             auth_mode: "internal".to_string(),
             scope: "api".to_string(),
+            enabled: true,
             health: "ok".to_string(),
             latency_ms: Some(1),
             config_ref: String::new(),
@@ -10213,6 +11788,7 @@ fn local_process_lifecycle_failure_is_persisted_by_executor() {
     store.put_operation(operation).expect("put operation");
 
     let failed = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
         .apply("op-local-start")
         .expect_err("local process lifecycle requires release runtime");
     assert!(
@@ -10234,6 +11810,287 @@ fn local_process_lifecycle_failure_is_persisted_by_executor() {
             .any(|record| record.level == "error"
                 && record.message.contains("operation service.start failed")),
         "unsupported lifecycle should be visible in operation logs"
+    );
+}
+
+#[test]
+fn local_process_driver_refuses_to_overwrite_existing_pid_file() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+    let state_dir = dir.path().join("state");
+    fs::create_dir_all(&state_dir).expect("create local process state dir");
+    let pid_file = state_dir.join("pid-guard.pid");
+    fs::write(&pid_file, "4294967294").expect("seed pid file");
+
+    let mut service = valid_service();
+    service.id = "pid-guard".to_string();
+    service.runtime.mode = RuntimeMode::LocalProcess;
+    service.runtime.driver = "local-process".to_string();
+    let mut release = valid_release_for_service(&service);
+    release.runtime.kind = "local-process".to_string();
+    if cfg!(windows) {
+        release.runtime.command = "cmd".to_string();
+        release.runtime.args = vec!["/c".to_string(), "exit".to_string()];
+    } else {
+        release.runtime.command = "sh".to_string();
+        release.runtime.args = vec!["-c".to_string(), "exit 0".to_string()];
+    }
+
+    let err = LocalProcessDriver::new()
+        .execute(&DriverRequest {
+            action: "service.start".to_string(),
+            service_id: service.id,
+            endpoint: String::new(),
+            link: None,
+            log_source: None,
+            release_runtime: Some(release.runtime),
+        })
+        .expect_err("a second start must not overwrite the tracked process");
+    assert!(err.to_string().contains("already has a pid file"));
+    assert_eq!(
+        fs::read_to_string(pid_file).expect("pid file remains"),
+        "4294967294"
+    );
+}
+
+#[test]
+fn concurrent_local_process_start_reserves_pid_file_atomically() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+    let mut service = valid_service();
+    service.id = "concurrent-pid-guard".to_string();
+    service.runtime.mode = RuntimeMode::LocalProcess;
+    service.runtime.driver = "local-process".to_string();
+    let mut release = valid_release_for_service(&service);
+    release.runtime.kind = "local-process".to_string();
+    if cfg!(windows) {
+        release.runtime.command = "powershell".to_string();
+        release.runtime.args = vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Start-Sleep -Seconds 30".to_string(),
+        ];
+    } else {
+        release.runtime.command = "sleep".to_string();
+        release.runtime.args = vec!["30".to_string()];
+    }
+    let request = DriverRequest {
+        action: "service.start".to_string(),
+        service_id: service.id.clone(),
+        endpoint: String::new(),
+        link: None,
+        log_source: None,
+        release_runtime: Some(release.runtime.clone()),
+    };
+    let mut cleanup = LocalProcessCleanup {
+        service_id: service.id,
+        endpoint: String::new(),
+        runtime: release.runtime,
+        active: true,
+    };
+    let barrier = Arc::new(Barrier::new(3));
+    let handles = (0..2)
+        .map(|_| {
+            let barrier = barrier.clone();
+            let request = request.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                LocalProcessDriver::new().execute(&request)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("start thread"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "exactly one concurrent start may own the PID reservation"
+    );
+    assert_eq!(
+        results.iter().filter(|result| result.is_err()).count(),
+        1,
+        "the competing start must be rejected"
+    );
+    assert!(
+        results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .any(|err| err.to_string().contains("already has a pid file"))
+    );
+
+    let stopped = LocalProcessDriver::new()
+        .execute(&DriverRequest {
+            action: "service.stop".to_string(),
+            ..request
+        })
+        .expect("stop the winning process");
+    assert_eq!(stopped.status, "SUCCEEDED");
+    cleanup.disarm();
+}
+
+#[test]
+fn release_delete_rejects_deployed_version_without_touching_runtime_or_registry() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+    let state_dir = dir.path().join("state");
+    fs::create_dir_all(&state_dir).expect("create local process state dir");
+    let pid_file = state_dir.join("delete-guard.pid");
+    fs::write(&pid_file, "4294967294").expect("seed pid file");
+
+    let mut service = valid_service();
+    service.id = "delete-guard".to_string();
+    service.name = "Delete Guard".to_string();
+    service.runtime.mode = RuntimeMode::LocalProcess;
+    service.runtime.driver = "local-process".to_string();
+    let mut release = valid_release_for_service(&service);
+    release.runtime.kind = "local-process".to_string();
+    if cfg!(windows) {
+        release.runtime.command = "cmd".to_string();
+        release.runtime.args = vec!["/c".to_string(), "exit".to_string()];
+    } else {
+        release.runtime.command = "sh".to_string();
+        release.runtime.args = vec!["-c".to_string(), "exit 0".to_string()];
+    }
+    let release_record = ServiceRelease {
+        service_name: release.service_name.clone(),
+        version: release.version.clone(),
+        release_url: release.source.url.clone(),
+        manifest: serde_json::to_value(&release).expect("release manifest"),
+        checksum: String::new(),
+        created_at: String::new(),
+    };
+    let operation =
+        release_delete_operation("op-delete-guard", &service.id, Some(&service.version))
+            .and_then(|operation| confirm_operation(&operation))
+            .expect("confirmed release delete");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store.put_service(service.clone()).expect("put service");
+    store
+        .upsert_service_release(release_record)
+        .expect("put release");
+    store
+        .upsert_host_service(HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: service.id.clone(),
+            version: service.version.clone(),
+            status: "running".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put running host service");
+    store.put_operation(operation).expect("put operation");
+
+    let err = OperationExecutor::new(&mut store)
+        .apply("op-delete-guard")
+        .expect_err("release.delete must reject a version referenced by a deployment");
+    assert!(err.to_string().contains("referenced by a deployment"));
+    assert!(
+        pid_file.exists(),
+        "a rejected release delete must not stop runtime"
+    );
+    assert!(
+        store
+            .get_service_release(&service.id, &service.version)
+            .expect("read release")
+            .is_some(),
+        "a rejected release delete must not remove registry state"
+    );
+}
+
+#[test]
+fn running_fixed_runtime_upgrade_requires_driver_authorization() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+    let state_dir = dir.path().join("state");
+    fs::create_dir_all(&state_dir).expect("create local process state dir");
+    let pid_file = state_dir.join("upgrade-auth-guard.pid");
+    fs::write(&pid_file, "4294967294").expect("seed pid file");
+
+    let mut old_service = valid_service();
+    old_service.id = "upgrade-auth-guard".to_string();
+    old_service.name = "Upgrade Auth Guard".to_string();
+    old_service.version = "1.0.0".to_string();
+    old_service.runtime.mode = RuntimeMode::LocalProcess;
+    old_service.runtime.driver = "local-process".to_string();
+    let mut old_release = valid_release_for_service(&old_service);
+    old_release.version = "1.0.0".to_string();
+    old_release.runtime.kind = "local-process".to_string();
+    if cfg!(windows) {
+        old_release.runtime.command = "cmd".to_string();
+        old_release.runtime.args = vec!["/c".to_string(), "exit".to_string()];
+    } else {
+        old_release.runtime.command = "sh".to_string();
+        old_release.runtime.args = vec!["-c".to_string(), "exit 0".to_string()];
+    }
+    let mut new_service = old_service.clone();
+    new_service.version = "2.0.0".to_string();
+    let mut new_release = old_release.clone();
+    new_release.version = "2.0.0".to_string();
+    let operation = release_install_operation_with_release(
+        "op-upgrade-auth-guard",
+        &new_service,
+        Some(&new_release),
+        &[],
+        "127.0.0.1",
+        None,
+        serde_json::json!({}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed upgrade");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store
+        .put_service(old_service.clone())
+        .expect("put old service");
+    store
+        .upsert_service_release(ServiceRelease {
+            service_name: old_release.service_name.clone(),
+            version: old_release.version.clone(),
+            release_url: old_release.source.url.clone(),
+            manifest: serde_json::to_value(&old_release).expect("old release manifest"),
+            checksum: String::new(),
+            created_at: String::new(),
+        })
+        .expect("put old release");
+    store
+        .upsert_host_service(HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: old_service.id.clone(),
+            version: old_service.version.clone(),
+            status: "running".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put running deployment");
+    store.put_operation(operation).expect("put operation");
+
+    let err = OperationExecutor::new(&mut store)
+        .apply("op-upgrade-auth-guard")
+        .expect_err("a running fixed runtime upgrade must require authorization");
+    assert!(err.to_string().contains("execute_service_driver=true"));
+    assert!(
+        pid_file.exists(),
+        "blocked upgrade must preserve the old PID"
+    );
+    assert_eq!(
+        store
+            .get_service(&old_service.id)
+            .expect("read service")
+            .expect("old service remains")
+            .version,
+        "1.0.0"
     );
 }
 
@@ -10266,7 +12123,7 @@ fn fixed_executor_drivers_reject_arbitrary_actions() {
     assert!(command.contains(&"restart".to_string()));
     assert!(compose.command_for("service.shell", "gateway").is_err());
 
-    let external = ExternalEndpointDriver::default();
+    let external = ExternalEndpointDriver;
     let health = driver_request_for_endpoint("endpoint.health.check", &endpoint);
     assert_eq!(
         external.execute(&health).expect("external health").status,
@@ -10280,6 +12137,7 @@ fn fixed_executor_drivers_reject_arbitrary_actions() {
         protocol: "http".to_string(),
         auth_mode: "none".to_string(),
         scope: "internal".to_string(),
+        enabled: true,
         health: "unknown".to_string(),
         latency_ms: None,
         config_ref: String::new(),
@@ -10453,18 +12311,191 @@ fn assert_endpoint_unreachable(host: &str, port: u16) {
     panic!("endpoint {host}:{port} should be unreachable after rollback");
 }
 
+struct LocalProcessCleanup {
+    service_id: String,
+    endpoint: String,
+    runtime: ReleaseRuntimeDecl,
+    active: bool,
+}
+
+#[derive(Debug, Default, Clone)]
+struct HealthyEndpointProbe;
+
+impl EndpointProbe for HealthyEndpointProbe {
+    fn probe(&self, endpoint: &Endpoint) -> Result<EndpointHealthResult> {
+        Ok(EndpointHealthResult {
+            endpoint: endpoint.endpoint.clone(),
+            health: "healthy".to_string(),
+            reachable: true,
+            latency_ms: Some(0),
+            message: "test probe reports the spawned runtime healthy".to_string(),
+        })
+    }
+}
+
+impl LocalProcessCleanup {
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for LocalProcessCleanup {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let _ = LocalProcessDriver::new().execute(&DriverRequest {
+            action: "service.stop".to_string(),
+            service_id: self.service_id.clone(),
+            endpoint: self.endpoint.clone(),
+            link: None,
+            log_source: None,
+            release_runtime: Some(self.runtime.clone()),
+        });
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn node_dispatch_local_process_executes_release_manifest_on_target_node() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _local_process_env = LocalProcessTestEnv::configure(dir.path());
+    let previous_execute = std::env::var("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER").ok();
+    let previous_host_ip = std::env::var("ORCHESTRATOR_NODE_HOST_IP").ok();
+    unsafe {
+        std::env::set_var("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER", "true");
+        std::env::set_var("ORCHESTRATOR_NODE_HOST_IP", "127.0.0.1");
+    }
+
+    let port = free_local_tcp_port();
+    let endpoint_id = format!("127.0.0.1:{port}:node-local-demo");
+    let mut service = valid_service();
+    service.id = "node-local-demo".to_string();
+    service.name = "Node Local Demo".to_string();
+    service.endpoint.default_port = port;
+    service.runtime.mode = RuntimeMode::LocalProcess;
+    service.runtime.driver = "local-process".to_string();
+    let script = format!(
+        "$listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse('127.0.0.1'),{port});$listener.Start();while($true){{$client=$listener.AcceptTcpClient();$stream=$client.GetStream();$buffer=New-Object byte[] 1024;$null=$stream.Read($buffer,0,$buffer.Length);$bytes=[Text.Encoding]::ASCII.GetBytes(\"HTTP/1.1 200 OK`r`nContent-Length:2`r`n`r`nok\");$stream.Write($bytes,0,$bytes.Length);$client.Close();}}"
+    );
+    let mut release = valid_release_for_service(&service);
+    release.runtime = ReleaseRuntimeDecl {
+        kind: "local-process".to_string(),
+        image: String::new(),
+        binary: String::new(),
+        system_service: String::new(),
+        command: "powershell".to_string(),
+        args: vec![
+            "-NoProfile".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-Command".to_string(),
+            script,
+        ],
+        working_dir: String::new(),
+        env: BTreeMap::new(),
+    };
+    validate_service_release(&release).expect("node local-process release validates");
+    let mut cleanup = LocalProcessCleanup {
+        service_id: service.id.clone(),
+        endpoint: endpoint_id.clone(),
+        runtime: release.runtime.clone(),
+        active: true,
+    };
+    let request = NodeServiceDispatchRequest {
+        operation_id: "op-node-local-process".to_string(),
+        execute_service_driver: true,
+        service: service.clone(),
+        release: Some(release.clone()),
+        host_service: HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: service.id.clone(),
+            version: service.version.clone(),
+            status: "dispatching".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({"source": "control-plane"}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+        endpoint: Endpoint {
+            endpoint: endpoint_id.clone(),
+            service_id: service.id.clone(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "unknown".to_string(),
+            reachable: false,
+            display_name: service.name.clone(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+        rendered_config: serde_json::json!({}),
+        package_load: None,
+    };
+    let mut console =
+        OrchestratorActionConsole::load_with_database_url(repo_root(), None).expect("node console");
+    let result = console
+        .accept_node_service_install(request)
+        .expect("node local-process install");
+
+    unsafe {
+        match previous_execute {
+            Some(value) => std::env::set_var("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER", value),
+            None => std::env::remove_var("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER"),
+        }
+        match previous_host_ip {
+            Some(value) => std::env::set_var("ORCHESTRATOR_NODE_HOST_IP", value),
+            None => std::env::remove_var("ORCHESTRATOR_NODE_HOST_IP"),
+        }
+    }
+
+    assert!(result.accepted);
+    assert!(result.driver_executed);
+    assert_eq!(result.driver_status, "SUCCEEDED");
+    assert_eq!(result.endpoint, endpoint_id);
+    assert!(
+        console
+            .endpoints()
+            .expect("node endpoints")
+            .iter()
+            .any(|endpoint| endpoint.service_id == "node-local-demo" && endpoint.reachable)
+    );
+    let operation = console
+        .operation("op-node-local-process")
+        .expect("node operation")
+        .expect("stored node operation");
+    assert_eq!(
+        operation
+            .request
+            .get("release_manifest")
+            .and_then(|manifest| manifest.get("runtime"))
+            .and_then(|runtime| runtime.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        Some("local-process")
+    );
+
+    LocalProcessDriver::new()
+        .execute(&DriverRequest {
+            action: "service.stop".to_string(),
+            service_id: service.id,
+            endpoint: result.endpoint,
+            link: None,
+            log_source: None,
+            release_runtime: Some(release.runtime),
+        })
+        .expect("stop node local process");
+    cleanup.disarm();
+}
+
 #[cfg(windows)]
 #[test]
 fn release_install_local_process_starts_service_and_rollback_stops_it() {
     let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
-    let previous_root = std::env::var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT").ok();
-    let previous_state = std::env::var("OJOS_LOCAL_PROCESS_STATE_DIR").ok();
     let dir = tempdir().expect("tempdir");
     let state_dir = dir.path().join("state");
-    unsafe {
-        std::env::set_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT", dir.path());
-        std::env::set_var("OJOS_LOCAL_PROCESS_STATE_DIR", &state_dir);
-    }
+    let _env = LocalProcessTestEnv::configure(dir.path());
 
     let port = free_local_tcp_port();
     let endpoint_id = format!("127.0.0.1:{port}:local-demo");
@@ -10526,6 +12557,12 @@ fn release_install_local_process_starts_service_and_rollback_stops_it() {
         observability: ReleaseObservabilityDecl::default(),
     };
     validate_service_release(&release).expect("local-process release validates");
+    let mut process_cleanup = LocalProcessCleanup {
+        service_id: service.id.clone(),
+        endpoint: endpoint_id.clone(),
+        runtime: release.runtime.clone(),
+        active: true,
+    };
     let operation = release_install_operation_with_release(
         "op-local-process-release-install",
         &service,
@@ -10573,6 +12610,7 @@ fn release_install_local_process_starts_service_and_rollback_stops_it() {
         .expect("driver log should record pid");
 
     OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
         .rollback("op-local-process-release-install")
         .expect("rollback should stop local process");
     assert!(
@@ -10580,17 +12618,302 @@ fn release_install_local_process_starts_service_and_rollback_stops_it() {
         "rollback should remove local process pid file"
     );
     assert_endpoint_unreachable("127.0.0.1", port);
+    process_cleanup.disarm();
+}
 
-    unsafe {
-        match previous_root {
-            Some(value) => std::env::set_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT", value),
-            None => std::env::remove_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT"),
-        }
-        match previous_state {
-            Some(value) => std::env::set_var("OJOS_LOCAL_PROCESS_STATE_DIR", value),
-            None => std::env::remove_var("OJOS_LOCAL_PROCESS_STATE_DIR"),
-        }
+#[test]
+fn authorized_release_upgrade_and_rollback_restore_running_runtime() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+
+    let mut old_service = valid_service();
+    old_service.id = "upgrade-running".to_string();
+    old_service.name = "Upgrade Running".to_string();
+    old_service.version = "1.0.0".to_string();
+    old_service.runtime.mode = RuntimeMode::LocalProcess;
+    old_service.runtime.driver = "local-process".to_string();
+    let mut old_release = valid_release_for_service(&old_service);
+    old_release.version = "1.0.0".to_string();
+    old_release.runtime.kind = "local-process".to_string();
+    if cfg!(windows) {
+        old_release.runtime.command = "powershell".to_string();
+        old_release.runtime.args = vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Start-Sleep -Seconds 30".to_string(),
+        ];
+    } else {
+        old_release.runtime.command = "sleep".to_string();
+        old_release.runtime.args = vec!["30".to_string()];
     }
+    let endpoint = "127.0.0.1:18080:upgrade-running".to_string();
+    let driver = LocalProcessDriver::new();
+    let old_started = driver
+        .execute(&DriverRequest {
+            action: "service.start".to_string(),
+            service_id: old_service.id.clone(),
+            endpoint: endpoint.clone(),
+            link: None,
+            log_source: None,
+            release_runtime: Some(old_release.runtime.clone()),
+        })
+        .expect("start old runtime");
+    let old_pid = old_started.pid.expect("old runtime pid");
+    let mut cleanup = LocalProcessCleanup {
+        service_id: old_service.id.clone(),
+        endpoint: endpoint.clone(),
+        runtime: old_release.runtime.clone(),
+        active: true,
+    };
+
+    let mut new_service = old_service.clone();
+    new_service.version = "2.0.0".to_string();
+    let mut new_release = old_release.clone();
+    new_release.version = "2.0.0".to_string();
+    let operation = release_install_operation_with_release(
+        "op-upgrade-running",
+        &new_service,
+        Some(&new_release),
+        &[],
+        "127.0.0.1",
+        Some(&endpoint),
+        serde_json::json!({"execute_service_driver": true}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed running upgrade");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store
+        .put_service(old_service.clone())
+        .expect("put old service");
+    store
+        .upsert_service_release(ServiceRelease {
+            service_name: old_release.service_name.clone(),
+            version: old_release.version.clone(),
+            release_url: old_release.source.url.clone(),
+            manifest: serde_json::to_value(&old_release).expect("old release manifest"),
+            checksum: String::new(),
+            created_at: String::new(),
+        })
+        .expect("put old release");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: endpoint.clone(),
+            service_id: old_service.id.clone(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: old_service.name.clone(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put old endpoint");
+    store
+        .upsert_host_service(HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: old_service.id.clone(),
+            version: old_service.version.clone(),
+            status: "running".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put running deployment");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_endpoint_probe(&mut store, HealthyEndpointProbe)
+        .with_service_driver_execution_enabled()
+        .apply("op-upgrade-running")
+        .expect("authorized upgrade");
+    let new_pid = fs::read_to_string(dir.path().join("state/upgrade-running.pid"))
+        .expect("new runtime pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse new pid");
+    assert_ne!(new_pid, old_pid, "upgrade must replace the old runtime");
+    assert_eq!(
+        store
+            .get_service(&old_service.id)
+            .expect("read upgraded service")
+            .expect("upgraded service")
+            .version,
+        "2.0.0"
+    );
+
+    OperationExecutor::with_endpoint_probe(&mut store, HealthyEndpointProbe)
+        .with_service_driver_execution_enabled()
+        .rollback("op-upgrade-running")
+        .expect("rollback running upgrade");
+    let restored_pid = fs::read_to_string(dir.path().join("state/upgrade-running.pid"))
+        .expect("restored runtime pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse restored pid");
+    assert_ne!(
+        restored_pid, new_pid,
+        "rollback must stop the new runtime and start the saved one"
+    );
+    assert_eq!(
+        store
+            .get_service(&old_service.id)
+            .expect("read restored service")
+            .expect("restored service")
+            .version,
+        "1.0.0"
+    );
+    assert_eq!(
+        store
+            .get_host_service("127.0.0.1", &old_service.id)
+            .expect("read restored deployment")
+            .expect("restored deployment")
+            .status,
+        "running"
+    );
+
+    driver
+        .execute(&DriverRequest {
+            action: "service.stop".to_string(),
+            service_id: old_service.id,
+            endpoint,
+            link: None,
+            log_source: None,
+            release_runtime: Some(old_release.runtime),
+        })
+        .expect("stop restored runtime");
+    cleanup.disarm();
+}
+
+#[test]
+fn authorized_release_upgrade_rollback_keeps_previous_stopped_runtime_stopped() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+
+    let mut old_service = valid_service();
+    old_service.id = "upgrade-stopped".to_string();
+    old_service.name = "Upgrade Stopped".to_string();
+    old_service.version = "1.0.0".to_string();
+    old_service.runtime.mode = RuntimeMode::LocalProcess;
+    old_service.runtime.driver = "local-process".to_string();
+    let mut old_release = valid_release_for_service(&old_service);
+    old_release.version = "1.0.0".to_string();
+    old_release.runtime.kind = "local-process".to_string();
+    if cfg!(windows) {
+        old_release.runtime.command = "powershell".to_string();
+        old_release.runtime.args = vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Start-Sleep -Seconds 30".to_string(),
+        ];
+    } else {
+        old_release.runtime.command = "sleep".to_string();
+        old_release.runtime.args = vec!["30".to_string()];
+    }
+    let mut new_service = old_service.clone();
+    new_service.version = "2.0.0".to_string();
+    let mut new_release = old_release.clone();
+    new_release.version = "2.0.0".to_string();
+    let endpoint = "127.0.0.1:18081:upgrade-stopped".to_string();
+    let mut cleanup = LocalProcessCleanup {
+        service_id: old_service.id.clone(),
+        endpoint: endpoint.clone(),
+        runtime: new_release.runtime.clone(),
+        active: true,
+    };
+    let operation = release_install_operation_with_release(
+        "op-upgrade-stopped",
+        &new_service,
+        Some(&new_release),
+        &[],
+        "127.0.0.1",
+        Some(&endpoint),
+        serde_json::json!({"execute_service_driver": true}),
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed stopped upgrade");
+
+    let mut store = MemoryOrchestratorStore::new();
+    store
+        .put_service(old_service.clone())
+        .expect("put old service");
+    store
+        .upsert_service_release(ServiceRelease {
+            service_name: old_release.service_name.clone(),
+            version: old_release.version.clone(),
+            release_url: old_release.source.url.clone(),
+            manifest: serde_json::to_value(&old_release).expect("old release manifest"),
+            checksum: String::new(),
+            created_at: String::new(),
+        })
+        .expect("put old release");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: endpoint.clone(),
+            service_id: old_service.id.clone(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "stopped".to_string(),
+            reachable: false,
+            display_name: old_service.name.clone(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put old endpoint");
+    store
+        .upsert_host_service(HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: old_service.id.clone(),
+            version: old_service.version.clone(),
+            status: "stopped".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put stopped deployment");
+    store.put_operation(operation).expect("put operation");
+
+    OperationExecutor::with_endpoint_probe(&mut store, HealthyEndpointProbe)
+        .with_service_driver_execution_enabled()
+        .apply("op-upgrade-stopped")
+        .expect("authorized upgrade");
+    assert!(
+        dir.path().join("state/upgrade-stopped.pid").exists(),
+        "the new version should be running after apply"
+    );
+
+    OperationExecutor::with_endpoint_probe(&mut store, HealthyEndpointProbe)
+        .with_service_driver_execution_enabled()
+        .rollback("op-upgrade-stopped")
+        .expect("rollback stopped upgrade");
+    assert!(
+        !dir.path().join("state/upgrade-stopped.pid").exists(),
+        "rollback must not restart a runtime that was previously stopped"
+    );
+    assert_eq!(
+        store
+            .get_host_service("127.0.0.1", &old_service.id)
+            .expect("read restored deployment")
+            .expect("restored deployment")
+            .status,
+        "stopped"
+    );
+    assert_eq!(
+        store
+            .get_service(&old_service.id)
+            .expect("read restored service")
+            .expect("restored service")
+            .version,
+        "1.0.0"
+    );
+    cleanup.disarm();
 }
 
 #[test]
@@ -10638,6 +12961,7 @@ fn unsupported_driver_action_writes_operation_log() {
     store.put_operation(operation).expect("put operation");
 
     let err = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
         .apply("op-unsupported-driver")
         .expect_err("unsupported driver action should fail operation");
     assert!(
@@ -10749,7 +13073,7 @@ fn collect_lossy_decoding_markers(root: &Path, dir: &Path, offenders: &mut Vec<S
             .any(|marker| source.contains(marker))
         {
             offenders.push(
-                path.strip_prefix(&root)
+                path.strip_prefix(root)
                     .expect("source file should stay below root")
                     .to_str()
                     .expect("source path must be UTF-8")
@@ -10798,6 +13122,7 @@ fn endpoint_and_link_health_checks_return_formal_statuses() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: "api".to_string(),
+        enabled: true,
         health: "unknown".to_string(),
         latency_ms: None,
         config_ref: String::new(),
@@ -10905,6 +13230,7 @@ fn operation_executor_persists_link_health_from_target_probe() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: "api".to_string(),
+        enabled: true,
         health: "healthy".to_string(),
         latency_ms: Some(1),
         config_ref: String::new(),
@@ -11157,7 +13483,7 @@ fn tcp_probe_uses_ip_port_only_for_http_connection() {
     assert!(
         captured.lines().any(|line| {
             line.split_once(':').is_some_and(|(name, value)| {
-                name.eq_ignore_ascii_case("host") && value.trim() == socket_addr.to_string()
+                name.eq_ignore_ascii_case("host") && value.trim() == socket_addr
             })
         }),
         "Host header must be ip:port, not ip:port:service-name"
@@ -11189,6 +13515,7 @@ fn link_health_requires_existing_endpoints() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: "api".to_string(),
+        enabled: true,
         health: "unknown".to_string(),
         latency_ms: None,
         config_ref: String::new(),
@@ -11248,6 +13575,7 @@ fn link_health_uses_target_reachability() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: "api".to_string(),
+        enabled: true,
         health: "unknown".to_string(),
         latency_ms: None,
         config_ref: String::new(),
@@ -11314,6 +13642,7 @@ fn topology_reflects_endpoint_link_health() {
             protocol: "http".to_string(),
             auth_mode: "internal".to_string(),
             scope: "api".to_string(),
+            enabled: true,
             health: "unreachable".to_string(),
             latency_ms: None,
             config_ref: String::new(),
@@ -11342,6 +13671,346 @@ fn topology_reflects_endpoint_link_health() {
     );
 }
 
+const LINK_TOGGLE_SOURCE: &str = "127.0.0.1:18140:gateway";
+const LINK_TOGGLE_TARGET: &str = "127.0.0.1:18141:problem-service";
+
+/// 构造一套 gateway -> problem-service 的最小 Service/Endpoint/Link 状态，
+/// 供 link.enable / link.disable 相关测试复用。
+fn link_toggle_store(enabled: bool, link_health: &str) -> MemoryOrchestratorStore {
+    let mut store = dispatcher_store_with_services();
+    store
+        .put_endpoint(Endpoint {
+            endpoint: LINK_TOGGLE_SOURCE.to_string(),
+            service_id: "gateway".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: "Gateway".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put source endpoint");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: LINK_TOGGLE_TARGET.to_string(),
+            service_id: "problem-service".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "unreachable".to_string(),
+            reachable: false,
+            display_name: "Problem API".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put target endpoint");
+    store
+        .put_link(Link {
+            source_endpoint: LINK_TOGGLE_SOURCE.to_string(),
+            target_endpoint: LINK_TOGGLE_TARGET.to_string(),
+            protocol: "http".to_string(),
+            auth_mode: "internal".to_string(),
+            scope: "api".to_string(),
+            enabled,
+            health: link_health.to_string(),
+            latency_ms: None,
+            config_ref: String::new(),
+            secret_ref: String::new(),
+            policy: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put link");
+    store
+}
+
+fn link_toggle_enabled_state(store: &MemoryOrchestratorStore) -> bool {
+    store
+        .get_link(LINK_TOGGLE_SOURCE, LINK_TOGGLE_TARGET)
+        .expect("read link")
+        .expect("link should stay in store")
+        .enabled
+}
+
+#[test]
+fn link_disable_and_enable_round_trip_through_operation_chain() {
+    let mut store = link_toggle_store(true, "healthy");
+    assert!(link_toggle_enabled_state(&store));
+
+    let result = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "link.disable",
+            "op-link-disable",
+            &[
+                ("source_endpoint", LINK_TOGGLE_SOURCE),
+                ("target_endpoint", LINK_TOGGLE_TARGET),
+                ("confirm", "true"),
+            ],
+        ))
+        .expect("link.disable should dispatch");
+    assert_eq!(result.status, "SUCCEEDED");
+    assert_eq!(
+        result.capability_status,
+        ActionCapabilityStatus::StoreBacked
+    );
+    assert!(
+        result
+            .changed_objects
+            .iter()
+            .any(|object| object.contains("Link")),
+        "link.disable should report a changed Link"
+    );
+    assert!(!link_toggle_enabled_state(&store));
+    let operation = store
+        .operation("op-link-disable")
+        .expect("disable operation should be persisted");
+    assert_eq!(operation.target_type, "Link");
+    assert_eq!(
+        operation.target_id,
+        format!("{LINK_TOGGLE_SOURCE} -> {LINK_TOGGLE_TARGET}")
+    );
+    assert_eq!(operation.status, OperationStatus::Succeeded);
+
+    let result = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "link.enable",
+            "op-link-enable",
+            &[
+                ("source_endpoint", LINK_TOGGLE_SOURCE),
+                ("target_endpoint", LINK_TOGGLE_TARGET),
+                ("confirm", "true"),
+            ],
+        ))
+        .expect("link.enable should dispatch");
+    assert_eq!(result.status, "SUCCEEDED");
+    assert!(link_toggle_enabled_state(&store));
+
+    // link.enable 执行前是禁用状态，回滚必须恢复成禁用。
+    OperationExecutor::new(&mut store)
+        .rollback("op-link-enable")
+        .expect("link.enable rollback");
+    assert!(!link_toggle_enabled_state(&store));
+}
+
+#[test]
+fn idempotent_link_toggle_rollback_restores_previous_enabled_state() {
+    for (action, operation_id, initial_enabled) in [
+        ("link.enable", "op-link-enable-idempotent", true),
+        ("link.disable", "op-link-disable-idempotent", false),
+    ] {
+        let mut store = link_toggle_store(initial_enabled, "healthy");
+        let result =
+            OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+                .dispatch(request(
+                    action,
+                    operation_id,
+                    &[
+                        ("source_endpoint", LINK_TOGGLE_SOURCE),
+                        ("target_endpoint", LINK_TOGGLE_TARGET),
+                        ("confirm", "true"),
+                    ],
+                ))
+                .expect("idempotent link toggle should dispatch");
+        assert_eq!(result.status, "SUCCEEDED");
+        assert_eq!(
+            link_toggle_enabled_state(&store),
+            initial_enabled,
+            "{action} apply should be idempotent"
+        );
+        assert_eq!(
+            store
+                .operation(operation_id)
+                .expect("toggle operation should be persisted")
+                .request
+                .get("previous_enabled")
+                .and_then(serde_json::Value::as_bool),
+            Some(initial_enabled),
+            "{action} must capture the state seen before apply"
+        );
+
+        OperationExecutor::new(&mut store)
+            .rollback(operation_id)
+            .expect("idempotent link toggle rollback");
+        assert_eq!(
+            link_toggle_enabled_state(&store),
+            initial_enabled,
+            "{action} rollback must restore the exact previous state"
+        );
+    }
+}
+
+#[test]
+fn link_update_without_enabled_preserves_disabled_state() {
+    let mut store = link_toggle_store(false, "healthy");
+    let result = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "link.update",
+            "op-link-update-disabled",
+            &[
+                ("source_endpoint", LINK_TOGGLE_SOURCE),
+                ("target_endpoint", LINK_TOGGLE_TARGET),
+                ("protocol", "http"),
+                ("auth_mode", "none"),
+                ("scope", "updated"),
+                ("confirm", "true"),
+            ],
+        ))
+        .expect("link.update should dispatch");
+    assert_eq!(result.status, "SUCCEEDED");
+
+    let link = store
+        .get_link(LINK_TOGGLE_SOURCE, LINK_TOGGLE_TARGET)
+        .expect("read updated link")
+        .expect("updated link should remain in store");
+    assert!(
+        !link.enabled,
+        "omitting enabled must not re-enable the Link"
+    );
+    assert_eq!(link.auth_mode, "none");
+    assert_eq!(link.scope, "updated");
+    assert_eq!(
+        link.health, "healthy",
+        "metadata PATCH must not erase the last persisted health result"
+    );
+    assert!(
+        store
+            .operation("op-link-update-disabled")
+            .expect("link update operation should be persisted")
+            .request
+            .get("enabled")
+            .is_none(),
+        "the plan must retain the distinction between omitted and explicit enabled"
+    );
+}
+
+#[test]
+fn link_toggle_requires_confirmation_before_apply() {
+    let mut store = link_toggle_store(true, "healthy");
+    let result = OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+        .dispatch(request(
+            "link.disable",
+            "op-link-disable-unconfirmed",
+            &[
+                ("source_endpoint", LINK_TOGGLE_SOURCE),
+                ("target_endpoint", LINK_TOGGLE_TARGET),
+            ],
+        ))
+        .expect("link.disable should plan without confirm");
+    assert_eq!(result.status, "PLANNED");
+    assert!(
+        link_toggle_enabled_state(&store),
+        "未确认的 link.disable 不得改变 Link 状态"
+    );
+}
+
+#[test]
+fn disabled_link_is_excluded_from_diagnostic_unhealthy_links() {
+    let link_id = format!("{LINK_TOGGLE_SOURCE} -> {LINK_TOGGLE_TARGET}");
+
+    let enabled_store = link_toggle_store(true, "unreachable");
+    let enabled_topology = enabled_store
+        .build_topology_view()
+        .expect("topology for enabled link");
+    let enabled_report: serde_json::Value =
+        serde_json::from_str(&diagnostic_report_json(&enabled_topology).expect("diagnostic json"))
+            .expect("diagnostic json is an object");
+    let enabled_unhealthy = enabled_report["links_summary"]["unhealthy"]
+        .as_array()
+        .expect("links_summary.unhealthy array");
+    assert!(
+        enabled_unhealthy
+            .iter()
+            .any(|value| value.as_str() == Some(link_id.as_str())),
+        "enabled 且 unreachable 的 Link 必须计入 unhealthy"
+    );
+
+    let disabled_store = link_toggle_store(false, "unreachable");
+    let disabled_topology = disabled_store
+        .build_topology_view()
+        .expect("topology for disabled link");
+    let disabled_report: serde_json::Value =
+        serde_json::from_str(&diagnostic_report_json(&disabled_topology).expect("diagnostic json"))
+            .expect("diagnostic json is an object");
+    let disabled_unhealthy = disabled_report["links_summary"]["unhealthy"]
+        .as_array()
+        .expect("links_summary.unhealthy array");
+    assert!(
+        disabled_unhealthy.is_empty(),
+        "disabled Link 不应被诊断报告当作 unhealthy"
+    );
+    assert_eq!(
+        disabled_report["links_summary"]["count"].as_u64(),
+        Some(1),
+        "禁用只影响健康统计，Link 本身仍然存在"
+    );
+}
+
+#[test]
+fn reconcile_tick_skips_disabled_link_health_probe() {
+    let mut store = link_toggle_store(false, "healthy");
+    let tick = run_reconcile_tick(&mut store, &StaticEndpointProbe, "link-toggle")
+        .expect("reconcile tick should run");
+    assert!(
+        tick.checked_links.is_empty(),
+        "disabled Link 不参与健康探测"
+    );
+    // 保留最后一次已知 health，重新启用后仍能看到停用前的状态。
+    assert_eq!(
+        store.links().first().map(|link| link.health.as_str()),
+        Some("healthy")
+    );
+}
+
+#[test]
+fn link_toggle_actions_stay_consistent_across_schema_and_catalog() {
+    let root = repo_root();
+    let schemas = load_shared_schemas(&root).expect("shared schemas should load");
+    validate_action_catalog(&schemas)
+        .expect("action catalog stays consistent with Action Registry");
+    assert_eq!(schemas.actions.len(), ACTION_CATALOG.len());
+    assert_eq!(schemas.actions.len(), schemas.forms.len());
+
+    for action in ["link.enable", "link.disable"] {
+        assert!(
+            schemas.actions.iter().any(|item| item.as_str() == action),
+            "{action} 必须登记在 Action Registry"
+        );
+        let descriptor = action_descriptor(action).expect("catalog descriptor");
+        assert_eq!(descriptor.target_type, "Link");
+        assert!(
+            descriptor.plan_mode.requires_confirmation(),
+            "{action} 是变更类动作，必须要求确认"
+        );
+        assert_eq!(
+            capability_for_action(action),
+            ActionCapabilityStatus::StoreBacked
+        );
+        let form = schemas.form_for(action).expect("form schema");
+        for field in ["source_endpoint", "target_endpoint"] {
+            assert!(
+                form.fields.iter().any(|item| item.name == field
+                    && item.field_type == "endpoint"
+                    && item.required),
+                "{action} 需要必填 endpoint 字段 {field}"
+            );
+        }
+        assert!(
+            form.fields.iter().any(|item| item.name == "confirm"
+                && item.field_type == "boolean"
+                && item.required),
+            "{action} 需要必填 confirm 字段"
+        );
+        assert!(
+            default_action_request(action).is_some(),
+            "{action} 必须有控制台默认表单"
+        );
+    }
+}
+
 #[test]
 fn orchestrator_view_can_load_from_store_state() {
     let root = repo_root();
@@ -11368,9 +14037,17 @@ fn orchestrator_view_can_load_from_store_state() {
     let operation =
         service_health_check_operation("op-store-view", "gateway", Some("127.0.0.1:8080:gateway"))
             .expect("operation");
-    let operation = start_operation(&operation)
+    let mut operation = start_operation(&operation)
         .and_then(|operation| fail_operation(&operation, "health check failed"))
         .expect("failed operation");
+    operation
+        .request
+        .as_object_mut()
+        .expect("operation request")
+        .insert(
+            "execute_service_driver".to_string(),
+            serde_json::Value::Bool(true),
+        );
     store.put_operation(operation).expect("operation");
     store
         .append_operation_log(operation_step_log_record(
@@ -11391,6 +14068,8 @@ fn orchestrator_view_can_load_from_store_state() {
     assert_eq!(view.operations[0].log_count, 1);
     assert_eq!(view.operations[0].created_at, "planned");
     assert_eq!(view.operations[0].updated_at, "failed");
+    assert!(view.operations[0].driver_authorized);
+    assert!(!view.operations[0].rollback_available);
     assert!(
         view.logs
             .iter()
@@ -11407,6 +14086,13 @@ fn operation_workbench_session_merges_into_view_operations_and_logs() {
         .expect("workbench context")
         .with_memory_store();
     let mut view = load_orchestrator_view_with_database_url(&root, None).expect("repo view");
+    assert!(
+        view.operations
+            .iter()
+            .filter(|row| row.status == "CATALOG")
+            .all(|row| !row.rollback_available),
+        "catalog rows are previews and must never expose rollback"
+    );
     let session = context
         .build_session("release.install")
         .and_then(|session| context.confirm(&session))
@@ -11423,6 +14109,10 @@ fn operation_workbench_session_merges_into_view_operations_and_logs() {
     assert_eq!(row.status, "SUCCEEDED");
     assert_eq!(row.result, "SUCCEEDED");
     assert_eq!(row.log_count, session.logs.len());
+    assert!(
+        row.rollback_available,
+        "stored operation rows derive availability from non-empty rollback steps"
+    );
     assert!(
         view.logs.iter().any(
             |log| log.operation_id == session.current_operation.operation_id
@@ -11561,8 +14251,18 @@ fn diagnostic_report_builds_from_store_and_exports_json_and_markdown() {
             .and_then(serde_json::Value::as_array)
             .is_some_and(|items| items
                 .iter()
-                .any(|item| item.as_str() == Some("service.start"))),
+                .any(|item| item.as_str() == Some("service.enable"))),
         "DiagnosticReport should list unsupported capabilities honestly"
+    );
+    assert!(
+        report
+            .data
+            .get("unsupported_capabilities")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items
+                .iter()
+                .all(|item| item.as_str() != Some("service.start"))),
+        "service.start 已接通真实执行链，不该再出现在 unsupported 清单里"
     );
 
     let json_export = export_diagnostic_report(&report, "json").expect("json export");
@@ -11638,6 +14338,7 @@ fn reconcile_tick_refreshes_health_topology_and_diagnostics() {
             protocol: "http".to_string(),
             auth_mode: "internal".to_string(),
             scope: "api".to_string(),
+            enabled: true,
             health: "unknown".to_string(),
             latency_ms: None,
             config_ref: String::new(),
@@ -11740,6 +14441,7 @@ fn reconcile_tick_snapshot_uses_refreshed_store_state() {
             protocol: "http".to_string(),
             auth_mode: "internal".to_string(),
             scope: "api".to_string(),
+            enabled: true,
             health: "unknown".to_string(),
             latency_ms: None,
             config_ref: String::new(),
@@ -12161,6 +14863,8 @@ fn put_test_service_and_endpoint(
         .expect("put endpoint");
 }
 
+// The helper mirrors all fields varied by API-surface tests.
+#[allow(clippy::too_many_arguments)]
 fn put_test_api(
     store: &mut MemoryOrchestratorStore,
     service_name: &str,
@@ -12212,6 +14916,1221 @@ fn put_test_api(
             updated_at: String::new(),
         })
         .expect("put deployed api");
+}
+
+struct LocalProcessTestEnv {
+    previous_root: Option<String>,
+    previous_state: Option<String>,
+}
+
+impl LocalProcessTestEnv {
+    fn configure(root: &Path) -> Self {
+        let previous_root = std::env::var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT").ok();
+        let previous_state = std::env::var("OJOS_LOCAL_PROCESS_STATE_DIR").ok();
+        unsafe {
+            std::env::set_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT", root);
+            std::env::set_var("OJOS_LOCAL_PROCESS_STATE_DIR", root.join("state"));
+        }
+        Self {
+            previous_root,
+            previous_state,
+        }
+    }
+}
+
+impl Drop for LocalProcessTestEnv {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous_root.take() {
+                Some(value) => std::env::set_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT", value),
+                None => std::env::remove_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT"),
+            }
+            match self.previous_state.take() {
+                Some(value) => std::env::set_var("OJOS_LOCAL_PROCESS_STATE_DIR", value),
+                None => std::env::remove_var("OJOS_LOCAL_PROCESS_STATE_DIR"),
+            }
+        }
+    }
+}
+
+fn put_local_process_lifecycle_fixture(
+    store: &mut MemoryOrchestratorStore,
+    service_id: &str,
+    port: u16,
+    status: &str,
+) -> (ServiceManifest, ServiceReleaseManifest, String) {
+    let mut service = valid_service();
+    service.id = service_id.to_string();
+    service.name = service_id.to_string();
+    service.endpoint.default_port = port;
+    service.runtime.mode = RuntimeMode::LocalProcess;
+    service.runtime.driver = "local-process".to_string();
+
+    let mut release = valid_release_for_service(&service);
+    release.runtime.kind = "local-process".to_string();
+    // 立即退出的进程足以证明驱动动作确实执行，同时不会给测试环境留下后台进程。
+    if cfg!(windows) {
+        release.runtime.command = "cmd".to_string();
+        release.runtime.args = vec!["/c".to_string(), "exit".to_string()];
+    } else {
+        release.runtime.command = "sh".to_string();
+        release.runtime.args = vec!["-c".to_string(), "exit 0".to_string()];
+    }
+    validate_service_release(&release).expect("local-process release validates");
+
+    let endpoint = format!("127.0.0.1:{port}:{service_id}");
+    store.put_service(service.clone()).expect("put service");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: endpoint.clone(),
+            service_id: service_id.to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: service_id.to_string(),
+            note: "lifecycle rollback fixture".to_string(),
+            config: serde_json::json!({"fixture": true}),
+            created_at: "endpoint-created".to_string(),
+            updated_at: "endpoint-updated".to_string(),
+        })
+        .expect("put endpoint");
+    store
+        .upsert_service_release(ServiceRelease {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            release_url: release.source.url.clone(),
+            manifest: serde_json::to_value(&release).expect("release manifest json"),
+            checksum: "sha256:fixture".to_string(),
+            created_at: "release-created".to_string(),
+        })
+        .expect("put release record");
+    store
+        .upsert_host_service(HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: service_id.to_string(),
+            version: release.version.clone(),
+            status: status.to_string(),
+            config: serde_json::json!({"port": port}),
+            labels: serde_json::json!({"fixture": service_id}),
+            created_at: "host-created".to_string(),
+            updated_at: "host-updated".to_string(),
+        })
+        .expect("put host service");
+    store
+        .upsert_node(NodeRecord {
+            node_id: "node-lifecycle-local".to_string(),
+            host_ip: "127.0.0.1".to_string(),
+            parent_node_id: String::new(),
+            role: "standalone".to_string(),
+            labels: serde_json::json!({"fixture": "lifecycle"}),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put lifecycle node");
+    put_test_api(
+        store,
+        service_id,
+        &format!("{}.read", service_id.replace('-', ".")),
+        &format!("/api/{service_id}"),
+        "global",
+        "public",
+        &endpoint,
+        status,
+    );
+
+    (service, release, endpoint)
+}
+
+fn confirm_if_required(operation: Operation) -> Operation {
+    if operation
+        .plan
+        .get("requires_confirmation")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+    {
+        confirm_operation(&operation).expect("confirm lifecycle operation")
+    } else {
+        operation
+    }
+}
+
+fn service_runtime_rows(
+    store: &MemoryOrchestratorStore,
+    service_id: &str,
+) -> (Vec<HostService>, Vec<DeployedServiceApi>) {
+    let mut host_services = store
+        .host_services()
+        .into_iter()
+        .filter(|item| item.service_name == service_id)
+        .collect::<Vec<_>>();
+    host_services.sort_by(|left, right| {
+        (&left.host_ip, &left.service_name).cmp(&(&right.host_ip, &right.service_name))
+    });
+    let mut deployed_apis = store
+        .deployed_service_apis()
+        .into_iter()
+        .filter(|item| item.service_name == service_id)
+        .collect::<Vec<_>>();
+    deployed_apis.sort_by(|left, right| {
+        (&left.host_ip, &left.service_name, &left.api_id).cmp(&(
+            &right.host_ip,
+            &right.service_name,
+            &right.api_id,
+        ))
+    });
+    (host_services, deployed_apis)
+}
+
+#[test]
+fn host_lifecycle_actions_stay_consistent_across_schema_and_catalog() {
+    let root = repo_root();
+    let schemas = load_shared_schemas(&root).expect("shared schemas should load");
+    validate_action_catalog(&schemas)
+        .expect("action catalog stays consistent with Action Registry");
+    assert_eq!(schemas.actions.len(), ACTION_CATALOG.len());
+    assert_eq!(schemas.actions.len(), schemas.forms.len());
+
+    for action in ["host.start", "host.stop"] {
+        assert!(
+            schemas.actions.iter().any(|item| item.as_str() == action),
+            "{action} 必须登记在 Action Registry"
+        );
+        let descriptor = action_descriptor(action).expect("catalog descriptor");
+        assert_eq!(
+            descriptor.target_type, "Host",
+            "{action} 复用已有的 host. 层，不引入新的核心对象"
+        );
+        assert_eq!(
+            capability_for_action(action),
+            ActionCapabilityStatus::RuntimePipeline,
+            "{action} 真的会调 executor 驱动服务进程"
+        );
+        let form = schemas.form_for(action).expect("form schema");
+        assert!(
+            form.fields
+                .iter()
+                .any(|item| item.name == "host_ip" && item.field_type == "string" && item.required),
+            "{action} 需要必填 host_ip"
+        );
+        assert!(
+            form.fields
+                .iter()
+                .any(|item| item.name == "confirm" && item.field_type == "boolean"),
+            "{action} 需要 confirm 字段"
+        );
+        assert!(
+            default_action_request(action).is_some(),
+            "{action} 必须有控制台默认表单"
+        );
+    }
+
+    assert!(
+        action_descriptor("host.stop")
+            .expect("host.stop descriptor")
+            .plan_mode
+            .requires_confirmation(),
+        "host.stop 是 High risk 批量停机，必须要求确认"
+    );
+    assert!(
+        !action_descriptor("host.start")
+            .expect("host.start descriptor")
+            .plan_mode
+            .requires_confirmation(),
+        "host.start 与 service.start 对齐，不强制确认"
+    );
+
+    let operation = host_lifecycle_operation(
+        "op-host-stop-plan",
+        "host.stop",
+        "127.0.0.1",
+        &["auth-service".to_string(), "gateway".to_string()],
+    )
+    .expect("host.stop plan");
+    assert_eq!(operation.target_type, "Host");
+    assert_eq!(operation.target_id, "127.0.0.1");
+    let steps = operation
+        .plan
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .expect("plan steps");
+    assert_eq!(steps.len(), 2, "每个服务一步");
+    assert!(
+        steps.iter().all(
+            |step| step.get("action").and_then(serde_json::Value::as_str) == Some("stop_service")
+        ),
+        "host.stop 的每一步都是停服务"
+    );
+    let rollback_steps = operation
+        .rollback_plan
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .expect("rollback steps");
+    assert!(
+        rollback_steps.iter().all(
+            |step| step.get("action").and_then(serde_json::Value::as_str)
+                == Some("restore_previous_service_state")
+        ),
+        "host.stop 必须按快照恢复每个服务，不能假定原状态全是 running"
+    );
+    assert_eq!(
+        operation
+            .plan
+            .get("requires_confirmation")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+
+    // 计划期拿不到服务清单时也必须留下至少一步，否则 executor 会拒绝空计划。
+    let empty_host_plan =
+        host_lifecycle_operation("op-host-start-plan", "host.start", "127.0.0.1", &[])
+            .expect("host.start plan without known services");
+    assert_eq!(
+        empty_host_plan
+            .plan
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+    assert!(host_lifecycle_operation("op-host-bad", "host.reboot", "127.0.0.1", &[]).is_err());
+}
+
+#[test]
+fn service_start_plan_carries_release_manifest_and_endpoint() {
+    let mut service = valid_service();
+    service.id = "batch-demo".to_string();
+    service.name = "Batch Demo".to_string();
+    service.runtime.mode = RuntimeMode::LocalProcess;
+    service.runtime.driver = "local-process".to_string();
+    let mut release = valid_release_for_service(&service);
+    release.runtime.kind = "local-process".to_string();
+    release.runtime.command = "cmd".to_string();
+    let endpoint_id = format!("127.0.0.1:{}:batch-demo", service.endpoint.default_port);
+    let endpoints = vec![Endpoint {
+        endpoint: endpoint_id.clone(),
+        service_id: "batch-demo".to_string(),
+        protocol: "http".to_string(),
+        health_path: "/health".to_string(),
+        health: "ok".to_string(),
+        reachable: true,
+        display_name: "Batch Demo".to_string(),
+        note: String::new(),
+        config: serde_json::json!({}),
+        created_at: String::new(),
+        updated_at: String::new(),
+    }];
+    let services = vec![service.clone()];
+
+    let start_request = request(
+        "service.start",
+        "op-service-start-plan",
+        &[("service_id", "batch-demo")],
+    );
+    let operation = plan_action_request_with_releases(
+        &start_request,
+        &services,
+        std::slice::from_ref(&release),
+        &[],
+        &endpoints,
+        None,
+    )
+    .expect("service.start plan");
+    assert_eq!(
+        operation
+            .request
+            .get("release_manifest")
+            .and_then(|value| value.get("runtime"))
+            .and_then(|value| value.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        Some("local-process"),
+        "service.start 必须带上 release runtime，否则 local-process 服务无法启动"
+    );
+    assert_eq!(
+        operation
+            .request
+            .get("endpoint")
+            .and_then(serde_json::Value::as_str),
+        Some(endpoint_id.as_str())
+    );
+
+    // 找不到 release 时退化为旧行为：只带 service_id，不报错。
+    let fallback =
+        plan_action_request_with_releases(&start_request, &services, &[], &[], &endpoints, None)
+            .expect("service.start plan without release");
+    assert!(fallback.request.get("release_manifest").is_none());
+    assert_eq!(
+        fallback
+            .request
+            .get("service_id")
+            .and_then(serde_json::Value::as_str),
+        Some("batch-demo")
+    );
+}
+
+#[test]
+fn host_stop_and_start_round_trip_updates_status_and_routes() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let previous_root = std::env::var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT").ok();
+    let previous_state = std::env::var("OJOS_LOCAL_PROCESS_STATE_DIR").ok();
+    let dir = tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    unsafe {
+        std::env::set_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT", dir.path());
+        std::env::set_var("OJOS_LOCAL_PROCESS_STATE_DIR", &state_dir);
+    }
+
+    let mut store = MemoryOrchestratorStore::new();
+    let mut service = valid_service();
+    service.id = "batch-demo".to_string();
+    service.name = "Batch Demo".to_string();
+    service.runtime.mode = RuntimeMode::LocalProcess;
+    service.runtime.driver = "local-process".to_string();
+    let endpoint_id = format!("127.0.0.1:{}:batch-demo", service.endpoint.default_port);
+    let mut release = valid_release_for_service(&service);
+    release.runtime.kind = "local-process".to_string();
+    // 一个立刻退出的无害进程：只需要 spawn 成功，测试不依赖它继续运行。
+    if cfg!(windows) {
+        release.runtime.command = "cmd".to_string();
+        release.runtime.args = vec!["/c".to_string(), "exit".to_string()];
+    } else {
+        release.runtime.command = "sh".to_string();
+        release.runtime.args = vec!["-c".to_string(), "exit 0".to_string()];
+    }
+    validate_service_release(&release).expect("local-process release validates");
+
+    store.put_service(service.clone()).expect("put service");
+    store
+        .upsert_node(NodeRecord {
+            node_id: "node-batch".to_string(),
+            host_ip: "127.0.0.1".to_string(),
+            parent_node_id: String::new(),
+            role: "standalone".to_string(),
+            labels: serde_json::json!({}),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put node");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: endpoint_id.clone(),
+            service_id: "batch-demo".to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: "Batch Demo".to_string(),
+            note: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put endpoint");
+    store
+        .upsert_service_release(ServiceRelease {
+            service_name: release.service_name.clone(),
+            version: release.version.clone(),
+            release_url: release.source.url.clone(),
+            manifest: serde_json::to_value(&release).expect("release manifest json"),
+            checksum: String::new(),
+            created_at: String::new(),
+        })
+        .expect("put release record");
+    store
+        .upsert_host_service(HostService {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: "batch-demo".to_string(),
+            version: release.version.clone(),
+            status: "running".to_string(),
+            config: serde_json::json!({}),
+            labels: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put host service");
+    store
+        .upsert_service_api_surface(ServiceApiSurface {
+            service_name: "batch-demo".to_string(),
+            version: release.version.clone(),
+            api_id: "batch.demo.read".to_string(),
+            protocol: "http".to_string(),
+            port_name: "http".to_string(),
+            path_prefix: "/api/batch-demo".to_string(),
+            methods: vec!["GET".to_string()],
+            visibility: "global".to_string(),
+            auth_mode: "public".to_string(),
+            permission: "public".to_string(),
+            stability: "stable".to_string(),
+            api_version: "v1".to_string(),
+            rate_limit: String::new(),
+            timeout: String::new(),
+            config: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put api surface");
+    store
+        .upsert_deployed_service_api(DeployedServiceApi {
+            host_ip: "127.0.0.1".to_string(),
+            service_name: "batch-demo".to_string(),
+            version: release.version.clone(),
+            endpoint: endpoint_id.clone(),
+            api_id: "batch.demo.read".to_string(),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put deployed api");
+    assert_eq!(
+        store
+            .effective_api_routes("node-batch")
+            .expect("effective routes before stop")
+            .len(),
+        1,
+        "running 的服务应该出现在 gateway 路由表里"
+    );
+
+    let operation = host_lifecycle_operation(
+        "op-host-stop-apply",
+        "host.stop",
+        "127.0.0.1",
+        &["batch-demo".to_string()],
+    )
+    .and_then(|operation| confirm_operation(&operation))
+    .expect("confirmed host.stop");
+    store.put_operation(operation).expect("put operation");
+
+    let applied = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
+        .apply("op-host-stop-apply")
+        .expect("host.stop should stop every service on the host");
+    assert_eq!(applied.status, OperationStatus::Succeeded);
+    let changed = applied
+        .result
+        .get("changed_objects")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        changed.iter().any(|item| item.get("type").and_then(
+            serde_json::Value::as_str
+        ) == Some("HostService")),
+        "host.stop 必须回写 HostService"
+    );
+    assert!(
+        changed
+            .iter()
+            .any(|item| item.get("type").and_then(serde_json::Value::as_str)
+                == Some("DeployedServiceApi")),
+        "host.stop 必须回写 DeployedServiceApi"
+    );
+    assert_eq!(
+        store
+            .host_services()
+            .first()
+            .map(|host_service| host_service.status.as_str()),
+        Some("stopped")
+    );
+    assert_eq!(
+        store
+            .deployed_service_apis()
+            .first()
+            .map(|api| api.status.as_str()),
+        Some("stopped")
+    );
+    assert!(
+        store
+            .effective_api_routes("node-batch")
+            .expect("effective routes after stop")
+            .is_empty(),
+        "停掉的服务不应该继续出现在 gateway 路由表里"
+    );
+
+    let rolled_back = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
+        .rollback("op-host-stop-apply")
+        .expect("host.stop rollback should start every service again");
+    assert_eq!(rolled_back.status, OperationStatus::RolledBack);
+    assert_eq!(
+        store
+            .host_services()
+            .first()
+            .map(|host_service| host_service.status.as_str()),
+        Some("running")
+    );
+    assert_eq!(
+        store
+            .deployed_service_apis()
+            .first()
+            .map(|api| api.status.as_str()),
+        Some("running")
+    );
+    assert_eq!(
+        store
+            .effective_api_routes("node-batch")
+            .expect("effective routes after rollback")
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .operation_logs("op-host-stop-apply")
+            .iter()
+            .any(|record| record.step_id == "driver:service.stop"),
+        "批量停机要为每个服务留下驱动日志"
+    );
+
+    unsafe {
+        match previous_root {
+            Some(value) => std::env::set_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT", value),
+            None => std::env::remove_var("ORCHESTRATOR_RELEASE_PACKAGE_ROOT"),
+        }
+        match previous_state {
+            Some(value) => std::env::set_var("OJOS_LOCAL_PROCESS_STATE_DIR", value),
+            None => std::env::remove_var("OJOS_LOCAL_PROCESS_STATE_DIR"),
+        }
+    }
+}
+
+#[test]
+fn service_lifecycle_rollbacks_restore_exact_runtime_rows() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+    let cases = [
+        ("service.start", "stopped", "running"),
+        ("service.stop", "running", "stopped"),
+        ("service.restart", "stopped", "running"),
+    ];
+
+    for (index, (action, initial_status, applied_status)) in cases.into_iter().enumerate() {
+        let mut store = MemoryOrchestratorStore::new();
+        let service_id = format!("rollback-{index}");
+        let (_service, release, endpoint) = put_local_process_lifecycle_fixture(
+            &mut store,
+            &service_id,
+            18_300 + index as u16,
+            initial_status,
+        );
+        let before = service_runtime_rows(&store, &service_id);
+        let operation_id = format!("op-{}", action.replace('.', "-"));
+        let operation = service_lifecycle_operation_with_release(
+            &operation_id,
+            action,
+            &service_id,
+            Some(&release),
+            Some(&endpoint),
+            Some("127.0.0.1"),
+        )
+        .map(confirm_if_required)
+        .expect("plan lifecycle operation");
+        store.put_operation(operation).expect("put operation");
+
+        let applied = OperationExecutor::new(&mut store)
+            .with_service_driver_execution_enabled()
+            .apply(&operation_id)
+            .expect("apply lifecycle operation");
+        assert_eq!(applied.status, OperationStatus::Succeeded);
+        assert!(
+            service_runtime_rows(&store, &service_id)
+                .0
+                .iter()
+                .all(|item| item.status == applied_status),
+            "{action} should set HostService to {applied_status}"
+        );
+        assert!(
+            service_runtime_rows(&store, &service_id)
+                .1
+                .iter()
+                .all(|item| item.status == applied_status),
+            "{action} should set DeployedServiceApi to {applied_status}"
+        );
+        let stored = store
+            .operation(&operation_id)
+            .expect("stored lifecycle operation");
+        assert_eq!(
+            stored
+                .request
+                .get("previous_runtime_state")
+                .and_then(|value| value.get("host_services"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|rows| rows.first())
+                .and_then(|row| row.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some(initial_status),
+            "{action} must persist its pre-driver snapshot"
+        );
+
+        let rolled_back = OperationExecutor::new(&mut store)
+            .with_service_driver_execution_enabled()
+            .rollback(&operation_id)
+            .expect("rollback lifecycle operation");
+        assert_eq!(rolled_back.status, OperationStatus::RolledBack);
+        assert_eq!(
+            service_runtime_rows(&store, &service_id),
+            before,
+            "{action} rollback must restore every runtime field, not only status"
+        );
+    }
+}
+
+#[test]
+fn dispatcher_rollback_forwards_driver_authorization_and_refreshes_gateway() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _process_env = LocalProcessTestEnv::configure(dir.path());
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind gateway listener");
+    let gateway_endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("gateway listener address")
+    );
+    let _gateway_override = crate::store::configure_gateway_publisher_for_current_test(
+        &gateway_endpoint,
+        "gateway-test-token",
+    );
+    let captured_requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_server = Arc::clone(&captured_requests);
+    let server = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("accept gateway route publish");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let bytes = stream.read(&mut buffer).expect("read gateway request");
+                if bytes == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..bytes]);
+                if http_request_body_is_complete(&request) {
+                    break;
+                }
+            }
+            captured_for_server
+                .lock()
+                .expect("captured gateway requests")
+                .push(String::from_utf8(request).expect("gateway request is UTF-8"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write gateway response");
+        }
+    });
+
+    let mut store = MemoryOrchestratorStore::new();
+    let service_id = "dispatcher-rollback";
+    let (_service, _release, endpoint) =
+        put_local_process_lifecycle_fixture(&mut store, service_id, 18_305, "stopped");
+    let apply_request = ActionRequest::new(
+        "op-dispatcher-start",
+        "service.start",
+        [
+            ("service_id".to_string(), service_id.to_string()),
+            ("host_ip".to_string(), "127.0.0.1".to_string()),
+            ("endpoint".to_string(), endpoint),
+            ("execute_service_driver".to_string(), "true".to_string()),
+            (
+                "gateway_node_id".to_string(),
+                "node-lifecycle-local".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let applied =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(apply_request)
+            .expect("dispatcher service.start");
+    assert_eq!(applied.status, "SUCCEEDED");
+    assert_eq!(
+        service_runtime_rows(&store, service_id)
+            .0
+            .first()
+            .map(|item| item.status.as_str()),
+        Some("running")
+    );
+    assert_eq!(
+        store
+            .operation("op-dispatcher-start")
+            .and_then(|operation| operation.request.get("gateway_node_id"))
+            .and_then(serde_json::Value::as_str),
+        Some("node-lifecycle-local"),
+        "planner must persist the gateway scope needed by a later rollback"
+    );
+
+    let denied_rollback =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(ActionRequest::new(
+                "op-dispatcher-rollback-without-driver",
+                "operation.rollback",
+                [(
+                    "operation_id".to_string(),
+                    "op-dispatcher-start".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            ))
+            .expect("dispatcher should return a structured rollback failure");
+    assert_eq!(denied_rollback.status, "FAILED");
+    assert!(
+        denied_rollback
+            .error
+            .contains("requires execute_service_driver=true"),
+        "rollback must require a fresh, explicit driver authorization: {}",
+        denied_rollback.error
+    );
+    assert_eq!(
+        service_runtime_rows(&store, service_id)
+            .0
+            .first()
+            .map(|item| item.status.as_str()),
+        Some("running"),
+        "a blocked rollback must leave the applied runtime state untouched"
+    );
+
+    let rollback_request = ActionRequest::new(
+        "op-dispatcher-rollback-request",
+        "operation.rollback",
+        [
+            (
+                "operation_id".to_string(),
+                "op-dispatcher-start".to_string(),
+            ),
+            ("execute_service_driver".to_string(), "true".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let rolled_back =
+        OrchestratorActionDispatcher::with_endpoint_probe(&mut store, StaticEndpointProbe)
+            .dispatch(rollback_request)
+            .expect("dispatcher operation.rollback");
+    assert_eq!(rolled_back.status, "ROLLED_BACK");
+    assert_eq!(
+        rolled_back.capability_status,
+        ActionCapabilityStatus::RuntimePipeline
+    );
+    assert_eq!(
+        service_runtime_rows(&store, service_id)
+            .0
+            .first()
+            .map(|item| item.status.as_str()),
+        Some("stopped")
+    );
+
+    server.join().expect("gateway server");
+    let requests = captured_requests.lock().expect("captured gateway requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "apply and rollback must both reload gateway"
+    );
+    assert!(
+        requests.iter().all(|request| request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer gateway-test-token")),
+        "configured gateway publisher must carry its admin token"
+    );
+    let bodies = requests
+        .iter()
+        .map(|request| {
+            let (_, body) = request
+                .split_once("\r\n\r\n")
+                .expect("gateway request body");
+            serde_json::from_str::<serde_json::Value>(body).expect("gateway JSON body")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bodies[0]
+            .get("routes")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(1),
+        "service.start should publish the newly active route"
+    );
+    assert_eq!(
+        bodies[1]
+            .get("routes")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(0),
+        "rollback to stopped must publish an empty effective route set"
+    );
+    assert!(bodies.iter().all(
+        |body| body.get("node_id").and_then(serde_json::Value::as_str)
+            == Some("node-lifecycle-local")
+    ));
+}
+
+#[test]
+fn host_lifecycle_rollbacks_restore_mixed_service_states() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+
+    for (index, action) in ["host.start", "host.stop"].into_iter().enumerate() {
+        let mut store = MemoryOrchestratorStore::new();
+        let running_service = format!("mixed-running-{index}");
+        let stopped_service = format!("mixed-stopped-{index}");
+        put_local_process_lifecycle_fixture(
+            &mut store,
+            &running_service,
+            18_310 + (index as u16 * 2),
+            "running",
+        );
+        put_local_process_lifecycle_fixture(
+            &mut store,
+            &stopped_service,
+            18_311 + (index as u16 * 2),
+            "stopped",
+        );
+        let before_running = service_runtime_rows(&store, &running_service);
+        let before_stopped = service_runtime_rows(&store, &stopped_service);
+        let operation_id = format!("op-host-mixed-{index}");
+        let operation = host_lifecycle_operation(
+            &operation_id,
+            action,
+            "127.0.0.1",
+            &[running_service.clone(), stopped_service.clone()],
+        )
+        .map(confirm_if_required)
+        .expect("plan host lifecycle operation");
+        store.put_operation(operation).expect("put operation");
+
+        OperationExecutor::new(&mut store)
+            .with_service_driver_execution_enabled()
+            .apply(&operation_id)
+            .expect("apply host lifecycle operation");
+        let applied_status = if action == "host.start" {
+            "running"
+        } else {
+            "stopped"
+        };
+        assert!(
+            store
+                .host_services()
+                .iter()
+                .all(|item| item.status == applied_status),
+            "{action} should update every service on the selected host"
+        );
+
+        let rolled_back = OperationExecutor::new(&mut store)
+            .with_service_driver_execution_enabled()
+            .rollback(&operation_id)
+            .expect("rollback host lifecycle operation");
+        assert_eq!(rolled_back.status, OperationStatus::RolledBack);
+        assert_eq!(
+            service_runtime_rows(&store, &running_service),
+            before_running,
+            "{action} rollback must return the originally running service to running"
+        );
+        assert_eq!(
+            service_runtime_rows(&store, &stopped_service),
+            before_stopped,
+            "{action} rollback must return the originally stopped service to stopped"
+        );
+        let logs = store.operation_logs(&operation_id);
+        assert!(
+            logs.iter()
+                .any(|record| record.step_id == "driver:service.start")
+                && logs
+                    .iter()
+                    .any(|record| record.step_id == "driver:service.stop"),
+            "mixed-state rollback must choose the driver action from each saved row"
+        );
+    }
+}
+
+#[test]
+fn service_delete_rollback_restores_full_service_and_forces_route_reload() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+    let mut store = MemoryOrchestratorStore::new();
+    let service_id = "delete-rollback";
+    let (_service, release, endpoint) =
+        put_local_process_lifecycle_fixture(&mut store, service_id, 18_320, "running");
+
+    // service.delete 是全局删除。即使请求带 host_ip，快照也必须覆盖其它主机上的记录。
+    let second_endpoint = format!("127.0.0.2:18320:{service_id}");
+    store
+        .put_endpoint(Endpoint {
+            endpoint: second_endpoint.clone(),
+            service_id: service_id.to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            health: "healthy".to_string(),
+            reachable: true,
+            display_name: service_id.to_string(),
+            note: "second host".to_string(),
+            config: serde_json::json!({"host": 2}),
+            created_at: "endpoint-two-created".to_string(),
+            updated_at: "endpoint-two-updated".to_string(),
+        })
+        .expect("put second endpoint");
+    store
+        .upsert_host_service(HostService {
+            host_ip: "127.0.0.2".to_string(),
+            service_name: service_id.to_string(),
+            version: release.version.clone(),
+            status: "stopped".to_string(),
+            config: serde_json::json!({"host": 2}),
+            labels: serde_json::json!({"fixture": "second-host"}),
+            created_at: "host-two-created".to_string(),
+            updated_at: "host-two-updated".to_string(),
+        })
+        .expect("put second host service");
+    store
+        .upsert_node(NodeRecord {
+            node_id: "node-lifecycle-second".to_string(),
+            host_ip: "127.0.0.2".to_string(),
+            parent_node_id: String::new(),
+            role: "standalone".to_string(),
+            labels: serde_json::json!({"fixture": "lifecycle"}),
+            status: "running".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("put second lifecycle node");
+    put_test_api(
+        &mut store,
+        service_id,
+        "delete.rollback.read",
+        "/api/delete-rollback",
+        "global",
+        "public",
+        &second_endpoint,
+        "stopped",
+    );
+
+    let before_services = store.services();
+    let before_releases = store.service_releases();
+    let before_endpoints = store.endpoints();
+    let before_surfaces = store.service_api_surfaces();
+    let before_runtime = service_runtime_rows(&store, service_id);
+    let mut operation = service_lifecycle_operation_with_release(
+        "op-service-delete-rollback",
+        "service.delete",
+        service_id,
+        Some(&release),
+        Some(&endpoint),
+        Some("127.0.0.1"),
+    )
+    .expect("plan service.delete");
+    operation
+        .request
+        .as_object_mut()
+        .expect("delete request object")
+        .insert(
+            "gateway_node_id".to_string(),
+            serde_json::Value::String("node-lifecycle-local".to_string()),
+        );
+    let operation = confirm_if_required(operation);
+    store.put_operation(operation).expect("put operation");
+
+    let gateway_calls = Arc::new(Mutex::new(Vec::new()));
+    let publisher = RecordingGatewayRoutePublisher {
+        calls: Arc::clone(&gateway_calls),
+        result: GatewayRoutePublishResult {
+            status: "published".to_string(),
+            message: "recorded service.delete route reload".to_string(),
+            endpoint: "http://gateway.test".to_string(),
+            route_count: 0,
+            reloaded: true,
+        },
+    };
+    let applied =
+        OperationExecutor::with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
+            &mut store,
+            StaticEndpointProbe,
+            DeferredAuthPermissionRegistrar,
+            DeferredRedisResourceProvisioner,
+            DeferredStorageResourceProvisioner,
+            DeferredMigrationRunner,
+            DeferredReleasePackageLoader,
+            publisher.clone(),
+            DeferredNodeServiceDispatcher,
+        )
+        .with_service_driver_execution_enabled()
+        .apply("op-service-delete-rollback")
+        .expect("apply service.delete");
+    assert_eq!(applied.status, OperationStatus::Succeeded);
+    assert!(store.services().is_empty());
+    assert!(service_runtime_rows(&store, service_id).0.is_empty());
+    let delete_publish = gateway_calls
+        .lock()
+        .expect("gateway calls")
+        .last()
+        .cloned()
+        .expect("service.delete route publish");
+    assert!(
+        delete_publish.force_reload,
+        "an empty post-delete route table must still reload gateway"
+    );
+    assert_eq!(delete_publish.node_id, "node-lifecycle-local");
+    assert!(delete_publish.routes.is_empty());
+    assert!(delete_publish.effective_routes.is_empty());
+    let stored = store
+        .operation("op-service-delete-rollback")
+        .expect("stored service.delete");
+    assert_eq!(
+        stored
+            .request
+            .get("previous_runtime_state")
+            .and_then(|value| value.get("host_services"))
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(2),
+        "global delete must snapshot both hosts even when request.host_ip is set"
+    );
+
+    let deleted_services = store.services();
+    let deleted_releases = store.service_releases();
+    let deleted_endpoints = store.endpoints();
+    let deleted_surfaces = store.service_api_surfaces();
+    let deleted_runtime = service_runtime_rows(&store, service_id);
+    let delete_log_count = store.operation_logs("op-service-delete-rollback").len();
+    let publish_count = gateway_calls.lock().expect("gateway calls").len();
+    let unauthorized = OperationExecutor::new(&mut store)
+        .rollback("op-service-delete-rollback")
+        .expect_err("service.delete rollback requires fresh driver authorization");
+    assert!(
+        unauthorized
+            .to_string()
+            .contains("rollback requires execute_service_driver=true")
+    );
+    assert_eq!(store.services(), deleted_services);
+    assert_eq!(store.service_releases(), deleted_releases);
+    assert_eq!(store.endpoints(), deleted_endpoints);
+    assert_eq!(store.service_api_surfaces(), deleted_surfaces);
+    assert_eq!(service_runtime_rows(&store, service_id), deleted_runtime);
+    assert_eq!(
+        store
+            .operation("op-service-delete-rollback")
+            .expect("stored service.delete")
+            .status,
+        OperationStatus::Succeeded
+    );
+    assert_eq!(
+        store.operation_logs("op-service-delete-rollback").len(),
+        delete_log_count,
+        "authorization failure must occur before rollback logs or mutations"
+    );
+    assert_eq!(
+        gateway_calls.lock().expect("gateway calls").len(),
+        publish_count,
+        "authorization failure must not publish restored routes"
+    );
+
+    let rolled_back =
+        OperationExecutor::with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
+            &mut store,
+            StaticEndpointProbe,
+            DeferredAuthPermissionRegistrar,
+            DeferredRedisResourceProvisioner,
+            DeferredStorageResourceProvisioner,
+            DeferredMigrationRunner,
+            DeferredReleasePackageLoader,
+            publisher,
+            DeferredNodeServiceDispatcher,
+        )
+        .with_service_driver_execution_enabled()
+        .rollback("op-service-delete-rollback")
+        .expect("rollback service.delete");
+    assert_eq!(rolled_back.status, OperationStatus::RolledBack);
+    assert_eq!(store.services(), before_services);
+    assert_eq!(store.service_releases(), before_releases);
+    assert_eq!(store.endpoints(), before_endpoints);
+    assert_eq!(store.service_api_surfaces(), before_surfaces);
+    assert_eq!(service_runtime_rows(&store, service_id), before_runtime);
+}
+
+#[test]
+fn runtime_rollback_refuses_to_claim_success_for_unmappable_prior_status() {
+    let _guard = DOCKER_BINARY_ENV_LOCK.lock().expect("env lock");
+    let dir = tempdir().expect("tempdir");
+    let _env = LocalProcessTestEnv::configure(dir.path());
+    let mut store = MemoryOrchestratorStore::new();
+    let service_id = "rollback-starting";
+    let (_service, release, endpoint) =
+        put_local_process_lifecycle_fixture(&mut store, service_id, 18_330, "starting");
+    let operation = service_lifecycle_operation_with_release(
+        "op-runtime-unmappable",
+        "service.start",
+        service_id,
+        Some(&release),
+        Some(&endpoint),
+        Some("127.0.0.1"),
+    )
+    .expect("plan service.start");
+    store.put_operation(operation).expect("put operation");
+    OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
+        .apply("op-runtime-unmappable")
+        .expect("apply service.start");
+
+    let error = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
+        .rollback("op-runtime-unmappable")
+        .expect_err("starting has no safe inverse driver action");
+    assert!(error.to_string().contains("cannot be restored safely"));
+    assert_eq!(
+        store
+            .operation("op-runtime-unmappable")
+            .map(|operation| &operation.status),
+        Some(&OperationStatus::Succeeded),
+        "a failed rollback must not mark the operation ROLLED_BACK"
+    );
+    assert_eq!(
+        service_runtime_rows(&store, service_id)
+            .0
+            .first()
+            .map(|item| item.status.as_str()),
+        Some("running"),
+        "metadata must stay aligned with the successfully applied start action"
+    );
+}
+
+#[test]
+fn host_lifecycle_requires_registered_host_services() {
+    let mut store = MemoryOrchestratorStore::new();
+    let operation = host_lifecycle_operation("op-host-empty", "host.start", "127.0.0.1", &[])
+        .expect("host.start plan");
+    store.put_operation(operation).expect("put operation");
+    let err = OperationExecutor::new(&mut store)
+        .with_service_driver_execution_enabled()
+        .apply("op-host-empty")
+        .expect_err("空主机不应该报告假成功");
+    assert!(err.to_string().contains("no registered services"));
+    assert_eq!(
+        store.operation("op-host-empty").map(|item| &item.status),
+        Some(&OperationStatus::Failed)
+    );
+}
+
+#[test]
+fn default_store_index_checksums_match_local_release_manifests() {
+    let root = repo_root();
+    let body = fs::read_to_string(root.join("store/index.json")).expect("default store index");
+    let index: serde_json::Value = serde_json::from_str(&body).expect("valid store index JSON");
+    let modules = index["modules"].as_array().expect("store modules");
+
+    assert!(!modules.is_empty(), "default store index must not be empty");
+    for module in modules {
+        let id = module["id"].as_str().expect("module id");
+        let source = module["source_url"].as_str().expect("module source_url");
+        let release_path = root.join(source).join("release.yaml");
+        let release = fs::read(&release_path)
+            .unwrap_or_else(|err| panic!("{id} release source {}: {err}", release_path.display()));
+        let expected = format!("sha256:{}", sha256_hex(&release));
+        assert_eq!(
+            module["checksum"].as_str(),
+            Some(expected.as_str()),
+            "{id} checksum must match {source}/release.yaml"
+        );
+    }
 }
 
 fn http_request_body_is_complete(bytes: &[u8]) -> bool {

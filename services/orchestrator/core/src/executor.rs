@@ -4,6 +4,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -84,6 +85,12 @@ impl LocalProcessDriver {
     pub fn with_state_dir(mut self, state_dir: impl Into<PathBuf>) -> Self {
         self.state_dir = state_dir.into();
         self
+    }
+}
+
+impl Default for LocalProcessDriver {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -213,14 +220,41 @@ impl LocalProcessDriver {
             let expanded = expand_runtime_value(value, &runtime.env)?;
             command_builder.env(key, expanded);
         }
-        let child = command_builder.spawn().map_err(|err| {
-            OrchestratorError::Dependency(format!(
-                "local process service_start failed to spawn {}: {err}",
-                request.service_id
-            ))
-        })?;
+        let mut pid_reservation = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pid_file)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(OrchestratorError::Blocked(format!(
+                    "local process {} already has a pid file; stop the existing instance before starting a replacement",
+                    request.service_id
+                )));
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let mut child = match command_builder.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                let _ = fs::remove_file(&pid_file);
+                return Err(OrchestratorError::Dependency(format!(
+                    "local process service_start failed to spawn {}: {err}",
+                    request.service_id
+                )));
+            }
+        };
         let pid = child.id();
-        fs::write(&pid_file, pid.to_string())?;
+        if let Err(err) = pid_reservation
+            .write_all(pid.to_string().as_bytes())
+            .and_then(|_| pid_reservation.sync_all())
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(pid_reservation);
+            let _ = fs::remove_file(&pid_file);
+            return Err(err.into());
+        }
         Ok(DriverResult {
             action: request.action.clone(),
             status: "SUCCEEDED".to_string(),
@@ -310,6 +344,10 @@ impl LocalProcessDriver {
         Ok(self
             .state_dir
             .join(format!("{}.pid", safe_file_stem(service_id)?)))
+    }
+
+    pub(crate) fn has_pid_file(&self, service_id: &str) -> Result<bool> {
+        Ok(self.pid_file(service_id)?.try_exists()?)
     }
 }
 

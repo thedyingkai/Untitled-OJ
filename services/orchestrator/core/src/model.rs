@@ -35,6 +35,11 @@ pub struct Link {
     pub auth_mode: String,
     #[serde(default)]
     pub scope: String,
+    /// Link 启停开关，对应 Pg service_links.enabled（NOT NULL DEFAULT TRUE）。
+    /// 注意必须使用 default_true 而不是 #[serde(default)]：bool 的 Default 是 false，
+    /// 历史快照/请求里没有该字段时会被误判成“全部禁用”。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(default)]
     pub health: String,
     #[serde(default)]
@@ -429,6 +434,11 @@ pub fn validate_link(link: &Link, endpoints: &[Endpoint]) -> Result<()> {
             "link source and target must be different endpoints".to_string(),
         ));
     }
+    if link.protocol.trim().is_empty() {
+        return Err(OrchestratorError::InvalidManifest(
+            "link protocol is required".to_string(),
+        ));
+    }
     let known = endpoints
         .iter()
         .map(|item| item.endpoint.as_str())
@@ -793,9 +803,9 @@ pub fn topology_authority(root_endpoint: &str) -> Result<TopologyAuthority> {
     Ok(TopologyAuthority {
         root_host,
         root_endpoint: root_endpoint.to_string(),
-        exposure_policy: "root-host-gui-tui-only".to_string(),
+        exposure_policy: "root-host-web-tui-only".to_string(),
         notes: vec![
-            "root host exposes full GUI/TUI".to_string(),
+            "root host exposes the full Web/TUI control plane".to_string(),
             "non-root hosts cannot change global topology or create global links".to_string(),
         ],
     })
@@ -844,10 +854,13 @@ pub fn diagnostic_report_json(topology: &Topology) -> Result<String> {
         })
         .map(|endpoint| endpoint.endpoint.clone())
         .collect::<Vec<_>>();
+    // 已禁用的 Link 是运维显式关停的连接，不参与健康统计，否则诊断会一直报假告警。
     let unhealthy_links = topology
         .links
         .iter()
-        .filter(|link| matches!(link.health.as_str(), "degraded" | "blocked" | "unreachable"))
+        .filter(|link| {
+            link.enabled && matches!(link.health.as_str(), "degraded" | "blocked" | "unreachable")
+        })
         .map(|link| format!("{} -> {}", link.source_endpoint, link.target_endpoint))
         .collect::<Vec<_>>();
     let service_endpoint_groups = service_endpoint_groups(&topology.endpoints);

@@ -108,8 +108,8 @@ ON CONFLICT (endpoint) DO UPDATE SET
     DatabaseStatement {
         name: "service_links.upsert",
         sql: r#"
-INSERT INTO service_links (source_endpoint, target_endpoint, from_ip, from_port, from_service_name, to_type, to_ip, to_port, to_service_name, protocol, auth_mode, scope, health, latency_ms, config_ref, secret_ref, policy, updated_at)
-VALUES ($1, $2, $3, $4, $5, 'endpoint', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+INSERT INTO service_links (source_endpoint, target_endpoint, from_ip, from_port, from_service_name, to_type, to_ip, to_port, to_service_name, protocol, auth_mode, scope, health, latency_ms, config_ref, secret_ref, policy, enabled, updated_at)
+VALUES ($1, $2, $3, $4, $5, 'endpoint', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
 ON CONFLICT (source_endpoint, target_endpoint) DO UPDATE SET
     from_ip = EXCLUDED.from_ip,
     from_port = EXCLUDED.from_port,
@@ -126,6 +126,7 @@ ON CONFLICT (source_endpoint, target_endpoint) DO UPDATE SET
     config_ref = EXCLUDED.config_ref,
     secret_ref = EXCLUDED.secret_ref,
     policy = EXCLUDED.policy,
+    enabled = EXCLUDED.enabled,
     updated_at = NOW()
 "#,
     },
@@ -890,14 +891,14 @@ impl OrchestratorStore for PgOrchestratorStore {
     }
 
     fn list_links(&self) -> Result<Vec<Link>> {
-        self.query("SELECT source_endpoint, target_endpoint, protocol, auth_mode, scope, health, latency_ms, config_ref, secret_ref, policy, created_at::TEXT, updated_at::TEXT FROM service_links ORDER BY source_endpoint, target_endpoint", &[])?
+        self.query("SELECT source_endpoint, target_endpoint, protocol, auth_mode, scope, health, latency_ms, config_ref, secret_ref, policy, created_at::TEXT, updated_at::TEXT, enabled FROM service_links ORDER BY source_endpoint, target_endpoint", &[])?
             .into_iter()
             .map(link_from_row)
             .collect()
     }
 
     fn get_link(&self, source_endpoint: &str, target_endpoint: &str) -> Result<Option<Link>> {
-        let mut rows = self.query("SELECT source_endpoint, target_endpoint, protocol, auth_mode, scope, health, latency_ms, config_ref, secret_ref, policy, created_at::TEXT, updated_at::TEXT FROM service_links WHERE source_endpoint = $1 AND target_endpoint = $2", &[&source_endpoint, &target_endpoint])?;
+        let mut rows = self.query("SELECT source_endpoint, target_endpoint, protocol, auth_mode, scope, health, latency_ms, config_ref, secret_ref, policy, created_at::TEXT, updated_at::TEXT, enabled FROM service_links WHERE source_endpoint = $1 AND target_endpoint = $2", &[&source_endpoint, &target_endpoint])?;
         rows.pop().map(link_from_row).transpose()
     }
 
@@ -914,8 +915,8 @@ impl OrchestratorStore for PgOrchestratorStore {
         })?;
         let latency_ms = link.latency_ms.map(|value| value as i32);
         self.execute(
-            "INSERT INTO service_links (source_endpoint, target_endpoint, from_ip, from_port, from_service_name, to_type, to_ip, to_port, to_service_name, protocol, auth_mode, scope, health, latency_ms, config_ref, secret_ref, policy, updated_at) VALUES ($1, $2, $3, $4, $5, 'endpoint', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW()) ON CONFLICT (source_endpoint, target_endpoint) DO UPDATE SET from_ip = EXCLUDED.from_ip, from_port = EXCLUDED.from_port, from_service_name = EXCLUDED.from_service_name, to_type = EXCLUDED.to_type, to_ip = EXCLUDED.to_ip, to_port = EXCLUDED.to_port, to_service_name = EXCLUDED.to_service_name, protocol = EXCLUDED.protocol, auth_mode = EXCLUDED.auth_mode, scope = EXCLUDED.scope, health = EXCLUDED.health, latency_ms = EXCLUDED.latency_ms, config_ref = EXCLUDED.config_ref, secret_ref = EXCLUDED.secret_ref, policy = EXCLUDED.policy, updated_at = NOW()",
-            &[&link.source_endpoint, &link.target_endpoint, &source.host, &source_port, &source.service_name, &target.host, &target_port, &target.service_name, &link.protocol, &link.auth_mode, &link.scope, &link.health, &latency_ms, &link.config_ref, &link.secret_ref, &link.policy],
+            "INSERT INTO service_links (source_endpoint, target_endpoint, from_ip, from_port, from_service_name, to_type, to_ip, to_port, to_service_name, protocol, auth_mode, scope, health, latency_ms, config_ref, secret_ref, policy, enabled, updated_at) VALUES ($1, $2, $3, $4, $5, 'endpoint', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW()) ON CONFLICT (source_endpoint, target_endpoint) DO UPDATE SET from_ip = EXCLUDED.from_ip, from_port = EXCLUDED.from_port, from_service_name = EXCLUDED.from_service_name, to_type = EXCLUDED.to_type, to_ip = EXCLUDED.to_ip, to_port = EXCLUDED.to_port, to_service_name = EXCLUDED.to_service_name, protocol = EXCLUDED.protocol, auth_mode = EXCLUDED.auth_mode, scope = EXCLUDED.scope, health = EXCLUDED.health, latency_ms = EXCLUDED.latency_ms, config_ref = EXCLUDED.config_ref, secret_ref = EXCLUDED.secret_ref, policy = EXCLUDED.policy, enabled = EXCLUDED.enabled, updated_at = NOW()",
+            &[&link.source_endpoint, &link.target_endpoint, &source.host, &source_port, &source.service_name, &target.host, &target_port, &target.service_name, &link.protocol, &link.auth_mode, &link.scope, &link.health, &latency_ms, &link.config_ref, &link.secret_ref, &link.policy, &link.enabled],
         )?;
         Ok(())
     }
@@ -1258,6 +1259,8 @@ fn link_from_row(row: Row) -> Result<Link> {
         protocol: row.get(2),
         auth_mode: row.get(3),
         scope: row.get(4),
+        // enabled 追加在 SELECT 末尾（index 12），保持既有列下标不变。
+        enabled: row.get(12),
         health: row.get(5),
         latency_ms,
         config_ref: row.get(7),
@@ -1439,7 +1442,7 @@ fn operation_from_row(operation_id: String, row: Row) -> Result<Operation> {
     let status_text: String = row.get(3 + offset);
     Ok(Operation {
         operation_id,
-        action: row.get(0 + offset),
+        action: row.get(offset),
         target_type: row.get(1 + offset),
         target_id: row.get(2 + offset),
         status: operation_status_from_text(&status_text),

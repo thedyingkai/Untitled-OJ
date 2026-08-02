@@ -50,8 +50,12 @@ migrations:
   - version: "000011_grant_problem_setter_create"
     path: services/auth-service/migrations/000011_grant_problem_setter_create.up.sql
     checksum: sha256:4802200f3bc8880c5d85c579148ee48fbf8a143d4aa9ba716b07e449a0aeedf9
+  - version: "000012_grant_service_permission_check"
+    path: services/auth-service/migrations/000012_grant_service_permission_check.up.sql
+    checksum: sha256:218a9fd8fabd0ea11acd8771402a585698f33c1a5c13742f7da1d378d481c08e
 permissions:
   - auth.admin
+  - auth.permission.check
   - system.admin
 routes:
   - path: /api/auth/**
@@ -78,6 +82,16 @@ apis:
     visibility: descendants
     auth_mode: service
     permission: system.admin
+    version: v1
+    stability: stable
+  - api_id: auth.user.permission.check
+    protocol: http
+    port_name: http
+    path_prefix: /auth/admin/permission-check
+    methods: [POST]
+    visibility: descendants
+    auth_mode: service
+    permission: auth.permission.check
     version: v1
     stability: stable
   - api_id: auth.user.permissions

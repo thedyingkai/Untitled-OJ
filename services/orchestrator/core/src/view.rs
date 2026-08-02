@@ -1,8 +1,8 @@
 use crate::{
     DeploymentTemplate, Endpoint, Link, Operation, OperationLogRecord, OrchestratorError,
     OrchestratorStore, PgOrchestratorStore, Result, ServiceManifest, ServiceReleaseManifest,
-    SharedSchemas, Topology, build_operation_workbench_with_releases, build_topology,
-    default_action_request, load_shared_schemas, new_operation_workbench_session,
+    SharedSchemas, Topology, action_descriptor, build_operation_workbench_with_releases,
+    build_topology, default_action_request, load_shared_schemas, new_operation_workbench_session,
     parse_endpoint_id, plan_action_preview_with_releases, preview_deployment_template,
     run_operation_workbench_flow, validate_action_catalog, validate_deployment_template_file,
     validate_endpoint_id, validate_service_manifest_file, validate_service_release_file,
@@ -116,6 +116,8 @@ pub struct LinkViewRow {
     pub protocol: String,
     pub auth_mode: String,
     pub scope: String,
+    /// 与本行其它字段一致使用 String："enabled" / "disabled"。
+    pub enabled: String,
     pub source: String,
 }
 
@@ -128,6 +130,12 @@ pub struct OperationViewRow {
     pub risk: String,
     pub plan_required: String,
     pub mode: String,
+    pub requires_confirmation: bool,
+    /// 只有持久化 Operation 的 rollback_plan.steps 非空时才允许界面提供回滚入口。
+    pub rollback_available: bool,
+    /// 该 Operation 的请求是否记录了运行时驱动授权。Web 用它判断 apply/rollback
+    /// 是否必须再次取得用户授权，不能只凭 action 名称猜测。
+    pub driver_authorized: bool,
     pub fields: String,
     pub preview_target: String,
     pub preview_steps: String,
@@ -702,8 +710,13 @@ fn link_model_row(link: &Link) -> LinkViewRow {
         protocol: link.protocol.clone(),
         auth_mode: link.auth_mode.clone(),
         scope: link.scope.clone(),
+        enabled: link_enabled_label(link.enabled),
         source: link.health.clone(),
     }
+}
+
+fn link_enabled_label(enabled: bool) -> String {
+    if enabled { "enabled" } else { "disabled" }.to_string()
 }
 
 fn template_rows(templates: &[DeploymentTemplate]) -> Vec<TemplateViewRow> {
@@ -823,6 +836,8 @@ fn link_rows(sets: &[DeploymentTemplate]) -> Vec<LinkViewRow> {
                 protocol: empty_to_default(&link.protocol, "runtime").to_string(),
                 auth_mode: empty_to_default(&link.auth_mode, "internal").to_string(),
                 scope: link.scope.clone(),
+                // 部署模板里的默认连接一律按启用预览，模板本身没有启停开关。
+                enabled: link_enabled_label(true),
                 source: set.id.clone(),
             });
         }
@@ -860,6 +875,7 @@ fn link_models(sets: &[DeploymentTemplate]) -> Vec<Link> {
                 protocol: empty_to_default(&link.protocol, "http").to_string(),
                 auth_mode: empty_to_default(&link.auth_mode, "internal").to_string(),
                 scope: link.scope.clone(),
+                enabled: true,
                 health: "unknown".to_string(),
                 latency_ms: None,
                 config_ref: String::new(),
@@ -939,6 +955,9 @@ fn operation_rows(
                     risk: descriptor.risk_label().to_string(),
                     plan_required: descriptor.plan_requirement().to_string(),
                     mode: descriptor.mode_label().to_string(),
+                    requires_confirmation: descriptor.plan_mode.requires_confirmation(),
+                    rollback_available: false,
+                    driver_authorized: false,
                     fields: form_fields_text(schemas, descriptor.action),
                     preview_target: preview
                         .as_ref()
@@ -975,6 +994,9 @@ fn operation_rows(
             risk: "高".to_string(),
             plan_required: "必须修复".to_string(),
             mode: "阻塞".to_string(),
+            requires_confirmation: false,
+            rollback_available: false,
+            driver_authorized: false,
             fields: String::new(),
             preview_target: String::new(),
             preview_steps: String::new(),
@@ -1003,6 +1025,31 @@ fn operation_store_rows(
             risk: String::new(),
             plan_required: operation_status_text(&operation.status),
             mode: "store".to_string(),
+            requires_confirmation: operation
+                .plan
+                .get("requires_confirmation")
+                .and_then(serde_json::Value::as_bool)
+                .or_else(|| {
+                    action_descriptor(&operation.action)
+                        .map(|descriptor| descriptor.plan_mode.requires_confirmation())
+                })
+                .unwrap_or(false),
+            rollback_available: operation
+                .rollback_plan
+                .get("steps")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|steps| !steps.is_empty()),
+            driver_authorized: operation
+                .request
+                .get("execute_service_driver")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || operation
+                    .request
+                    .get("install_options")
+                    .and_then(|options| options.get("execute_service_driver"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
             fields: operation.target_id.clone(),
             preview_target: operation.target_id.clone(),
             preview_steps: operation
@@ -1011,11 +1058,11 @@ fn operation_store_rows(
                 .and_then(serde_json::Value::as_array)
                 .map(|steps| steps.len().to_string())
                 .unwrap_or_else(|| "0".to_string()),
-            preview_confirmation: operation
-                .confirmed_at
-                .is_empty()
-                .then_some("no".to_string())
-                .unwrap_or_else(|| "yes".to_string()),
+            preview_confirmation: if operation.confirmed_at.is_empty() {
+                "no".to_string()
+            } else {
+                "yes".to_string()
+            },
             result: operation_result_summary(operation),
             error: operation.error_message.clone(),
             log_count: log_counts
@@ -1380,4 +1427,28 @@ pub fn ensure_view_is_loaded(view: &OrchestratorView) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_error_row_never_advertises_rollback() {
+        let invalid_schemas = SharedSchemas {
+            actions: Vec::new(),
+            form_actions: Vec::new(),
+            forms: Vec::new(),
+            plan_states: Vec::new(),
+            plan_required_fields: Vec::new(),
+            result_object_types: Vec::new(),
+            result_required_fields: Vec::new(),
+            error_required_fields: Vec::new(),
+            error_redactions: Vec::new(),
+        };
+        let rows = operation_rows(&invalid_schemas, &[], &[], &[], &[], None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "action.catalog.invalid");
+        assert!(!rows[0].rollback_available);
+    }
 }

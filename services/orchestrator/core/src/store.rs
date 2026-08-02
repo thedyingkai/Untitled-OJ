@@ -23,12 +23,19 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use tar::Archive;
 use ureq::Agent;
 use zip::ZipArchive;
+
+#[cfg(test)]
+thread_local! {
+    #[allow(clippy::missing_const_for_thread_local)]
+    static TEST_CONFIGURED_GATEWAY_PUBLISHER: std::cell::RefCell<Option<HttpGatewayRoutePublisher>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 pub trait OrchestratorStore {
     fn list_services(&self) -> Result<Vec<ServiceManifest>>;
@@ -1203,6 +1210,8 @@ pub trait GatewayRoutePublisher {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeServiceDispatchRequest {
     pub operation_id: String,
+    #[serde(default)]
+    pub execute_service_driver: bool,
     pub service: ServiceManifest,
     pub release: Option<ServiceReleaseManifest>,
     pub host_service: HostService,
@@ -1217,6 +1226,10 @@ pub struct NodeServiceDispatchResult {
     pub message: String,
     pub endpoint: String,
     pub accepted: bool,
+    #[serde(default)]
+    pub driver_executed: bool,
+    #[serde(default)]
+    pub driver_status: String,
 }
 
 pub trait NodeServiceDispatcher {
@@ -1224,6 +1237,12 @@ pub trait NodeServiceDispatcher {
         &self,
         request: &NodeServiceDispatchRequest,
     ) -> Result<NodeServiceDispatchResult>;
+
+    /// `true` selects the node as the sole runtime-driver location. Implementations that merely
+    /// defer node dispatch must override this to preserve standalone execution.
+    fn routes_execution_to_node(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1296,7 +1315,23 @@ pub struct DeferredReleasePackageLoader;
 /// Maximum HTTP redirects followed when downloading a remote release package.
 /// GitHub release asset URLs redirect once to a storage host; a small bound keeps
 /// that working without allowing unbounded redirect chains.
+///
+/// 注意：重定向由我们自己逐跳跟随（ureq 侧配置为 `max_redirects(0)`），
+/// 因为每一跳的目标都必须重新过一次 `validate_outbound_url` 的 SSRF 校验，
+/// 交给 ureq 自动跟随就没有拦截点了。
 const RELEASE_PACKAGE_MAX_REDIRECTS: u32 = 5;
+
+/// 解压炸弹防护：单个 release 包解压后允许写出的总字节数。
+/// 压缩包自身受 `max_package_bytes`（默认 64MB）限制，但压缩比可以高达数千倍，
+/// 所以解压侧必须单独设一道闸。
+const MAX_EXTRACTED_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// 解压炸弹防护：单个 release 包允许的条目数（含目录条目）。
+/// 防的是"几百万个空文件"这类耗尽 inode / 目录项的包。
+const MAX_EXTRACTED_PACKAGE_ENTRIES: usize = 5000;
+
+/// 解压炸弹防护：单个条目解压后允许写出的字节数，与默认整包下载上限一致。
+const MAX_EXTRACTED_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone)]
 pub struct ConfiguredReleasePackageLoader {
@@ -1310,6 +1345,11 @@ pub struct LocalReleasePackageLoader {
     timeout: Duration,
     max_manifest_bytes: usize,
     max_package_bytes: usize,
+    /// 是否放行指向 loopback / 私网的包源。构造时取自
+    /// `ORCHESTRATOR_ALLOW_PRIVATE_RELEASE_SOURCE`，可用
+    /// [`LocalReleasePackageLoader::with_allow_private_source`] 显式覆盖，
+    /// 这样测试里的本地 HTTP 桩不必去改进程级环境变量（并行测试下不安全）。
+    allow_private_source: bool,
 }
 
 struct LoadedReleasePackageSource {
@@ -1334,6 +1374,31 @@ pub struct HttpGatewayRoutePublisher {
     timeout: Duration,
 }
 
+#[cfg(test)]
+pub(crate) struct TestConfiguredGatewayPublisherGuard {
+    previous: Option<HttpGatewayRoutePublisher>,
+}
+
+#[cfg(test)]
+impl Drop for TestConfiguredGatewayPublisherGuard {
+    fn drop(&mut self) {
+        TEST_CONFIGURED_GATEWAY_PUBLISHER.with(|publisher| {
+            publisher.replace(self.previous.take());
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn configure_gateway_publisher_for_current_test(
+    endpoint: impl Into<String>,
+    token: impl Into<String>,
+) -> TestConfiguredGatewayPublisherGuard {
+    let publisher = HttpGatewayRoutePublisher::new(endpoint).with_token(token);
+    let previous =
+        TEST_CONFIGURED_GATEWAY_PUBLISHER.with(|configured| configured.replace(Some(publisher)));
+    TestConfiguredGatewayPublisherGuard { previous }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct DeferredNodeServiceDispatcher;
 
@@ -1347,6 +1412,7 @@ pub struct ConfiguredNodeServiceDispatcher {
 pub struct HttpNodeServiceDispatcher {
     endpoint: String,
     token: Option<String>,
+    control_token: Option<String>,
     timeout: Duration,
 }
 
@@ -1399,6 +1465,11 @@ struct ReleaseRecordPreviousState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct ReleaseDeletePreviousState {
+    releases: Vec<ServiceRelease>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 struct RegistryResourcePreviousState {
     routes: Vec<ServiceRoute>,
     migrations: Vec<ServiceMigrationRecord>,
@@ -1409,6 +1480,33 @@ struct RegistryResourcePreviousState {
     configs: Vec<RenderedServiceConfig>,
     api_surfaces: Vec<ServiceApiSurface>,
     deployed_apis: Vec<DeployedServiceApi>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct ServiceRuntimePreviousState {
+    host_services: Vec<HostService>,
+    deployed_apis: Vec<DeployedServiceApi>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct EndpointMutationPreviousState {
+    endpoint: Endpoint,
+    links: Vec<Link>,
+    log_views: Vec<LogView>,
+    deployed_apis: Vec<DeployedServiceApi>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct LinkMutationPreviousState {
+    link: Link,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceRuntimeRestoreSpec {
+    service: ServiceManifest,
+    release: Option<ServiceReleaseManifest>,
+    endpoint: String,
+    action: &'static str,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1981,11 +2079,20 @@ impl LocalReleasePackageLoader {
             timeout: Duration::from_secs(15),
             max_manifest_bytes: 1024 * 1024,
             max_package_bytes: 64 * 1024 * 1024,
+            allow_private_source: allow_private_release_source(),
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// 显式覆盖「是否放行 loopback / 私网包源」。生产不应调用它——生产用
+    /// `ORCHESTRATOR_ALLOW_PRIVATE_RELEASE_SOURCE` 环境变量表达意图；
+    /// 它存在是为了让测试的本地 HTTP 桩不必改进程级环境变量。
+    pub fn with_allow_private_source(mut self, allow_private_source: bool) -> Self {
+        self.allow_private_source = allow_private_source;
         self
     }
 
@@ -2027,42 +2134,74 @@ impl LocalReleasePackageLoader {
         let agent: Agent = Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .http_status_as_error(false)
-            // Follow a bounded number of redirects: GitHub release asset URLs
-            // (…/releases/download/…) answer with a 302 to a storage host, so a
-            // zero-redirect fetch would reject the download as a non-2xx status.
-            .max_redirects(RELEASE_PACKAGE_MAX_REDIRECTS)
+            // Redirects are followed by hand (see the loop below): GitHub release asset
+            // URLs (…/releases/download/…) answer with a 302 to a storage host, so we do
+            // need to follow them — but every hop must be re-checked against the SSRF
+            // policy, and ureq's automatic follower gives us no interception point.
+            // With `max_redirects(0)` ureq returns the 3xx response as-is and never
+            // raises `TooManyRedirects`.
+            .max_redirects(0)
+            // 保留 `.proxy(None)`：既有部署依赖 daemon 直连（出口代理未必能访问
+            // release 资产的存储域名），改动会破坏现网。代价是不能再指望出口代理
+            // 做第二道过滤——本进程内的 `validate_outbound_url` 就是唯一的闸门。
             .proxy(None)
             .build()
             .into();
-        let response = agent.get(source_url).call().map_err(|err| {
-            OrchestratorError::Dependency(format!(
-                "release package fetch request failed for {source_url}: {err}"
-            ))
-        })?;
-        let status = response.status().as_u16();
-        if !(200..=299).contains(&status) {
-            return Err(OrchestratorError::Dependency(format!(
-                "release package fetch failed for {source_url}: http {status}"
-            )));
-        }
-        let mut reader = response.into_body().into_reader();
-        let mut body = Vec::new();
-        reader
-            .by_ref()
-            .take((self.max_package_bytes as u64) + 1)
-            .read_to_end(&mut body)
-            .map_err(|err| {
+        let mut current_url = source_url.trim().to_string();
+        let mut hops: u32 = 0;
+        loop {
+            // 每一跳（含首跳）都重新校验：重定向目标可能指向 127.0.0.1 或云元数据地址。
+            validate_outbound_url_with_policy(&current_url, self.allow_private_source)?;
+            let response = agent.get(&current_url).call().map_err(|err| {
                 OrchestratorError::Dependency(format!(
-                    "release package body read failed for {source_url}: {err}"
+                    "release package fetch request failed for {source_url}: {err}"
                 ))
             })?;
-        if body.len() > self.max_package_bytes {
-            return Err(OrchestratorError::InvalidManifest(format!(
-                "release package exceeds {} bytes",
-                self.max_package_bytes
-            )));
+            let status = response.status().as_u16();
+            if matches!(status, 301 | 302 | 303 | 307 | 308) {
+                if hops >= RELEASE_PACKAGE_MAX_REDIRECTS {
+                    return Err(OrchestratorError::Dependency(format!(
+                        "release package fetch failed for {source_url}: more than {RELEASE_PACKAGE_MAX_REDIRECTS} redirects"
+                    )));
+                }
+                let location = response
+                    .headers()
+                    .get("location")
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| {
+                        OrchestratorError::Dependency(format!(
+                            "release package fetch failed for {source_url}: http {status} without a usable location header"
+                        ))
+                    })?
+                    .to_string();
+                current_url = resolve_outbound_redirect(&current_url, &location)?;
+                hops += 1;
+                continue;
+            }
+            if !(200..=299).contains(&status) {
+                return Err(OrchestratorError::Dependency(format!(
+                    "release package fetch failed for {source_url}: http {status}"
+                )));
+            }
+            let mut reader = response.into_body().into_reader();
+            let mut body = Vec::new();
+            reader
+                .by_ref()
+                .take((self.max_package_bytes as u64) + 1)
+                .read_to_end(&mut body)
+                .map_err(|err| {
+                    OrchestratorError::Dependency(format!(
+                        "release package body read failed for {source_url}: {err}"
+                    ))
+                })?;
+            if body.len() > self.max_package_bytes {
+                return Err(OrchestratorError::InvalidManifest(format!(
+                    "release package exceeds {} bytes",
+                    self.max_package_bytes
+                )));
+            }
+            return Ok(body);
         }
-        Ok(body)
     }
 
     fn load_remote_release_source(&self, source_url: &str) -> Result<LoadedReleasePackageSource> {
@@ -2157,6 +2296,371 @@ impl LocalReleasePackageLoader {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 出网地址闸门（SSRF 防护）
+//
+// daemon 会按调用方给的 URL 去下载 release 包 / 商店索引。没有这道闸门时，
+// 攻击者可以让 daemon 请求 http://127.0.0.1:*（打本机上其他服务的管理端口）、
+// http://169.254.169.254/（云厂商实例元数据，拿临时凭证）或任意内网地址。
+// 这里在发请求之前把目标地址解析出来逐个判定，重定向的每一跳也要再判一次。
+//
+// 已知残留风险（有意接受，见 README/审计记录）：
+//   * DNS rebinding —— 我们解析一次做判定，ureq 连接时会再解析一次，两次之间
+//     记录可能被换掉。彻底解决需要自定义 Resolver / 连接期校验，属于后续工作。
+//   * 出口代理被显式关闭（`.proxy(None)`），所以没有网络层的第二道过滤。
+// ---------------------------------------------------------------------------
+
+/// 逃生阀：内网私有镜像源场景下允许把包源指向私网地址。
+///
+/// 打开后放行 loopback、RFC1918 私网、CGNAT、IPv6 唯一本地地址；
+/// **不会**放行 link-local（169.254/16、fe80::/10，即云元数据地址）、
+/// 未指定地址、多播与广播地址——那些在任何部署形态下都不是合法的包源。
+fn allow_private_release_source() -> bool {
+    std::env::var("ORCHESTRATOR_ALLOW_PRIVATE_RELEASE_SOURCE")
+        .ok()
+        .is_some_and(|value| truthy(&value))
+}
+
+/// 出网 URL 的解析结果（只保留判定与重定向拼接需要的部分）。
+struct OutboundUrl {
+    scheme: String,
+    /// `host[:port]`，已剥离 userinfo；用于拼接相对重定向时原样复用。
+    authority: String,
+    /// 裸主机名或 IP 字面量（IPv6 已去掉方括号）。
+    host: String,
+    /// 端口；URL 未写端口时按 scheme 补 80/443。
+    port: u16,
+    /// 以 '/' 开头的路径，不含 query/fragment。
+    path: String,
+}
+
+/// 校验一个出网 URL 是否允许请求。
+///
+/// * 只允许 http / https；
+/// * host 是 IP 字面量时直接判定；是域名时用 `ToSocketAddrs` 解析，
+///   **所有**解析结果都必须通过判定（只要有一条指向内网就整体拒绝）；
+/// * 被拒绝时返回 [`OrchestratorError::Blocked`]，错误信息里带上判定理由。
+///
+/// 逃生阀是环境变量 `ORCHESTRATOR_ALLOW_PRIVATE_RELEASE_SOURCE`；
+/// 命中逃生阀放行时会打一条 warning 日志说明放行了什么。
+pub fn validate_outbound_url(url: &str) -> Result<()> {
+    validate_outbound_url_with_policy(url, allow_private_release_source())
+}
+
+/// [`validate_outbound_url`] 的内部形态：策略显式传入，方便单元测试不依赖进程环境变量。
+fn validate_outbound_url_with_policy(url: &str, allow_private: bool) -> Result<()> {
+    let parsed = parse_outbound_url(url)?;
+    if let Ok(ip) = parsed.host.parse::<IpAddr>() {
+        return check_outbound_ip(ip, &parsed.host, allow_private);
+    }
+    let resolved = (parsed.host.as_str(), parsed.port)
+        .to_socket_addrs()
+        .map_err(|err| {
+            OrchestratorError::Blocked(format!(
+                "outbound url host {} could not be resolved: {err}",
+                parsed.host
+            ))
+        })?;
+    let mut checked = 0usize;
+    for addr in resolved {
+        check_outbound_ip(addr.ip(), &parsed.host, allow_private)?;
+        checked += 1;
+    }
+    if checked == 0 {
+        return Err(OrchestratorError::Blocked(format!(
+            "outbound url host {} resolved to no address",
+            parsed.host
+        )));
+    }
+    Ok(())
+}
+
+/// 把 3xx 的 `Location` 拼成绝对 URL。
+///
+/// 只做拼接，不做安全判定——调用方拿到结果后**必须**再跑一次 [`validate_outbound_url`]。
+pub fn resolve_outbound_redirect(base_url: &str, location: &str) -> Result<String> {
+    let location = location.trim();
+    if location.is_empty() {
+        return Err(OrchestratorError::Blocked(
+            "redirect location header is empty".to_string(),
+        ));
+    }
+    let lowered = location.to_ascii_lowercase();
+    if lowered.starts_with("http://") || lowered.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    let base = parse_outbound_url(base_url)?;
+    // 协议相对地址：//host/path
+    if let Some(rest) = location.strip_prefix("//") {
+        return Ok(format!("{}://{}", base.scheme, rest));
+    }
+    // 绝对路径：/path
+    if location.starts_with('/') {
+        return Ok(format!("{}://{}{}", base.scheme, base.authority, location));
+    }
+    // 其余一律按相对路径处理；带 scheme 但不是 http(s) 的（如 file:、gopher:）
+    // 会被拼成一个奇怪的相对路径，随后在 validate_outbound_url 里再被拒。
+    let base_dir = match base.path.rfind('/') {
+        Some(index) => &base.path[..=index],
+        None => "/",
+    };
+    Ok(format!(
+        "{}://{}{}{}",
+        base.scheme, base.authority, base_dir, location
+    ))
+}
+
+fn parse_outbound_url(url: &str) -> Result<OutboundUrl> {
+    let url = url.trim();
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Err(OrchestratorError::Blocked(format!(
+            "outbound url {} must start with http:// or https://",
+            outbound_url_label(url)
+        )));
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Err(OrchestratorError::Blocked(format!(
+            "outbound url scheme {scheme} is not allowed; only http and https are supported"
+        )));
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority_raw, tail) = rest.split_at(authority_end);
+    // userinfo（user:pass@host）不参与连接目标判定：HTTP 客户端连的是最后一个 '@' 之后的主机，
+    // 攻击者常用 `https://trusted.example@127.0.0.1/` 这种写法骗过只看前缀的校验。
+    let authority = match authority_raw.rsplit_once('@') {
+        Some((_, after)) => after,
+        None => authority_raw,
+    };
+    if authority.is_empty() {
+        return Err(OrchestratorError::Blocked(format!(
+            "outbound url {} must contain a host",
+            outbound_url_label(url)
+        )));
+    }
+    let (host, port) = split_outbound_host_port(authority, &scheme)?;
+    if host.is_empty() {
+        return Err(OrchestratorError::Blocked(format!(
+            "outbound url {} must contain a host",
+            outbound_url_label(url)
+        )));
+    }
+    let path_end = tail.find(['?', '#']).unwrap_or(tail.len());
+    let path = &tail[..path_end];
+    Ok(OutboundUrl {
+        scheme,
+        authority: authority.to_string(),
+        host,
+        port,
+        path: if path.is_empty() {
+            "/".to_string()
+        } else {
+            path.to_string()
+        },
+    })
+}
+
+fn split_outbound_host_port(authority: &str, scheme: &str) -> Result<(String, u16)> {
+    let default_port: u16 = if scheme == "https" { 443 } else { 80 };
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, tail)) = rest.split_once(']') else {
+            return Err(OrchestratorError::Blocked(
+                "outbound url ipv6 host is missing a closing bracket".to_string(),
+            ));
+        };
+        let port = if tail.is_empty() {
+            default_port
+        } else if let Some(port_text) = tail.strip_prefix(':') {
+            parse_outbound_port(port_text, default_port)?
+        } else {
+            return Err(OrchestratorError::Blocked(
+                "outbound url ipv6 host has trailing characters after the closing bracket"
+                    .to_string(),
+            ));
+        };
+        return Ok((host.to_string(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port_text)) => Ok((
+            host.to_string(),
+            parse_outbound_port(port_text, default_port)?,
+        )),
+        None => Ok((authority.to_string(), default_port)),
+    }
+}
+
+fn parse_outbound_port(port_text: &str, default_port: u16) -> Result<u16> {
+    if port_text.is_empty() {
+        return Ok(default_port);
+    }
+    port_text.parse::<u16>().map_err(|_| {
+        OrchestratorError::Blocked(format!(
+            "outbound url port {} is invalid",
+            outbound_url_label(port_text)
+        ))
+    })
+}
+
+/// 错误信息里回显 URL 片段时截断，避免超长输入把日志/响应刷爆。
+fn outbound_url_label(value: &str) -> String {
+    let label: String = value.chars().take(200).collect();
+    if label.len() < value.len() {
+        format!("{label}...")
+    } else {
+        label
+    }
+}
+
+fn check_outbound_ip(ip: IpAddr, host: &str, allow_private: bool) -> Result<()> {
+    // 先看逃生阀也不放行的类别（元数据地址、未指定、多播、广播……）。
+    if let Some(reason) = outbound_ip_block_reason(ip, true) {
+        return Err(OrchestratorError::Blocked(format!(
+            "outbound url host {host} resolves to {ip} which is not allowed: {reason}"
+        )));
+    }
+    if let Some(reason) = outbound_ip_block_reason(ip, false) {
+        if !allow_private {
+            return Err(OrchestratorError::Blocked(format!(
+                "outbound url host {host} resolves to {ip} which is not allowed: {reason}; set ORCHESTRATOR_ALLOW_PRIVATE_RELEASE_SOURCE=1 only if this is an intentional private mirror"
+            )));
+        }
+        eprintln!(
+            "warning: ORCHESTRATOR_ALLOW_PRIVATE_RELEASE_SOURCE=1 allows an outbound request to {host} ({ip}): {reason}"
+        );
+    }
+    Ok(())
+}
+
+/// 判定一个 IP 是否禁止作为出网目标；返回 `None` 表示放行。
+///
+/// `allow_private = true` 表示逃生阀已打开，只保留"任何情况下都不允许"的那几类。
+fn outbound_ip_block_reason(ip: IpAddr, allow_private: bool) -> Option<&'static str> {
+    match ip {
+        IpAddr::V4(ipv4) => outbound_ipv4_block_reason(ipv4, allow_private),
+        IpAddr::V6(ipv6) => outbound_ipv6_block_reason(ipv6, allow_private),
+    }
+}
+
+fn outbound_ipv4_block_reason(ip: Ipv4Addr, allow_private: bool) -> Option<&'static str> {
+    let octets = ip.octets();
+    // 无条件拒绝的类别。
+    if ip.is_unspecified() {
+        return Some("unspecified address");
+    }
+    if ip.is_broadcast() {
+        return Some("broadcast address");
+    }
+    if ip.is_multicast() {
+        return Some("multicast address 224.0.0.0/4");
+    }
+    if ip.is_link_local() {
+        return Some("link-local address 169.254.0.0/16 (cloud instance metadata)");
+    }
+    if octets[0] == 0 {
+        return Some("this-network address 0.0.0.0/8");
+    }
+    if octets[0] >= 240 {
+        return Some("reserved address 240.0.0.0/4");
+    }
+    if allow_private {
+        return None;
+    }
+    // 逃生阀可放行的类别。
+    if ip.is_loopback() {
+        return Some("loopback address 127.0.0.0/8");
+    }
+    if ip.is_private() {
+        return Some("private address (RFC 1918)");
+    }
+    // CGNAT 100.64.0.0/10；std 上判断它的 `is_shared` 仍是 unstable，这里手写。
+    if octets[0] == 100 && (octets[1] & 0b1100_0000) == 64 {
+        return Some("carrier-grade NAT address 100.64.0.0/10");
+    }
+    None
+}
+
+fn outbound_ipv6_block_reason(ip: Ipv6Addr, allow_private: bool) -> Option<&'static str> {
+    let segments = ip.segments();
+    if ip.is_unspecified() {
+        return Some("unspecified address");
+    }
+    if ip.is_multicast() {
+        return Some("multicast address ff00::/8");
+    }
+    // fe80::/10 链路本地；`is_unicast_link_local` 在 stable 上不可用，这里手写掩码。
+    if (segments[0] & 0xffc0) == 0xfe80 {
+        return Some("link-local address fe80::/10");
+    }
+    // loopback 要在 IPv4 兼容地址换算之前判掉：`::1` 的低 32 位落在 0.0.0.0/8 里，
+    // 换算后会被当成"无条件拒绝"，逃生阀就没法放行本机地址了。
+    if ip.is_loopback() {
+        return if allow_private {
+            None
+        } else {
+            Some("loopback address ::1")
+        };
+    }
+    // IPv4-mapped（::ffff:a.b.c.d）与已废弃的 IPv4-compatible（::a.b.c.d）
+    // 都要按其中的 IPv4 地址判定，否则 ::ffff:127.0.0.1 就绕过去了。
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return outbound_ipv4_block_reason(mapped, allow_private);
+    }
+    if segments[..6].iter().all(|segment| *segment == 0) {
+        let compat = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            (segments[6] & 0x00ff) as u8,
+            (segments[7] >> 8) as u8,
+            (segments[7] & 0x00ff) as u8,
+        );
+        return outbound_ipv4_block_reason(compat, allow_private);
+    }
+    if allow_private {
+        return None;
+    }
+    // fc00::/7 唯一本地地址；`is_unique_local` 在 stable 上不可用，这里手写掩码。
+    if (segments[0] & 0xfe00) == 0xfc00 {
+        return Some("unique local address fc00::/7");
+    }
+    // fec0::/10 站点本地（已废弃，但仍指向内网）。
+    if (segments[0] & 0xffc0) == 0xfec0 {
+        return Some("site-local address fec0::/10");
+    }
+    None
+}
+
+/// 从 release 包源读出的 release.yaml 文本与校验信息（市场导入用）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FetchedReleaseSource {
+    pub release_yaml: String,
+    pub source_display: String,
+    pub checksum: String,
+}
+
+impl LocalReleasePackageLoader {
+    /// 拉取 release 包源（http(s) URL、file://、或仓库内相对路径），
+    /// 解出其中的 release.yaml 文本并返回整包 sha256 校验和。
+    /// 与 `load_release_package` 不同，此方法不要求预知 service 名称与版本，
+    /// 供市场导入在注册前解析外部包使用。
+    pub fn fetch_release_source(&self, source_url: &str) -> Result<FetchedReleaseSource> {
+        let source_url = source_url.trim();
+        if source_url.is_empty() {
+            return Err(OrchestratorError::InvalidManifest(
+                "release package source url is required".to_string(),
+            ));
+        }
+        let loaded = if source_url.starts_with("http://") || source_url.starts_with("https://") {
+            self.load_remote_release_source(source_url)?
+        } else {
+            self.load_local_release_source(source_url)?
+        };
+        Ok(FetchedReleaseSource {
+            release_yaml: loaded.text,
+            source_display: loaded.source_display,
+            checksum: loaded.checksum,
+        })
+    }
+}
+
 fn release_yaml_text_from_bytes(
     body: &[u8],
     source_display: &str,
@@ -2227,13 +2731,90 @@ fn looks_like_gzip(body: &[u8]) -> bool {
     body.starts_with(&[0x1f, 0x8b])
 }
 
+/// 解压预算：条目数与写出字节数跨条目累计，任一维度超限立刻中止解压。
+///
+/// 压缩包本身只有 64MB 上限，但 zip/gzip 的压缩比可以到几千倍，
+/// 不设解压上限时一个几百 KB 的包就能把磁盘写满。
+struct ExtractBudget {
+    entries: usize,
+    total_bytes: u64,
+}
+
+impl ExtractBudget {
+    fn new() -> Self {
+        Self {
+            entries: 0,
+            total_bytes: 0,
+        }
+    }
+
+    fn account_entry(&mut self) -> Result<()> {
+        self.entries += 1;
+        if self.entries > MAX_EXTRACTED_PACKAGE_ENTRIES {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "release package contains more than {MAX_EXTRACTED_PACKAGE_ENTRIES} entries"
+            )));
+        }
+        Ok(())
+    }
+
+    fn remaining_bytes(&self) -> u64 {
+        MAX_EXTRACTED_PACKAGE_BYTES.saturating_sub(self.total_bytes)
+    }
+
+    /// 把一个归档条目写到 `out_path`，写入量同时受单条目上限与整包剩余预算约束。
+    fn copy_entry<R: Read>(&mut self, reader: R, out_path: &Path) -> Result<()> {
+        let limit = MAX_EXTRACTED_ENTRY_BYTES.min(self.remaining_bytes());
+        let mut out = fs::File::create(out_path).map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "create release package file {} failed: {err}",
+                out_path.display()
+            ))
+        })?;
+        // 多取 1 字节：copy 出来的量真的超过 limit 就说明条目被截断了，判失败。
+        let mut limited = reader.take(limit + 1);
+        let written = std::io::copy(&mut limited, &mut out).map_err(|err| {
+            OrchestratorError::Dependency(format!(
+                "extract release package file {} failed: {err}",
+                out_path.display()
+            ))
+        })?;
+        if written > limit {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "release package entry {} exceeds the extraction limit ({} bytes per entry, {} bytes per package)",
+                out_path.display(),
+                MAX_EXTRACTED_ENTRY_BYTES,
+                MAX_EXTRACTED_PACKAGE_BYTES
+            )));
+        }
+        self.total_bytes += written;
+        Ok(())
+    }
+}
+
 fn extract_zip_release_package(body: &[u8], package_root: &Path) -> Result<()> {
     clear_release_package_extract_root(package_root)?;
+    let result = extract_zip_entries(body, package_root);
+    if result.is_err() {
+        // 失败（尤其是超限）时清掉已落盘的部分，别把半个炸弹留在缓存目录里。
+        let _ = clear_release_package_extract_root(package_root);
+    }
+    result
+}
+
+fn extract_zip_entries(body: &[u8], package_root: &Path) -> Result<()> {
     let cursor = std::io::Cursor::new(body);
     let mut archive = ZipArchive::new(cursor).map_err(|err| {
         OrchestratorError::InvalidManifest(format!("release package zip is invalid: {err}"))
     })?;
+    if archive.len() > MAX_EXTRACTED_PACKAGE_ENTRIES {
+        return Err(OrchestratorError::InvalidManifest(format!(
+            "release package contains more than {MAX_EXTRACTED_PACKAGE_ENTRIES} entries"
+        )));
+    }
+    let mut budget = ExtractBudget::new();
     for index in 0..archive.len() {
+        budget.account_entry()?;
         let mut file = archive.by_index(index).map_err(|err| {
             OrchestratorError::InvalidManifest(format!(
                 "read release package zip entry failed: {err}"
@@ -2263,18 +2844,7 @@ fn extract_zip_release_package(body: &[u8], package_root: &Path) -> Result<()> {
                 ))
             })?;
         }
-        let mut out = fs::File::create(&out_path).map_err(|err| {
-            OrchestratorError::Dependency(format!(
-                "create release package file {} failed: {err}",
-                out_path.display()
-            ))
-        })?;
-        std::io::copy(&mut file, &mut out).map_err(|err| {
-            OrchestratorError::Dependency(format!(
-                "extract release package file {} failed: {err}",
-                out_path.display()
-            ))
-        })?;
+        budget.copy_entry(&mut file, &out_path)?;
     }
     Ok(())
 }
@@ -2282,19 +2852,26 @@ fn extract_zip_release_package(body: &[u8], package_root: &Path) -> Result<()> {
 fn extract_tar_release_package(source_url: &str, body: &[u8], package_root: &Path) -> Result<()> {
     clear_release_package_extract_root(package_root)?;
     let lower = source_url.to_ascii_lowercase();
-    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") || looks_like_gzip(body) {
+    let result = if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") || looks_like_gzip(body) {
         let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(body));
         extract_tar_entries(Archive::new(decoder), package_root)
     } else {
         extract_tar_entries(Archive::new(std::io::Cursor::new(body)), package_root)
+    };
+    if result.is_err() {
+        // 同 zip：失败时清掉已解压的内容。gzip 炸弹正是从这条路径进来的。
+        let _ = clear_release_package_extract_root(package_root);
     }
+    result
 }
 
 fn extract_tar_entries<R: Read>(mut archive: Archive<R>, package_root: &Path) -> Result<()> {
     let entries = archive.entries().map_err(|err| {
         OrchestratorError::InvalidManifest(format!("release package tar is invalid: {err}"))
     })?;
+    let mut budget = ExtractBudget::new();
     for entry in entries {
+        budget.account_entry()?;
         let mut entry = entry.map_err(|err| {
             OrchestratorError::InvalidManifest(format!(
                 "read release package tar entry failed: {err}"
@@ -2317,6 +2894,7 @@ fn extract_tar_entries<R: Read>(mut archive: Archive<R>, package_root: &Path) ->
             })?;
             continue;
         }
+        // 保持既有行为：symlink / hardlink / 设备节点等非普通文件一律跳过。
         if !entry_type.is_file() {
             continue;
         }
@@ -2328,12 +2906,9 @@ fn extract_tar_entries<R: Read>(mut archive: Archive<R>, package_root: &Path) ->
                 ))
             })?;
         }
-        entry.unpack(&out_path).map_err(|err| {
-            OrchestratorError::Dependency(format!(
-                "extract release package file {} failed: {err}",
-                out_path.display()
-            ))
-        })?;
+        // 不再用 `entry.unpack()`：它无法限流。手动 copy 的副作用是不再套用归档里的
+        // 权限位与 mtime——对 release 包来说无所谓，而且顺带避免了 setuid 位被带出来。
+        budget.copy_entry(&mut entry, &out_path)?;
     }
     Ok(())
 }
@@ -2419,18 +2994,25 @@ impl ReleasePackageLoader for LocalReleasePackageLoader {
         request: &ReleasePackageLoadRequest,
     ) -> Result<ReleasePackageLoadResult> {
         let source_url = request.source_url.trim();
+        let expected_checksum = expected_release_package_checksum(request);
+        if env_flag("ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM") && expected_checksum.is_none() {
+            return Err(OrchestratorError::Blocked(
+                "release package checksum is required by ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM"
+                    .to_string(),
+            ));
+        }
         let loaded = if source_url.starts_with("http://") || source_url.starts_with("https://") {
             self.load_remote_release_source(source_url)?
         } else {
             self.load_local_release_source(&request.source_url)?
         };
-        if let Some(expected_checksum) = expected_release_package_checksum(request) {
-            if loaded.checksum != expected_checksum {
-                return Err(OrchestratorError::InvalidManifest(format!(
-                    "release package checksum mismatch: expected {expected_checksum}, got {}",
-                    loaded.checksum
-                )));
-            }
+        if let Some(expected_checksum) = expected_checksum
+            && loaded.checksum != expected_checksum
+        {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "release package checksum mismatch: expected {expected_checksum}, got {}",
+                loaded.checksum
+            )));
         }
         let manifest: ServiceReleaseManifest = serde_yaml::from_str(&loaded.text)?;
         validate_service_release(&manifest)?;
@@ -2491,6 +3073,15 @@ impl GatewayRoutePublisher for DeferredGatewayRoutePublisher {
 
 impl ConfiguredGatewayRoutePublisher {
     pub fn from_env() -> Self {
+        #[cfg(test)]
+        if let Some(http) =
+            TEST_CONFIGURED_GATEWAY_PUBLISHER.with(|publisher| publisher.borrow().clone())
+        {
+            return Self {
+                publish_enabled: true,
+                http: Some(http),
+            };
+        }
         let publish_enabled = env_flag("ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH");
         let http = if publish_enabled {
             HttpGatewayRoutePublisher::from_env()
@@ -2651,6 +3242,12 @@ impl GatewayRoutePublisher for HttpGatewayRoutePublisher {
         &self,
         request: &GatewayRoutePublishRequest,
     ) -> Result<GatewayRoutePublishResult> {
+        if request.force_reload && request.node_id.trim().is_empty() {
+            return Err(OrchestratorError::Dependency(
+                "gateway route publish requires gateway_node_id or GATEWAY_NODE_ID; refusing to push an unscoped route table"
+                    .to_string(),
+            ));
+        }
         if request.routes.is_empty() && !request.force_reload {
             return Ok(GatewayRoutePublishResult {
                 status: "skipped".to_string(),
@@ -2730,7 +3327,13 @@ impl NodeServiceDispatcher for DeferredNodeServiceDispatcher {
             ),
             endpoint: String::new(),
             accepted: false,
+            driver_executed: false,
+            driver_status: "DEFERRED".to_string(),
         })
+    }
+
+    fn routes_execution_to_node(&self) -> bool {
+        false
     }
 }
 
@@ -2766,7 +3369,13 @@ impl NodeServiceDispatcher for ConfiguredNodeServiceDispatcher {
             },
             endpoint: String::new(),
             accepted: false,
+            driver_executed: false,
+            driver_status: "DEFERRED".to_string(),
         })
+    }
+
+    fn routes_execution_to_node(&self) -> bool {
+        self.dispatch_enabled
     }
 }
 
@@ -2775,6 +3384,7 @@ impl HttpNodeServiceDispatcher {
         Self {
             endpoint: endpoint.into().trim_end_matches('/').to_string(),
             token: None,
+            control_token: None,
             timeout: Duration::from_secs(10),
         }
     }
@@ -2783,6 +3393,14 @@ impl HttpNodeServiceDispatcher {
         let token = token.into().trim().to_string();
         if !token.is_empty() {
             self.token = Some(token);
+        }
+        self
+    }
+
+    pub fn with_control_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into().trim().to_string();
+        if !token.is_empty() {
+            self.control_token = Some(token);
         }
         self
     }
@@ -2801,6 +3419,9 @@ impl HttpNodeServiceDispatcher {
         if let Ok(token) = std::env::var("ORCHESTRATOR_NODE_TOKEN") {
             dispatcher = dispatcher.with_token(token);
         }
+        if let Ok(token) = std::env::var("ORCHESTRATOR_INTERNAL_TOKEN") {
+            dispatcher = dispatcher.with_control_token(token);
+        }
         Some(dispatcher)
     }
 }
@@ -2816,6 +3437,8 @@ impl NodeServiceDispatcher for HttpNodeServiceDispatcher {
                 message: "node endpoint is not configured".to_string(),
                 endpoint: String::new(),
                 accepted: false,
+                driver_executed: false,
+                driver_status: "DEFERRED".to_string(),
             });
         }
         let url = format!(
@@ -2824,6 +3447,7 @@ impl NodeServiceDispatcher for HttpNodeServiceDispatcher {
         );
         let body = serde_json::json!({
             "operation_id": request.operation_id,
+            "execute_service_driver": request.execute_service_driver,
             "service": request.service,
             "release": request.release,
             "host_service": request.host_service,
@@ -2842,17 +3466,52 @@ impl NodeServiceDispatcher for HttpNodeServiceDispatcher {
         if let Some(token) = self.token.as_ref() {
             builder = builder.header("Authorization", format!("Bearer {}", token.trim()));
         }
+        if let Some(token) = self.control_token.as_ref() {
+            builder = builder.header("x-ojos-orchestrator-token", token.trim());
+        }
         let response = builder.send(serde_json::to_string(&body)?).map_err(|err| {
             OrchestratorError::Dependency(format!("node service dispatch request failed: {err}"))
         })?;
         let status = response.status().as_u16();
         if (200..=299).contains(&status) {
-            Ok(NodeServiceDispatchResult {
-                status: "dispatched".to_string(),
-                message: format!("node-mode orchestrator accepted install request: http {status}"),
-                endpoint: self.endpoint.clone(),
-                accepted: true,
-            })
+            let mut response_body = Vec::new();
+            response
+                .into_body()
+                .into_reader()
+                .take(64 * 1024 + 1)
+                .read_to_end(&mut response_body)
+                .map_err(|err| {
+                    OrchestratorError::Dependency(format!(
+                        "node service dispatch response read failed: {err}"
+                    ))
+                })?;
+            if response_body.len() > 64 * 1024 {
+                return Err(OrchestratorError::Dependency(
+                    "node service dispatch response exceeds 65536 bytes".to_string(),
+                ));
+            }
+            if response_body.is_empty() {
+                return Err(OrchestratorError::Dependency(
+                    "node service dispatch response is missing structured execution evidence"
+                        .to_string(),
+                ));
+            }
+            let envelope: serde_json::Value =
+                serde_json::from_slice(&response_body).map_err(|err| {
+                    OrchestratorError::Dependency(format!(
+                        "node service dispatch response is invalid JSON: {err}"
+                    ))
+                })?;
+            envelope
+                .get("node_dispatch_result")
+                .cloned()
+                .ok_or_else(|| {
+                    OrchestratorError::Dependency(
+                        "node service dispatch response is missing node_dispatch_result"
+                            .to_string(),
+                    )
+                })
+                .and_then(|value| serde_json::from_value(value).map_err(Into::into))
         } else {
             Err(OrchestratorError::Dependency(format!(
                 "node service dispatch failed: http {status}"
@@ -3289,6 +3948,8 @@ impl<
     N: NodeServiceDispatcher,
 > OperationExecutor<'a, S, P, A, R, T, M, L, DeferredGatewayRoutePublisher, N>
 {
+    // Dependency wiring stays explicit at this constructor boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_runtime_provisioners_release_loader_and_node_dispatcher(
         store: &'a mut S,
         endpoint_probe: P,
@@ -3327,6 +3988,8 @@ impl<
     N: NodeServiceDispatcher,
 > OperationExecutor<'a, S, P, A, R, T, M, L, G, N>
 {
+    // Dependency wiring stays explicit at this constructor boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_runtime_provisioners_release_loader_gateway_publisher_and_node_dispatcher(
         store: &'a mut S,
         endpoint_probe: P,
@@ -3425,19 +4088,45 @@ impl<
         node_id: &str,
         api_count: usize,
     ) -> Result<GatewayRoutePublishResult> {
+        self.publish_gateway_routes_for_service(
+            operation_id,
+            &release.service_name,
+            routes,
+            effective_routes,
+            node_id,
+            api_count,
+            false,
+        )
+    }
+
+    // The arguments map directly to the gateway publish request and its reload policy.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_gateway_routes_for_service(
+        &mut self,
+        operation_id: &str,
+        service_name: &str,
+        routes: &[ServiceRoute],
+        effective_routes: &[EffectiveApiRoute],
+        node_id: &str,
+        api_count: usize,
+        force_reload_if_empty: bool,
+    ) -> Result<GatewayRoutePublishResult> {
         let request = GatewayRoutePublishRequest {
             operation_id: operation_id.to_string(),
-            service_name: release.service_name.clone(),
+            service_name: service_name.to_string(),
             routes: routes.to_vec(),
             effective_routes: effective_routes.to_vec(),
             node_id: node_id.to_string(),
             api_count,
-            force_reload: api_count > 0 || !routes.is_empty() || !effective_routes.is_empty(),
+            force_reload: force_reload_if_empty
+                || api_count > 0
+                || !routes.is_empty()
+                || !effective_routes.is_empty(),
         };
         let result = self.gateway_route_publisher.publish_routes(&request)?;
         self.store.append_operation_log(gateway_route_log_record(
             operation_id,
-            &release.service_name,
+            service_name,
             api_count,
             request.force_reload,
             &result,
@@ -3519,6 +4208,8 @@ impl<
         Ok(result)
     }
 
+    // The arguments are the independent records assembled into a node dispatch request.
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_release_to_node(
         &mut self,
         operation: &Operation,
@@ -3531,6 +4222,7 @@ impl<
     ) -> Result<NodeServiceDispatchResult> {
         let request = NodeServiceDispatchRequest {
             operation_id: operation.operation_id.clone(),
+            execute_service_driver: operation_bool_field(operation, "execute_service_driver"),
             service: service.clone(),
             release: release.cloned(),
             host_service: host_service.clone(),
@@ -3555,6 +4247,11 @@ impl<
         release: &ServiceReleaseManifest,
         endpoint: String,
     ) -> Result<DriverResult> {
+        if !self.service_driver_execution_enabled {
+            return Err(OrchestratorError::Blocked(
+                "local-process stop requires execute_service_driver=true".to_string(),
+            ));
+        }
         if !release
             .runtime
             .kind
@@ -3588,7 +4285,44 @@ impl<
         Ok(result)
     }
 
-    fn stop_installed_local_process_release(
+    fn execute_service_runtime_action(
+        &mut self,
+        operation: &Operation,
+        action: &str,
+        service: &ServiceManifest,
+        release: Option<&ServiceReleaseManifest>,
+        endpoint: &str,
+    ) -> Result<Option<DriverResult>> {
+        if !service_uses_fixed_runtime(service, release) {
+            return Ok(None);
+        }
+        if !self.service_driver_execution_enabled {
+            return Err(OrchestratorError::Blocked(format!(
+                "{action} for {} requires execute_service_driver=true",
+                service.id
+            )));
+        }
+        let mut runtime_operation = operation.clone();
+        runtime_operation.action = action.to_string();
+        runtime_operation.target_type = "Service".to_string();
+        runtime_operation.target_id = service.id.clone();
+        runtime_operation.request = serde_json::json!({
+            "service_id": service.id,
+            "endpoint": endpoint,
+            "release_manifest": release,
+        });
+        let result = execute_service_driver_action(
+            service,
+            &runtime_operation,
+            self.service_driver_execution_enabled,
+        )?;
+        self.store
+            .append_operation_log(driver_result_log_record(&operation.operation_id, &result))?;
+        ensure_driver_result_succeeded(&result)?;
+        Ok(Some(result))
+    }
+
+    fn stop_installed_service_runtime(
         &mut self,
         operation: &Operation,
         service_name: &str,
@@ -3596,6 +4330,36 @@ impl<
         let Some(service) = self.store.get_service(service_name)? else {
             return Ok(None);
         };
+        let host_services = self
+            .store
+            .list_host_services()?
+            .into_iter()
+            .filter(|row| row.service_name == service_name)
+            .collect::<Vec<_>>();
+        let has_active_row = host_services
+            .iter()
+            .any(|row| runtime_status_may_be_active(&row.status))
+            || self
+                .store
+                .list_deployed_service_apis()?
+                .into_iter()
+                .any(|row| {
+                    row.service_name == service_name && runtime_status_may_be_active(&row.status)
+                });
+        let has_local_pid = matches!(service.runtime.mode, RuntimeMode::LocalProcess)
+            && LocalProcessDriver::new().has_pid_file(service_name)?;
+        if !has_active_row && !has_local_pid {
+            return Ok(None);
+        }
+        if let Some(host_service) = host_services
+            .iter()
+            .find(|host_service| host_service_has_nonlocal_runtime(host_service))
+        {
+            return Err(nonlocal_runtime_action_blocked(
+                "release.install rollback",
+                host_service,
+            ));
+        }
         let endpoint = operation
             .request
             .get("endpoint")
@@ -3613,30 +4377,38 @@ impl<
                     .map(|endpoint| endpoint.endpoint)
             })
             .unwrap_or_default();
-        let release = release_manifest_from_operation(operation)?.or_else(|| {
-            self.store
-                .list_service_releases()
-                .ok()
-                .and_then(|releases| {
-                    releases
-                        .into_iter()
-                        .find(|release| release.service_name == service_name)
-                })
-                .and_then(|release| serde_json::from_value(release.manifest).ok())
-        });
-        let Some(release) = release else {
-            return Ok(None);
+        let release = match release_manifest_from_operation(operation)? {
+            Some(release) => Some(release),
+            None => self
+                .store
+                .get_service_release(service_name, &service.version)?
+                .map(|record| serde_json::from_value(record.manifest))
+                .transpose()?,
         };
-        if !release
-            .runtime
-            .kind
-            .trim()
-            .eq_ignore_ascii_case("local-process")
-        {
-            return Ok(None);
+        self.execute_service_runtime_action(
+            operation,
+            "service.stop",
+            &service,
+            release.as_ref(),
+            &endpoint,
+        )
+    }
+
+    fn ensure_control_plane_runtime_owner(
+        &self,
+        action: &str,
+        service_name: &str,
+        host_ip: Option<&str>,
+    ) -> Result<()> {
+        let host_services = self.store.list_host_services()?;
+        if let Some(host_service) = host_services.iter().find(|host_service| {
+            host_service.service_name == service_name
+                && host_ip.is_none_or(|host_ip| host_service.host_ip == host_ip)
+                && host_service_has_nonlocal_runtime(host_service)
+        }) {
+            return Err(nonlocal_runtime_action_blocked(action, host_service));
         }
-        self.stop_local_process_release(&operation.operation_id, &service, &release, endpoint)
-            .map(Some)
+        Ok(())
     }
 
     fn execute_release_migrations(
@@ -3653,7 +4425,7 @@ impl<
                 .request
                 .get("migration_dry_run")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| truthy(value));
+                .is_some_and(truthy);
         let allow_destructive = operation
             .request
             .get("allow_destructive_migrations")
@@ -3663,7 +4435,7 @@ impl<
                 .request
                 .get("allow_destructive_migrations")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| truthy(value));
+                .is_some_and(truthy);
         let plan = self.pending_release_migrations(release)?;
         let request = MigrationExecutionRequest {
             service_name: release.service_name.clone(),
@@ -3776,27 +4548,27 @@ impl<
             .collect::<BTreeMap<_, _>>();
         let mut plan = PendingMigrationPlan::default();
         for migration in &release.migrations {
-            if let Some(record) = existing.get(&migration.version) {
-                if record.status == "applied" {
-                    if record.checksum != migration.checksum {
-                        return Err(OrchestratorError::Dependency(format!(
-                            "migration {}@{} was already applied with checksum {}, release declares {}",
-                            release.service_name,
-                            migration.version,
-                            empty_checksum_label(&record.checksum),
-                            empty_checksum_label(&migration.checksum)
-                        )));
-                    }
-                    plan.already_applied.push(MigrationExecutionRecord {
-                        migration_version: migration.version.clone(),
-                        path: migration.path.clone(),
-                        checksum: migration.checksum.clone(),
-                        status: "applied".to_string(),
-                        applied_at: record.applied_at.clone(),
-                        message: "already applied; skipped for this install".to_string(),
-                    });
-                    continue;
+            if let Some(record) = existing.get(&migration.version)
+                && record.status == "applied"
+            {
+                if record.checksum != migration.checksum {
+                    return Err(OrchestratorError::Dependency(format!(
+                        "migration {}@{} was already applied with checksum {}, release declares {}",
+                        release.service_name,
+                        migration.version,
+                        empty_checksum_label(&record.checksum),
+                        empty_checksum_label(&migration.checksum)
+                    )));
                 }
+                plan.already_applied.push(MigrationExecutionRecord {
+                    migration_version: migration.version.clone(),
+                    path: migration.path.clone(),
+                    checksum: migration.checksum.clone(),
+                    status: "applied".to_string(),
+                    applied_at: record.applied_at.clone(),
+                    message: "already applied; skipped for this install".to_string(),
+                });
+                continue;
             }
             plan.pending.push(migration.clone());
         }
@@ -3846,6 +4618,10 @@ impl<
             .store
             .get_operation(operation_id)?
             .ok_or_else(|| OrchestratorError::Dependency("operation not found".to_string()))?;
+        ensure_release_apply_execution_authorized(
+            &operation,
+            self.service_driver_execution_enabled,
+        )?;
         let requires_confirmation = operation
             .plan
             .get("requires_confirmation")
@@ -3913,7 +4689,7 @@ impl<
             ))?;
         }
 
-        let result = match self.apply_operation_mutation(&running) {
+        match self.apply_operation_mutation(&running) {
             Ok(changed_objects) => {
                 let operation_after_mutation = self
                     .store
@@ -3961,8 +4737,7 @@ impl<
                 ))?;
                 Err(err)
             }
-        };
-        result
+        }
     }
 
     pub fn rollback(&mut self, operation_id: &str) -> Result<Operation> {
@@ -3979,11 +4754,12 @@ impl<
                 operation.status
             )));
         }
-        if operation.rollback_plan.is_null() {
+        if rollback_steps(&operation).is_empty() {
             return Err(OrchestratorError::Blocked(
-                "operation rollback plan is not available".to_string(),
+                "operation rollback plan is not available or has no steps".to_string(),
             ));
         }
+        ensure_rollback_execution_authorized(&operation, self.service_driver_execution_enabled)?;
         let lock_key = format!("operation:{operation_id}");
         let acquired = self.store.acquire_operation_lock(OperationLock {
             lock_key: lock_key.clone(),
@@ -4011,7 +4787,7 @@ impl<
             "info",
             format!("rollback loaded {} prior operation logs", prior_logs.len()),
         ))?;
-        for (index, step) in rollback_steps(&operation).iter().enumerate() {
+        for (index, step) in rollback_steps(operation).iter().enumerate() {
             self.store.append_operation_log(operation_step_log_record(
                 &operation.operation_id,
                 format!("rollback:{}", step_id(step, index)),
@@ -4020,7 +4796,7 @@ impl<
                 step.clone(),
             ))?;
         }
-        let changed_objects = match self.rollback_operation_mutation(&operation) {
+        let changed_objects = match self.rollback_operation_mutation(operation) {
             Ok(changed_objects) => changed_objects,
             Err(err) => {
                 self.store.append_operation_log(operation_log_record(
@@ -4040,7 +4816,7 @@ impl<
             "changed_objects": changed_objects,
             "topology_snapshot_id": serde_json::Value::Null,
         });
-        let rolled_back = crate::rollback_operation(&operation, result)?;
+        let rolled_back = crate::rollback_operation(operation, result)?;
         self.store.update_operation(rolled_back.clone())?;
         self.store.append_operation_log(operation_log_record(
             &rolled_back.operation_id,
@@ -4091,8 +4867,36 @@ impl<
                 let external_service_running =
                     operation_bool_field(operation, "external_service_running")
                         || operation_bool_field(operation, "existing_endpoint_running");
-                let _previous_state =
+                let node_execution_selected = !external_service_running
+                    && self.node_service_dispatcher.routes_execution_to_node();
+                if external_service_running
+                    && operation_bool_field(operation, "execute_service_driver")
+                {
+                    return Err(OrchestratorError::Blocked(
+                        "external_service_running and execute_service_driver are mutually exclusive"
+                            .to_string(),
+                    ));
+                }
+                let previous_state =
                     self.capture_release_install_previous_state(operation, &service.id)?;
+                if external_service_running {
+                    self.ensure_external_registration_has_no_active_previous_runtime(
+                        &previous_state,
+                    )?;
+                } else {
+                    let _ = self
+                        .stop_previous_runtime_before_release_install(operation, &previous_state)?;
+                }
+                let control_plane_labels = install_labels_with_runtime_owner(
+                    release.as_ref(),
+                    if external_service_running {
+                        Some("external")
+                    } else if node_execution_selected {
+                        Some("node")
+                    } else {
+                        None
+                    },
+                );
                 self.store.put_service(service.clone())?;
                 for endpoint in self
                     .store
@@ -4108,7 +4912,7 @@ impl<
                     host_ip,
                     "installing",
                     serde_json::json!({}),
-                    install_labels(release.as_ref()),
+                    control_plane_labels.clone(),
                 )?)?;
                 let endpoint = endpoint_from_install(&service, release.as_ref(), &endpoint_id)?;
                 self.store.put_endpoint(endpoint.clone())?;
@@ -4186,51 +4990,80 @@ impl<
                     dispatch_config.clone(),
                     install_labels(release.as_ref()),
                 )?;
-                let node_dispatch = Some(self.dispatch_release_to_node(
-                    operation,
-                    &service,
-                    release.as_ref(),
-                    &dispatch_host_service,
-                    &endpoint,
-                    dispatch_config,
-                    release_package_load.as_ref(),
-                )?);
-                let driver_result = execute_service_driver_action(
-                    &service,
-                    operation,
-                    self.service_driver_execution_enabled,
-                )?;
+                let node_dispatch = if external_service_running {
+                    None
+                } else {
+                    Some(self.dispatch_release_to_node(
+                        operation,
+                        &service,
+                        release.as_ref(),
+                        &dispatch_host_service,
+                        &endpoint,
+                        dispatch_config,
+                        release_package_load.as_ref(),
+                    )?)
+                };
+                if node_execution_selected
+                    && node_dispatch
+                        .as_ref()
+                        .is_none_or(|dispatch| !dispatch.accepted)
+                {
+                    return Err(OrchestratorError::Dependency(format!(
+                        "node execution was selected but dispatch was not accepted: {}",
+                        node_dispatch
+                            .as_ref()
+                            .map(|dispatch| dispatch.message.as_str())
+                            .unwrap_or("missing node dispatch result")
+                    )));
+                }
+                if node_execution_selected {
+                    ensure_node_dispatch_driver_evidence(
+                        operation,
+                        node_dispatch
+                            .as_ref()
+                            .expect("node dispatch result is always present"),
+                    )?;
+                }
+                let driver_result = if external_service_running {
+                    external_running_driver_result(operation)
+                } else if node_execution_selected {
+                    node_dispatch_driver_result(
+                        operation,
+                        node_dispatch
+                            .as_ref()
+                            .expect("node dispatch result is always present"),
+                    )
+                } else {
+                    execute_service_driver_action(
+                        &service,
+                        operation,
+                        self.service_driver_execution_enabled,
+                    )?
+                };
                 self.store.append_operation_log(driver_result_log_record(
                     &operation.operation_id,
                     &driver_result,
                 ))?;
-                if self.service_driver_execution_enabled {
+                if !node_execution_selected && self.service_driver_execution_enabled {
                     ensure_driver_result_succeeded(&driver_result)?;
                 }
-                let health = if external_service_running {
-                    external_running_install_health(&endpoint)
-                } else if driver_result.status == "SUCCEEDED" {
+                let health = if external_service_running || driver_result.status == "SUCCEEDED" {
                     self.wait_endpoint_health_and_persist(&operation.operation_id, &endpoint)?
                 } else {
                     deferred_install_health(&endpoint, &driver_result)
                 };
-                if external_service_running {
-                    self.store.update_endpoint_health(
-                        &endpoint.endpoint,
-                        health.health.clone(),
-                        health.reachable,
-                    )?;
-                    self.store.append_operation_log(endpoint_health_log_record(
-                        &operation.operation_id,
-                        &health,
-                    ))?;
+                if external_service_running && !health.reachable {
+                    return Err(OrchestratorError::Dependency(format!(
+                        "externally started service health failed for {}: {}",
+                        endpoint.endpoint, health.message
+                    )));
                 }
                 if self.service_driver_execution_enabled
                     && !external_service_running
                     && driver_result.status == "SUCCEEDED"
                     && !health.reachable
                 {
-                    if let Some(release) = release.as_ref() {
+                    if !node_execution_selected && let Some(release) = release.as_ref() {
                         let _ = self.stop_local_process_release(
                             &operation.operation_id,
                             &service,
@@ -4238,9 +5071,14 @@ impl<
                             endpoint.endpoint.clone(),
                         );
                     }
+                    let cleanup_hint = if node_execution_selected {
+                        "; the node runtime may still be running and must be stopped on the target node before retrying"
+                    } else {
+                        ""
+                    };
                     return Err(OrchestratorError::Dependency(format!(
-                        "service_start health failed for {}: {}",
-                        endpoint.endpoint, health.message
+                        "service_start health failed for {}: {}{}",
+                        endpoint.endpoint, health.message, cleanup_hint
                     )));
                 }
                 let final_status = if external_service_running {
@@ -4260,7 +5098,7 @@ impl<
                         node_dispatch.as_ref(),
                         Some(&driver_result),
                     ),
-                    install_labels(release.as_ref()),
+                    control_plane_labels,
                 )?)?;
                 if let Some(release) = release.as_ref() {
                     self.ensure_node_for_host(host_ip)?;
@@ -4324,40 +5162,55 @@ impl<
                     .get("service_id")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(operation.target_id.as_str());
-                let _ = self.stop_installed_local_process_release(operation, service_name)?;
                 let version = operation
                     .request
                     .get("version")
                     .and_then(serde_json::Value::as_str)
                     .filter(|value| !value.trim().is_empty());
-                let _previous_state =
-                    self.capture_release_install_previous_state(operation, service_name)?;
-                match version {
-                    Some(version) => {
-                        self.store.delete_service_release(service_name, version)?;
-                        changed.push(changed_object(
-                            "ServiceRelease",
-                            &format!("{service_name}@{version}"),
-                        ));
-                    }
-                    None => {
-                        for release in self
-                            .store
-                            .list_service_releases()?
-                            .into_iter()
-                            .filter(|release| release.service_name == service_name)
-                        {
-                            self.store
-                                .delete_service_release(&release.service_name, &release.version)?;
-                            changed.push(changed_object(
-                                "ServiceRelease",
-                                &format!("{}@{}", release.service_name, release.version),
-                            ));
-                        }
-                    }
+                let referenced_by_deployment =
+                    self.store.list_host_services()?.into_iter().any(|row| {
+                        row.service_name == service_name
+                            && version.is_none_or(|version| row.version == version)
+                    }) || self
+                        .store
+                        .list_deployed_service_apis()?
+                        .into_iter()
+                        .any(|row| {
+                            row.service_name == service_name
+                                && version.is_none_or(|version| row.version == version)
+                        });
+                if referenced_by_deployment {
+                    let target = version
+                        .map(|version| format!("{service_name}@{version}"))
+                        .unwrap_or_else(|| service_name.to_string());
+                    return Err(OrchestratorError::Blocked(format!(
+                        "release {target} is referenced by a deployment; install another version or use service.delete to uninstall it"
+                    )));
                 }
-                self.clear_release_resource_registries(service_name)?;
-                changed.push(changed_object("ReleaseRegistry", service_name));
+                let releases = self
+                    .store
+                    .list_service_releases()?
+                    .into_iter()
+                    .filter(|release| release.service_name == service_name)
+                    .filter(|release| version.is_none_or(|version| release.version == version))
+                    .collect::<Vec<_>>();
+                if releases.is_empty() {
+                    let target = version
+                        .map(|version| format!("{service_name}@{version}"))
+                        .unwrap_or_else(|| service_name.to_string());
+                    return Err(OrchestratorError::Dependency(format!(
+                        "release {target} not found"
+                    )));
+                }
+                self.capture_release_delete_previous_state(operation, &releases)?;
+                for release in releases {
+                    self.store
+                        .delete_service_release(&release.service_name, &release.version)?;
+                    changed.push(changed_object(
+                        "ServiceRelease",
+                        &format!("{}@{}", release.service_name, release.version),
+                    ));
+                }
             }
             "release.rollback" => {
                 let target_operation_id = self.resolve_release_rollback_target(operation)?;
@@ -4383,8 +5236,12 @@ impl<
                 );
                 changed.push(changed_object("ServiceRelease", &operation.target_id));
             }
-            "service.enable" | "service.disable" | "service.start" | "service.stop"
-            | "service.restart" => {
+            "service.enable" | "service.disable" => {
+                self.ensure_control_plane_runtime_owner(
+                    &operation.action,
+                    &operation.target_id,
+                    operation_host_ip(operation).as_deref(),
+                )?;
                 let service = ensure_service_exists(self.store, operation.target_id.as_str())?;
                 let driver_result = execute_service_driver_action(
                     &service,
@@ -4398,7 +5255,56 @@ impl<
                 ensure_driver_result_succeeded(&driver_result)?;
                 changed.push(changed_object("Service", &operation.target_id));
             }
+            "service.start" | "service.stop" | "service.restart" => {
+                self.capture_service_runtime_previous_state(
+                    operation,
+                    Some(operation.target_id.as_str()),
+                    operation_host_ip(operation).as_deref(),
+                )?;
+                changed.extend(self.apply_service_lifecycle(
+                    operation,
+                    operation.target_id.as_str(),
+                    operation.action.as_str(),
+                    operation_host_ip(operation).as_deref(),
+                )?);
+            }
+            "host.start" | "host.stop" => {
+                let host_ip = host_lifecycle_host_ip(operation);
+                self.capture_service_runtime_previous_state(
+                    operation,
+                    None,
+                    Some(host_ip.as_str()),
+                )?;
+                changed.extend(self.apply_host_lifecycle(
+                    operation,
+                    &host_ip,
+                    host_lifecycle_service_action(operation.action.as_str()),
+                )?);
+            }
             "service.delete" => {
+                self.ensure_control_plane_runtime_owner(
+                    "service.delete",
+                    &operation.target_id,
+                    None,
+                )?;
+                self.capture_release_install_previous_state(
+                    operation,
+                    operation.target_id.as_str(),
+                )?;
+                let operation_with_release_state = self
+                    .store
+                    .get_operation(&operation.operation_id)?
+                    .ok_or_else(|| {
+                        OrchestratorError::Dependency(
+                            "service.delete operation disappeared while capturing rollback state"
+                                .to_string(),
+                        )
+                    })?;
+                self.capture_service_runtime_previous_state(
+                    &operation_with_release_state,
+                    Some(operation.target_id.as_str()),
+                    None,
+                )?;
                 let service = ensure_service_exists(self.store, operation.target_id.as_str())?;
                 let driver_result = execute_service_driver_action(
                     &service,
@@ -4411,6 +5317,7 @@ impl<
                 ))?;
                 ensure_driver_result_succeeded(&driver_result)?;
                 self.store.delete_service(&operation.target_id)?;
+                self.publish_service_gateway_routes(operation, &operation.target_id)?;
                 changed.push(changed_object("Service", &operation.target_id));
             }
             "log.create" => {
@@ -4461,13 +5368,27 @@ impl<
                     }
                 }
             }
-            "endpoint.create" | "endpoint.update" => {
+            "endpoint.create" => {
+                if self.store.get_endpoint(&operation.target_id)?.is_some() {
+                    return Err(OrchestratorError::Blocked(format!(
+                        "endpoint {} already exists",
+                        operation.target_id
+                    )));
+                }
+                let endpoint = endpoint_from_operation(operation, self.store)?;
+                let endpoint_id = endpoint.endpoint.clone();
+                self.store.put_endpoint(endpoint)?;
+                changed.push(changed_object("Endpoint", &endpoint_id));
+            }
+            "endpoint.update" => {
+                self.capture_endpoint_mutation_previous_state(operation)?;
                 let endpoint = endpoint_from_operation(operation, self.store)?;
                 let endpoint_id = endpoint.endpoint.clone();
                 self.store.put_endpoint(endpoint)?;
                 changed.push(changed_object("Endpoint", &endpoint_id));
             }
             "endpoint.delete" => {
+                self.capture_endpoint_mutation_previous_state(operation)?;
                 self.store.delete_endpoint(&operation.target_id)?;
                 changed.push(changed_object("Endpoint", &operation.target_id));
             }
@@ -4479,17 +5400,83 @@ impl<
                 self.probe_endpoint_and_persist(&operation.operation_id, &endpoint)?;
                 changed.push(changed_object("Endpoint", endpoint_id));
             }
-            "link.create" | "link.update" => {
+            "link.create" => {
                 let link = link_from_operation(operation);
+                if self
+                    .store
+                    .get_link(&link.source_endpoint, &link.target_endpoint)?
+                    .is_some()
+                {
+                    return Err(OrchestratorError::Blocked(format!(
+                        "link {} already exists",
+                        link_target_id(&link)
+                    )));
+                }
+                let target = link_target_id(&link);
+                self.store.put_link(link)?;
+                changed.push(changed_object("Link", &target));
+            }
+            "link.update" => {
+                let mut link = link_from_operation(operation);
+                let current = self
+                    .store
+                    .get_link(&link.source_endpoint, &link.target_endpoint)?
+                    .ok_or_else(|| {
+                        OrchestratorError::Dependency(format!(
+                            "link {} not found",
+                            link_target_id(&link)
+                        ))
+                    })?;
+                self.capture_link_mutation_previous_state(operation, &current)?;
+                if operation.request.get("protocol").is_none() {
+                    link.protocol = current.protocol.clone();
+                }
+                if operation.request.get("auth_mode").is_none() {
+                    link.auth_mode = current.auth_mode.clone();
+                }
+                if operation.request.get("scope").is_none() {
+                    link.scope = current.scope.clone();
+                }
+                if operation.request.get("enabled").is_none() {
+                    link.enabled = current.enabled;
+                }
+                if operation.request.get("config_ref").is_none() {
+                    link.config_ref = current.config_ref.clone();
+                }
+                if operation.request.get("secret_ref").is_none() {
+                    link.secret_ref = current.secret_ref.clone();
+                }
+                if operation.request.get("policy").is_none() {
+                    link.policy = current.policy.clone();
+                }
+                link.health = current.health;
+                link.latency_ms = current.latency_ms;
+                link.created_at = current.created_at;
                 let target = link_target_id(&link);
                 self.store.put_link(link)?;
                 changed.push(changed_object("Link", &target));
             }
             "link.delete" => {
                 let link = link_from_operation(operation);
+                let current = self
+                    .store
+                    .get_link(&link.source_endpoint, &link.target_endpoint)?
+                    .ok_or_else(|| {
+                        OrchestratorError::Dependency(format!(
+                            "link {} not found",
+                            link_target_id(&link)
+                        ))
+                    })?;
+                self.capture_link_mutation_previous_state(operation, &current)?;
                 self.store
                     .delete_link(&link.source_endpoint, &link.target_endpoint)?;
                 changed.push(changed_object("Link", &link_target_id(&link)));
+            }
+            "link.enable" | "link.disable" => {
+                let enabled = operation.action == "link.enable";
+                self.capture_link_previous_enabled(operation)?;
+                let target = self.toggle_link_enabled(operation, enabled)?;
+                changed.push(changed_object("Link", &target));
             }
             "link.health.check" => {
                 let requested = link_from_operation(operation);
@@ -4762,64 +5749,169 @@ impl<
                 }
             }
             "release.install" => {
-                let already_known = operation
-                    .request
-                    .get("already_known")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-                let previous_state = release_install_previous_state_from_operation(operation)?;
-                let _ =
-                    self.stop_installed_local_process_release(operation, &operation.target_id)?;
-                self.append_migration_rollback_unsupported_log(operation)?;
-                if let Some(previous_state) = previous_state {
-                    let service_name = operation.target_id.as_str();
-                    self.clear_release_resource_registries(service_name)?;
-                    if let Some(release) = release_manifest_from_operation(operation)? {
-                        self.store
-                            .delete_service_release(&release.service_name, &release.version)?;
+                let previous_state = release_install_previous_state_from_operation(operation)?
+                    .ok_or_else(|| {
+                        OrchestratorError::Blocked(
+                            "release.install rollback cannot safely continue without previous_state"
+                                .to_string(),
+                        )
+                    })?;
+                let restore_spec = if operation_bool_field(operation, "execute_service_driver") {
+                    self.release_install_runtime_restore_spec(&previous_state)?
+                } else {
+                    None
+                };
+                if operation_bool_field(operation, "execute_service_driver") {
+                    self.ensure_control_plane_runtime_owner(
+                        "release.install rollback",
+                        &operation.target_id,
+                        None,
+                    )?;
+                    let _ = self.stop_installed_service_runtime(operation, &operation.target_id)?;
+                    if let Some(spec) = restore_spec.as_ref() {
+                        let _ = self.restore_release_install_runtime(operation, spec)?;
                     }
-                    changed.extend(
-                        self.restore_release_install_previous_state(service_name, &previous_state)?,
-                    );
-                    return Ok(changed);
                 }
-                self.clear_release_resource_registries(&operation.target_id)?;
+                self.append_migration_rollback_unsupported_log(operation)?;
+                let service_name = operation.target_id.as_str();
+                self.clear_release_resource_registries(service_name)?;
                 if let Some(release) = release_manifest_from_operation(operation)? {
                     self.store
                         .delete_service_release(&release.service_name, &release.version)?;
                 }
-                if !already_known {
-                    self.store.delete_service(&operation.target_id)?;
-                    changed.push(changed_object("ServiceRelease", &operation.target_id));
-                    changed.push(changed_object("Service", &operation.target_id));
-                }
+                changed.extend(
+                    self.restore_release_install_previous_state(service_name, &previous_state)?,
+                );
             }
             "release.delete" => {
-                let previous_state = release_install_previous_state_from_operation(operation)?
+                let previous_state = release_delete_previous_state_from_operation(operation)?
                     .ok_or_else(|| {
                         OrchestratorError::Dependency(
                             "release.delete rollback requires previous_state".to_string(),
                         )
                     })?;
-                let service_name = operation
-                    .request
-                    .get("service_id")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(operation.target_id.as_str());
-                self.clear_release_resource_registries(service_name)?;
-                changed.extend(
-                    self.restore_release_install_previous_state(service_name, &previous_state)?,
-                );
+                for release in previous_state.releases {
+                    self.store.upsert_service_release(release.clone())?;
+                    changed.push(changed_object(
+                        "ServiceRelease",
+                        &format!("{}@{}", release.service_name, release.version),
+                    ));
+                }
+            }
+            "release.rollback" => {
+                return Err(OrchestratorError::Blocked(
+                    "release.rollback is a wrapper around an install rollback and cannot itself be rolled back; create a new install or rollback operation instead"
+                        .to_string(),
+                ));
             }
             "endpoint.create" => {
                 self.store.delete_endpoint(&operation.target_id)?;
                 changed.push(changed_object("Endpoint", &operation.target_id));
+            }
+            "endpoint.update" | "endpoint.delete" => {
+                let previous_state = endpoint_mutation_previous_state_from_operation(operation)?
+                    .ok_or_else(|| {
+                        OrchestratorError::Dependency(format!(
+                            "{} rollback requires previous_state",
+                            operation.action
+                        ))
+                    })?;
+                changed.extend(self.restore_endpoint_mutation_previous_state(&previous_state)?);
             }
             "link.create" => {
                 let link = link_from_operation(operation);
                 self.store
                     .delete_link(&link.source_endpoint, &link.target_endpoint)?;
                 changed.push(changed_object("Link", &link_target_id(&link)));
+            }
+            "link.update" | "link.delete" => {
+                let previous_state = link_mutation_previous_state_from_operation(operation)?
+                    .ok_or_else(|| {
+                        OrchestratorError::Dependency(format!(
+                            "{} rollback requires previous_state",
+                            operation.action
+                        ))
+                    })?;
+                let target = link_target_id(&previous_state.link);
+                self.store.put_link(previous_state.link)?;
+                changed.push(changed_object("Link", &target));
+            }
+            "link.enable" | "link.disable" => {
+                let previous_enabled = operation
+                    .request
+                    .get("previous_enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| {
+                        OrchestratorError::Dependency(format!(
+                            "{} rollback requires previous_enabled",
+                            operation.action
+                        ))
+                    })?;
+                let target = self.toggle_link_enabled(operation, previous_enabled)?;
+                changed.push(changed_object("Link", &target));
+            }
+            "service.enable" | "service.disable" => {
+                self.ensure_control_plane_runtime_owner(
+                    &format!("{} rollback", operation.action),
+                    &operation.target_id,
+                    operation_host_ip(operation).as_deref(),
+                )?;
+                let service = ensure_service_exists(self.store, operation.target_id.as_str())?;
+                // 回滚沿用原 Operation 的 manifest、endpoint 与其它请求字段，只把
+                // 驱动动作取反；这样 local-process 仍能读取原 release_manifest。
+                let mut inverse_operation = operation.clone();
+                inverse_operation.action = match operation.action.as_str() {
+                    "service.enable" => "service.disable".to_string(),
+                    "service.disable" => "service.enable".to_string(),
+                    _ => unreachable!("service enable/disable branch"),
+                };
+                let driver_result = execute_service_driver_action(
+                    &service,
+                    &inverse_operation,
+                    self.service_driver_execution_enabled,
+                )?;
+                self.store.append_operation_log(driver_result_log_record(
+                    &operation.operation_id,
+                    &driver_result,
+                ))?;
+                ensure_driver_result_succeeded(&driver_result)?;
+                changed.push(changed_object("Service", &operation.target_id));
+            }
+            "service.start" | "service.stop" | "service.restart" | "host.start" | "host.stop" => {
+                let previous_state = service_runtime_previous_state_from_operation(operation)?
+                    .ok_or_else(|| {
+                        OrchestratorError::Dependency(format!(
+                            "{} rollback requires previous_runtime_state",
+                            operation.action
+                        ))
+                    })?;
+                changed.extend(
+                    self.restore_service_runtime_previous_state(operation, &previous_state)?,
+                );
+            }
+            "service.delete" => {
+                let previous_install_state =
+                    release_install_previous_state_from_operation(operation)?.ok_or_else(|| {
+                        OrchestratorError::Dependency(
+                            "service.delete rollback requires previous_state".to_string(),
+                        )
+                    })?;
+                let previous_runtime_state =
+                    service_runtime_previous_state_from_operation(operation)?.ok_or_else(|| {
+                        OrchestratorError::Dependency(
+                            "service.delete rollback requires previous_runtime_state".to_string(),
+                        )
+                    })?;
+                changed.extend(self.restore_release_install_previous_state(
+                    &operation.target_id,
+                    &previous_install_state,
+                )?);
+                changed.extend(
+                    self.restore_service_runtime_previous_state(
+                        operation,
+                        &previous_runtime_state,
+                    )?,
+                );
             }
             "topology.apply" => {
                 self.store.delete_topology(&operation.target_id)?;
@@ -4844,14 +5936,727 @@ impl<
                     self.restore_registry_resource_previous_state(&service_name, &previous_state)?,
                 );
             }
-            "service.delete" | "endpoint.delete" | "link.delete" => {
-                changed.push(changed_object(&operation.target_type, &operation.target_id));
-            }
             _ => {
-                changed.push(changed_object(&operation.target_type, &operation.target_id));
+                return Err(OrchestratorError::Blocked(format!(
+                    "action {} has no rollback mutation",
+                    operation.action
+                )));
             }
         }
         Ok(changed)
+    }
+
+    fn restore_endpoint_mutation_previous_state(
+        &mut self,
+        previous_state: &EndpointMutationPreviousState,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.store.put_endpoint(previous_state.endpoint.clone())?;
+        let mut changed = vec![changed_object(
+            "Endpoint",
+            &previous_state.endpoint.endpoint,
+        )];
+        for link in &previous_state.links {
+            self.store.put_link(link.clone())?;
+            changed.push(changed_object("Link", &link_target_id(link)));
+        }
+        for log_view in &previous_state.log_views {
+            self.store.upsert_log_source(log_view.clone())?;
+            changed.push(changed_object("LogView", &log_view.source_id));
+        }
+        for api in &previous_state.deployed_apis {
+            self.store.upsert_deployed_service_api(api.clone())?;
+            changed.push(changed_object("DeployedServiceApi", &deployed_api_id(api)));
+        }
+        Ok(changed)
+    }
+
+    fn capture_endpoint_mutation_previous_state(&mut self, operation: &Operation) -> Result<()> {
+        let endpoint = self
+            .store
+            .get_endpoint(&operation.target_id)?
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(format!("endpoint {} not found", operation.target_id))
+            })?;
+        let previous_state = EndpointMutationPreviousState {
+            endpoint,
+            links: self
+                .store
+                .list_links()?
+                .into_iter()
+                .filter(|link| {
+                    link.source_endpoint == operation.target_id
+                        || link.target_endpoint == operation.target_id
+                })
+                .collect(),
+            log_views: self
+                .store
+                .list_log_sources()?
+                .into_iter()
+                .filter(|log| log.endpoint == operation.target_id)
+                .collect(),
+            deployed_apis: self
+                .store
+                .list_deployed_service_apis()?
+                .into_iter()
+                .filter(|api| api.endpoint == operation.target_id)
+                .collect(),
+        };
+        let mut persisted = operation.clone();
+        persisted
+            .request
+            .as_object_mut()
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(
+                    "endpoint mutation request must be a JSON object".to_string(),
+                )
+            })?
+            .insert(
+                "previous_state".to_string(),
+                serde_json::to_value(previous_state)?,
+            );
+        self.store.update_operation(persisted)
+    }
+
+    fn capture_link_mutation_previous_state(
+        &mut self,
+        operation: &Operation,
+        link: &Link,
+    ) -> Result<()> {
+        let mut persisted = operation.clone();
+        persisted
+            .request
+            .as_object_mut()
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(
+                    "link mutation request must be a JSON object".to_string(),
+                )
+            })?
+            .insert(
+                "previous_state".to_string(),
+                serde_json::to_value(LinkMutationPreviousState { link: link.clone() })?,
+            );
+        self.store.update_operation(persisted)
+    }
+
+    /// 在切换 Link 前把原始 enabled 写回 Operation。这样启用一个本来就启用的
+    /// Link（或禁用一个本来就禁用的 Link）回滚后仍能恢复原值，而不是机械取反。
+    fn capture_link_previous_enabled(&mut self, operation: &Operation) -> Result<()> {
+        let requested = link_from_operation(operation);
+        let link = self
+            .store
+            .get_link(&requested.source_endpoint, &requested.target_endpoint)?
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(format!(
+                    "link {} not found",
+                    link_target_id(&requested)
+                ))
+            })?;
+        let mut operation = operation.clone();
+        operation
+            .request
+            .as_object_mut()
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(
+                    "link toggle operation request must be a JSON object".to_string(),
+                )
+            })?
+            .insert(
+                "previous_enabled".to_string(),
+                serde_json::Value::Bool(link.enabled),
+            );
+        self.store.update_operation(operation)
+    }
+
+    /// 在生命周期驱动执行前保存受影响的运行态记录。快照先写回 Operation，
+    /// 后续驱动或元数据更新即使失败，Failed Operation 仍有足够信息执行回滚。
+    fn capture_service_runtime_previous_state(
+        &mut self,
+        operation: &Operation,
+        service_name: Option<&str>,
+        host_ip: Option<&str>,
+    ) -> Result<ServiceRuntimePreviousState> {
+        let previous_state = ServiceRuntimePreviousState {
+            host_services: self
+                .store
+                .list_host_services()?
+                .into_iter()
+                .filter(|host_service| {
+                    service_name.is_none_or(|name| host_service.service_name == name)
+                })
+                .filter(|host_service| host_ip.is_none_or(|ip| host_service.host_ip == ip))
+                .collect(),
+            deployed_apis: self
+                .store
+                .list_deployed_service_apis()?
+                .into_iter()
+                .filter(|api| service_name.is_none_or(|name| api.service_name == name))
+                .filter(|api| host_ip.is_none_or(|ip| api.host_ip == ip))
+                .collect(),
+        };
+        let mut operation = operation.clone();
+        operation
+            .request
+            .as_object_mut()
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(format!(
+                    "{} operation request must be a JSON object",
+                    operation.action
+                ))
+            })?
+            .insert(
+                "previous_runtime_state".to_string(),
+                serde_json::to_value(&previous_state)?,
+            );
+        self.store.update_operation(operation)?;
+        Ok(previous_state)
+    }
+
+    /// 恢复生命周期操作前的运行态。先把确实发生状态变化的服务驱动回原来的
+    /// running/stopped 状态，所有驱动成功后再逐行恢复 HostService 与
+    /// DeployedServiceApi；任一步失败都会向上传递，Operation 不会误标 ROLLED_BACK。
+    fn restore_service_runtime_previous_state(
+        &mut self,
+        operation: &Operation,
+        previous_state: &ServiceRuntimePreviousState,
+    ) -> Result<Vec<serde_json::Value>> {
+        if let Some(host_service) = previous_state
+            .host_services
+            .iter()
+            .find(|host_service| host_service_has_nonlocal_runtime(host_service))
+        {
+            return Err(nonlocal_runtime_action_blocked(
+                &format!("{} rollback", operation.action),
+                host_service,
+            ));
+        }
+        let current_host_services = self.store.list_host_services()?;
+        for host_service in &previous_state.host_services {
+            let already_matches_snapshot = current_host_services.iter().any(|current| {
+                current.host_ip == host_service.host_ip
+                    && current.service_name == host_service.service_name
+                    && current.status.eq_ignore_ascii_case(&host_service.status)
+            });
+            if already_matches_snapshot {
+                continue;
+            }
+            let Some(action) = service_runtime_restore_action(&host_service.status) else {
+                self.store
+                    .append_operation_log(operation_step_log_record(
+                        &operation.operation_id,
+                        format!(
+                            "rollback:runtime:{}:{}",
+                            host_service.host_ip, host_service.service_name
+                        ),
+                        "error",
+                        format!(
+                            "runtime restore for {} on {} cannot safely map status {} to a driver action",
+                            host_service.service_name, host_service.host_ip, host_service.status
+                        ),
+                        serde_json::json!({
+                            "service_name": host_service.service_name,
+                            "host_ip": host_service.host_ip,
+                            "status": host_service.status,
+                            "driver_action": serde_json::Value::Null,
+                        }),
+                    ))?;
+                return Err(OrchestratorError::Blocked(format!(
+                    "runtime state {} for {} on {} cannot be restored safely",
+                    host_service.status, host_service.service_name, host_service.host_ip
+                )));
+            };
+            let step_operation = self.service_step_operation(operation, host_service, action)?;
+            let service = ensure_service_exists(self.store, &host_service.service_name)?;
+            let driver_result = execute_service_driver_action(
+                &service,
+                &step_operation,
+                self.service_driver_execution_enabled,
+            )?;
+            self.store.append_operation_log(driver_result_log_record(
+                &operation.operation_id,
+                &driver_result,
+            ))?;
+            ensure_driver_result_succeeded(&driver_result)?;
+        }
+
+        let mut changed = Vec::new();
+        let mut service_names = BTreeSet::new();
+        for host_service in &previous_state.host_services {
+            self.store.upsert_host_service(host_service.clone())?;
+            service_names.insert(host_service.service_name.clone());
+            changed.push(changed_object(
+                "HostService",
+                &format!("{}:{}", host_service.host_ip, host_service.service_name),
+            ));
+        }
+        for api in &previous_state.deployed_apis {
+            self.store.upsert_deployed_service_api(api.clone())?;
+            service_names.insert(api.service_name.clone());
+            changed.push(changed_object("DeployedServiceApi", &deployed_api_id(api)));
+        }
+        for service_name in service_names {
+            self.publish_service_gateway_routes(operation, &service_name)?;
+        }
+        Ok(changed)
+    }
+
+    /// 读取 Operation 里的 source/target endpoint，切换该 Link 的 enabled 并落库，
+    /// 返回 changed_object 用的 link target id。apply 与 rollback 共用同一段实现。
+    fn toggle_link_enabled(&mut self, operation: &Operation, enabled: bool) -> Result<String> {
+        let requested = link_from_operation(operation);
+        let mut link = self
+            .store
+            .get_link(&requested.source_endpoint, &requested.target_endpoint)?
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(format!(
+                    "link {} not found",
+                    link_target_id(&requested)
+                ))
+            })?;
+        let target = link_target_id(&link);
+        link.enabled = enabled;
+        self.store.put_link(link)?;
+        Ok(target)
+    }
+
+    /// service.start / service.stop / service.restart 的公共实现：
+    /// 先跑驱动动作，成功后把 HostService 与 DeployedServiceApi 的 status 回写，
+    /// 再把新的有效路由推给 gateway（`effective_api_routes_from_registry` 只保留
+    /// status == "running" 的 DeployedServiceApi，不回写状态则停服务后路由不会失效）。
+    fn apply_service_lifecycle(
+        &mut self,
+        operation: &Operation,
+        service_id: &str,
+        action: &str,
+        host_ip: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.ensure_control_plane_runtime_owner(action, service_id, host_ip)?;
+        let service = ensure_service_exists(self.store, service_id)?;
+        let driver_result = execute_service_driver_action(
+            &service,
+            operation,
+            self.service_driver_execution_enabled,
+        )?;
+        self.store.append_operation_log(driver_result_log_record(
+            &operation.operation_id,
+            &driver_result,
+        ))?;
+        ensure_driver_result_succeeded(&driver_result)?;
+        let mut changed = self.apply_service_runtime_status(
+            &service.id,
+            host_ip,
+            service_runtime_status(action),
+        )?;
+        self.publish_service_gateway_routes(operation, &service.id)?;
+        changed.push(changed_object("Service", &service.id));
+        Ok(changed)
+    }
+
+    /// host.start / host.stop：按 host_ip 枚举 HostService，逐个执行等价的
+    /// service.start / service.stop 驱动动作与状态回写，汇总成一次 Operation 的变更集。
+    fn apply_host_lifecycle(
+        &mut self,
+        operation: &Operation,
+        host_ip: &str,
+        service_action: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        if host_ip.trim().is_empty() {
+            return Err(OrchestratorError::Dependency(format!(
+                "{} requires host_ip",
+                operation.action
+            )));
+        }
+        // OrchestratorStore 只提供全表 list_host_services()，按调用侧过滤该主机的服务。
+        let mut host_services = self
+            .store
+            .list_host_services()?
+            .into_iter()
+            .filter(|host_service| host_service.host_ip == host_ip)
+            .collect::<Vec<_>>();
+        host_services.sort_by(|left, right| left.service_name.cmp(&right.service_name));
+        if host_services.is_empty() {
+            return Err(OrchestratorError::Dependency(format!(
+                "host {host_ip} has no registered services"
+            )));
+        }
+        if let Some(host_service) = host_services
+            .iter()
+            .find(|host_service| host_service_has_nonlocal_runtime(host_service))
+        {
+            return Err(nonlocal_runtime_action_blocked(
+                &operation.action,
+                host_service,
+            ));
+        }
+        let mut changed = Vec::new();
+        for host_service in host_services {
+            let step_operation =
+                self.service_step_operation(operation, &host_service, service_action)?;
+            changed.extend(self.apply_service_lifecycle(
+                &step_operation,
+                &host_service.service_name,
+                service_action,
+                Some(host_ip),
+            )?);
+        }
+        changed.push(changed_object("Host", host_ip));
+        Ok(changed)
+    }
+
+    /// 把某个服务在指定 host（None 表示全部 host）上的 HostService.status 与
+    /// DeployedServiceApi.status 回写成同一个取值。status 取值沿用
+    /// `release_install_host_status` 的风格：running|starting|failed|planned|deferred，
+    /// 另外新增 "stopped" 表示编排器已确认服务被显式停止 —— 安装链路不表达"停止"语义，
+    /// 所以 `release_install_host_status` 不会产生这个取值。
+    fn apply_service_runtime_status(
+        &mut self,
+        service_name: &str,
+        host_ip: Option<&str>,
+        status: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut changed = Vec::new();
+        let host_services = self
+            .store
+            .list_host_services()?
+            .into_iter()
+            .filter(|host_service| host_service.service_name == service_name)
+            .filter(|host_service| host_ip.is_none_or(|host_ip| host_service.host_ip == host_ip))
+            .collect::<Vec<_>>();
+        for mut host_service in host_services {
+            if host_service.status == status {
+                continue;
+            }
+            host_service.status = status.to_string();
+            let target = format!("{}:{}", host_service.host_ip, host_service.service_name);
+            self.store.upsert_host_service(host_service)?;
+            changed.push(changed_object("HostService", &target));
+        }
+        let deployed_apis = self
+            .store
+            .list_deployed_service_apis()?
+            .into_iter()
+            .filter(|api| api.service_name == service_name)
+            .filter(|api| host_ip.is_none_or(|host_ip| api.host_ip == host_ip))
+            .collect::<Vec<_>>();
+        for mut api in deployed_apis {
+            if api.status == status {
+                continue;
+            }
+            api.status = status.to_string();
+            let target = format!("{}:{}:{}", api.host_ip, api.service_name, api.api_id);
+            self.store.upsert_deployed_service_api(api)?;
+            changed.push(changed_object("DeployedServiceApi", &target));
+        }
+        Ok(changed)
+    }
+
+    /// 状态回写后重新计算该服务的有效路由并推给 gateway，语义与 release.install
+    /// 成功后的 publish_gateway_routes 调用一致。
+    fn publish_service_gateway_routes(
+        &mut self,
+        operation: &Operation,
+        service_name: &str,
+    ) -> Result<GatewayRoutePublishResult> {
+        let gateway_node_id = gateway_reload_node_id(operation);
+        let effective_routes = match gateway_node_id.as_deref() {
+            Some(node_id) => self.store.effective_api_routes(node_id)?,
+            None => Vec::new(),
+        };
+        let routes = self
+            .store
+            .list_service_routes()?
+            .into_iter()
+            .filter(|route| route.target_service_name == service_name)
+            .collect::<Vec<_>>();
+        let api_count = self
+            .store
+            .list_deployed_service_apis()?
+            .into_iter()
+            .filter(|api| api.service_name == service_name)
+            .count();
+        self.publish_gateway_routes_for_service(
+            &operation.operation_id,
+            service_name,
+            &routes,
+            &effective_routes,
+            gateway_node_id.as_deref().unwrap_or(""),
+            api_count,
+            operation.action == "service.delete",
+        )
+    }
+
+    /// 用一条 HostService 合成等价的 service.start / service.stop Operation，
+    /// 让 host.* 批量动作复用 service.* 的驱动执行与状态回写实现。
+    fn service_step_operation(
+        &self,
+        operation: &Operation,
+        host_service: &HostService,
+        service_action: &str,
+    ) -> Result<Operation> {
+        let mut request = serde_json::Map::new();
+        request.insert(
+            "service_id".to_string(),
+            serde_json::Value::String(host_service.service_name.clone()),
+        );
+        request.insert(
+            "host_ip".to_string(),
+            serde_json::Value::String(host_service.host_ip.clone()),
+        );
+        if let Some(gateway_node_id) = gateway_reload_node_id(operation) {
+            request.insert(
+                "gateway_node_id".to_string(),
+                serde_json::Value::String(gateway_node_id),
+            );
+        }
+        if let Some(endpoint) = self.host_service_endpoint(host_service)? {
+            request.insert("endpoint".to_string(), serde_json::Value::String(endpoint));
+        }
+        if let Some(release) = self.host_service_release(host_service)? {
+            request.insert(
+                "release_manifest".to_string(),
+                serde_json::to_value(&release)?,
+            );
+        }
+        // 只换 action/target/request，operation_id 沿用父 Operation，
+        // 这样每个服务的驱动日志都挂在同一条 host.* Operation 上。
+        let mut step_operation = operation.clone();
+        step_operation.action = service_action.to_string();
+        step_operation.target_type = "Service".to_string();
+        step_operation.target_id = host_service.service_name.clone();
+        step_operation.request = serde_json::Value::Object(request);
+        Ok(step_operation)
+    }
+
+    fn host_service_endpoint(&self, host_service: &HostService) -> Result<Option<String>> {
+        Ok(self
+            .store
+            .list_endpoints()?
+            .into_iter()
+            .find(|endpoint| {
+                endpoint.service_id == host_service.service_name
+                    && parse_endpoint_id(&endpoint.endpoint)
+                        .is_ok_and(|identity| identity.host == host_service.host_ip)
+            })
+            .map(|endpoint| endpoint.endpoint))
+    }
+
+    fn host_service_release(
+        &self,
+        host_service: &HostService,
+    ) -> Result<Option<ServiceReleaseManifest>> {
+        let records = self.store.list_service_releases()?;
+        let record = records.iter().find(|record| {
+            record.service_name == host_service.service_name
+                && record.version == host_service.version
+        });
+        match record {
+            Some(record) => serde_json::from_value(record.manifest.clone())
+                .map(Some)
+                .map_err(OrchestratorError::Json),
+            None => Ok(None),
+        }
+    }
+
+    fn stop_previous_runtime_before_release_install(
+        &mut self,
+        operation: &Operation,
+        previous_state: &ReleaseInstallPreviousState,
+    ) -> Result<Option<DriverResult>> {
+        let Some(service) = previous_state.service.as_ref() else {
+            return Ok(None);
+        };
+        let has_active_row = previous_state
+            .host_services
+            .iter()
+            .any(|row| runtime_status_may_be_active(&row.status))
+            || previous_state
+                .deployed_apis
+                .iter()
+                .any(|row| runtime_status_may_be_active(&row.status));
+        let has_local_pid = matches!(service.runtime.mode, RuntimeMode::LocalProcess)
+            && LocalProcessDriver::new().has_pid_file(&service.id)?;
+        if !has_active_row && !has_local_pid {
+            return Ok(None);
+        }
+        if let Some(host_service) = previous_state
+            .host_services
+            .iter()
+            .find(|host_service| host_service_has_nonlocal_runtime(host_service))
+        {
+            return Err(nonlocal_runtime_action_blocked(
+                "release.install upgrade",
+                host_service,
+            ));
+        }
+        let release = release_manifest_from_previous_state(previous_state, &service.version)?;
+        if !service_uses_fixed_runtime(service, release.as_ref()) {
+            return Ok(None);
+        }
+        let endpoint = previous_state
+            .endpoints
+            .first()
+            .map(|endpoint| endpoint.endpoint.as_str())
+            .or_else(|| {
+                previous_state
+                    .deployed_apis
+                    .first()
+                    .map(|api| api.endpoint.as_str())
+            })
+            .unwrap_or("");
+        self.execute_service_runtime_action(
+            operation,
+            "service.stop",
+            service,
+            release.as_ref(),
+            endpoint,
+        )
+    }
+
+    fn ensure_external_registration_has_no_active_previous_runtime(
+        &self,
+        previous_state: &ReleaseInstallPreviousState,
+    ) -> Result<()> {
+        let active_registry_row = previous_state
+            .host_services
+            .iter()
+            .any(|row| runtime_status_may_be_active(&row.status))
+            || previous_state
+                .deployed_apis
+                .iter()
+                .any(|row| runtime_status_may_be_active(&row.status));
+        let local_pid = if let Some(service) = previous_state
+            .service
+            .as_ref()
+            .filter(|service| matches!(service.runtime.mode, RuntimeMode::LocalProcess))
+        {
+            LocalProcessDriver::new().has_pid_file(&service.id)?
+        } else {
+            false
+        };
+        if active_registry_row || local_pid {
+            return Err(OrchestratorError::Blocked(
+                "external_service_running cannot replace an active existing deployment; stop it at its current owner first"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn release_install_runtime_restore_spec(
+        &self,
+        previous_state: &ReleaseInstallPreviousState,
+    ) -> Result<Option<ServiceRuntimeRestoreSpec>> {
+        let mut statuses = previous_state
+            .host_services
+            .iter()
+            .map(|row| row.status.trim())
+            .chain(
+                previous_state
+                    .deployed_apis
+                    .iter()
+                    .map(|row| row.status.trim()),
+            )
+            .filter(|status| !status.is_empty())
+            .collect::<BTreeSet<_>>();
+        if statuses.is_empty() {
+            return Ok(None);
+        }
+        if statuses.iter().all(|status| {
+            matches!(
+                status.to_ascii_lowercase().as_str(),
+                "planned" | "deferred" | "failed"
+            )
+        }) {
+            return Ok(None);
+        }
+        if statuses.len() != 1 {
+            return Err(OrchestratorError::Blocked(
+                "release.install rollback cannot restore mixed running/stopped runtime states"
+                    .to_string(),
+            ));
+        }
+        let status = statuses.pop_first().expect("one runtime status");
+        let action = service_runtime_restore_action(status).ok_or_else(|| {
+            OrchestratorError::Blocked(format!(
+                "release.install rollback cannot safely restore runtime status {status}"
+            ))
+        })?;
+        let service = previous_state.service.clone().ok_or_else(|| {
+            OrchestratorError::Blocked(
+                "release.install rollback runtime snapshot has deployments but no service"
+                    .to_string(),
+            )
+        })?;
+        let mut versions = previous_state
+            .host_services
+            .iter()
+            .map(|row| row.version.trim())
+            .chain(
+                previous_state
+                    .deployed_apis
+                    .iter()
+                    .map(|row| row.version.trim()),
+            )
+            .filter(|version| !version.is_empty())
+            .collect::<BTreeSet<_>>();
+        if versions.len() > 1 {
+            return Err(OrchestratorError::Blocked(
+                "release.install rollback cannot restore multiple runtime versions with one fixed driver"
+                    .to_string(),
+            ));
+        }
+        let version = versions
+            .pop_first()
+            .map(str::to_string)
+            .unwrap_or_else(|| service.version.clone());
+        let release = release_manifest_from_previous_state(previous_state, &version)?;
+        if matches!(service.runtime.mode, RuntimeMode::LocalProcess)
+            && release.as_ref().is_none_or(|release| {
+                !release
+                    .runtime
+                    .kind
+                    .trim()
+                    .eq_ignore_ascii_case("local-process")
+            })
+        {
+            return Err(OrchestratorError::Blocked(format!(
+                "release.install rollback cannot restore local-process {}@{} without its exact release runtime",
+                service.id, version
+            )));
+        }
+        if !service_uses_fixed_runtime(&service, release.as_ref()) {
+            return Ok(None);
+        }
+        let endpoint = previous_state
+            .deployed_apis
+            .first()
+            .map(|api| api.endpoint.clone())
+            .or_else(|| {
+                previous_state
+                    .endpoints
+                    .first()
+                    .map(|endpoint| endpoint.endpoint.clone())
+            })
+            .unwrap_or_default();
+        Ok(Some(ServiceRuntimeRestoreSpec {
+            service,
+            release,
+            endpoint,
+            action,
+        }))
+    }
+
+    fn restore_release_install_runtime(
+        &mut self,
+        operation: &Operation,
+        spec: &ServiceRuntimeRestoreSpec,
+    ) -> Result<Option<DriverResult>> {
+        self.execute_service_runtime_action(
+            operation,
+            spec.action,
+            &spec.service,
+            spec.release.as_ref(),
+            &spec.endpoint,
+        )
     }
 
     fn capture_release_install_previous_state(
@@ -5154,6 +6959,31 @@ impl<
         Ok(previous_state)
     }
 
+    fn capture_release_delete_previous_state(
+        &mut self,
+        operation: &Operation,
+        releases: &[ServiceRelease],
+    ) -> Result<ReleaseDeletePreviousState> {
+        let previous_state = ReleaseDeletePreviousState {
+            releases: releases.to_vec(),
+        };
+        let mut operation = operation.clone();
+        operation
+            .request
+            .as_object_mut()
+            .ok_or_else(|| {
+                OrchestratorError::Dependency(
+                    "release.delete operation request must be a JSON object".to_string(),
+                )
+            })?
+            .insert(
+                "previous_state".to_string(),
+                serde_json::to_value(&previous_state)?,
+            );
+        self.store.update_operation(operation)?;
+        Ok(previous_state)
+    }
+
     fn capture_registry_resource_previous_state(
         &mut self,
         operation: &Operation,
@@ -5339,27 +7169,9 @@ impl<
             .get("version")
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.trim().is_empty());
-        self.store
-            .list_operations()?
-            .into_iter()
-            .rev()
-            .find(|candidate| {
-                candidate.action == "release.install"
-                    && matches!(candidate.status, OperationStatus::Succeeded)
-                    && candidate
-                        .request
-                        .get("service_id")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(service_name)
-                    && requested_version.is_none_or(|version| {
-                        candidate
-                            .request
-                            .get("version")
-                            .and_then(serde_json::Value::as_str)
-                            == Some(version)
-                    })
-            })
-            .map(|operation| operation.operation_id)
+        let operations = self.store.list_operations()?;
+        latest_successful_release_install_operation(&operations, service_name, requested_version)
+            .map(|operation| operation.operation_id.clone())
             .ok_or_else(|| {
                 OrchestratorError::Dependency(format!(
                     "no successful release.install operation found for {service_name}"
@@ -5536,9 +7348,34 @@ fn release_install_previous_state_from_operation(
         .map_err(OrchestratorError::Json)
 }
 
+fn release_manifest_from_previous_state(
+    previous_state: &ReleaseInstallPreviousState,
+    version: &str,
+) -> Result<Option<ServiceReleaseManifest>> {
+    previous_state
+        .releases
+        .iter()
+        .find(|record| record.version == version)
+        .map(|record| serde_json::from_value(record.manifest.clone()))
+        .transpose()
+        .map_err(OrchestratorError::Json)
+}
+
 fn release_record_previous_state_from_operation(
     operation: &Operation,
 ) -> Result<Option<ReleaseRecordPreviousState>> {
+    operation
+        .request
+        .get("previous_state")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(OrchestratorError::Json)
+}
+
+fn release_delete_previous_state_from_operation(
+    operation: &Operation,
+) -> Result<Option<ReleaseDeletePreviousState>> {
     operation
         .request
         .get("previous_state")
@@ -5562,6 +7399,81 @@ fn registry_resource_previous_state_from_operation(
         .to_string();
     let previous_state = serde_json::from_value(value).map_err(OrchestratorError::Json)?;
     Ok(Some((service_name, previous_state)))
+}
+
+fn service_runtime_previous_state_from_operation(
+    operation: &Operation,
+) -> Result<Option<ServiceRuntimePreviousState>> {
+    operation
+        .request
+        .get("previous_runtime_state")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(OrchestratorError::Json)
+}
+
+fn endpoint_mutation_previous_state_from_operation(
+    operation: &Operation,
+) -> Result<Option<EndpointMutationPreviousState>> {
+    operation
+        .request
+        .get("previous_state")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(OrchestratorError::Json)
+}
+
+fn link_mutation_previous_state_from_operation(
+    operation: &Operation,
+) -> Result<Option<LinkMutationPreviousState>> {
+    operation
+        .request
+        .get("previous_state")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(OrchestratorError::Json)
+}
+
+pub(crate) fn latest_successful_release_install_operation<'a>(
+    operations: &'a [Operation],
+    service_name: &str,
+    requested_version: Option<&str>,
+) -> Option<&'a Operation> {
+    operations
+        .iter()
+        .filter(|candidate| {
+            candidate.action == "release.install"
+                && matches!(candidate.status, OperationStatus::Succeeded)
+                && candidate
+                    .request
+                    .get("service_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(service_name)
+                && requested_version.is_none_or(|version| {
+                    candidate
+                        .request
+                        .get("version")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(version)
+                })
+        })
+        .max_by(|left, right| {
+            release_install_recency_key(left).cmp(&release_install_recency_key(right))
+        })
+}
+
+fn release_install_recency_key(operation: &Operation) -> (&str, &str, &str) {
+    let created_at = operation.created_at.trim();
+    let updated_at = operation.updated_at.trim();
+    let primary = if created_at.is_empty() {
+        updated_at
+    } else {
+        created_at
+    };
+    (primary, updated_at, operation.operation_id.as_str())
 }
 
 fn ensure_release_install_operation_matches_request(
@@ -6421,9 +8333,9 @@ fn service_redis_resources_from_release(
 }
 
 fn redis_stream_name(resource: &ServiceRedisResource) -> String {
-    if resource.service_name == "judge-api" && resource.name == "redis" {
-        "ojos:judge:task".to_string()
-    } else if resource.service_name == "judge-worker" && resource.name == "redis" {
+    if matches!(resource.service_name.as_str(), "judge-api" | "judge-worker")
+        && resource.name == "redis"
+    {
         "ojos:judge:task".to_string()
     } else {
         format!(
@@ -6483,7 +8395,7 @@ impl SimpleRedisConnection {
     fn send_command(&mut self, args: &[&str]) -> Result<()> {
         let mut payload = format!("*{}\r\n", args.len()).into_bytes();
         for arg in args {
-            payload.extend_from_slice(format!("${}\r\n", arg.as_bytes().len()).as_bytes());
+            payload.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
             payload.extend_from_slice(arg.as_bytes());
             payload.extend_from_slice(b"\r\n");
         }
@@ -6641,6 +8553,52 @@ fn install_labels(release: Option<&ServiceReleaseManifest>) -> serde_json::Value
     }
 }
 
+fn install_labels_with_runtime_owner(
+    release: Option<&ServiceReleaseManifest>,
+    runtime_owner: Option<&str>,
+) -> serde_json::Value {
+    let mut labels = install_labels(release);
+    if let Some(runtime_owner) = runtime_owner
+        && let Some(object) = labels.as_object_mut()
+    {
+        object.insert(
+            "runtime_owner".to_string(),
+            serde_json::Value::String(runtime_owner.to_string()),
+        );
+    }
+    labels
+}
+
+fn host_service_runtime_owner(host_service: &HostService) -> Option<&str> {
+    host_service
+        .labels
+        .get("runtime_owner")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn host_service_has_nonlocal_runtime(host_service: &HostService) -> bool {
+    host_service_runtime_owner(host_service).is_some_and(|owner| {
+        owner.eq_ignore_ascii_case("node") || owner.eq_ignore_ascii_case("external")
+    })
+}
+
+fn runtime_status_may_be_active(status: &str) -> bool {
+    !matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "stopped" | "planned" | "deferred" | "failed"
+    )
+}
+
+fn nonlocal_runtime_action_blocked(action: &str, host_service: &HostService) -> OrchestratorError {
+    let owner = host_service_runtime_owner(host_service).unwrap_or("nonlocal");
+    OrchestratorError::Blocked(format!(
+        "{action} for {owner}-owned runtime {} on {} is not implemented; refusing control-plane local driver execution",
+        host_service.service_name, host_service.host_ip
+    ))
+}
+
 fn rendered_runtime_config(
     service: &ServiceManifest,
     release: Option<&ServiceReleaseManifest>,
@@ -6685,6 +8643,66 @@ fn rendered_runtime_config(
     })
 }
 
+fn node_dispatch_driver_result(
+    operation: &Operation,
+    dispatch: &NodeServiceDispatchResult,
+) -> DriverResult {
+    let executed = dispatch.driver_executed;
+    let status = if executed && !dispatch.driver_status.trim().is_empty() {
+        dispatch.driver_status.clone()
+    } else {
+        "PLANNED".to_string()
+    };
+    DriverResult {
+        action: "release.install".to_string(),
+        status,
+        message: if executed {
+            format!(
+                "node service driver returned {}: {}",
+                dispatch.driver_status, dispatch.message
+            )
+        } else if operation_bool_field(operation, "execute_service_driver") {
+            format!(
+                "node accepted the authorized request without executing its driver: {}",
+                dispatch.message
+            )
+        } else {
+            format!(
+                "node accepted the request without per-operation driver authorization: {}",
+                dispatch.message
+            )
+        },
+        command: Vec::new(),
+        pid: None,
+        pid_file: String::new(),
+    }
+}
+
+fn ensure_node_dispatch_driver_evidence(
+    operation: &Operation,
+    dispatch: &NodeServiceDispatchResult,
+) -> Result<()> {
+    let execution_requested = operation_bool_field(operation, "execute_service_driver");
+    if !execution_requested && dispatch.driver_executed {
+        return Err(OrchestratorError::Dependency(
+            "node reported driver execution without per-operation authorization".to_string(),
+        ));
+    }
+    if execution_requested && !dispatch.driver_executed {
+        return Err(OrchestratorError::Blocked(format!(
+            "node accepted {} but did not execute the authorized service driver: {}",
+            operation.operation_id, dispatch.message
+        )));
+    }
+    if execution_requested && !dispatch.driver_status.eq_ignore_ascii_case("SUCCEEDED") {
+        return Err(OrchestratorError::Dependency(format!(
+            "node service driver returned {}: {}",
+            dispatch.driver_status, dispatch.message
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn release_install_host_status(
     node_dispatch: Option<&NodeServiceDispatchResult>,
     driver_result: &DriverResult,
@@ -6705,6 +8723,67 @@ pub(crate) fn release_install_host_status(
     }
 }
 
+/// service.start / service.restart 成功后服务处于 running；service.stop 成功后是 stopped。
+/// 取值风格与 `release_install_host_status` 一致（running|starting|failed|planned|deferred），
+/// "stopped" 是启停链路新增的取值，安装链路不会产生。
+fn service_runtime_status(action: &str) -> &'static str {
+    match action {
+        "service.stop" => "stopped",
+        _ => "running",
+    }
+}
+
+/// host.start / host.stop 在 apply 阶段展开成的单服务动作。
+fn host_lifecycle_service_action(action: &str) -> &'static str {
+    if action == "host.start" {
+        "service.start"
+    } else {
+        "service.stop"
+    }
+}
+
+/// 只有稳定运行态能安全映射到驱动动作。其它状态仍会恢复元数据，但不会猜测
+/// 进程应该启动还是停止。
+fn service_runtime_restore_action(status: &str) -> Option<&'static str> {
+    match status {
+        "running" => Some("service.start"),
+        "stopped" => Some("service.stop"),
+        _ => None,
+    }
+}
+
+fn service_uses_fixed_runtime(
+    service: &ServiceManifest,
+    release: Option<&ServiceReleaseManifest>,
+) -> bool {
+    release.is_some_and(|release| {
+        release
+            .runtime
+            .kind
+            .trim()
+            .eq_ignore_ascii_case("local-process")
+    }) || matches!(
+        service.runtime.mode,
+        RuntimeMode::LocalProcess | RuntimeMode::Container
+    )
+}
+
+/// host.* Operation 的目标主机：优先取 request.host_ip，回退到 target_id。
+fn host_lifecycle_host_ip(operation: &Operation) -> String {
+    operation_host_ip(operation).unwrap_or_else(|| operation.target_id.trim().to_string())
+}
+
+/// service.* Operation 上可选的 host_ip 过滤条件；未指定时回写全部 host。
+fn operation_host_ip(operation: &Operation) -> Option<String> {
+    operation
+        .request
+        .get("host_ip")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn deferred_install_health(
     endpoint: &Endpoint,
     driver_result: &DriverResult,
@@ -6721,14 +8800,16 @@ fn deferred_install_health(
     }
 }
 
-fn external_running_install_health(endpoint: &Endpoint) -> EndpointHealthResult {
-    EndpointHealthResult {
-        endpoint: endpoint.endpoint.clone(),
-        health: "ok".to_string(),
-        reachable: true,
-        latency_ms: None,
-        message: "service process was started externally before release.install; service_start remains deferred"
-            .to_string(),
+fn external_running_driver_result(operation: &Operation) -> DriverResult {
+    DriverResult {
+        action: operation.action.clone(),
+        status: "SUPPORTED".to_string(),
+        message:
+            "external_service_running skips service startup; endpoint health must verify the process"
+                .to_string(),
+        command: Vec::new(),
+        pid: None,
+        pid_file: String::new(),
     }
 }
 
@@ -6739,6 +8820,47 @@ fn operation_bool_field(operation: &Operation, field: &str) -> bool {
             .get("install_options")
             .and_then(|value| value.get(field))
             .is_some_and(json_truthy_value)
+}
+
+fn ensure_release_apply_execution_authorized(
+    operation: &Operation,
+    execution_enabled: bool,
+) -> Result<()> {
+    let requires_authorization = operation.action == "release.rollback"
+        || (operation.action == "release.install"
+            && operation_bool_field(operation, "execute_service_driver"));
+    if requires_authorization && !execution_enabled {
+        return Err(OrchestratorError::Blocked(format!(
+            "{} requires execute_service_driver=true",
+            operation.action
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_rollback_execution_authorized(
+    operation: &Operation,
+    execution_enabled: bool,
+) -> Result<()> {
+    let requires_authorization = matches!(
+        operation.action.as_str(),
+        "service.enable"
+            | "service.disable"
+            | "service.start"
+            | "service.stop"
+            | "service.restart"
+            | "service.delete"
+            | "host.start"
+            | "host.stop"
+    ) || (operation.action == "release.install"
+        && operation_bool_field(operation, "execute_service_driver"));
+    if requires_authorization && !execution_enabled {
+        return Err(OrchestratorError::Blocked(format!(
+            "{} rollback requires execute_service_driver=true",
+            operation.action
+        )));
+    }
+    Ok(())
 }
 
 fn gateway_reload_node_id(operation: &Operation) -> Option<String> {
@@ -6889,6 +9011,12 @@ fn link_from_operation(operation: &Operation) -> Link {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string(),
+        // Operation request 里没有 enabled 时默认启用，避免历史 Operation 回放时把 Link 关掉。
+        enabled: operation
+            .request
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
         health: "unknown".to_string(),
         latency_ms: None,
         config_ref: operation
@@ -7037,7 +9165,21 @@ pub(crate) fn execute_service_driver_action(
                 driver.execute(&request)
             }
         }
-        RuntimeMode::LocalProcess => LocalProcessDriver::new().execute(&request),
+        RuntimeMode::LocalProcess => {
+            if execute_fixed_commands {
+                LocalProcessDriver::new().execute(&request)
+            } else {
+                Ok(DriverResult {
+                    action: operation.action.clone(),
+                    status: "PLANNED".to_string(),
+                    message: "local-process service runtime requires execute_service_driver=true"
+                        .to_string(),
+                    command: Vec::new(),
+                    pid: None,
+                    pid_file: String::new(),
+                })
+            }
+        }
         RuntimeMode::External => ExternalEndpointDriver.execute(&request),
     }
 }
@@ -7065,7 +9207,9 @@ fn ensure_driver_result_succeeded(result: &DriverResult) -> Result<()> {
 }
 
 fn ensure_node_dispatch_accepted(result: &NodeServiceDispatchResult) -> Result<()> {
-    if result.status.eq_ignore_ascii_case("failed") {
+    if result.status.eq_ignore_ascii_case("failed")
+        || (result.driver_executed && result.driver_status.eq_ignore_ascii_case("failed"))
+    {
         return Err(OrchestratorError::Dependency(format!(
             "node dispatch failed: {}",
             result.message
@@ -7202,6 +9346,8 @@ fn node_dispatch_log_record(
             "status": result.status,
             "endpoint": result.endpoint,
             "accepted": result.accepted,
+            "driver_executed": result.driver_executed,
+            "driver_status": result.driver_status,
             "message": result.message,
         }),
     )
@@ -7365,6 +9511,8 @@ fn migration_execution_log_record(
     )
 }
 
+// The log record deliberately receives each pipeline result independently.
+#[allow(clippy::too_many_arguments)]
 fn release_install_pipeline_log_record(
     operation_id: &str,
     service: &ServiceManifest,
@@ -7476,6 +9624,8 @@ fn release_install_pipeline_log_record(
                 "status": result.status,
                 "endpoint": result.endpoint,
                 "accepted": result.accepted,
+                "driver_executed": result.driver_executed,
+                "driver_status": result.driver_status,
                 "message": result.message,
             })),
             "service_start": driver_result.status,
@@ -7574,10 +9724,11 @@ fn service_database_url_env_candidates(service_name: &str) -> Vec<String> {
     let key = service_env_key(service_name);
     let mut prefixes = vec![key.clone()];
     for suffix in ["_SERVICE", "_API", "_WORKER"] {
-        if let Some(prefix) = key.strip_suffix(suffix) {
-            if !prefix.is_empty() && !prefixes.iter().any(|item| item == prefix) {
-                prefixes.push(prefix.to_string());
-            }
+        if let Some(prefix) = key.strip_suffix(suffix)
+            && !prefix.is_empty()
+            && !prefixes.iter().any(|item| item == prefix)
+        {
+            prefixes.push(prefix.to_string());
         }
     }
 
@@ -7729,4 +9880,172 @@ fn changed_object(object_type: &str, id: &str) -> serde_json::Value {
 
 fn link_target_id(link: &Link) -> String {
     format!("{} -> {}", link.source_endpoint, link.target_endpoint)
+}
+
+#[cfg(test)]
+mod outbound_url_tests {
+    use super::*;
+
+    /// 用例一律走 `validate_outbound_url_with_policy`，策略显式传入：
+    /// 既不读进程环境变量（避免和并行跑的其它用例互相干扰），
+    /// 也只用 IP 字面量（沙箱 / 离线 CI 没有 DNS，用域名会挂）。
+    fn allow(url: &str) {
+        assert!(
+            validate_outbound_url_with_policy(url, false).is_ok(),
+            "expected {url} to be allowed"
+        );
+    }
+
+    fn block(url: &str) {
+        assert!(
+            validate_outbound_url_with_policy(url, false).is_err(),
+            "expected {url} to be blocked"
+        );
+    }
+
+    #[test]
+    fn public_literal_addresses_are_allowed() {
+        allow("https://8.8.8.8/store/index.json");
+        allow("https://1.1.1.1:8443/packages/demo.zip");
+        allow("http://93.184.216.34/release.yaml");
+        allow("https://[2606:4700:4700::1111]/release.yaml");
+        // /10 之外的 100.x 不是 CGNAT，属于正常公网。
+        allow("https://100.128.0.1/release.yaml");
+        // 172.32/16 在 RFC 1918 的 172.16/12 之外。
+        allow("https://172.32.0.1/release.yaml");
+    }
+
+    #[test]
+    fn loopback_is_blocked() {
+        block("http://127.0.0.1:8080/release.yaml");
+        block("http://127.1.2.3/release.yaml");
+        block("https://[::1]/release.yaml");
+        block("https://[::ffff:127.0.0.1]/release.yaml");
+    }
+
+    #[test]
+    fn private_ranges_are_blocked() {
+        block("http://10.0.0.5/release.yaml");
+        block("http://172.16.0.1/release.yaml");
+        block("http://172.31.255.255/release.yaml");
+        block("http://192.168.1.1/release.yaml");
+        block("https://[fc00::1]/release.yaml");
+        block("https://[fd12:3456:789a::1]/release.yaml");
+    }
+
+    #[test]
+    fn link_local_and_metadata_are_blocked_even_with_the_escape_hatch() {
+        block("http://169.254.169.254/latest/meta-data/");
+        block("https://[fe80::1]/release.yaml");
+        assert!(
+            validate_outbound_url_with_policy("http://169.254.169.254/latest/meta-data/", true)
+                .is_err(),
+            "cloud metadata must stay blocked even when private sources are allowed"
+        );
+        assert!(
+            validate_outbound_url_with_policy("https://[fe80::1]/release.yaml", true).is_err(),
+            "ipv6 link-local must stay blocked even when private sources are allowed"
+        );
+    }
+
+    #[test]
+    fn carrier_grade_nat_is_blocked() {
+        block("http://100.64.0.1/release.yaml");
+        block("http://100.100.100.100/release.yaml");
+        block("http://100.127.255.255/release.yaml");
+    }
+
+    #[test]
+    fn unspecified_multicast_and_broadcast_are_blocked() {
+        block("http://0.0.0.0/release.yaml");
+        block("http://255.255.255.255/release.yaml");
+        block("http://239.1.2.3/release.yaml");
+        block("https://[::]/release.yaml");
+        assert!(
+            validate_outbound_url_with_policy("http://0.0.0.0/release.yaml", true).is_err(),
+            "unspecified address must stay blocked even when private sources are allowed"
+        );
+    }
+
+    #[test]
+    fn userinfo_cannot_disguise_an_internal_host() {
+        block("https://github.com@127.0.0.1/release.yaml");
+        block("https://github.com:token@10.0.0.5/release.yaml");
+    }
+
+    #[test]
+    fn non_http_schemes_and_garbage_are_blocked() {
+        block("ftp://8.8.8.8/release.yaml");
+        block("file:///etc/passwd");
+        block("gopher://8.8.8.8:70/x");
+        block("8.8.8.8/release.yaml");
+        block("");
+        block("https://");
+    }
+
+    #[test]
+    fn escape_hatch_allows_private_mirrors_only() {
+        assert!(
+            validate_outbound_url_with_policy("http://10.0.0.5:8080/release.yaml", true).is_ok(),
+            "private mirror should be reachable with the escape hatch"
+        );
+        assert!(
+            validate_outbound_url_with_policy("http://127.0.0.1:9000/release.yaml", true).is_ok(),
+            "loopback mirror should be reachable with the escape hatch"
+        );
+        assert!(
+            validate_outbound_url_with_policy("https://[fd00::1]/release.yaml", true).is_ok(),
+            "ipv6 unique local mirror should be reachable with the escape hatch"
+        );
+        // 逃生阀不改变公网地址的判定。
+        assert!(validate_outbound_url_with_policy("https://8.8.8.8/x", true).is_ok());
+    }
+
+    #[test]
+    fn default_ports_follow_the_scheme() {
+        let http = parse_outbound_url("http://8.8.8.8/release.yaml").expect("parse http url");
+        assert_eq!(http.port, 80);
+        assert_eq!(http.path, "/release.yaml");
+        let https = parse_outbound_url("https://8.8.8.8?a=1").expect("parse https url");
+        assert_eq!(https.port, 443);
+        assert_eq!(https.path, "/");
+        let explicit = parse_outbound_url("https://8.8.8.8:8443/a/b").expect("parse explicit port");
+        assert_eq!(explicit.port, 8443);
+        let bracketed =
+            parse_outbound_url("https://[2606:4700::1111]:8443/a").expect("parse ipv6 port");
+        assert_eq!(bracketed.port, 8443);
+        assert_eq!(bracketed.host, "2606:4700::1111");
+    }
+
+    #[test]
+    fn redirect_targets_are_resolved_against_the_base() {
+        assert_eq!(
+            resolve_outbound_redirect("https://example.com/a/b", "/c/d").expect("absolute path"),
+            "https://example.com/c/d"
+        );
+        assert_eq!(
+            resolve_outbound_redirect("https://example.com/a/b?x=1", "c").expect("relative path"),
+            "https://example.com/a/c"
+        );
+        assert_eq!(
+            resolve_outbound_redirect("https://example.com/a", "//cdn.example.net/z")
+                .expect("protocol relative"),
+            "https://cdn.example.net/z"
+        );
+        assert_eq!(
+            resolve_outbound_redirect("https://example.com:8443/a/b", "/c").expect("keeps port"),
+            "https://example.com:8443/c"
+        );
+        assert_eq!(
+            resolve_outbound_redirect("https://user:pass@example.com/a", "/c")
+                .expect("drops userinfo"),
+            "https://example.com/c"
+        );
+        // 绝对 URL 原样返回；是否放行由调用方再跑一次 validate_outbound_url 决定。
+        let hostile = resolve_outbound_redirect("https://example.com/a", "http://127.0.0.1/x")
+            .expect("absolute redirect");
+        assert_eq!(hostile, "http://127.0.0.1/x");
+        assert!(validate_outbound_url_with_policy(&hostile, false).is_err());
+        assert!(resolve_outbound_redirect("https://example.com/a", "").is_err());
+    }
 }

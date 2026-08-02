@@ -30,16 +30,25 @@ forms:
   release.install:
     fields:
       - { name: service_id, type: service_id, required: true }
+      - { name: version, type: string }
+      - { name: source_url, type: string }
+      - { name: release_url, type: string }
+      - { name: release_checksum, type: string }
       - { name: host_ip, type: string }
       - { name: endpoint, type: endpoint }
       - { name: migration_dry_run, type: boolean }
       - { name: allow_destructive_migrations, type: boolean }
       - { name: execute_service_driver, type: boolean }
+      - { name: external_service_running, type: boolean }
+      - { name: gateway_node_id, type: string }
       - { name: confirm, type: boolean, required: true }
   release.rollback:
     fields:
       - { name: service_id, type: service_id, required: true }
-      - { name: version, type: string, required: true }
+      - { name: version, type: string }
+      - { name: target_operation_id, type: string }
+      - { name: execute_service_driver, type: boolean }
+      - { name: gateway_node_id, type: string }
       - { name: confirm, type: boolean, required: true }
 
   host.create:
@@ -62,6 +71,18 @@ forms:
   host.health.check:
     fields:
       - { name: host_ip, type: string, required: true }
+  host.start:
+    fields:
+      - { name: host_ip, type: string, required: true }
+      - { name: execute_service_driver, type: boolean }
+      - { name: gateway_node_id, type: string }
+      - { name: confirm, type: boolean }
+  host.stop:
+    fields:
+      - { name: host_ip, type: string, required: true }
+      - { name: execute_service_driver, type: boolean }
+      - { name: gateway_node_id, type: string }
+      - { name: confirm, type: boolean, required: true }
 
   service.create:
     fields:
@@ -84,20 +105,34 @@ forms:
     fields:
       - { name: service_id, type: service_id, required: true }
       - { name: host_ip, type: string }
+      - { name: execute_service_driver, type: boolean }
+      - { name: gateway_node_id, type: string }
       - { name: confirm, type: boolean, required: true }
   service.start:
     fields:
       - { name: service_id, type: service_id, required: true }
       - { name: host_ip, type: string }
+      - { name: endpoint, type: endpoint }
+      - { name: version, type: string }
+      - { name: execute_service_driver, type: boolean }
+      - { name: gateway_node_id, type: string }
   service.stop:
     fields:
       - { name: service_id, type: service_id, required: true }
       - { name: host_ip, type: string }
+      - { name: endpoint, type: endpoint }
+      - { name: version, type: string }
+      - { name: execute_service_driver, type: boolean }
+      - { name: gateway_node_id, type: string }
       - { name: confirm, type: boolean, required: true }
   service.restart:
     fields:
       - { name: service_id, type: service_id, required: true }
       - { name: host_ip, type: string }
+      - { name: endpoint, type: endpoint }
+      - { name: version, type: string }
+      - { name: execute_service_driver, type: boolean }
+      - { name: gateway_node_id, type: string }
       - { name: confirm, type: boolean, required: true }
   service.enable:
     fields:
@@ -156,6 +191,7 @@ forms:
       - { name: config_ref, type: string }
       - { name: secret_ref, type: secret_ref }
       - { name: policy, type: json }
+      - { name: enabled, type: boolean }
   link.list:
     fields:
       - { name: endpoint, type: endpoint }
@@ -174,7 +210,18 @@ forms:
       - { name: config_ref, type: string }
       - { name: secret_ref, type: secret_ref }
       - { name: policy, type: json }
+      - { name: enabled, type: boolean }
   link.delete:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+      - { name: confirm, type: boolean, required: true }
+  link.enable:
+    fields:
+      - { name: source_endpoint, type: endpoint, required: true }
+      - { name: target_endpoint, type: endpoint, required: true }
+      - { name: confirm, type: boolean, required: true }
+  link.disable:
     fields:
       - { name: source_endpoint, type: endpoint, required: true }
       - { name: target_endpoint, type: endpoint, required: true }
@@ -465,6 +512,8 @@ forms:
   operation.rollback:
     fields:
       - { name: operation_id, type: string, required: true }
+      - { name: execute_service_driver, type: boolean }
+      - { name: gateway_node_id, type: string }
       - { name: confirm, type: boolean, required: true }
 
   log.create:

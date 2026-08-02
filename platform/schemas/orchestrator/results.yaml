@@ -2,17 +2,36 @@ schema_version: 1
 product: OJOS Orchestrator
 result:
   required_fields:
-    - operation_id
+    - action_id
     - status
-    - started_at
-    - finished_at
+    - message
+    - operation_id
+    - result
+    - error
+    - warnings
     - changed_objects
-    - topology_snapshot_id
+    - capability_status
+    - logs
   changed_object_types:
     - Service
+    - ServiceRelease
     - Endpoint
     - Link
     - Operation
     - Topology
     - LogView
     - DiagnosticReport
+    - Host
+    - HostService
+    - ServiceApiSurface
+    - DeployedServiceApi
+    - Route
+    - Permission
+    - Frontend
+    - MigrationRecord
+    - RedisResource
+    - StorageResource
+    - RenderedConfig
+    - ReleaseRegistry
+    - Node
+    - API

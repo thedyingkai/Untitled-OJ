@@ -126,6 +126,7 @@ fn topology_contract_uses_endpoint_and_link_identity() {
         protocol: "http".to_string(),
         auth_mode: "internal".to_string(),
         scope: "root-managed".to_string(),
+        enabled: true,
         health: "ok".to_string(),
         latency_ms: Some(1),
         config_ref: String::new(),
@@ -152,5 +153,5 @@ fn topology_contract_uses_endpoint_and_link_identity() {
         topology.links[0].target_endpoint,
         "127.0.0.1:8081:problem-service"
     );
-    assert_eq!(topology.authority.exposure_policy, "root-host-gui-tui-only");
+    assert_eq!(topology.authority.exposure_policy, "root-host-web-tui-only");
 }

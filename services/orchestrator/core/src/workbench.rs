@@ -10,7 +10,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationWorkbenchContext {
@@ -492,6 +492,8 @@ pub fn new_operation_workbench_session(workbench: OperationWorkbench) -> Operati
     }
 }
 
+// This public helper keeps the workbench's independent registry inputs explicit.
+#[allow(clippy::too_many_arguments)]
 pub fn update_operation_workbench_field(
     session: &OperationWorkbenchSession,
     field: &str,
@@ -515,6 +517,8 @@ pub fn update_operation_workbench_field(
     )
 }
 
+// This public helper keeps the workbench's independent registry inputs explicit.
+#[allow(clippy::too_many_arguments)]
 pub fn update_operation_workbench_field_with_releases(
     session: &OperationWorkbenchSession,
     field: &str,
@@ -816,6 +820,7 @@ fn link_models(sets: &[DeploymentTemplate]) -> Vec<crate::Link> {
                 protocol: empty_to_default(&link.protocol, "http").to_string(),
                 auth_mode: empty_to_default(&link.auth_mode, "internal").to_string(),
                 scope: link.scope.clone(),
+                enabled: true,
                 health: "unknown".to_string(),
                 latency_ms: None,
                 config_ref: String::new(),
@@ -857,7 +862,7 @@ fn topology_model(
     )
 }
 
-fn slash_path(path: &PathBuf) -> Result<String> {
+fn slash_path(path: &Path) -> Result<String> {
     Ok(path
         .to_str()
         .ok_or_else(|| OrchestratorError::UnsafePath("workbench path must be UTF-8".to_string()))?

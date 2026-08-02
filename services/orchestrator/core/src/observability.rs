@@ -109,10 +109,13 @@ pub fn build_diagnostic_report<S: OrchestratorStore>(
         })
         .map(|endpoint| endpoint.endpoint.clone())
         .collect::<Vec<_>>();
+    // 与 model::diagnostic_report_json 保持一致：disabled Link 不计入 unhealthy。
     let unhealthy_links = topology
         .links
         .iter()
-        .filter(|link| matches!(link.health.as_str(), "degraded" | "blocked" | "unreachable"))
+        .filter(|link| {
+            link.enabled && matches!(link.health.as_str(), "degraded" | "blocked" | "unreachable")
+        })
         .map(|link| format!("{} -> {}", link.source_endpoint, link.target_endpoint))
         .collect::<Vec<_>>();
     let service_endpoint_groups = service_endpoint_groups(&topology.endpoints);

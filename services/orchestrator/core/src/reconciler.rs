@@ -73,6 +73,14 @@ where
     }
 
     for link in store.list_links()? {
+        // disabled Link 直接跳过健康探测：
+        // 1) 禁用是运维显式动作，不应该继续对目标 Endpoint 发起探测流量；
+        // 2) 这里刻意不把 health 改写成 "disabled"，保留最后一次已知健康值，
+        //    重新启用后可以立刻看到停用前的状态，也避免 "disabled" 混进 health 枚举。
+        //    诊断侧已按 enabled 过滤，不会因为保留旧值而误报 unhealthy。
+        if !link.enabled {
+            continue;
+        }
         let Some(target_health) = endpoint_results.get(&link.target_endpoint) else {
             continue;
         };

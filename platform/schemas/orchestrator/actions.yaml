@@ -15,6 +15,8 @@ actions:
   - host.update
   - host.delete
   - host.health.check
+  - host.start
+  - host.stop
   - service.create
   - service.list
   - service.get
@@ -37,6 +39,8 @@ actions:
   - link.get
   - link.update
   - link.delete
+  - link.enable
+  - link.disable
   - link.health.check
   - route.create
   - route.list
