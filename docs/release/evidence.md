@@ -62,14 +62,32 @@ platform/schemas/orchestrator/
 ```powershell
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+
+Push-Location services/judge-worker
+cargo test --all-targets
+cargo audit
+Pop-Location
 
 Get-ChildItem -Recurse -Filter go.mod services,platform |
-  ForEach-Object { Push-Location $_.DirectoryName; go test ./... -count=1; go vet ./...; Pop-Location }
+  ForEach-Object {
+    Push-Location $_.DirectoryName
+    go test ./... -count=1
+    go vet ./...
+    govulncheck ./...
+    Pop-Location
+  }
 
 Push-Location manager/web
 npm ci
 npm audit
 npm run typecheck
+npm run build
+Pop-Location
+
+Push-Location services/gateway/frontend
+npm ci
+npm audit --audit-level=high
 npm run build
 Pop-Location
 

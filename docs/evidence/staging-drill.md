@@ -30,7 +30,8 @@
 - commit：`875586ff92324d8d936d71f35c24cb0f1ad494f5`
 - 时间：2026-08-01 20:33 UTC
 
-这条记录只证明上述 `main` 提交。当前 Web、生命周期和鉴权重构必须在推送后重新运行，不能沿用这条成功记录。
+这条记录只证明上述历史提交。本轮代码基线 `2a0d647ad47ccbd1b1834de95b38e55b2ef98229` 尚未重跑
+Staging Drill，不能沿用这条成功记录。
 
 脚本以 0 退出时，manifest 会记录 `staging drill = real restore verified`。发布判断还应同时核对对应 run 的
 artifact 与 commit，不能只看文档中的状态文字。

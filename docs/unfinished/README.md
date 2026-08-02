@@ -36,11 +36,18 @@
 
 ## 当前远端门禁
 
-- Staging Drill 已在 `main@875586f` 成功：[30717233049](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30717233049)。
-- Ops Drills Nightly 仍失败：[30718434686](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30718434686) 的 service 凭据和 Redis 恢复通过，告警触发失败，Manager 冒烟被跳过。
-- Orchestrator Docker E2E 仍失败：[30715126809](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30715126809) 停在 Gateway 前端依赖审计，后续镜像、trace 和 load/soak 没有执行。
+- [Orchestrator CI 30746067945](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067945) 已在
+  `2a0d647` 上成功。Rust、PostgreSQL live integration、judge-worker/nsjail、Go 漏洞扫描、两个 Web
+  前端和生产策略检查均通过。
+- [Orchestrator Docker E2E 30746067935](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067935)
+  已在同一 SHA 上成功。它由 push 触发，因此镜像构建、trace 和 load/soak 按 workflow 条件跳过。
+- Staging Drill 最近一次成功仍是历史基线 `875586f`：
+  [30717233049](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30717233049)。
+- Ops Drills Nightly 最近一次已核对的运行仍是失败的
+  [30718434686](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30718434686)：service 凭据与 Redis
+  恢复通过，告警触发失败，Manager 冒烟被跳过。
 
-这些 run 只覆盖 `main@875586f`，不能证明当前重构分支。修完后需要在同一候选 commit 上重新取得 artifact。
+当前还缺 `2a0d647` 的 Staging、Ops Drills，以及启用镜像、trace、load/soak 的全量 Docker E2E artifact。
 
 ## 历史边界
 

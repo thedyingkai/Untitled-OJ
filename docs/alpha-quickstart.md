@@ -1,7 +1,7 @@
 # v0.1.0 Alpha 快速上手
 
 这份说明只对应 2026-07-03 发布的 `v0.1.0-alpha`。该版本提供 daemon、TUI 和原生 GUI；当前源码已经删除
-原生 GUI，改用 daemon 托管的 Web UI。不要用本文判断当前分支的入口或功能。
+原生 GUI，改用 daemon 托管的 Web UI。不要用本文判断当前代码的入口或功能。
 
 该版本可以从 URL 下载服务发布包，校验 SHA-256，并注册 Service、Endpoint、Route 和 Permission。发布包只含
 服务契约，不含服务二进制或镜像。
@@ -86,5 +86,5 @@ curl -X POST http://127.0.0.1:8090/releases/gateway/install \
 - 拉取注册的是服务契约（`release.yaml`），不会下载或运行服务二进制、镜像。
 - 判题（judge-worker）需要 **Linux + nsjail + cgroup v2 + 特权容器**，Windows 桌面上多半跑不起来；作为
   Linux Docker 镜像使用（`services/judge-worker/Dockerfile`）。
-- 当前分支的 Web UI、商店和生命周期说明见 [Web UI 与插件商店](orchestrator/web-ui.md)。完整平台部署见
+- 当前代码的 Web UI、商店和生命周期说明见 [Web UI 与插件商店](orchestrator/web-ui.md)。完整平台部署见
   [部署清单](ops/deployment-checklist.md)。

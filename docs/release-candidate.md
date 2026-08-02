@@ -2,23 +2,24 @@
 
 ## 当前结论
 
-截至 2026-08-02，本轮重构保持 `NO-GO`。包含当前改动的 commit 尚未通过全部发布门禁。
+截至 2026-08-02，本轮重构保持 `NO-GO`。代码基线
+`2a0d647ad47ccbd1b1834de95b38e55b2ef98229` 已通过常规 CI 和 push 范围的 Docker E2E，但还没有
+同一 SHA 的 Staging、Ops Drills 和全量容器演练证据。
 
-`main` 当前基线是 `875586ff92324d8d936d71f35c24cb0f1ad494f5`。它不包含待审查的 Web 控制面、商店、Link 启停、生命周期回滚和权限链修复，因此不能作为本轮候选 SHA。旧文档记录的 `853423a80d2ba20840867b4420a4f70da57b34af` 也只保留历史意义。
+`v0.1.0-alpha` 所在的 `875586ff92324d8d936d71f35c24cb0f1ad494f5` 只保留为历史发布基线，不能替代本轮证据。
 
 ## 判定依据
 
 | 项目 | 当前证据 | 判定 |
 | --- | --- | --- |
-| Rust workspace | 审查期间本地 `cargo fmt` 与 `cargo test --workspace --all-targets` 通过 | 可进入 CI，不能替代候选 commit 的远端结果 |
-| judge-worker | 独立 crate 的 25 个测试与依赖审计通过；严格 Clippy 仍有 18 个既有样式告警 | 现有 CI 门禁可执行，代码质量债务仍需单独处理 |
-| Go services | 七个 module 的 `go test ./... -count=1` 与 `go vet ./...` 本地通过 | 可进入 CI |
-| Orchestrator Web UI | typecheck、build 和当前 lockfile 的 `npm audit` 本地通过 | 需要候选 commit 的 CI 复验 |
-| Gateway frontend | Node 24 下 typecheck、build 和 `npm audit` 本地通过，0 个已知漏洞 | 基线失败原因已在本地消除，仍要由候选 commit 的 CI 证明 |
-| 生产策略与 Manager 冒烟 | `ci-policy.sh`、全部 shell 语法和 Manager Web/TUI 冒烟本地通过 | 容器级路径仍需远端 Docker E2E |
-| Staging Drill | [30717233049](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30717233049) 在基线 commit 上通过 | 只证明基线 |
-| Ops Drills Nightly | [30718434686](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30718434686) 失败 | 告警演练失败，Manager 冒烟未运行 |
-| Orchestrator Docker E2E | [30715126809](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30715126809) 失败 | Gateway 前端依赖审计失败，后续门禁被跳过 |
+| Rust workspace 与 judge-worker | [Orchestrator CI 30746067945](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067945) 通过 workspace、PostgreSQL live、judge-worker、依赖审计和严格 nsjail 测试 | 当前代码基线通过 |
+| Go services | 同一 run 的七个 module test 与 `govulncheck` 通过；`go vet` 已在本地通过 | 当前代码基线通过 |
+| Orchestrator Web UI | 同一 run 的 typecheck 与 build 通过；依赖审计已在本地通过 | 当前代码基线通过 |
+| Gateway frontend | 同一 run 的 typecheck、build、依赖审计和 Playwright E2E 通过，artifact 已上传 | 当前代码基线通过 |
+| 生产策略与 Manager 冒烟 | CI 生产策略 job 与 Docker E2E 的 production ops gates 通过；Manager 冒烟在本地通过 | 当前 SHA 仍缺 Ops Drills 中的远端 Manager 冒烟 |
+| Staging Drill | [30717233049](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30717233049) 在 `875586f` 上通过 | 没有本轮 SHA 的证据 |
+| Ops Drills Nightly | [30718434686](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30718434686) 在旧 SHA 上失败 | 告警演练失败，Manager 冒烟未运行；本轮未重跑 |
+| Orchestrator Docker E2E | [30746067935](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067935) 在 `2a0d647` 上成功 | push 模式跳过镜像、trace 与 load/soak，不能替代全量演练 |
 | 运行资产 | Orchestrator 镜像和 bundle 不携带完整业务服务源码、Compose 文件或业务镜像 | local-process/container 生命周期不能仅靠当前 bundle 完成 |
 | 容量与 HA | 只有短时 load/soak 冒烟；没有正式 HA/failover 证据 | 不满足稳定生产发布 |
 

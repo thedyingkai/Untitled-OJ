@@ -2,9 +2,10 @@
 
 本文按代码、测试和远端运行记录说明当前能力，不再用主观百分比代替证据。
 
-- 当前工作分支包含 Web 控制面、商店、生命周期和内部服务鉴权重构，尚未形成新 tag。
+- 本轮 Web 控制面、商店、生命周期和内部服务鉴权重构已合入 `main`，尚未形成新 tag。
 - 已发布的 `v0.1.0-alpha` 是历史版本，仍使用原生 GUI。
-- 远端 `main` 的最新可核对提交为 `875586f`。它的 staging 演练成功，但不能证明当前未合并分支已经通过。
+- 本轮已验证的代码基线为 `2a0d647ad47ccbd1b1834de95b38e55b2ef98229`；常规 CI 和 push 范围的
+  Docker E2E 已通过，Staging 与 Ops 定时演练还没有在这个 SHA 上重跑。
 - 当前定位仍是 beta / 受控生产候选，不是 HA 或容量发布。
 
 ## 1. 总体
@@ -42,7 +43,7 @@ Service / Set / Endpoint / Link / Operation / Topology / LogView / DiagnosticRep
 | problem/user/storage 服务 | 题目包、用户资料、local/MinIO 存储及内部 Gateway 客户端 | handler 与异常路径测试深度不一；对象存储 TLS 取决于部署 PKI |
 | Web UI + TUI | 拓扑、商店、Service/Operation 生命周期、Link、日志；共用 core | TUI 进程内调用，没有独立 operator 身份；Web UI 的认证粒度只有控制面共享令牌 |
 | Gateway frontend | OJ SPA、类型检查、构建和少量 Playwright E2E | E2E 数量少，管理与失败路径覆盖不足 |
-| 部署与演练 | Compose、预检、备份恢复、staging、凭据、Redis、告警、trace、load 脚本 | 单机无 HA；部分远端门禁仍需在当前分支重新跑通 |
+| 部署与演练 | Compose、预检、备份恢复、staging、凭据、Redis、告警、trace、load 脚本 | 单机无 HA；定时演练仍需在本轮代码基线上重跑 |
 
 ### 关键技术实现手段
 
@@ -128,14 +129,16 @@ deploy/ops/staging-drill.sh                                            # 备份/
 10. **Redis/MinIO 端到端 TLS 未落地**：强制策略为 opt-in；示例 Compose 仍以单机开发拓扑为主。
 11. **judge-worker 需要高权限宿主**：Compose 要求 privileged/SYS_ADMIN/cgroup host/apparmor unconfined
     （nsjail 硬需求）。
-12. **远端门禁不是全绿**：`875586f` 的 staging 已成功；同期 Ops Drills 在告警 webhook 失败，Docker E2E
-    在 Gateway 前端依赖审计失败。本分支已修正这两个原因，但要以推送后的运行结果为准。
+12. **远端门禁还没有闭环**：[Orchestrator CI 30746067945](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067945)
+    与 [Docker E2E 30746067935](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067935) 已在
+    `2a0d647` 上通过。后者由 push 触发，按设计跳过镜像构建、trace 和 load/soak；Staging 与 Ops Drills
+    也没有在这个 SHA 上重跑。
 13. **可观测性覆盖窄**：告警和 trace 演练路径有限；load/soak 是冒烟，不是容量测试。
 
 ## 5. 未完成事项
 
 详见 [未完成事项](unfinished/README.md)。摘要：完整 manager 认证模型、HA/failover 拓扑与容量 SLA、
-Redis/MinIO 端到端 TLS、远端 nightly/staging 首次成功 artifact，以及若干代码质量项。
+Redis/MinIO 端到端 TLS、本轮代码基线的 nightly/staging artifact，以及若干代码质量项。
 
 ## 6. 使用判断
 

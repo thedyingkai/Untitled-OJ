@@ -1,18 +1,24 @@
 # 生产就绪证据
 
-这是一份证据账本。只有 `headSha` 与待发布 commit 完全一致的远端运行，才能作为该版本的发布门禁。本地结果适合排错，不能替代 GitHub Actions artifact；旧 commit 的成功记录也不能证明当前改动。
+这是一份证据账本。功能门禁的 `headSha` 必须与待发布的代码基线完全一致；如果后续只改证据文档，应单独写明
+代码 SHA。任何代码、配置、lockfile、schema 或 workflow 变化都会使旧 run 失效。本地结果适合排错，不能替代
+GitHub Actions artifact。
 
 ## 远端基线
 
-截至 2026-08-02，`main` 的基线 commit 仍是 `875586ff92324d8d936d71f35c24cb0f1ad494f5`。下面列的是 8 月 1 日最新一轮定时运行，只覆盖这个基线，不包含当前 Web 控制面和生命周期修复分支。
+截至 2026-08-02，本轮已验证的代码基线是
+`2a0d647ad47ccbd1b1834de95b38e55b2ef98229`，已直接推送到 `main`。
 
 | Workflow | 结果 | 已证明的部分 | 未通过或未执行的部分 |
 | --- | --- | --- | --- |
-| [Staging Drill 30717233049](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30717233049) | 通过 | 备份、恢复和回滚演练完成，artifact 已上传 | 不能外推到当前分支 |
-| [Ops Drills Nightly 30718434686](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30718434686) | 失败 | service 凭据生命周期、Redis 恢复通过 | 告警触发失败；Manager 冒烟被跳过 |
-| [Orchestrator Docker E2E 30715126809](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30715126809) | 失败 | Rust、PostgreSQL、nsjail、Go 检查通过 | Gateway 前端的 `npm audit --audit-level=high` 仍报告 `axios` 与 `postcss` 高危问题；后续编排器模型、Compose、生产门禁、镜像、trace 和 load/soak 步骤被跳过 |
+| [Orchestrator CI 30746067945](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067945) | 通过 | Rust workspace、PostgreSQL live、judge-worker、Rust 审计、严格 nsjail、Go test/漏洞扫描、两个 Web 前端、浏览器 E2E、模型和生产策略 | 该 workflow 范围内无失败项 |
+| [Orchestrator Docker E2E 30746067935](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067935) | 通过 | Rust、PostgreSQL live、严格 nsjail、Go、Gateway 前端、模型、Compose 与生产策略 | push 模式按条件跳过镜像构建、trace 和 load/soak |
+| [Staging Drill 30717233049](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30717233049) | 通过 | `875586f` 的备份、恢复和回滚演练完成，artifact 已上传 | 不是本轮代码 SHA |
+| [Ops Drills Nightly 30718434686](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30718434686) | 失败 | 旧 SHA 的 service 凭据生命周期与 Redis 恢复通过 | 告警触发失败，Manager 冒烟被跳过；本轮未重跑 |
 
-因此，当前没有可用于发布本轮重构的完整远端绿灯。
+常规 CI 与 push 范围的 Docker E2E 已经闭环，但发布证据仍不完整。live PostgreSQL 首轮失败来自过期测试夹具：
+它把迁移验证误标成外部运行时接管，并在破坏性迁移失败后跳过 rollback 直接重试。最终测试改为 runtime-deferred，
+并按“失败 → 回滚 → 授权重试”的真实顺序执行；生产状态机的健康和所有权保护没有放宽。
 
 ## 本地审查记录
 
@@ -23,16 +29,15 @@
 | `cargo fmt --all -- --check` | 通过 | 最终提交前工作树结果 |
 | `cargo test --workspace --all-targets` | 通过 | 覆盖 Rust workspace；PostgreSQL live 测试仍依赖外部数据库 |
 | `services/judge-worker` 的 `cargo test --all-targets` 与 `cargo audit` | 通过 | 25 个测试通过，独立锁文件未命中已知漏洞 |
-| 七个 Go module 的 `go test ./... -count=1` | 通过 | 本地工具链结果 |
-| 七个 Go module 的 `go vet ./...` | 通过 | 本地工具链结果 |
-| `manager/web` 的 typecheck、build 与 `npm audit` | 通过 | Node 24.14，使用当前 `package-lock.json`；最终 commit 仍需 CI 复验 |
-| Gateway frontend 的 typecheck、build 与 `npm audit` | 通过 | Node 24.14；本地已不再报告基线 run 中的 `axios`、`postcss` 高危问题 |
+| 七个 Go module 的 test、vet 与 `govulncheck` | 通过 | Go 1.26.5；gRPC 1.82.1、`x/text` 0.39.0；远端同 SHA 复验 test 与漏洞扫描 |
+| `manager/web` 的 typecheck、build 与 `npm audit` | 通过 | Node 24.14，使用当前 `package-lock.json`；远端同 SHA 复验 typecheck 与 build |
+| Gateway frontend 的 typecheck、build、`npm audit` 与浏览器 E2E | 通过 | Node 24.14；远端 artifact 已上传 |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 通过 | 本地为 0 告警；现有 CI 还没有把 clippy 设为门禁 |
 | `services/judge-worker` 的严格 Clippy | 未通过 | Rust 1.92 报告 18 个既有样式告警；当前 CI 只运行 fmt、check、test，不把它设为门禁 |
 | Shell 语法与生产策略 | 通过 | 全部 `.sh` 通过 `bash -n`，`deploy/ops/ci-policy.sh` 与 Manager Web/TUI 冒烟通过；审查环境没有 `shellcheck` |
-| 容器级 E2E | 未执行 | 本机 Docker daemon 不可用；Compose 渲染已由生产策略脚本检查 |
+| 容器级 E2E | 本地未执行，远端 push 范围通过 | 本机 Docker daemon 不可用；远端 run 未包含 schedule-only 的镜像、trace 和 load/soak |
 
-这些结果说明改动可以继续进入分支验证，不等于生产放行。
+这些结果证明代码基线可以继续做发布演练，不等于生产放行。
 
 ## 生产密钥策略
 
@@ -65,10 +70,9 @@
 
 ## 放行前仍缺什么
 
-- 在待发布 commit 上跑通 Rust、Go、Web、Gateway 浏览器 E2E、Compose 配置和生产策略检查。
-- 跑通同一 commit 的 Staging Drill、Ops Drills Nightly 与 Orchestrator Docker E2E，并保留 artifact。
-- 修复告警触发演练；当前最新 Ops run 因此失败。
-- 复验 Gateway 前端依赖审计；基线远端 run 仍停在两个高危依赖。
+- 在 `2a0d647` 上重跑 Staging Drill 与 Ops Drills Nightly，并保留 artifact；Ops 必须实际跑过告警触发和
+  Manager Web/TUI 冒烟。
+- 运行全量 Orchestrator Docker E2E，启用镜像构建、trace 和 basic load/soak，并保存运行证据。
 - 明确运行资产交付方式。当前 Orchestrator 镜像和 alpha bundle 包含 Web 产物、schema、Service/Release manifest、模板与商店索引，不包含完整业务服务源码、Compose 文件或业务镜像。内置条目默认只能用于目录、计划和元数据注册；真正执行 local-process/container driver 需要源码 checkout，或另行提供可运行的 binary/image 和目标端运行资产。
 - 完成容量、HA/failover 与端到端 TLS 决策。`basic-load-soak.sh` 是冒烟检查，不是容量证明。
 

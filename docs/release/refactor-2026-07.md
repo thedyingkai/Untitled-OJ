@@ -96,11 +96,12 @@ Orchestrator Dockerfile 使用三阶段构建：
 
 ## 验证记录
 
-最终提交前工作树已通过 `cargo fmt --all -- --check`、`cargo test --workspace --all-targets`、严格
-`cargo clippy --workspace --all-targets -- -D warnings`、七个 Go module 的 test/vet、两个 Web 前端在 Node 24
-下的 typecheck/build/`npm audit`、全部 shell 语法、生产策略和 Manager 冒烟。独立 judge-worker 的 25 个测试
-与依赖审计通过；它的严格 Clippy 在 Rust 1.92 下仍有 18 个既有样式告警。审查环境没有 `shellcheck`，Docker
-daemon 也不可用，因此没有在本机运行容器级 E2E。
+代码基线 `2a0d647ad47ccbd1b1834de95b38e55b2ef98229` 在本地通过 `cargo fmt`、Rust workspace 测试、严格
+Clippy、七个 Go module 的 test/vet/`govulncheck`、两个 Web 前端的 typecheck/build/依赖审计、全部 shell
+语法、生产策略和 Manager 冒烟。独立 judge-worker 的 25 个测试与依赖审计通过；它的严格 Clippy 在 Rust
+1.92 下仍有 18 个既有样式告警。本机没有 Docker daemon，也没有 `shellcheck`。
 
-这些仍只是本地结果，应以最终 commit 的 GitHub Actions 为准。当前远端基线还有 Ops Drills 和 Docker E2E
-失败，详见 [生产就绪证据](../production-readiness.md)。
+[Orchestrator CI 30746067945](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067945) 与
+[Docker E2E 30746067935](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067935) 已在同一 SHA
+通过。push 触发的 Docker E2E 不运行镜像构建、trace 和 load/soak；Staging 与 Ops Drills 也还没有在该 SHA
+上重跑，发布结论继续保持 `NO-GO`。详见 [生产就绪证据](../production-readiness.md)。
