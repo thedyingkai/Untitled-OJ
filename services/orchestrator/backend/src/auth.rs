@@ -2,8 +2,155 @@
 
 use crate::http::{ApiRequest, StatusError};
 use anyhow::Result;
+use orchestrator_legacy::V1Role;
+use std::fmt;
 
 pub(crate) const ORCHESTRATOR_INTERNAL_TOKEN_HEADER: &str = "x-ojos-orchestrator-token";
+
+/// Authenticated identity passed to v1 handlers. A `Principal` is constructed
+/// only by a server-side verifier; request identity and role headers are never
+/// considered identity evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Principal {
+    id: String,
+    role: V1Role,
+    source: PrincipalSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrincipalSource {
+    DesktopSession,
+    InternalToken,
+    Oidc,
+    EphemeralDev,
+}
+
+impl Principal {
+    pub fn verified(id: impl Into<String>, role: V1Role, source: PrincipalSource) -> Self {
+        Self {
+            id: id.into(),
+            role,
+            source,
+        }
+    }
+
+    pub fn desktop_admin() -> Self {
+        Self::verified(
+            "local-admin",
+            V1Role::Admin,
+            PrincipalSource::DesktopSession,
+        )
+    }
+
+    pub fn internal_admin() -> Self {
+        Self::verified(
+            "internal-admin",
+            V1Role::Admin,
+            PrincipalSource::InternalToken,
+        )
+    }
+
+    pub fn ephemeral_dev() -> Self {
+        Self::verified(
+            "ephemeral-dev",
+            V1Role::Admin,
+            PrincipalSource::EphemeralDev,
+        )
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn role(&self) -> V1Role {
+        self.role
+    }
+
+    pub fn source(&self) -> PrincipalSource {
+        self.source
+    }
+
+    pub fn allows(&self, required: V1Role) -> bool {
+        self.role >= required
+    }
+}
+
+/// Boundary for the remote OIDC browser and TUI flow verifier.
+/// Implementations must validate signature, issuer, audience, expiry and the
+/// flow-specific state/nonce before returning a principal. The v1 server does
+/// not parse claims or accept role headers itself.
+pub trait OidcPrincipalVerifier: Send + Sync {
+    fn verify_bearer(
+        &self,
+        authorization_header: Option<&str>,
+    ) -> std::result::Result<Option<Principal>, PrincipalVerificationError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrincipalVerificationError {
+    detail: String,
+}
+
+impl PrincipalVerificationError {
+    pub fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for PrincipalVerificationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for PrincipalVerificationError {}
+
+/// Resolves identity from authenticated server context. `desktop_principal`
+/// is supplied only after the HttpOnly session and CSRF checks succeed.
+pub(crate) fn resolve_principal(
+    request: &ApiRequest,
+    desktop_principal: Option<&Principal>,
+    expected_internal_token: Option<&str>,
+    ephemeral_dev: bool,
+    oidc_verifier: Option<&dyn OidcPrincipalVerifier>,
+) -> std::result::Result<Option<Principal>, PrincipalVerificationError> {
+    if let Some(principal) = desktop_principal {
+        return Ok(Some(principal.clone()));
+    }
+
+    if let Some(expected) = expected_internal_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        && request
+            .headers
+            .get(ORCHESTRATOR_INTERNAL_TOKEN_HEADER)
+            .map(String::as_str)
+            .map(str::trim)
+            == Some(expected)
+    {
+        return Ok(Some(Principal::internal_admin()));
+    }
+
+    if let Some(verifier) = oidc_verifier
+        && let Some(principal) =
+            verifier.verify_bearer(request.headers.get("authorization").map(String::as_str))?
+    {
+        if principal.source() != PrincipalSource::Oidc {
+            return Err(PrincipalVerificationError::new(
+                "OIDC verifier returned a principal with an invalid source",
+            ));
+        }
+        return Ok(Some(principal));
+    }
+
+    if ephemeral_dev {
+        return Ok(Some(Principal::ephemeral_dev()));
+    }
+
+    Ok(None)
+}
 
 /// 配置了内部令牌后，除 `GET /health` 以外的所有 API 请求都必须携带令牌：只读 GET
 /// 同样会泄露拓扑、端点与节点清单，因此不再豁免。静态资源与 SPA 入口不经过这里
@@ -36,13 +183,14 @@ pub(crate) fn internal_token_check(
     }
 }
 
-pub(crate) fn configured_internal_token() -> Option<String> {
+pub fn configured_internal_token() -> Option<String> {
     std::env::var("ORCHESTRATOR_INTERNAL_TOKEN")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(any(feature = "legacy-0_2", test))]
 pub(crate) fn require_node_token(request: &ApiRequest) -> Result<()> {
     let token = std::env::var("ORCHESTRATOR_NODE_TOKEN")
         .ok()
@@ -67,6 +215,7 @@ pub(crate) fn require_node_token(request: &ApiRequest) -> Result<()> {
 /// 节点一旦允许真实运行驱动，安装入口就不能继续沿用开发环境的 fail-open 规则。
 /// 此时节点令牌和控制面令牌必须同时配置，并且请求必须同时匹配两者。驱动总开关
 /// 关闭时仍保留原来的 metadata-only 兼容行为。
+#[cfg(any(feature = "legacy-0_2", test))]
 pub(crate) fn require_node_install_credentials(
     request: &ApiRequest,
     expected_internal_token: Option<&str>,
@@ -123,6 +272,7 @@ pub(crate) fn require_node_install_credentials(
     Ok(())
 }
 
+#[cfg(any(feature = "legacy-0_2", test))]
 fn node_driver_execution_enabled() -> bool {
     std::env::var("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER")
         .ok()
@@ -143,6 +293,77 @@ pub(crate) fn smoke_mode_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    fn request(headers: impl IntoIterator<Item = (&'static str, &'static str)>) -> ApiRequest {
+        ApiRequest {
+            method: "GET".to_string(),
+            path: "/api/v1/capabilities".to_string(),
+            headers: headers
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect::<BTreeMap<_, _>>(),
+            body: String::new(),
+        }
+    }
+
+    struct TestOidcVerifier;
+
+    impl OidcPrincipalVerifier for TestOidcVerifier {
+        fn verify_bearer(
+            &self,
+            authorization_header: Option<&str>,
+        ) -> std::result::Result<Option<Principal>, PrincipalVerificationError> {
+            Ok((authorization_header == Some("Bearer verified-oidc"))
+                .then(|| Principal::verified("oidc-viewer", V1Role::Viewer, PrincipalSource::Oidc)))
+        }
+    }
+
+    #[test]
+    fn principal_resolution_ignores_all_caller_identity_and_role_headers() {
+        let spoofed = request([
+            ("x-actor-id", "forged-admin"),
+            ("x-user-id", "forged-user"),
+            ("x-role", "admin"),
+            ("x-user-role", "admin"),
+        ]);
+        assert_eq!(
+            resolve_principal(&spoofed, None, Some("expected"), false, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn principal_resolution_accepts_only_verified_server_contexts() {
+        let internal = request([(ORCHESTRATOR_INTERNAL_TOKEN_HEADER, "expected")]);
+        assert_eq!(
+            resolve_principal(&internal, None, Some("expected"), false, None)
+                .unwrap()
+                .unwrap(),
+            Principal::internal_admin()
+        );
+
+        let oidc = request([("authorization", "Bearer verified-oidc")]);
+        let oidc_principal = resolve_principal(&oidc, None, None, false, Some(&TestOidcVerifier))
+            .unwrap()
+            .unwrap();
+        assert_eq!(oidc_principal.id(), "oidc-viewer");
+        assert_eq!(oidc_principal.role(), V1Role::Viewer);
+
+        let desktop = Principal::desktop_admin();
+        assert_eq!(
+            resolve_principal(&request([]), Some(&desktop), None, false, None)
+                .unwrap()
+                .unwrap(),
+            desktop
+        );
+        assert_eq!(
+            resolve_principal(&request([]), None, None, true, None)
+                .unwrap()
+                .unwrap(),
+            Principal::ephemeral_dev()
+        );
+    }
 
     #[test]
     fn internal_token_check_is_fail_open_when_unconfigured() {

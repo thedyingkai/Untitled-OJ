@@ -12,6 +12,7 @@ import {
   ref,
   watch,
 } from "vue";
+import type { Directive } from "vue";
 import type { FlowEdge, FlowNode } from "../flow-types";
 
 const props = defineProps<{
@@ -38,20 +39,75 @@ const MAX_SCALE = 1.9;
 const NODE_WIDTH = 176;
 const NODE_HEIGHT = 78;
 
-/* 节点实际尺寸测量（用于边的锚点） */
-const sizes = reactive(new Map<string, { width: number; height: number }>());
-
-function measureNode(id: string, el: unknown) {
-  const element = el as HTMLElement | null;
-  if (element) {
-    sizes.set(id, {
-      width: element.offsetWidth || NODE_WIDTH,
-      height: element.offsetHeight || NODE_HEIGHT,
-    });
-  }
+/*
+ * 节点实际尺寸测量（用于边的锚点）。
+ *
+ * 这里刻意不使用 reactive(Map)：函数 ref 会在每次渲染后执行，若无条件写入
+ * 一个新的尺寸对象，边路径在渲染时又读取这个 Map，就会形成无限更新循环。
+ * ResizeObserver 只在尺寸真实变化时提升 revision，因此一次 resize 最多触发一次
+ * 必要的路径重算。
+ */
+interface NodeSize {
+  width: number;
+  height: number;
 }
 
+const sizes = new Map<string, NodeSize>();
+const observedElements = new Map<Element, string>();
+const sizeRevision = ref(0);
+let resizeObserver: ResizeObserver | null = null;
+
+function updateNodeSize(id: string, element: HTMLElement) {
+  const next = {
+    width: element.offsetWidth || NODE_WIDTH,
+    height: element.offsetHeight || NODE_HEIGHT,
+  };
+  const previous = sizes.get(id);
+  if (previous?.width === next.width && previous.height === next.height) return;
+  sizes.set(id, next);
+  sizeRevision.value += 1;
+}
+
+function ensureResizeObserver() {
+  if (resizeObserver || typeof ResizeObserver === "undefined") return;
+  resizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const id = observedElements.get(entry.target);
+      if (id) updateNodeSize(id, entry.target as HTMLElement);
+    }
+  });
+}
+
+function observeNode(id: string, element: HTMLElement) {
+  ensureResizeObserver();
+  observedElements.set(element, id);
+  resizeObserver?.observe(element);
+  updateNodeSize(id, element);
+}
+
+function unobserveNode(id: string, element: HTMLElement) {
+  resizeObserver?.unobserve(element);
+  observedElements.delete(element);
+  if (sizes.delete(id)) sizeRevision.value += 1;
+}
+
+const vNodeMeasure: Directive<HTMLElement, string> = {
+  mounted(element, binding) {
+    observeNode(binding.value, element);
+  },
+  updated(element, binding) {
+    if (binding.value === binding.oldValue) return;
+    if (binding.oldValue) unobserveNode(binding.oldValue, element);
+    observeNode(binding.value, element);
+  },
+  unmounted(element, binding) {
+    unobserveNode(binding.value, element);
+  },
+};
+
 function nodeSize(id: string) {
+  // 让边路径和 fitView 只依赖显式的尺寸版本，而不是 Map 写操作本身。
+  void sizeRevision.value;
   return sizes.get(id) ?? { width: NODE_WIDTH, height: NODE_HEIGHT };
 }
 
@@ -314,12 +370,22 @@ function onDrop(event: DragEvent) {
 /* ---------- 初始化 ---------- */
 
 let fitted = false;
+let fitTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleFitView() {
+  if (fitTimer) clearTimeout(fitTimer);
+  fitTimer = setTimeout(() => {
+    fitTimer = null;
+    fitView();
+  }, 50);
+}
+
 watch(
   () => props.nodes.length,
   (count) => {
     if (!fitted && count > 0) {
       fitted = true;
-      setTimeout(fitView, 50);
+      scheduleFitView();
     }
   },
 );
@@ -332,16 +398,24 @@ onMounted(() => {
   window.addEventListener("resize", onResize);
   if (props.nodes.length) {
     fitted = true;
-    setTimeout(fitView, 50);
+    scheduleFitView();
   }
 });
-onBeforeUnmount(() => window.removeEventListener("resize", onResize));
+onBeforeUnmount(() => {
+  window.removeEventListener("resize", onResize);
+  if (fitTimer) clearTimeout(fitTimer);
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  observedElements.clear();
+  sizes.clear();
+});
 </script>
 
 <template>
   <div
     ref="viewport"
     class="flow-viewport"
+    data-testid="flow-viewport"
     @pointerdown="onPanePointerDown"
     @pointermove="onPanePointerMove"
     @pointerup="onPanePointerUp"
@@ -446,12 +520,13 @@ onBeforeUnmount(() => window.removeEventListener("resize", onResize));
         v-for="node in nodes"
         :key="node.id"
         class="flow-node"
+        :data-node-id="node.id"
         :class="{
           'connect-hover': connectState.hover === node.id,
           dragging: dragState.id === node.id,
         }"
         :style="{ left: `${node.x}px`, top: `${node.y}px` }"
-        :ref="(el) => measureNode(node.id, el)"
+        v-node-measure="node.id"
         @pointerdown="onNodePointerDown($event, node)"
       >
         <slot name="node" :node="node" :selected="selectedNode === node.id" />

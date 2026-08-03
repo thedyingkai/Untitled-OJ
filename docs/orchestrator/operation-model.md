@@ -1,80 +1,78 @@
-# Operation 模型
+# Operation 与 Job 模型
 
-Operation 是一次编排动作的计划、执行和审计记录。
+Operation 是一次用户可见、可审计、可恢复的长操作聚合；Job 是 Operation 分派给指定
+Node Agent 或控制面内部执行器的持久步骤。Store、Topology、Deployment 与 Node 的异步
+mutation 都返回 `202 + operation_id`，真实完成状态只能从 Operation/Job 投影和事件确认。
 
-Operation 面向正式对象，如 service releases、services、endpoints、links、topology、log views 和
-diagnostic reports。部署模板不是 operation 目标。
-
-状态机为：
-
-```text
-PLANNED
-AWAITING_CONFIRMATION
-RUNNING
-SUCCEEDED
-FAILED
-ROLLED_BACK
-CANCELLED
-EXPIRED
-```
-
-计划阶段持久化 `operation_id`、`action`、`target_type`、`target_id`、请求、计划、回滚计划和时间戳。
-需要确认的动作由 `PLANNED` 进入 `AWAITING_CONFIRMATION`；这个名称表示已经确认、正在等待执行。应用阶段
-获取 OperationLock，进入 `RUNNING`，逐步写日志，最后落到 `SUCCEEDED` 或 `FAILED`。
-
-回滚读取原 Operation 中保存的前态，而不是机械反转当前值。Link 启停恢复原来的 `enabled`；Service 和 Host
-生命周期恢复受影响的 `HostService`、`DeployedServiceApi` 和运行状态。生命周期应用和回滚都只有在请求显式
-设置 `execute_service_driver=true` 时才会执行本地进程或 Compose 驱动。驱动或路由刷新失败时返回
-`FAILED`，不会把 Operation 标成 `ROLLED_BACK`。
-
-回滚入口还要满足两个条件：原 Operation 的状态是 `SUCCEEDED` 或 `FAILED`，并且
-`rollback_plan.steps` 非空。空计划会在加锁、写回滚日志或恢复任何 store 对象之前直接阻止。即使计划里写了步骤，
-执行器没有对应 mutation 的未知动作仍会失败；apply 也遵循同一规则，不会用伪造的 changed object 冒充成功。
-
-`service.start/stop/restart/delete`、`host.start/stop` 以及已有 `service.enable/disable` 记录的回滚，每次都要重新传
-`execute_service_driver=true`。授权检查先于 store 恢复，避免 `service.delete` 先恢复部分记录、随后才因驱动未授权
-失败。`operation.create` 目前没有独立的真实 mutation，因此能力状态是 `UNSUPPORTED`。
-
-`release.install` 可以不授权 driver，只登记或延后启动。若在 `operation.apply` 时才授予
-`execute_service_driver=true`，dispatcher 会把这次授权写回原 Operation；后续回滚据此要求新的逐次授权，
-不会把实际启动过的运行时误当成纯元数据安装。Node 端还必须打开
-`ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER`，这个环境上限不能代替请求授权。
-请求已设置 `execute_service_driver=true`、而目标 Node 没打开该上限时，安装会以 `FAILED` / `Blocked` 结束，
-不会降级成 metadata-only。只有未授权 driver 的请求可以只登记元数据。
-Node 真执行还要求专用 bearer、控制面内部 token 和 `ORCHESTRATOR_NODE_HOST_IP`；请求主机与 Endpoint host
-必须和节点身份完全一致。
-
-`external_service_running=true` 只用于登记已经由外部系统启动、且健康检查可达的 Endpoint。它与 driver 授权
-互斥，也会跳过 Node 派发。登记前执行器拒绝覆盖可能仍活动的旧运行时；登记后写入
-`runtime_owner=external`，控制面生命周期和 `service.delete` 不会接管该进程。运维人员应先在真实 owner 一侧
-停止或移除运行时。
-
-`release.rollback` 可以显式指定 `target_operation_id`。执行器会核对目标是否为同一 Service、同一指定版本且
-状态允许回滚的 `release.install`。未指定目标时，它按 `created_at`、`updated_at` 和 Operation ID 的稳定顺序，
-选择最新的成功安装，不依赖 store 的返回顺序。这个 wrapper 本身没有反向回滚计划；需要反向操作时应新建
-install 或 rollback，不能再次回滚 wrapper。
-
-`release.delete` 只删除 Release 记录。被 `HostService` 或 `DeployedServiceApi` 引用的版本会被拒绝；应先安装
-其它版本，或用 `service.delete` 卸载 Service。删除历史版本不会停止当前进程，也不会清空当前路由和资源登记。
-`service.delete` 只卸载由本控制面本地 driver 管理的部署；`runtime_owner=node` 或 `external` 时会拒绝执行。
-
-执行器只支持固定 action 和发布契约声明的运行方式。任意 shell、任意脚本路径、用户提交的命令字符串和远程
-root shell 都不在模型内。
-
-当前固定 driver 为：
+## Operation 状态
 
 ```text
-LocalProcessDriver
-DockerComposeDriver
-ExternalEndpointDriver
+PLANNED -> CONFIRMED -> ENQUEUING -> RUNNING -> SUCCEEDED
+    |          |             |          |        FAILED
+    |          |             |          |        NEEDS_ATTENTION
+    +----------+-------------+----------+------> CANCELLED
+                                           \
+                                            -> CANCELLING -> CANCELLED
+
+SUCCEEDED/FAILED -- rollback --> 新的 ROLLBACK Operation -> ROLLED_BACK 或 FAILED
+FAILED -- retry --> ENQUEUING（新 generation，仅重建可证明失败的步骤）
 ```
 
-Web UI、TUI 和 daemon 使用同一个 dispatcher 与 store-backed 状态机。
+正式状态为 `PLANNED`、`CONFIRMED`、`ENQUEUING`、`RUNNING`、`CANCELLING`、
+`SUCCEEDED`、`FAILED`、`CANCELLED`、`NEEDS_ATTENTION` 与 `ROLLED_BACK`。
 
-## 回滚边界
+- plan 持久化 action、target、规范化请求、不可变计划摘要、依赖 DAG 和补偿步骤；重放同一
+  operation/idempotency key 必须得到同一结果，变更 payload 会冲突。
+- confirm 只接受 `PLANNED`；apply 将已确认计划置为 `ENQUEUING`，幂等地物化 Job 后才进入
+  `RUNNING`。
+- cancel 在尚未 claim 时立即取消；已 lease 的 Job 进入协作式取消，Operation 为
+  `CANCELLING`，直到所有结果可证明。
+- retry 只允许 `FAILED`，使用新的 generation 重建失败步骤；`NEEDS_ATTENTION` 在人工对账前
+  禁止 retry。
+- rollback 不修改旧 Operation。它从可回滚的 `SUCCEEDED`/`FAILED` Operation 创建新的
+  rollback Operation，并保留来源 ID 和反向计划。
 
-- 数据库 schema 没有自动 down migration；需要从备份恢复。
-- `release.install` 能恢复编排器中的 Service、Release、Endpoint、Link、API surface、路由和资源登记。获得
-  驱动授权后，回滚会先停止当前固定运行时，再按快照恢复旧版本的 running/stopped 状态；无法安全表达的混合
-  状态会明确阻塞。外部 Redis、存储和 auth-service 已产生的副作用不保证自动撤销。
-- 当前 beta 会阻塞 `runtime_owner=node` 的升级、回滚以及 Service/Host 生命周期；远端 stop/rollback 协议尚未接通。运维人员应先核对真实运行态，再决定人工恢复，不能把控制面记录当成节点已回滚的证明。
+## Job 状态与 lease
+
+```text
+QUEUED -> LEASED -> SUCCEEDED
+                 -> RETRY_WAIT -> LEASED
+                 -> FAILED
+                 -> CANCEL_REQUESTED -> CANCELLED
+                 -> NEEDS_ATTENTION
+```
+
+默认 lease 30 秒、heartbeat 10 秒、长轮询 25 秒、最多 3 次尝试，退避为 1/5/30 秒。
+claim 使用数据库 CAS，同一 Job 在并发 claim 中只能产生一个有效 lease。heartbeat、事件和
+complete 都校验 lease token；旧 lease、重复完成和乱序事件不会改变已确认结果。
+
+投递语义是至少一次。每个副作用必须使用稳定的 Job idempotency key；Node 在本地 SQLite
+ledger 记录 claim、attempt 与副作用结果。lease 过期时：
+
+- 可证明没有发生副作用，且仍有预算时，进入 `RETRY_WAIT`；
+- 已耗尽重试预算，或取消期间结果未知，进入 `NEEDS_ATTENTION`；
+- 对不可证明的 mutation 结果绝不盲目重跑，也不自动执行补偿。
+
+## 依赖、补偿与恢复
+
+计划步骤声明依赖关系和 `ON_SUCCESS`/`ON_FAILURE` 条件。依赖失败时，后续正常步骤标记为
+skipped；只有失败结果已知时才物化补偿 Job。任何步骤进入 `NEEDS_ATTENTION` 时自动补偿停止，
+由运维人员结合 Node ledger、Docker RepoDigest、Provider 状态和审计记录对账。
+
+控制面在监听端口前恢复过期 lease、`ENQUEUING`、`RUNNING` 和 `CANCELLING` Operation。
+部分 enqueue 后崩溃会按稳定 step/generation key 补齐，不会创建第二个副作用 Job。SIGTERM
+先停止接收新工作，最多排空 30 秒；未完成工作由下次启动按上述规则恢复。
+
+## API 与审计
+
+- 所有 mutation 要求 `Idempotency-Key`，并在外部副作用前写入 append-only audit intent；
+  审计写入失败时不开始副作用。
+- `GET /api/v1/operations/{id}` 读取聚合；日志接口读取有序持久日志；事件接口使用 SSE，支持
+  `Last-Event-ID` 重连与事件去重。
+- Operation/Job 资源本身长期可查询。`ORCHESTRATOR_LOG_RETENTION_DAYS` 只清理已终结
+  Operation 的详细日志、已终结 Job 的事件和过期幂等响应，不清理资源、Topology 历史或审计。
+- `operation.create/update/delete`、日志修改/删除、诊断修改/删除和伪 service enable/disable
+  不属于 v1 产品 action；GA 路由不会用通用 CRUD 或 metadata-only 成功代替真实执行。
+
+Node v1 只使用带 SPIFFE Node ID 的 mTLS pull 协议进行 claim/heartbeat/complete/cancel。
+0.2 的 Node push、共享 bearer 和 shell 拼接路径不属于 v1 Operation/Job 模型。

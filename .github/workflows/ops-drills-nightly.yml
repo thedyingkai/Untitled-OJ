@@ -9,11 +9,11 @@ permissions:
   contents: read
 
 jobs:
-  recovery-security-observability:
-    name: Recovery security observability drills
+  recovery-functional-observability:
+    name: Recovery, functional and observability drills
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-go@v6
         with:
@@ -46,14 +46,24 @@ jobs:
         env:
           OJOS_EVIDENCE_DIR: artifacts/alert-firing-drill
         run: bash deploy/ops/alert-firing-drill.sh
-      - name: Manager operator smoke
+      - name: Orchestrator Web v1 control workflows
         shell: bash
-        env:
-          OJOS_EVIDENCE_DIR: artifacts/manager-smoke
-        run: bash deploy/ops/manager-smoke.sh
+        working-directory: manager/web
+        run: |
+          set -euo pipefail
+          npm ci --registry=https://registry.npmjs.org
+          npm run typecheck
+          npm test
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+      - name: Orchestrator TUI v1 contract
+        shell: bash
+        run: cargo test -p ojos-orchestrator-tui
       - name: Upload ops drill evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ops-drill-evidence
-          path: artifacts
+          path: |
+            artifacts
+            manager/web/playwright-report

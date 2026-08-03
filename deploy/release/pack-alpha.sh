@@ -8,7 +8,7 @@
 #   - dist/<bundle>/                                       (staged platform bundle)
 #   - dist/<bundle>.(zip|tar.gz)                           (the archived bundle)
 #
-# The bundle contains the orchestrator binaries, the Web UI build output
+# The bundle contains Desktop, daemon and TUI binaries, the Web UI build output
 # (manager/web/dist, served by the daemon at /), plus the runtime data the
 # daemon/TUI read at --repo-root: platform/schemas/orchestrator,
 # services/*/{service,release}.yaml, and sets/.
@@ -92,17 +92,21 @@ bundle="$dist/$bundle_name"
 mkdir -p "$bundle" "$bundle/platform/schemas" "$bundle/services" "$bundle/sets"
 
 copied_bin=0
-for b in ojos-orchestrator-daemon ojos-orchestrator-tui; do
+missing_bin=0
+for b in ojos-orchestrator-daemon ojos-orchestrator-tui ojos-orchestrator-desktop; do
   if [ -f "target/release/$b.exe" ]; then
     cp "target/release/$b.exe" "$bundle/"
     copied_bin=$((copied_bin + 1))
   elif [ -f "target/release/$b" ]; then
     cp "target/release/$b" "$bundle/"
     copied_bin=$((copied_bin + 1))
+  else
+    echo "pack-alpha: missing required binary target/release/$b[.exe]" >&2
+    missing_bin=$((missing_bin + 1))
   fi
 done
-if [ "$copied_bin" -eq 0 ]; then
-  echo "pack-alpha: no orchestrator binaries in target/release; run 'cargo build --release' first" >&2
+if [ "$missing_bin" -ne 0 ] || [ "$copied_bin" -ne 3 ]; then
+  echo "pack-alpha: build daemon, TUI and Desktop before packaging" >&2
   exit 1
 fi
 
@@ -140,13 +144,15 @@ manager/web/dist）：
 
   ojos-orchestrator-daemon  --repo-root . --bind 127.0.0.1:8090
   ojos-orchestrator-tui     --repo-root .
+  ojos-orchestrator-desktop --repo-root .
 
-图形主入口（Web UI）：daemon 启动后用浏览器打开
+图形主入口（本地 WebView，无需浏览器）：
 
-  http://127.0.0.1:8090/
+  ojos-orchestrator-desktop --repo-root .
 
 本 bundle 已内置 Web UI 构建产物（manager/web/dist），无需另行构建或部署；
-产物目录可用 daemon 的 --web-root 覆盖。
+Desktop 默认在进程内启动只监听 loopback 随机端口的控制面。也可用
+--daemon-url https://host:port 连接已有 daemon；远端明文 HTTP 默认拒绝。
 
 命令行入口：
   查看它管理的 services：  curl http://127.0.0.1:8090/services

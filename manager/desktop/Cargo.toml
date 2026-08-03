@@ -1,0 +1,36 @@
+[package]
+name = "ojos-orchestrator-desktop"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+legacy-0_2 = ["orchestrator-backend/legacy-0_2"]
+
+[[bin]]
+name = "ojos-orchestrator-desktop"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+directories = "6"
+getrandom = "0.3"
+orchestrator-backend = { package = "ojos-orchestrator-daemon", path = "../../services/orchestrator/backend" }
+orchestrator-agent.workspace = true
+orchestrator-runtime.workspace = true
+serde_json.workspace = true
+tauri = "2.11.5"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+url = "2.5"
+
+[build-dependencies]
+ico = "0.5"
+png = "0.17"
+tauri-build = "2"
+
+[dev-dependencies]
+tempfile.workspace = true

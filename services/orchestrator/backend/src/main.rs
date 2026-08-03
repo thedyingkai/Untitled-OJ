@@ -7,25 +7,18 @@
 //! - `server` —— 监听、工作线程池与请求分发；
 //! - `market_api` / `static_site` / `ui_layout` —— 插件商店、静态托管与画布布局。
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use orchestrator_core::OrchestratorActionConsole;
+use orchestrator_backend::{
+    EmbeddedServerOptions, EmbeddedStorage, configured_internal_token, start_embedded_server,
+};
 use std::fs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
-
-mod auth;
-mod http;
-mod market_api;
-mod routes;
-mod server;
-mod static_site;
-#[cfg(test)]
-mod test_env;
-mod ui_layout;
-
-/// 保持 `crate::ApiRequest` / `crate::ApiResponse` / `crate::query_value` 等历史路径可用，
-/// 拆分模块后 market_api 等既有模块无需改 use。
-pub(crate) use http::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "ojos-orchestrator-daemon")]
@@ -41,6 +34,14 @@ struct Cli {
     /// Web UI 构建产物目录；默认 <repo_root>/manager/web/dist
     #[arg(long)]
     web_root: Option<PathBuf>,
+
+    /// Durable writable directory for OCI artifacts served to Node Agents.
+    #[arg(long)]
+    artifact_root: Option<PathBuf>,
+
+    /// Explicitly allow the non-durable developer/test store.
+    #[arg(long)]
+    ephemeral: bool,
 }
 
 fn main() -> Result<()> {
@@ -50,10 +51,63 @@ fn main() -> Result<()> {
     let web_root = cli
         .web_root
         .clone()
+        .or_else(|| std::env::var_os("ORCHESTRATOR_WEB_ROOT").map(PathBuf::from))
         .map(|path| fs::canonicalize(&path).unwrap_or(path))
         .unwrap_or_else(|| repo_root.join("manager").join("web").join("dist"));
-    let console = OrchestratorActionConsole::load(repo_root.clone())?;
-    server::serve(cli.bind, console, repo_root, web_root)
+    let bind_addr = resolve_bind_addr(&cli.bind)?;
+    let artifact_root = cli
+        .artifact_root
+        .or_else(|| std::env::var_os("ORCHESTRATOR_ARTIFACT_DIR").map(PathBuf::from))
+        .ok_or_else(|| {
+            anyhow!(
+                "--artifact-root or ORCHESTRATOR_ARTIFACT_DIR is required and must name durable writable storage"
+            )
+        })?;
+    let storage = match std::env::var("ORCHESTRATOR_DATABASE_URL") {
+        Ok(database_url) if !database_url.trim().is_empty() => {
+            EmbeddedStorage::Postgres { database_url }
+        }
+        _ if cli.ephemeral => EmbeddedStorage::Ephemeral,
+        _ => {
+            return Err(anyhow!(
+                "ORCHESTRATOR_DATABASE_URL is required; use --ephemeral only for development/tests"
+            ));
+        }
+    };
+    let server = start_embedded_server(EmbeddedServerOptions {
+        repo_root,
+        web_root,
+        artifact_root,
+        bind_addr,
+        internal_token: configured_internal_token(),
+        desktop_bootstrap_secret: None,
+        desktop_agent_secret: None,
+        storage,
+    })?;
+    let terminated = Arc::new(AtomicBool::new(false));
+    let signal_terminated = Arc::clone(&terminated);
+    let shutdown = server.shutdown_handle();
+    ctrlc::set_handler(move || {
+        signal_terminated.store(true, Ordering::Release);
+        shutdown.shutdown();
+    })
+    .context("install SIGINT/SIGTERM handler")?;
+
+    while !terminated.load(Ordering::Acquire) && !server.is_finished() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    if terminated.load(Ordering::Acquire) {
+        server.join_timeout(Duration::from_secs(30))
+    } else {
+        server.join()
+    }
+}
+
+fn resolve_bind_addr(bind: &str) -> Result<SocketAddr> {
+    bind.to_socket_addrs()
+        .with_context(|| format!("resolve bind address {bind}"))?
+        .next()
+        .ok_or_else(|| anyhow!("bind address {bind} did not resolve to an IP address"))
 }
 
 fn configure_utf8_console() -> Result<()> {

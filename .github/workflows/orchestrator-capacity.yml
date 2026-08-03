@@ -1,0 +1,241 @@
+name: Orchestrator capacity and soak gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Prepared direct single-active Orchestrator v1 HTTPS origin (not a load balancer)
+        required: true
+      profile:
+        description: smoke uses reduced defaults; production enforces 100/2000/10000/50
+        required: true
+        type: choice
+        options: [smoke, production]
+        default: smoke
+      soak_seconds:
+        description: 0 for capacity only; use 86400 for the full stability gate
+        required: true
+        default: "0"
+      nodes:
+        description: Override minimum Node count (blank uses profile default)
+        required: false
+      deployments:
+        description: Override minimum Deployment count (blank uses profile default)
+        required: false
+      topology_resources:
+        description: Override minimum Endpoint+Link count (blank uses profile default)
+        required: false
+      concurrent_operations:
+        description: Override concurrent Operation count (blank uses profile default)
+        required: false
+      candidate_image_run_id:
+        description: Successful attempt-1 Orchestrator candidate OCI images run for this exact SHA (required for production)
+        required: false
+
+permissions:
+  actions: read
+  attestations: read
+  contents: read
+  packages: read
+
+concurrency:
+  group: orchestrator-capacity-${{ inputs.profile }}
+  cancel-in-progress: false
+
+jobs:
+  hosted-smoke:
+    if: inputs.profile == 'smoke'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install private CA when configured
+        shell: bash
+        env:
+          CA_PEM: ${{ secrets.ORCHESTRATOR_GATE_CA_PEM }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$CA_PEM" ]]; then
+            umask 077
+            printf '%s\n' "$CA_PEM" >"$RUNNER_TEMP/orchestrator-ca.pem"
+          fi
+      - name: Run configurable capacity smoke
+        shell: bash
+        env:
+          ORCHESTRATOR_GATE_BASE_URL: ${{ inputs.base_url }}
+          ORCHESTRATOR_GATE_OIDC_TOKEN: ${{ secrets.ORCHESTRATOR_GATE_OIDC_TOKEN }}
+          ORCHESTRATOR_GATE_CA_FILE: ${{ secrets.ORCHESTRATOR_GATE_CA_PEM != '' && format('{0}/orchestrator-ca.pem', runner.temp) || '' }}
+          NODES: ${{ inputs.nodes }}
+          DEPLOYMENTS: ${{ inputs.deployments }}
+          TOPOLOGY_RESOURCES: ${{ inputs.topology_resources }}
+          OPERATIONS: ${{ inputs.concurrent_operations }}
+          SOAK_SECONDS: ${{ inputs.soak_seconds }}
+        run: |
+          set -euo pipefail
+          [[ "$SOAK_SECONDS" =~ ^[0-9]+$ && "$SOAK_SECONDS" -le 18000 ]]
+          args=(--profile smoke --soak-seconds "$SOAK_SECONDS" --report artifacts/orchestrator-capacity-smoke.json)
+          [[ -z "$NODES" ]] || args+=(--nodes "$NODES")
+          [[ -z "$DEPLOYMENTS" ]] || args+=(--deployments "$DEPLOYMENTS")
+          [[ -z "$TOPOLOGY_RESOURCES" ]] || args+=(--topology-resources "$TOPOLOGY_RESOURCES")
+          [[ -z "$OPERATIONS" ]] || args+=(--concurrent-operations "$OPERATIONS")
+          python3 deploy/ops/orchestrator-capacity-gate.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: orchestrator-capacity-smoke
+          path: artifacts/orchestrator-capacity-smoke.json
+          if-no-files-found: error
+
+  production-soak:
+    if: inputs.profile == 'production'
+    # A dedicated runner is required because GitHub-hosted jobs cannot provide
+    # an uninterrupted 24-hour evidence window.
+    runs-on: [self-hosted, linux, x64, orchestrator-soak]
+    environment: orchestrator-production-soak
+    # The evidence window itself is 24h plus a fixed 10m warmup. Leave a full
+    # qualification/restart/validation/upload hour inside the job lifetime;
+    # the Actions artifact runtime credential is issued for the job lifetime,
+    # while github.token is deliberately consumed only at gate startup.
+    timeout-minutes: 1560
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify the pinned production evidence toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(command -v gh)" == /usr/local/bin/gh ]]
+          gh version | grep -Eq '^gh version 2\.97\.0 \('
+          [[ "$(command -v jq)" == /usr/local/bin/jq ]]
+          [[ "$(jq --version)" == jq-1.7.1 ]]
+      - name: Authenticate verifier to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Select and independently verify exact candidate OCI subjects
+        shell: bash
+        env:
+          CANDIDATE_IMAGE_RUN_ID: ${{ inputs.candidate_image_run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_IMAGE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "production requires a candidate_image_run_id" >&2
+            exit 1
+          }
+          mkdir -p artifacts/candidate-images
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_IMAGE_RUN_ID")"
+          jq -e --arg sha "$GITHUB_SHA" \
+            '.name == "Orchestrator candidate OCI images" and .path == ".github/workflows/orchestrator-candidate-images.yml" and .head_branch == "main" and .head_sha == $sha and .run_attempt == 1 and .conclusion == "success" and (.event == "push" or .event == "workflow_dispatch")' \
+            <<<"$run_json" >/dev/null
+          for artifact in \
+            orchestrator-candidate-image-control-plane \
+            orchestrator-candidate-image-agent \
+            orchestrator-candidate-image-capacity-fixture \
+            orchestrator-candidate-image-provenance
+          do
+            gh run download "$CANDIDATE_IMAGE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "$artifact" --dir "artifacts/candidate-images/$artifact"
+          done
+          python3 deploy/ops/verify-orchestrator-image-provenance.py \
+            --root artifacts/candidate-images \
+            --candidate-sha "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-run-id "$CANDIDATE_IMAGE_RUN_ID" \
+            --github-env "$GITHUB_ENV" \
+            --record-output artifacts/candidate-image-provenance.json
+          verify_args=(
+            --repo "$GITHUB_REPOSITORY"
+            --cert-oidc-issuer https://token.actions.githubusercontent.com
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/orchestrator-candidate-images.yml"
+            --source-ref refs/heads/main
+            --source-digest "$GITHUB_SHA"
+            --deny-self-hosted-runners
+          )
+          for component in control-plane agent capacity-fixture; do
+            reference="$(jq -er '.reference' "artifacts/candidate-images/orchestrator-candidate-image-$component/$component.json")"
+            gh attestation verify "oci://$reference" "${verify_args[@]}"
+          done
+      - name: Install private CA when configured
+        shell: bash
+        env:
+          CA_PEM: ${{ secrets.ORCHESTRATOR_GATE_CA_PEM }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$CA_PEM" ]]; then
+            umask 077
+            printf '%s\n' "$CA_PEM" >"$RUNNER_TEMP/orchestrator-ca.pem"
+          fi
+      - name: Run production scale and stability gate
+        shell: bash
+        env:
+          ORCHESTRATOR_GATE_BASE_URL: ${{ inputs.base_url }}
+          ORCHESTRATOR_GATE_CA_FILE: ${{ secrets.ORCHESTRATOR_GATE_CA_PEM != '' && format('{0}/orchestrator-ca.pem', runner.temp) || '' }}
+          ORCHESTRATOR_GATE_TOKEN_ARGV_JSON: ${{ secrets.ORCHESTRATOR_GATE_TOKEN_ARGV_JSON }}
+          ORCHESTRATOR_GATE_OCI_REVISION: ${{ vars.ORCHESTRATOR_GATE_OCI_REVISION }}
+          ORCHESTRATOR_GATE_PROVENANCE_COMMIT: ${{ vars.ORCHESTRATOR_GATE_PROVENANCE_COMMIT }}
+          ORCHESTRATOR_GATE_RUNNER_LABELS: self-hosted,linux,x64,orchestrator-soak
+          ORCHESTRATOR_GATE_GITHUB_TOKEN: ${{ github.token }}
+          SOAK_SECONDS: ${{ inputs.soak_seconds }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          python3 - <<'PY'
+          import json, os, pathlib
+          pathlib.Path("artifacts/orchestrator-capacity-production.json").write_text(
+              json.dumps({
+                  "schema_version": 2,
+                  "profile": "production",
+                  "identity": {"source_commit": os.environ["GITHUB_SHA"]},
+                  "failures": ["production capacity gate did not start or was interrupted before its first checkpoint"],
+              }, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          [[ "$SOAK_SECONDS" -ge 86400 ]]
+          [[ -n "${ORCHESTRATOR_GATE_TOKEN_ARGV_JSON:-}" ]] || {
+            echo "production requires the protected token-helper argv" >&2
+            exit 1
+          }
+          [[ -n "${ORCHESTRATOR_GATE_RESTART_ARGV_JSON:-}" ]] || {
+            echo "self-hosted runner must define ORCHESTRATOR_GATE_RESTART_ARGV_JSON for a real restart" >&2
+            exit 1
+          }
+          [[ -n "${ORCHESTRATOR_GATE_GITHUB_TOKEN:-}" ]] || {
+            echo "production requires an Actions API read token" >&2
+            exit 1
+          }
+          [[ "$ORCHESTRATOR_GATE_OCI_REVISION" == "$GITHUB_SHA" ]] || {
+            echo "deployed OCI revision does not match workflow SHA" >&2
+            exit 1
+          }
+          [[ "$ORCHESTRATOR_GATE_PROVENANCE_COMMIT" == "$GITHUB_SHA" ]] || {
+            echo "deployment provenance does not match workflow SHA" >&2
+            exit 1
+          }
+          python3 deploy/ops/orchestrator-capacity-gate.py \
+            --profile production \
+            --source-commit "$GITHUB_SHA" \
+            --soak-seconds "$SOAK_SECONDS" \
+            --warmup-seconds 600 \
+            --sample-seconds 30 \
+            --control-plane-image "$ORCHESTRATOR_GATE_CONTROL_PLANE_IMAGE" \
+            --agent-image "$ORCHESTRATOR_GATE_AGENT_IMAGE" \
+            --fixture-image "$ORCHESTRATOR_GATE_FIXTURE_IMAGE" \
+            --image-workflow-run-id "$ORCHESTRATOR_GATE_IMAGE_WORKFLOW_RUN_ID" \
+            --image-provenance-record-sha256 "$ORCHESTRATOR_GATE_IMAGE_PROVENANCE_RECORD_SHA256" \
+            --report artifacts/orchestrator-capacity-production.json
+      - name: Validate fail-closed production evidence v2
+        shell: bash
+        run: |
+          python3 deploy/ops/validate-orchestrator-ga-evidence.py \
+            artifacts/orchestrator-capacity-production.json \
+            --expected-commit "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: orchestrator-capacity-production
+          path: artifacts/orchestrator-capacity-production*
+          if-no-files-found: warn
+          retention-days: 90

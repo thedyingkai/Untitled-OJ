@@ -2,16 +2,19 @@
 //!
 //! 本模块只做“HTTP 语义 → core 动作”的翻译，业务规则一律留在 core 里。
 
-use crate::auth::{
-    ORCHESTRATOR_INTERNAL_TOKEN_HEADER, configured_internal_token, internal_token_check,
-    require_node_install_credentials, smoke_mode_enabled,
-};
+#[cfg(test)]
+use crate::auth::configured_internal_token;
+#[cfg(any(feature = "legacy-0_2", test))]
+use crate::auth::require_node_install_credentials;
+use crate::auth::{ORCHESTRATOR_INTERNAL_TOKEN_HEADER, internal_token_check, smoke_mode_enabled};
 use crate::http::{ApiRequest, ApiResponse, StatusError, path_segments, query_bool, query_value};
 use anyhow::Result;
-use orchestrator_core::{
-    ActionRequest, EffectiveApiRoute, Endpoint, NodeRecord, NodeServiceDispatchRequest,
-    OrchestratorActionConsole, OrchestratorError, ServiceRoute, SmokeControlPlaneSeed,
-    SmokeNodeTreeSeed, parse_endpoint_id, validate_endpoint_id,
+#[cfg(any(feature = "legacy-0_2", test))]
+use orchestrator_legacy::NodeServiceDispatchRequest;
+use orchestrator_legacy::{
+    ActionRequest, EffectiveApiRoute, Endpoint, NodeRecord, OrchestratorActionConsole,
+    OrchestratorError, ServiceRoute, SmokeControlPlaneSeed, SmokeNodeTreeSeed, parse_endpoint_id,
+    validate_endpoint_id,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -20,6 +23,9 @@ use std::collections::BTreeMap;
 /// manifest 校验失败按 400；不允许当前状态执行的动作按 409。依赖、IO 等
 /// 服务端故障仍按 500 上报。
 pub(crate) fn status_for_error(err: &anyhow::Error) -> u16 {
+    if let Some(status) = err.downcast_ref::<orchestrator_manager::StoreRequestError>() {
+        return status.status();
+    }
     if let Some(status) = err.downcast_ref::<StatusError>() {
         return status.0;
     }
@@ -30,7 +36,9 @@ pub(crate) fn status_for_error(err: &anyhow::Error) -> u16 {
             | OrchestratorError::Yaml(_)
             | OrchestratorError::Json(_) => 400,
             OrchestratorError::Blocked(_) => 409,
-            OrchestratorError::Dependency(_) | OrchestratorError::Io(_) => 500,
+            // Infrastructure adapters redact I/O details and map them to the
+            // domain-level dependency failure before crossing this boundary.
+            OrchestratorError::Dependency(_) => 500,
         };
     }
     if err.downcast_ref::<serde_json::Error>().is_some() {
@@ -39,16 +47,27 @@ pub(crate) fn status_for_error(err: &anyhow::Error) -> u16 {
     500
 }
 
+#[cfg(test)]
 pub(crate) fn handle_api_request(
     console: &mut OrchestratorActionConsole,
     request: ApiRequest,
 ) -> ApiResponse {
-    match route_api_request(console, request) {
+    let internal_token = configured_internal_token();
+    handle_api_request_with_internal_token(console, request, internal_token.as_deref())
+}
+
+pub(crate) fn handle_api_request_with_internal_token(
+    console: &mut OrchestratorActionConsole,
+    request: ApiRequest,
+    expected_internal_token: Option<&str>,
+) -> ApiResponse {
+    match route_api_request_with_internal_token(console, request, expected_internal_token) {
         Ok(response) => response,
         Err(err) => ApiResponse::error(status_for_error(&err), err.to_string()),
     }
 }
 
+#[cfg(test)]
 pub(crate) fn route_api_request(
     console: &mut OrchestratorActionConsole,
     request: ApiRequest,
@@ -80,6 +99,7 @@ fn route_api_request_with_internal_token(
         expected_internal_token,
     )?;
     match (request.method.as_str(), segment_refs.as_slice()) {
+        #[cfg(any(feature = "legacy-0_2", test))]
         ("POST", ["api", "node", "services", "install"]) => {
             require_node_install_credentials(&request, expected_internal_token)?;
             let request = serde_json::from_str::<NodeServiceDispatchRequest>(&request.body)?;
@@ -132,7 +152,7 @@ fn route_api_request_with_internal_token(
             "services": console.view()?.services,
         }))),
         ("GET", ["deployments"]) => Ok(ApiResponse::ok(json!({
-            "deployments": deployment_rows(console)?,
+            "deployments": console.view()?.deployments,
         }))),
         ("GET", ["nodes"]) => Ok(ApiResponse::ok(json!({
             "nodes": console.nodes()?,
@@ -542,8 +562,40 @@ fn route_api_request_with_internal_token(
                 "action_result": console.dispatch(action)?,
             })))
         }
+        ("GET", ["diagnostics"]) => {
+            let cursor = query_value(query, "cursor")
+                .map_err(|error| StatusError::new(400, error.to_string()))?
+                .unwrap_or_default();
+            let limit = query_value(query, "limit")
+                .map_err(|error| StatusError::new(400, error.to_string()))?
+                .map(|value| value.parse::<usize>())
+                .transpose()
+                .map_err(|_| StatusError::new(400, "limit must be an integer"))?
+                .unwrap_or(50);
+            if !(1..=200).contains(&limit) {
+                return Err(StatusError::new(400, "limit must be between 1 and 200").into());
+            }
+            let mut reports = console.diagnostic_reports()?;
+            reports.sort_by(|left, right| left.report_id.cmp(&right.report_id));
+            let mut reports = reports
+                .into_iter()
+                .filter(|report| report.report_id.as_str() > cursor.as_str())
+                .take(limit + 1)
+                .collect::<Vec<_>>();
+            let next_cursor = if reports.len() > limit {
+                reports.truncate(limit);
+                reports.last().map(|report| report.report_id.clone())
+            } else {
+                None
+            };
+            Ok(ApiResponse::ok(json!({
+                "items": reports,
+                "next_cursor": next_cursor,
+            })))
+        }
         ("GET", [report_file]) if report_file.ends_with(".json") => {
             let report_id = report_file.trim_end_matches(".json");
+            require_diagnostic_report(console, report_id)?;
             let export = console.diagnostic_export(report_id, "json")?;
             Ok(ApiResponse::ok(json!({
                 "report_id": export.report_id,
@@ -553,6 +605,7 @@ fn route_api_request_with_internal_token(
         }
         ("GET", [report_file]) if report_file.ends_with(".md") => {
             let report_id = report_file.trim_end_matches(".md");
+            require_diagnostic_report(console, report_id)?;
             let export = console.diagnostic_export(report_id, "markdown")?;
             Ok(ApiResponse::ok(json!({
                 "report_id": export.report_id,
@@ -562,6 +615,7 @@ fn route_api_request_with_internal_token(
         }
         ("GET", ["diagnostics", report_file]) if report_file.ends_with(".json") => {
             let report_id = report_file.trim_end_matches(".json");
+            require_diagnostic_report(console, report_id)?;
             let export = console.diagnostic_export(report_id, "json")?;
             Ok(ApiResponse::ok(json!({
                 "report_id": export.report_id,
@@ -571,6 +625,7 @@ fn route_api_request_with_internal_token(
         }
         ("GET", ["diagnostics", report_file]) if report_file.ends_with(".md") => {
             let report_id = report_file.trim_end_matches(".md");
+            require_diagnostic_report(console, report_id)?;
             let export = console.diagnostic_export(report_id, "markdown")?;
             Ok(ApiResponse::ok(json!({
                 "report_id": export.report_id,
@@ -592,6 +647,15 @@ fn route_api_request_with_internal_token(
             ),
         )),
     }
+}
+
+fn require_diagnostic_report(console: &OrchestratorActionConsole, report_id: &str) -> Result<()> {
+    if console.diagnostic_report(report_id)?.is_none() {
+        return Err(
+            StatusError::new(404, format!("diagnostic report {report_id} not found")).into(),
+        );
+    }
+    Ok(())
 }
 
 fn action_request_from_body(
@@ -816,74 +880,6 @@ fn internal_service_definitions(
 
 /// Web 服务页使用的部署视图。一行严格对应一条 HostService，而不是 Service manifest
 /// 注册表；这样同一服务部署到两台主机时不会被折叠成一个含糊的“服务”按钮。
-fn deployment_rows(console: &OrchestratorActionConsole) -> Result<Vec<Value>> {
-    let services = console
-        .services()?
-        .into_iter()
-        .map(|service| (service.id.clone(), service))
-        .collect::<BTreeMap<_, _>>();
-    let releases = console.service_releases()?;
-    let endpoints = console.endpoints()?;
-    let mut deployments = console.host_services()?;
-    deployments.sort_by(|left, right| {
-        left.service_name
-            .cmp(&right.service_name)
-            .then_with(|| left.host_ip.cmp(&right.host_ip))
-            .then_with(|| left.version.cmp(&right.version))
-    });
-
-    deployments
-        .into_iter()
-        .map(|deployment| {
-            let service = services.get(&deployment.service_name);
-            let mut matching_endpoints = endpoints
-                .iter()
-                .filter(|endpoint| {
-                    endpoint.service_id == deployment.service_name
-                        && parse_endpoint_id(&endpoint.endpoint)
-                            .is_ok_and(|identity| identity.host == deployment.host_ip)
-                })
-                .collect::<Vec<_>>();
-            matching_endpoints.sort_by(|left, right| left.endpoint.cmp(&right.endpoint));
-            let primary_endpoint = matching_endpoints.first().copied();
-            let runtime = releases
-                .iter()
-                .find(|release| {
-                    release.service_name == deployment.service_name
-                        && release.version == deployment.version
-                })
-                .and_then(|release| release.manifest.get("runtime"))
-                .and_then(|runtime| runtime.get("kind"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| {
-                    service.map(|service| format!("{:?}", service.runtime.mode))
-                })
-                .unwrap_or_else(|| "unknown".to_string());
-
-            Ok(json!({
-                "service_id": deployment.service_name,
-                "name": service.map(|service| service.name.as_str()).unwrap_or(""),
-                "version": deployment.version,
-                "kind": service.map(|service| service.kind.as_str()).unwrap_or("unknown"),
-                "runtime": runtime,
-                "host_ip": deployment.host_ip,
-                "status": deployment.status,
-                "endpoint": primary_endpoint.map(|endpoint| endpoint.endpoint.as_str()).unwrap_or(""),
-                "protocol": primary_endpoint.map(|endpoint| endpoint.protocol.as_str()).unwrap_or(""),
-                "health_path": primary_endpoint.map(|endpoint| endpoint.health_path.as_str()).unwrap_or(""),
-                "endpoint_health": primary_endpoint.map(|endpoint| endpoint.health.as_str()).unwrap_or("unknown"),
-                "reachable": primary_endpoint.is_some_and(|endpoint| endpoint.reachable),
-                "endpoint_count": matching_endpoints.len(),
-                "endpoints": matching_endpoints
-                    .iter()
-                    .map(|endpoint| endpoint.endpoint.as_str())
-                    .collect::<Vec<_>>(),
-            }))
-        })
-        .collect()
-}
-
 fn internal_permissions(console: &OrchestratorActionConsole) -> Result<Vec<Value>> {
     Ok(console
         .service_permission_records()?
@@ -1318,7 +1314,7 @@ mod tests {
         execute_service_driver: bool,
     ) -> String {
         let root = repo_root();
-        let service = orchestrator_core::validate_service_manifest_file(
+        let service = orchestrator_legacy::validate_service_manifest_file(
             &root,
             std::path::Path::new(service_yaml),
         )
@@ -1329,7 +1325,7 @@ mod tests {
             execute_service_driver,
             service: service.clone(),
             release: None,
-            host_service: orchestrator_core::HostService {
+            host_service: orchestrator_legacy::HostService {
                 host_ip: host_ip.to_string(),
                 service_name: service.id.clone(),
                 version: service.version.clone(),
@@ -2285,6 +2281,12 @@ mod tests {
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("make external health connection blocking");
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .expect("bound external health read");
                         let mut buffer = [0_u8; 1024];
                         let _ = stream.read(&mut buffer).expect("read health request");
                         stream
@@ -2569,7 +2571,7 @@ mod tests {
             ),
         )
         .expect("release delete route");
-        assert_eq!(delete.status, 200);
+        assert_eq!(delete.status, 204);
         assert_eq!(delete.body["action_result"]["action_id"], "release.delete");
         assert_eq!(delete.body["action_result"]["status"], "SUCCEEDED");
     }
@@ -2749,6 +2751,11 @@ mod tests {
             json!(report_id)
         );
 
+        let list = get(&mut console, "/diagnostics?limit=1");
+        assert_eq!(list.status, 200);
+        assert_eq!(list.body["items"][0]["report_id"], json!(report_id));
+        assert!(list.body["next_cursor"].is_null());
+
         let json_export = get(&mut console, &format!("/diagnostics/{report_id}.json"));
         assert_eq!(json_export.status, 200);
         assert_eq!(json_export.body["format"], "json");
@@ -2767,6 +2774,21 @@ mod tests {
                 .as_str()
                 .expect("markdown content")
                 .contains("# DiagnosticReport")
+        );
+
+        // Expected route errors must cross the same response boundary as a
+        // real HTTP request. The lower-level `route_api_request` deliberately
+        // returns `Err(StatusError)` so the outer handler can grade it.
+        let missing = handle_api_request(
+            &mut console,
+            request("GET", "/diagnostics/missing.json", ""),
+        );
+        assert_eq!(missing.status, 404);
+        assert_eq!(missing.body["status"], "error");
+        assert!(
+            missing.body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("diagnostic report missing not found"))
         );
     }
 
@@ -2874,7 +2896,7 @@ mod tests {
                 }"#,
             ),
         );
-        assert_eq!(response.status, 200);
+        assert_eq!(response.status, 204);
         let endpoints = console.endpoints().expect("endpoints");
         assert!(
             !endpoints

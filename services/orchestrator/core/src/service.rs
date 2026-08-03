@@ -1,18 +1,23 @@
 use crate::{
     Endpoint, Link, Operation, OperationStatus, OrchestratorError, Result, Topology,
-    plan_operation, sanitize_path_for_error, validate_endpoint, validate_link, validate_topology,
+    plan_operation, validate_endpoint, validate_link, validate_topology,
 };
 use regex::Regex;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
 use std::net::IpAddr;
 use std::path::{Component, Path};
 
 const SERVICE_SCHEMA_VERSION: u32 = 1;
 const SET_SCHEMA_VERSION: u32 = 1;
+
+/// Signed Release API declaration used by Topology v1 to prove a Link from
+/// the source service to its declared target. This is an explicit product
+/// contract: Topology must never assume that an arbitrary HTTP service owns a
+/// hidden `/probe` route.
+pub const LINK_PROBE_V1_CAPABILITY: &str = "orchestrator.link-probe.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +148,28 @@ pub struct ReleaseMigrationDecl {
     pub checksum: String,
     #[serde(default)]
     pub destructive: bool,
+    /// Immutable one-shot OCI runner used by the v1 Node pipeline.  Keeping
+    /// this declaration inside the signed release manifest binds both the
+    /// migration checksum and the executable artifact to Catalog trust.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci: Option<ReleaseMigrationOciDecl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseMigrationOciDecl {
+    /// Production form is `repository@sha256:<64 lowercase hex>`.
+    pub image: String,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default = "default_migration_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+const fn default_migration_timeout_ms() -> u64 {
+    5 * 60_000
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -468,135 +495,6 @@ pub struct DeploymentTemplatePreview {
     pub default_links: Vec<DeploymentTemplateLink>,
 }
 
-pub fn validate_service_manifest_file(
-    repo_root: &Path,
-    manifest_path: &Path,
-) -> Result<ServiceManifest> {
-    validate_service_manifest_path(repo_root, manifest_path)?;
-    let text = fs::read_to_string(repo_root.join(manifest_path))?;
-    let manifest: ServiceManifest = serde_yaml::from_str(&text)?;
-    validate_service_manifest(&manifest)?;
-    Ok(manifest)
-}
-
-pub fn validate_service_release_file(
-    repo_root: &Path,
-    release_path: &Path,
-) -> Result<ServiceReleaseManifest> {
-    validate_release_path(repo_root, release_path)?;
-    let text = fs::read_to_string(repo_root.join(release_path))?;
-    let release: ServiceReleaseManifest = serde_yaml::from_str(&text)?;
-    validate_service_release(&release)?;
-    let service_path = release_path
-        .parent()
-        .unwrap_or_else(|| Path::new("services"))
-        .join("service.yaml");
-    if repo_root.join(&service_path).is_file() {
-        let service = validate_service_manifest_file(repo_root, &service_path)?;
-        ensure(
-            service.id == release.service_name,
-            "release service_name must match service.yaml id",
-        )?;
-        ensure(
-            service.version == release.version,
-            "release version must match service.yaml version",
-        )?;
-        ensure(
-            service.kind == release.service_type,
-            "release service_type must match service.yaml kind",
-        )?;
-        ensure(
-            service.endpoint.protocol == release.backend.protocol,
-            "release backend protocol must match service endpoint protocol",
-        )?;
-        ensure(
-            service.endpoint.default_port == release.backend.port,
-            "release backend port must match service endpoint default_port",
-        )?;
-        ensure(
-            service.endpoint.health_path == release.backend.health_path,
-            "release backend health_path must match service endpoint health_path",
-        )?;
-        for permission in &service.permissions {
-            ensure(
-                release.permissions.iter().any(|item| item == permission),
-                "release permissions must cover service.yaml permissions",
-            )?;
-        }
-        for permission in &service.ui.permissions {
-            ensure(
-                release.permissions.iter().any(|item| item == permission),
-                "release permissions must cover service.yaml ui permissions",
-            )?;
-        }
-        ensure(
-            release.frontend.enabled == service.ui.enabled,
-            "release frontend enabled must match service.yaml ui enabled",
-        )?;
-        if service.ui.enabled {
-            for route in &service.ui.routes {
-                ensure(
-                    release.frontend.route_prefix == *route,
-                    "release frontend route_prefix must cover service.yaml ui routes",
-                )?;
-            }
-        }
-        for bucket in &service.provides.storage_buckets {
-            ensure(
-                release.storage.iter().any(|item| item.bucket == *bucket),
-                "release storage must cover service.yaml storage_buckets",
-            )?;
-        }
-        for dependency in &service.requires.services {
-            ensure(
-                release.dependencies.iter().any(|item| item == dependency),
-                "release dependencies must cover service.yaml requires.services",
-            )?;
-        }
-        for queue in &service.requires.queue {
-            ensure(
-                release.redis.iter().any(|item| item.name == *queue),
-                "release redis must cover service.yaml requires.queue",
-            )?;
-        }
-        for secret in service
-            .requires
-            .secrets
-            .iter()
-            .chain(service.security.required_secrets.iter())
-        {
-            ensure(
-                release.secrets.iter().any(|item| item == secret),
-                "release secrets must cover service.yaml secrets",
-            )?;
-        }
-        for route in service
-            .endpoint
-            .routes
-            .iter()
-            .chain(service.provides.routes.iter())
-        {
-            ensure(
-                release.routes.iter().any(|release_route| {
-                    release_route_covers_service_route(&release_route.path, route)
-                }),
-                "release routes must cover service.yaml routes",
-            )?;
-        }
-    }
-    Ok(release)
-}
-
-fn release_route_covers_service_route(release_route: &str, service_route: &str) -> bool {
-    let release_base = release_route
-        .trim_end_matches("/**")
-        .trim_end_matches("/*")
-        .trim_end_matches('*')
-        .trim_end_matches('/');
-    let service_base = service_route.trim_end_matches('/');
-    release_base == service_base || service_base.starts_with(&format!("{release_base}/"))
-}
-
 pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> {
     let id_re = Regex::new(r"^[a-z0-9][a-z0-9-]*$").expect("valid regex");
     let key_re = Regex::new(r"^[a-z0-9][a-z0-9_.:-]*$").expect("valid regex");
@@ -885,6 +783,12 @@ pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> 
                 "release api caller selector is invalid",
             )?;
         }
+        if api.api_id == LINK_PROBE_V1_CAPABILITY {
+            ensure(
+                release_link_probe_api_is_exact(api),
+                "orchestrator.link-probe.v1 must declare HTTP default port GET /probe, global public stable v1, with no caller filters",
+            )?;
+        }
     }
     unique_by(
         release.redis.iter().map(|redis| redis.name.as_str()),
@@ -933,6 +837,32 @@ pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// Returns true only for the exact, validated Link probe v1 API shape. Older
+/// release metadata has no such API and therefore defaults to `false`.
+pub fn release_supports_link_probe_v1(release: &ServiceReleaseManifest) -> bool {
+    release
+        .apis
+        .iter()
+        .any(|api| api.api_id == LINK_PROBE_V1_CAPABILITY && release_link_probe_api_is_exact(api))
+}
+
+fn release_link_probe_api_is_exact(api: &ReleaseApiSurfaceDecl) -> bool {
+    api.protocol.eq_ignore_ascii_case("http")
+        && api.port_name == "default"
+        && api.path_prefix == "/probe"
+        && api.methods.len() == 1
+        && api.methods[0].eq_ignore_ascii_case("GET")
+        && api.visibility == "global"
+        && api.auth_mode == "public"
+        && api.permission == "public"
+        && api.stability == "stable"
+        && api.version == "v1"
+        && api.grpc_service.is_empty()
+        && api.stream_name.is_empty()
+        && api.allowed_callers.is_empty()
+        && api.denied_callers.is_empty()
 }
 
 fn release_api_port_exists(release: &ServiceReleaseManifest, port_name: &str) -> bool {
@@ -1079,119 +1009,6 @@ pub fn validate_service_manifest(manifest: &ServiceManifest) -> Result<()> {
     validate_link_requirements(&manifest.requires.links, &key_re)?;
     validate_link_requirements(&manifest.requires.optional_links, &key_re)?;
     Ok(())
-}
-
-pub fn validate_deployment_template_file(
-    repo_root: &Path,
-    set_path: &Path,
-) -> Result<DeploymentTemplate> {
-    validate_set_path(repo_root, set_path)?;
-    let text = fs::read_to_string(repo_root.join(set_path))?;
-    let set: DeploymentTemplate = serde_yaml::from_str(&text)?;
-    validate_deployment_template(&set)?;
-    validate_deployment_template_references(repo_root, &set)?;
-    Ok(set)
-}
-
-pub fn validate_deployment_template_references(
-    repo_root: &Path,
-    set: &DeploymentTemplate,
-) -> Result<()> {
-    let service_manifests = discover_service_manifests(repo_root)?;
-    let service_ids = service_manifests
-        .iter()
-        .map(|service| service.id.as_str())
-        .collect::<HashSet<_>>();
-    let set_service_ids = set
-        .services
-        .iter()
-        .map(DeploymentTemplateService::id)
-        .collect::<HashSet<_>>();
-    for service in &set.services {
-        ensure(
-            service_ids.contains(service.id()),
-            &format!("set references missing service {}", service.id()),
-        )?;
-    }
-    for endpoint in &set.default_endpoints {
-        ensure(
-            set_service_ids.contains(endpoint.service.as_str()),
-            "default endpoint service is not in set",
-        )?;
-        ensure(
-            service_ids.contains(endpoint.service.as_str()),
-            &format!(
-                "default endpoint references missing service {}",
-                endpoint.service
-            ),
-        )?;
-    }
-    for link in &set.default_links {
-        ensure(
-            service_ids.contains(link.from.as_str()) && service_ids.contains(link.to.as_str()),
-            &format!(
-                "default link references missing service {} -> {}",
-                link.from, link.to
-            ),
-        )?;
-    }
-    for service in &set.services {
-        let Some(manifest) = service_manifests
-            .iter()
-            .find(|manifest| manifest.id == service.id())
-        else {
-            continue;
-        };
-        for required_link in &manifest.requires.links {
-            let target = required_link.id.as_str();
-            if set_service_ids.contains(target) {
-                ensure(
-                    set.default_links.iter().any(|link| {
-                        link.from == manifest.id
-                            && link.to == target
-                            && link_protocol_matches(&link.protocol, &required_link.protocol)
-                    }),
-                    &format!(
-                        "set default_links must cover required link {} -> {}",
-                        manifest.id, target
-                    ),
-                )?;
-            } else {
-                ensure(
-                    set_declares_external_required_link(set, &manifest.id, target),
-                    &format!(
-                        "set policies.network.required_external_links must cover required link {} -> {}",
-                        manifest.id, target
-                    ),
-                )?;
-            }
-        }
-    }
-    validate_operation_order(
-        &set.operations.install_order,
-        &set_service_ids,
-        "install_order",
-    )?;
-    validate_operation_order(&set.operations.start_order, &set_service_ids, "start_order")?;
-    validate_operation_order(&set.operations.stop_order, &set_service_ids, "stop_order")?;
-    Ok(())
-}
-
-fn link_protocol_matches(set_protocol: &str, required_protocol: &str) -> bool {
-    set_protocol.trim().is_empty()
-        || required_protocol.trim().is_empty()
-        || set_protocol.eq_ignore_ascii_case(required_protocol)
-}
-
-fn set_declares_external_required_link(set: &DeploymentTemplate, from: &str, to: &str) -> bool {
-    set.policies
-        .get("network")
-        .and_then(|network| network.get("required_external_links"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|item| item.trim() == format!("{from} -> {to}"))
 }
 
 pub fn validate_deployment_template(set: &DeploymentTemplate) -> Result<()> {
@@ -2512,113 +2329,6 @@ fn validate_link_requirements(items: &[RequiredLinkDecl], key_re: &Regex) -> Res
         )?;
     }
     Ok(())
-}
-
-fn discover_service_manifests(repo_root: &Path) -> Result<Vec<ServiceManifest>> {
-    let services_dir = repo_root.join("services");
-    let mut services = Vec::new();
-    if !services_dir.is_dir() {
-        return Err(OrchestratorError::UnsafePath(
-            "services directory is not available".to_string(),
-        ));
-    }
-    for entry in fs::read_dir(&services_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let rel = Path::new("services")
-            .join(entry.file_name())
-            .join("service.yaml");
-        if !repo_root.join(&rel).is_file() {
-            continue;
-        }
-        let manifest = validate_service_manifest_file(repo_root, &rel)?;
-        services.push(manifest);
-    }
-    Ok(services)
-}
-
-fn validate_operation_order(
-    items: &[String],
-    set_service_ids: &HashSet<&str>,
-    field_name: &str,
-) -> Result<()> {
-    let mut seen = HashSet::new();
-    for item in items {
-        ensure(
-            set_service_ids.contains(item.as_str()),
-            &format!("{field_name} references service outside set"),
-        )?;
-        if !seen.insert(item.as_str()) {
-            return Err(OrchestratorError::InvalidManifest(format!(
-                "{field_name} contains duplicate service"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_service_manifest_path(repo_root: &Path, manifest_path: &Path) -> Result<()> {
-    ensure(
-        !manifest_path.is_absolute(),
-        "service manifest path must be relative",
-    )?;
-    reject_path_components(manifest_path)?;
-    ensure(
-        manifest_path.file_name().and_then(|v| v.to_str()) == Some("service.yaml"),
-        "service manifest file must be service.yaml",
-    )?;
-    let services_dir = repo_root.join("services");
-    let full = repo_root.join(manifest_path);
-    let canonical_services = services_dir.canonicalize().map_err(|_| {
-        OrchestratorError::UnsafePath("services directory is not available".to_string())
-    })?;
-    let canonical_manifest = full
-        .canonicalize()
-        .map_err(|_| OrchestratorError::UnsafePath(sanitize_path_for_error(manifest_path)))?;
-    ensure(
-        canonical_manifest.starts_with(&canonical_services),
-        "service manifest must stay under services",
-    )
-}
-
-fn validate_release_path(repo_root: &Path, release_path: &Path) -> Result<()> {
-    ensure(!release_path.is_absolute(), "release path must be relative")?;
-    reject_path_components(release_path)?;
-    ensure(
-        release_path.file_name().and_then(|v| v.to_str()) == Some("release.yaml"),
-        "release manifest file must be release.yaml",
-    )?;
-    let services_dir = repo_root.join("services");
-    let full = repo_root.join(release_path);
-    let canonical_services = services_dir.canonicalize().map_err(|_| {
-        OrchestratorError::UnsafePath("services directory is not available".to_string())
-    })?;
-    let canonical_release = full
-        .canonicalize()
-        .map_err(|_| OrchestratorError::UnsafePath(sanitize_path_for_error(release_path)))?;
-    ensure(
-        canonical_release.starts_with(&canonical_services),
-        "release manifest must stay under services",
-    )
-}
-
-fn validate_set_path(repo_root: &Path, set_path: &Path) -> Result<()> {
-    ensure(!set_path.is_absolute(), "set path must be relative")?;
-    reject_path_components(set_path)?;
-    let sets_dir = repo_root.join("sets");
-    let full = repo_root.join(set_path);
-    let canonical_sets = sets_dir.canonicalize().map_err(|_| {
-        OrchestratorError::UnsafePath("sets directory is not available".to_string())
-    })?;
-    let canonical_set = full
-        .canonicalize()
-        .map_err(|_| OrchestratorError::UnsafePath(sanitize_path_for_error(set_path)))?;
-    ensure(
-        canonical_set.starts_with(&canonical_sets),
-        "set file must stay under sets",
-    )
 }
 
 fn reject_path_components(path: &Path) -> Result<()> {

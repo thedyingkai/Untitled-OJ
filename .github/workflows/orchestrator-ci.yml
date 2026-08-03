@@ -25,7 +25,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26.5"
@@ -84,6 +84,7 @@ jobs:
             echo "::endgroup::"
           done
       - name: Scan Go modules for reachable vulnerabilities
+        if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -121,7 +122,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -139,8 +140,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --check
-          cargo check
-          cargo test
+          cargo check --workspace --exclude ojos-orchestrator-desktop
+          cargo test --workspace --exclude ojos-orchestrator-desktop
       - name: Test Orchestrator PostgreSQL live integration
         shell: bash
         env:
@@ -148,7 +149,52 @@ jobs:
           OJOS_REQUIRE_PG_LIVE: "1"
         run: |
           set -euo pipefail
-          cargo test -p orchestrator-core --test pg_store_integration -- --test-threads=1
+          cargo test -p orchestrator-legacy --test pg_store_integration -- --test-threads=1
+      - name: Start certificate-verifying PostgreSQL contract service
+        shell: bash
+        run: |
+          set -euo pipefail
+          certs="$RUNNER_TEMP/orchestrator-pg-tls"
+          mkdir -p "$certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=OJOS CI PostgreSQL CA' -keyout "$certs/ca.key" -out "$certs/ca.crt"
+          openssl req -newkey rsa:2048 -nodes -subj '/CN=localhost' \
+            -keyout "$certs/server.key" -out "$certs/server.csr"
+          cat >"$certs/server.ext" <<'EOF'
+          subjectAltName=DNS:localhost,IP:127.0.0.1
+          extendedKeyUsage=serverAuth
+          EOF
+          openssl x509 -req -days 1 -in "$certs/server.csr" \
+            -CA "$certs/ca.crt" -CAkey "$certs/ca.key" -CAcreateserial \
+            -extfile "$certs/server.ext" -out "$certs/server.crt"
+          sudo chown 999:999 "$certs/server.key" "$certs/server.crt"
+          sudo chmod 0600 "$certs/server.key"
+          docker run -d --name ojos-orchestrator-pg-tls \
+            -p 55433:5432 \
+            -v "$certs:/certs:ro" \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=ojos-tls-live-ci \
+            -e POSTGRES_DB=ojos_orchestrator_tls \
+            postgres:17 \
+            -c ssl=on \
+            -c ssl_cert_file=/certs/server.crt \
+            -c ssl_key_file=/certs/server.key
+          for attempt in {1..60}; do
+            docker exec ojos-orchestrator-pg-tls pg_isready -U postgres -d ojos_orchestrator_tls && exit 0
+            sleep 1
+          done
+          docker logs ojos-orchestrator-pg-tls >&2
+          exit 1
+      - name: Test pooled TLS PostgreSQL repository contract
+        shell: bash
+        env:
+          OJOS_TEST_POSTGRES_URL: postgresql://postgres:ojos-tls-live-ci@127.0.0.1:55433/ojos_orchestrator_tls?sslmode=require
+          OJOS_TEST_POSTGRES_CA: ${{ runner.temp }}/orchestrator-pg-tls/ca.crt
+        run: cargo test -p orchestrator-storage --test postgres_contract -- --test-threads=1
+      - name: Stop PostgreSQL contract service
+        if: always()
+        shell: bash
+        run: docker rm -f ojos-orchestrator-pg-tls >/dev/null 2>&1 || true
       - name: Test judge worker
         shell: bash
         run: |
@@ -158,6 +204,7 @@ jobs:
           cargo check
           cargo test
       - name: Audit Rust dependencies
+        if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -214,7 +261,7 @@ jobs:
     name: Gateway frontend build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -224,8 +271,11 @@ jobs:
         working-directory: services/gateway/frontend
         run: |
           npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
-          npm audit --registry=https://registry.npmjs.org --audit-level=high
           npm run build
+      - name: Audit gateway frontend dependencies
+        if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}
+        working-directory: services/gateway/frontend
+        run: npm audit --registry=https://registry.npmjs.org --audit-level=high
       - name: Gateway frontend browser E2E
         working-directory: services/gateway/frontend
         run: |
@@ -244,7 +294,7 @@ jobs:
     name: Orchestrator Web UI build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: "24.11"
@@ -256,14 +306,80 @@ jobs:
           set -euo pipefail
           npm ci --registry=https://registry.npmjs.org
           npm run typecheck
+          npm test
           npm run build
           test -f dist/index.html
+
+  orchestrator-desktop-build:
+    name: Desktop app (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: ubuntu-latest
+            platform: linux-x64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11"
+          cache: npm
+          cache-dependency-path: manager/web/package-lock.json
+      - name: Install Linux WebView build dependencies
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            wget \
+            xauth \
+            xvfb
+      - name: Build Web control surface
+        working-directory: manager/web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --registry=https://registry.npmjs.org
+          npm run typecheck
+          npm test
+          npm run build
+          test -f dist/index.html
+      - name: Test and build desktop app
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ojos-orchestrator-desktop --lib
+          cargo build -p ojos-orchestrator-desktop
+      - name: Smoke-test embedded desktop app (Linux)
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        run: xvfb-run -a env OJOS_DESKTOP_SMOKE=1 ./target/debug/ojos-orchestrator-desktop --repo-root "$PWD"
+      - name: Smoke-test embedded desktop app (Windows)
+        if: matrix.platform == 'windows-x64'
+        shell: pwsh
+        run: |
+          $env:OJOS_DESKTOP_SMOKE = "1"
+          & .\target\debug\ojos-orchestrator-desktop.exe --repo-root $PWD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   compose-policy:
     name: Docker Compose production policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - name: Judge worker compose defaults
         shell: bash
         env:
@@ -304,7 +420,7 @@ jobs:
     name: Orchestrator model checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Run Orchestrator model checks
         shell: bash

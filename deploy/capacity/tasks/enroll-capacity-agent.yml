@@ -1,0 +1,108 @@
+- name: Detect whether the controller issued a code for this Node
+  ansible.builtin.stat:
+    path: "{{ capacity_fixture_output_dir }}/enrollment/capacity-node-{{ '%02d' | format(capacity_worker_ordinal | int) }}-{{ '%02d' | format(capacity_engine_ordinal) }}.code"
+  delegate_to: localhost
+  become: false
+  register: controller_enrollment_code
+  no_log: true
+
+- name: Require either an installed identity or its controller enrollment code
+  ansible.builtin.assert:
+    that:
+      - identity_files.results[capacity_engine_ordinal].stat.exists or controller_enrollment_code.stat.exists
+    fail_msg: >-
+      Agent {{ capacity_engine_ordinal }} has neither current.json nor its
+      controller-issued enrollment code; refusing to invent or skip identity state.
+
+- name: Enroll one Agent with its isolated one-time code
+  block:
+    - name: Stage the code only in this Agent state directory
+      ansible.builtin.copy:
+        src: "{{ capacity_fixture_output_dir }}/enrollment/capacity-node-{{ '%02d' | format(capacity_worker_ordinal | int) }}-{{ '%02d' | format(capacity_engine_ordinal) }}.code"
+        dest: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code"
+        owner: "10004"
+        group: "10004"
+        mode: "0600"
+      when: controller_enrollment_code.stat.exists
+      no_log: true
+
+    - name: Redeem this code into the matching Agent mTLS identity
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - /opt/ojos/capacity/worker
+          - -f
+          - /opt/ojos/capacity/worker/compose.yml
+          - run
+          - --rm
+          - --no-deps
+          - --volume
+          - "/var/lib/ojos/capacity/agents/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code:/run/secrets/enrollment-code:ro"
+          - "agent-{{ '%02d' | format(capacity_engine_ordinal) }}"
+          - enroll
+          - --control-plane
+          - "{{ capacity_control_plane_api_url }}"
+          - --enrollment-code-file
+          - /run/secrets/enrollment-code
+          - --ca
+          - /run/secrets/control-plane-ca.pem
+          - --identity-dir
+          - /var/lib/ojos-agent/identity
+          - --expected-node-id
+          - "capacity-node-{{ '%02d' | format(capacity_worker_ordinal | int) }}-{{ '%02d' | format(capacity_engine_ordinal) }}"
+      when: controller_enrollment_code.stat.exists
+      register: enroll_agent
+      until: enroll_agent is succeeded
+      retries: 30
+      delay: 5
+      no_log: true
+
+    - name: Parse the enrollment command result before consuming its controller code
+      ansible.builtin.set_fact:
+        capacity_enrollment_result: "{{ enroll_agent.stdout | from_json }}"
+      when: controller_enrollment_code.stat.exists
+      no_log: true
+
+    - name: Prove the enrollment result is bound to this exact Agent
+      ansible.builtin.assert:
+        that:
+          - capacity_enrollment_result is mapping
+          - capacity_enrollment_result.status in ['ENROLLED', 'RECOVERED']
+          - capacity_enrollment_result.node_id == 'capacity-node-' ~ ('%02d' | format(capacity_worker_ordinal | int)) ~ '-' ~ ('%02d' | format(capacity_engine_ordinal))
+          - capacity_enrollment_result.spiffe_id == 'spiffe://ojos.local/node/' ~ capacity_enrollment_result.node_id
+          - capacity_enrollment_result.serial_hex is string
+          - capacity_enrollment_result.serial_hex is match('^[0-9a-f]{1,128}$')
+          - capacity_enrollment_result.not_after_ms is integer
+          - capacity_enrollment_result.renew_after_ms is integer
+          - capacity_enrollment_result.renew_after_ms > 0
+          - capacity_enrollment_result.not_after_ms > capacity_enrollment_result.renew_after_ms
+          - capacity_enrollment_result.identity_dir == '/var/lib/ojos-agent/identity'
+        fail_msg: >-
+          Enrollment command returned success without a complete result bound to
+          this Agent; preserving the controller code for a safe exact retry.
+      when: controller_enrollment_code.stat.exists
+      no_log: true
+
+    - name: Remove this Agent staged code immediately after enrollment
+      ansible.builtin.file:
+        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code"
+        state: absent
+      when: controller_enrollment_code.stat.exists
+      no_log: true
+
+    - name: Remove this Agent controller code immediately after enrollment
+      ansible.builtin.file:
+        path: "{{ capacity_fixture_output_dir }}/enrollment/capacity-node-{{ '%02d' | format(capacity_worker_ordinal | int) }}-{{ '%02d' | format(capacity_engine_ordinal) }}.code"
+        state: absent
+      delegate_to: localhost
+      become: false
+      when: controller_enrollment_code.stat.exists
+      no_log: true
+  always:
+    - name: Erase this Agent staged code after any interrupted enrollment
+      ansible.builtin.file:
+        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code"
+        state: absent
+      no_log: true

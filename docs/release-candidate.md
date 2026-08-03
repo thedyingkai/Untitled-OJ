@@ -1,41 +1,48 @@
-# 发布候选判定
+# Orchestrator v1.0 发布候选判定
 
-## 当前结论
+## 当前结论：NO-GO
 
-截至 2026-08-02，本轮重构保持 `NO-GO`。代码基线
-`2a0d647ad47ccbd1b1834de95b38e55b2ef98229` 已通过常规 CI 和 push 范围的 Docker E2E，但还没有
-同一 SHA 的 Staging、Ops Drills 和全量容器演练证据。
+当前源码已经达到 v1 功能候选状态，发布 workflow 也已编码功能、升级、容量和制品门禁；但尚无一个冻结 commit 同时满足全部外部证据。因此不能创建或宣称 `v1.0.0` GA。
 
-`v0.1.0-alpha` 所在的 `875586ff92324d8d936d71f35c24cb0f1ad494f5` 只保留为历史发布基线，不能替代本轮证据。
+`Cargo.toml`、Desktop、Web 和 Service/Release manifest 中的 `1.0.0` 是候选版本一致性要求，不是发布证明。历史 `v0.1.0-alpha` 及任何旧 commit 的绿色 workflow 不能替代当前候选。
 
-## 判定依据
+## 功能候选判定
 
-| 项目 | 当前证据 | 判定 |
+| 范围 | 当前判定 | 说明 |
 | --- | --- | --- |
-| Rust workspace 与 judge-worker | [Orchestrator CI 30746067945](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067945) 通过 workspace、PostgreSQL live、judge-worker、依赖审计和严格 nsjail 测试 | 当前代码基线通过 |
-| Go services | 同一 run 的七个 module test 与 `govulncheck` 通过；`go vet` 已在本地通过 | 当前代码基线通过 |
-| Orchestrator Web UI | 同一 run 的 typecheck 与 build 通过；依赖审计已在本地通过 | 当前代码基线通过 |
-| Gateway frontend | 同一 run 的 typecheck、build、依赖审计和 Playwright E2E 通过，artifact 已上传 | 当前代码基线通过 |
-| 生产策略与 Manager 冒烟 | CI 生产策略 job 与 Docker E2E 的 production ops gates 通过；Manager 冒烟在本地通过 | 当前 SHA 仍缺 Ops Drills 中的远端 Manager 冒烟 |
-| Staging Drill | [30717233049](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30717233049) 在 `875586f` 上通过 | 没有本轮 SHA 的证据 |
-| Ops Drills Nightly | [30718434686](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30718434686) 在旧 SHA 上失败 | 告警演练失败，Manager 冒烟未运行；本轮未重跑 |
-| Orchestrator Docker E2E | [30746067935](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067935) 在 `2a0d647` 上成功 | push 模式跳过镜像、trace 与 load/soak，不能替代全量演练 |
-| 运行资产 | Orchestrator 镜像和 bundle 不携带完整业务服务源码、Compose 文件或业务镜像 | local-process/container 生命周期不能仅靠当前 bundle 完成 |
-| 容量与 HA | 只有短时 load/soak 冒烟；没有正式 HA/failover 证据 | 不满足稳定生产发布 |
+| 正式契约 | 已实现 | `/api/v1`、OpenAPI、published action/RBAC、Problem Details、幂等、cursor、ETag 和 SSE 已进入自动契约。 |
+| 持久化与并发 | 已实现 | Desktop SQLite、生产 PostgreSQL TLS pool、schema checksum、单主动锁、持久 Job/Operation、恢复和有界过载均有实现与契约测试。 |
+| Node/runtime | 已实现 | mTLS pull Agent、本地 ledger、Docker Engine API、完整 deployment 生命周期及崩溃恢复路径已有测试入口。 |
+| Store | 已实现 | Catalog v2、OCI digest、安装默认启动、健康提升、升级/回滚/卸载、补偿和 provider fail-fast 已接入 v1。 |
+| Topology | 已实现 | immutable revision、确定性 diff、validate/apply/rollback、Status/drift、并发冲突和 UI state 已接入 v1。 |
+| Desktop/Web/TUI | 已实现 | Tauri 内嵌 WebView/loopback backend/Agent，远程 OIDC Web、Device Flow TUI 和 published action 能力等价已经落地。 |
+| 运维与发布工具 | 已实现 | preflight、live/ready、指标、日志保留、备份恢复、容量 runner、兼容构建和多平台打包/签名 workflow 已存在。 |
 
-完整证据和密钥要求见 [生产就绪证据](production-readiness.md)。
+“已实现”仅表示代码和自动化入口具备，仍须由待发布 commit 的 CI 与候选环境复验。
 
-## 晋级条件
+## 阻止 GO 的两项外部证据
 
-发布候选至少满足以下条件：
+| 门禁 | 当前状态 | GO 条件 |
+| --- | --- | --- |
+| 同 commit 生产规模 + 24h | 缺失 | production profile 报告证明 100 Nodes、2,000 Deployments、10,000 Endpoint+Link、50 并发 Operations、全部 p95/恢复阈值及完整 24 小时稳定性，并通过 commit 绑定校验。 |
+| 签名多平台 GA 制品 | 尚未生成/发布 | Windows MSI/ZIP 与 Linux DEB/AppImage/tar.gz 及 SHA256、SPDX SBOM、provenance、Sigstore bundle、attestation 全部从同一候选 commit 生成并通过布局 smoke。 |
 
-1. 记录唯一候选 commit，并冻结源码、lockfile、schema 和文档。
-2. 在该 commit 上跑通 Rust、Go、Web、Gateway 浏览器 E2E、Compose 和生产策略检查。
-3. 同一 commit 的 Staging Drill、Ops Drills Nightly 与 Orchestrator Docker E2E 全部成功，artifact 可下载。
-4. 告警触发、Manager Web/TUI 冒烟、镜像构建、trace 和 basic load/soak 都实际执行，不能因前序失败被跳过。
-5. 生产环境启用 `ORCHESTRATOR_INTERNAL_TOKEN`、`ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM=1`，并通过 `deploy/ops/preflight.sh`。
-6. 写清运行资产来源。若使用 local-process 或 container driver，目标节点必须拿到对应 binary、image、Compose 或源码目录。
+0.2.0 → 1.0.0 真实升级不再是外部未实现项。发布 contract gate 使用历史 0.2 仓储 writer
+向真实 TLS PostgreSQL 17 旧表写入数据，再由 v1 验证 migration/import、未应用 draft、
+`External/Unknown` runtime 和重启幂等；数据库与 artifact 联合备份恢复也有真实 drill。
+这些门禁已在本地通过，但候选 commit 仍须在 release CI 中重跑，任何失败都会阻止 GA build。
 
-## 即使晋级也不代表什么
+## 晋级顺序
 
-首个 beta 不声明 HA、自动 failover、容量 SLA 或 schema 级回滚。`LocalProcessDriver` 也不是生产级进程监督器。上述边界必须继续保留在发布说明中，不能用一个绿色 workflow 概括过去。
+1. 冻结唯一候选 commit；源码、schema、lockfile、workflow 和发布文档均纳入该 commit。
+2. 在该 commit 上运行 release contract/function gates，包括真实 Docker Agent 生命周期和 Web 30 分钟持续运行。
+3. 在同一 commit 上取得 production 100/2000/10000/50 + 24h 报告，并由 release workflow 重新校验。
+4. 确认该 commit 的真实持久 0.2.0 → 1.0.0 升级与联合备份恢复 gate 通过；若失败，修复后生成新候选 commit，并从第 2 步重跑。
+5. 运行 Windows/Linux GA build，下载后复核资源布局、checksum、签名、SBOM、provenance 和 attestation。
+6. 仅在上述结果全部属于同一 commit 时创建并验证 `v1.0.0` tag，发布不可变 GA assets，并把本页改为 GO，登记 run ID 和 artifact digest。
+
+## v1 发布声明边界
+
+即使晋级为 GO，v1 仍只声明单主动控制面、最多 100 Nodes、Docker Engine、显式节点放置和单租户运维边界；不声明 active-active、自动 failover、自动扩缩容、Kubernetes runtime、通用调度器或多租户计费。
+
+详细证据要求见 [生产就绪证据](production-readiness.md)，实际运维命令见 [Orchestrator v1.0 运维手册](orchestrator/operations-v1.md)。

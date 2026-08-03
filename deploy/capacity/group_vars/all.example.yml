@@ -1,0 +1,97 @@
+# Copy to an encrypted inventory/group_vars/all.yml or pass with an encrypted
+# extra-vars file. Values ending in _file/_dir are controller-local protected inputs.
+capacity_candidate_sha: "0000000000000000000000000000000000000000"
+capacity_enrollment_generation: "github-run-id-attempt"
+capacity_repo_root: "{{ playbook_dir }}/../.."
+capacity_fixture_output_dir: "{{ lookup('env', 'RUNNER_TEMP') | default('/var/tmp', true) }}/orchestrator-capacity-fixture-{{ capacity_candidate_sha }}"
+# The signed Catalog tree remains immutable and exact. Node plans, enrollment
+# material and evidence are written only to its parent workspace.
+capacity_catalog_output_dir: "{{ capacity_fixture_output_dir }}/catalog"
+
+capacity_control_plane_api_url: "https://orchestrator-capacity.example.com:8090"
+capacity_catalog_public_base_url: "https://orchestrator-capacity.example.com:8443"
+capacity_control_plane_listen_address: "0.0.0.0"
+capacity_database_listen_address: "192.0.2.10"
+
+# Every production image is repository@sha256:<64 lowercase hex>.
+capacity_control_plane_image: "registry.example/ojos/orchestrator@sha256:REPLACE"
+capacity_agent_image: "registry.example/ojos/orchestrator-agent@sha256:REPLACE"
+capacity_fixture_image: "registry.example/ojos/capacity-fixture@sha256:REPLACE"
+capacity_postgres_image: "registry.example/library/postgres@sha256:REPLACE"
+capacity_migrate_image: "registry.example/migrate/migrate@sha256:REPLACE"
+capacity_catalog_server_image: "registry.example/library/nginx@sha256:REPLACE"
+capacity_docker_engine_image: "registry.example/library/docker@sha256:REPLACE"
+
+# The three candidate repositories are private by default in GHCR. This
+# read-only package credential is used by the host Docker clients and is also
+# materialized as a strict read-only Agent credential document. The password
+# file is controller-local and must contain only the token bytes.
+capacity_registry_server: "ghcr.io"
+capacity_registry_username: "REPLACE_PACKAGE_READER"
+capacity_registry_password_file: "/protected/orchestrator-capacity/ghcr-read-token"
+
+capacity_postgres_database: ojos_orchestrator
+capacity_postgres_user: ojos_orchestrator_app
+capacity_postgres_secret_bundle_dir: "/protected/orchestrator-capacity/postgres"
+capacity_control_plane_env_file: "/protected/orchestrator-capacity/control-plane.env"
+capacity_control_plane_secret_bundle_dir: "/protected/orchestrator-capacity/control-plane"
+capacity_catalog_signing_key_file: "/protected/orchestrator-capacity/catalog-ed25519.seed.b64"
+capacity_control_plane_ca_file: "/protected/orchestrator-capacity/control-plane-ca.pem"
+capacity_catalog_ca_file: "/protected/orchestrator-capacity/catalog-ca.pem"
+# Exact JSON downloaded from the candidate image workflow only after all three
+# OCI subjects and their GitHub attestations have been verified.
+capacity_image_provenance_record_file: "/protected/orchestrator-capacity/candidate-image-provenance.json"
+
+# JSON array of argv strings. The helper must print exactly
+# {"access_token":"...","expires_at":<unix-seconds>} and never use a shell.
+capacity_token_helper_argv_json: '["/protected/bin/orchestrator-token-helper"]'
+
+# GitHub runner registration is a protected, short-lived external input.
+capacity_github_repository_url: "https://github.com/OWNER/REPOSITORY"
+capacity_github_runner_expected_version: "2.336.0"
+capacity_github_runner_archive_url: "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz"
+capacity_github_runner_archive_sha256: "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d"
+# JSON argv executed on the Ansible controller immediately before config.sh.
+# stdout must be exactly {"token":"...","expires_at":<unix-seconds>}.
+capacity_github_runner_registration_token_argv_json: '["/protected/bin/github-runner-registration-token"]'
+capacity_github_cli_version: "2.97.0"
+capacity_github_cli_archive_url: "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_amd64.tar.gz"
+capacity_github_cli_archive_sha256: "a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112"
+capacity_jq_version: "1.7.1"
+capacity_jq_binary_url: "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64"
+capacity_jq_binary_sha256: "5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5"
+capacity_runner_gate_env_file: "/protected/orchestrator-capacity/runner.env"
+capacity_runner_secret_bundle_dir: "/protected/orchestrator-capacity/runner"
+capacity_github_runner_user: ojos-runner
+capacity_github_runner_dir: /opt/actions-runner
+# Exact value written by config.sh/svc.sh to .service. This is deliberately
+# protected configuration rather than a broad actions.runner.* match.
+capacity_github_runner_expected_service_name: "actions.runner.OWNER-REPOSITORY.ojos-orchestrator-soak.service"
+capacity_environment_observer_dir: /opt/actions-runner/environment-observer
+capacity_environment_observer_inventory_file: "/protected/orchestrator-capacity/environment-inventory.yml"
+capacity_environment_observer_extra_vars_file: "/protected/orchestrator-capacity/environment-extra-vars.json"
+capacity_environment_observer_ansible_executable: /usr/bin/ansible-playbook
+capacity_environment_observer_python_executable: /usr/bin/python3
+capacity_environment_observer_token_argv_json: '["/opt/actions-runner/protected/orchestrator-token-helper"]'
+capacity_environment_observer_gate_argv_json: '["/usr/bin/python3","/opt/actions-runner/environment-observer/orchestrator-capacity-live-evidence.py","--config","/opt/actions-runner/environment-observer/config.json"]'
+capacity_restart_helper_gate_argv_json: '["/opt/actions-runner/protected/orchestrator-restart-helper"]'
+capacity_manage_environment_observer_packages: true
+capacity_environment_observer_packages:
+  - ansible-core
+
+# runner.env must contain all eight values below. The environment helper argv
+# names a protected executable/config bundle and prints only the strict JSON
+# evidence object documented in README.md; it must never print SSH/OIDC data.
+# ORCHESTRATOR_GATE_EXPECTED_RUNNER_UNIT=actions.runner.OWNER-REPOSITORY.ojos-orchestrator-soak.service
+# ORCHESTRATOR_GATE_ENVIRONMENT_ARGV_JSON=["/usr/bin/python3","/opt/actions-runner/environment-observer/orchestrator-capacity-live-evidence.py","--config","/opt/actions-runner/environment-observer/config.json"]
+# ORCHESTRATOR_GATE_RESTART_ARGV_JSON=["/opt/actions-runner/protected/orchestrator-restart-helper"]
+# ORCHESTRATOR_GATE_CONTROL_PLANE_IMAGE=registry.example/ojos/orchestrator@sha256:...
+# ORCHESTRATOR_GATE_AGENT_IMAGE=registry.example/ojos/orchestrator-agent@sha256:...
+# ORCHESTRATOR_GATE_FIXTURE_IMAGE=registry.example/ojos/capacity-fixture@sha256:...
+# ORCHESTRATOR_GATE_IMAGE_WORKFLOW_RUN_ID=123456789
+# ORCHESTRATOR_GATE_IMAGE_PROVENANCE_RECORD_SHA256=<sha256 of the exact JSON record>
+
+capacity_manage_docker_packages: true
+capacity_docker_packages:
+  - docker.io
+  - docker-compose-plugin

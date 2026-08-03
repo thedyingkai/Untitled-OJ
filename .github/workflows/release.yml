@@ -1,125 +1,1035 @@
-name: Release Alpha
+name: Orchestrator v1 signed candidate
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: Exact semantic version to build or promote
+        required: true
+        default: "1.0.0"
+        type: string
+      publish:
+        description: Promote an already verified candidate without rebuilding it
+        required: true
+        default: false
+        type: boolean
+      candidate_run_id:
+        description: Successful unpublished candidate run to promote (required only when publish=true)
+        required: false
+        default: ""
+        type: string
+
+run-name: >-
+  Orchestrator v1 ${{ inputs.publish && format('promotion of run {0}', inputs.candidate_run_id) || format('candidate {0}', github.sha) }}
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-alpha-${{ github.ref }}
+  group: >-
+    orchestrator-v1-${{ inputs.publish && format('promotion-{0}', inputs.candidate_run_id) || format('candidate-{0}', github.sha) }}
   cancel-in-progress: false
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
-    name: Build ${{ matrix.platform }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            platform: windows-x64
-          - os: ubuntu-latest
-            platform: linux-x64
+  resolve-dispatch:
+    name: Resolve immutable candidate identity
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      mode: ${{ steps.resolve.outputs.mode }}
+      version: ${{ steps.resolve.outputs.version }}
+      candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}
+      candidate_run_id: ${{ steps.resolve.outputs.candidate_run_id }}
+      candidate_run_attempt: ${{ steps.resolve.outputs.candidate_run_attempt }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Validate dispatch and resolve candidate
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]] || {
+            echo "candidate construction and promotion refuse workflow reruns" >&2
+            exit 1
+          }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || {
+            echo "candidate construction and promotion must be dispatched from main" >&2
+            exit 1
+          }
+          [[ "$INPUT_VERSION" == "1.0.0" ]] || {
+            echo "this frozen v1 workflow only accepts version 1.0.0" >&2
+            exit 1
+          }
+
+          if [[ "$INPUT_PUBLISH" == "false" ]]; then
+            [[ -z "$INPUT_CANDIDATE_RUN_ID" ]] || {
+              echo "candidate_run_id must be empty when publish=false" >&2
+              exit 1
+            }
+            [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            commit_message="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" \
+              --jq '.commit.message')"
+            [[ "$commit_message" == "feat(orchestrator): freeze v1 release candidate" ]] || {
+              echo "candidate commit message is not the frozen v1 release-candidate message" >&2
+              exit 1
+            }
+            {
+              echo "mode=candidate"
+              echo "version=$INPUT_VERSION"
+              echo "candidate_sha=$GITHUB_SHA"
+              echo "candidate_run_id=$GITHUB_RUN_ID"
+              echo "candidate_run_attempt=$GITHUB_RUN_ATTEMPT"
+            } >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          [[ "$INPUT_PUBLISH" == "true" ]] || exit 1
+          [[ "$INPUT_CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "publish=true requires a numeric candidate_run_id" >&2
+            exit 1
+          }
+          [[ "$INPUT_CANDIDATE_RUN_ID" != "$GITHUB_RUN_ID" ]] || exit 1
+          run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$INPUT_CANDIDATE_RUN_ID")"
+          [[ "$(jq -r '.name' <<<"$run_json")" == "Orchestrator v1 signed candidate" ]]
+          [[ "$(jq -r '.path' <<<"$run_json")" == ".github/workflows/release.yml" ]]
+          [[ "$(jq -r '.event' <<<"$run_json")" == "workflow_dispatch" ]]
+          [[ "$(jq -r '.head_branch' <<<"$run_json")" == "main" ]]
+          [[ "$(jq -r '.status' <<<"$run_json")" == "completed" ]]
+          [[ "$(jq -r '.conclusion' <<<"$run_json")" == "success" ]]
+          [[ "$(jq -r '.run_attempt' <<<"$run_json")" == "1" ]] || {
+            echo "selected candidate run is a rerun and cannot be promoted" >&2
+            exit 1
+          }
+          candidate_sha="$(jq -r '.head_sha' <<<"$run_json")"
+          [[ "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          {
+            echo "mode=promotion"
+            echo "version=$INPUT_VERSION"
+            echo "candidate_sha=$candidate_sha"
+            echo "candidate_run_id=$INPUT_CANDIDATE_RUN_ID"
+            echo "candidate_run_attempt=1"
+          } >>"$GITHUB_OUTPUT"
+
+  candidate-gates:
+    name: Same-commit functional and recovery gates
+    if: needs.resolve-dispatch.outputs.mode == 'candidate'
+    needs: resolve-dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      OJOS_BUILD_COMMIT: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11"
+          cache: npm
+          cache-dependency-path: manager/web/package-lock.json
+      - name: Install Desktop WebView test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libayatana-appindicator3-dev librsvg2-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libxdo-dev xauth xvfb
+      - name: Start certificate-verifying PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          certs="$RUNNER_TEMP/orchestrator-release-pg-tls"
+          mkdir -p "$certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=OJOS Release PostgreSQL CA' \
+            -keyout "$certs/ca.key" -out "$certs/ca.crt"
+          openssl req -newkey rsa:2048 -nodes -subj '/CN=localhost' \
+            -keyout "$certs/server.key" -out "$certs/server.csr"
+          cat >"$certs/server.ext" <<'EOF'
+          subjectAltName=DNS:localhost,IP:127.0.0.1
+          extendedKeyUsage=serverAuth
+          EOF
+          openssl x509 -req -days 1 -in "$certs/server.csr" \
+            -CA "$certs/ca.crt" -CAkey "$certs/ca.key" -CAcreateserial \
+            -extfile "$certs/server.ext" -out "$certs/server.crt"
+          sudo chown 999:999 "$certs/server.key" "$certs/server.crt"
+          sudo chmod 0600 "$certs/server.key"
+          docker run -d --name ojos-release-pg-tls -p 55434:5432 \
+            -v "$certs:/certs:ro" \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=ojos-release-pg-ci \
+            -e POSTGRES_DB=ojos_orchestrator_release \
+            postgres:17 \
+            -c ssl=on -c ssl_cert_file=/certs/server.crt \
+            -c ssl_key_file=/certs/server.key
+          for attempt in {1..60}; do
+            docker exec ojos-release-pg-tls \
+              pg_isready -U postgres -d ojos_orchestrator_release && exit 0
+            sleep 1
+          done
+          docker logs ojos-release-pg-tls >&2
+          exit 1
+      - name: Historical 0.2 to v1 TLS migration drill
+        shell: bash
+        env:
+          ORCHESTRATOR_DATABASE_URL: postgresql://postgres:ojos-release-pg-ci@127.0.0.1:55434/ojos_orchestrator_release?sslmode=disable
+          OJOS_CONFIRM_V0_2_UPGRADE_FIXTURE: write-v0-2-upgrade-fixture
+          OJOS_TEST_POSTGRES_UPGRADE_URL: postgresql://postgres:ojos-release-pg-ci@127.0.0.1:55434/ojos_orchestrator_release?sslmode=require
+          OJOS_TEST_POSTGRES_CA: ${{ runner.temp }}/orchestrator-release-pg-tls/ca.crt
+        run: |
+          set -euo pipefail
+          docker exec -i ojos-release-pg-tls \
+            psql -v ON_ERROR_STOP=1 -U postgres -d ojos_orchestrator_release \
+            < services/orchestrator/migrations/000001_orchestrator_schema.up.sql
+          cargo run -p orchestrator-legacy --features legacy-0_2 \
+            --bin ojos-orchestrator-v0-2-upgrade-fixture
+          cargo test -p orchestrator-storage --test postgres_contract \
+            postgres_upgrade_from_v0_2_writer_when_configured \
+            -- --exact --test-threads=1
+      - name: Real PostgreSQL and artifact backup/restore drill
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec ojos-release-pg-tls \
+            createdb -U postgres ojos_orchestrator_backup_restore_drill
+          docker run --rm --network host \
+            -v "$PWD:/workspace" -w /workspace \
+            -v "$RUNNER_TEMP/orchestrator-release-pg-tls:/certs:ro" \
+            -e 'ORCHESTRATOR_DRILL_DATABASE_URL=postgresql://postgres:ojos-release-pg-ci@127.0.0.1:55434/ojos_orchestrator_backup_restore_drill?sslmode=verify-full&sslrootcert=/certs/ca.crt' \
+            -e OJOS_EVIDENCE_DIR=artifacts/orchestrator-release-recovery \
+            postgres:17 \
+            bash deploy/ops/tests/orchestrator-backup-restore-drill.sh
+      - name: Rust, Web, TUI and operations contract gates
+        shell: bash
+        env:
+          OJOS_TEST_POSTGRES_URL: postgresql://postgres:ojos-release-pg-ci@127.0.0.1:55434/ojos_orchestrator_release?sslmode=require
+          OJOS_TEST_POSTGRES_CA: ${{ runner.temp }}/orchestrator-release-pg-tls/ca.crt
+        run: |
+          set -euo pipefail
+          grep -q '^version = "1.0.0"$' Cargo.toml
+          grep -q '"version": "1.0.0"' manager/desktop/tauri.conf.json
+          grep -q '^version: 1.0.0$' services/orchestrator/service.yaml
+          grep -q '^version: 1.0.0$' services/orchestrator/release.yaml
+          node -e "const p=require('./manager/web/package.json'); const l=require('./manager/web/package-lock.json'); if(p.version !== '1.0.0' || l.version !== '1.0.0' || l.packages[''].version !== '1.0.0') process.exit(1)"
+          cargo fmt --all -- --check
+          cargo test -p orchestrator-storage -- --test-threads=1
+          unset OJOS_TEST_POSTGRES_URL OJOS_TEST_POSTGRES_CA
+          cargo test --workspace --all-targets
+          npm --prefix manager/web ci --registry=https://registry.npmjs.org
+          npm --prefix manager/web run typecheck
+          npm --prefix manager/web test
+          npm --prefix manager/web run build
+          python3 -m unittest discover -s deploy/ops/tests -p 'test_*.py'
+          bash deploy/ops/orchestrator-docker-agent-e2e.sh
+      - name: Continuous real Desktop WebView and Playwright anti-freeze flow
+        working-directory: manager/web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx playwright install --with-deps chromium
+          cargo build -p ojos-orchestrator-desktop
+          desktop_log="$RUNNER_TEMP/orchestrator-desktop-soak.log"
+          desktop_data="$RUNNER_TEMP/orchestrator-desktop-soak-data"
+          mkdir -p "$desktop_data"
+          (
+            cd "$GITHUB_WORKSPACE"
+            timeout 1860s xvfb-run -a env \
+              OJOS_DESKTOP_SMOKE=1 \
+              OJOS_DESKTOP_SMOKE_DURATION_MS=1800000 \
+              ./target/debug/ojos-orchestrator-desktop \
+              --repo-root "$GITHUB_WORKSPACE" \
+              --data-dir "$desktop_data"
+          ) >"$desktop_log" 2>&1 &
+          desktop_pid=$!
+          OJOS_E2E_SOAK_MS=1800000 npm run test:e2e &
+          playwright_pid=$!
+          cleanup() {
+            kill "$desktop_pid" "$playwright_pid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          first_status=0
+          if wait -n -p finished_pid "$desktop_pid" "$playwright_pid"; then
+            first_status=0
+          else
+            first_status=$?
+          fi
+          if [[ "$first_status" -ne 0 ]]; then
+            cleanup
+            wait "$desktop_pid" >/dev/null 2>&1 || true
+            wait "$playwright_pid" >/dev/null 2>&1 || true
+            cat "$desktop_log" >&2
+            exit "$first_status"
+          fi
+          if [[ "$finished_pid" == "$desktop_pid" ]]; then
+            wait "$playwright_pid"
+          else
+            wait "$desktop_pid"
+          fi
+          trap - EXIT
+      - name: Stop PostgreSQL
+        if: always()
+        shell: bash
+        run: docker rm -f ojos-release-pg-tls >/dev/null 2>&1 || true
+      - name: Upload recovery drill evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: orchestrator-v1-candidate-recovery-evidence
+          path: artifacts/orchestrator-release-recovery
+          if-no-files-found: warn
+          retention-days: 90
+
+  production-evidence:
+    name: Download complete same-commit production report and sidecars
+    if: needs.resolve-dispatch.outputs.mode == 'candidate'
+    needs: resolve-dispatch
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      capacity_run_id: ${{ steps.evidence.outputs.capacity_run_id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+          persist-credentials: false
+      - name: Select and validate complete production evidence v2
+        id: evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMMIT: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/capacity-runs
+          mapfile -t run_ids < <(
+            gh run list --workflow orchestrator-capacity.yml \
+              --branch main --commit "$EXPECTED_COMMIT" --status success --limit 100 \
+              --json databaseId --jq '.[].databaseId'
+          )
+          [[ "${#run_ids[@]}" -gt 0 ]] || {
+            echo "no successful production capacity workflow exists for $EXPECTED_COMMIT" >&2
+            exit 1
+          }
+          accepted_run=""
+          for run_id in "${run_ids[@]}"; do
+            run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            if [[ "$(jq -r '.run_attempt' <<<"$run_json")" != "1" ||
+                  "$(jq -r '.head_sha' <<<"$run_json")" != "$EXPECTED_COMMIT" ||
+                  "$(jq -r '.name' <<<"$run_json")" != "Orchestrator capacity and soak gate" ||
+                  "$(jq -r '.event' <<<"$run_json")" != "workflow_dispatch" ||
+                  "$(jq -r '.head_branch' <<<"$run_json")" != "main" ||
+                  "$(jq -r '.status' <<<"$run_json")" != "completed" ||
+                  "$(jq -r '.conclusion' <<<"$run_json")" != "success" ]]; then
+              continue
+            fi
+            destination="artifacts/capacity-runs/$run_id"
+            mkdir -p "$destination"
+            if ! gh run download "$run_id" \
+              --name orchestrator-capacity-production --dir "$destination"; then
+              rm -rf -- "$destination"
+              continue
+            fi
+            report="$destination/orchestrator-capacity-production.json"
+            [[ -s "$report" ]] || continue
+            if ! python3 deploy/ops/validate-orchestrator-ga-evidence.py \
+              "$report" --expected-commit "$EXPECTED_COMMIT"; then
+              continue
+            fi
+            REPORT="$report" python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          report = pathlib.Path(os.environ["REPORT"])
+          value = json.loads(report.read_text(encoding="utf-8"))
+          index = value.get("logs", {}).get("index", [])
+          expected = {
+              "capacity_events_ndjson",
+              "prometheus_snapshots_ndjson",
+              "environment_observations_ndjson",
+          }
+          actual = {item.get("kind") for item in index if isinstance(item, dict)}
+          if len(index) != 3 or actual != expected:
+              raise SystemExit(f"capacity sidecar index mismatch: {actual}")
+          for item in index:
+              name = item.get("path")
+              if not isinstance(name, str) or pathlib.Path(name).name != name:
+                  raise SystemExit("capacity sidecar path must be a local basename")
+              sidecar = report.parent / name
+              if not sidecar.is_file() or sidecar.stat().st_size <= 0:
+                  raise SystemExit(f"capacity sidecar is missing or empty: {name}")
+          PY
+            rm -rf -- artifacts/accepted-capacity
+            cp -R "$destination" artifacts/accepted-capacity
+            accepted_run="$run_id"
+            break
+          done
+          [[ -n "$accepted_run" ]] || {
+            echo "no complete same-commit report plus sidecars passed validation" >&2
+            exit 1
+          }
+          echo "capacity_run_id=$accepted_run" >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: orchestrator-v1-production-evidence
+          path: artifacts/accepted-capacity
+          if-no-files-found: error
+          retention-days: 90
+
+  build-windows:
+    name: Build and Authenticode-sign Windows candidate
+    if: needs.resolve-dispatch.outputs.mode == 'candidate'
+    needs: [resolve-dispatch, candidate-gates, production-evidence]
+    runs-on: windows-latest
+    timeout-minutes: 90
+    environment: orchestrator-rc-signing
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      OJOS_BUILD_COMMIT: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+      OJOS_RELEASE_VERSION: ${{ needs.resolve-dispatch.outputs.version }}
+      OJOS_RELEASE_CHANNEL: ga
+      OJOS_RELEASE_PLATFORM: windows-x64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v6
         with:
           node-version: "24.11"
           cache: npm
           cache-dependency-path: manager/web/package-lock.json
-
-      - name: Build orchestrator binaries
+      - uses: anchore/sbom-action/download-syft@v0.20.8
+      - name: Test structured Authenticode timestamp parser fixtures
+        shell: pwsh
+        run: >-
+          pwsh -NoProfile -File
+          deploy/ops/tests/test-authenticode-timestamp.ps1
+      - name: Install pinned Tauri CLI
+        shell: bash
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build Web, four executables and Desktop without a bundle
         shell: bash
         run: |
           set -euo pipefail
-          # egui GUI 已删除；两个平台都只出 daemon + TUI，图形入口是 daemon 托管的 Web UI。
-          cargo build --release -p ojos-orchestrator-daemon -p ojos-orchestrator-tui
-
-      # Web UI 是编排器的图形主入口，bundle 必须带上它的构建产物，
-      # 否则解压运行后打开 8090 只有引导页。
-      - name: Build orchestrator Web UI
-        shell: bash
-        working-directory: manager/web
-        run: |
-          set -euo pipefail
-          npm ci --registry=https://registry.npmjs.org
-          npm run typecheck
-          npm run build
-          test -f dist/index.html
-
-      - name: Package alpha artifacts
-        shell: bash
-        env:
-          OJOS_ALPHA_VERSION: ${{ github.ref_name }}
-          OJOS_ALPHA_PLATFORM: ${{ matrix.platform }}
-          OJOS_ALPHA_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
-        run: bash deploy/release/pack-alpha.sh
-
-      - name: Upload platform bundle
-        uses: actions/upload-artifact@v7
+          npm --prefix manager/web ci --registry=https://registry.npmjs.org
+          npm --prefix manager/web run build
+          cargo build --release -p ojos-orchestrator-daemon
+          cargo build --release -p ojos-orchestrator-tui
+          cargo build --release -p orchestrator-agent --bin ojos-orchestrator-agent
+          (cd manager/desktop && cargo tauri build --no-bundle)
+          for name in \
+            ojos-orchestrator-daemon.exe \
+            ojos-orchestrator-tui.exe \
+            ojos-orchestrator-agent.exe \
+            ojos-orchestrator-desktop.exe; do
+            test -s "target/release/$name"
+          done
+          test -s target/release/WebView2Loader.dll
+      - name: Authenticate to Azure with GitHub OIDC
+        uses: azure/login@v3
         with:
-          name: bundle-${{ matrix.platform }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Authenticode-sign daemon, TUI, Agent and Desktop executables
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files: |
+            ${{ github.workspace }}\target\release\ojos-orchestrator-daemon.exe
+            ${{ github.workspace }}\target\release\ojos-orchestrator-tui.exe
+            ${{ github.workspace }}\target\release\ojos-orchestrator-agent.exe
+            ${{ github.workspace }}\target\release\ojos-orchestrator-desktop.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Bundle the MSI from the signed Desktop executable
+        id: msi
+        shell: pwsh
+        run: |
+          Push-Location manager/desktop
+          try {
+            cargo tauri bundle --bundles msi
+            if ($LASTEXITCODE -ne 0) { throw "Tauri MSI bundle failed" }
+          }
+          finally { Pop-Location }
+          $msis = @(Get-ChildItem -LiteralPath target/release/bundle/msi -Filter *.msi -File)
+          if ($msis.Count -ne 1) { throw "expected exactly one MSI, found $($msis.Count)" }
+          "path=$($msis[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - name: Authenticode-sign the MSI
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ steps.msi.outputs.path }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Package signed MSI and portable ZIP
+        shell: bash
+        run: bash deploy/release/pack-orchestrator-v1.sh
+      - name: Verify publisher, RFC3161 timestamp, MSI and portable signatures
+        shell: pwsh
+        run: |
+          $directory = "dist/orchestrator-release/$env:OJOS_RELEASE_VERSION/windows-x64/ga"
+          $msi = Join-Path $directory "ojos-orchestrator-$env:OJOS_RELEASE_VERSION-windows-x64.msi"
+          $zip = Join-Path $directory "ojos-orchestrator-$env:OJOS_RELEASE_VERSION-ga-windows-x64.zip"
+          pwsh -NoProfile -File deploy/release/verify-windows-authenticode.ps1 `
+            -BinaryDirectory target/release `
+            -MsiPath $msi `
+            -PortableZip $zip `
+            -ExpectedPublisherSubject '${{ vars.WINDOWS_PUBLISHER_SUBJECT }}' `
+            -CandidateSha '${{ needs.resolve-dispatch.outputs.candidate_sha }}' `
+            -EvidencePath artifacts/windows-authenticode.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Start signed Windows MSI and portable layouts independently
+        shell: pwsh
+        run: |
+          $directory = "dist/orchestrator-release/$env:OJOS_RELEASE_VERSION/windows-x64/ga"
+          pwsh -NoProfile -File deploy/release/smoke-orchestrator-v1-layout.ps1 `
+            -ArtifactDirectory $directory `
+            -Version $env:OJOS_RELEASE_VERSION `
+            -Channel ga
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Assert Windows primary artifact set
+        shell: bash
+        run: |
+          OJOS_REQUIRE_SIGNATURES=0 \
+            bash deploy/release/assert-orchestrator-v1-artifacts.sh \
+              "dist/orchestrator-release/$OJOS_RELEASE_VERSION/windows-x64/ga"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: orchestrator-v1-primary-windows
           path: |
-            dist/ojos-orchestrator-*-${{ matrix.platform }}.zip
-            dist/ojos-orchestrator-*-${{ matrix.platform }}.tar.gz
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/windows-x64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-windows-x64.msi
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/windows-x64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-ga-windows-x64.zip
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/windows-x64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-ga-windows-x64.spdx.json
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/windows-x64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-ga-windows-x64.provenance.json
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/windows-x64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-ga-windows-x64.SHA256SUMS
           if-no-files-found: error
-
-      # The per-service release packages are platform-independent; publish the
-      # copies built on Linux (single, reproducible set) to avoid tar metadata
-      # differences between runners.
-      - name: Upload service packages
-        if: matrix.platform == 'linux-x64'
-        uses: actions/upload-artifact@v7
+          retention-days: 30
+      - uses: actions/upload-artifact@v7
         with:
-          name: service-packages
-          path: dist/services/**
+          name: orchestrator-v1-windows-evidence
+          path: artifacts/windows-authenticode.json
           if-no-files-found: error
+          retention-days: 90
 
-  release:
-    name: Publish GitHub Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+  build-linux:
+    name: Build Linux candidate
+    if: needs.resolve-dispatch.outputs.mode == 'candidate'
+    needs: [resolve-dispatch, candidate-gates, production-evidence]
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      OJOS_BUILD_COMMIT: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+      OJOS_RELEASE_VERSION: ${{ needs.resolve-dispatch.outputs.version }}
+      OJOS_RELEASE_CHANNEL: ga
+      OJOS_RELEASE_PLATFORM: linux-x86_64
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v7
+      - uses: actions/checkout@v6
         with:
-          path: release-assets
-
-      - name: Show gathered assets
+          ref: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11"
+          cache: npm
+          cache-dependency-path: manager/web/package-lock.json
+      - name: Install Linux WebView and bundler dependencies
         shell: bash
-        run: find release-assets -type f | sort
-
-      - name: Create GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          notes="$(mktemp)"
-          cat >"$notes" <<EOF
-          OJOS Orchestrator ${{ github.ref_name }} —— alpha 预发布。
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libayatana-appindicator3-dev librsvg2-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libxdo-dev libfuse2 patchelf xauth xdg-utils xvfb
+      - name: Install pinned Tauri CLI
+        shell: bash
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - uses: anchore/sbom-action/download-syft@v0.20.8
+      - name: Build Web, binaries, DEB and AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix manager/web ci --registry=https://registry.npmjs.org
+          npm --prefix manager/web run build
+          cargo build --release -p ojos-orchestrator-daemon
+          cargo build --release -p ojos-orchestrator-tui
+          cargo build --release -p orchestrator-agent --bin ojos-orchestrator-agent
+          (cd manager/desktop && cargo tauri build --bundles deb,appimage)
+          bash deploy/release/pack-orchestrator-v1.sh
+      - name: Smoke and assert Linux artifact layouts
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="dist/orchestrator-release/$OJOS_RELEASE_VERSION/linux-x86_64/ga"
+          bash deploy/release/smoke-orchestrator-v1-layout.sh "$directory"
+          OJOS_REQUIRE_SIGNATURES=0 \
+            bash deploy/release/assert-orchestrator-v1-artifacts.sh "$directory"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: orchestrator-v1-primary-linux
+          path: |
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/linux-x86_64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-linux-x86_64.deb
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/linux-x86_64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-linux-x86_64.AppImage
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/linux-x86_64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-ga-linux-x86_64.tar.gz
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/linux-x86_64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-ga-linux-x86_64.spdx.json
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/linux-x86_64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-ga-linux-x86_64.provenance.json
+            dist/orchestrator-release/${{ needs.resolve-dispatch.outputs.version }}/linux-x86_64/ga/ojos-orchestrator-${{ needs.resolve-dispatch.outputs.version }}-ga-linux-x86_64.SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
 
-          资产：
-          - \`ojos-orchestrator-${{ github.ref_name }}-windows-x64.zip\` —— Windows 编排器（daemon / TUI）+ Web UI + 运行时数据。
-          - \`ojos-orchestrator-${{ github.ref_name }}-linux-x64.tar.gz\` —— Linux 编排器（daemon / TUI）+ Web UI + 运行时数据。
-          - \`ojos-service-<name>-${{ github.ref_name }}.tar.gz\` + \`manifest.json\` —— 可被编排器拉取下载的各 service 发布包及其 sha256。
+  attest-and-sign-primary:
+    name: Trust ${{ matrix.id }} independently
+    if: needs.resolve-dispatch.outputs.mode == 'candidate'
+    needs: [resolve-dispatch, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-msi
+            source: orchestrator-v1-primary-windows
+            template: ojos-orchestrator-{version}-windows-x64.msi
+          - id: windows-zip
+            source: orchestrator-v1-primary-windows
+            template: ojos-orchestrator-{version}-ga-windows-x64.zip
+          - id: windows-sbom
+            source: orchestrator-v1-primary-windows
+            template: ojos-orchestrator-{version}-ga-windows-x64.spdx.json
+          - id: windows-provenance
+            source: orchestrator-v1-primary-windows
+            template: ojos-orchestrator-{version}-ga-windows-x64.provenance.json
+          - id: windows-checksums
+            source: orchestrator-v1-primary-windows
+            template: ojos-orchestrator-{version}-ga-windows-x64.SHA256SUMS
+          - id: linux-deb
+            source: orchestrator-v1-primary-linux
+            template: ojos-orchestrator-{version}-linux-x86_64.deb
+          - id: linux-appimage
+            source: orchestrator-v1-primary-linux
+            template: ojos-orchestrator-{version}-linux-x86_64.AppImage
+          - id: linux-tar
+            source: orchestrator-v1-primary-linux
+            template: ojos-orchestrator-{version}-ga-linux-x86_64.tar.gz
+          - id: linux-sbom
+            source: orchestrator-v1-primary-linux
+            template: ojos-orchestrator-{version}-ga-linux-x86_64.spdx.json
+          - id: linux-provenance
+            source: orchestrator-v1-primary-linux
+            template: ojos-orchestrator-{version}-ga-linux-x86_64.provenance.json
+          - id: linux-checksums
+            source: orchestrator-v1-primary-linux
+            template: ojos-orchestrator-{version}-ga-linux-x86_64.SHA256SUMS
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.source }}
+          path: primary
+      - uses: sigstore/cosign-installer@v4.1.0
+      - name: Select exactly one primary artifact and create its Sigstore bundle
+        id: primary
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-dispatch.outputs.version }}
+          TEMPLATE: ${{ matrix.template }}
+        run: |
+          set -euo pipefail
+          name="${TEMPLATE/\{version\}/$VERSION}"
+          path="$PWD/primary/$name"
+          [[ -s "$path" ]] || { echo "missing primary artifact $name" >&2; exit 1; }
+          cosign sign-blob --yes --bundle "$path.sigstore.json" "$path"
+          [[ -s "$path.sigstore.json" ]]
+          echo "path=$path" >>"$GITHUB_OUTPUT"
+          echo "bundle=$path.sigstore.json" >>"$GITHUB_OUTPUT"
+      - name: Create a dedicated GitHub build attestation for this primary
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.primary.outputs.path }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: orchestrator-v1-signed-primary-${{ matrix.id }}
+          path: |
+            ${{ steps.primary.outputs.path }}
+            ${{ steps.primary.outputs.bundle }}
+          if-no-files-found: error
+          retention-days: 90
 
-          启动 daemon 后浏览器打开 \`http://127.0.0.1:8090/\` 即是图形主入口。
-          用法见仓库 \`docs/alpha-quickstart.md\`（下载运行编排器、按 service 看效果、拉取 service 下载）。
-          EOF
-          mapfile -t assets < <(find release-assets -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name 'manifest.json' \) | sort)
-          echo "publishing ${#assets[@]} assets"
-          gh release create "${{ github.ref_name }}" "${assets[@]}" \
-            --repo "${{ github.repository }}" \
-            --title "OJOS Orchestrator ${{ github.ref_name }}" \
-            --notes-file "$notes" \
-            --prerelease
+  assemble-candidate:
+    name: Assemble and reverify exact 22-file candidate payload
+    if: needs.resolve-dispatch.outputs.mode == 'candidate'
+    needs:
+      - resolve-dispatch
+      - production-evidence
+      - build-windows
+      - build-linux
+      - attest-and-sign-primary
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: orchestrator-v1-signed-primary-*
+          path: candidate/payload
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: orchestrator-v1-production-evidence
+          path: candidate/evidence/capacity
+      - uses: actions/download-artifact@v8
+        with:
+          name: orchestrator-v1-windows-evidence
+          path: candidate/evidence/windows
+      - uses: sigstore/cosign-installer@v4.1.0
+      - name: Create candidate evidence manifest outside the payload
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-dispatch.outputs.version }}
+          CANDIDATE_SHA: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+          CAPACITY_RUN_ID: ${{ needs.production-evidence.outputs.capacity_run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 deploy/release/orchestrator-candidate.py create \
+            --version "$VERSION" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --candidate-run-id "$GITHUB_RUN_ID" \
+            --candidate-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --capacity-run-id "$CAPACITY_RUN_ID" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-ref "$GITHUB_REF" \
+            --payload-dir candidate/payload \
+            --authenticode-evidence candidate/evidence/windows/windows-authenticode.json \
+            --capacity-evidence candidate/evidence/capacity/orchestrator-capacity-production.json \
+            --output candidate/candidate-manifest.json
+          jq -e \
+            '.status == "SECURITY_ACCEPTANCE_PENDING" and .published == false' \
+            candidate/candidate-manifest.json >/dev/null
+          bash deploy/release/verify-orchestrator-v1-trust.sh \
+            candidate/payload candidate/candidate-manifest.json \
+            "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" "$VERSION" \
+            "$GITHUB_RUN_ATTEMPT"
+          test "$(find candidate/payload -maxdepth 1 -type f | wc -l)" -eq 22
+          test ! -e candidate/payload/candidate-manifest.json
+          test ! -d candidate/payload/evidence
+      - uses: actions/upload-artifact@v7
+        id: signed-candidate-upload
+        with:
+          name: orchestrator-v1-signed-candidate
+          path: candidate
+          if-no-files-found: error
+          retention-days: 90
+      - name: Bind upload output, API artifact identity and manifest digest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.signed-candidate-upload.outputs.artifact-id }}
+          UPLOAD_ARTIFACT_DIGEST: ${{ steps.signed-candidate-upload.outputs.artifact-digest }}
+          CANDIDATE_SHA: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]]
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$UPLOAD_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          artifact_json=""
+          api_digest=""
+          for attempt in $(seq 1 6); do
+            response=""
+            if response="$(gh api \
+              "/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" \
+              2>/dev/null)"; then
+              response_digest="$(jq -r '.digest // empty' <<<"$response")"
+              if [[ "$response_digest" =~ ^sha256:[0-9a-f]{64}$ &&
+                    "$(jq -r '.id // empty' <<<"$response")" == "$ARTIFACT_ID" &&
+                    "$(jq -r '.name // empty' <<<"$response")" == "orchestrator-v1-signed-candidate" &&
+                    "$(jq -r '.expired // empty' <<<"$response")" == "false" &&
+                    "$(jq -r '.workflow_run.id // empty' <<<"$response")" == "$GITHUB_RUN_ID" &&
+                    "$(jq -r '.workflow_run.head_sha // empty' <<<"$response")" == "$CANDIDATE_SHA" ]]; then
+                artifact_json="$response"
+                api_digest="$response_digest"
+                break
+              fi
+            fi
+            if [[ "$attempt" -lt 6 ]]; then
+              sleep 5
+            fi
+          done
+          [[ -n "$artifact_json" ]] || {
+            echo "candidate artifact metadata was not complete after 6 attempts" >&2
+            exit 1
+          }
+          [[ "$(jq -r '.name' <<<"$artifact_json")" == \
+             "orchestrator-v1-signed-candidate" ]]
+          [[ "$(jq -r '.expired' <<<"$artifact_json")" == "false" ]]
+          [[ "$(jq -r '.workflow_run.id' <<<"$artifact_json")" == "$GITHUB_RUN_ID" ]]
+          [[ "$(jq -r '.workflow_run.head_sha' <<<"$artifact_json")" == "$CANDIDATE_SHA" ]]
+          [[ "$api_digest" == "sha256:$UPLOAD_ARTIFACT_DIGEST" ]] || {
+            echo "upload action and Actions API disagree on candidate artifact digest" >&2
+            exit 1
+          }
+          manifest_sha256="$(sha256sum candidate/candidate-manifest.json | awk '{print $1}')"
+          jq -n \
+            --arg candidate_sha "$CANDIDATE_SHA" \
+            --arg candidate_run_id "$GITHUB_RUN_ID" \
+            --arg candidate_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg manifest_sha256 "$manifest_sha256" \
+            --arg artifact_id "$ARTIFACT_ID" \
+            --arg artifact_digest "$api_digest" \
+            --arg upload_artifact_digest "$UPLOAD_ARTIFACT_DIGEST" \
+            '{
+              schema_version: 1,
+              candidate_sha: $candidate_sha,
+              candidate_workflow_run_id: $candidate_run_id,
+              candidate_workflow_run_attempt: ($candidate_run_attempt | tonumber),
+              candidate_manifest_sha256: $manifest_sha256,
+              candidate_artifact_id: $artifact_id,
+              candidate_artifact_server_digest: $artifact_digest,
+              upload_action_artifact_digest: $upload_artifact_digest,
+              published: false
+            }' >candidate-identity.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: orchestrator-v1-candidate-identity
+          path: candidate-identity.json
+          if-no-files-found: error
+          retention-days: 90
+
+  promote-existing-candidate:
+    name: Promote an existing verified candidate without rebuilding
+    if: needs.resolve-dispatch.outputs.mode == 'promotion'
+    needs: resolve-dispatch
+    runs-on: ubuntu-latest
+    environment: orchestrator-ga-promotion
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@v4.1.0
+      - name: Resolve and download the exact security-accepted candidate artifact
+        id: candidate-artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+          CANDIDATE_RUN_ID: ${{ needs.resolve-dispatch.outputs.candidate_run_id }}
+          ACCEPTED_SHA: ${{ vars.ORCHESTRATOR_SECURITY_ACCEPTED_CANDIDATE_SHA }}
+          ACCEPTED_RUN_ID: ${{ vars.ORCHESTRATOR_SECURITY_ACCEPTED_CANDIDATE_RUN_ID }}
+          ACCEPTED_MANIFEST_SHA256: ${{ vars.ORCHESTRATOR_SECURITY_ACCEPTED_CANDIDATE_MANIFEST_SHA256 }}
+          ACCEPTED_ARTIFACT_ID: ${{ vars.ORCHESTRATOR_SECURITY_ACCEPTED_CANDIDATE_ARTIFACT_ID }}
+          ACCEPTED_ARTIFACT_DIGEST: ${{ vars.ORCHESTRATOR_SECURITY_ACCEPTED_CANDIDATE_ARTIFACT_DIGEST }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]] || {
+            echo "candidate promotion refuses workflow reruns" >&2
+            exit 1
+          }
+          [[ "$ACCEPTED_SHA" =~ ^[0-9a-f]{40}$ && "$ACCEPTED_SHA" == "$CANDIDATE_SHA" ]] || {
+            echo "protected GA acceptance does not match the candidate SHA" >&2
+            exit 1
+          }
+          [[ "$ACCEPTED_RUN_ID" =~ ^[1-9][0-9]*$ && "$ACCEPTED_RUN_ID" == "$CANDIDATE_RUN_ID" ]] || {
+            echo "protected GA acceptance does not match the candidate workflow run" >&2
+            exit 1
+          }
+          [[ "$ACCEPTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "protected GA acceptance has no candidate manifest SHA-256" >&2
+            exit 1
+          }
+          [[ "$ACCEPTED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "protected GA acceptance has no candidate artifact id" >&2
+            exit 1
+          }
+          [[ "$ACCEPTED_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "protected GA acceptance has no candidate artifact server digest" >&2
+            exit 1
+          }
+
+          artifacts_json="$(gh api --paginate --slurp \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100")"
+          artifact_json="$(jq -cer --arg name orchestrator-v1-signed-candidate '
+            [.[].artifacts[]? | select(.name == $name)] |
+            if length == 1 then .[0]
+            else error("expected exactly one signed candidate artifact, found \(length)")
+            end
+          ' <<<"$artifacts_json")"
+          artifact_id="$(jq -r '.id // empty' <<<"$artifact_json")"
+          artifact_digest="$(jq -r '.digest // empty' <<<"$artifact_json")"
+          artifact_run_id="$(jq -r '.workflow_run.id // empty' <<<"$artifact_json")"
+          artifact_sha="$(jq -r '.workflow_run.head_sha // empty' <<<"$artifact_json")"
+          [[ "$(jq -r '.expired' <<<"$artifact_json")" == "false" ]] || {
+            echo "selected candidate artifact is expired" >&2
+            exit 1
+          }
+          [[ "$artifact_id" =~ ^[1-9][0-9]*$ && "$artifact_id" == "$ACCEPTED_ARTIFACT_ID" ]] || {
+            echo "candidate artifact id does not match protected acceptance" >&2
+            exit 1
+          }
+          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ && \
+             "$artifact_digest" == "$ACCEPTED_ARTIFACT_DIGEST" ]] || {
+            echo "candidate artifact server digest does not match protected acceptance" >&2
+            exit 1
+          }
+          [[ "$artifact_run_id" == "$CANDIDATE_RUN_ID" && "$artifact_sha" == "$CANDIDATE_SHA" ]] || {
+            echo "candidate artifact belongs to another workflow run or commit" >&2
+            exit 1
+          }
+          artifact_metadata="$(mktemp)"
+          archive=""
+          trap 'rm -f -- "$artifact_metadata" "${archive:-}"' EXIT
+          printf '%s\n' "$artifact_json" >"$artifact_metadata"
+          python3 deploy/release/orchestrator-candidate.py verify-promotion-acceptance \
+            --artifact-json "$artifact_metadata" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --candidate-run-id "$CANDIDATE_RUN_ID" \
+            --candidate-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --accepted-sha "$ACCEPTED_SHA" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" \
+            --accepted-manifest-sha256 "$ACCEPTED_MANIFEST_SHA256" \
+            --accepted-artifact-id "$ACCEPTED_ARTIFACT_ID" \
+            --accepted-artifact-digest "$ACCEPTED_ARTIFACT_DIGEST" >/dev/null
+
+          mkdir candidate
+          archive="$(mktemp)"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" >"$archive"
+          [[ -s "$archive" ]] || { echo "candidate artifact archive is empty" >&2; exit 1; }
+          archive_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+          [[ "sha256:$archive_sha256" == "$artifact_digest" ]] || {
+            echo "downloaded candidate archive does not match its server digest" >&2
+            exit 1
+          }
+          unzip -q "$archive" -d candidate
+          manifest=candidate/candidate-manifest.json
+          [[ -s "$manifest" ]] || { echo "candidate manifest is missing" >&2; exit 1; }
+          manifest_sha256="$(sha256sum "$manifest" | awk '{print $1}')"
+          [[ "$manifest_sha256" == "$ACCEPTED_MANIFEST_SHA256" ]] || {
+            echo "candidate manifest digest does not match protected acceptance" >&2
+            exit 1
+          }
+          python3 deploy/release/orchestrator-candidate.py verify-promotion-acceptance \
+            --artifact-json "$artifact_metadata" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --candidate-run-id "$CANDIDATE_RUN_ID" \
+            --candidate-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --accepted-sha "$ACCEPTED_SHA" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" \
+            --accepted-manifest-sha256 "$ACCEPTED_MANIFEST_SHA256" \
+            --accepted-artifact-id "$ACCEPTED_ARTIFACT_ID" \
+            --accepted-artifact-digest "$ACCEPTED_ARTIFACT_DIGEST" \
+            --actual-artifact-archive-sha256 "$archive_sha256" \
+            --actual-manifest-sha256 "$manifest_sha256" >/dev/null
+          {
+            echo "artifact_id=$artifact_id"
+            echo "artifact_digest=$artifact_digest"
+            echo "manifest_sha256=$manifest_sha256"
+          } >>"$GITHUB_OUTPUT"
+      - name: Reverify candidate identity, all 11 signatures and all attestations
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve-dispatch.outputs.version }}
+          CANDIDATE_SHA: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+          CANDIDATE_RUN_ID: ${{ needs.resolve-dispatch.outputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.resolve-dispatch.outputs.candidate_run_attempt }}
+        run: |
+          set -euo pipefail
+          bash deploy/release/verify-orchestrator-v1-trust.sh \
+            candidate/payload candidate/candidate-manifest.json \
+            "$CANDIDATE_SHA" "$CANDIDATE_RUN_ID" "$GITHUB_REPOSITORY" "$VERSION" \
+            "$CANDIDATE_RUN_ATTEMPT"
+          test "$(find candidate/payload -maxdepth 1 -type f | wc -l)" -eq 22
+          manifest_sha="$(jq -r '.candidate_sha' candidate/candidate-manifest.json)"
+          [[ "$manifest_sha" == "$CANDIDATE_SHA" ]]
+          jq -e \
+            '.status == "SECURITY_ACCEPTANCE_PENDING" and .published == false' \
+            candidate/candidate-manifest.json >/dev/null
+      - name: Require a pre-existing tag at the candidate commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve-dispatch.outputs.version }}
+          CANDIDATE_SHA: ${{ needs.resolve-dispatch.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          object="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object | [.type, .sha] | @tsv')"
+          IFS=$'\t' read -r type sha <<<"$object"
+          while [[ "$type" == "tag" ]]; do
+            object="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.object | [.type, .sha] | @tsv')"
+            IFS=$'\t' read -r type sha <<<"$object"
+          done
+          [[ "$type" == "commit" && "$sha" == "$CANDIDATE_SHA" ]] || {
+            echo "$tag does not already resolve to the candidate commit" >&2
+            exit 1
+          }
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists; promotion is intentionally non-overwriting" >&2
+            exit 1
+          fi
+      - name: Publish only the verified 22-file payload without creating a tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve-dispatch.outputs.version }}
+        run: |
+          set -euo pipefail
+          assets=()
+          while IFS= read -r name; do
+            assets+=("candidate/payload/$name" "candidate/payload/$name.sigstore.json")
+          done < <(python3 deploy/release/orchestrator-candidate.py list-assets --version "$VERSION")
+          [[ "${#assets[@]}" -eq 22 ]]
+          gh release create "v$VERSION" --verify-tag --draft \
+            --title "OJOS Orchestrator v$VERSION" \
+            --notes "Promoted from immutable signed candidate run ${{ needs.resolve-dispatch.outputs.candidate_run_id }} after protected GA approval." \
+            "${assets[@]}"
+          expected="$(mktemp)"
+          actual="$(mktemp)"
+          printf '%s\n' "${assets[@]##*/}" | sort >"$expected"
+          gh release view "v$VERSION" --json assets \
+            --jq '.assets[].name' | sort >"$actual"
+          diff -u "$expected" "$actual"
+          gh release edit "v$VERSION" --draft=false

@@ -1,0 +1,63 @@
+name: ojos-capacity-{{ '%02d' | format(capacity_worker_ordinal | int) }}
+services:
+{% for engine in range(0, 10) %}
+  engine-{{ '%02d' | format(engine) }}:
+    image: {{ capacity_docker_engine_image }}
+    privileged: true
+    command:
+      - --host=unix:///var/run/docker.sock
+      - --group=10004
+      - --storage-driver=overlay2
+      - --log-driver=json-file
+      - --log-opt=max-size=10m
+      - --log-opt=max-file=3
+    volumes:
+      - engine-{{ '%02d' | format(engine) }}-data:/var/lib/docker
+      - engine-{{ '%02d' | format(engine) }}-socket:/var/run
+    ports:
+{% for service_index in range(0, 20) %}
+      - "0.0.0.0:{{ 20000 + engine * 20 + service_index }}:{{ 20000 + engine * 20 + service_index }}/tcp"
+{% endfor %}
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    restart: unless-stopped
+    logging: &capacity_logging
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+
+  agent-{{ '%02d' | format(engine) }}:
+    image: {{ capacity_agent_image }}
+    user: "10004:10004"
+    command:
+      - run
+      - --control-plane
+      - {{ capacity_control_plane_api_url }}
+      - --identity-dir
+      - /var/lib/ojos-agent/identity
+      - --ledger
+      - /var/lib/ojos-agent/execution-ledger.sqlite3
+      - --registry-credentials
+      - /run/secrets/registry-credentials.json
+      - --instance
+      - capacity-node-{{ '%02d' | format(capacity_worker_ordinal | int) }}-{{ '%02d' | format(engine) }}-{{ capacity_candidate_sha[0:12] }}
+    depends_on:
+      engine-{{ '%02d' | format(engine) }}:
+        condition: service_healthy
+    volumes:
+      - engine-{{ '%02d' | format(engine) }}-socket:/var/run
+      - /var/lib/ojos/capacity/agents/{{ '%02d' | format(engine) }}:/var/lib/ojos-agent
+      - /etc/ojos/capacity/control-plane-ca.pem:/run/secrets/control-plane-ca.pem:ro
+      - /etc/ojos/capacity/registry-credentials.json:/run/secrets/registry-credentials.json:ro
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging: *capacity_logging
+{% endfor %}
+
+volumes:
+{% for engine in range(0, 10) %}
+  engine-{{ '%02d' | format(engine) }}-data:
+  engine-{{ '%02d' | format(engine) }}-socket:
+{% endfor %}

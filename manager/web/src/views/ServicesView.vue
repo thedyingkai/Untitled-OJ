@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { ref } from "vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusChip from "../components/StatusChip.vue";
 import { api } from "../api";
@@ -8,98 +8,27 @@ import type { DeploymentRow } from "../types";
 
 const store = useOrchestrator();
 const busy = ref("");
-const executeDriver = ref(false);
+type DeploymentAction = "start" | "stop" | "restart" | "uninstall";
 
-interface HostRow {
-  ip: string;
-  services: number;
-  endpoints: number;
-}
-
-/**
- * 主机清单来自明确的部署行，不再从端点字符串猜主机，也因此兼容 IPv6。
- */
-const hosts = computed<HostRow[]>(() => {
-  const grouped = new Map<string, { services: Set<string>; endpoints: number }>();
-  for (const deployment of store.deployments) {
-    if (!deployment.host_ip) continue;
-    let entry = grouped.get(deployment.host_ip);
-    if (!entry) {
-      entry = { services: new Set<string>(), endpoints: 0 };
-      grouped.set(deployment.host_ip, entry);
-    }
-    entry.endpoints += deployment.endpoint_count;
-    if (deployment.service_id) entry.services.add(deployment.service_id);
-  }
-  return [...grouped.entries()]
-    .map(([ip, entry]) => ({
-      ip,
-      services: entry.services.size,
-      endpoints: entry.endpoints,
-    }))
-    .sort((left, right) => left.ip.localeCompare(right.ip));
-});
-
-/**
- * 主机整机启停：core 的 host.start / host.stop 取 host_ip + confirm=true，
- * 走通用 POST /actions 派发。
- */
-async function hostLifecycle(action: "host.start" | "host.stop", ip: string) {
+async function lifecycle(action: DeploymentAction, deployment: DeploymentRow) {
+  const capability = `deployment.${action}`;
+  if (!store.ensureAction(capability)) return;
   if (
-    action === "host.stop" &&
-    !window.confirm(`停止主机 ${ip} 上的全部服务？该操作会中断其上所有端点。`)
-  ) {
-    return;
-  }
-  busy.value = `${action}:${ip}`;
+    (action === "stop" || action === "uninstall") &&
+    !window.confirm(
+      `${action === "stop" ? "停止" : "卸载"}部署 ${deployment.deployment_id}？`,
+    )
+  ) return;
+  busy.value = `${action}:${deployment.deployment_id}`;
   try {
-    await api.dispatchAction(action, {
-      host_ip: ip,
-      confirm: "true",
-      execute_service_driver: executeDriver.value ? "true" : "false",
-    });
-    store.toast(
-      "ok",
-      `${action === "host.start" ? "启动" : "停止"}主机 ${ip} 的动作已下发`,
-    );
-    await store.refreshCore();
+    const result = await api.deploymentAction(deployment.deployment_id, action);
+    store.toast("ok", `操作已提交：${result.operation_id}`);
+    await store.refreshCore(true);
   } catch (err) {
-    store.toast("err", `${action} 失败：${(err as Error).message}`);
+    store.toast("err", `${capability} 失败：${(err as Error).message}`);
   } finally {
     busy.value = "";
   }
-}
-
-async function lifecycle(action: string, deployment: DeploymentRow) {
-  if (!deployment.endpoint) {
-    store.toast(
-      "err",
-      `${deployment.service_id}@${deployment.host_ip} 没有登记 Endpoint，无法精确执行生命周期动作`,
-    );
-    return;
-  }
-  busy.value = `${action}:${deployment.service_id}@${deployment.host_ip}`;
-  try {
-    await api.dispatchAction(action, {
-      service_id: deployment.service_id,
-      host_ip: deployment.host_ip,
-      endpoint: deployment.endpoint,
-      version: deployment.version,
-      confirm: "true",
-      execute_service_driver: executeDriver.value ? "true" : "false",
-    });
-    store.toast("ok", `${action} 已执行`);
-    await store.refreshCore();
-  } catch (err) {
-    store.toast("err", `${action} 失败：${(err as Error).message}`);
-  } finally {
-    busy.value = "";
-  }
-}
-
-function actionTitle(deployment: DeploymentRow): string {
-  if (!deployment.endpoint) return "该部署没有登记 Endpoint，无法精确选择运行实例";
-  return executeDriver.value ? "" : "请先授权执行运行时驱动";
 }
 </script>
 
@@ -109,58 +38,6 @@ function actionTitle(deployment: DeploymentRow): string {
   </PageHeader>
 
   <div class="services-body">
-    <section class="card driver-authorization">
-      <label class="driver-check">
-        <input v-model="executeDriver" type="checkbox" :disabled="!!busy" />
-        <span>
-          <strong>授权执行运行时驱动</strong>
-          <small>
-            勾选后，启动、停止和重启会实际执行容器或本地进程命令；未勾选时这些按钮不可用。
-          </small>
-        </span>
-      </label>
-    </section>
-
-    <!-- 主机整机启停 -->
-    <section class="card host-card">
-      <div class="host-head">
-        <h3>主机</h3>
-        <span class="muted host-hint">
-          按部署记录聚合，可整机启停其上全部服务
-        </span>
-      </div>
-      <div v-if="hosts.length" class="host-list">
-        <div v-for="host in hosts" :key="host.ip" class="host-row">
-          <div class="host-info">
-            <span class="mono host-ip">{{ host.ip }}</span>
-            <span class="chip">{{ host.services }} 个服务</span>
-            <span class="muted host-sub">{{ host.endpoints }} 个端点</span>
-          </div>
-          <div class="row-actions">
-            <button
-              class="btn sm"
-              :disabled="!!busy || !executeDriver"
-              :title="executeDriver ? '' : '请先授权执行运行时驱动'"
-              @click="hostLifecycle('host.start', host.ip)"
-            >
-              启动全部
-            </button>
-            <button
-              class="btn danger sm"
-              :disabled="!!busy || !executeDriver"
-              :title="executeDriver ? '' : '请先授权执行运行时驱动'"
-              @click="hostLifecycle('host.stop', host.ip)"
-            >
-              停止全部
-            </button>
-          </div>
-        </div>
-      </div>
-      <div v-else class="muted host-empty">
-        尚无部署记录，先到商店安装模块。
-      </div>
-    </section>
-
     <div
       class="card"
       v-if="store.deployments.length"
@@ -169,15 +46,14 @@ function actionTitle(deployment: DeploymentRow): string {
       <table class="table">
         <thead>
           <tr>
+            <th>Deployment</th>
             <th>服务</th>
-            <th>主机</th>
-            <th>版本</th>
-            <th>类型</th>
+            <th>Node</th>
             <th>运行时</th>
-            <th>部署状态</th>
+            <th>期望 / 实际</th>
+            <th>制品 Digest</th>
             <th>Endpoint</th>
-            <th>最近检查</th>
-            <th>检查配置</th>
+            <th>健康</th>
             <th style="text-align: right">操作</th>
           </tr>
         </thead>
@@ -186,6 +62,7 @@ function actionTitle(deployment: DeploymentRow): string {
             v-for="deployment in store.deployments"
             :key="`${deployment.host_ip}:${deployment.service_id}`"
           >
+            <td class="mono">{{ deployment.deployment_id }}</td>
             <td>
               <div style="font-weight: 600">
                 {{ deployment.name || deployment.service_id }}
@@ -194,11 +71,16 @@ function actionTitle(deployment: DeploymentRow): string {
                 {{ deployment.service_id }}
               </div>
             </td>
-            <td class="mono">{{ deployment.host_ip }}</td>
-            <td class="mono">{{ deployment.version }}</td>
-            <td><span class="chip">{{ deployment.kind }}</span></td>
+            <td>
+              <div class="mono">{{ deployment.node_id }}</div>
+              <div class="muted" style="font-size: 11px">{{ deployment.host_ip }}</div>
+            </td>
             <td class="muted">{{ deployment.runtime }}</td>
-            <td><StatusChip :status="deployment.status || 'unknown'" /></td>
+            <td>
+              <div class="mono">{{ deployment.desired_state }}</div>
+              <StatusChip :status="deployment.observed_state || 'unknown'" />
+            </td>
+            <td class="mono digest-cell">{{ deployment.artifact_digest }}</td>
             <td>
               <div class="mono endpoint-cell">
                 {{ deployment.endpoint || "未登记" }}
@@ -220,35 +102,46 @@ function actionTitle(deployment: DeploymentRow): string {
                 "
               />
             </td>
-            <td class="muted check-config">
-              {{ deployment.protocol || "—" }}
-              <span class="mono">{{ deployment.health_path || "未配置路径" }}</span>
-            </td>
             <td>
               <div class="row-actions">
                 <button
                   class="btn sm"
-                  :disabled="!!busy || !executeDriver || !deployment.endpoint"
-                  :title="actionTitle(deployment)"
-                  @click="lifecycle('service.start', deployment)"
+                  :disabled="
+                    !!busy ||
+                    !store.supportsAction('deployment.start')
+                  "
+                  @click="lifecycle('start', deployment)"
                 >
                   启动
                 </button>
                 <button
                   class="btn sm"
-                  :disabled="!!busy || !executeDriver || !deployment.endpoint"
-                  :title="actionTitle(deployment)"
-                  @click="lifecycle('service.stop', deployment)"
+                  :disabled="
+                    !!busy ||
+                    !store.supportsAction('deployment.stop')
+                  "
+                  @click="lifecycle('stop', deployment)"
                 >
                   停止
                 </button>
                 <button
                   class="btn sm"
-                  :disabled="!!busy || !executeDriver || !deployment.endpoint"
-                  :title="actionTitle(deployment)"
-                  @click="lifecycle('service.restart', deployment)"
+                  :disabled="
+                    !!busy ||
+                    !store.supportsAction('deployment.restart')
+                  "
+                  @click="lifecycle('restart', deployment)"
                 >
                   重启
+                </button>
+                <button
+                  class="btn danger sm"
+                  :disabled="
+                    !!busy || !store.supportsAction('deployment.uninstall')
+                  "
+                  @click="lifecycle('uninstall', deployment)"
+                >
+                  卸载
                 </button>
               </div>
             </td>

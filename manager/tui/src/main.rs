@@ -1,14 +1,24 @@
 use anyhow::Result;
 use clap::Parser;
+mod api_client;
+mod device_auth;
+mod remote;
+mod worker;
+
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use orchestrator_core::{
-    ActionRequest, OperationWorkbenchContext, OperationWorkbenchSession, OperationWorkbenchView,
-    OrchestratorActionConsole, OrchestratorView, OrchestratorViewPage, default_console_request,
-    endpoint_hosts, merge_operation_workbench_session_into_view, parse_endpoint_id,
+use orchestrator_legacy::{
+    ActionRequest, DeploymentViewRow, OperationViewRow, OperationWorkbenchContext,
+    OperationWorkbenchSession, OperationWorkbenchView, OrchestratorActionConsole, OrchestratorView,
+    OrchestratorViewPage, endpoint_hosts, merge_operation_workbench_session_into_view,
+    parse_endpoint_id,
+};
+use orchestrator_manager::{
+    GithubReleaseView, InstalledServiceView, StoreCatalog, StoreIndexView, StoreInstallRequest,
+    StoreModuleView, StoreStatusView, installed_services_from_deployments,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -16,10 +26,13 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use worker::{CoreSnapshot, ManagerEvent, ManagerTask, ManagerWorker, WorkPurpose};
 
 #[derive(Parser)]
 #[command(name = "ojos-orchestrator-tui")]
@@ -28,6 +41,35 @@ use std::time::Duration;
 struct Cli {
     #[arg(long, default_value = ".")]
     repo_root: PathBuf,
+
+    /// Connect to a running control plane through its stable `/api/v1` API.
+    /// If omitted, `OJOS_ORCHESTRATOR_URL` is used before compatibility/local mode.
+    #[arg(long)]
+    api_url: Option<String>,
+
+    /// OIDC issuer used for Device Authorization Grant discovery.
+    #[arg(long)]
+    oidc_issuer: Option<String>,
+
+    /// Public OIDC client registered for the TUI Device Authorization Grant.
+    #[arg(long)]
+    oidc_client_id: Option<String>,
+
+    /// Space-delimited scopes requested by the TUI.
+    #[arg(long)]
+    oidc_scope: Option<String>,
+
+    /// Optional OAuth audience/resource hint requested from the provider.
+    #[arg(long)]
+    oidc_audience: Option<String>,
+
+    /// Execute one remote TUI command and print its v1 result as JSON.
+    #[arg(long)]
+    command: Option<String>,
+
+    /// Explicitly run the deprecated in-process compatibility console.
+    #[arg(long)]
+    legacy_local: bool,
 }
 
 /// TUI 页签：core 的 9 个正式对象页 + TUI 独有的插件商店页。
@@ -65,92 +107,114 @@ impl TuiPage {
     }
 }
 
-/// 商店索引里的一个模块条目。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct StoreModuleRow {
-    id: String,
-    name: String,
-    description: String,
-    kind: String,
-    tags: String,
+/// 「导入并安装」表单。字段顺序：仓库、包地址、校验和、目标主机、驱动、外部运行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoreInstallForm {
+    module_id: String,
     repo: String,
     source_url: String,
     checksum: String,
-}
-
-impl StoreModuleRow {
-    fn source(&self) -> &str {
-        if self.source_url.trim().is_empty() {
-            self.repo.as_str()
-        } else {
-            self.source_url.as_str()
-        }
-    }
-}
-
-/// 「导入并安装」表单：复用 action 表单的字段光标 + 逐键输入模式。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct StoreInstallForm {
-    module_id: String,
-    source_url: String,
-    checksum: String,
+    host_ip: String,
+    execute_service_driver: bool,
+    external_service_running: bool,
     field: usize,
 }
 
-/// 商店页状态。索引只读本地文件；远程索引留给 daemon / Web UI。
-#[derive(Debug, Clone, Default)]
+impl Default for StoreInstallForm {
+    fn default() -> Self {
+        Self {
+            module_id: String::new(),
+            repo: String::new(),
+            source_url: String::new(),
+            checksum: String::new(),
+            host_ip: "127.0.0.1".to_string(),
+            execute_service_driver: false,
+            external_service_running: false,
+            field: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct StorePane {
+    status: StoreStatusView,
     index_url: String,
-    modules: Vec<StoreModuleRow>,
+    cached: bool,
+    modules: Vec<StoreModuleView>,
+    installed: BTreeMap<String, InstalledServiceView>,
     message: String,
     selected: usize,
     form: Option<StoreInstallForm>,
+    releases: Vec<GithubReleaseView>,
+    selected_release: usize,
+    selected_asset: usize,
+    uninstall_driver_authorized: bool,
 }
 
 impl StorePane {
-    fn load(repo_root: &Path) -> Self {
-        let mut pane = Self::default();
-        pane.reload(repo_root);
-        pane
+    fn new(status: StoreStatusView, installed: BTreeMap<String, InstalledServiceView>) -> Self {
+        Self {
+            index_url: status.index_url.clone(),
+            status,
+            cached: false,
+            modules: Vec::new(),
+            installed,
+            message: "正在后台加载商店索引…".to_string(),
+            selected: 0,
+            form: None,
+            releases: Vec::new(),
+            selected_release: 0,
+            selected_asset: 0,
+            uninstall_driver_authorized: false,
+        }
     }
 
-    fn reload(&mut self, repo_root: &Path) {
-        self.index_url = configured_store_index_url();
-        self.form = None;
-        self.modules = Vec::new();
-        if store_index_is_remote(&self.index_url) {
-            self.selected = 0;
-            self.message = "请通过 daemon/Web UI 使用远程索引".to_string();
-            return;
-        }
-        match load_store_index(repo_root, &self.index_url) {
-            Ok(modules) => {
-                self.modules = modules;
-                self.message = String::new();
-            }
-            Err(err) => {
-                self.message = format!("读取商店索引失败: {err}");
-            }
-        }
+    fn apply_index(&mut self, index: StoreIndexView) -> Result<()> {
+        self.modules = index.modules()?;
+        self.index_url = index.index_url;
+        self.cached = index.cached;
+        self.installed = index.installed;
+        self.message.clear();
         if self.selected >= self.modules.len() {
             self.selected = 0;
         }
+        Ok(())
     }
+
+    fn selected_asset_url(&self) -> Option<&str> {
+        self.releases
+            .get(self.selected_release)
+            .and_then(|release| release.assets.get(self.selected_asset))
+            .map(|asset| asset.browser_download_url.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputEditor {
+    WorkbenchField { name: String, value: String },
+    OperationFilter { value: String },
 }
 
 struct App {
     page: TuiPage,
-    repo_root: PathBuf,
-    console: OrchestratorActionConsole,
+    console: Arc<Mutex<OrchestratorActionConsole>>,
+    worker: ManagerWorker,
     context: OperationWorkbenchContext,
     session: OperationWorkbenchSession,
     selected_field_index: usize,
     selected_endpoint_index: usize,
+    selected_deployment_index: usize,
+    selected_link_index: usize,
+    selected_operation_index: usize,
     selected_release_index: usize,
+    operation_filter: String,
+    selected_log_operation_id: String,
+    input_editor: Option<InputEditor>,
     execute_service_driver: bool,
     store: StorePane,
     view: OrchestratorView,
     last_message: String,
+    last_live_refresh: Instant,
 }
 
 impl App {
@@ -162,37 +226,66 @@ impl App {
     #[cfg(test)]
     fn new_memory(repo_root: PathBuf) -> Result<Self> {
         let console = OrchestratorActionConsole::load_with_database_url(repo_root.clone(), None)?;
-        Self::from_console(console, repo_root)
+        let mut app = Self::from_console(console, repo_root)?;
+        app.wait_for_worker();
+        Ok(app)
     }
 
     fn from_console(console: OrchestratorActionConsole, repo_root: PathBuf) -> Result<Self> {
         let context = console.context()?;
         let session = context.build_session("release.install")?;
         let view = console.view()?;
+        let installed = installed_services_from_deployments(view.deployments.clone())?;
         let selected_release_index = view
             .release_registry
             .iter()
             .position(|record| record.record_type == "release")
             .unwrap_or(0);
-        let store = StorePane::load(&repo_root);
-        Ok(Self {
+        let catalog = Arc::new(StoreCatalog::new());
+        let status = catalog.status(&console);
+        let store = StorePane::new(status, installed);
+        let console = Arc::new(Mutex::new(console));
+        let worker = ManagerWorker::spawn(console.clone(), catalog.clone(), repo_root.clone());
+        let mut app = Self {
             page: TuiPage::Core(OrchestratorViewPage::Overview),
-            repo_root,
             console,
+            worker,
             context,
             session,
             selected_field_index: 0,
             selected_endpoint_index: 0,
+            selected_deployment_index: 0,
+            selected_link_index: 0,
+            selected_operation_index: 0,
             selected_release_index,
+            operation_filter: String::new(),
+            selected_log_operation_id: String::new(),
+            input_editor: None,
             execute_service_driver: false,
             store,
             view,
             last_message: String::new(),
-        })
+            last_live_refresh: Instant::now(),
+        };
+        app.queue_store_reload(false);
+        Ok(app)
     }
 
-    fn refresh(&mut self) -> Result<()> {
-        let context = self.console.context()?;
+    fn apply_core_state(
+        &mut self,
+        context: OperationWorkbenchContext,
+        view: OrchestratorView,
+        installed: BTreeMap<String, InstalledServiceView>,
+    ) -> Result<()> {
+        let selected_deployment = self
+            .selected_deployment()
+            .map(|row| (row.service_id.clone(), row.host_ip.clone()));
+        let selected_link = self
+            .selected_link()
+            .map(|row| (row.from.clone(), row.to.clone()));
+        let selected_operation_id = self
+            .selected_operation()
+            .map(|row| row.operation_id.clone());
         let action = self.session.workbench.selected_action.clone();
         let session = context
             .build_session_from_request(&self.session.workbench.request)
@@ -200,7 +293,8 @@ impl App {
             .or_else(|_| context.build_session("release.install"))?;
         self.context = context;
         self.session = session;
-        self.view = self.console.view()?;
+        self.view = view;
+        self.store.installed = installed;
         if self.selected_release_index >= self.view.release_registry.len() {
             self.selected_release_index = self
                 .view
@@ -209,8 +303,204 @@ impl App {
                 .position(|record| record.record_type == "release")
                 .unwrap_or(0);
         }
-        self.last_message = "已刷新".to_string();
+        self.selected_endpoint_index =
+            bounded_index(self.selected_endpoint_index, self.view.endpoints.len());
+        self.selected_deployment_index = selected_deployment
+            .and_then(|(service_id, host_ip)| {
+                self.view
+                    .deployments
+                    .iter()
+                    .position(|row| row.service_id == service_id && row.host_ip == host_ip)
+            })
+            .unwrap_or_else(|| {
+                bounded_index(self.selected_deployment_index, self.view.deployments.len())
+            });
+        self.selected_link_index = selected_link
+            .and_then(|(from, to)| {
+                self.view
+                    .links
+                    .iter()
+                    .position(|row| row.from == from && row.to == to)
+            })
+            .unwrap_or_else(|| bounded_index(self.selected_link_index, self.view.links.len()));
+        self.selected_operation_index = selected_operation_id
+            .and_then(|operation_id| {
+                self.view
+                    .operations
+                    .iter()
+                    .position(|row| row.operation_id == operation_id)
+            })
+            .unwrap_or_else(|| {
+                bounded_index(self.selected_operation_index, self.view.operations.len())
+            });
         Ok(())
+    }
+
+    fn apply_snapshot(&mut self, snapshot: CoreSnapshot) {
+        if let Err(err) = self.apply_core_state(snapshot.context, snapshot.view, snapshot.installed)
+        {
+            self.last_message = err.to_string();
+        }
+    }
+
+    fn submit_task(&mut self, task: ManagerTask, message: impl Into<String>) -> bool {
+        if self.worker.is_busy() {
+            self.last_message = "已有后台管理任务正在执行，请稍候".to_string();
+            return false;
+        }
+        match self.worker.submit(task) {
+            Ok(()) => {
+                self.last_message = message.into();
+                true
+            }
+            Err(err) => {
+                self.last_message = err;
+                false
+            }
+        }
+    }
+
+    fn queue_refresh(&mut self) {
+        self.submit_task(ManagerTask::Refresh, "正在后台刷新…");
+    }
+
+    fn queue_store_reload(&mut self, refresh: bool) {
+        if self.submit_task(
+            ManagerTask::LoadStoreIndex { refresh },
+            "正在后台加载商店索引…",
+        ) {
+            self.store.message = "正在后台加载商店索引…".to_string();
+        }
+    }
+
+    fn queue_github_releases(&mut self, repo: String) {
+        if repo.trim().is_empty() {
+            self.last_message = "请先填写 GitHub 仓库 owner/name".to_string();
+            return;
+        }
+        self.submit_task(
+            ManagerTask::LoadGithubReleases { repo },
+            "正在后台获取 GitHub Releases…",
+        );
+    }
+
+    fn drain_worker_events(&mut self) {
+        while let Some(event) = self.worker.try_next() {
+            self.handle_worker_event(event);
+        }
+    }
+
+    fn handle_worker_event(&mut self, event: ManagerEvent) {
+        match event {
+            ManagerEvent::Refreshed(Ok(snapshot)) => {
+                self.apply_snapshot(*snapshot);
+                self.last_message = "已刷新".to_string();
+            }
+            ManagerEvent::Refreshed(Err(err)) => self.last_message = err,
+            ManagerEvent::StoreIndexLoaded(Ok(index)) => {
+                let count = index
+                    .index
+                    .get("modules")
+                    .and_then(|value| value.as_array())
+                    .map(Vec::len)
+                    .unwrap_or_default();
+                match self.store.apply_index(*index) {
+                    Ok(()) => self.last_message = format!("商店索引已加载，共 {count} 个模块"),
+                    Err(err) => {
+                        self.store.message = err.to_string();
+                        self.last_message = self.store.message.clone();
+                    }
+                }
+            }
+            ManagerEvent::StoreIndexLoaded(Err(err)) => {
+                self.store.message = format!("读取商店索引失败: {err}");
+                self.last_message = self.store.message.clone();
+            }
+            ManagerEvent::GithubReleasesLoaded(Ok(list)) => {
+                let list = *list;
+                self.store.releases = list.releases;
+                self.store.selected_release = 0;
+                self.store.selected_asset = 0;
+                if let Some(url) = self.store.selected_asset_url().map(str::to_string)
+                    && let Some(form) = self.store.form.as_mut()
+                {
+                    form.source_url = url;
+                }
+                self.last_message = format!(
+                    "已加载 {} 的 {} 个 GitHub Release；PageUp/PageDown 切换资产",
+                    list.repo,
+                    self.store.releases.len()
+                );
+            }
+            ManagerEvent::GithubReleasesLoaded(Err(err)) => {
+                self.store.releases.clear();
+                self.last_message = format!("获取 GitHub Release 失败: {err}");
+            }
+            ManagerEvent::Installed(Ok(completion)) => {
+                let completion = *completion;
+                let service_id = completion.result.service_id.clone();
+                let result = completion.result.action_result;
+                self.apply_snapshot(completion.snapshot);
+                self.store.form = None;
+                self.last_message = format!(
+                    "已安装 {service_id} · {} {}: {}",
+                    result.capability_status.label(),
+                    result.status,
+                    result.message
+                );
+            }
+            ManagerEvent::Installed(Err(err)) => {
+                self.last_message = format!("安装失败: {err}");
+            }
+            ManagerEvent::Dispatched {
+                purpose,
+                completion: Ok(completion),
+            } => {
+                let completion = *completion;
+                let result = completion.result;
+                self.apply_snapshot(completion.snapshot);
+                if purpose == WorkPurpose::StoreUninstall {
+                    self.store.uninstall_driver_authorized = false;
+                }
+                self.last_message = format!(
+                    "{} {}: {}",
+                    result.capability_status.label(),
+                    result.status,
+                    result.message
+                );
+            }
+            ManagerEvent::Dispatched {
+                purpose,
+                completion: Err(err),
+            } => {
+                if purpose == WorkPurpose::StoreUninstall {
+                    self.store.uninstall_driver_authorized = false;
+                }
+                self.last_message = err;
+            }
+        }
+    }
+
+    fn tick(&mut self) {
+        self.drain_worker_events();
+        let live = self.selected_operation().is_some_and(operation_is_live);
+        if live
+            && self.last_live_refresh.elapsed() >= Duration::from_secs(1)
+            && !self.worker.is_busy()
+        {
+            self.last_live_refresh = Instant::now();
+            let _ = self.worker.submit(ManagerTask::Refresh);
+        }
+    }
+
+    #[cfg(test)]
+    fn wait_for_worker(&mut self) {
+        while self.worker.is_busy() {
+            let Some(event) = self.worker.recv() else {
+                break;
+            };
+            self.handle_worker_event(event);
+        }
     }
 
     fn set_page(&mut self, page: TuiPage) {
@@ -226,7 +516,7 @@ impl App {
         self.page = pages[(current + 1) % pages.len()];
     }
 
-    /// 表格行选择：商店页选模块，Service 页选 Release，Endpoint 页选 Endpoint。
+    /// 表格行选择始终作用于当前页正在显示的对象。
     fn move_selection(&mut self, delta: isize) {
         match self.page {
             TuiPage::Store => {
@@ -239,8 +529,24 @@ impl App {
                 self.selected_endpoint_index = index;
             }
             TuiPage::Core(OrchestratorViewPage::Services) => {
-                let len = self.view.release_registry.len();
-                self.selected_release_index = shift_index(self.selected_release_index, len, delta);
+                let len = self.view.deployments.len();
+                self.selected_deployment_index =
+                    shift_index(self.selected_deployment_index, len, delta);
+            }
+            TuiPage::Core(OrchestratorViewPage::Links) => {
+                self.selected_link_index =
+                    shift_index(self.selected_link_index, self.view.links.len(), delta);
+            }
+            TuiPage::Core(OrchestratorViewPage::Operations) => {
+                let indices = self.filtered_operation_indices();
+                let current = indices
+                    .iter()
+                    .position(|index| *index == self.selected_operation_index)
+                    .unwrap_or(0);
+                let next = shift_index(current, indices.len(), delta);
+                if let Some(index) = indices.get(next) {
+                    self.selected_operation_index = *index;
+                }
             }
             _ => {
                 self.last_message = "当前页没有可选择的表格行".to_string();
@@ -349,17 +655,104 @@ impl App {
         }
     }
 
+    fn begin_field_edit(&mut self) {
+        let Some(field) = self
+            .session
+            .workbench
+            .form_fields
+            .get(self.selected_field_index)
+        else {
+            self.last_message = "当前 action 没有可编辑字段".to_string();
+            return;
+        };
+        let value = self
+            .session
+            .workbench
+            .request
+            .fields
+            .get(&field.name)
+            .cloned()
+            .unwrap_or_default();
+        self.input_editor = Some(InputEditor::WorkbenchField {
+            name: field.name.clone(),
+            value,
+        });
+        self.last_message = "正在编辑字段：Enter 保存，Esc 取消".to_string();
+    }
+
+    fn begin_operation_filter_edit(&mut self) {
+        self.input_editor = Some(InputEditor::OperationFilter {
+            value: self.operation_filter.clone(),
+        });
+        self.last_message = "输入操作筛选条件：Enter 保存，Esc 取消".to_string();
+    }
+
+    fn handle_input_editor_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                self.input_editor = None;
+                self.last_message = "已取消编辑".to_string();
+            }
+            KeyCode::Enter => {
+                let Some(editor) = self.input_editor.take() else {
+                    return;
+                };
+                match editor {
+                    InputEditor::WorkbenchField { name, value } => self.update_field(&name, value),
+                    InputEditor::OperationFilter { value } => {
+                        self.operation_filter = value;
+                        if let Some(index) = self.filtered_operation_indices().first().copied() {
+                            self.selected_operation_index = index;
+                        }
+                        self.last_message = "操作筛选已更新".to_string();
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(editor) = self.input_editor.as_mut() {
+                    match editor {
+                        InputEditor::WorkbenchField { value, .. }
+                        | InputEditor::OperationFilter { value } => {
+                            value.pop();
+                        }
+                    }
+                }
+            }
+            KeyCode::Char(character) => {
+                if let Some(editor) = self.input_editor.as_mut() {
+                    match editor {
+                        InputEditor::WorkbenchField { value, .. }
+                        | InputEditor::OperationFilter { value } => value.push(character),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn confirm_session(&mut self) {
-        self.dispatch_current("operation.confirm");
+        if self.page == TuiPage::Core(OrchestratorViewPage::Operations) {
+            self.run_selected_operation_action("operation.confirm");
+        } else {
+            self.dispatch_current("operation.confirm");
+        }
     }
 
     fn apply_session(&mut self) {
+        if self.page == TuiPage::Core(OrchestratorViewPage::Operations) {
+            self.run_selected_operation_action("operation.apply");
+            return;
+        }
         let action = self.session.workbench.selected_action.clone();
         self.dispatch_current(&action);
     }
 
     fn rollback_session(&mut self) {
-        self.dispatch_current("operation.rollback");
+        if self.page == TuiPage::Core(OrchestratorViewPage::Operations) {
+            self.run_selected_operation_action("operation.rollback");
+        } else {
+            self.dispatch_current("operation.rollback");
+        }
     }
 
     fn run_action(&mut self, action: &str) {
@@ -429,9 +822,116 @@ impl App {
             .map(|identity| identity.host.to_string())
     }
 
+    fn selected_deployment(&self) -> Option<&DeploymentViewRow> {
+        self.view
+            .deployments
+            .get(self.selected_deployment_index)
+            .or_else(|| self.view.deployments.first())
+    }
+
+    fn selected_deployment_host_ip(&self) -> Option<String> {
+        self.selected_deployment()
+            .map(|deployment| deployment.host_ip.clone())
+            .filter(|host| !host.trim().is_empty())
+    }
+
+    fn selected_link(&self) -> Option<&orchestrator_legacy::LinkViewRow> {
+        self.view
+            .links
+            .get(self.selected_link_index)
+            .or_else(|| self.view.links.first())
+    }
+
+    fn filtered_operation_indices(&self) -> Vec<usize> {
+        let keyword = self.operation_filter.trim().to_ascii_lowercase();
+        self.view
+            .operations
+            .iter()
+            .enumerate()
+            .filter(|(_, operation)| {
+                keyword.is_empty()
+                    || operation
+                        .operation_id
+                        .to_ascii_lowercase()
+                        .contains(&keyword)
+                    || operation.action.to_ascii_lowercase().contains(&keyword)
+                    || operation.target.to_ascii_lowercase().contains(&keyword)
+                    || operation.status.to_ascii_lowercase().contains(&keyword)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn selected_operation(&self) -> Option<&OperationViewRow> {
+        let operation = self.view.operations.get(self.selected_operation_index);
+        if operation.is_some_and(|operation| {
+            self.filtered_operation_indices()
+                .contains(&self.selected_operation_index)
+                && !operation.operation_id.trim().is_empty()
+        }) {
+            operation
+        } else {
+            self.filtered_operation_indices()
+                .first()
+                .and_then(|index| self.view.operations.get(*index))
+                .filter(|operation| !operation.operation_id.trim().is_empty())
+        }
+    }
+
+    fn run_selected_operation_action(&mut self, action: &str) {
+        match self.selected_operation_action_request(action) {
+            Ok(request) => self.dispatch_request(request),
+            Err(err) => self.last_message = err.to_string(),
+        }
+    }
+
+    fn selected_operation_action_request(&self, action: &str) -> Result<ActionRequest> {
+        let operation = self
+            .selected_operation()
+            .ok_or_else(|| anyhow::anyhow!("请先选择一条持久化 Operation 记录"))?;
+        let allowed = match action {
+            "operation.confirm" => operation.status == "PLANNED" && operation.requires_confirmation,
+            "operation.apply" => {
+                operation.status == "AWAITING_CONFIRMATION"
+                    || (operation.status == "PLANNED" && !operation.requires_confirmation)
+            }
+            "operation.rollback" => {
+                matches!(operation.status.as_str(), "SUCCEEDED" | "FAILED")
+                    && operation.rollback_available
+            }
+            _ => false,
+        };
+        if !allowed {
+            anyhow::bail!("{action} 不适用于当前状态 {}", operation.status);
+        }
+        if matches!(action, "operation.apply" | "operation.rollback")
+            && operation_driver_required(operation)
+            && !self.execute_service_driver
+        {
+            anyhow::bail!("请先按 w 授权执行运行时驱动");
+        }
+        let mut request = ActionRequest::new(
+            format!("{}-tui", action.replace('.', "-")),
+            action,
+            [
+                ("operation_id".to_string(), operation.operation_id.clone()),
+                ("confirm".to_string(), "true".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        if matches!(action, "operation.apply" | "operation.rollback") && self.execute_service_driver
+        {
+            request
+                .fields
+                .insert("execute_service_driver".to_string(), "true".to_string());
+        }
+        Ok(request)
+    }
+
     fn run_endpoint_action(&mut self, action: &str) {
         if let Some(endpoint) = self.selected_endpoint_id() {
-            self.run_action_with_fields(action, [("endpoint", endpoint)]);
+            self.run_action_with_exact_fields(action, [("endpoint".to_string(), endpoint)]);
         } else {
             self.run_action(action);
         }
@@ -440,47 +940,85 @@ impl App {
     /// 主机启停：`host.start` / `host.stop` 需要 host_ip + confirm=true；
     /// 另外只有带上 `execute_service_driver=true` 时 dispatcher 才会真的执行驱动。
     fn run_host_action(&mut self, action: &str) {
-        let Some(host_ip) = self.selected_host_ip() else {
-            self.last_message = "没有可用于主机启停的 Endpoint".to_string();
+        if !self.execute_service_driver {
+            self.last_message = "主机启停需要先按 w 授权执行运行时驱动".to_string();
             return;
-        };
-        if self.execute_service_driver {
-            self.run_action_with_fields(
-                action,
-                [
-                    ("host_ip", host_ip),
-                    ("confirm", "true".to_string()),
-                    ("execute_service_driver", "true".to_string()),
-                ],
-            );
-        } else {
-            self.run_action_with_fields(
-                action,
-                [("host_ip", host_ip), ("confirm", "true".to_string())],
+        }
+        match self.host_action_fields() {
+            Ok(fields) => self.run_action_with_exact_fields(action, fields),
+            Err(err) => self.last_message = err.to_string(),
+        }
+    }
+
+    fn host_action_fields(&self) -> Result<Vec<(String, String)>> {
+        let host_ip = self
+            .selected_deployment_host_ip()
+            .ok_or_else(|| anyhow::anyhow!("没有可用于主机启停的部署记录"))?;
+        Ok(vec![
+            ("host_ip".to_string(), host_ip),
+            ("confirm".to_string(), "true".to_string()),
+            ("execute_service_driver".to_string(), "true".to_string()),
+        ])
+    }
+
+    fn run_service_action(&mut self, action: &str) {
+        if !self.execute_service_driver {
+            self.last_message = "服务生命周期操作需要先按 w 授权执行运行时驱动".to_string();
+            return;
+        }
+        match self.service_action_fields() {
+            Ok(fields) => self.run_action_with_exact_fields(action, fields),
+            Err(err) => self.last_message = err.to_string(),
+        }
+    }
+
+    fn service_action_fields(&self) -> Result<Vec<(String, String)>> {
+        let deployment = self
+            .selected_deployment()
+            .ok_or_else(|| anyhow::anyhow!("请先选择一条部署记录"))?;
+        if deployment.endpoint.trim().is_empty() {
+            anyhow::bail!(
+                "{}@{} 没有登记 Endpoint，无法精确执行生命周期动作",
+                deployment.service_id,
+                deployment.host_ip
             );
         }
+        Ok(vec![
+            ("service_id".to_string(), deployment.service_id.clone()),
+            ("host_ip".to_string(), deployment.host_ip.clone()),
+            ("endpoint".to_string(), deployment.endpoint.clone()),
+            ("version".to_string(), deployment.version.clone()),
+            ("confirm".to_string(), "true".to_string()),
+            ("execute_service_driver".to_string(), "true".to_string()),
+        ])
     }
 
     fn run_link_action(&mut self, action: &str) {
-        if let Some(link) = self.view.links.first().cloned() {
-            self.run_action_with_fields(
-                action,
-                [("source_endpoint", link.from), ("target_endpoint", link.to)],
-            );
-        } else {
-            self.run_action(action);
+        match self.link_action_fields() {
+            Some(fields) => self.run_action_with_exact_fields(action, fields),
+            None => self.run_action(action),
         }
     }
 
+    fn link_action_fields(&self) -> Option<Vec<(String, String)>> {
+        let link = self.selected_link()?;
+        Some(vec![
+            ("source_endpoint".to_string(), link.from.clone()),
+            ("target_endpoint".to_string(), link.to.clone()),
+        ])
+    }
+
     fn run_operation_logs_view(&mut self) {
-        let operation_id = self
-            .view
-            .operations
-            .iter()
-            .find(|operation| operation.status != "CATALOG")
+        let Some(operation_id) = self
+            .selected_operation()
             .map(|operation| operation.operation_id.clone())
-            .unwrap_or_else(|| self.session.current_operation.operation_id.clone());
-        self.run_action_with_fields("log.query", [("operation_id", operation_id)]);
+        else {
+            self.last_message = "请先选择一条 Operation 记录".to_string();
+            return;
+        };
+        self.selected_log_operation_id = operation_id.clone();
+        self.page = TuiPage::Core(OrchestratorViewPage::Logs);
+        self.last_message = format!("正在查看 Operation {operation_id} 的日志");
     }
 
     fn selected_release_target(&self) -> Option<(String, String)> {
@@ -513,23 +1051,16 @@ impl App {
         }
     }
 
-    /// 某个模块 id 是否已经作为 Service 存在于当前视图里。
+    /// 已安装状态来自 HostService/Deployment 投影，不能把仓库 manifest 当成已部署实例。
     fn installed_version(&self, service_id: &str) -> Option<String> {
-        self.view
-            .services
-            .iter()
-            .find(|service| service.id == service_id)
+        self.store
+            .installed
+            .get(service_id)
             .map(|service| service.version.clone())
     }
 
     fn reload_store_index(&mut self) {
-        let repo_root = self.repo_root.clone();
-        self.store.reload(&repo_root);
-        if self.store.message.is_empty() {
-            self.last_message = format!("商店索引已刷新，共 {} 个模块", self.store.modules.len());
-        } else {
-            self.last_message = self.store.message.clone();
-        }
+        self.queue_store_reload(true);
     }
 
     /// 打开「导入并安装」表单。`use_selected_module` 为 true 时用索引里选中的模块预填。
@@ -541,12 +1072,21 @@ impl App {
                 return;
             };
             form.module_id = module.id.clone();
+            form.repo = module.repo.clone();
             form.source_url = module.source_url.clone();
             form.checksum = module.checksum.clone();
         }
+        let repo = form.repo.clone();
         self.store.form = Some(form);
+        self.store.releases.clear();
+        self.store.selected_release = 0;
+        self.store.selected_asset = 0;
         self.page = TuiPage::Store;
-        self.last_message = "Tab 切换字段  Enter 导入并安装  Esc 取消".to_string();
+        self.last_message =
+            "Tab 切换字段，仓库字段按 Enter 获取 Releases，其余字段按 Enter 安装".to_string();
+        if !repo.trim().is_empty() {
+            self.queue_github_releases(repo);
+        }
     }
 
     /// 表单输入模式：所有按键先交给表单，避免与全局快捷键冲突。
@@ -559,27 +1099,84 @@ impl App {
                 self.store.form = None;
                 self.last_message = "已取消导入安装".to_string();
             }
-            KeyCode::Enter => self.submit_store_form(),
-            KeyCode::Tab | KeyCode::Up | KeyCode::Down => {
+            KeyCode::Enter => {
+                let repo = self
+                    .store
+                    .form
+                    .as_ref()
+                    .filter(|form| form.field == 0)
+                    .map(|form| form.repo.trim().to_string())
+                    .filter(|repo| !repo.is_empty());
+                if let Some(repo) = repo {
+                    self.queue_github_releases(repo);
+                } else {
+                    self.submit_store_form();
+                }
+            }
+            KeyCode::Tab | KeyCode::Down | KeyCode::Right => {
                 if let Some(form) = self.store.form.as_mut() {
-                    form.field = usize::from(form.field == 0);
+                    form.field = (form.field + 1) % 6;
+                }
+            }
+            KeyCode::BackTab | KeyCode::Up | KeyCode::Left => {
+                if let Some(form) = self.store.form.as_mut() {
+                    form.field = (form.field + 5) % 6;
+                }
+            }
+            KeyCode::PageUp => self.cycle_store_asset(-1),
+            KeyCode::PageDown => self.cycle_store_asset(1),
+            KeyCode::Char(' ') => {
+                if let Some(form) = self.store.form.as_mut() {
+                    match form.field {
+                        4 => {
+                            form.execute_service_driver = !form.execute_service_driver;
+                            if form.execute_service_driver {
+                                form.external_service_running = false;
+                            }
+                        }
+                        5 => {
+                            form.external_service_running = !form.external_service_running;
+                            if form.external_service_running {
+                                form.execute_service_driver = false;
+                            }
+                        }
+                        _ => match form.field {
+                            0 => form.repo.push(' '),
+                            1 => form.source_url.push(' '),
+                            2 => form.checksum.push(' '),
+                            3 => form.host_ip.push(' '),
+                            _ => {}
+                        },
+                    }
                 }
             }
             KeyCode::Backspace => {
                 if let Some(form) = self.store.form.as_mut() {
-                    if form.field == 0 {
-                        form.source_url.pop();
-                    } else {
-                        form.checksum.pop();
+                    match form.field {
+                        0 => {
+                            form.repo.pop();
+                        }
+                        1 => {
+                            form.source_url.pop();
+                        }
+                        2 => {
+                            form.checksum.pop();
+                        }
+                        3 => {
+                            form.host_ip.pop();
+                        }
+                        _ => {}
                     }
                 }
             }
             KeyCode::Char(value) => {
                 if let Some(form) = self.store.form.as_mut() {
-                    if form.field == 0 {
-                        form.source_url.push(value);
-                    } else {
-                        form.checksum.push(value);
+                    match form.field {
+                        0 => form.repo.push(value),
+                        1 => form.source_url.push(value),
+                        2 => form.checksum.push(value),
+                        3 => form.host_ip.push(value),
+                        _ => {}
                     }
                 }
             }
@@ -587,61 +1184,132 @@ impl App {
         }
     }
 
+    fn cycle_store_asset(&mut self, delta: isize) {
+        let assets = self
+            .store
+            .releases
+            .iter()
+            .enumerate()
+            .flat_map(|(release_index, release)| {
+                release
+                    .assets
+                    .iter()
+                    .enumerate()
+                    .map(move |(asset_index, _)| (release_index, asset_index))
+            })
+            .collect::<Vec<_>>();
+        if assets.is_empty() {
+            self.last_message = "当前没有可选择的 GitHub Release 资产".to_string();
+            return;
+        }
+        let current = assets
+            .iter()
+            .position(|(release, asset)| {
+                *release == self.store.selected_release && *asset == self.store.selected_asset
+            })
+            .unwrap_or(0);
+        let (release, asset) = assets[shift_index(current, assets.len(), delta)];
+        self.store.selected_release = release;
+        self.store.selected_asset = asset;
+        let source = self.store.selected_asset_url().map(str::to_string);
+        if let Some(form) = self.store.form.as_mut()
+            && let Some(source) = source
+        {
+            form.source_url = source;
+        }
+    }
+
     fn submit_store_form(&mut self) {
         let Some(form) = self.store.form.clone() else {
             return;
         };
-        let source_url = form.source_url.trim().to_string();
-        if source_url.is_empty() {
-            self.last_message = "请先填写 source_url".to_string();
-            return;
-        }
-        let checksum = form.checksum.trim().to_string();
-        self.store.form = None;
-        self.install_release_from_source(&source_url, &checksum);
-    }
-
-    /// 商店安装两步走：先 `import_external_release` 把外部 release 包注册成
-    /// Service + Release 契约，再派发 `release.install` 走正式 action 通道。
-    fn install_release_from_source(&mut self, source_url: &str, checksum: &str) {
-        let repo_root = self.repo_root.clone();
-        let expected = Some(checksum.trim()).filter(|value| !value.is_empty());
-        let outcome = self
-            .console
-            .import_external_release(&repo_root, source_url, expected);
-        let imported = match outcome {
-            Ok(imported) => imported,
-            Err(err) => {
-                self.last_message = format!("导入 release 失败: {err}");
-                return;
-            }
-        };
-        let service_id = imported.service.id.clone();
-        let mut request = match default_console_request("release.install") {
+        let request = match self.store_install_request(&form) {
             Ok(request) => request,
             Err(err) => {
-                self.last_message = format!("release.install 表单缺失: {err}");
+                self.last_message = err.to_string();
                 return;
             }
         };
-        request
-            .fields
-            .insert("service_id".to_string(), service_id.clone());
-        request
-            .fields
-            .insert("confirm".to_string(), "true".to_string());
-        if self.execute_service_driver {
-            request
-                .fields
-                .insert("execute_service_driver".to_string(), "true".to_string());
+        self.submit_task(ManagerTask::Install(request), "正在后台导入并安装…");
+    }
+
+    fn store_install_request(&self, form: &StoreInstallForm) -> Result<StoreInstallRequest> {
+        let source_url = form.source_url.trim().to_string();
+        if source_url.is_empty() {
+            anyhow::bail!("请先填写 source_url");
         }
-        let prefix = match imported.replaced_existing {
-            true => format!("已更新 {service_id}"),
-            false => format!("已导入 {service_id}"),
+        if self.store.status.require_release_checksum && form.checksum.trim().is_empty() {
+            anyhow::bail!("当前配置强制校验 release 包，请填写 sha256 校验和");
+        }
+        if form.execute_service_driver && form.external_service_running {
+            anyhow::bail!("运行时驱动与“外部服务已在运行”不能同时启用");
+        }
+        Ok(StoreInstallRequest {
+            source_url,
+            checksum: form.checksum.trim().to_string(),
+            host_ip: if form.host_ip.trim().is_empty() {
+                "127.0.0.1".to_string()
+            } else {
+                form.host_ip.trim().to_string()
+            },
+            execute_service_driver: form.execute_service_driver,
+            external_service_running: form.external_service_running,
+            ..StoreInstallRequest::default()
+        })
+    }
+
+    fn toggle_uninstall_driver(&mut self) {
+        self.store.uninstall_driver_authorized = !self.store.uninstall_driver_authorized;
+        self.last_message = format!(
+            "卸载运行时驱动授权已{}",
+            driver_toggle_label(self.store.uninstall_driver_authorized)
+        );
+    }
+
+    fn uninstall_selected_store_module(&mut self) {
+        let (service_id, request) = match self.store_uninstall_request() {
+            Ok(request) => request,
+            Err(err) => {
+                self.last_message = err.to_string();
+                return;
+            }
         };
-        self.dispatch_request(request);
-        let message = format!("{prefix} · {}", self.last_message);
-        self.last_message = message;
+        if !self.submit_task(
+            ManagerTask::Dispatch {
+                request,
+                purpose: WorkPurpose::StoreUninstall,
+            },
+            format!("正在后台卸载 {service_id}…"),
+        ) {
+            self.store.uninstall_driver_authorized = false;
+        }
+    }
+
+    fn store_uninstall_request(&self) -> Result<(String, ActionRequest)> {
+        let module = self
+            .store
+            .modules
+            .get(self.store.selected)
+            .ok_or_else(|| anyhow::anyhow!("请先选择一个商店模块"))?;
+        let service_id = module.id.clone();
+        if !self.store.installed.contains_key(&service_id) {
+            anyhow::bail!("{service_id} 尚未部署");
+        }
+        if !self.store.uninstall_driver_authorized {
+            anyhow::bail!("请先按 t 授权执行卸载运行时驱动");
+        }
+        let request = ActionRequest::new(
+            "service-delete-tui",
+            "service.delete",
+            [
+                ("service_id".to_string(), service_id.clone()),
+                ("confirm".to_string(), "true".to_string()),
+                ("execute_service_driver".to_string(), "true".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        Ok((service_id, request))
     }
 
     fn dispatch_current(&mut self, action: &str) {
@@ -701,23 +1369,46 @@ impl App {
 
     /// 统一的 action 派发出口：core dispatcher 执行 + 刷新视图 + 回显能力状态。
     fn dispatch_request(&mut self, request: ActionRequest) {
-        match self.console.dispatch(request) {
-            Ok(result) => {
+        if self.worker.is_busy() {
+            self.last_message = "已有后台管理任务正在执行，请稍候".to_string();
+            return;
+        }
+        if request.field("execute_service_driver") == Some("true") {
+            self.submit_task(
+                ManagerTask::Dispatch {
+                    request,
+                    purpose: WorkPurpose::RuntimeAction,
+                },
+                "运行时动作正在后台执行…",
+            );
+            return;
+        }
+        let outcome = (|| -> Result<_> {
+            let mut console = self
+                .console
+                .lock()
+                .map_err(|_| anyhow::anyhow!("TUI 编排器状态锁已损坏"))?;
+            let result = console.dispatch(request)?;
+            let context = console.context()?;
+            let view = console.view()?;
+            let installed = installed_services_from_deployments(view.deployments.clone())?;
+            Ok((result, context, view, installed))
+        })();
+        match outcome {
+            Ok((result, context, view, installed)) => {
                 let message = format!(
                     "{} {}: {}",
                     result.capability_status.label(),
                     result.status,
                     result.message
                 );
-                if let Err(err) = self.refresh() {
+                if let Err(err) = self.apply_core_state(context, view, installed) {
                     self.last_message = err.to_string();
                 } else {
                     self.last_message = message;
                 }
             }
-            Err(err) => {
-                self.last_message = err.to_string();
-            }
+            Err(err) => self.last_message = err.to_string(),
         }
     }
 
@@ -735,6 +1426,44 @@ fn shift_index(current: usize, len: usize, delta: isize) -> usize {
     (current as isize + delta).rem_euclid(len) as usize
 }
 
+fn bounded_index(current: usize, len: usize) -> usize {
+    if len == 0 || current >= len {
+        0
+    } else {
+        current
+    }
+}
+
+fn runtime_driver_action(action: &str) -> bool {
+    matches!(
+        action,
+        "release.install"
+            | "release.rollback"
+            | "host.start"
+            | "host.stop"
+            | "service.start"
+            | "service.stop"
+            | "service.restart"
+            | "service.delete"
+            | "service.enable"
+            | "service.disable"
+    )
+}
+
+fn operation_driver_required(operation: &OperationViewRow) -> bool {
+    if !runtime_driver_action(&operation.action) {
+        return false;
+    }
+    operation.action != "release.install" || operation.driver_authorized
+}
+
+fn operation_is_live(operation: &OperationViewRow) -> bool {
+    matches!(
+        operation.status.as_str(),
+        "RUNNING" | "PLANNED" | "AWAITING_CONFIRMATION"
+    )
+}
+
 fn driver_toggle_label(enabled: bool) -> &'static str {
     match enabled {
         true => "开启",
@@ -749,328 +1478,71 @@ fn field_marker(selected: bool) -> &'static str {
     }
 }
 
-const DEFAULT_STORE_INDEX_PATH: &str = "store/index.json";
-
-/// 与 daemon 的 `market_api` 同名开关；TUI 只支持本地相对路径形态。
-fn configured_store_index_url() -> String {
-    std::env::var("OJOS_STORE_INDEX_URL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_STORE_INDEX_PATH.to_string())
-}
-
-fn store_index_is_remote(index_url: &str) -> bool {
-    let lowered = index_url.trim().to_ascii_lowercase();
-    lowered.starts_with("http://") || lowered.starts_with("https://")
-}
-
-fn store_index_path(repo_root: &Path, index_url: &str) -> Result<PathBuf> {
-    let trimmed = index_url.trim();
-    let relative = trimmed
-        .strip_prefix("file://")
-        .unwrap_or(trimmed)
-        .trim_start_matches('/');
-    let path = Path::new(relative);
-    let escapes = path.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::Prefix(_) | Component::RootDir
-        )
-    });
-    if path.is_absolute() || escapes {
-        anyhow::bail!("商店索引路径必须位于仓库内: {trimmed}");
-    }
-    Ok(repo_root.join(path))
-}
-
-fn load_store_index(repo_root: &Path, index_url: &str) -> Result<Vec<StoreModuleRow>> {
-    let path = store_index_path(repo_root, index_url)?;
-    let Ok(text) = fs::read_to_string(&path) else {
-        anyhow::bail!("无法读取 {}", path.display());
-    };
-    store_modules_from_index(&text)
-}
-
-fn store_modules_from_index(text: &str) -> Result<Vec<StoreModuleRow>> {
-    let document = JsonParser::parse(text)?;
-    let Some(entries) = document.get("modules").and_then(Json::as_array) else {
-        anyhow::bail!("索引缺少 modules 数组");
-    };
-    let mut rows = Vec::new();
-    for entry in entries {
-        let id = entry.string_field("id");
-        if id.trim().is_empty() {
-            continue;
-        }
-        let mut name = entry.string_field("name");
-        if name.trim().is_empty() {
-            name = id.clone();
-        }
-        rows.push(StoreModuleRow {
-            id,
-            name,
-            description: entry.string_field("description"),
-            kind: entry.string_field("kind"),
-            tags: entry.string_list("tags").join(","),
-            repo: entry.string_field("repo"),
-            source_url: entry.string_field("source_url"),
-            checksum: entry.string_field("checksum"),
-        });
-    }
-    Ok(rows)
-}
-
-/// 最小 JSON 数据模型。TUI 的依赖被限制为 anyhow/clap/orchestrator-core/ratatui/crossterm，
-/// 拿不到 serde_json，所以商店索引在这里自带一个只读解析器。
-#[derive(Debug, Clone, PartialEq)]
-enum Json {
-    Null,
-    Bool(bool),
-    Number(f64),
-    String(String),
-    Array(Vec<Json>),
-    Object(Vec<(String, Json)>),
-}
-
-impl Json {
-    fn get(&self, key: &str) -> Option<&Json> {
-        match self {
-            Json::Object(entries) => entries
-                .iter()
-                .find(|(name, _)| name.as_str() == key)
-                .map(|(_, value)| value),
-            _ => None,
-        }
-    }
-
-    fn as_str(&self) -> Option<&str> {
-        match self {
-            Json::String(value) => Some(value.as_str()),
-            _ => None,
-        }
-    }
-
-    fn as_array(&self) -> Option<&[Json]> {
-        match self {
-            Json::Array(items) => Some(items.as_slice()),
-            _ => None,
-        }
-    }
-
-    fn string_field(&self, key: &str) -> String {
-        self.get(key)
-            .and_then(Json::as_str)
-            .unwrap_or_default()
-            .to_string()
-    }
-
-    fn string_list(&self, key: &str) -> Vec<String> {
-        let Some(items) = self.get(key).and_then(Json::as_array) else {
-            return Vec::new();
-        };
-        items
-            .iter()
-            .filter_map(Json::as_str)
-            .map(str::to_string)
-            .collect()
-    }
-}
-
-struct JsonParser {
-    chars: Vec<char>,
-    index: usize,
-}
-
-impl JsonParser {
-    fn parse(text: &str) -> Result<Json> {
-        let mut parser = Self {
-            chars: text.chars().collect(),
-            index: 0,
-        };
-        let value = parser.parse_value()?;
-        parser.skip_whitespace();
-        if parser.index != parser.chars.len() {
-            anyhow::bail!("JSON 尾部有多余内容");
-        }
-        Ok(value)
-    }
-
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.index).copied()
-    }
-
-    fn bump(&mut self) -> Option<char> {
-        let value = self.peek();
-        if value.is_some() {
-            self.index += 1;
-        }
-        value
-    }
-
-    fn skip_whitespace(&mut self) {
-        while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r')) {
-            self.index += 1;
-        }
-    }
-
-    fn expect(&mut self, expected: char) -> Result<()> {
-        if self.bump() == Some(expected) {
-            return Ok(());
-        }
-        anyhow::bail!("JSON 缺少 {expected}");
-    }
-
-    fn parse_value(&mut self) -> Result<Json> {
-        self.skip_whitespace();
-        match self.peek() {
-            Some('{') => self.parse_object(),
-            Some('[') => self.parse_array(),
-            Some('"') => self.parse_string().map(Json::String),
-            Some('t') => self.parse_literal("true").map(|()| Json::Bool(true)),
-            Some('f') => self.parse_literal("false").map(|()| Json::Bool(false)),
-            Some('n') => self.parse_literal("null").map(|()| Json::Null),
-            Some(_) => self.parse_number(),
-            None => anyhow::bail!("JSON 意外结束"),
-        }
-    }
-
-    fn parse_literal(&mut self, literal: &str) -> Result<()> {
-        for expected in literal.chars() {
-            self.expect(expected)?;
-        }
-        Ok(())
-    }
-
-    fn parse_number(&mut self) -> Result<Json> {
-        let start = self.index;
-        while let Some(value) = self.peek() {
-            if !value.is_ascii_digit() && !matches!(value, '-' | '+' | '.' | 'e' | 'E') {
-                break;
-            }
-            self.index += 1;
-        }
-        let text = self.chars[start..self.index].iter().collect::<String>();
-        let Ok(number) = text.parse::<f64>() else {
-            anyhow::bail!("JSON 数字无法解析");
-        };
-        Ok(Json::Number(number))
-    }
-
-    fn parse_string(&mut self) -> Result<String> {
-        self.expect('"')?;
-        let mut out = String::new();
-        loop {
-            let Some(value) = self.bump() else {
-                anyhow::bail!("JSON 字符串未闭合");
-            };
-            if value == '"' {
-                break;
-            }
-            if value != '\\' {
-                out.push(value);
-                continue;
-            }
-            let Some(escape) = self.bump() else {
-                anyhow::bail!("JSON 转义未结束");
-            };
-            match escape {
-                '"' => out.push('"'),
-                '\\' => out.push('\\'),
-                '/' => out.push('/'),
-                'b' => out.push('\u{8}'),
-                'f' => out.push('\u{c}'),
-                'n' => out.push('\n'),
-                'r' => out.push('\r'),
-                't' => out.push('\t'),
-                'u' => out.push(self.parse_unicode_escape()?),
-                _ => anyhow::bail!("JSON 不支持的转义"),
-            }
-        }
-        Ok(out)
-    }
-
-    fn parse_unicode_escape(&mut self) -> Result<char> {
-        let high = self.parse_hex4()?;
-        if !(0xd800..0xdc00).contains(&high) {
-            let Some(value) = char::from_u32(high) else {
-                anyhow::bail!("JSON 转义字符不合法");
-            };
-            return Ok(value);
-        }
-        self.expect('\\')?;
-        self.expect('u')?;
-        let low = self.parse_hex4()?;
-        if !(0xdc00..0xe000).contains(&low) {
-            anyhow::bail!("JSON 代理对不合法");
-        }
-        let code = 0x10000 + ((high - 0xd800) << 10) + (low - 0xdc00);
-        let Some(value) = char::from_u32(code) else {
-            anyhow::bail!("JSON 代理对不合法");
-        };
-        Ok(value)
-    }
-
-    fn parse_hex4(&mut self) -> Result<u32> {
-        let mut value = 0u32;
-        for _ in 0..4 {
-            let Some(digit) = self.bump().and_then(|item| item.to_digit(16)) else {
-                anyhow::bail!("JSON 转义需要 4 位十六进制");
-            };
-            value = value * 16 + digit;
-        }
-        Ok(value)
-    }
-
-    fn parse_array(&mut self) -> Result<Json> {
-        self.expect('[')?;
-        let mut items = Vec::new();
-        self.skip_whitespace();
-        if self.peek() == Some(']') {
-            self.index += 1;
-            return Ok(Json::Array(items));
-        }
-        loop {
-            items.push(self.parse_value()?);
-            self.skip_whitespace();
-            match self.bump() {
-                Some(',') => continue,
-                Some(']') => break,
-                _ => anyhow::bail!("JSON 数组缺少 , 或 ]"),
-            }
-        }
-        Ok(Json::Array(items))
-    }
-
-    fn parse_object(&mut self) -> Result<Json> {
-        self.expect('{')?;
-        let mut entries = Vec::new();
-        self.skip_whitespace();
-        if self.peek() == Some('}') {
-            self.index += 1;
-            return Ok(Json::Object(entries));
-        }
-        loop {
-            self.skip_whitespace();
-            let key = self.parse_string()?;
-            self.skip_whitespace();
-            self.expect(':')?;
-            let value = self.parse_value()?;
-            entries.push((key, value));
-            self.skip_whitespace();
-            match self.bump() {
-                Some(',') => continue,
-                Some('}') => break,
-                _ => anyhow::bail!("JSON 对象缺少 , 或 }}"),
-            }
-        }
-        Ok(Json::Object(entries))
-    }
-}
-
 fn main() -> Result<()> {
     configure_utf8_console()?;
     let cli = Cli::parse();
+    let api_url = cli
+        .api_url
+        .or_else(|| std::env::var("OJOS_ORCHESTRATOR_URL").ok());
+    if let Some(api_url) = api_url {
+        let mut config = api_client::ApiClientConfig::new(api_url)?;
+        let issuer = cli
+            .oidc_issuer
+            .or_else(|| std::env::var("OJOS_TUI_OIDC_ISSUER").ok())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "remote TUI requires --oidc-issuer or OJOS_TUI_OIDC_ISSUER; bearer-token fallback is disabled"
+                )
+            })?;
+        let client_id = cli
+            .oidc_client_id
+            .or_else(|| std::env::var("OJOS_TUI_OIDC_CLIENT_ID").ok())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("remote TUI requires --oidc-client-id or OJOS_TUI_OIDC_CLIENT_ID")
+            })?;
+        let mut oidc = device_auth::DeviceFlowConfig::new(issuer, client_id)?;
+        oidc.scope = cli
+            .oidc_scope
+            .or_else(|| std::env::var("OJOS_TUI_OIDC_SCOPE").ok())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "openid profile".to_string());
+        oidc.audience = cli
+            .oidc_audience
+            .or_else(|| std::env::var("OJOS_TUI_OIDC_AUDIENCE").ok())
+            .filter(|value| !value.trim().is_empty());
+        let access_token = device_auth::authenticate(&oidc, |prompt| {
+            eprintln!("OIDC device authorization required.");
+            eprintln!("Verification URI: {}", prompt.verification_uri);
+            eprintln!("User code: {}", prompt.user_code);
+            if let Some(uri) = prompt.verification_uri_complete.as_deref() {
+                eprintln!("Direct verification URI: {uri}");
+            }
+            eprintln!(
+                "Waiting for authorization (expires in {} seconds)...",
+                prompt.expires_in.as_secs()
+            );
+        })?;
+        config.bearer_token = Some(access_token);
+        let client = api_client::ApiClient::connect(config);
+        if let Some(command) = cli.command {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&remote::execute_once(&client, &command)?)?
+            );
+            return Ok(());
+        }
+        return remote::run_remote(client);
+    }
+    if cli.command.is_some() {
+        anyhow::bail!("--command requires --api-url or OJOS_ORCHESTRATOR_URL");
+    }
+    if !cli.legacy_local {
+        anyhow::bail!(
+            "the v1 TUI requires --api-url or OJOS_ORCHESTRATOR_URL; use --legacy-local only for the deprecated 0.2 compatibility console"
+        );
+    }
     let repo_root = fs::canonicalize(&cli.repo_root).unwrap_or(cli.repo_root);
     let app = App::new(repo_root)?;
     run(app)
@@ -1104,11 +1576,16 @@ fn run(mut app: App) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let result = loop {
+        app.tick();
         terminal.draw(|frame| draw(frame, &app))?;
         if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?
         {
             if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if app.input_editor.is_some() {
+                app.handle_input_editor_key(key.code);
                 continue;
             }
             // 商店表单处于输入模式时按键全部归表单，避免和全局快捷键抢按键。
@@ -1119,7 +1596,7 @@ fn run(mut app: App) -> Result<()> {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
                 KeyCode::Tab => app.next_page(),
-                KeyCode::Char('r') => app.refresh()?,
+                KeyCode::Char('r') => app.queue_refresh(),
                 KeyCode::Char('n') => app.next_action(),
                 KeyCode::Char('p') => app.previous_action(),
                 KeyCode::Char('f') => app.next_field(),
@@ -1133,6 +1610,12 @@ fn run(mut app: App) -> Result<()> {
                         .cloned()
                     {
                         app.update_field(&field.name, String::new());
+                    }
+                }
+                KeyCode::Enter => app.begin_field_edit(),
+                KeyCode::Char('/') => {
+                    if app.page == TuiPage::Core(OrchestratorViewPage::Operations) {
+                        app.begin_operation_filter_edit();
                     }
                 }
                 KeyCode::Char('c') => app.confirm_session(),
@@ -1165,9 +1648,22 @@ fn run(mut app: App) -> Result<()> {
                 KeyCode::Char('w') => app.toggle_service_driver(),
                 KeyCode::Char('s') => app.run_host_action("host.start"),
                 KeyCode::Char('S') => app.run_host_action("host.stop"),
+                KeyCode::F(5) => app.run_service_action("service.start"),
+                KeyCode::F(6) => app.run_service_action("service.stop"),
+                KeyCode::F(7) => app.run_service_action("service.restart"),
                 KeyCode::Char('g') => app.reload_store_index(),
                 KeyCode::Char('m') => app.open_store_form(true),
                 KeyCode::Char('M') => app.open_store_form(false),
+                KeyCode::Char('t') => {
+                    if app.page == TuiPage::Store {
+                        app.toggle_uninstall_driver();
+                    }
+                }
+                KeyCode::Delete => {
+                    if app.page == TuiPage::Store {
+                        app.uninstall_selected_store_module();
+                    }
+                }
                 KeyCode::Char(value) => {
                     if let Some(page) = TuiPage::all()
                         .into_iter()
@@ -1198,13 +1694,13 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         ])
         .split(frame.area());
 
-    draw_header(frame, layout[0]);
+    draw_header(frame, app, layout[0]);
     draw_tabs(frame, app, layout[1]);
     match app.page {
         TuiPage::Core(page) => draw_core_page(frame, app, layout[2], page),
         TuiPage::Store => draw_store(frame, app, layout[2]),
     }
-    draw_footer(frame, layout[3]);
+    draw_footer(frame, app, layout[3]);
 }
 
 fn draw_core_page(
@@ -1226,7 +1722,7 @@ fn draw_core_page(
     }
 }
 
-fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
+fn draw_header(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     let text = vec![Line::from(vec![
         Span::styled(
             " OJOS Orchestrator ",
@@ -1242,6 +1738,19 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
         ),
         Span::raw("  "),
         Span::styled("Store", Style::default().fg(Color::Cyan)),
+        Span::raw("  │  "),
+        Span::styled(
+            if app.last_message.is_empty() {
+                "就绪"
+            } else {
+                app.last_message.as_str()
+            },
+            Style::default().fg(if app.worker.is_busy() {
+                Color::Yellow
+            } else {
+                Color::White
+            }),
+        ),
     ])];
     frame.render_widget(
         Paragraph::new(text).block(Block::default().borders(Borders::ALL)),
@@ -1279,7 +1788,8 @@ fn draw_overview(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     let lines = vec![
         Line::from(format!("Action: {}", app.view.schemas.action_count())),
         Line::from(format!("Form: {}", app.view.schemas.form_count())),
-        Line::from(format!("Service: {}", app.view.services.len())),
+        Line::from(format!("Deployment: {}", app.view.deployments.len())),
+        Line::from(format!("Service Manifest: {}", app.view.services.len())),
         Line::from(format!(
             "Release Registry: {}",
             app.view.release_registry.len()
@@ -1307,55 +1817,120 @@ fn draw_services(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(11),
-            Constraint::Min(6),
+            Constraint::Length(5),
+            Constraint::Min(8),
+            Constraint::Length(7),
         ])
         .split(area);
     frame.render_widget(
-        Paragraph::new(
-            "Release Actions: R create  U update  i install  Y delete  B rollback  z validate",
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Release Actions"),
-        ),
+        Paragraph::new("Service: F5 start  F6 stop  F7 restart · Host: s start  S stop · w driver")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Lifecycle Actions"),
+            ),
         chunks[0],
     );
-    let rows = app.view.services.iter().map(|service| {
-        Row::new(vec![
-            Cell::from(service.id.clone()),
-            Cell::from(service.name.clone()),
-            Cell::from(service.version.clone()),
-            Cell::from(service.kind.clone()),
-            Cell::from(service.endpoint.clone()),
-            Cell::from(service.runtime.clone()),
-            Cell::from(service.ui.clone()),
-            Cell::from(service.health.clone()),
-        ])
-    });
+    let selected = app.selected_deployment();
+    let hosts = app
+        .view
+        .deployments
+        .iter()
+        .map(|deployment| deployment.host_ip.as_str())
+        .filter(|host| !host.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("  ");
+    let host_lines = vec![
+        Line::from(format!(
+            "选中部署: {}@{}  Endpoint: {}",
+            selected.map(|row| row.service_id.as_str()).unwrap_or("—"),
+            selected.map(|row| row.host_ip.as_str()).unwrap_or("—"),
+            selected
+                .map(|row| row.endpoint.as_str())
+                .filter(|endpoint| !endpoint.is_empty())
+                .unwrap_or("未登记")
+        )),
+        Line::from(format!(
+            "全部部署主机: {hosts}  运行时驱动: {}  后台任务: {}",
+            driver_toggle_label(app.execute_service_driver),
+            if app.worker.is_busy() {
+                "运行中"
+            } else {
+                "空闲"
+            }
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(host_lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL).title("Host")),
+        chunks[1],
+    );
+
+    let rows = app
+        .view
+        .deployments
+        .iter()
+        .enumerate()
+        .map(|(index, deployment)| {
+            let style = if index == app.selected_deployment_index {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(deployment.service_id.clone()),
+                Cell::from(deployment.host_ip.clone()),
+                Cell::from(deployment.version.clone()),
+                Cell::from(deployment.kind.clone()),
+                Cell::from(deployment.runtime.clone()),
+                Cell::from(deployment.status.clone()),
+                Cell::from(if deployment.endpoint.is_empty() {
+                    "未登记".to_string()
+                } else {
+                    deployment.endpoint.clone()
+                }),
+                Cell::from(deployment.endpoint_health.clone()),
+                Cell::from(deployment.protocol.clone()),
+                Cell::from(deployment.health_path.clone()),
+            ])
+            .style(style)
+        });
     frame.render_widget(
         Table::new(
             rows,
             [
                 Constraint::Length(18),
-                Constraint::Length(16),
-                Constraint::Length(8),
                 Constraint::Length(15),
-                Constraint::Length(16),
-                Constraint::Length(11),
                 Constraint::Length(8),
-                Constraint::Min(10),
+                Constraint::Length(12),
+                Constraint::Length(12),
+                Constraint::Length(14),
+                Constraint::Length(24),
+                Constraint::Length(12),
+                Constraint::Length(9),
+                Constraint::Min(14),
             ],
         )
         .header(
             Row::new(vec![
-                "ID", "名称", "版本", "类型", "Endpoint", "Runtime", "UI", "Health",
+                "Service",
+                "Host",
+                "Version",
+                "Kind",
+                "Runtime",
+                "Status",
+                "Endpoint",
+                "Health",
+                "Protocol",
+                "Health Path",
             ])
             .style(Style::default().fg(Color::Yellow)),
         )
-        .block(Block::default().borders(Borders::ALL).title("Service")),
-        chunks[1],
+        .block(Block::default().borders(Borders::ALL).title("Deployments")),
+        chunks[2],
     );
 
     let registry_rows = app
@@ -1401,7 +1976,7 @@ fn draw_services(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .title("Service Release Registry"),
         ),
-        chunks[2],
+        chunks[3],
     );
 }
 
@@ -1537,7 +2112,12 @@ fn draw_links(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title("Link Actions")),
         chunks[0],
     );
-    let rows = app.view.links.iter().map(|link| {
+    let rows = app.view.links.iter().enumerate().map(|(index, link)| {
+        let style = if index == app.selected_link_index {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
         Row::new(vec![
             Cell::from(link.from.clone()),
             Cell::from(link.to.clone()),
@@ -1547,6 +2127,7 @@ fn draw_links(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             Cell::from(link.enabled.clone()),
             Cell::from(link.source.clone()),
         ])
+        .style(style)
     });
     frame.render_widget(
         Table::new(
@@ -1582,7 +2163,16 @@ fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         ])
         .split(area);
     frame.render_widget(
-        Paragraph::new("Operation Actions: c confirm  a apply  u rollback  o logs").block(
+        Paragraph::new(format!(
+            "c confirm  a apply  u rollback  o logs  / filter [{}]  w driver [{}]",
+            if app.operation_filter.is_empty() {
+                "all"
+            } else {
+                app.operation_filter.as_str()
+            },
+            driver_toggle_label(app.execute_service_driver)
+        ))
+        .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Operation Actions"),
@@ -1591,26 +2181,23 @@ fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     );
     draw_operation_workbench(frame, app, chunks[1]);
 
-    let rows = app.view.operations.iter().map(|operation| {
+    let rows = app.filtered_operation_indices().into_iter().map(|index| {
+        let operation = &app.view.operations[index];
+        let style = if index == app.selected_operation_index {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
         Row::new(vec![
             Cell::from(operation.operation_id.clone()),
             Cell::from(operation.action.clone()),
             Cell::from(operation.target.clone()),
             Cell::from(operation.status.clone()),
             Cell::from(operation.risk.clone()),
-            Cell::from(operation.mode.clone()),
-            Cell::from(operation.plan_required.clone()),
-            Cell::from(operation.fields.clone()),
-            Cell::from(operation.preview_target.clone()),
-            Cell::from(operation.preview_confirmation.clone()),
-            Cell::from(operation.result.clone()),
-            Cell::from(operation.error.clone()),
             Cell::from(operation.log_count.to_string()),
-            Cell::from(operation.summary.clone()),
-            Cell::from(operation.created_at.clone()),
             Cell::from(operation.updated_at.clone()),
-            Cell::from(operation.preview_steps.clone()),
         ])
+        .style(style)
     });
     frame.render_widget(
         Table::new(
@@ -1618,49 +2205,29 @@ fn draw_operations(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             [
                 Constraint::Length(24),
                 Constraint::Length(28),
+                Constraint::Length(22),
                 Constraint::Length(16),
-                Constraint::Length(16),
-                Constraint::Length(6),
-                Constraint::Length(12),
-                Constraint::Length(10),
-                Constraint::Length(20),
-                Constraint::Length(18),
                 Constraint::Length(8),
-                Constraint::Length(10),
-                Constraint::Length(18),
                 Constraint::Length(6),
-                Constraint::Length(18),
-                Constraint::Length(16),
-                Constraint::Length(16),
-                Constraint::Min(24),
+                Constraint::Min(18),
             ],
         )
         .header(
             Row::new(vec![
                 "Operation",
                 "Action",
-                "对象",
+                "目标",
                 "状态",
                 "风险",
-                "模式",
-                "Plan",
-                "字段",
-                "预览目标",
-                "确认",
-                "结果",
-                "错误",
                 "日志",
-                "摘要",
-                "Created",
                 "Updated",
-                "预览步骤",
             ])
             .style(Style::default().fg(Color::Yellow)),
         )
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Operation Action Registry"),
+                .title("Operation Records"),
         ),
         chunks[2],
     );
@@ -1673,27 +2240,44 @@ fn draw_operation_workbench(frame: &mut ratatui::Frame<'_>, app: &App, area: Rec
         .get(app.selected_field_index)
         .map(|field| field.name.as_str())
         .unwrap_or("无");
-    let lines = vec![
-        Line::from(format!("Action: {}", workbench.selected_action)),
-        Line::from(format!("Operation: {}", workbench.operation_id)),
-        Line::from(format!("目标: {}", workbench.target)),
-        Line::from(format!("字段: {}", workbench.fields)),
+    let selected = app.selected_operation();
+    let mut lines = vec![
         Line::from(format!(
-            "状态: {}    结果: {}    日志: {}",
-            workbench.current_status,
-            if workbench.result_status.is_empty() {
-                "待执行"
-            } else {
-                &workbench.result_status
-            },
-            workbench.log_count
+            "选中 Operation: {}  Action: {}  Status: {}",
+            selected
+                .map(|operation| operation.operation_id.as_str())
+                .unwrap_or("—"),
+            selected
+                .map(|operation| operation.action.as_str())
+                .unwrap_or("—"),
+            selected
+                .map(|operation| operation.status.as_str())
+                .unwrap_or("—")
         )),
-        Line::from(format!("预览步骤: {}", workbench.preview_steps)),
         Line::from(format!(
-            "需确认: {}    可执行: {}    可回滚: {}",
-            workbench.requires_confirmation, workbench.can_apply, workbench.rollback
+            "目标: {}  摘要: {}",
+            selected
+                .map(|operation| operation.target.as_str())
+                .unwrap_or("—"),
+            selected
+                .map(|operation| operation.summary.as_str())
+                .filter(|summary| !summary.is_empty())
+                .unwrap_or("—")
         )),
-        Line::from(format!("提示: {}", workbench.warnings)),
+        Line::from(format!(
+            "需确认: {}  可回滚: {}  驱动已记录授权: {}  错误: {}",
+            selected.is_some_and(|operation| operation.requires_confirmation),
+            selected.is_some_and(|operation| operation.rollback_available),
+            selected.is_some_and(|operation| operation.driver_authorized),
+            selected
+                .map(|operation| operation.error.as_str())
+                .filter(|error| !error.is_empty())
+                .unwrap_or("—")
+        )),
+        Line::from(format!(
+            "Action 工作台: {}  当前字段: {selected_field}  Enter 输入任意文本，v 循环值",
+            workbench.selected_action
+        )),
         Line::from(format!(
             "表单: {}",
             workbench
@@ -1718,8 +2302,20 @@ fn draw_operation_workbench(frame: &mut ratatui::Frame<'_>, app: &App, area: Rec
                 .collect::<Vec<_>>()
                 .join("  ")
         )),
-        Line::from(format!("当前字段: {selected_field}")),
     ];
+    if let Some(operation) = selected {
+        let operation_logs = app
+            .view
+            .logs
+            .iter()
+            .filter(|log| log.operation_id == operation.operation_id)
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>();
+        for log in operation_logs.into_iter().rev() {
+            lines.push(Line::from(format!("[{}] {}", log.level, log.message)));
+        }
+    }
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
@@ -1758,17 +2354,41 @@ fn draw_topology(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
 }
 
 fn draw_logs(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
-    let rows = app.view.logs.iter().map(|log| {
-        Row::new(vec![
-            Cell::from(log.source_id.clone()),
-            Cell::from(log.service_id.clone()),
-            Cell::from(log.endpoint.clone()),
-            Cell::from(log.operation_id.clone()),
-            Cell::from(log.level.clone()),
-            Cell::from(log.message.clone()),
-            Cell::from(log.path.clone()),
-        ])
-    });
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(4)])
+        .split(area);
+    let filter = if app.selected_log_operation_id.is_empty() {
+        "全部日志".to_string()
+    } else {
+        format!(
+            "Operation {}（运行中每秒自动刷新）",
+            app.selected_log_operation_id
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(filter).block(Block::default().borders(Borders::ALL).title("日志筛选")),
+        chunks[0],
+    );
+    let rows = app
+        .view
+        .logs
+        .iter()
+        .filter(|log| {
+            app.selected_log_operation_id.is_empty()
+                || log.operation_id == app.selected_log_operation_id
+        })
+        .map(|log| {
+            Row::new(vec![
+                Cell::from(log.source_id.clone()),
+                Cell::from(log.service_id.clone()),
+                Cell::from(log.endpoint.clone()),
+                Cell::from(log.operation_id.clone()),
+                Cell::from(log.level.clone()),
+                Cell::from(log.message.clone()),
+                Cell::from(log.path.clone()),
+            ])
+        });
     frame.render_widget(
         Table::new(
             rows,
@@ -1795,7 +2415,7 @@ fn draw_logs(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             .style(Style::default().fg(Color::Yellow)),
         )
         .block(Block::default().borders(Borders::ALL).title("LogView")),
-        area,
+        chunks[1],
     );
 }
 
@@ -1841,19 +2461,35 @@ fn draw_store(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(6),
             Constraint::Min(5),
-            Constraint::Length(9),
+            Constraint::Length(12),
         ])
         .split(area);
     let header = vec![
-        Line::from("Store Actions: m install  M manual install  g reload index"),
-        Line::from("Up/Down 选择模块  w 切换运行时驱动执行"),
+        Line::from("Store: m install  M manual  g reload  t authorize uninstall  Delete uninstall"),
+        Line::from("Up/Down 选择模块；表单内 Tab 切字段，PageUp/PageDown 切 GitHub 资产"),
         Line::from(format!(
-            "索引 {}    模块 {}    运行时驱动 {}",
+            "索引 {}  模块 {}  cache={}  后台任务={}",
             app.store.index_url,
             app.store.modules.len(),
-            driver_toggle_label(app.execute_service_driver)
+            app.store.cached,
+            if app.worker.is_busy() {
+                "运行中"
+            } else {
+                "空闲"
+            }
+        )),
+        Line::from(format!(
+            "包加载={}  GitHub Token={}  校验和={}  卸载授权={}",
+            app.store.status.package_load_enabled,
+            app.store.status.github_token_configured,
+            if app.store.status.require_release_checksum {
+                "强制"
+            } else {
+                "可选"
+            },
+            driver_toggle_label(app.store.uninstall_driver_authorized)
         )),
     ];
     frame.render_widget(
@@ -1873,7 +2509,7 @@ fn draw_store(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             Cell::from(module.id.clone()),
             Cell::from(module.name.clone()),
             Cell::from(module.kind.clone()),
-            Cell::from(module.tags.clone()),
+            Cell::from(module.tags.join(",")),
             Cell::from(module.source().to_string()),
             Cell::from(store_installed_label(app, &module.id)),
         ]);
@@ -1931,15 +2567,29 @@ fn store_detail_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(format!("{} ({})", module.name, module.id)),
         Line::from(module.description.clone()),
-        Line::from(format!("类型 {}    标签 {}", module.kind, module.tags)),
+        Line::from(format!(
+            "类型 {}    标签 {}",
+            module.kind,
+            module.tags.join(",")
+        )),
         Line::from(format!("来源 {}", module.source())),
         Line::from(format!("状态 {}", store_installed_label(app, &module.id))),
-        Line::from("m 用该来源导入并安装；M 手动填写来源。"),
+        Line::from("m 用该来源安装；远程索引、GitHub Release 与直链均由共享管理层处理。"),
     ];
-    if module.source_url.trim().is_empty() {
-        lines.push(Line::from(
-            "该模块只给了仓库，请用 Web UI 选 Release 资产。",
-        ));
+    if let Some(installed) = app.store.installed.get(&module.id) {
+        lines.push(Line::from(format!(
+            "部署 {} 个：{}",
+            installed.deployments.len(),
+            installed
+                .deployments
+                .iter()
+                .map(|deployment| format!(
+                    "{}@{} {}",
+                    deployment.version, deployment.host_ip, deployment.status
+                ))
+                .collect::<Vec<_>>()
+                .join("；")
+        )));
     }
     if !app.store.message.is_empty() {
         lines.push(Line::from(app.store.message.clone()));
@@ -1949,19 +2599,35 @@ fn store_detail_lines(app: &App) -> Vec<Line<'static>> {
 
 fn store_form_lines(form: &StoreInstallForm) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from("导入并安装：Tab 换字段  Enter 提交  Esc 取消"),
+        Line::from("导入并安装：仓库字段 Enter 获取 Releases；其余字段 Enter 提交；Esc 取消"),
+        Line::from(format!(
+            "{} repo       {}",
+            field_marker(form.field == 0),
+            form.repo
+        )),
         Line::from(format!(
             "{} source_url {}",
-            field_marker(form.field == 0),
+            field_marker(form.field == 1),
             form.source_url
         )),
         Line::from(format!(
             "{} checksum   {}",
-            field_marker(form.field == 1),
+            field_marker(form.field == 2),
             form.checksum
         )),
-        Line::from("source_url 支持仓库内相对路径与 release 包直链。"),
-        Line::from("checksum 可留空，填写时形如 sha256:<hex>。"),
+        Line::from(format!(
+            "{} host_ip    {}",
+            field_marker(form.field == 3),
+            form.host_ip
+        )),
+        Line::from(format!(
+            "{} execute_service_driver={}   {} external_service_running={}",
+            field_marker(form.field == 4),
+            form.execute_service_driver,
+            field_marker(form.field == 5),
+            form.external_service_running
+        )),
+        Line::from("布尔字段按 Space 切换且互斥；source_url 支持本地包、直链和 GitHub 资产。"),
     ];
     if !form.module_id.is_empty() {
         lines.push(Line::from(format!("来自索引模块 {}", form.module_id)));
@@ -1969,11 +2635,18 @@ fn store_form_lines(form: &StoreInstallForm) -> Vec<Line<'static>> {
     lines
 }
 
-fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect) {
+fn draw_footer(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    let text = match &app.input_editor {
+        Some(InputEditor::WorkbenchField { name, value }) => {
+            format!("编辑字段 {name}> {value}_  · Enter 保存 / Esc 取消")
+        }
+        Some(InputEditor::OperationFilter { value }) => {
+            format!("操作筛选> {value}_  · Enter 保存 / Esc 取消")
+        }
+        None => "q/Esc quit  r refresh  Tab/1-9 pages  Enter edit field  / operation filter  F5/F6/F7 service start-stop-restart  s/S host start-stop  w driver  e/E/x/h endpoint  l/L/X/H/k/K link  c/a/u/o operation  0 store  m/M install  g index  t+Delete uninstall  Up/Down select".to_string(),
+    };
     frame.render_widget(
-        Paragraph::new(
-            "q/Esc quit  r refresh  Tab/1-9 pages  R/U/i/Y/B/z release  e/E/x/h endpoint  l/L/X/H link  c/a/u/o operation  d/D diagnostics  0 store page  m/M store install  g reload index  s/S host start-stop  w service driver  Up/Down select row",
-        )
+        Paragraph::new(text)
             .wrap(Wrap { trim: true })
             .block(Block::default().borders(Borders::ALL)),
         area,
@@ -1983,14 +2656,8 @@ fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_core::ReleaseRegistryViewRow;
+    use orchestrator_legacy::ReleaseRegistryViewRow;
     use std::collections::BTreeMap;
-
-    const SAMPLE_STORE_INDEX: &str = r#"{"schema_version":1,"modules":[
-{"id":"demo","name":"Demo","tags":["a","b"],"source_url":"services/demo"},
-{"id":"only-repo","repo":"owner/name"},
-{"id":"","name":"skipped"}
-]}"#;
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2003,6 +2670,53 @@ mod tests {
     fn tui_source() -> String {
         std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
             .expect("TUI source should be readable as UTF-8")
+    }
+
+    fn deployment(service_id: &str, host_ip: &str, endpoint: &str) -> DeploymentViewRow {
+        DeploymentViewRow {
+            service_id: service_id.to_string(),
+            name: service_id.to_string(),
+            version: "1.0.0".to_string(),
+            kind: "backend-api".to_string(),
+            runtime: "local-process".to_string(),
+            host_ip: host_ip.to_string(),
+            status: "RUNNING".to_string(),
+            endpoint: endpoint.to_string(),
+            protocol: "http".to_string(),
+            health_path: "/health".to_string(),
+            endpoint_health: "healthy".to_string(),
+            reachable: true,
+            endpoint_count: usize::from(!endpoint.is_empty()),
+            endpoints: (!endpoint.is_empty())
+                .then(|| endpoint.to_string())
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn operation(id: &str, action: &str, status: &str) -> OperationViewRow {
+        OperationViewRow {
+            operation_id: id.to_string(),
+            action: action.to_string(),
+            target: "Service demo".to_string(),
+            status: status.to_string(),
+            risk: "MEDIUM".to_string(),
+            plan_required: String::new(),
+            mode: "store".to_string(),
+            requires_confirmation: false,
+            rollback_available: false,
+            driver_authorized: false,
+            fields: String::new(),
+            preview_target: "demo".to_string(),
+            preview_steps: String::new(),
+            preview_confirmation: String::new(),
+            result: String::new(),
+            error: String::new(),
+            log_count: 0,
+            summary: "test operation".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
     }
 
     #[test]
@@ -2218,7 +2932,7 @@ mod tests {
         assert!(source.contains("Deployment templates are readonly"));
 
         let repo_view =
-            orchestrator_core::load_orchestrator_view_with_database_url(&repo_root(), None)
+            orchestrator_legacy::load_orchestrator_view_with_database_url(&repo_root(), None)
                 .expect("repo view");
         assert!(!repo_view.templates.is_empty());
 
@@ -2330,7 +3044,7 @@ mod tests {
         }
         assert!(keys.contains(&'k'), "既有 link.enable 按键必须保留");
         assert!(keys.contains(&'K'), "既有 link.disable 按键必须保留");
-        for key in ['w', 's', 'S', 'g', 'm', 'M'] {
+        for key in ['w', 's', 'S', 'g', 'm', 'M', 't', '/'] {
             assert!(keys.contains(&key), "新增按键 {key} 未接入事件处理");
         }
         let mut unique = keys.clone();
@@ -2346,31 +3060,12 @@ mod tests {
     }
 
     #[test]
-    fn tui_store_index_parser_reads_modules_and_flags_remote_index() {
-        let modules = store_modules_from_index(SAMPLE_STORE_INDEX).expect("index parses");
-        assert_eq!(modules.len(), 2);
-        assert_eq!(modules[0].id, "demo");
-        assert_eq!(modules[0].name, "Demo");
-        assert_eq!(modules[0].tags, "a,b");
-        assert_eq!(modules[0].source(), "services/demo");
-        assert_eq!(modules[1].name, "only-repo");
-        assert_eq!(modules[1].source(), "owner/name");
-        assert!(store_modules_from_index("{}").is_err());
-        assert!(store_modules_from_index("not json").is_err());
-        assert!(store_index_is_remote("https://example.com/index.json"));
-        assert!(!store_index_is_remote("store/index.json"));
-        let repo = PathBuf::from("repo-root");
-        assert!(store_index_path(&repo, "../escape.json").is_err());
-        assert!(store_index_path(&repo, "store/index.json").is_ok());
-    }
-
-    #[test]
     fn tui_store_page_lists_local_index_modules() {
         let source = tui_source();
-        assert!(source.contains("Store Actions: m install  M manual install  g reload index"));
+        assert!(source.contains("Store: m install  M manual  g reload"));
 
-        let app = App::new_memory(repo_root()).expect("TUI app should load");
-        assert!(!store_index_is_remote(&app.store.index_url));
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        assert_eq!(app.store.index_url, "store/index.json");
         assert!(
             !app.store.modules.is_empty(),
             "TUI 应能读出仓库内商店索引: {}",
@@ -2382,11 +3077,23 @@ mod tests {
                 .iter()
                 .any(|module| module.id == "gateway")
         );
+        assert!(app.installed_version("gateway").is_none());
         assert!(
-            app.installed_version("gateway").is_some(),
-            "已在 view.services 里的模块应标记为已安装"
+            app.store.installed.is_empty(),
+            "仓库 manifest 不能被误标为已经部署"
         );
         assert!(app.installed_version("not-installed-module").is_none());
+
+        app.reload_store_index();
+        assert!(app.worker.is_busy(), "远程/本地索引刷新都应离开渲染线程");
+        app.run_action("host.create");
+        assert!(
+            app.last_message.contains("后台管理任务正在执行"),
+            "输入处理不能等待后台任务持有的 console 锁"
+        );
+        app.wait_for_worker();
+        assert!(!app.worker.is_busy());
+        assert!(app.store.message.is_empty());
     }
 
     #[test]
@@ -2394,15 +3101,23 @@ mod tests {
         let mut app = App::new_memory(repo_root()).expect("TUI app should load");
         app.open_store_form(false);
         assert_eq!(app.page, TuiPage::Store);
+        app.handle_store_form_key(KeyCode::Tab);
         for value in ['s', 'v', 'c'] {
             app.handle_store_form_key(KeyCode::Char(value));
         }
         app.handle_store_form_key(KeyCode::Backspace);
         app.handle_store_form_key(KeyCode::Tab);
         app.handle_store_form_key(KeyCode::Char('a'));
+        app.handle_store_form_key(KeyCode::Tab);
+        app.handle_store_form_key(KeyCode::Tab);
+        app.handle_store_form_key(KeyCode::Char(' '));
+        app.handle_store_form_key(KeyCode::Tab);
+        app.handle_store_form_key(KeyCode::Char(' '));
         let form = app.store.form.clone().expect("store form should stay open");
         assert_eq!(form.source_url, "sv");
         assert_eq!(form.checksum, "a");
+        assert!(!form.execute_service_driver);
+        assert!(form.external_service_running);
         app.handle_store_form_key(KeyCode::Esc);
         assert!(app.store.form.is_none());
 
@@ -2416,7 +3131,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_store_import_and_install_dispatches_release_install() {
+    fn tui_store_install_request_matches_web_options_and_rejects_conflicts() {
         let mut app = App::new_memory(repo_root()).expect("TUI app should load");
         app.store.selected = app
             .store
@@ -2428,59 +3143,291 @@ mod tests {
         let form = app.store.form.clone().expect("store form should open");
         assert_eq!(form.module_id, "gateway");
         assert_eq!(form.source_url, "services/gateway");
+        let mut configured = form.clone();
+        configured.host_ip = "10.0.0.8".to_string();
+        configured.external_service_running = true;
+        let request = app
+            .store_install_request(&configured)
+            .expect("valid Store request");
+        assert_eq!(request.source_url, "services/gateway");
+        assert_eq!(request.host_ip, "10.0.0.8");
+        assert!(request.external_service_running);
+        assert!(!request.execute_service_driver);
 
-        app.submit_store_form();
-        assert!(app.store.form.is_none());
-        assert!(
-            app.last_message.starts_with("已导入 gateway")
-                || app.last_message.starts_with("已更新 gateway"),
-            "商店安装应先经 import_external_release 注册契约: {}",
-            app.last_message
+        configured.execute_service_driver = true;
+        assert!(app.store_install_request(&configured).is_err());
+    }
+
+    #[test]
+    fn tui_service_and_host_lifecycle_target_selected_deployment_exactly() {
+        let source = tui_source();
+        assert!(source.contains("Service: F5 start  F6 stop  F7 restart"));
+
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        app.view.deployments = vec![
+            deployment("gateway", "10.0.0.1", "10.0.0.1:8080:gateway"),
+            deployment("auth-service", "10.0.0.2", "10.0.0.2:8081:auth-service"),
+        ];
+        app.set_page(TuiPage::Core(OrchestratorViewPage::Services));
+        app.move_selection(1);
+        assert_eq!(app.selected_deployment_index, 1);
+        let service = app
+            .service_action_fields()
+            .expect("selected service action fields")
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            service.get("service_id").map(String::as_str),
+            Some("auth-service")
         );
-        assert!(
-            app.last_message.contains("RUNTIME_PIPELINE"),
-            "导入后应派发 release.install: {}",
-            app.last_message
+        assert_eq!(service.get("host_ip").map(String::as_str), Some("10.0.0.2"));
+        assert_eq!(
+            service.get("endpoint").map(String::as_str),
+            Some("10.0.0.2:8081:auth-service")
+        );
+        assert_eq!(service.get("version").map(String::as_str), Some("1.0.0"));
+        assert_eq!(
+            service.get("execute_service_driver").map(String::as_str),
+            Some("true")
+        );
+
+        let host = app
+            .host_action_fields()
+            .expect("selected host fields")
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(host.get("host_ip").map(String::as_str), Some("10.0.0.2"));
+        assert_eq!(host.get("confirm").map(String::as_str), Some("true"));
+    }
+
+    #[test]
+    fn tui_link_actions_target_the_selected_row_instead_of_the_first() {
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        app.view.links = vec![
+            orchestrator_legacy::LinkViewRow {
+                from: "127.0.0.1:8000:first".to_string(),
+                to: "127.0.0.1:8001:first-target".to_string(),
+                protocol: "http".to_string(),
+                auth_mode: "none".to_string(),
+                scope: "local".to_string(),
+                enabled: "enabled".to_string(),
+                source: "store".to_string(),
+            },
+            orchestrator_legacy::LinkViewRow {
+                from: "10.0.0.2:9000:selected".to_string(),
+                to: "10.0.0.3:9001:selected-target".to_string(),
+                protocol: "grpc".to_string(),
+                auth_mode: "token".to_string(),
+                scope: "cluster".to_string(),
+                enabled: "enabled".to_string(),
+                source: "store".to_string(),
+            },
+        ];
+        app.page = TuiPage::Core(OrchestratorViewPage::Links);
+        app.move_selection(1);
+        let fields = app
+            .link_action_fields()
+            .expect("selected link fields")
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            fields.get("source_endpoint").map(String::as_str),
+            Some("10.0.0.2:9000:selected")
+        );
+        assert_eq!(
+            fields.get("target_endpoint").map(String::as_str),
+            Some("10.0.0.3:9001:selected-target")
         );
     }
 
     #[test]
-    fn tui_host_lifecycle_actions_target_selected_endpoint_host() {
-        let source = tui_source();
-        assert!(source.contains("Host Actions: s host start  S host stop"));
+    fn tui_operation_actions_use_selected_record_and_web_gating() {
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        let mut confirm = operation("op-confirm", "endpoint.create", "PLANNED");
+        confirm.requires_confirmation = true;
+        let apply = operation("op-apply", "service.stop", "AWAITING_CONFIRMATION");
+        app.view.operations = vec![confirm, apply];
+        app.page = TuiPage::Core(OrchestratorViewPage::Operations);
+        app.selected_operation_index = 0;
+
+        let request = app
+            .selected_operation_action_request("operation.confirm")
+            .expect("confirm should be allowed");
+        assert_eq!(request.field("operation_id"), Some("op-confirm"));
+        assert!(
+            app.selected_operation_action_request("operation.apply")
+                .is_err(),
+            "confirmation-required PLANNED operation cannot be applied directly"
+        );
+
+        app.selected_operation_index = 1;
+        assert!(
+            app.selected_operation_action_request("operation.apply")
+                .is_err(),
+            "runtime action requires an explicit driver authorization"
+        );
+        app.execute_service_driver = true;
+        let request = app
+            .selected_operation_action_request("operation.apply")
+            .expect("authorized apply should be allowed");
+        assert_eq!(request.field("operation_id"), Some("op-apply"));
+        assert_eq!(request.field("execute_service_driver"), Some("true"));
+
+        app.view.operations[1].status = "SUCCEEDED".to_string();
+        app.view.operations[1].rollback_available = true;
+        let rollback = app
+            .selected_operation_action_request("operation.rollback")
+            .expect("available rollback should be allowed");
+        assert_eq!(rollback.field("operation_id"), Some("op-apply"));
+
+        app.view.logs = vec![
+            orchestrator_legacy::LogViewRow {
+                source_id: "operation:op-confirm".to_string(),
+                service_id: String::new(),
+                endpoint: String::new(),
+                operation_id: "op-confirm".to_string(),
+                level: "info".to_string(),
+                message: "first".to_string(),
+                path: "operation".to_string(),
+            },
+            orchestrator_legacy::LogViewRow {
+                source_id: "operation:op-apply".to_string(),
+                service_id: String::new(),
+                endpoint: String::new(),
+                operation_id: "op-apply".to_string(),
+                level: "info".to_string(),
+                message: "selected".to_string(),
+                path: "operation".to_string(),
+            },
+        ];
+        app.run_operation_logs_view();
+        assert_eq!(app.selected_log_operation_id, "op-apply");
+        assert_eq!(app.page, TuiPage::Core(OrchestratorViewPage::Logs));
+    }
+
+    #[test]
+    fn tui_text_editor_accepts_arbitrary_field_values_and_operation_filters() {
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        app.select_action("endpoint.create");
+        app.selected_field_index = app
+            .session
+            .workbench
+            .form_fields
+            .iter()
+            .position(|field| field.name == "protocol")
+            .expect("protocol field");
+        app.update_field("protocol", String::new());
+        app.begin_field_edit();
+        for character in "custom+proto".chars() {
+            app.handle_input_editor_key(KeyCode::Char(character));
+        }
+        app.handle_input_editor_key(KeyCode::Enter);
+        assert_eq!(
+            app.session.workbench.request.field("protocol"),
+            Some("custom+proto")
+        );
+
+        app.view.operations = vec![
+            operation("op-start", "service.start", "SUCCEEDED"),
+            operation("op-stop", "service.stop", "FAILED"),
+        ];
+        app.begin_operation_filter_edit();
+        for character in "stop".chars() {
+            app.handle_input_editor_key(KeyCode::Char(character));
+        }
+        app.handle_input_editor_key(KeyCode::Enter);
+        assert_eq!(app.filtered_operation_indices(), vec![1]);
+        assert_eq!(app.selected_operation_index, 1);
+    }
+
+    #[test]
+    fn tui_store_github_asset_selection_and_uninstall_request_are_exact() {
+        let mut app = App::new_memory(repo_root()).expect("TUI app should load");
+        app.open_store_form(false);
+        app.store.releases = vec![orchestrator_manager::GithubReleaseView {
+            tag_name: "v1.2.3".to_string(),
+            name: "Release".to_string(),
+            prerelease: false,
+            published_at: String::new(),
+            html_url: "https://github.com/owner/repo/releases/v1.2.3".to_string(),
+            assets: vec![
+                orchestrator_manager::GithubAssetView {
+                    name: "first.zip".to_string(),
+                    size: 1,
+                    browser_download_url: "https://example.com/first.zip".to_string(),
+                    content_type: "application/zip".to_string(),
+                },
+                orchestrator_manager::GithubAssetView {
+                    name: "second.zip".to_string(),
+                    size: 2,
+                    browser_download_url: "https://example.com/second.zip".to_string(),
+                    content_type: "application/zip".to_string(),
+                },
+            ],
+        }];
+        app.cycle_store_asset(1);
+        assert_eq!(
+            app.store.form.as_ref().map(|form| form.source_url.as_str()),
+            Some("https://example.com/second.zip")
+        );
+
+        let gateway = app
+            .store
+            .modules
+            .iter()
+            .position(|module| module.id == "gateway")
+            .expect("gateway module");
+        app.store.selected = gateway;
+        app.store.installed.insert(
+            "gateway".to_string(),
+            InstalledServiceView {
+                version: "1.0.0".to_string(),
+                versions: vec!["1.0.0".to_string()],
+                kind: "gateway".to_string(),
+                deployments: Vec::new(),
+            },
+        );
+        assert!(app.store_uninstall_request().is_err());
+        app.store.uninstall_driver_authorized = true;
+        let (service_id, request) = app
+            .store_uninstall_request()
+            .expect("authorized uninstall request");
+        assert_eq!(service_id, "gateway");
+        assert_eq!(request.action, "service.delete");
+        assert_eq!(request.field("service_id"), Some("gateway"));
+        assert_eq!(request.field("confirm"), Some("true"));
+        assert_eq!(request.field("execute_service_driver"), Some("true"));
+    }
+
+    #[test]
+    fn tui_renders_store_services_and_operations_at_compact_and_wide_sizes() {
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new_memory(repo_root()).expect("TUI app should load");
-        app.set_page(TuiPage::Core(OrchestratorViewPage::Endpoints));
-        app.move_selection(1);
-        assert_eq!(app.selected_endpoint_index, 1);
-        let host_ip = app.selected_host_ip().expect("selected endpoint host");
-        assert!(!host_ip.is_empty());
-
-        assert!(!app.execute_service_driver);
-        app.toggle_service_driver();
-        assert!(app.execute_service_driver);
-        app.toggle_service_driver();
-        assert!(!app.execute_service_driver);
-
-        app.run_host_action("host.start");
-        let request = app.session.workbench.request.clone();
-        assert_eq!(request.action, "host.start");
-        assert_eq!(request.field("host_ip"), Some(host_ip.as_str()));
-        assert_eq!(request.field("confirm"), Some("true"));
-        assert_eq!(request.field("execute_service_driver"), None);
-        assert!(
-            app.last_message.contains("RUNTIME_PIPELINE"),
-            "host.start 必须经 core dispatcher 的 runtime pipeline: {}",
-            app.last_message
-        );
-
-        app.run_host_action("host.stop");
-        assert_eq!(app.session.workbench.request.action, "host.stop");
-        assert!(
-            app.last_message.contains("RUNTIME_PIPELINE"),
-            "host.stop 必须经 core dispatcher 的 runtime pipeline: {}",
-            app.last_message
-        );
+        app.view.deployments = vec![deployment("gateway", "127.0.0.1", "127.0.0.1:8080:gateway")];
+        app.view.operations = vec![operation("op-render", "service.start", "PLANNED")];
+        for (width, height) in [(80, 24), (160, 48)] {
+            for page in [
+                TuiPage::Core(OrchestratorViewPage::Services),
+                TuiPage::Core(OrchestratorViewPage::Operations),
+                TuiPage::Store,
+            ] {
+                app.page = page;
+                let backend = TestBackend::new(width, height);
+                let mut terminal = Terminal::new(backend).expect("test terminal");
+                terminal
+                    .draw(|frame| draw(frame, &app))
+                    .expect("TUI should render without layout panic");
+                let screen = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(screen.contains("OJOS"));
+            }
+        }
     }
 
     #[test]
@@ -2599,8 +3546,7 @@ mod tests {
         app.run_release_action("release.delete");
         assert!(app.last_message.contains("选择一条 Release 记录"));
 
-        app.set_page(TuiPage::Core(OrchestratorViewPage::Services));
-        app.move_selection(1);
+        app.selected_release_index = 1;
         assert_eq!(app.selected_release_index, 1);
         assert!(app.release_action_fields("release.install").is_some());
     }
@@ -2609,8 +3555,8 @@ mod tests {
     fn tui_footer_documents_new_store_and_host_keys() {
         let source = tui_source();
         assert!(source.contains("q/Esc quit  r refresh  Tab/1-9 pages"));
-        assert!(source.contains("0 store page  m/M store install  g reload index"));
-        assert!(source.contains("s/S host start-stop  w service driver  Up/Down select row"));
+        assert!(source.contains("F5/F6/F7 service start-stop-restart"));
+        assert!(source.contains("t+Delete uninstall"));
         assert!(source.contains("导航 1-9 / 0 / Tab"));
     }
 

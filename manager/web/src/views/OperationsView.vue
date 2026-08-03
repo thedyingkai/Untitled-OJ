@@ -13,19 +13,18 @@ const selected = ref<OperationRow | null>(null);
 const busy = ref(false);
 const filter = ref("");
 const executeDriver = ref(false);
+const planOpen = ref(false);
+const planning = ref(false);
+const planDocument = ref(`{
+  "action": "deployment.restart",
+  "fields": {
+    "deployment_id": "deployment-id"
+  }
+}`);
 
-const runtimeDriverActions = new Set([
-  "release.install",
-  "release.rollback",
-  "host.start",
-  "host.stop",
-  "service.start",
-  "service.stop",
-  "service.restart",
-  "service.delete",
-  "service.enable",
-  "service.disable",
-]);
+// v1 plans persist their exact runtime payload before confirmation. The UI no
+// longer sends a second legacy "execute driver" switch that could change it.
+const runtimeDriverActions = new Set<string>();
 
 const filtered = computed(() => {
   const keyword = filter.value.trim().toLowerCase();
@@ -41,7 +40,7 @@ const filtered = computed(() => {
 });
 
 const selectedLive = computed(() =>
-  ["RUNNING", "PLANNED", "AWAITING_CONFIRMATION"].includes(
+  ["RUNNING", "PLANNED", "CONFIRMED", "ENQUEUING", "CANCELLING"].includes(
     selected.value?.status ?? "",
   ),
 );
@@ -55,9 +54,15 @@ const selectedCanConfirm = computed(
 );
 const selectedCanApply = computed(
   () =>
-    selected.value?.status === "AWAITING_CONFIRMATION" ||
-    (selected.value?.status === "PLANNED" &&
-      !selected.value.requires_confirmation),
+    selected.value?.status === "CONFIRMED" ||
+    (selected.value?.status === "PLANNED" && !selected.value.requires_confirmation),
+);
+const selectedCanCancel = computed(() =>
+  selected.value
+    ? ["PLANNED", "CONFIRMED", "ENQUEUING", "RUNNING"].includes(
+        selected.value.status,
+      )
+    : false,
 );
 
 function selectOperation(operation: OperationRow) {
@@ -80,9 +85,11 @@ function driverRequired(kind: "apply" | "rollback") {
 }
 
 async function operationAction(
-  kind: "confirm" | "apply" | "rollback",
+  kind: "confirm" | "apply" | "cancel" | "retry" | "rollback",
   operation: OperationRow,
 ) {
+  const capability = `operation.${kind}`;
+  if (!store.ensureAction(capability)) return;
   if (
     (kind === "apply" || kind === "rollback") &&
     driverRequired(kind) &&
@@ -94,6 +101,8 @@ async function operationAction(
   busy.value = true;
   try {
     if (kind === "confirm") await api.operationConfirm(operation.operation_id);
+    if (kind === "cancel") await api.operationCancel(operation.operation_id);
+    if (kind === "retry") await api.operationRetry(operation.operation_id);
     if (kind === "apply") {
       await api.operationApply(
         operation.operation_id,
@@ -119,10 +128,59 @@ async function operationAction(
     busy.value = false;
   }
 }
+
+async function createPlan() {
+  if (!store.ensureAction("operation.plan")) return;
+  let document: unknown;
+  try {
+    document = JSON.parse(planDocument.value);
+  } catch (error) {
+    store.toast("err", `计划 JSON 无效：${(error as Error).message}`);
+    return;
+  }
+  if (!document || typeof document !== "object" || Array.isArray(document)) {
+    store.toast("err", "计划必须是包含 action 和 fields 的 JSON 对象");
+    return;
+  }
+  const action = (document as Record<string, unknown>).action;
+  const fields = (document as Record<string, unknown>).fields;
+  if (
+    typeof action !== "string" ||
+    !action.trim() ||
+    !fields ||
+    typeof fields !== "object" ||
+    Array.isArray(fields)
+  ) {
+    store.toast("err", "计划必须包含非空 action 和对象类型 fields");
+    return;
+  }
+  planning.value = true;
+  try {
+    const operation = await api.operationPlan(document as Record<string, unknown>);
+    planOpen.value = false;
+    await store.refreshCore(true);
+    selected.value =
+      store.operations.find((item) => item.operation_id === operation.operation_id) ??
+      operation;
+    store.toast("ok", `计划已创建：${operation.operation_id}`);
+  } catch (error) {
+    store.toast("err", `创建计划失败：${(error as Error).message}`);
+  } finally {
+    planning.value = false;
+  }
+}
 </script>
 
 <template>
   <PageHeader title="操作" subtitle="编排动作的计划、确认、执行与回滚记录">
+    <button
+      class="btn sm"
+      data-action="operation.plan"
+      :disabled="!store.supportsAction('operation.plan')"
+      @click="planOpen = true"
+    >
+      新建计划
+    </button>
     <input
       class="input"
       style="width: 220px"
@@ -182,6 +240,30 @@ async function operationAction(
     </div>
   </div>
 
+  <Modal :open="planOpen" title="新建 Operation 计划" width="680px" @close="planOpen = false">
+    <div class="field">
+      <label>ActionRequest JSON</label>
+      <textarea
+        v-model="planDocument"
+        class="input mono plan-document"
+        spellcheck="false"
+        aria-label="Operation plan JSON"
+      ></textarea>
+      <span class="hint">服务端负责校验 action、固定执行计划和权限；创建成功返回不可变的 PLANNED Operation。</span>
+    </div>
+    <template #footer>
+      <button class="btn" :disabled="planning" @click="planOpen = false">取消</button>
+      <button
+        class="btn primary"
+        data-action="operation.plan"
+        :disabled="planning || !store.supportsAction('operation.plan')"
+        @click="createPlan"
+      >
+        {{ planning ? "创建中…" : "创建计划" }}
+      </button>
+    </template>
+  </Modal>
+
   <Modal
     :open="!!selected"
     :title="`操作 ${selected?.operation_id ?? ''}`"
@@ -222,7 +304,7 @@ async function operationAction(
 
       <div class="op-actions">
         <button
-          v-if="selectedCanConfirm"
+          v-if="selectedCanConfirm && store.supportsAction('operation.confirm')"
           class="btn sm"
           :disabled="busy"
           @click="operationAction('confirm', selected)"
@@ -230,7 +312,7 @@ async function operationAction(
           确认
         </button>
         <button
-          v-if="selectedCanApply"
+          v-if="selectedCanApply && store.supportsAction('operation.apply')"
           class="btn primary sm"
           :disabled="busy || (driverRequired('apply') && !executeDriver)"
           :title="
@@ -243,8 +325,25 @@ async function operationAction(
           执行
         </button>
         <button
+          v-if="selectedCanCancel && store.supportsAction('operation.cancel')"
+          class="btn sm"
+          :disabled="busy"
+          @click="operationAction('cancel', selected)"
+        >
+          取消
+        </button>
+        <button
+          v-if="selected.status === 'FAILED' && store.supportsAction('operation.retry')"
+          class="btn sm"
+          :disabled="busy"
+          @click="operationAction('retry', selected)"
+        >
+          重试
+        </button>
+        <button
           v-if="
             selected.rollback_available &&
+            store.supportsAction('operation.rollback') &&
             ['SUCCEEDED', 'FAILED'].includes(selected.status)
           "
           class="btn danger sm"
@@ -271,6 +370,11 @@ async function operationAction(
   flex: 1;
   overflow-y: auto;
   padding: 18px 22px;
+}
+.plan-document {
+  min-height: 260px;
+  resize: vertical;
+  line-height: 1.5;
 }
 .op-meta .kv {
   display: flex;

@@ -1,97 +1,111 @@
-# 可核对证据
+# Orchestrator v1.0 可核对证据索引
 
-本页给出实现入口、测试名和证据边界。远端运行结果另见 [生产就绪证据](../production-readiness.md)；两类证据不要混用。
+本页说明“到哪里核对实现和自动化”，不记录历史绿色 run。候选 commit 的 GO/NO-GO 见 [生产就绪证据](../production-readiness.md)；本地测试和其他 commit 的 artifact 不能替代该结论。
 
 ## 实现入口
 
 ```text
-services/orchestrator/core/
-services/orchestrator/backend/
-manager/web/
-manager/tui/
-platform/schemas/orchestrator/
+services/orchestrator/core/          纯领域模型、校验、plan/diff、published action
+services/orchestrator/storage/       Memory / SQLite / PostgreSQL、迁移、锁和持久投影
+services/orchestrator/control-plane/ Operation / Job / lease / recovery / compensation
+services/orchestrator/runtime/       Docker Engine 与类型化运行时契约
+services/orchestrator/manager/       Catalog / Release / Store 用例
+services/orchestrator/agent/         mTLS pull Agent、本地 execution ledger
+services/orchestrator/backend/       /api/v1、身份、SSE、live/ready/metrics
+manager/desktop/                     Tauri WebView、embedded backend/Agent、SQLite
+manager/web/                         Web 控制面
+manager/tui/                         /api/v1 Device Flow 客户端
+platform/schemas/orchestrator/       OpenAPI、published action、Agent protocol
 ```
 
-原生 `manager/gui` 已删除。浏览器通过 daemon 的 REST API 使用同一套 action dispatcher，TUI 仍直接复用 core。
+`services/orchestrator/legacy/` 是 0.2 兼容边界，不应被引用为 v1 默认持久化、Node 或 provider 语义。
 
-## 代码与测试索引
+## 功能证据
 
-- Store 与持久化：`services/orchestrator/core/src/store.rs`、`services/orchestrator/core/src/database.rs`，数据库变量为 `ORCHESTRATOR_DATABASE_URL`。PostgreSQL 集成测试在 `services/orchestrator/core/tests/pg_store_integration.rs`。
-- Operation 状态机：`services/orchestrator/core/src/model.rs`；计划、确认、执行和回滚由 `OperationExecutor` 落库并写日志。
-- Service/Release 契约：`services/orchestrator/core/src/service.rs`。多版本选择由
-  `release_install_planner_selects_service_manifest_version` 覆盖；自动回滚目标的时间顺序由
-  `release_rollback_target_uses_operation_timestamps_not_store_order` 覆盖。
-- Release 包校验：`release_package_loader_enforces_required_checksum_for_every_entry_point`、`release_install_fails_on_release_package_checksum_mismatch`。
-- Driver 边界：`docker_compose_driver_rejects_unknown_action`、`docker_compose_driver_runs_only_when_explicitly_enabled`、`external_endpoint_driver_does_not_start_services`。
-- 本地进程与 Release 删除边界：`concurrent_local_process_start_reserves_pid_file_atomically`、
-  `release_delete_historical_version_keeps_current_deployment_intact`、
-  `release_delete_rejects_deployed_version_without_touching_runtime_or_registry`。
-- Release 升级与回滚：`running_fixed_runtime_upgrade_requires_driver_authorization`、
-  `authorized_release_upgrade_and_rollback_restore_running_runtime`、
-  `authorized_release_upgrade_rollback_keeps_previous_stopped_runtime_stopped`、
-  `release_rollback_wrapper_cannot_claim_a_second_rollback`。
-- Endpoint 身份：`endpoint_requires_ip_port_service_name`、`topology_uses_endpoint_identity_without_machine_or_installation`。
-- Endpoint CRUD 与健康：`endpoint_create_update_delete_and_health_write_store`、`endpoint_http_health_updates_store`、`endpoint_tcp_health_updates_store`、`endpoint_unreachable_is_recorded`。
-- Link CRUD、启停与回滚：`link_create_update_delete_and_health_write_store`、`link_disable_and_enable_round_trip_through_operation_chain`、`idempotent_link_toggle_rollback_restores_previous_enabled_state`、`link_update_without_enabled_preserves_disabled_state`。
-- 已停用 Link 的边界：`disabled_link_is_excluded_from_diagnostic_unhealthy_links`、`reconcile_tick_skips_disabled_link_health_probe`。
-- Service 与主机生命周期：`service_start_plan_carries_release_manifest_and_endpoint`、`host_stop_and_start_round_trip_updates_status_and_routes`。执行前会把 `HostService` 和 `DeployedServiceApi` 快照写进 Operation，显式回滚按旧状态恢复。
-- Action/schema 覆盖：`action_registry_contains_required_actions_and_no_forbidden_actions`、`core_action_catalog_covers_registry_and_core_objects`、`form_registry_covers_every_action`。
-- 部署模板边界：`set_expand_apply_are_not_formal_console_actions`，且数据库 schema 不持久化 `service_sets`。
-- Daemon 路由：`daemon_endpoint_routes_use_core_dispatcher`、`daemon_operation_routes_expose_operation_state_and_logs`、`daemon_operation_rollback_route_dispatches_action`、`daemon_diagnostics_export_routes_work`。
-- 控制面鉴权：`internal_token_check_leaves_only_health_open`、`internal_token_check_guards_mutations_and_internal_reads`。
-- Service API 鉴权边界：`service_release_api_surface_validation_rules_are_enforced`、
-  `TestServiceProxyInternalAPIWithoutTailKeepsServiceCallerCredential`、
-  `TestServiceProxyPermissionAPINonAuthProviderDropsServiceCredential`、
-  `TestServiceProxyRejectsPublicPermissionForServiceAuth`。
-- HTTP 解析：`daemon_decodes_http_requests_as_strict_utf8`、`oversized_content_length_is_rejected_without_overflow`。
-- 商店安装状态：`repository_catalog_is_not_reported_as_installed`，目录条目不会再被误报为已安装部署。
-- 节点令牌：`daemon_node_install_route_accepts_node_and_control_plane_tokens_together` 覆盖节点 bearer 与控制面 token 并存。
-- TUI：`tui_loads_shared_orchestrator_view_from_core`、
-  `tui_release_shortcuts_do_not_reuse_preview_paths_or_versions`，以及 TUI 内的 Endpoint、Link、诊断与商店菜单测试。
+### 正式契约
 
-## 尚不能从这些测试推出的结论
+- `services/orchestrator/core/src/contract_v1.rs` 校验 OpenAPI、published action 和类型契约。
+- backend contract tests 校验 router、dispatcher、RBAC、capabilities、Problem Details、request id、幂等、cursor、ETag 和 SSE。
+- `manager/web/src/published-actions.ts` 与 `manager/tui/src/remote.rs` 由能力矩阵测试和共同 fixture 锁定；发布矩阵不得包含 `UNSUPPORTED`。
 
-- `LocalProcessDriver` 只保存 PID 文件，没有生产级监督、存活恢复和 PID 复用保护。
-- `DockerComposeDriver` 只接受固定动作，且依赖目标环境中的 Compose 文件与 Docker。
-- 当前打包产物主要携带 manifest、schema、模板和 Web 静态文件。它不会自动提供业务服务源码、binary 或 image。
-- 节点侧 install rollback 仍未实现，跨主机滚动发布也没有完整生产证据。
-- PostgreSQL store 没有连接池，连接使用 `NoTls`。
+### 存储、并发与恢复
 
-## 本地复核命令
+- `services/orchestrator/storage/tests/sqlite_contract.rs`：WAL、foreign keys、busy timeout、schema checksum、文件锁和重启持久化。
+- `services/orchestrator/storage/tests/postgres_contract.rs`：证书校验 TLS pool、readiness、schema checksum、单主动 advisory lock、事务仓储、retention、旧数据一次性导入和重启幂等。
+- `services/orchestrator/control-plane/` tests：32 并发 claim、lease epoch/CAS、heartbeat、重复 complete、乱序 event、retry、cancel、过期恢复和 `NEEDS_ATTENTION`。
+- backend durable/recovery tests：SQLite/PostgreSQL 重新打开后恢复 Operation/Job，慢 I/O 不占数据库事务或全局 console mutex。
+
+### Node、Runtime 与 Store
+
+- `services/orchestrator/agent/`：一次性 enroll、证书 generation/续签/激活/吊销、本地 SQLite ledger、重复投递和 SIGTERM 排空。
+- `services/orchestrator/runtime/`：Docker socket/pipe 请求、固定动作、artifact digest/RepoDigest 校验、取消和错误映射。
+- `services/orchestrator/backend/tests/docker_agent_v1_e2e.rs` 与 `deploy/ops/orchestrator-docker-agent-e2e.sh`：真实 registry、Docker Engine、Agent pull Job，以及 install/start/stop/restart/uninstall 和重启恢复。
+- `services/orchestrator/manager/` 与 Store API tests：Catalog v2、签名/依赖/平台、仅导入零 Docker、默认安装 Running、幂等、失败补偿、升级/回滚、External health 和 provider fail-fast。
+
+### Topology
+
+- storage topology contracts：不可变 revision、强 ETag、确定性 diff、draft/applied head、Status 与 rollback 新 revision。
+- control-plane/backend tests：validate、apply saga、补偿、并发冲突、drift/reconciler、审计和恢复。
+- `manager/web/e2e/orchestrator-v1.spec.ts`：Endpoint/Link draft 编辑、validate/diff/apply/rollback、Status、drift 和布局失败可见。
+
+### Desktop、Web 与 TUI
+
+- `manager/desktop` tests：随机 loopback backend、应用数据目录 SQLite、bootstrap exchange、导航限制、shutdown 和资源发现；release gate 还以 `OJOS_DESKTOP_SMOKE_DURATION_MS=1800000` 在真实 Tauri WebView 中连续验证认证 API、应用 shell 和事件循环。
+- Web Vitest/Playwright：Store、Topology、Deployment、Node、Operation/SSE、Diagnostic、RBAC、Problem、失败补偿和布局；`OJOS_E2E_SOAK_MS=1800000` 用于 30 分钟持续运行门禁。
+- TUI tests：Device Flow、capabilities、完整 published command surface、mutation idempotency、cursor、ETag、Problem 和事件语义；`--legacy-local` 只属于显式 0.2 兼容。
+
+### 运维与制品
+
+- `deploy/ops/orchestrator-preflight.sh`：生产 PostgreSQL/TLS/OIDC/Node CA/Catalog/artifact/Web build 配置 fail closed。
+- `deploy/ops/orchestrator-backup.sh`、`orchestrator-restore.sh`：PostgreSQL 与 OCI artifact 的一致备份、checksum 和失败切回。
+- `deploy/ops/orchestrator-capacity-gate.py`：100/2000/10000/50、真实重启、延迟和 24 小时稳定性；通过受保护的无 shell helper 在 qualification、每个 Operation round 和 final 记录独立 Engine/容器/网络环境证据 sidecar。
+- `deploy/ops/validate-orchestrator-ga-evidence.py`：拒绝错误 commit、smoke、短时或阈值不合格报告。
+- `.github/workflows/release.yml`：手工创建不可变签名候选，拒绝 workflow rerun，串联功能/升级门禁、同 commit production evidence、多平台构建、Azure OIDC Artifact Signing、布局 smoke、SHA256、SPDX SBOM、provenance、逐主制品 Sigstore 和 attestation；上传后用 Actions API 固定 artifact ID/digest 并生成独立候选身份记录；tag 不触发该 workflow。
+- `deploy/release/orchestrator-candidate.py`：锁定首次 workflow attempt、11 个主制品、11 个 Sigstore bundle 和精确 22 文件 payload，验证结构化 Authenticode/容量身份，并生成 `SECURITY_ACCEPTANCE_PENDING`、`published=false` 的 schema v2 证据 manifest；晋级时核对受保护的 run/manifest/artifact 身份。
+- `deploy/release/authenticode-timestamp.ps1` 与 `verify-windows-authenticode.ps1`：从嵌入签名解析并验证 OJOS 制品的 RFC3161/SHA-256 token 与父签名绑定，如实记录 Microsoft WebView2Loader 的原始 timestamp 协议。
+- `deploy/release/verify-orchestrator-v1-trust.sh`：晋级前锁定首次 candidate attempt，并逐一复验 11 个主制品的 manifest digest、Cosign 身份、GitHub attestation 与平台 checksum。
+- `deploy/ops/tests/test_release_workflow_policy.py`：静态锁定候选/晋级互斥、无 tag trigger、Azure 签名顺序、无重建晋级及 manifest 不进入 Release 资产。
+- `.github/workflows/orchestrator-candidate-images.yml`：从 `main` 同一 SHA 构建 control-plane、Agent、capacity fixture 三个 digest 候选镜像；fixture base 必须 digest 固定，每个镜像都写 revision label、启用 BuildKit provenance/SBOM、生成 GitHub attestation，并在拉回核对后上传 digest evidence。
+
+## 本地功能复核
+
+下列命令适合开发阶段发现回归；它们不产生 GA 运行证据：
 
 ```powershell
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-
-Push-Location services/judge-worker
-cargo test --all-targets
-cargo audit
-Pop-Location
-
-Get-ChildItem -Recurse -Filter go.mod services,platform |
-  ForEach-Object {
-    Push-Location $_.DirectoryName
-    go test ./... -count=1
-    go vet ./...
-    govulncheck ./...
-    Pop-Location
-  }
 
 Push-Location manager/web
 npm ci
-npm audit
 npm run typecheck
+npm test
 npm run build
+npm run test:e2e
 Pop-Location
 
-Push-Location services/gateway/frontend
-npm ci
-npm audit --audit-level=high
-npm run build
-Pop-Location
-
+python -m unittest discover -s deploy/ops/tests -p "test_*.py"
 git diff --check
 ```
 
-完成修改后要在干净 checkout 和候选 commit 上重跑，不能只引用开发过程中的一次本地成功。
+TLS PostgreSQL contract 需要专用数据库和 `OJOS_TEST_POSTGRES_URL`/`OJOS_TEST_POSTGRES_CA`。真实 0.2 writer 导入还需要单独设置 `OJOS_TEST_POSTGRES_UPGRADE_URL`；若环境变量缺失，对应测试会跳过，不能把整个命令的成功误写为该演练已完成。
+
+Docker Agent 生命周期需要真实 Docker daemon/registry。Web 30 分钟持续运行要显式设置 `OJOS_E2E_SOAK_MS=1800000`，Desktop 30 分钟持续运行要同时使用 `OJOS_DESKTOP_SMOKE=1` 与 `OJOS_DESKTOP_SMOKE_DURATION_MS=1800000`；普通短时 E2E 或仅启动一次 WebView 都不能替代。
+
+生产容量还必须使用 `orchestrator-candidate-images.yml` 从候选 `main` commit 产生的三个
+RepoDigest。候选镜像 artifact 中的 commit、digest、revision label 和 workflow run 是镜像
+身份入口；容量报告仍须把 `source_commit`、`oci_revision`、`provenance_commit` 和
+`server_build.commit_sha` 绑定到同一 SHA。自行重打 tag 或只记录镜像名不构成有效证据。
+
+## 当前不能从仓库内测试推出的结论
+
+即使以上测试全部通过，也仍不能声称：
+
+- 当前候选已在 100 Nodes、2,000 Deployments、10,000 Endpoint+Link、50 并发 Operation 下持续运行 24 小时；
+- Windows/Linux GA 安装包和 portable 包已经从同一候选 commit 实际生成、签名、attest 并下载复核；
+- 候选已经完成最终安全验收或已经发布。
+
+真实持久 0.2.0 → 1.0.0 导入和 PostgreSQL/artifact 联合恢复已经进入自动 release gate，
+候选 commit 仍须重跑，但不再列为外部功能缺口。两个工程外部证据的完成标准见
+[未完成的上线证据](../unfinished/README.md)；候选与晋级边界见
+[签名候选与晋级政策](candidate-promotion.md)。当前状态固定为
+`SECURITY_ACCEPTANCE_PENDING`、`published=false`，不得发布。

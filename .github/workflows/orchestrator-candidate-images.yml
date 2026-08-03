@@ -1,0 +1,263 @@
+name: Orchestrator candidate OCI images
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      fixture_base_image:
+        description: Digest-pinned Linux x64 base image used by the capacity fixture
+        required: true
+        default: docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+        type: string
+
+run-name: Orchestrator OCI candidate ${{ github.sha }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orchestrator-candidate-images-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Freeze image source identity
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.head_commit.message == 'feat(orchestrator): freeze v1 release candidate'
+    runs-on: ubuntu-latest
+    outputs:
+      registry_namespace: ${{ steps.identity.outputs.registry_namespace }}
+      fixture_base_image: ${{ steps.identity.outputs.fixture_base_image }}
+    steps:
+      - name: Require main and immutable inputs
+        id: identity
+        shell: bash
+        env:
+          CANDIDATE_COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
+          EXPECTED_COMMIT_MESSAGE: "feat(orchestrator): freeze v1 release candidate"
+          FIXTURE_BASE_IMAGE: ${{ inputs.fixture_base_image || 'docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            [[ "$CANDIDATE_COMMIT_MESSAGE" == "$EXPECTED_COMMIT_MESSAGE" ]] || {
+              echo "automatic candidate images require the frozen candidate commit message" >&2
+              exit 1
+            }
+          fi
+          [[ "$FIXTURE_BASE_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
+            echo "fixture_base_image must be an immutable lowercase sha256 RepoDigest" >&2
+            exit 1
+          }
+          image_name="${FIXTURE_BASE_IMAGE%@*}"
+          [[ "${image_name##*/}" != *:* ]] || {
+            echo "fixture_base_image must not retain a tag before its digest" >&2
+            exit 1
+          }
+          namespace="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          echo "registry_namespace=$namespace" >>"$GITHUB_OUTPUT"
+          echo "fixture_base_image=$FIXTURE_BASE_IMAGE" >>"$GITHUB_OUTPUT"
+
+  build:
+    name: Build and attest ${{ matrix.component }}
+    needs: guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - component: control-plane
+            image: ojos-orchestrator-control-plane
+            context: .
+            dockerfile: services/orchestrator/backend/Dockerfile
+          - component: agent
+            image: ojos-orchestrator-agent
+            context: .
+            dockerfile: services/orchestrator/agent/Dockerfile
+          - component: capacity-fixture
+            image: ojos-orchestrator-capacity-fixture
+            context: deploy/capacity/fixture
+            dockerfile: deploy/capacity/fixture/Dockerfile
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push immutable candidate image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          tags: ${{ needs.guard.outputs.registry_namespace }}/${{ matrix.image }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          build-args: |
+            GITHUB_SHA=${{ github.sha }}
+            OJOS_BUILD_COMMIT=${{ github.sha }}
+            CAPACITY_FIXTURE_BASE_IMAGE=${{ needs.guard.outputs.fixture_base_image }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=orchestrator-${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=orchestrator-${{ matrix.component }}
+
+      - name: Create GitHub build provenance for the pushed digest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ needs.guard.outputs.registry_namespace }}/${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify pulled digest and OCI revision label
+        id: verify
+        shell: bash
+        env:
+          IMAGE: ${{ needs.guard.outputs.registry_namespace }}/${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          reference="$IMAGE@$DIGEST"
+          docker pull --platform linux/amd64 "$reference"
+          revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$reference")"
+          [[ "$revision" == "$GITHUB_SHA" ]] || {
+            echo "pulled OCI revision $revision does not match $GITHUB_SHA" >&2
+            exit 1
+          }
+          mkdir -p evidence
+          jq -n \
+            --arg component "$COMPONENT" \
+            --arg image "$IMAGE" \
+            --arg digest "$DIGEST" \
+            --arg reference "$reference" \
+            --arg commit_sha "$GITHUB_SHA" \
+            --arg workflow_run_id "$GITHUB_RUN_ID" \
+            --arg workflow_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow_file ".github/workflows/orchestrator-candidate-images.yml" \
+            '{schema_version:2, component:$component, image:$image, digest:$digest, reference:$reference, commit_sha:$commit_sha, workflow_run_id:$workflow_run_id, workflow_run_attempt:$workflow_run_attempt, repository:$repository, workflow_file:$workflow_file}' \
+            >"evidence/$COMPONENT.json"
+
+      - name: Upload immutable image identity
+        uses: actions/upload-artifact@v7
+        with:
+          name: orchestrator-candidate-image-${{ matrix.component }}
+          path: evidence/${{ matrix.component }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  provenance-record:
+    name: Freeze independently verifiable image provenance record
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      packages: read
+    steps:
+      - name: Authenticate verifier to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Download exact control-plane identity
+        uses: actions/download-artifact@v8
+        with:
+          name: orchestrator-candidate-image-control-plane
+          path: evidence/control-plane
+
+      - name: Download exact Agent identity
+        uses: actions/download-artifact@v8
+        with:
+          name: orchestrator-candidate-image-agent
+          path: evidence/agent
+
+      - name: Download exact capacity-fixture identity
+        uses: actions/download-artifact@v8
+        with:
+          name: orchestrator-candidate-image-capacity-fixture
+          path: evidence/capacity-fixture
+
+      - name: Verify both subjects and freeze their joint record
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp_identity=evidence/control-plane/control-plane.json
+          agent_identity=evidence/agent/agent.json
+          fixture_identity=evidence/capacity-fixture/capacity-fixture.json
+          for identity in "$cp_identity" "$agent_identity" "$fixture_identity"; do
+            jq -e \
+              --arg sha "$GITHUB_SHA" \
+              --arg run_id "$GITHUB_RUN_ID" \
+              --arg attempt "$GITHUB_RUN_ATTEMPT" \
+              --arg repository "$GITHUB_REPOSITORY" \
+              '.schema_version == 2 and .commit_sha == $sha and .workflow_run_id == $run_id and .workflow_run_attempt == $attempt and .repository == $repository and .workflow_file == ".github/workflows/orchestrator-candidate-images.yml" and (.digest | test("^sha256:[0-9a-f]{64}$")) and .reference == (.image + "@" + .digest)' \
+              "$identity" >/dev/null
+          done
+          cp_reference="$(jq -er '.reference' "$cp_identity")"
+          agent_reference="$(jq -er '.reference' "$agent_identity")"
+          fixture_reference="$(jq -er '.reference' "$fixture_identity")"
+          [[ "$(jq -er '.component' "$cp_identity")" == control-plane ]]
+          [[ "$(jq -er '.component' "$agent_identity")" == agent ]]
+          [[ "$(jq -er '.component' "$fixture_identity")" == capacity-fixture ]]
+          verify_args=(
+            --repo "$GITHUB_REPOSITORY"
+            --cert-oidc-issuer https://token.actions.githubusercontent.com
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/orchestrator-candidate-images.yml"
+            --source-ref refs/heads/main
+            --source-digest "$GITHUB_SHA"
+            --deny-self-hosted-runners
+          )
+          gh attestation verify "oci://$cp_reference" "${verify_args[@]}"
+          gh attestation verify "oci://$agent_reference" "${verify_args[@]}"
+          gh attestation verify "oci://$fixture_reference" "${verify_args[@]}"
+          mkdir -p provenance
+          jq -S -n \
+            --arg candidate_sha "$GITHUB_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow_run_id "$GITHUB_RUN_ID" \
+            --arg workflow_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg control_plane_reference "$cp_reference" \
+            --arg control_plane_digest "$(jq -er '.digest' "$cp_identity")" \
+            --arg agent_reference "$agent_reference" \
+            --arg agent_digest "$(jq -er '.digest' "$agent_identity")" \
+            --arg fixture_reference "$fixture_reference" \
+            --arg fixture_digest "$(jq -er '.digest' "$fixture_identity")" \
+            '{schema_version:1,candidate_sha:$candidate_sha,repository:$repository,source_workflow:".github/workflows/orchestrator-candidate-images.yml",source_workflow_run_id:$workflow_run_id,source_workflow_run_attempt:($workflow_run_attempt|tonumber),github_oidc_issuer:"https://token.actions.githubusercontent.com",control_plane:{reference:$control_plane_reference,digest:$control_plane_digest},agent:{reference:$agent_reference,digest:$agent_digest},capacity_fixture:{reference:$fixture_reference,digest:$fixture_digest}}' \
+            >provenance/candidate-image-provenance.json
+
+      - name: Upload protected deployment provenance input
+        uses: actions/upload-artifact@v7
+        with:
+          name: orchestrator-candidate-image-provenance
+          path: provenance/candidate-image-provenance.json
+          if-no-files-found: error
+          retention-days: 90

@@ -1,0 +1,17 @@
+events {}
+http {
+  access_log /dev/stdout;
+  error_log /dev/stderr warn;
+  server {
+    listen 8443 ssl;
+    server_name _;
+    ssl_certificate /run/secrets/catalog-tls.crt;
+    ssl_certificate_key /run/secrets/catalog-tls.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /srv/catalog;
+    location / {
+      limit_except GET HEAD { deny all; }
+      try_files $uri =404;
+    }
+  }
+}

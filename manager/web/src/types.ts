@@ -11,6 +11,8 @@ export interface ServiceRow {
 
 /** 一行对应一个 host + service 部署，不与 Service manifest 注册表混用。 */
 export interface DeploymentRow {
+  deployment_id: string;
+  node_id: string;
   service_id: string;
   name: string;
   version: string;
@@ -25,6 +27,11 @@ export interface DeploymentRow {
   reachable: boolean;
   endpoint_count: number;
   endpoints: string[];
+  container_id: string;
+  artifact_digest: string;
+  desired_state: string;
+  observed_state: string;
+  updated_at: string;
 }
 
 export interface EndpointRow {
@@ -33,6 +40,11 @@ export interface EndpointRow {
   protocol: string;
   expose: string;
   source: string;
+  health_path: string;
+  health: string;
+  reachable: boolean;
+  display_name: string;
+  note: string;
 }
 
 export interface LinkRow {
@@ -44,6 +56,18 @@ export interface LinkRow {
   /** "enabled" / "disabled"，对应 core 的 Link.enabled 启停开关 */
   enabled: string;
   source: string;
+  health: string;
+}
+
+export interface NodeRow {
+  node_id: string;
+  host_ip: string;
+  parent_node_id: string;
+  role: string;
+  labels: Record<string, unknown>;
+  status: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface OperationRow {
@@ -83,25 +107,107 @@ export interface TopologyEndpoint {
   service_id: string;
   protocol: string;
   health_path: string;
-  health: string;
-  reachable: boolean;
   display_name: string;
   note: string;
-  [key: string]: unknown;
+  config: Record<string, unknown>;
 }
 
 export interface TopologyLink {
   source_endpoint: string;
   target_endpoint: string;
+  protocol: string;
+  auth_mode: string;
+  scope: string;
+  enabled: boolean;
+  config_ref: string;
+  secret_ref: string;
+  policy: Record<string, unknown>;
   [key: string]: unknown;
 }
 
-export interface TopologyData {
-  root_host: string;
+export interface TopologySpec {
+  api_version: "v1";
+  topology_id: string;
   root_endpoint: string;
-  services: string[];
+  authority: {
+    root_endpoint: string;
+    exposure_policy: string;
+  };
   endpoints: TopologyEndpoint[];
   links: TopologyLink[];
+}
+
+export interface TopologyRevision {
+  topology_id: string;
+  revision_number: number;
+  revision_id: string;
+  parent_revision_id: string | null;
+  rollback_of_revision_id: string | null;
+  content_sha256: string;
+  spec: TopologySpec;
+  created_at: string;
+  created_by: string;
+  message: string;
+}
+
+export interface TopologyHeads {
+  topology_id: string;
+  draft_revision_id: string;
+  applied_revision_id: string | null;
+  applying_revision_id: string | null;
+  applying_operation_id: string | null;
+  last_operation_id: string | null;
+}
+
+export interface TopologyEndpointStatus {
+  endpoint: string;
+  health: string;
+  reachable: boolean;
+  latency_ms?: number | null;
+  message: string;
+  observed_at: string;
+}
+
+export interface TopologyLinkStatus {
+  source_endpoint: string;
+  target_endpoint: string;
+  health: string;
+  latency_ms?: number | null;
+  message: string;
+  observed_at: string;
+}
+
+export interface TopologyStatus {
+  topology_id: string;
+  desired_revision_id: string | null;
+  observed_revision_id: string | null;
+  state: string;
+  deployments: Array<Record<string, unknown>>;
+  endpoints: TopologyEndpointStatus[];
+  links: TopologyLinkStatus[];
+  drift: Array<{
+    resource_kind: string;
+    resource_id: string;
+    kind: string;
+    detail: string;
+  }>;
+  last_operation_id: string | null;
+  updated_at: string;
+}
+
+export interface TopologyDetail {
+  heads: TopologyHeads;
+  draft: TopologyRevision;
+  status: TopologyStatus | null;
+}
+
+export interface TopologyDiff {
+  topology_id: string;
+  from_revision_id: string | null;
+  to_revision_id: string | null;
+  from_sha256: string | null;
+  to_sha256: string;
+  changes: Array<Record<string, unknown>>;
   [key: string]: unknown;
 }
 
@@ -114,6 +220,13 @@ export interface StoreModule {
   repo: string;
   source_url: string;
   checksum: string;
+  version: string;
+  channel: string;
+  platforms: Array<{ os: string; arch: string }>;
+  min_orchestrator_version: string;
+  oci_image: string;
+  source_id: string;
+  catalog_id: string;
 }
 
 export interface StoreIndexResponse {
@@ -133,6 +246,8 @@ export interface StoreIndexResponse {
       versions: string[];
       kind: string;
       deployments: Array<{
+        deployment_id: string;
+        node_id: string;
         version: string;
         host_ip: string;
         status: string;
@@ -141,29 +256,28 @@ export interface StoreIndexResponse {
   >;
 }
 
-export interface StoreStatus {
-  index_url: string;
-  package_load_enabled: boolean;
-  github_token_configured: boolean;
-  require_release_checksum: boolean;
-  allow_private_release_source: boolean;
-  store: string;
+export interface AsyncOperationResult {
+  operation_id: string;
+  deployment_id?: string;
+  revision_id?: string;
+  topology_id?: string;
+  [key: string]: unknown;
 }
 
-export interface GithubAsset {
-  name: string;
-  size: number;
-  browser_download_url: string;
-  content_type: string;
-}
-
-export interface GithubRelease {
-  tag_name: string;
-  name: string;
-  prerelease: boolean;
-  published_at: string;
-  html_url: string;
-  assets: GithubAsset[];
+export interface StoreValidationResult {
+  valid: boolean;
+  catalog_source_id: string;
+  catalog_id: string;
+  verified_key_ids: string[];
+  target_platform: { os: string; arch: string };
+  plan: unknown;
+  metadata: Array<Record<string, unknown>>;
+  side_effects: {
+    release_imports: number;
+    operations: number;
+    jobs: number;
+    runtime_calls: number;
+  };
 }
 
 export interface HealthInfo {
@@ -172,6 +286,15 @@ export interface HealthInfo {
   store: string;
   warnings: string[];
 }
+
+export interface CapabilityRow {
+  action: string;
+  target_type: string;
+  capability_status: string;
+  required_permission: string;
+}
+
+export type LoadStatus = "idle" | "loading" | "ready" | "error";
 
 export interface LayoutState {
   positions?: Record<string, { x: number; y: number }>;

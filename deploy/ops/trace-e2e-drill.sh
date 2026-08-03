@@ -14,6 +14,7 @@ export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1},localhost,127.0.0.1,::1"
 export no_proxy="${no_proxy:-$NO_PROXY}"
 
 compose_file="$repo_root/deploy/compose/docker-compose.yml"
+compose_dev_file="${OJOS_COMPOSE_DEV_OVERRIDE:-$repo_root/deploy/compose/docker-compose.dev.yml}"
 env_file="${OJOS_COMPOSE_ENV_FILE:-$repo_root/.env.example}"
 bootstrap_compose="${OJOS_TRACE_DRILL_BOOTSTRAP_COMPOSE:-0}"
 build_compose="${OJOS_TRACE_DRILL_BUILD_COMPOSE:-0}"
@@ -60,10 +61,12 @@ docker_cli_path() {
 }
 
 compose_file_for_docker="$(docker_cli_path "$compose_file")"
+compose_dev_file_for_docker="$(docker_cli_path "$compose_dev_file")"
 env_file_for_docker="$(docker_cli_path "$env_file")"
 
 docker_compose() {
-  MSYS2_ARG_CONV_EXCL='*' docker compose --env-file "$env_file_for_docker" -f "$compose_file_for_docker" "$@"
+  MSYS2_ARG_CONV_EXCL='*' docker compose --env-file "$env_file_for_docker" \
+    -f "$compose_file_for_docker" -f "$compose_dev_file_for_docker" "$@"
 }
 
 run_compose_migrations() {

@@ -1,6 +1,6 @@
 # OJOS Orchestrator Web UI
 
-这是编排器的浏览器入口，提供拓扑画布、Service 生命周期、插件商店和 Operation 日志。它使用 Vue 3、TypeScript、Vite 与 Pinia；`src/components/FlowCanvas.vue` 自己实现画布交互。
+这是编排器的同源 Web UI，生产入口由 Desktop WebView 或远程控制面托管，不要求打开外部浏览器。它提供版本化拓扑、Catalog v2 Store、Deployment、Node 和 Operation/SSE 控制能力，使用 Vue 3、TypeScript、Vite 与 Pinia。
 
 ## 环境和构建
 
@@ -9,6 +9,8 @@ Node 版本需满足 `^22.18.0 || >=24.11.0`，npm 至少为 10。CI 和 Docker 
 ```bash
 npm ci
 npm run typecheck
+npm test
+npm run test:e2e
 npm run build
 ```
 
@@ -22,7 +24,7 @@ cargo run -p ojos-orchestrator-daemon -- \
   --bind 127.0.0.1:8090
 ```
 
-随后打开 `http://127.0.0.1:8090/`。未设置 `ORCHESTRATOR_DATABASE_URL` 时使用内存 store，daemon 退出后操作和拓扑记录会丢失。
+上述方式只用于 Web 开发。Desktop 正式入口会启动随机 loopback 端口并在 WebView 内加载；生产 daemon 必须使用持久存储，UI 不把内存模式显示成可上线状态。
 
 ## 开发
 
@@ -32,41 +34,50 @@ npm run dev
 
 Vite 监听 `127.0.0.1:5174`，将控制面路径代理到 `127.0.0.1:8090`。开发服务器只负责前端热更新，daemon 仍需单独运行。
 
-## 控制面令牌
+## 浏览器上线门禁
 
-生产环境应设置 `ORCHESTRATOR_INTERNAL_TOKEN`。配置后，除 `GET /health` 和静态资源外，所有 API 都要求请求头：
+`npm run test:e2e` 会先构建生产 Web bundle，再用 Chromium 加载真实 DOM，并连接状态化的本地 v1 控制面夹具。覆盖 Store 安装/补偿、Topology revision/apply/rollback、RBAC 拒绝、Operation SSE/重试/取消，以及布局持久化失败。夹具只用于浏览器契约测试，不会替代 daemon 的 Rust 集成测试。
 
-```text
-x-ojos-orchestrator-token: <ORCHESTRATOR_INTERNAL_TOKEN>
+持续运行用例由 `OJOS_E2E_SOAK_MS` 控制；普通 CI 默认 5 秒，GA 门禁固定 30 分钟：
+
+```powershell
+$env:OJOS_E2E_SOAK_MS = "1800000"
+npm run test:e2e:soak
 ```
 
-Web UI 收到 401 后会显示令牌输入页。令牌只保存在当前浏览器的 `localStorage`，不会写回 daemon；共享机器用完后应从侧栏清除。
+该用例持续检查页面事件循环响应、轮询并发上限和路由可操作性。Operation 测试还会在关闭日志面板后确认 SSE 轮询停止。
+
+## 会话和 API 契约
+
+业务请求和按用户/拓扑隔离的布局状态都只使用 `/api/v1`（布局为 `/api/v1/ui/layout`）。成功响应必须包含 `data` 与 `meta.request_id`，错误按 `application/problem+json` 处理；所有 mutation 自动携带 `Idempotency-Key`，Topology revision mutation 额外携带强 ETag `If-Match`，集合读取跟随 `next_cursor`。
+
+Desktop 使用同源一次性 bootstrap 会话；远程 Web 使用 OIDC Authorization Code + PKCE 和 HttpOnly 会话。页面不接收、不持久化 bearer token，`localStorage` 不参与身份认证。
 
 ## 运行时操作
 
-启动、停止、重启和卸载可能执行本地进程或容器命令。相关页面要求先勾选“授权执行运行时驱动”，未授权时按钮不可用。
+启动、停止、重启、卸载、安装、Apply 和 Rollback 都是异步 mutation，只在服务端返回 `202 + operation_id` 后显示“已提交”。UI 不把接受请求显示成执行成功，最终状态与日志来自 Operation 投影和 SSE。
 
-服务页读取 `/deployments`，一行对应一条 `host + service` 部署记录。同一服务部署在多台主机时会分成多行；启动、停止和重启请求会同时携带该行的 `host_ip`、`endpoint` 与 `version`，不会再由后端任选一个 Endpoint。表中的“部署状态”来自 HostService，“最近检查”来自 Endpoint 记录；“检查配置”只说明协议与路径，不把 manifest 里的检查声明当成实时健康结果。
+服务页读取 `/api/v1/deployments` 的持久 RuntimeInstance，一行对应唯一 `deployment_id`；生命周期请求精确指向该 ID。Store 安装固定选择 `target_node_id`，默认 `MANAGED + start=true`。未发布的 upgrade、rollback、Node drain/remove 等能力不会显示操作入口。
 
-这个开关不负责提供运行资产。alpha bundle 和 Orchestrator 镜像只有控制面 binary、Web dist、schema、manifest、模板与商店索引，没有完整业务服务源码、Compose 文件或业务镜像。要执行 local-process/container driver，目标环境还需相应源码、binary、image 和配置。
+Topology 画布编辑 Endpoint/Link 时创建新的 immutable draft revision；validate、diff、apply、rollback 使用正式 Topology API。健康、链路状态和 drift 只读自 `TopologyStatus`，不会从 Spec 或 manifest 推断。
 
 ## 目录
 
 ```text
 src/
-  api.ts                 # daemon REST 封装与 action 状态检查
-  token.ts               # 控制面令牌和 401 状态
+  api.ts                 # /api/v1 envelope、problem、cursor、ETag 与 SSE
+  auth.ts                # Desktop/OIDC 会话初始化、401 重定向与内存 CSRF
   endpoint.ts            # IPv4 / IPv6 Endpoint ID 解析
   store.ts               # Pinia 状态、4 秒轮询、布局保存
   flow-types.ts          # 画布节点和边类型
   components/
     FlowCanvas.vue       # 平移、缩放、拖拽和连线
     EndpointNode.vue     # Endpoint 节点卡片
-    TokenGate.vue        # 401 令牌门禁
-    OperationLogs.vue    # Operation 日志轮询
+    OperationLogs.vue    # 可续传的 Operation SSE 日志
   views/
     TopologyView.vue
     StoreView.vue
     ServicesView.vue
+    NodesView.vue
     OperationsView.vue
 ```

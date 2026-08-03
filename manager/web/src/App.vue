@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted } from "vue";
 import { RouterLink, RouterView } from "vue-router";
-import TokenGate from "./components/TokenGate.vue";
+import {
+  authError,
+  authLabel,
+  authMode,
+  authRedirecting,
+  authenticated,
+  beginOidcLogin,
+  logoutBrowserSession,
+} from "./auth";
 import { useOrchestrator } from "./store";
 
 const store = useOrchestrator();
@@ -10,13 +18,23 @@ onMounted(() => {
   store.startPolling();
   store.loadLayout();
 });
-onUnmounted(() => store.stopPolling());
+onUnmounted(() => store.dispose());
+
+async function logout() {
+  try {
+    await logoutBrowserSession();
+  } catch (error) {
+    store.toast("err", (error as Error).message);
+  }
+}
 
 const nav = [
   { to: "/topology", label: "拓扑", icon: "◈" },
   { to: "/market", label: "商店", icon: "▤" },
   { to: "/services", label: "服务", icon: "❖" },
+  { to: "/nodes", label: "Nodes", icon: "◎" },
   { to: "/operations", label: "操作", icon: "≡" },
+  { to: "/diagnostics", label: "诊断", icon: "⌁" },
 ];
 </script>
 
@@ -82,24 +100,47 @@ const nav = [
           </div>
         </div>
 
-        <!-- 控制面令牌指示 -->
-        <div class="token-state">
-          <span class="chip" :class="store.tokenConfigured ? 'ok' : ''">
-            {{ store.tokenConfigured ? "令牌已配置" : "令牌未配置" }}
-          </span>
+        <!-- HttpOnly 会话指示 -->
+        <div class="session-state">
+          <span class="chip" :class="authenticated ? 'ok' : ''">{{ authLabel }}</span>
           <button
-            v-if="store.tokenConfigured"
-            class="btn ghost sm token-clear"
-            title="清除浏览器本地保存的控制面令牌"
-            @click="store.clearToken()"
+            v-if="authMode === 'oidc' && authenticated"
+            class="btn ghost sm session-logout"
+            title="销毁服务端 Web 会话"
+            @click="logout"
           >
-            清除
+            退出
           </button>
         </div>
       </div>
     </aside>
 
     <main class="content">
+      <div
+        v-if="store.coreStatus === 'error' && !store.authRequired"
+        class="connection-error"
+        role="alert"
+      >
+        <span>{{ store.coreError || "编排器数据加载失败" }}</span>
+        <button class="btn sm" :disabled="store.loading" @click="store.refreshCore(true)">
+          {{ store.loading ? "重试中…" : "重试" }}
+        </button>
+      </div>
+      <div v-else-if="store.authRequired" class="connection-error" role="alert">
+        <span>
+          {{
+            authError ||
+            (authRedirecting ? "正在跳转到身份提供方…" : "需要登录后才能访问编排器")
+          }}
+        </span>
+        <button
+          v-if="authMode === 'oidc' && !authRedirecting"
+          class="btn sm"
+          @click="beginOidcLogin"
+        >
+          登录
+        </button>
+      </div>
       <RouterView />
     </main>
 
@@ -116,9 +157,6 @@ const nav = [
         </div>
       </TransitionGroup>
     </div>
-
-    <!-- 控制面令牌门禁（401 时覆盖全屏） -->
-    <TokenGate />
   </div>
 </template>
 
@@ -232,18 +270,18 @@ const nav = [
   font-size: 11px;
   color: var(--faint);
 }
-.token-state {
+.session-state {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
   margin-top: 10px;
 }
-.token-state .chip {
+.session-state .chip {
   font-size: 11px;
   padding: 1px 8px;
 }
-.token-clear {
+.session-logout {
   padding: 2px 6px;
   font-size: 11px;
 }
@@ -254,6 +292,18 @@ const nav = [
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.connection-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(248, 113, 113, 0.45);
+  background: rgba(127, 29, 29, 0.22);
+  color: #fecaca;
+  font-size: 12px;
 }
 
 .toasts {

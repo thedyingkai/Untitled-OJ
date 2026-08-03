@@ -17,6 +17,10 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 单个请求（含 body）的字节上限。
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+/// A complete 2,000 Endpoint / 8,000 Link TopologySpec is intentionally sent
+/// as one immutable revision. Keep the larger limit scoped to those two
+/// revision-writing routes instead of widening every mutation endpoint.
+const MAX_TOPOLOGY_SPEC_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const SECURITY_RESPONSE_HEADERS: &str = concat!(
     "Content-Security-Policy: frame-ancestors 'none'; object-src 'none'; base-uri 'none'\r\n",
     "X-Frame-Options: DENY\r\n",
@@ -37,28 +41,97 @@ pub(crate) struct ApiRequest {
 pub(crate) struct ApiResponse {
     pub(crate) status: u16,
     pub(crate) body: Value,
+    pub(crate) content_type: String,
+    pub(crate) headers: BTreeMap<String, String>,
 }
 
 impl ApiResponse {
     pub(crate) fn ok(body: Value) -> Self {
-        Self { status: 200, body }
+        Self::json(200, body)
     }
 
     pub(crate) fn created(body: Value) -> Self {
-        Self { status: 201, body }
+        Self::json(201, body)
+    }
+
+    pub(crate) fn accepted(body: Value) -> Self {
+        Self::json(202, body)
     }
 
     pub(crate) fn no_content(body: Value) -> Self {
-        Self { status: 200, body }
+        Self::json(204, body)
+    }
+
+    pub(crate) fn event_stream(body: impl Into<String>) -> Self {
+        Self {
+            status: 200,
+            body: Value::String(body.into()),
+            content_type: "text/event-stream; charset=utf-8".to_string(),
+            headers: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn text(
+        status: u16,
+        body: impl Into<String>,
+        content_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            body: Value::String(body.into()),
+            content_type: content_type.into(),
+            headers: BTreeMap::new(),
+        }
     }
 
     pub(crate) fn error(status: u16, message: impl Into<String>) -> Self {
-        Self {
+        Self::json(
             status,
-            body: json!({
+            json!({
                 "status": "error",
                 "message": message.into(),
             }),
+        )
+    }
+
+    pub(crate) fn problem(
+        status: u16,
+        code: impl Into<String>,
+        detail: impl Into<String>,
+        request_id: impl Into<String>,
+        operation_id: Option<&str>,
+    ) -> Self {
+        let mut body = json!({
+            "type": "about:blank",
+            "title": status_reason_phrase(status),
+            "status": status,
+            "code": code.into(),
+            "detail": detail.into(),
+            "request_id": request_id.into(),
+        });
+        if let Some(operation_id) = operation_id {
+            body["operation_id"] = Value::String(operation_id.to_string());
+        }
+        let mut response = Self::json(status, body);
+        response.content_type = "application/problem+json; charset=utf-8".to_string();
+        response
+    }
+
+    pub(crate) fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        let name = name.into();
+        let value = value.into();
+        if !name.contains(['\r', '\n']) && !value.contains(['\r', '\n']) {
+            self.headers.insert(name, value);
+        }
+        self
+    }
+
+    fn json(status: u16, body: Value) -> Self {
+        Self {
+            status,
+            body,
+            content_type: "application/json; charset=utf-8".to_string(),
+            headers: BTreeMap::new(),
         }
     }
 }
@@ -100,15 +173,30 @@ pub(crate) fn has_json_content_type(headers: &BTreeMap<String, String>) -> bool 
         .unwrap_or(false)
 }
 
-pub(crate) fn read_http_request(stream: &mut TcpStream) -> Result<ApiRequest> {
+pub(crate) trait HttpStream: Read + Write {
+    fn set_http_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()>;
+    fn set_http_write_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()>;
+}
+
+impl HttpStream for TcpStream {
+    fn set_http_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.set_read_timeout(timeout)
+    }
+
+    fn set_http_write_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.set_write_timeout(timeout)
+    }
+}
+
+pub(crate) fn read_http_request(stream: &mut impl HttpStream) -> Result<ApiRequest> {
     read_http_request_with_timeout(stream, READ_TIMEOUT)
 }
 
 fn read_http_request_with_timeout(
-    stream: &mut TcpStream,
+    stream: &mut impl HttpStream,
     total_timeout: Duration,
 ) -> Result<ApiRequest> {
-    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    stream.set_http_write_timeout(Some(WRITE_TIMEOUT))?;
     let deadline = Instant::now() + total_timeout;
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
@@ -117,7 +205,7 @@ fn read_http_request_with_timeout(
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
             .ok_or_else(|| anyhow!("request read timed out"))?;
-        stream.set_read_timeout(Some(remaining))?;
+        stream.set_http_read_timeout(Some(remaining))?;
         let read = stream.read(&mut buffer).map_err(|err| {
             if matches!(
                 err.kind(),
@@ -135,7 +223,7 @@ fn read_http_request_with_timeout(
         if complete_http_request(&bytes)? {
             break;
         }
-        if bytes.len() > MAX_REQUEST_BYTES {
+        if bytes.len() > MAX_TOPOLOGY_SPEC_REQUEST_BYTES {
             return Err(anyhow!("request body is too large"));
         }
     }
@@ -147,8 +235,13 @@ fn complete_http_request(bytes: &[u8]) -> Result<bool> {
         return Ok(false);
     };
     let headers = std::str::from_utf8(&bytes[..header_end])?;
+    let request_line = headers
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("missing request line"))?;
     let content_length = content_length(headers)?;
-    let expected_length = expected_request_length(header_end, content_length)?;
+    let expected_length =
+        expected_request_length(header_end, content_length, request_byte_limit(request_line))?;
     Ok(bytes.len() >= expected_length)
 }
 
@@ -159,6 +252,7 @@ fn parse_http_request_bytes(bytes: Vec<u8>) -> Result<ApiRequest> {
     let request_line = lines
         .next()
         .ok_or_else(|| anyhow!("missing request line"))?;
+    let max_request_bytes = request_byte_limit(request_line);
     let mut parts = request_line.split_whitespace();
     let method = parts
         .next()
@@ -170,7 +264,7 @@ fn parse_http_request_bytes(bytes: Vec<u8>) -> Result<ApiRequest> {
         .to_string();
     let headers = parse_headers(lines)?;
     let content_length = content_length_from_headers(&headers)?;
-    let expected_length = expected_request_length(header_end, content_length)?;
+    let expected_length = expected_request_length(header_end, content_length, max_request_bytes)?;
     let body_bytes = bytes
         .get(header_end + 4..expected_length)
         .ok_or_else(|| anyhow!("HTTP body is incomplete"))?;
@@ -183,14 +277,44 @@ fn parse_http_request_bytes(bytes: Vec<u8>) -> Result<ApiRequest> {
     })
 }
 
-fn expected_request_length(header_end: usize, content_length: usize) -> Result<usize> {
+fn request_byte_limit(request_line: &str) -> usize {
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let path = parts
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default();
+    let is_initial_revision = method == "POST" && path == "/api/v1/topologies";
+    let is_next_revision = method == "POST"
+        && path.starts_with("/api/v1/topologies/")
+        && path.ends_with("/revisions")
+        && path
+            .trim_start_matches("/api/v1/topologies/")
+            .strip_suffix("/revisions")
+            .is_some_and(|topology_id| {
+                !topology_id.is_empty() && !topology_id.trim_end_matches('/').contains('/')
+            });
+    if is_initial_revision || is_next_revision {
+        MAX_TOPOLOGY_SPEC_REQUEST_BYTES
+    } else {
+        MAX_REQUEST_BYTES
+    }
+}
+
+fn expected_request_length(
+    header_end: usize,
+    content_length: usize,
+    max_request_bytes: usize,
+) -> Result<usize> {
     let body_start = header_end
         .checked_add(4)
         .ok_or_else(|| anyhow!("request length overflow"))?;
     let expected_length = body_start
         .checked_add(content_length)
         .ok_or_else(|| anyhow!("request length overflow"))?;
-    if expected_length > MAX_REQUEST_BYTES {
+    if expected_length > max_request_bytes {
         return Err(anyhow!("request body is too large"));
     }
     Ok(expected_length)
@@ -239,16 +363,44 @@ fn content_length_from_headers(headers: &BTreeMap<String, String>) -> Result<usi
         .map(|value| value.unwrap_or(0))
 }
 
-pub(crate) fn write_http_response(stream: &mut TcpStream, response: ApiResponse) -> Result<()> {
-    let body = response_json(response.body)?;
+pub(crate) fn write_http_response(
+    stream: &mut impl Write,
+    mut response: ApiResponse,
+) -> Result<()> {
+    if matches!(response.status, 429 | 503) && !response.headers.contains_key("Retry-After") {
+        response
+            .headers
+            .insert("Retry-After".to_string(), "1".to_string());
+    }
+    crate::observability::record_response(&response);
+    let body = if !response.content_type.starts_with("application/json")
+        && !response
+            .content_type
+            .starts_with("application/problem+json")
+    {
+        response
+            .body
+            .as_str()
+            .ok_or_else(|| anyhow!("non-JSON response body must be a string"))?
+            .to_string()
+    } else {
+        response_json(response.body)?
+    };
     let status_text = status_reason_phrase(response.status);
+    let extra_headers = response
+        .headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\n{}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}\r\n{}Connection: close\r\n\r\n{}",
         response.status,
         status_text,
+        response.content_type,
         body.len(),
         SECURITY_RESPONSE_HEADERS,
+        extra_headers,
         body
     )?;
     Ok(())
@@ -258,6 +410,9 @@ fn status_reason_phrase(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        302 => "Found",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -265,6 +420,12 @@ fn status_reason_phrase(status: u16) -> &'static str {
         409 => "Conflict",
         410 => "Gone",
         415 => "Unsupported Media Type",
+        422 => "Unprocessable Content",
+        428 => "Precondition Required",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Internal Server Error",
     }
@@ -409,6 +570,47 @@ mod tests {
     }
 
     #[test]
+    fn large_request_limit_is_scoped_to_immutable_topology_revision_writes() {
+        let two_mib = 2 * 1024 * 1024;
+        for target in [
+            "/api/v1/topologies",
+            "/api/v1/topologies/capacity-primary/revisions",
+            "/api/v1/topologies?source=capacity",
+        ] {
+            let request = format!("POST {target} HTTP/1.1\r\nContent-Length: {two_mib}\r\n\r\n");
+            assert!(
+                !complete_http_request(request.as_bytes())
+                    .expect("a production-sized topology body is allowed"),
+                "headers alone cannot complete {target}"
+            );
+        }
+
+        for target in [
+            "/api/v1/store/releases:install",
+            "/api/v1/topologies/capacity-primary:apply",
+            "/api/v1/topologies/capacity-primary/revisions/extra",
+        ] {
+            let request = format!("POST {target} HTTP/1.1\r\nContent-Length: {two_mib}\r\n\r\n");
+            assert!(
+                complete_http_request(request.as_bytes())
+                    .expect_err("non-Spec routes retain the default request limit")
+                    .to_string()
+                    .contains("too large")
+            );
+        }
+
+        let nine_mib = 9 * 1024 * 1024;
+        let request =
+            format!("POST /api/v1/topologies HTTP/1.1\r\nContent-Length: {nine_mib}\r\n\r\n");
+        assert!(
+            complete_http_request(request.as_bytes())
+                .expect_err("TopologySpec writes still have an absolute upper bound")
+                .to_string()
+                .contains("too large")
+        );
+    }
+
+    #[test]
     fn query_parameters_are_form_url_decoded() {
         assert_eq!(
             query_value(
@@ -490,6 +692,27 @@ mod tests {
                 "missing response security header {header}"
             );
         }
+    }
+
+    #[test]
+    fn event_stream_body_is_written_verbatim_instead_of_json_quoted() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let writer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            write_http_response(
+                &mut stream,
+                ApiResponse::event_stream("id: 1\nevent: job\ndata: {}\n\n"),
+            )
+            .unwrap();
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        writer.join().unwrap();
+        assert!(response.contains("Content-Type: text/event-stream"));
+        assert!(response.ends_with("id: 1\nevent: job\ndata: {}\n\n"));
+        assert!(!response.ends_with("\"id: 1\\nevent: job\\ndata: {}\\n\\n\""));
     }
 
     #[test]

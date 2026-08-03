@@ -1,0 +1,28 @@
+all:
+  vars:
+    ansible_user: ojos-deployer
+  children:
+    orchestrator_database:
+      hosts:
+        capacity-db-01:
+          ansible_host: 192.0.2.10
+    orchestrator_control_plane:
+      hosts:
+        capacity-control-01:
+          ansible_host: 192.0.2.20
+    orchestrator_soak_runner:
+      hosts:
+        capacity-runner-01:
+          ansible_host: 192.0.2.30
+    orchestrator_workers:
+      hosts:
+        capacity-worker-00: { ansible_host: 192.0.2.100, capacity_worker_ordinal: 0 }
+        capacity-worker-01: { ansible_host: 192.0.2.101, capacity_worker_ordinal: 1 }
+        capacity-worker-02: { ansible_host: 192.0.2.102, capacity_worker_ordinal: 2 }
+        capacity-worker-03: { ansible_host: 192.0.2.103, capacity_worker_ordinal: 3 }
+        capacity-worker-04: { ansible_host: 192.0.2.104, capacity_worker_ordinal: 4 }
+        capacity-worker-05: { ansible_host: 192.0.2.105, capacity_worker_ordinal: 5 }
+        capacity-worker-06: { ansible_host: 192.0.2.106, capacity_worker_ordinal: 6 }
+        capacity-worker-07: { ansible_host: 192.0.2.107, capacity_worker_ordinal: 7 }
+        capacity-worker-08: { ansible_host: 192.0.2.108, capacity_worker_ordinal: 8 }
+        capacity-worker-09: { ansible_host: 192.0.2.109, capacity_worker_ordinal: 9 }

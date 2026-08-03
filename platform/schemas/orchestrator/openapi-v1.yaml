@@ -1,0 +1,1180 @@
+openapi: 3.1.0
+info:
+  title: OJOS Orchestrator API
+  version: 1.0.0
+  description: Stable operator API. Mutations require Idempotency-Key and return durable Operations.
+servers:
+  - url: /api/v1
+security:
+  - oidc: []
+  - desktopSessionCookie: []
+  - oidcSessionCookie: []
+x-ojos-published-actions:
+  - catalog.list
+  - catalog.search
+  - catalog.register
+  - catalog.remove
+  - release.import
+  - release.validate
+  - release.install
+  - release.upgrade
+  - release.rollback
+  - release.delete
+  - node.register
+  - node.revoke
+  - node.list
+  - node.health
+  - node.drain
+  - node.remove
+  - deployment.list
+  - deployment.get
+  - deployment.start
+  - deployment.stop
+  - deployment.restart
+  - deployment.uninstall
+  - deployment.health
+  - topology.draft
+  - topology.revision
+  - topology.endpoint.edit
+  - topology.link.edit
+  - topology.validate
+  - topology.diff
+  - topology.apply
+  - topology.rollback
+  - topology.status
+  - topology.export
+  - operation.plan
+  - operation.confirm
+  - operation.apply
+  - operation.cancel
+  - operation.retry
+  - operation.rollback
+  - operation.logs
+  - operation.events
+  - diagnostic.create
+  - diagnostic.list
+  - diagnostic.get
+  - diagnostic.export
+# Canonical reachability probe for every public action. `openapi_path` must
+# identify a declared operation; `probe_path` is the concrete `/api/v1` route
+# used by the backend RBAC contract test. Routes may expose additional reads,
+# but no published action may exist without one real product route.
+x-ojos-action-routes:
+  - { action: catalog.list, method: GET, openapi_path: /store/catalogs, probe_path: /api/v1/store/catalogs }
+  - { action: catalog.search, method: GET, openapi_path: /store/packages, probe_path: /api/v1/store/packages }
+  - { action: catalog.register, method: POST, openapi_path: /store/catalogs, probe_path: /api/v1/store/catalogs }
+  - { action: catalog.remove, method: DELETE, openapi_path: "/store/catalogs/{sourceId}", probe_path: /api/v1/store/catalogs/catalog-1 }
+  - { action: release.import, method: POST, openapi_path: "/store/releases:import", probe_path: "/api/v1/store/releases:import" }
+  - { action: release.validate, method: POST, openapi_path: "/store/releases:validate", probe_path: "/api/v1/store/releases:validate" }
+  - { action: release.install, method: POST, openapi_path: "/store/releases:install", probe_path: "/api/v1/store/releases:install" }
+  - { action: release.upgrade, method: POST, openapi_path: "/store/releases:upgrade", probe_path: "/api/v1/store/releases:upgrade" }
+  - { action: release.rollback, method: POST, openapi_path: "/store/releases:rollback", probe_path: "/api/v1/store/releases:rollback" }
+  - { action: release.delete, method: POST, openapi_path: "/store/releases:delete", probe_path: "/api/v1/store/releases:delete" }
+  - { action: node.register, method: POST, openapi_path: /nodes/enrollment-codes, probe_path: /api/v1/nodes/enrollment-codes }
+  - { action: node.revoke, method: POST, openapi_path: "/nodes/{nodeId}:revoke-certificates", probe_path: "/api/v1/nodes/node-1:revoke-certificates" }
+  - { action: node.list, method: GET, openapi_path: /nodes, probe_path: /api/v1/nodes }
+  - { action: node.health, method: GET, openapi_path: "/nodes/{nodeId}/health", probe_path: /api/v1/nodes/node-1/health }
+  - { action: node.drain, method: POST, openapi_path: "/nodes/{nodeId}:drain", probe_path: "/api/v1/nodes/node-1:drain" }
+  - { action: node.remove, method: DELETE, openapi_path: "/nodes/{nodeId}", probe_path: /api/v1/nodes/node-1 }
+  - { action: deployment.list, method: GET, openapi_path: /deployments, probe_path: /api/v1/deployments }
+  - { action: deployment.get, method: GET, openapi_path: "/deployments/{deploymentId}", probe_path: /api/v1/deployments/deployment-1 }
+  - { action: deployment.start, method: POST, openapi_path: "/deployments/{deploymentId}:{action}", probe_path: "/api/v1/deployments/deployment-1:start" }
+  - { action: deployment.stop, method: POST, openapi_path: "/deployments/{deploymentId}:{action}", probe_path: "/api/v1/deployments/deployment-1:stop" }
+  - { action: deployment.restart, method: POST, openapi_path: "/deployments/{deploymentId}:{action}", probe_path: "/api/v1/deployments/deployment-1:restart" }
+  - { action: deployment.uninstall, method: POST, openapi_path: "/deployments/{deploymentId}:{action}", probe_path: "/api/v1/deployments/deployment-1:uninstall" }
+  - { action: deployment.health, method: GET, openapi_path: "/deployments/{deploymentId}/health", probe_path: /api/v1/deployments/deployment-1/health }
+  - { action: topology.draft, method: POST, openapi_path: /topologies, probe_path: /api/v1/topologies }
+  - { action: topology.revision, method: POST, openapi_path: "/topologies/{topologyId}/revisions", probe_path: /api/v1/topologies/primary/revisions }
+  - { action: topology.endpoint.edit, method: PUT, openapi_path: "/topologies/{topologyId}/draft/endpoints/{endpointId}", probe_path: /api/v1/topologies/primary/draft/endpoints/endpoint-1 }
+  - { action: topology.link.edit, method: PUT, openapi_path: "/topologies/{topologyId}/draft/links/{sourceEndpoint}/{targetEndpoint}", probe_path: /api/v1/topologies/primary/draft/links/endpoint-1/endpoint-2 }
+  - { action: topology.validate, method: POST, openapi_path: "/topologies/{topologyId}:validate", probe_path: "/api/v1/topologies/primary:validate" }
+  - { action: topology.diff, method: POST, openapi_path: "/topologies/{topologyId}:diff", probe_path: "/api/v1/topologies/primary:diff" }
+  - { action: topology.apply, method: POST, openapi_path: "/topologies/{topologyId}:apply", probe_path: "/api/v1/topologies/primary:apply" }
+  - { action: topology.rollback, method: POST, openapi_path: "/topologies/{topologyId}:rollback", probe_path: "/api/v1/topologies/primary:rollback" }
+  - { action: topology.status, method: GET, openapi_path: "/topologies/{topologyId}/status", probe_path: /api/v1/topologies/primary/status }
+  - { action: topology.export, method: GET, openapi_path: "/topologies/{topologyId}", probe_path: /api/v1/topologies/primary }
+  - { action: operation.plan, method: POST, openapi_path: "/operations:plan", probe_path: "/api/v1/operations:plan" }
+  - { action: operation.confirm, method: POST, openapi_path: "/operations/{operationId}:confirm", probe_path: "/api/v1/operations/operation-1:confirm" }
+  - { action: operation.apply, method: POST, openapi_path: "/operations/{operationId}:apply", probe_path: "/api/v1/operations/operation-1:apply" }
+  - { action: operation.cancel, method: POST, openapi_path: "/operations/{operationId}:cancel", probe_path: "/api/v1/operations/operation-1:cancel" }
+  - { action: operation.retry, method: POST, openapi_path: "/operations/{operationId}:retry", probe_path: "/api/v1/operations/operation-1:retry" }
+  - { action: operation.rollback, method: POST, openapi_path: "/operations/{operationId}:rollback", probe_path: "/api/v1/operations/operation-1:rollback" }
+  - { action: operation.logs, method: GET, openapi_path: "/operations/{operationId}/logs", probe_path: /api/v1/operations/operation-1/logs }
+  - { action: operation.events, method: GET, openapi_path: "/operations/{operationId}/events", probe_path: /api/v1/operations/operation-1/events }
+  - { action: diagnostic.create, method: POST, openapi_path: /diagnostics, probe_path: /api/v1/diagnostics }
+  - { action: diagnostic.list, method: GET, openapi_path: /diagnostics, probe_path: /api/v1/diagnostics }
+  - { action: diagnostic.get, method: GET, openapi_path: "/diagnostics/{diagnosticId}", probe_path: /api/v1/diagnostics/diagnostic-1 }
+  - { action: diagnostic.export, method: GET, openapi_path: "/diagnostics/{diagnosticId}.{format}", probe_path: /api/v1/diagnostics/diagnostic-1.json }
+paths:
+  /healthz/live:
+    get:
+      operationId: live
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+  /healthz/ready:
+    get:
+      operationId: ready
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/Ready" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /auth/config:
+    get:
+      operationId: getAuthenticationConfig
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+  /auth/session:
+    get:
+      operationId: getBrowserSession
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+  /auth/oidc/start:
+    get:
+      operationId: startOidcAuthorizationCodeFlow
+      security: []
+      parameters:
+        - name: return_to
+          in: query
+          schema: { type: string }
+      responses:
+        "302":
+          description: Redirect to the discovered HTTPS authorization endpoint.
+  /auth/oidc/callback:
+    get:
+      operationId: completeOidcAuthorizationCodeFlow
+      security: []
+      parameters:
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: error, in: query, schema: { type: string } }
+      responses:
+        "302":
+          description: Sets the HttpOnly Secure Web session and redirects to return_to.
+        "401": { $ref: "#/components/responses/Problem" }
+  /auth/logout:
+    post:
+      operationId: logoutBrowserSession
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "403": { $ref: "#/components/responses/Problem" }
+  /ui/layout:
+    get:
+      operationId: getTopologyUiLayout
+      parameters:
+        - name: topology_id
+          in: query
+          schema: { type: string, default: primary }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "401": { $ref: "#/components/responses/Problem" }
+    put:
+      operationId: putTopologyUiLayout
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - name: topology_id
+          in: query
+          schema: { type: string, default: primary }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UiLayout" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+  /capabilities:
+    get:
+      operationId: listCapabilities
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+  /operations:plan:
+    post:
+      operationId: planOperation
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ActionRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Operation" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /operations:
+    get:
+      operationId: listOperations
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+  /operations/{operationId}:
+    get:
+      operationId: getOperation
+      parameters: [{ $ref: "#/components/parameters/OperationId" }]
+      responses:
+        "200": { $ref: "#/components/responses/Operation" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /operations/{operationId}:confirm:
+    post:
+      operationId: confirmOperation
+      parameters:
+        - { $ref: "#/components/parameters/OperationId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200": { $ref: "#/components/responses/Operation" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /operations/{operationId}:apply:
+    post:
+      operationId: applyOperation
+      parameters:
+        - { $ref: "#/components/parameters/OperationId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /operations/{operationId}:cancel:
+    post:
+      operationId: cancelOperation
+      parameters:
+        - { $ref: "#/components/parameters/OperationId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+  /operations/{operationId}:retry:
+    post:
+      operationId: retryOperation
+      parameters:
+        - { $ref: "#/components/parameters/OperationId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+  /operations/{operationId}:rollback:
+    post:
+      operationId: rollbackOperation
+      parameters:
+        - { $ref: "#/components/parameters/OperationId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+  /operations/{operationId}/events:
+    get:
+      operationId: streamOperationEvents
+      parameters:
+        - { $ref: "#/components/parameters/OperationId" }
+        - name: Last-Event-ID
+          in: header
+          schema: { type: string }
+      responses:
+        "200":
+          description: Server-sent event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+  /operations/{operationId}/logs:
+    get:
+      operationId: listOperationLogs
+      parameters:
+        - { $ref: "#/components/parameters/OperationId" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /store/catalogs:
+    get:
+      operationId: listCatalogs
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+    post:
+      operationId: registerCatalog
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CatalogSourceRegistration" }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+  /store/catalogs/{sourceId}:
+    delete:
+      operationId: removeCatalog
+      parameters:
+        - name: sourceId
+          in: path
+          required: true
+          schema: { type: string }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /store/packages:
+    get:
+      operationId: listStorePackages
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - name: search
+          in: query
+          schema: { type: string }
+        - name: channel
+          in: query
+          schema: { enum: [stable, beta, nightly] }
+        - name: os
+          in: query
+          schema: { type: string }
+        - name: arch
+          in: query
+          schema: { type: string }
+        - name: variant
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/CatalogPackages" }
+  /store/releases:validate:
+    post:
+      operationId: validateRelease
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CatalogReleaseSelection" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /store/releases:import:
+    post:
+      operationId: importRelease
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReleaseImportRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+  /store/releases:install:
+    post:
+      operationId: installRelease
+      x-ojos-error-codes:
+        - CATALOG_METADATA_CAPABILITY_MISMATCH
+        - STORE_ENDPOINT_INVALID
+        - STORE_ENDPOINT_NODE_MISMATCH
+        - STORE_ENDPOINT_SERVICE_MISMATCH
+        - STORE_ENDPOINT_UNAVAILABLE
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StoreInstallRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /store/releases:upgrade:
+    post:
+      operationId: upgradeRelease
+      x-ojos-error-codes:
+        - CATALOG_METADATA_CAPABILITY_MISMATCH
+        - STORE_REPLACEMENT_ENDPOINT_CUTOVER_UNSUPPORTED
+        - STORE_ENDPOINT_UNAVAILABLE
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReleaseReplacementRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /store/releases:rollback:
+    post:
+      operationId: rollbackRelease
+      x-ojos-error-codes:
+        - CATALOG_METADATA_CAPABILITY_MISMATCH
+        - STORE_REPLACEMENT_ENDPOINT_CUTOVER_UNSUPPORTED
+        - STORE_ENDPOINT_UNAVAILABLE
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReleaseReplacementRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /store/releases:delete:
+    post:
+      operationId: deleteRelease
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [service_id, version]
+              properties:
+                service_id: { type: string, minLength: 1 }
+                version: { type: string, minLength: 1 }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /nodes:
+    get:
+      operationId: listNodes
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+  /nodes/enrollment-codes:
+    post:
+      operationId: createNodeEnrollmentCode
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [node_id, host_ip]
+              properties:
+                node_id: { type: string, minLength: 1, maxLength: 128 }
+                host_ip: { type: string, minLength: 1 }
+                role: { type: string, default: standalone }
+                parent_node_id: { type: string, default: "" }
+                labels: { type: object, default: {} }
+                ttl_seconds: { type: integer, minimum: 60, maximum: 3600, default: 600 }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+  /nodes/{nodeId}:
+    get:
+      operationId: getNode
+      parameters: [{ $ref: "#/components/parameters/NodeId" }]
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+    delete:
+      operationId: removeNode
+      parameters:
+        - { $ref: "#/components/parameters/NodeId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /nodes/{nodeId}:revoke-certificates:
+    post:
+      operationId: revokeNodeCertificates
+      parameters:
+        - { $ref: "#/components/parameters/NodeId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 512 }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /nodes/{nodeId}/health:
+    get:
+      operationId: getNodeHealth
+      parameters: [{ $ref: "#/components/parameters/NodeId" }]
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /nodes/{nodeId}:drain:
+    post:
+      operationId: drainNode
+      parameters:
+        - { $ref: "#/components/parameters/NodeId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /deployments:
+    get:
+      operationId: listDeployments
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+  /deployments/{deploymentId}:
+    get:
+      operationId: getDeployment
+      parameters: [{ $ref: "#/components/parameters/DeploymentId" }]
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /deployments/{deploymentId}/health:
+    get:
+      operationId: getDeploymentHealth
+      parameters: [{ $ref: "#/components/parameters/DeploymentId" }]
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /deployments/{deploymentId}:{action}:
+    post:
+      operationId: mutateDeployment
+      parameters:
+        - name: deploymentId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: action
+          in: path
+          required: true
+          schema: { enum: [start, stop, restart, uninstall] }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+  /topologies:
+    get:
+      operationId: listTopologies
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+    post:
+      operationId: createTopologyDraft
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TopologySpec" }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+  /topologies/{topologyId}:
+    get:
+      operationId: getTopology
+      parameters: [{ $ref: "#/components/parameters/TopologyId" }]
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /topologies/{topologyId}/draft/endpoints/{endpointId}:
+    put:
+      operationId: putTopologyDraftEndpoint
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TopologyEndpointSpec" }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+        "409": { $ref: "#/components/responses/Problem" }
+    delete:
+      operationId: deleteTopologyDraftEndpoint
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /topologies/{topologyId}/draft/links/{sourceEndpoint}/{targetEndpoint}:
+    put:
+      operationId: putTopologyDraftLink
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - name: sourceEndpoint
+          in: path
+          required: true
+          schema: { type: string }
+        - name: targetEndpoint
+          in: path
+          required: true
+          schema: { type: string }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TopologyLinkSpec" }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+        "409": { $ref: "#/components/responses/Problem" }
+    delete:
+      operationId: deleteTopologyDraftLink
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - name: sourceEndpoint
+          in: path
+          required: true
+          schema: { type: string }
+        - name: targetEndpoint
+          in: path
+          required: true
+          schema: { type: string }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /topologies/{topologyId}/revisions:
+    get:
+      operationId: listTopologyRevisions
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+    post:
+      operationId: createTopologyRevision
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TopologySpec" }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /topologies/{topologyId}/revisions/{revisionId}:
+    get:
+      operationId: getTopologyRevision
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - name: revisionId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /topologies/{topologyId}:validate:
+    post:
+      operationId: validateTopology
+      x-ojos-error-codes:
+        - TOPOLOGY_LINK_PROBE_RELEASE_BINDING_REQUIRED
+        - TOPOLOGY_LINK_PROBE_CAPABILITY_REQUIRED
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+  /topologies/{topologyId}:diff:
+    post:
+      operationId: diffTopology
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+  /topologies/{topologyId}:apply:
+    post:
+      operationId: applyTopology
+      x-ojos-error-codes:
+        - TOPOLOGY_LINK_PROBE_RELEASE_BINDING_REQUIRED
+        - TOPOLOGY_LINK_PROBE_CAPABILITY_REQUIRED
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /topologies/{topologyId}:rollback:
+    post:
+      operationId: rollbackTopology
+      x-ojos-error-codes:
+        - TOPOLOGY_LINK_PROBE_RELEASE_BINDING_REQUIRED
+        - TOPOLOGY_LINK_PROBE_CAPABILITY_REQUIRED
+      parameters:
+        - { $ref: "#/components/parameters/TopologyId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+  /topologies/{topologyId}/status:
+    get:
+      operationId: getTopologyStatus
+      parameters: [{ $ref: "#/components/parameters/TopologyId" }]
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+  /diagnostics:
+    get:
+      operationId: listDiagnostics
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+    post:
+      operationId: createDiagnostic
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DiagnosticCreateRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+        "400": { $ref: "#/components/responses/Problem" }
+  /diagnostics/{diagnosticId}:
+    get:
+      operationId: getDiagnostic
+      parameters:
+        - name: diagnosticId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /diagnostics/{diagnosticId}.{format}:
+    get:
+      operationId: exportDiagnostic
+      parameters:
+        - name: diagnosticId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: format
+          in: path
+          required: true
+          schema: { enum: [json, md] }
+      responses:
+        "200": { description: Exported diagnostic document }
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: /.well-known/openid-configuration
+    desktopSessionCookie:
+      type: apiKey
+      in: cookie
+      name: ojos_session
+    oidcSessionCookie:
+      type: apiKey
+      in: cookie
+      name: ojos_oidc_session
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 8, maxLength: 200 }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema: { type: string }
+    TopologyId:
+      name: topologyId
+      in: path
+      required: true
+      schema: { type: string }
+    NodeId:
+      name: nodeId
+      in: path
+      required: true
+      schema: { type: string }
+    DeploymentId:
+      name: deploymentId
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Ready:
+      description: The durable control plane is ready and identifies the exact running build.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ReadyEnvelope" }
+    Success:
+      description: Successful response
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Envelope" }
+    CatalogPackages:
+      description: Verified Catalog v2 releases, including release-version-scoped runtime capabilities.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CatalogPackageEnvelope" }
+    Operation:
+      description: Durable operation
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Envelope" }
+    AsyncOperation:
+      description: Accepted durable operation
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/AsyncOperationEnvelope" }
+    Problem:
+      description: RFC 9457 problem detail
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+  schemas:
+    ReadyEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [status, store, storage, recovery_complete, warnings, build]
+          properties:
+            status: { const: ready }
+            store: { enum: [sqlite, postgres] }
+            storage: { type: object, additionalProperties: true }
+            recovery_complete: { const: true }
+            warnings:
+              type: array
+              items: { type: string }
+            build: { $ref: "#/components/schemas/BuildIdentity" }
+        meta:
+          type: object
+          additionalProperties: false
+          required: [request_id, api_version]
+          properties:
+            request_id: { type: string }
+            api_version: { const: v1 }
+    BuildIdentity:
+      type: object
+      additionalProperties: false
+      required: [version, commit_sha, profile, target]
+      properties:
+        version: { type: string, minLength: 1 }
+        commit_sha:
+          oneOf:
+            - { type: string, pattern: "^[0-9a-f]{40}$" }
+            - { const: development }
+        profile: { enum: [production, desktop, ephemeral] }
+        target: { type: string, minLength: 1 }
+    Envelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {}
+        meta:
+          type: object
+          required: [request_id, api_version]
+          properties:
+            request_id: { type: string }
+            api_version: { const: v1 }
+            next_cursor: { type: [string, "null"] }
+    AsyncOperationEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [operation_id, operation]
+          properties:
+            operation_id: { type: string, minLength: 1 }
+            operation: { type: object }
+          additionalProperties: true
+        meta:
+          type: object
+          required: [request_id, api_version]
+          properties:
+            request_id: { type: string }
+            api_version: { const: v1 }
+    Problem:
+      type: object
+      required: [type, title, status, code, detail, request_id]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        code: { type: string }
+        detail: { type: string }
+        request_id: { type: string }
+        operation_id: { type: string }
+    ActionRequest:
+      type: object
+      required: [action, fields]
+      properties:
+        action: { type: string }
+        fields: { type: object, additionalProperties: true }
+    DiagnosticCreateRequest:
+      type: object
+      additionalProperties: false
+      description: Creates a diagnostic snapshot for the current applied Topology.
+    CatalogSource:
+      type: object
+      additionalProperties: false
+      required: [id, url, required_key_id]
+      properties:
+        id: { type: string }
+        url: { type: string, format: uri-reference }
+        required_key_id: { type: string }
+        enabled: { type: boolean, default: true }
+        auth_secret_ref: { type: string }
+        offline_oci_layouts:
+          type: object
+          additionalProperties: { type: string }
+    CatalogSourceRegistration:
+      type: object
+      additionalProperties: false
+      required: [id, url, required_key_id]
+      properties:
+        id: { type: string }
+        url: { type: string, format: uri-reference }
+        required_key_id: { type: string }
+        enabled: { type: boolean, default: true }
+        auth_secret_ref: { type: string }
+        offline_oci_layouts:
+          type: object
+          additionalProperties: { type: string }
+        public_key:
+          type: string
+          minLength: 44
+          maxLength: 44
+          pattern: '^[A-Za-z0-9+/]{43}=$'
+          writeOnly: true
+          description: Optional canonical padded-base64 encoding of the raw 32-byte Ed25519 public key, used only to bootstrap required_key_id when the control plane does not trust it yet.
+    ReleaseImportRequest:
+      $ref: "#/components/schemas/CatalogReleaseSelection"
+    RuntimeCapabilityV2:
+      type: string
+      enum: [link-probe-v1]
+      description: >-
+        A release-version-scoped capability covered by the Catalog v2 JCS/Ed25519
+        signature. Absence means unsupported. link-probe-v1 is valid only when the
+        exact metadata manifest also contains LinkProbeV1ManifestApi.
+    CatalogReleaseV2:
+      type: object
+      additionalProperties: false
+      required: [version, channel, platforms, min_orchestrator_version, metadata, oci_image]
+      properties:
+        version: { type: string }
+        channel: { enum: [stable, beta, nightly] }
+        platforms:
+          type: array
+          minItems: 1
+          items: { type: object, additionalProperties: true }
+        min_orchestrator_version: { type: string }
+        dependencies: { type: array, default: [], items: { type: object } }
+        runtime_capabilities:
+          type: array
+          uniqueItems: true
+          default: []
+          items: { $ref: "#/components/schemas/RuntimeCapabilityV2" }
+        metadata: { type: object, additionalProperties: false, required: [url, sha256], properties: { url: { type: string }, sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' } } }
+        oci_image: { type: string, pattern: '^[^@[:space:]]+@sha256:[0-9a-f]{64}$' }
+    LinkProbeV1ManifestApi:
+      type: object
+      additionalProperties: false
+      description: Exact signed release-manifest API declaration required by Catalog runtime_capabilities=link-probe-v1.
+      required: [api_id, protocol, port_name, path_prefix, methods, visibility, auth_mode, permission, stability, version]
+      properties:
+        api_id: { const: orchestrator.link-probe.v1 }
+        protocol: { const: http }
+        port_name: { const: default }
+        path_prefix: { const: /probe }
+        methods: { type: array, minItems: 1, maxItems: 1, items: { const: GET } }
+        visibility: { const: global }
+        auth_mode: { const: public }
+        permission: { const: public }
+        stability: { const: stable }
+        version: { const: v1 }
+        grpc_service: { const: "", default: "" }
+        stream_name: { const: "", default: "" }
+        rate_limit: { type: string, default: "" }
+        timeout: { type: string, default: "" }
+        allowed_callers: { type: array, maxItems: 0, default: [] }
+        denied_callers: { type: array, maxItems: 0, default: [] }
+    CatalogPackageEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [items, installed, next_cursor]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/CatalogPackageItem" }
+            installed: { type: array, items: { type: object, additionalProperties: true } }
+            next_cursor: { type: [string, "null"] }
+        meta:
+          type: object
+          additionalProperties: false
+          required: [request_id, api_version]
+          properties:
+            request_id: { type: string }
+            api_version: { const: v1 }
+    CatalogPackageItem:
+      type: object
+      additionalProperties: false
+      required: [source_id, catalog_id, module_id, name, description, kind, tags, version, channel, platforms, min_orchestrator_version, runtime_capabilities, metadata_sha256, oci_image]
+      properties:
+        source_id: { type: string }
+        catalog_id: { type: string }
+        module_id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        kind: { type: string }
+        tags: { type: array, items: { type: string } }
+        version: { type: string }
+        channel: { enum: [stable, beta, nightly] }
+        platforms: { type: array, items: { type: object, additionalProperties: true } }
+        min_orchestrator_version: { type: string }
+        runtime_capabilities:
+          type: array
+          uniqueItems: true
+          items: { $ref: "#/components/schemas/RuntimeCapabilityV2" }
+        metadata_sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        oci_image: { type: string, pattern: '^[^@[:space:]]+@sha256:[0-9a-f]{64}$' }
+    StoreInstallRequest:
+      type: object
+      additionalProperties: false
+      required: [service_id, target_node_id]
+      properties:
+        service_id: { type: string }
+        version: { type: string }
+        catalog_source_id: { type: string }
+        channel: { enum: [stable, beta, nightly], default: stable }
+        target_node_id: { type: string }
+        endpoint:
+          type: string
+          description: >-
+            Managed binding in ip:host_port:service_id form. The IP must equal
+            target_node_id.host_ip, service_id must match the selected release,
+            and Docker publishes exactly the signed backend container port to this host port.
+        mode: { enum: [MANAGED, EXTERNAL], default: MANAGED }
+        start: { type: boolean, default: true }
+        migration_policy: { enum: [DRY_RUN, APPLY], default: APPLY }
+        gateway_node_id: { type: string }
+    CatalogReleaseSelection:
+      type: object
+      additionalProperties: false
+      required: [service_id, target_node_id]
+      properties:
+        service_id: { type: string }
+        target_node_id: { type: string }
+        version: { type: string }
+        catalog_source_id: { type: string }
+        channel: { enum: [stable, beta, nightly], default: stable }
+    ReleaseReplacementRequest:
+      type: object
+      additionalProperties: false
+      required: [deployment_id]
+      properties:
+        deployment_id: { type: string }
+        version: { type: string }
+        catalog_source_id: { type: string }
+        channel: { enum: [stable, beta, nightly], default: stable }
+        migration_policy: { enum: [DRY_RUN, APPLY], default: APPLY }
+        endpoint:
+          type: string
+          description: >-
+            Optional replacement binding. Reusing the active instance's host port
+            fails closed; an explicit different port is required for zero-overlap cutover.
+        gateway_node_id: { type: string }
+    TopologySpec:
+      type: object
+      additionalProperties: false
+      required: [api_version, topology_id, root_endpoint, authority, endpoints, links]
+      properties:
+        api_version: { const: v1 }
+        topology_id: { type: string }
+        root_endpoint: { type: string }
+        authority:
+          type: object
+          additionalProperties: false
+          required: [root_endpoint, exposure_policy]
+          properties:
+            root_endpoint: { type: string }
+            exposure_policy: { type: string }
+        endpoints:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyEndpointSpec" }
+        links:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyLinkSpec" }
+    TopologyEndpointSpec:
+      type: object
+      additionalProperties: false
+      required: [endpoint, service_id, protocol]
+      properties:
+        endpoint: { type: string }
+        service_id: { type: string }
+        protocol: { type: string }
+        health_path: { type: string, default: "" }
+        display_name: { type: string, default: "" }
+        note: { type: string, default: "" }
+        config: { type: object, default: {} }
+    TopologyLinkSpec:
+      type: object
+      additionalProperties: false
+      required: [source_endpoint, target_endpoint, protocol, auth_mode, scope]
+      properties:
+        source_endpoint: { type: string }
+        target_endpoint: { type: string }
+        protocol: { type: string }
+        auth_mode: { type: string }
+        scope: { type: string }
+        enabled:
+          type: boolean
+          default: true
+          description: >-
+            When true, the exact source RuntimeInstance release_version must resolve
+            to a registered release whose signed Catalog and manifest both declare
+            link-probe-v1/orchestrator.link-probe.v1. Topology never assumes a hidden probe route.
+        config_ref: { type: string, default: "" }
+        secret_ref: { type: string, default: "" }
+        policy: { type: object, default: {} }
+    UiLayout:
+      type: object
+      additionalProperties: true

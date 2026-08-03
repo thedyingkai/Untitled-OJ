@@ -1,0 +1,9 @@
+{
+  "data": {
+    "operations": [
+      {"operation_id":"op-queued","action":"release.install","status":"QUEUED"},
+      {"operation_id":"op-attention","action":"topology.apply","status":"NEEDS_ATTENTION"}
+    ]
+  },
+  "meta": {"request_id":"req-fixture-operations","api_version":"v1"}
+}

@@ -106,6 +106,14 @@ require_enabled_flag() {
   esac
 }
 
+require_absolute_path() {
+  local name="$1"
+  local value="${!name:-}"
+  [[ -n "$value" ]] || die "$name is required"
+  reject_weak_value "$name" "$value"
+  [[ "$value" == /* ]] || die "$name must be an absolute path"
+}
+
 flag_is_enabled() {
   local value
   value="$(printf '%s' "$(value_for "$1")" | tr '[:upper:]' '[:lower:]')"
@@ -179,34 +187,43 @@ require_database_url PROBLEM_DATABASE_URL
 require_database_url JUDGE_DATABASE_URL
 require_database_url USER_DATABASE_URL
 require_database_url ORCHESTRATOR_DATABASE_URL
+require_database_url ORCHESTRATOR_MIGRATION_DATABASE_URL
 require_redis_url REDIS_URL
-
-if flag_is_enabled ORCHESTRATOR_NODE_DISPATCH \
-  || flag_is_enabled ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER; then
-  require_secret ORCHESTRATOR_NODE_TOKEN 32
-  require_distinct_secret ORCHESTRATOR_NODE_TOKEN \
-    JWT_SECRET \
-    ORCHESTRATOR_INTERNAL_TOKEN \
-    AUTH_INTERNAL_TOKEN \
-    OJOS_WORKER_TOKEN \
-    OJOS_USER_SERVICE_TOKEN \
-    OJOS_PROBLEM_SERVICE_TOKEN \
-    OJOS_JUDGE_API_SERVICE_TOKEN \
-    OJOS_JUDGE_WORKER_SERVICE_TOKEN
-fi
-
-if flag_is_enabled ORCHESTRATOR_NODE_DISPATCH; then
-  node_endpoint="$(value_for ORCHESTRATOR_NODE_ENDPOINT)"
-  [[ "$node_endpoint" =~ ^https?://[^[:space:]]+$ ]] \
-    || die "ORCHESTRATOR_NODE_ENDPOINT must be an http(s) URL when node dispatch is enabled"
-  reject_weak_value ORCHESTRATOR_NODE_ENDPOINT "$node_endpoint"
-fi
-
-if flag_is_enabled ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER; then
-  node_host_ip="$(value_for ORCHESTRATOR_NODE_HOST_IP)"
-  [[ -n "$node_host_ip" ]] || die "ORCHESTRATOR_NODE_HOST_IP is required when node driver execution is enabled"
-  reject_weak_value ORCHESTRATOR_NODE_HOST_IP "$node_host_ip"
-fi
+[[ "$(value_for ORCHESTRATOR_DATABASE_URL)" =~ [\?\&]sslmode=require([\&]|$) ]] || \
+  die "ORCHESTRATOR_DATABASE_URL must explicitly set sslmode=require"
+migration_database_url="$(value_for ORCHESTRATOR_MIGRATION_DATABASE_URL)"
+[[ "$migration_database_url" =~ [\?\&]sslmode=verify-full([\&]|$) ]] || \
+  die "ORCHESTRATOR_MIGRATION_DATABASE_URL must explicitly set sslmode=verify-full"
+[[ "$migration_database_url" == *"sslrootcert=/run/secrets/orchestrator-postgres-ca.crt"* ]] || \
+  die "ORCHESTRATOR_MIGRATION_DATABASE_URL must use the mounted PostgreSQL CA path"
+orchestrator_database_name="${ORCHESTRATOR_POSTGRES_DB:-ojos_orchestrator}"
+migration_database_path="${migration_database_url%%\?*}"
+[[ "${migration_database_path##*/}" == "$orchestrator_database_name" ]] || \
+  die "ORCHESTRATOR_MIGRATION_DATABASE_URL must target ORCHESTRATOR_POSTGRES_DB"
+for name in \
+  ORCHESTRATOR_POSTGRES_CA_CERT \
+  ORCHESTRATOR_HEALTHCHECK_CA_CERT \
+  ORCHESTRATOR_TLS_CERT \
+  ORCHESTRATOR_TLS_KEY \
+  ORCHESTRATOR_NODE_CA_CERT \
+  ORCHESTRATOR_NODE_CA_KEY \
+  ORCHESTRATOR_ARTIFACT_DIR
+do
+  require_absolute_path "$name"
+done
+healthcheck_url="$(value_for ORCHESTRATOR_HEALTHCHECK_URL)"
+[[ "$healthcheck_url" == https://* ]] || \
+  die "ORCHESTRATOR_HEALTHCHECK_URL must use https:// in production"
+for removed in \
+  ORCHESTRATOR_NODE_DISPATCH \
+  ORCHESTRATOR_NODE_ENDPOINT \
+  ORCHESTRATOR_NODE_TOKEN \
+  ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER \
+  ORCHESTRATOR_NODE_HOST_IP
+do
+  [[ -z "$(value_for "$removed")" ]] || \
+    die "$removed belongs to the removed 0.2 Node push/bearer path; use the v1 mTLS pull Agent"
+done
 
 if [[ "${OJOS_SECRET_CHECK_REQUIRE_ALERTS:-0}" == "1" ]]; then
   alert_url="$(value_for OJOS_ALERT_WEBHOOK_URL)"
@@ -218,10 +235,9 @@ if [[ "${OJOS_SECRET_CHECK_REQUIRE_MONITORING:-0}" == "1" ]]; then
   require_secret GRAFANA_ADMIN_PASSWORD 32
 fi
 
-# Opt-in transport-security enforcement. Off by default so the current beta profile
-# (loopback-bound datastores, plaintext redis://, MINIO_USE_SSL=false) and ci-policy.sh
-# keep passing. Turning it on requires TLS-configured Redis and MinIO endpoints, which
-# depends on a PKI/cert decision that is still deferred.
+# Optional Redis/MinIO transport enforcement is separate from the mandatory
+# Orchestrator HTTPS and Node mTLS files checked above. Local integration may
+# keep loopback-only Redis/MinIO plaintext; production can require both here.
 if [[ "${OJOS_SECRET_CHECK_REQUIRE_TLS:-0}" == "1" ]]; then
   redis_url="$(value_for REDIS_URL)"
   [[ "$redis_url" =~ ^rediss:// ]] || die "OJOS_SECRET_CHECK_REQUIRE_TLS=1 requires REDIS_URL to use the rediss:// (TLS) scheme"

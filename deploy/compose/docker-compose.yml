@@ -84,7 +84,13 @@ services:
         condition: service_healthy
     volumes:
       - ../../services/orchestrator/migrations:/migrations:ro
-    command: [ "-path", "/migrations", "-database", "${ORCHESTRATOR_DATABASE_URL:-postgres://postgres:ojos-orchestrator-local@orchestrator-db:5432/ojos_orchestrator?sslmode=disable}", "up" ]
+      - type: bind
+        source: ${ORCHESTRATOR_POSTGRES_CA_CERT:?set ORCHESTRATOR_POSTGRES_CA_CERT to an absolute host CA file}
+        target: /run/secrets/orchestrator-postgres-ca.crt
+        read_only: true
+    # migrate/migrate uses lib/pq. Its URL therefore carries the fixed
+    # container CA path, while the daemon receives the CA in its own option.
+    command: [ "-path", "/migrations", "-database", "${ORCHESTRATOR_MIGRATION_DATABASE_URL:?set ORCHESTRATOR_MIGRATION_DATABASE_URL with sslmode=verify-full and sslrootcert=/run/secrets/orchestrator-postgres-ca.crt}", "up" ]
 
   orchestrator:
     build:
@@ -101,29 +107,86 @@ services:
       orchestrator-migrations:
         condition: service_completed_successfully
     environment:
-      ORCHESTRATOR_DATABASE_URL: ${ORCHESTRATOR_DATABASE_URL:-postgres://postgres:ojos-orchestrator-local@orchestrator-db:5432/ojos_orchestrator?sslmode=disable}
-      # 服务端门禁令牌：未配置时 daemon fail-open（任何人都能改拓扑）。必须与 gateway
-      # 侧的同名变量取同一个值；生产用 .env.production.example 里的强随机值覆盖。
-      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:-ojos-local-internal}
-      ORCHESTRATOR_RELEASE_PACKAGE_LOAD: "1"
+      ORCHESTRATOR_DATABASE_URL: ${ORCHESTRATOR_DATABASE_URL:?set the production PostgreSQL URL with sslmode=require}
+      ORCHESTRATOR_POSTGRES_CA_CERT: /run/secrets/orchestrator-postgres-ca.crt
+      ORCHESTRATOR_ARTIFACT_DIR: /var/lib/ojos/orchestrator/artifacts
+      ORCHESTRATOR_HEALTHCHECK_URL: ${ORCHESTRATOR_HEALTHCHECK_URL:-https://orchestrator:8090/api/v1/healthz/ready}
+      ORCHESTRATOR_HEALTHCHECK_CA_CERT: /run/secrets/orchestrator-health-ca.crt
+      ORCHESTRATOR_TLS_CERT: /run/secrets/orchestrator-tls.crt
+      ORCHESTRATOR_TLS_KEY: /run/secrets/orchestrator-tls.key
+      ORCHESTRATOR_NODE_CA_CERT: /run/secrets/orchestrator-node-ca.crt
+      ORCHESTRATOR_NODE_CA_KEY: /run/secrets/orchestrator-node-ca.key
+      ORCHESTRATOR_CATALOG_TRUST_KEYS: ${ORCHESTRATOR_CATALOG_TRUST_KEYS:-}
+      ORCHESTRATOR_CATALOG_SOURCES: ${ORCHESTRATOR_CATALOG_SOURCES:-}
+      ORCHESTRATOR_OIDC_ISSUER: ${ORCHESTRATOR_OIDC_ISSUER:-}
+      ORCHESTRATOR_OIDC_AUDIENCE: ${ORCHESTRATOR_OIDC_AUDIENCE:-}
+      ORCHESTRATOR_OIDC_CLIENT_ID: ${ORCHESTRATOR_OIDC_CLIENT_ID:-}
+      ORCHESTRATOR_OIDC_SCOPES: ${ORCHESTRATOR_OIDC_SCOPES:-openid profile email}
+      ORCHESTRATOR_PUBLIC_BASE_URL: ${ORCHESTRATOR_PUBLIC_BASE_URL:-}
+      ORCHESTRATOR_OIDC_ROLE_CLAIM: ${ORCHESTRATOR_OIDC_ROLE_CLAIM:-roles}
+      ORCHESTRATOR_OIDC_VIEWER_ROLE: ${ORCHESTRATOR_OIDC_VIEWER_ROLE:-viewer}
+      ORCHESTRATOR_OIDC_OPERATOR_ROLE: ${ORCHESTRATOR_OIDC_OPERATOR_ROLE:-operator}
+      ORCHESTRATOR_OIDC_ADMIN_ROLE: ${ORCHESTRATOR_OIDC_ADMIN_ROLE:-admin}
+      ORCHESTRATOR_OIDC_JWKS_CACHE_SECONDS: ${ORCHESTRATOR_OIDC_JWKS_CACHE_SECONDS:-300}
+      ORCHESTRATOR_OIDC_HTTP_TIMEOUT_SECONDS: ${ORCHESTRATOR_OIDC_HTTP_TIMEOUT_SECONDS:-5}
+      ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN: ${ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN:-}
+      ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: ${ORCHESTRATOR_GATEWAY_ADMIN_TOKEN:-}
+      ORCHESTRATOR_AUTH_ADMIN_ORIGIN: ${ORCHESTRATOR_AUTH_ADMIN_ORIGIN:-}
+      ORCHESTRATOR_AUTH_ADMIN_TOKEN: ${ORCHESTRATOR_AUTH_ADMIN_TOKEN:-}
+      ORCHESTRATOR_MAX_WORKERS: ${ORCHESTRATOR_MAX_WORKERS:-160}
+      ORCHESTRATOR_LOG_RETENTION_DAYS: ${ORCHESTRATOR_LOG_RETENTION_DAYS:-30}
+      ORCHESTRATOR_ARTIFACT_RETENTION_DAYS: ${ORCHESTRATOR_ARTIFACT_RETENTION_DAYS:-30}
+      ORCHESTRATOR_ARTIFACT_QUOTA_BYTES: ${ORCHESTRATOR_ARTIFACT_QUOTA_BYTES:-10737418240}
+      ORCHESTRATOR_OTEL_EXPORTER_OTLP_ENDPOINT: ${ORCHESTRATOR_OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      ORCHESTRATOR_OTEL_EXPORT_TIMEOUT_MS: ${ORCHESTRATOR_OTEL_EXPORT_TIMEOUT_MS:-2000}
+      ORCHESTRATOR_OTEL_QUEUE_CAPACITY: ${ORCHESTRATOR_OTEL_QUEUE_CAPACITY:-1024}
+      ORCHESTRATOR_LEGACY_API_MODE: gone
+      OJOS_GITHUB_TOKEN: ${OJOS_GITHUB_TOKEN:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # Compatibility-only internal callers still need an explicit distinct
+      # credential. Public v1 Web/TUI traffic is authenticated through OIDC.
+      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:?set ORCHESTRATOR_INTERNAL_TOKEN}
       ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM: ${ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM:-1}
-      ORCHESTRATOR_RELEASE_PACKAGE_ROOT: /workspace
-      ORCHESTRATOR_NODE_DISPATCH: ${ORCHESTRATOR_NODE_DISPATCH:-0}
-      ORCHESTRATOR_NODE_ENDPOINT: ${ORCHESTRATOR_NODE_ENDPOINT:-}
-      ORCHESTRATOR_NODE_TOKEN: ${ORCHESTRATOR_NODE_TOKEN:-}
-      ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER: ${ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER:-0}
-      ORCHESTRATOR_NODE_HOST_IP: ${ORCHESTRATOR_NODE_HOST_IP:-}
-      ORCHESTRATOR_AUTH_PERMISSION_SYNC: "1"
-      AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
-      AUTH_SERVICE_ADMIN_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
-      ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH: "0"
     ports:
       - "127.0.0.1:8090:8090"
     expose:
       - "8090"
-    # GET /health 是唯一免令牌的路由，健康检查无需携带 ORCHESTRATOR_INTERNAL_TOKEN。
+    volumes:
+      - orchestrator-artifacts:/var/lib/ojos/orchestrator/artifacts
+      - type: bind
+        source: ${ORCHESTRATOR_POSTGRES_CA_CERT:?set ORCHESTRATOR_POSTGRES_CA_CERT to an absolute host CA file}
+        target: /run/secrets/orchestrator-postgres-ca.crt
+        read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_HEALTHCHECK_CA_CERT:?set ORCHESTRATOR_HEALTHCHECK_CA_CERT to an absolute host CA file}
+        target: /run/secrets/orchestrator-health-ca.crt
+        read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_TLS_CERT:?set ORCHESTRATOR_TLS_CERT to an absolute host certificate file}
+        target: /run/secrets/orchestrator-tls.crt
+        read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_TLS_KEY:?set ORCHESTRATOR_TLS_KEY to an absolute host key file}
+        target: /run/secrets/orchestrator-tls.key
+        read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_NODE_CA_CERT:?set ORCHESTRATOR_NODE_CA_CERT to an absolute host CA file}
+        target: /run/secrets/orchestrator-node-ca.crt
+        read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_NODE_CA_KEY:?set ORCHESTRATOR_NODE_CA_KEY to an absolute host key file}
+        target: /run/secrets/orchestrator-node-ca.key
+        read_only: true
+    # v1 live/ready routes are auth-exempt. Production overrides the URL with HTTPS.
     healthcheck:
-      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:8090/health || exit 1" ]
+      test:
+        - CMD-SHELL
+        - >-
+          case "$${ORCHESTRATOR_HEALTHCHECK_URL}" in
+            https://*) curl -fsS --cacert "$${ORCHESTRATOR_HEALTHCHECK_CA_CERT}" "$${ORCHESTRATOR_HEALTHCHECK_URL}" ;;
+            http://127.0.0.1:*|http://localhost:*) curl -fsS "$${ORCHESTRATOR_HEALTHCHECK_URL}" ;;
+            *) echo "healthcheck URL must use HTTPS or loopback HTTP" >&2; exit 1 ;;
+          esac
       interval: 10s
       timeout: 5s
       retries: 10
@@ -481,6 +544,7 @@ services:
 
 volumes:
   orchestrator-db-data:
+  orchestrator-artifacts:
   auth-db-data:
   problem-db-data:
   judge-db-data:

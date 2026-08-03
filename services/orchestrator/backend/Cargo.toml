@@ -3,10 +3,47 @@ name = "ojos-orchestrator-daemon"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "orchestrator_backend"
+
+[features]
+default = []
+legacy-0_2 = ["orchestrator-legacy/legacy-0_2"]
+
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 clap.workspace = true
-orchestrator-core.workspace = true
+ctrlc = { version = "3.4", features = ["termination"] }
+getrandom = "0.3"
+jsonwebtoken = "9.3"
+rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+orchestrator-legacy.workspace = true
+orchestrator-control-plane.workspace = true
+orchestrator-manager.workspace = true
+orchestrator-runtime.workspace = true
+orchestrator-storage = { path = "../storage" }
 serde.workspace = true
 serde_json.workspace = true
+semver.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+tar = "0.4"
+time = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+x509-parser = "0.18"
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+url = "2.5"
+
+[dev-dependencies]
+async-trait = "0.1"
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
+orchestrator-agent.workspace = true
+rand = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+rsa = "0.9"
+tempfile.workspace = true
+serde_yaml.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

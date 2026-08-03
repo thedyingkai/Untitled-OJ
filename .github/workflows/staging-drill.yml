@@ -1,4 +1,4 @@
-name: Staging Drill
+name: Orchestrator v1 Recovery Drill
 
 on:
   schedule:
@@ -9,31 +9,40 @@ permissions:
   contents: read
 
 jobs:
-  backup-restore-rollback:
-    name: Backup restore rollback staging drill
+  backup-restore:
+    name: PostgreSQL and artifact backup/restore
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.5"
-          cache-dependency-path: |
-            platform/shared/go/go.sum
-            services/auth-service/go.sum
-            services/gateway/go.sum
-            services/storage-service/go.sum
-            services/problem-service/go.sum
-            services/judge-api/go.sum
-            services/user-service/go.sum
-      - name: Run staging backup/restore/rollback drill
-        shell: bash
+    services:
+      postgres:
+        image: postgres:17
         env:
-          OJOS_EVIDENCE_DIR: artifacts/staging-drill
-        run: bash deploy/ops/staging-drill.sh
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ojos-orchestrator-recovery-ci
+          POSTGRES_DB: ojos_orchestrator_backup_restore_drill
+        ports:
+          - 55436:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ojos_orchestrator_backup_restore_drill"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run v1 database and artifact recovery drill
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Use the same PostgreSQL major for pg_dump/pg_restore as the server;
+          # ubuntu-latest's distro client may lag and refuse a newer server.
+          docker run --rm --network host \
+            -v "$PWD:/workspace" -w /workspace \
+            -e 'ORCHESTRATOR_DRILL_DATABASE_URL=postgresql://postgres:ojos-orchestrator-recovery-ci@127.0.0.1:55436/ojos_orchestrator_backup_restore_drill?sslmode=disable' \
+            -e OJOS_EVIDENCE_DIR=artifacts/orchestrator-backup-restore \
+            postgres:17 \
+            bash deploy/ops/tests/orchestrator-backup-restore-drill.sh
       - name: Upload staging drill evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: staging-drill-evidence
-          path: artifacts/staging-drill
+          name: orchestrator-v1-recovery-evidence
+          path: artifacts/orchestrator-backup-restore

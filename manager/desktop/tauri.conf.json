@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OJOS Orchestrator",
+  "version": "1.0.0",
+  "identifier": "org.ojos.orchestrator",
+  "build": {
+    "frontendDist": "../web/dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' http://127.0.0.1:* https:; form-action 'self' https:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "deb", "appimage"],
+    "resources": {
+      "../web/dist/": "manager/web/dist/",
+      "../../platform/schemas/orchestrator/": "platform/schemas/orchestrator/",
+      "../../sets/": "sets/",
+      "../../store/index.json": "store/index.json",
+      "../../services/auth-service/service.yaml": "services/auth-service/service.yaml",
+      "../../services/auth-service/release.yaml": "services/auth-service/release.yaml",
+      "../../services/gateway/service.yaml": "services/gateway/service.yaml",
+      "../../services/gateway/release.yaml": "services/gateway/release.yaml",
+      "../../services/jaeger/service.yaml": "services/jaeger/service.yaml",
+      "../../services/jaeger/release.yaml": "services/jaeger/release.yaml",
+      "../../services/judge-api/service.yaml": "services/judge-api/service.yaml",
+      "../../services/judge-api/release.yaml": "services/judge-api/release.yaml",
+      "../../services/judge-worker/service.yaml": "services/judge-worker/service.yaml",
+      "../../services/judge-worker/release.yaml": "services/judge-worker/release.yaml",
+      "../../services/minio/service.yaml": "services/minio/service.yaml",
+      "../../services/minio/release.yaml": "services/minio/release.yaml",
+      "../../services/orchestrator/service.yaml": "services/orchestrator/service.yaml",
+      "../../services/orchestrator/release.yaml": "services/orchestrator/release.yaml",
+      "../../services/postgresql/service.yaml": "services/postgresql/service.yaml",
+      "../../services/postgresql/release.yaml": "services/postgresql/release.yaml",
+      "../../services/problem-service/service.yaml": "services/problem-service/service.yaml",
+      "../../services/problem-service/release.yaml": "services/problem-service/release.yaml",
+      "../../services/redis/service.yaml": "services/redis/service.yaml",
+      "../../services/redis/release.yaml": "services/redis/release.yaml",
+      "../../services/storage-service/service.yaml": "services/storage-service/service.yaml",
+      "../../services/storage-service/release.yaml": "services/storage-service/release.yaml",
+      "../../services/user-service/service.yaml": "services/user-service/service.yaml",
+      "../../services/user-service/release.yaml": "services/user-service/release.yaml"
+    },
+    "category": "DeveloperTool",
+    "shortDescription": "OJOS service orchestrator",
+    "longDescription": "Embedded OJOS Orchestrator control plane, Web UI and local Node agent.",
+    "icon": ["icons/icon.png"]
+  }
+}

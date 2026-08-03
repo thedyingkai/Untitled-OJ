@@ -1,6 +1,9 @@
 # 2026-07 编排器重构记录
 
-本轮把原生 GUI 换成同源 Web 控制面，并补上商店、Link 启停、Service/主机生命周期和几处安全边界。这里记录当前实现，也把仍然挡住生产发布的问题写清。
+> **历史记录：本文冻结 2026-07 当时的实现与缺口，不代表 Orchestrator v1 当前状态。**
+> 其中 TUI 进程内调用、共享 token Node push、无 PostgreSQL 连接池/NoTls、全局 console 锁、Deferred provider、浏览器 token 和旧发布结论均已过时。当前架构见[项目状态总结](../completeness-summary.md)，当前 GA 判定见[发布候选判定](../release-candidate.md)。
+
+当时的重构把原生 GUI 换成同源 Web 控制面，并补上商店、Link 启停、Service/主机生命周期和几处边界。下文保留当时的实现与发布判断，供迁移和考古使用。
 
 ## 入口与并发模型
 

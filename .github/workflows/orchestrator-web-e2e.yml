@@ -1,0 +1,55 @@
+name: Orchestrator Web E2E
+
+on:
+  pull_request:
+    paths:
+      - "manager/web/**"
+      - "platform/schemas/orchestrator/actions-v1.yaml"
+      - ".github/workflows/orchestrator-web-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "manager/web/**"
+      - "platform/schemas/orchestrator/actions-v1.yaml"
+      - ".github/workflows/orchestrator-web-e2e.yml"
+  workflow_dispatch:
+    inputs:
+      soak_ms:
+        description: "Browser soak duration in milliseconds (use 1800000 for the GA gate)"
+        required: false
+        default: "5000"
+
+permissions:
+  contents: read
+
+jobs:
+  browser-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: manager/web
+    env:
+      OJOS_E2E_SOAK_MS: ${{ inputs.soak_ms || '5000' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.11.0
+          cache: npm
+          cache-dependency-path: manager/web/package-lock.json
+      - run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
+      - run: npx playwright install --with-deps chromium
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:e2e
+      - name: Upload Playwright diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: orchestrator-web-playwright
+          path: |
+            manager/web/playwright-report
+            manager/web/test-results
+          if-no-files-found: ignore
+          retention-days: 7

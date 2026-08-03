@@ -1,0 +1,38 @@
+[package]
+name = "orchestrator-agent"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ojos-orchestrator-agent"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+clap.workspace = true
+fs2 = "0.4"
+hmac = "0.12"
+orchestrator-control-plane.workspace = true
+orchestrator-runtime.workspace = true
+redis = { version = "0.32", features = ["tokio-comp", "tokio-rustls-comp"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+tempfile.workspace = true
+time = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+x509-parser = "0.18"
+
+[dev-dependencies]
+serde_yaml.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }

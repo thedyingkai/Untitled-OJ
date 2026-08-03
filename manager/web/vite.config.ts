@@ -1,25 +1,8 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 
-const apiPrefixes = [
-  "/health",
-  "/services",
-  "/deployments",
-  "/nodes",
-  "/releases",
-  "/release-registry",
-  "/templates",
-  "/endpoints",
-  "/links",
-  "/operations",
-  "/topology",
-  "/diagnostics",
-  "/actions",
-  "/internal",
-  "/store",
-  "/ui",
-  "/api",
-];
+// Business traffic and per-user UI state both use the versioned v1 contract.
+const apiPrefixes = ["/api"];
 
 export default defineConfig({
   plugins: [vue()],

@@ -14,11 +14,14 @@ need_cmd() {
 
 need_cmd "$bash_bin"
 need_cmd docker
+need_cmd python3
 
 shopt -s globstar nullglob
 for script in "$script_dir"/**/*.sh; do
   "$bash_bin" -n "$script"
 done
+
+python3 -m unittest discover -s "$script_dir/tests" -p 'test_*.py'
 
 if grep -R --line-number \
   --include='*.yaml' \
@@ -82,7 +85,35 @@ USER_DATABASE_URL=postgres://ojos_user_app:UserDbProd_0123456789abcdef@user-db:5
 ORCHESTRATOR_POSTGRES_DB=ojos_orchestrator
 ORCHESTRATOR_POSTGRES_USER=ojos_orchestrator_app
 ORCHESTRATOR_POSTGRES_PASSWORD=OrchestratorDbProd_0123456789
-ORCHESTRATOR_DATABASE_URL=postgres://ojos_orchestrator_app:OrchestratorDbProd_0123456789@orchestrator-db:5432/ojos_orchestrator?sslmode=disable
+ORCHESTRATOR_DATABASE_URL=postgres://ojos_orchestrator_app:OrchestratorDbProd_0123456789@orchestrator-db:5432/ojos_orchestrator?sslmode=require
+ORCHESTRATOR_MIGRATION_DATABASE_URL=postgres://ojos_orchestrator_app:OrchestratorDbProd_0123456789@orchestrator-db:5432/ojos_orchestrator?sslmode=verify-full&sslrootcert=/run/secrets/orchestrator-postgres-ca.crt
+ORCHESTRATOR_POSTGRES_CA_CERT=/run/secrets/orchestrator-postgres-ca.crt
+ORCHESTRATOR_HEALTHCHECK_URL=https://orchestrator:8090/api/v1/healthz/ready
+ORCHESTRATOR_HEALTHCHECK_CA_CERT=/run/secrets/orchestrator-health-ca.crt
+ORCHESTRATOR_TLS_CERT=/run/secrets/orchestrator-tls.crt
+ORCHESTRATOR_TLS_KEY=/run/secrets/orchestrator-tls.key
+ORCHESTRATOR_NODE_CA_CERT=/run/secrets/orchestrator-node-ca.crt
+ORCHESTRATOR_NODE_CA_KEY=/run/secrets/orchestrator-node-ca.key
+ORCHESTRATOR_ARTIFACT_DIR=/var/lib/ojos/orchestrator/artifacts
+ORCHESTRATOR_MAX_WORKERS=160
+ORCHESTRATOR_LOG_RETENTION_DAYS=30
+ORCHESTRATOR_ARTIFACT_RETENTION_DAYS=30
+ORCHESTRATOR_ARTIFACT_QUOTA_BYTES=10737418240
+ORCHESTRATOR_CATALOG_TRUST_KEYS={"catalog-prod":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+ORCHESTRATOR_CATALOG_SOURCES=[{"id":"official","url":"https://catalog.invalid/v2/catalog.json","required_key_id":"catalog-prod","enabled":true,"auth_secret_ref":""}]
+ORCHESTRATOR_OIDC_ISSUER=https://identity.invalid
+ORCHESTRATOR_OIDC_AUDIENCE=ojos-orchestrator
+ORCHESTRATOR_OIDC_CLIENT_ID=ojos-orchestrator-web
+ORCHESTRATOR_OIDC_SCOPES=openid profile email
+ORCHESTRATOR_PUBLIC_BASE_URL=https://orchestrator.invalid
+ORCHESTRATOR_OIDC_ROLE_CLAIM=roles
+ORCHESTRATOR_OIDC_VIEWER_ROLE=viewer
+ORCHESTRATOR_OIDC_OPERATOR_ROLE=operator
+ORCHESTRATOR_OIDC_ADMIN_ROLE=admin
+ORCHESTRATOR_OIDC_JWKS_CACHE_SECONDS=300
+ORCHESTRATOR_OIDC_HTTP_TIMEOUT_SECONDS=5
+OJOS_GITHUB_TOKEN=GitHubCatalogProd_0123456789abcdef012345
+GITHUB_TOKEN=GitHubFallbackProd_0123456789abcdef0123
 
 REDIS_PASSWORD=RedisProd_0123456789abcdef012345
 REDIS_URL=redis://:RedisProd_0123456789abcdef012345@redis:6379/0
@@ -90,9 +121,6 @@ JWT_SECRET=JwtProd_0123456789abcdef0123456789abcdef
 AUTH_INTERNAL_TOKEN=AuthIntProd_0123456789abcdef0123456789
 ORCHESTRATOR_INTERNAL_TOKEN=OrchIntProd_0123456789abcdef0123456789
 ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM=1
-ORCHESTRATOR_NODE_DISPATCH=1
-ORCHESTRATOR_NODE_ENDPOINT=http://node.internal:8091
-ORCHESTRATOR_NODE_TOKEN=NodeDispatchProd_0123456789abcdef012345
 OJOS_WORKER_TOKEN=WorkerAuthProd_0123456789abcdef01234567
 OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT=http://gateway:8080
 OJOS_AUTH_PERMISSION_CHECK_API_ID=auth.user.permission.check
@@ -130,58 +158,199 @@ EOF
 
 OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$strong_env" "$bash_bin" "$script_dir/secret-check.sh"
 
-missing_node_token_env="$(mktemp)"
-missing_node_endpoint_env="$(mktemp)"
-driver_without_host_env="$(mktemp)"
-reused_node_token_env="$(mktemp)"
 reused_service_token_env="$(mktemp)"
-trap 'rm -f "$strong_env" "$missing_node_token_env" "$missing_node_endpoint_env" "$driver_without_host_env" "$reused_node_token_env" "$reused_service_token_env"' EXIT
-grep -v '^ORCHESTRATOR_NODE_TOKEN=' "$strong_env" >"$missing_node_token_env"
-if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$missing_node_token_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-missing-node-token.log 2>&1; then
-  echo "ops-ci: enabled node dispatch unexpectedly passed without ORCHESTRATOR_NODE_TOKEN" >&2
-  exit 1
-fi
-grep -v '^ORCHESTRATOR_NODE_ENDPOINT=' "$strong_env" >"$missing_node_endpoint_env"
-if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$missing_node_endpoint_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-missing-node-endpoint.log 2>&1; then
-  echo "ops-ci: enabled node dispatch unexpectedly passed without ORCHESTRATOR_NODE_ENDPOINT" >&2
-  exit 1
-fi
-cp "$strong_env" "$driver_without_host_env"
-printf '\nORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER=1\n' >>"$driver_without_host_env"
-if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$driver_without_host_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-missing-node-host.log 2>&1; then
-  echo "ops-ci: enabled node driver unexpectedly passed without ORCHESTRATOR_NODE_HOST_IP" >&2
-  exit 1
-fi
-sed 's/^ORCHESTRATOR_NODE_TOKEN=.*/ORCHESTRATOR_NODE_TOKEN=OrchIntProd_0123456789abcdef0123456789/' \
-  "$strong_env" >"$reused_node_token_env"
-if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$reused_node_token_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-reused-node-token.log 2>&1; then
-  echo "ops-ci: node dispatch unexpectedly accepted a reused control-plane token" >&2
-  exit 1
-fi
+wrong_migration_database_env="$(mktemp)"
+missing_postgres_ca_env="$(mktemp)"
+plaintext_health_env="$(mktemp)"
+trap 'rm -f "$strong_env" "$reused_service_token_env" "$wrong_migration_database_env" "$missing_postgres_ca_env" "$plaintext_health_env"' EXIT
 sed 's/^OJOS_PROBLEM_SERVICE_TOKEN=.*/OJOS_PROBLEM_SERVICE_TOKEN=UserSvcProd_0123456789abcdef0123456789/' \
   "$strong_env" >"$reused_service_token_env"
 if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$reused_service_token_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-reused-service-token.log 2>&1; then
   echo "ops-ci: secret policy unexpectedly accepted a reused service token" >&2
   exit 1
 fi
+sed '/^ORCHESTRATOR_MIGRATION_DATABASE_URL=/ s#/ojos_orchestrator?#/wrong_database?#' \
+  "$strong_env" >"$wrong_migration_database_env"
+if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$wrong_migration_database_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-wrong-migration-database.log 2>&1; then
+  echo "ops-ci: migration URL unexpectedly accepted a non-Orchestrator database" >&2
+  exit 1
+fi
+grep -v '^ORCHESTRATOR_POSTGRES_CA_CERT=' "$strong_env" >"$missing_postgres_ca_env"
+if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$missing_postgres_ca_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-missing-postgres-ca.log 2>&1; then
+  echo "ops-ci: production policy unexpectedly accepted a missing PostgreSQL CA" >&2
+  exit 1
+fi
+sed 's#^ORCHESTRATOR_HEALTHCHECK_URL=https://#ORCHESTRATOR_HEALTHCHECK_URL=http://#' \
+  "$strong_env" >"$plaintext_health_env"
+if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$plaintext_health_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-plaintext-health.log 2>&1; then
+  echo "ops-ci: production policy unexpectedly accepted a plaintext healthcheck" >&2
+  exit 1
+fi
 
 rendered="$(mktemp)"
-trap 'rm -f "$strong_env" "$missing_node_token_env" "$missing_node_endpoint_env" "$driver_without_host_env" "$reused_node_token_env" "$reused_service_token_env" "$rendered"' EXIT
+dev_rendered="$(mktemp)"
+trap 'rm -f "$strong_env" "$reused_service_token_env" "$wrong_migration_database_env" "$missing_postgres_ca_env" "$plaintext_health_env" "$rendered" "$dev_rendered"' EXIT
 docker compose --env-file "$strong_env" -f "$repo_root/deploy/compose/docker-compose.yml" config >"$rendered"
 grep -q 'OJOS_RUNNER_MODE: nsjail' "$rendered" || {
   echo "ops-ci: judge-worker must render with OJOS_RUNNER_MODE=nsjail" >&2
   exit 1
 }
-grep -Eq "ORCHESTRATOR_NODE_DISPATCH: [\"']?1[\"']?$" "$rendered" || {
-  echo "ops-ci: orchestrator node dispatch flag was not passed through Compose" >&2
+if grep -Eq 'ORCHESTRATOR_NODE_(DISPATCH|ENDPOINT|TOKEN|EXECUTE_SERVICE_DRIVER|HOST_IP):' "$rendered"; then
+  echo "ops-ci: v1 Compose must not publish the removed Node push/bearer transport" >&2
+  exit 1
+fi
+if grep -Eq 'ORCHESTRATOR_NODE_(DISPATCH|ENDPOINT|TOKEN|EXECUTE_SERVICE_DRIVER|HOST_IP)' \
+  "$repo_root/deploy/compose/docker-compose.yml" "$repo_root/deploy/ops/production.env.example"; then
+  echo "ops-ci: production files still reference the removed Node push/bearer transport" >&2
+  exit 1
+fi
+grep -q 'claim' "$repo_root/platform/schemas/orchestrator/agent-protocol-v1.yaml" || {
+  echo "ops-ci: v1 Agent pull protocol must publish the claim route" >&2
   exit 1
 }
-grep -q 'ORCHESTRATOR_NODE_ENDPOINT: http://node.internal:8091' "$rendered" || {
-  echo "ops-ci: orchestrator node endpoint was not passed through Compose" >&2
+grep -q '^ORCHESTRATOR_NODE_CA_CERT=' "$repo_root/.env.production.example" || {
+  echo "ops-ci: production configuration must expose the v1 Node mTLS CA" >&2
   exit 1
 }
-grep -q 'ORCHESTRATOR_NODE_TOKEN: NodeDispatchProd_0123456789abcdef012345' "$rendered" || {
-  echo "ops-ci: orchestrator node token was not passed through Compose" >&2
+grep -q '^ORCHESTRATOR_NODE_CA_KEY=' "$repo_root/.env.production.example" || {
+  echo "ops-ci: production configuration must expose the v1 Node mTLS signer" >&2
+  exit 1
+}
+for variable in \
+  ORCHESTRATOR_DATABASE_URL \
+  ORCHESTRATOR_POSTGRES_CA_CERT \
+  ORCHESTRATOR_ARTIFACT_DIR \
+  ORCHESTRATOR_HEALTHCHECK_URL \
+  ORCHESTRATOR_HEALTHCHECK_CA_CERT \
+  ORCHESTRATOR_TLS_CERT \
+  ORCHESTRATOR_TLS_KEY \
+  ORCHESTRATOR_NODE_CA_CERT \
+  ORCHESTRATOR_NODE_CA_KEY \
+  ORCHESTRATOR_CATALOG_TRUST_KEYS \
+  ORCHESTRATOR_CATALOG_SOURCES \
+  ORCHESTRATOR_OIDC_ISSUER \
+  ORCHESTRATOR_OIDC_AUDIENCE \
+  ORCHESTRATOR_OIDC_CLIENT_ID \
+  ORCHESTRATOR_OIDC_SCOPES \
+  ORCHESTRATOR_PUBLIC_BASE_URL \
+  ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN \
+  ORCHESTRATOR_GATEWAY_ADMIN_TOKEN \
+  ORCHESTRATOR_AUTH_ADMIN_ORIGIN \
+  ORCHESTRATOR_AUTH_ADMIN_TOKEN \
+  ORCHESTRATOR_MAX_WORKERS \
+  ORCHESTRATOR_LOG_RETENTION_DAYS \
+  ORCHESTRATOR_ARTIFACT_RETENTION_DAYS \
+  ORCHESTRATOR_ARTIFACT_QUOTA_BYTES \
+  OJOS_GITHUB_TOKEN \
+  GITHUB_TOKEN
+do
+  grep -Eq "^[[:space:]]+$variable:" "$rendered" || {
+    echo "ops-ci: production Compose did not pass $variable to the daemon" >&2
+    exit 1
+  }
+done
+for assignment in \
+  'ORCHESTRATOR_POSTGRES_CA_CERT: /run/secrets/orchestrator-postgres-ca.crt' \
+  'ORCHESTRATOR_HEALTHCHECK_CA_CERT: /run/secrets/orchestrator-health-ca.crt' \
+  'ORCHESTRATOR_TLS_CERT: /run/secrets/orchestrator-tls.crt' \
+  'ORCHESTRATOR_TLS_KEY: /run/secrets/orchestrator-tls.key' \
+  'ORCHESTRATOR_NODE_CA_CERT: /run/secrets/orchestrator-node-ca.crt' \
+  'ORCHESTRATOR_NODE_CA_KEY: /run/secrets/orchestrator-node-ca.key' \
+  'ORCHESTRATOR_HEALTHCHECK_URL: https://orchestrator:8090/api/v1/healthz/ready' \
+  'ORCHESTRATOR_LEGACY_API_MODE: gone'
+do
+  grep -Fq "$assignment" "$rendered" || {
+    echo "ops-ci: production Compose did not render fixed assignment $assignment" >&2
+    exit 1
+  }
+done
+grep -Fq 'sslmode=verify-full&sslrootcert=/run/secrets/orchestrator-postgres-ca.crt' "$rendered" || {
+  echo "ops-ci: migrations must verify PostgreSQL with the mounted CA" >&2
+  exit 1
+}
+grep -Fq 'catalog.invalid/v2/catalog.json' "$rendered" || {
+  echo "ops-ci: trusted Catalog v2 sources were not passed through Compose" >&2
+  exit 1
+}
+grep -Fq 'OJOS_GITHUB_TOKEN: GitHubCatalogProd_0123456789abcdef012345' "$rendered" || {
+  echo "ops-ci: the preferred private GitHub Catalog token was not passed through Compose" >&2
+  exit 1
+}
+grep -Fq -- '--cacert "$${ORCHESTRATOR_HEALTHCHECK_CA_CERT}"' "$repo_root/deploy/compose/docker-compose.yml" || {
+  echo "ops-ci: production readiness healthcheck must verify its HTTPS CA" >&2
+  exit 1
+}
+for target in \
+  /run/secrets/orchestrator-postgres-ca.crt \
+  /run/secrets/orchestrator-health-ca.crt \
+  /run/secrets/orchestrator-tls.crt \
+  /run/secrets/orchestrator-tls.key \
+  /run/secrets/orchestrator-node-ca.crt \
+  /run/secrets/orchestrator-node-ca.key
+do
+  awk -v target="$target" '
+    index($0, "target: " target) {
+      seen = 1
+      if ((getline <= 0) || $0 !~ /read_only: true/) bad = 1
+    }
+    END { exit !(seen && !bad) }
+  ' "$rendered" || {
+    echo "ops-ci: $target must be rendered as a read-only bind mount" >&2
+    exit 1
+  }
+done
+[[ "$(grep -Fc 'target: /run/secrets/orchestrator-postgres-ca.crt' "$rendered")" -ge 2 ]] || {
+  echo "ops-ci: PostgreSQL CA must be mounted into both migration and daemon containers" >&2
+  exit 1
+}
+if grep -Fq -e 'dev-secrets/placeholder' -e 'dev-secrets\placeholder' "$rendered"; then
+  echo "ops-ci: production Compose unexpectedly rendered a development placeholder mount" >&2
+  exit 1
+fi
+if grep -Eq 'ORCHESTRATOR_(RELEASE_PACKAGE_(LOAD|ROOT)|AUTH_PERMISSION_SYNC|GATEWAY_ROUTE_PUBLISH)' \
+  "$rendered" "$repo_root/deploy/compose/docker-compose.yml" "$repo_root/deploy/ops/production.env.example"; then
+  echo "ops-ci: production files still expose removed 0.2 registration/publish switches" >&2
+  exit 1
+fi
+
+docker compose --env-file "$repo_root/.env.example" \
+  -f "$repo_root/deploy/compose/docker-compose.yml" \
+  -f "$repo_root/deploy/compose/docker-compose.dev.yml" config >"$dev_rendered"
+grep -Fq -- '- --ephemeral' "$dev_rendered" || {
+  echo "ops-ci: development Compose must opt into the explicit ephemeral daemon" >&2
+  exit 1
+}
+grep -Fq 'ORCHESTRATOR_DATABASE_URL: ""' "$dev_rendered" || {
+  echo "ops-ci: development Compose must not connect the daemon to PostgreSQL" >&2
+  exit 1
+}
+grep -Fq 'ORCHESTRATOR_HEALTHCHECK_URL: http://127.0.0.1:8090/api/v1/healthz/live' "$dev_rendered" || {
+  echo "ops-ci: development Compose must use the bounded loopback live check" >&2
+  exit 1
+}
+if grep -Eq 'ORCHESTRATOR_CATALOG_(TRUST_KEYS|SOURCES): ""' "$dev_rendered"; then
+  echo "ops-ci: development Compose must unset Catalog variables, not export empty JSON" >&2
+  exit 1
+fi
+for variable in ORCHESTRATOR_CATALOG_TRUST_KEYS ORCHESTRATOR_CATALOG_SOURCES; do
+  grep -Eq "^[[:space:]]+$variable: null$" "$dev_rendered" || {
+    echo "ops-ci: development Compose must leave $variable unset" >&2
+    exit 1
+  }
+done
+for variable in \
+  ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN \
+  ORCHESTRATOR_GATEWAY_ADMIN_TOKEN \
+  ORCHESTRATOR_AUTH_ADMIN_ORIGIN \
+  ORCHESTRATOR_AUTH_ADMIN_TOKEN
+do
+  grep -Eq "^[[:space:]]+$variable: null$" "$dev_rendered" || {
+    echo "ops-ci: development Compose must leave optional provider variable $variable unset" >&2
+    exit 1
+  }
+done
+grep -Fq -e 'dev-secrets/placeholder' -e 'dev-secrets\placeholder' "$dev_rendered" || {
+  echo "ops-ci: development Compose must resolve its harmless placeholder mounts" >&2
   exit 1
 }
 runner_lines="$(grep 'OJOS_RUNNER_MODE:' "$rendered" || true)"
@@ -194,6 +363,9 @@ if grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: "true"' "$rendered" || grep -q 'OJOS_ALL
   exit 1
 fi
 docker compose --env-file "$strong_env" -f "$repo_root/deploy/compose/docker-compose.yml" config --quiet
+docker compose --env-file "$repo_root/.env.example" \
+  -f "$repo_root/deploy/compose/docker-compose.yml" \
+  -f "$repo_root/deploy/compose/docker-compose.dev.yml" config --quiet
 docker compose --env-file "$strong_env" -f "$repo_root/deploy/worker/docker-compose.yml" config --quiet
 docker compose --env-file "$strong_env" -f "$repo_root/deploy/ops/monitoring/docker-compose.yml" config --quiet
 

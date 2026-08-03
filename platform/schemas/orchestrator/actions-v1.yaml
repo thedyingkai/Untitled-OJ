@@ -1,0 +1,53 @@
+schema_version: 1
+api_version: v1
+product: OJOS Orchestrator
+roles:
+  viewer: orchestrator.read
+  operator: orchestrator.operate
+  admin: orchestrator.admin
+actions:
+  - { action: catalog.list, target_type: Catalog, role: viewer, asynchronous: false }
+  - { action: catalog.search, target_type: Catalog, role: viewer, asynchronous: false }
+  - { action: catalog.register, target_type: Catalog, role: admin, asynchronous: false }
+  - { action: catalog.remove, target_type: Catalog, role: admin, asynchronous: false }
+  - { action: release.import, target_type: Release, role: operator, asynchronous: false }
+  - { action: release.validate, target_type: Release, role: operator, asynchronous: false }
+  - { action: release.install, target_type: Release, role: operator, asynchronous: true }
+  - { action: release.upgrade, target_type: Release, role: operator, asynchronous: true }
+  - { action: release.rollback, target_type: Release, role: operator, asynchronous: true }
+  - { action: release.delete, target_type: Release, role: admin, asynchronous: false }
+  - { action: node.register, target_type: Node, role: admin, asynchronous: false }
+  - { action: node.revoke, target_type: Node, role: admin, asynchronous: false }
+  - { action: node.list, target_type: Node, role: viewer, asynchronous: false }
+  - { action: node.health, target_type: Node, role: viewer, asynchronous: false }
+  - { action: node.drain, target_type: Node, role: admin, asynchronous: true }
+  - { action: node.remove, target_type: Node, role: admin, asynchronous: true }
+  - { action: deployment.list, target_type: Deployment, role: viewer, asynchronous: false }
+  - { action: deployment.get, target_type: Deployment, role: viewer, asynchronous: false }
+  - { action: deployment.start, target_type: Deployment, role: operator, asynchronous: true }
+  - { action: deployment.stop, target_type: Deployment, role: operator, asynchronous: true }
+  - { action: deployment.restart, target_type: Deployment, role: operator, asynchronous: true }
+  - { action: deployment.uninstall, target_type: Deployment, role: admin, asynchronous: true }
+  - { action: deployment.health, target_type: Deployment, role: viewer, asynchronous: false }
+  - { action: topology.draft, target_type: Topology, role: operator, asynchronous: false }
+  - { action: topology.revision, target_type: Topology, role: operator, asynchronous: false }
+  - { action: topology.endpoint.edit, target_type: Topology, role: operator, asynchronous: false }
+  - { action: topology.link.edit, target_type: Topology, role: operator, asynchronous: false }
+  - { action: topology.validate, target_type: Topology, role: operator, asynchronous: false }
+  - { action: topology.diff, target_type: Topology, role: operator, asynchronous: false }
+  - { action: topology.apply, target_type: Topology, role: operator, asynchronous: true }
+  - { action: topology.rollback, target_type: Topology, role: operator, asynchronous: true }
+  - { action: topology.status, target_type: Topology, role: viewer, asynchronous: false }
+  - { action: topology.export, target_type: Topology, role: viewer, asynchronous: false }
+  - { action: operation.plan, target_type: Operation, role: operator, asynchronous: false }
+  - { action: operation.confirm, target_type: Operation, role: operator, asynchronous: false }
+  - { action: operation.apply, target_type: Operation, role: operator, asynchronous: true }
+  - { action: operation.cancel, target_type: Operation, role: operator, asynchronous: true }
+  - { action: operation.retry, target_type: Operation, role: operator, asynchronous: true }
+  - { action: operation.rollback, target_type: Operation, role: operator, asynchronous: true }
+  - { action: operation.logs, target_type: Operation, role: viewer, asynchronous: false }
+  - { action: operation.events, target_type: Operation, role: viewer, asynchronous: false }
+  - { action: diagnostic.create, target_type: Diagnostic, role: operator, asynchronous: false }
+  - { action: diagnostic.list, target_type: Diagnostic, role: viewer, asynchronous: false }
+  - { action: diagnostic.get, target_type: Diagnostic, role: viewer, asynchronous: false }
+  - { action: diagnostic.export, target_type: Diagnostic, role: viewer, asynchronous: false }

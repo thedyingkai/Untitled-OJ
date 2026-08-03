@@ -1,0 +1,32 @@
+# Explicit local integration override for the v1 control plane.
+#
+# The base image and base Compose file keep the production daemon fail-closed:
+# PostgreSQL mode still requires TLS, OIDC, Node CA and trusted Catalog input.
+# Local trace/load drills opt into this override instead of weakening those
+# production checks or reviving the removed 0.2 Node push/bearer transport.
+services:
+  orchestrator:
+    command:
+      - ojos-orchestrator-daemon
+      - --ephemeral
+      - --repo-root
+      - /workspace
+      - --bind
+      - 0.0.0.0:8090
+      - --web-root
+      - /app/manager/web/dist
+      - --artifact-root
+      - /var/lib/ojos/orchestrator/artifacts
+    environment:
+      # An empty Catalog variable is still considered configured by the daemon.
+      # Remove both keys entirely so ephemeral Desktop/integration startup uses
+      # the local dynamic Catalog registry instead of parsing empty JSON.
+      ORCHESTRATOR_CATALOG_TRUST_KEYS: null
+      ORCHESTRATOR_CATALOG_SOURCES: null
+      ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN: null
+      ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: null
+      ORCHESTRATOR_AUTH_ADMIN_ORIGIN: null
+      ORCHESTRATOR_AUTH_ADMIN_TOKEN: null
+      ORCHESTRATOR_DATABASE_URL: ""
+      ORCHESTRATOR_HEALTHCHECK_URL: http://127.0.0.1:8090/api/v1/healthz/live
+      ORCHESTRATOR_LEGACY_API_MODE: gone

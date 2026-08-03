@@ -1,22 +1,94 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import PageHeader from "../components/PageHeader.vue";
 import Modal from "../components/Modal.vue";
+import StatusChip from "../components/StatusChip.vue";
 import FlowCanvas from "../components/FlowCanvas.vue";
 import type { FlowEdge, FlowNode } from "../flow-types";
 import EndpointNode from "../components/EndpointNode.vue";
 import { api } from "../api";
 import { parseEndpointId } from "../endpoint";
 import { useOrchestrator } from "../store";
-import type { EndpointRow, LinkRow, ServiceRow } from "../types";
+import type {
+  EndpointRow,
+  LinkRow,
+  ServiceRow,
+  TopologyDiff,
+  TopologyRevision,
+  TopologySpec,
+} from "../types";
 
 const store = useOrchestrator();
 const canvas = ref<InstanceType<typeof FlowCanvas> | null>(null);
+const topologyId = "primary";
+const history = ref<TopologyRevision[]>([]);
+const rollbackRevisionId = ref("");
+const diffResult = ref<TopologyDiff | null>(null);
+const validationHash = ref("");
+const topologyOperationId = ref("");
+
+const currentRevision = computed(() => store.topology?.draft ?? null);
+const topologyStatus = computed(() => store.topology?.status ?? null);
+const editCapability = computed(() =>
+  store.topology ? "topology.revision" : "topology.draft",
+);
+
+async function refreshHistory() {
+  if (!store.topology || !store.supportsAction("topology.export")) {
+    history.value = [];
+    return;
+  }
+  history.value = await api.topologyRevisions(topologyId);
+  if (!rollbackRevisionId.value) {
+    rollbackRevisionId.value =
+      store.topology.heads.applied_revision_id ?? history.value[0]?.revision_id ?? "";
+  }
+}
+
+watch(
+  () => store.topology?.draft.revision_id,
+  () => void refreshHistory(),
+  { immediate: true },
+);
+
+function cloneSpec(): TopologySpec | null {
+  const spec = store.topology?.draft.spec;
+  return spec ? JSON.parse(JSON.stringify(spec)) as TopologySpec : null;
+}
+
+async function saveSpec(spec: TopologySpec, message: string) {
+  if (!store.ensureAction(editCapability.value)) return;
+  if (store.topology) {
+    await api.topologyCreateRevision(
+      topologyId,
+      spec,
+      store.topology.draft.revision_id,
+      { changeMessage: message },
+    );
+  } else {
+    await api.topologyCreate(spec, { changeMessage: message });
+  }
+  await store.refreshCore(true);
+  await refreshHistory();
+}
 
 /* ---------- 画布数据 ---------- */
 
 const selectedNode = ref<string | null>(null);
 const selectedEdge = ref<string | null>(null);
+
+/** 画布调色板只暴露已有部署投影对应的服务，避免把“已登记 manifest”伪装成可部署实例。 */
+const paletteServices = computed<ServiceRow[]>(() => {
+  const deployedIds = new Set(
+    store.deployments
+      .filter(
+        (deployment) =>
+          deployment.service_id && deployment.status?.toUpperCase() !== "FAILED",
+      )
+      .map((deployment) => deployment.service_id),
+  );
+  return store.services.filter((service) => deployedIds.has(service.id));
+});
 
 /** 拖动中的临时坐标（避免每帧写 pinia + PUT） */
 const livePositions = ref<Record<string, { x: number; y: number }>>({});
@@ -37,6 +109,11 @@ const nodes = computed<FlowNode[]>(() =>
       service: endpoint.service_id,
     };
     const service = store.serviceById(endpoint.service_id);
+    const deployment = store.deployments.find(
+      (candidate) =>
+        candidate.endpoint === endpoint.endpoint ||
+        candidate.endpoints?.includes(endpoint.endpoint),
+    );
     const position =
       livePositions.value[endpoint.endpoint] ??
       store.layout.positions?.[endpoint.endpoint] ??
@@ -49,7 +126,8 @@ const nodes = computed<FlowNode[]>(() =>
         serviceId: endpoint.service_id,
         kind: service?.kind ?? "backend-api",
         protocol: endpoint.protocol,
-        health: service?.health ?? "",
+        // 健康必须来自部署/Endpoint 的 observed 投影，不从 Service manifest 猜测。
+        health: deployment?.endpoint_health || "unknown",
         host: parsed.host,
         port: parsed.port,
       },
@@ -116,6 +194,7 @@ function defaultLinkProtocol(target: string): (typeof linkProtocols)[number] {
 }
 
 function onConnect(source: string, target: string) {
+  if (!store.ensureAction(editCapability.value)) return;
   const exists = store.links.some(
     (link) => link.from === source && link.to === target,
   );
@@ -131,18 +210,30 @@ function onConnect(source: string, target: string) {
 }
 
 async function confirmCreateLink() {
+  if (!store.ensureAction(editCapability.value)) return;
   const connection = pendingConnection.value;
   if (!connection) return;
+  const spec = cloneSpec();
+  if (!spec) {
+    store.toast("err", "请先创建拓扑中的第一个 Endpoint");
+    return;
+  }
   creatingLink.value = true;
   try {
-    await api.createLink({
+    spec.links.push({
       source_endpoint: connection.source,
       target_endpoint: connection.target,
       protocol: connection.protocol,
+      auth_mode: "none",
+      scope: "",
+      enabled: true,
+      config_ref: "",
+      secret_ref: "",
+      policy: {},
     });
-    store.toast("ok", "Link 已创建");
+    await saveSpec(spec, `add link ${connection.source} -> ${connection.target}`);
+    store.toast("ok", "已创建包含该 Link 的新 draft revision");
     pendingConnection.value = null;
-    await store.refreshCore();
   } catch (err) {
     store.toast("err", `创建 Link 失败：${(err as Error).message}`);
   } finally {
@@ -192,20 +283,36 @@ function onDropAt(position: { x: number; y: number }, event: DragEvent) {
 }
 
 async function confirmCreateEndpoint() {
+  if (!store.ensureAction(editCapability.value)) return;
   const form = endpointForm.value;
   const endpointId = `${form.host_ip.trim()}:${form.port.trim()}:${form.service_id}`;
   creatingEndpoint.value = true;
   try {
-    await api.createEndpoint({
+    const endpoint = {
       endpoint: endpointId,
       service_id: form.service_id,
       protocol: form.protocol,
       health_path: form.health_path.trim(),
-    });
+      display_name: form.service_id,
+      note: "",
+      config: {},
+    };
+    const spec = cloneSpec() ?? {
+      api_version: "v1" as const,
+      topology_id: topologyId,
+      root_endpoint: endpointId,
+      authority: {
+        root_endpoint: endpointId,
+        exposure_policy: "internal",
+      },
+      endpoints: [],
+      links: [],
+    };
+    spec.endpoints.push(endpoint);
+    await saveSpec(spec, `add endpoint ${endpointId}`);
     store.setNodePosition(endpointId, { x: form.x, y: form.y });
-    store.toast("ok", `端点 ${endpointId} 已创建`);
+    store.toast("ok", `已创建 Endpoint ${endpointId} 的新 draft revision`);
     endpointModal.value = false;
-    await store.refreshCore();
   } catch (err) {
     store.toast("err", `创建端点失败：${(err as Error).message}`);
   } finally {
@@ -235,30 +342,31 @@ const selectedLinkRow = computed(() =>
   ),
 );
 
-async function runHealthCheck() {
-  if (!selectedNode.value) return;
-  busy.value = true;
-  try {
-    await api.checkEndpointHealth(selectedNode.value);
-    store.toast("ok", "健康检查已执行");
-    await store.refreshCore();
-  } catch (err) {
-    store.toast("err", `健康检查失败：${(err as Error).message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
 async function deleteSelectedNode() {
+  if (!store.ensureAction(editCapability.value)) return;
   if (!selectedNode.value) return;
-  if (!window.confirm(`删除端点 ${selectedNode.value}？相关 Link 需先移除。`))
+  const spec = cloneSpec();
+  if (!spec) return;
+  if (spec.endpoints.length === 1) {
+    store.toast("err", "TopologySpec 必须保留 root Endpoint，不能删除最后一个 Endpoint");
     return;
+  }
+  if (!window.confirm(`删除端点 ${selectedNode.value} 及其相关 Link？`)) return;
   busy.value = true;
   try {
-    await api.deleteEndpoint(selectedNode.value);
-    store.toast("ok", "端点已删除");
+    const removed = selectedNode.value;
+    spec.endpoints = spec.endpoints.filter((item) => item.endpoint !== removed);
+    spec.links = spec.links.filter(
+      (link) =>
+        link.source_endpoint !== removed && link.target_endpoint !== removed,
+    );
+    if (spec.root_endpoint === removed) {
+      spec.root_endpoint = spec.endpoints[0]!.endpoint;
+      spec.authority.root_endpoint = spec.root_endpoint;
+    }
+    await saveSpec(spec, `remove endpoint ${removed}`);
+    store.toast("ok", "已创建移除 Endpoint 的新 draft revision");
     clearSelection();
-    await store.refreshCore();
   } catch (err) {
     store.toast("err", `删除失败：${(err as Error).message}`);
   } finally {
@@ -267,15 +375,22 @@ async function deleteSelectedNode() {
 }
 
 async function deleteSelectedEdge() {
+  if (!store.ensureAction(editCapability.value)) return;
   const parts = selectedEdgeParts.value;
   if (!parts) return;
+  const spec = cloneSpec();
+  if (!spec) return;
   if (!window.confirm(`删除 Link ${parts.source} → ${parts.target}？`)) return;
   busy.value = true;
   try {
-    await api.deleteLink(parts.source, parts.target);
-    store.toast("ok", "Link 已删除");
+    spec.links = spec.links.filter(
+      (link) =>
+        link.source_endpoint !== parts.source ||
+        link.target_endpoint !== parts.target,
+    );
+    await saveSpec(spec, `remove link ${parts.source} -> ${parts.target}`);
+    store.toast("ok", "已创建移除 Link 的新 draft revision");
     clearSelection();
-    await store.refreshCore();
   } catch (err) {
     store.toast("err", `删除失败：${(err as Error).message}`);
   } finally {
@@ -293,15 +408,23 @@ async function toggleSelectedEdge() {
   const parts = selectedEdgeParts.value;
   if (!parts) return;
   const enabled = selectedLinkEnabled.value;
+  if (!store.ensureAction(editCapability.value)) return;
+  const spec = cloneSpec();
+  if (!spec) return;
   busy.value = true;
   try {
-    if (enabled) {
-      await api.disableLink(parts.source, parts.target);
-    } else {
-      await api.enableLink(parts.source, parts.target);
-    }
-    store.toast("ok", enabled ? "Link 已停用" : "Link 已启用");
-    await store.refreshCore();
+    const link = spec.links.find(
+      (item) =>
+        item.source_endpoint === parts.source &&
+        item.target_endpoint === parts.target,
+    );
+    if (!link) return;
+    link.enabled = !enabled;
+    await saveSpec(
+      spec,
+      `${enabled ? "disable" : "enable"} link ${parts.source} -> ${parts.target}`,
+    );
+    store.toast("ok", enabled ? "已在新 revision 中停用 Link" : "已在新 revision 中启用 Link");
   } catch (err) {
     store.toast(
       "err",
@@ -312,16 +435,73 @@ async function toggleSelectedEdge() {
   }
 }
 
-async function checkSelectedEdge() {
-  const parts = selectedEdgeParts.value;
-  if (!parts) return;
+async function validateDraft() {
+  const spec = cloneSpec();
+  if (!spec || !store.ensureAction("topology.validate")) return;
   busy.value = true;
   try {
-    await api.checkLinkHealth(parts.source, parts.target);
-    store.toast("ok", "Link 健康检查已执行");
-    await store.refreshCore();
+    const result = await api.topologyValidate(topologyId, spec);
+    validationHash.value = result.content_sha256;
+    store.toast("ok", `Spec 校验通过：${result.content_sha256}`);
   } catch (err) {
-    store.toast("err", `检查失败：${(err as Error).message}`);
+    store.toast("err", `校验失败：${(err as Error).message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function diffDraft() {
+  if (!store.topology || !store.ensureAction("topology.diff")) return;
+  busy.value = true;
+  try {
+    diffResult.value = await api.topologyDiff(topologyId, {
+      from_revision_id: store.topology.heads.applied_revision_id ?? undefined,
+      to_revision_id: store.topology.draft.revision_id,
+    });
+  } catch (err) {
+    store.toast("err", `Diff 失败：${(err as Error).message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function applyDraft() {
+  if (!store.topology || !store.ensureAction("topology.apply")) return;
+  busy.value = true;
+  try {
+    const result = await api.topologyApply(
+      topologyId,
+      store.topology.draft.revision_id,
+    );
+    topologyOperationId.value = result.operation_id;
+    store.toast("ok", `Apply Operation 已提交：${result.operation_id}`);
+    await store.refreshCore(true);
+  } catch (err) {
+    store.toast("err", `Apply 失败：${(err as Error).message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function rollbackTopology() {
+  if (
+    !store.topology ||
+    !rollbackRevisionId.value ||
+    !store.ensureAction("topology.rollback")
+  ) return;
+  busy.value = true;
+  try {
+    const result = await api.topologyRollback(
+      topologyId,
+      store.topology.draft.revision_id,
+      rollbackRevisionId.value,
+    );
+    topologyOperationId.value = result.operation_id;
+    store.toast("ok", `Rollback Operation 已提交：${result.operation_id}`);
+    await store.refreshCore(true);
+    await refreshHistory();
+  } catch (err) {
+    store.toast("err", `Rollback 失败：${(err as Error).message}`);
   } finally {
     busy.value = false;
   }
@@ -335,8 +515,19 @@ function resetLayout() {
   store.endpoints.forEach((endpoint, index) => {
     store.setNodePosition(endpoint.endpoint, autoPosition(index));
   });
-  setTimeout(() => canvas.value?.fitView(), 60);
+  if (resetFitTimer) clearTimeout(resetFitTimer);
+  resetFitTimer = setTimeout(() => {
+    resetFitTimer = null;
+    canvas.value?.fitView();
+  }, 60);
 }
+
+let resetFitTimer: ReturnType<typeof setTimeout> | null = null;
+
+onBeforeUnmount(() => {
+  if (resetFitTimer) clearTimeout(resetFitTimer);
+  resetFitTimer = null;
+});
 </script>
 
 <template>
@@ -344,12 +535,61 @@ function resetLayout() {
     title="拓扑"
     subtitle="拖拽服务到画布创建端点，从右侧端口拖出连线建立 Link"
   >
+    <span
+      v-if="store.layoutStatus === 'saving' || store.layoutStatus === 'error'"
+      class="chip"
+      data-testid="layout-persistence-status"
+      :class="store.layoutStatus === 'error' ? 'err' : ''"
+      :title="store.layoutError"
+    >
+      {{ store.layoutStatus === "saving" ? "布局保存中…" : "布局未保存" }}
+    </span>
     <button class="btn sm" @click="paletteOpen = !paletteOpen">
       {{ paletteOpen ? "隐藏服务面板" : "显示服务面板" }}
     </button>
+    <span v-if="currentRevision" class="chip mono">
+      draft r{{ currentRevision.revision_number }} · {{ currentRevision.revision_id }}
+    </span>
+    <span v-if="topologyStatus" class="chip" :class="topologyStatus.state === 'IN_SYNC' ? 'ok' : 'warn'">
+      {{ topologyStatus.state }} · drift {{ topologyStatus.drift.length }}
+    </span>
+    <button
+      class="btn sm"
+      :disabled="!!busy || !currentRevision || !store.supportsAction('topology.validate')"
+      @click="validateDraft"
+    >校验</button>
+    <button
+      class="btn sm"
+      :disabled="!!busy || !currentRevision || !store.supportsAction('topology.diff')"
+      @click="diffDraft"
+    >Diff</button>
+    <button
+      class="btn primary sm"
+      :disabled="!!busy || !currentRevision || !store.supportsAction('topology.apply')"
+      @click="applyDraft"
+    >Apply</button>
     <button class="btn sm" @click="resetLayout">自动布局</button>
-    <button class="btn sm" @click="store.refreshCore()">刷新</button>
+    <button class="btn sm" @click="store.refreshCore(true)">刷新</button>
   </PageHeader>
+
+  <div v-if="currentRevision" class="topology-statebar">
+    <span v-if="validationHash" class="mono">validated {{ validationHash }}</span>
+    <span v-if="diffResult">diff {{ diffResult.changes?.length ?? 0 }} changes</span>
+    <span v-if="topologyOperationId" class="mono">operation {{ topologyOperationId }}</span>
+    <label v-if="history.length" class="rollback-control">
+      回滚到
+      <select class="select" v-model="rollbackRevisionId">
+        <option v-for="revision in history" :key="revision.revision_id" :value="revision.revision_id">
+          r{{ revision.revision_number }} · {{ revision.message || revision.revision_id }}
+        </option>
+      </select>
+      <button
+        class="btn sm"
+        :disabled="!!busy || !rollbackRevisionId || !store.supportsAction('topology.rollback')"
+        @click="rollbackTopology"
+      >Rollback</button>
+    </label>
+  </div>
 
   <div class="canvas-wrap">
     <!-- 服务拖拽面板 -->
@@ -358,19 +598,21 @@ function resetLayout() {
       <p class="palette-hint">拖拽到画布创建运行端点</p>
       <div class="palette-list">
         <div
-          v-for="service in store.services"
+          v-for="service in paletteServices"
           :key="service.id"
           class="palette-item"
-          draggable="true"
+          :draggable="store.supportsAction(editCapability)"
+          :class="{ unavailable: !store.supportsAction(editCapability) }"
+          :data-service-id="service.id"
           @dragstart="onPaletteDragStart($event, service)"
         >
           <div class="palette-item-name">{{ service.name || service.id }}</div>
           <div class="palette-item-meta">
             <span class="chip">{{ service.kind }}</span>
-            <span class="mono muted">v{{ service.version }}</span>
+            <span v-if="service.version" class="mono muted">v{{ service.version }}</span>
           </div>
         </div>
-        <div v-if="!store.services.length" class="empty">
+        <div v-if="!paletteServices.length" class="empty">
           <span class="icon">▤</span>
           <span>尚无已安装服务<br />先去商店安装模块</span>
         </div>
@@ -378,7 +620,7 @@ function resetLayout() {
     </aside>
 
     <!-- 画布 -->
-    <div class="canvas">
+    <div class="canvas" data-testid="topology-canvas">
       <FlowCanvas
         ref="canvas"
         :nodes="nodes"
@@ -432,13 +674,13 @@ function resetLayout() {
         <div class="kv">
           <span>来源</span><span>{{ selectedEndpointRow.source }}</span>
         </div>
+        <div class="kv">
+          <span>实时健康</span><span><StatusChip :status="selectedEndpointRow.health" /></span>
+        </div>
         <div class="inspector-actions">
-          <button class="btn sm" :disabled="busy" @click="runHealthCheck">
-            健康检查
-          </button>
           <button
             class="btn danger sm"
-            :disabled="busy"
+            :disabled="busy || !store.supportsAction(editCapability)"
             @click="deleteSelectedNode"
           >
             删除端点
@@ -475,14 +717,17 @@ function resetLayout() {
             </span>
           </span>
         </div>
+        <div class="kv" v-if="selectedLinkRow">
+          <span>实时健康</span><span><StatusChip :status="selectedLinkRow.health" /></span>
+        </div>
         <div class="inspector-actions">
-          <button class="btn sm" :disabled="busy" @click="checkSelectedEdge">
-            健康检查
-          </button>
           <button
             class="btn sm"
             :class="{ primary: !selectedLinkEnabled }"
-            :disabled="busy"
+            :disabled="
+              busy ||
+              !store.supportsAction(editCapability)
+            "
             @click="toggleSelectedEdge"
           >
             {{ selectedLinkEnabled ? "停用" : "启用" }}
@@ -491,7 +736,7 @@ function resetLayout() {
         <div class="inspector-actions">
           <button
             class="btn danger sm"
-            :disabled="busy"
+            :disabled="busy || !store.supportsAction(editCapability)"
             @click="deleteSelectedEdge"
           >
             删除 Link
@@ -532,7 +777,7 @@ function resetLayout() {
       <button class="btn" @click="pendingConnection = null">取消</button>
       <button
         class="btn primary"
-        :disabled="creatingLink"
+        :disabled="creatingLink || !store.supportsAction(editCapability)"
         @click="confirmCreateLink"
       >
         {{ creatingLink ? "创建中…" : "创建 Link" }}
@@ -585,7 +830,7 @@ function resetLayout() {
       <button class="btn" @click="endpointModal = false">取消</button>
       <button
         class="btn primary"
-        :disabled="creatingEndpoint"
+        :disabled="creatingEndpoint || !store.supportsAction(editCapability)"
         @click="confirmCreateEndpoint"
       >
         {{ creatingEndpoint ? "创建中…" : "创建端点" }}
@@ -595,6 +840,27 @@ function resetLayout() {
 </template>
 
 <style scoped>
+.topology-statebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 38px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--muted);
+  font-size: 11px;
+}
+.rollback-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.rollback-control .select {
+  width: 260px;
+  padding: 4px 8px;
+}
 .canvas-wrap {
   flex: 1;
   display: flex;
@@ -611,6 +877,10 @@ function resetLayout() {
   flex-direction: column;
   padding: 14px;
   overflow-y: auto;
+}
+.palette-item.unavailable {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 .palette-title {
   font-size: 12px;

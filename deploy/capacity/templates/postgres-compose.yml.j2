@@ -1,0 +1,37 @@
+name: ojos-capacity-postgres
+services:
+  postgres:
+    image: {{ capacity_postgres_image }}
+    environment:
+      POSTGRES_DB: {{ capacity_postgres_database }}
+      POSTGRES_USER: {{ capacity_postgres_user }}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/run/secrets/server.crt
+      - -c
+      - ssl_key_file=/run/secrets/server.key
+      - -c
+      - ssl_ca_file=/run/secrets/root.crt
+      - -c
+      - max_connections=300
+    ports:
+      - "{{ capacity_database_listen_address }}:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - /etc/ojos/capacity/postgres:/run/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ capacity_postgres_user }} -d {{ capacity_postgres_database }}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: 20m, max-file: "5" }
+
+volumes:
+  postgres-data:

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "nodes": [
+{% set comma = joiner(",") %}
+{% for worker in groups['orchestrator_workers'] | sort %}
+{% for engine in range(0, 10) %}
+    {{ comma() }}{
+      "node_id": "capacity-node-{{ '%02d' | format(hostvars[worker].capacity_worker_ordinal | int) }}-{{ '%02d' | format(engine) }}",
+      "host_ip": "{{ hostvars[worker].ansible_host }}",
+      "worker": "{{ worker }}",
+      "engine_ordinal": {{ engine }},
+      "labels": {
+        "capacity.profile": "production",
+        "runtime": "docker",
+        "os": "linux",
+        "arch": "x86_64"
+      }
+    }
+{% endfor %}
+{% endfor %}
+  ]
+}

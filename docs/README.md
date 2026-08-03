@@ -1,52 +1,57 @@
-# OJOS 文档索引
+# OJOS Orchestrator 文档索引
 
-这里收录 OJOS Orchestrator 的维护文档。架构、契约和运维说明以当前源码为准；带版本号的发布文档只描述
-对应历史版本。
+当前源码是 Orchestrator `1.0.0` 发布候选，尚未发布 GA。架构和契约以 v1 文档与当前源码为准；历史 alpha、0.2 兼容记录和 `docs/evidence/*.json` 不能替代候选 commit 的运行证据。
 
-## 架构（architecture/）
+## 首先阅读
 
-- [架构总览](architecture/README.md)：service-release-first 架构与主要对象。
-- [耦合决策](architecture/coupling-decisions.md)：core、外部驱动与仍需收口的边界。
-- [编排器需求](orchestrator/requirements.md)：正式对象、入口和职责范围。
-- [编排器边界](orchestrator/boundary.md)：编排器与 Gateway、业务服务、Root 角色的边界。
-- [Action 模型](orchestrator/action-model.md)：action 目录、执行契约和能力状态。
-- [Operation 模型](orchestrator/operation-model.md)：操作状态机、确认和回滚。
-- [Topology 模型](orchestrator/topology-model.md)：拓扑来源、节点、API 路由和健康状态。
-- [编排器数据库](orchestrator/database.md)：数据库所有权和正式表。
-- [入口形态与能力边界](orchestrator/gui-tui-parity.md)：Web UI、TUI、daemon 的分工。
-- [Web UI 与插件商店](orchestrator/web-ui.md)：构建、页面、商店 API 和运行限制。
+- [项目状态总结](completeness-summary.md)：当前已实现能力与 GA 前唯一剩余门禁。
+- [发布候选判定](release-candidate.md)：当前 GO/NO-GO 和晋级顺序。
+- [Orchestrator v1.0 运维手册](orchestrator/operations-v1.md)：生产预检、Node Agent、健康/指标、备份恢复、容量和 24 小时门禁。
+- [生产就绪证据](production-readiness.md)：候选证据账本与 commit 绑定规则。
+- [未完成的上线证据](unfinished/README.md)：仍需从候选环境和发布系统取得的两类 artifact。
 
-## 规范（spec/）
+## 架构与契约
 
-- [Service 规范](spec/service-spec.md)：`service.yaml` 身份契约。
-- [Set 规范](spec/set-spec.md)：推荐部署组合。
-- [Endpoint / Link 规范](spec/endpoint-link-spec.md)：`ip:port:service-name` 身份与授权关系。
+- [架构总览](architecture/README.md)：v1 模块、执行路径和状态所有权。
+- [耦合决策](architecture/coupling-decisions.md)：pure core、storage/control-plane/runtime/manager/agent 边界。
+- [产品需求](orchestrator/requirements.md)：正式交付形态、对象、action 和非目标。
+- [编排器边界](orchestrator/boundary.md)：控制面、Gateway、Store、Topology 和兼容层边界。
+- [Action 模型](orchestrator/action-model.md)：published action、HTTP 契约和 0.2 兼容边界。
+- [Operation/Job 模型](orchestrator/operation-model.md)：状态机、lease、恢复和补偿。
+- [Topology 模型](orchestrator/topology-model.md)：Spec/Revision/Status、diff/apply/rollback 和 drift。
+- [编排器数据库](orchestrator/database.md)：Memory/SQLite/PostgreSQL、迁移、事务和旧数据导入。
+- [Agent protocol v1](../platform/schemas/orchestrator/agent-protocol-v1.yaml)：Node enroll、claim、heartbeat、complete 和证书生命周期。
+- [OpenAPI v1](../platform/schemas/orchestrator/openapi-v1.yaml) / [published actions](../platform/schemas/orchestrator/actions-v1.yaml)：正式机器契约。
 
-## 服务（services/）
+## 客户端
 
-- [基础 Service 列表](services/README.md)：平台基础服务与边界。
+- [Desktop 本地应用](orchestrator/desktop.md)：Tauri WebView、embedded backend/Agent、SQLite 和制品资源布局。
+- [Desktop、Web 与 TUI 能力一致性](orchestrator/gui-tui-parity.md)：身份、published action 和共同协议规则。
+- [Web UI 与 Store](orchestrator/web-ui.md)：Catalog v2、Store/Topology 页面、SSE 和持续运行门禁。
+- [Web 开发说明](../manager/web/README.md)。
+- [TUI 使用说明](../manager/tui/README.md)。
 
-## 运维（ops/）
+## 运维、发布与证据
 
-- [部署清单](ops/deployment-checklist.md)：beta 部署步骤和放量前检查。
-- [运维手册](ops/ops-runbook.md)：健康检查、排障、备份和回滚。
+- [v1 运维手册](orchestrator/operations-v1.md)：远程生产唯一正式运维入口。
+- [生产运维脚本](../deploy/ops/README.md)：preflight、备份恢复、Docker Agent E2E 和 capacity/soak runner。
+- [可核对证据索引](release/evidence.md)：实现、测试和 workflow 入口。
+- [发布文档说明](release/README.md)：当前与历史发布记录的边界。
+- [Staging 演练历史记录](evidence/staging-drill.md)：旧整栈演练范围，仅供历史核对，不是 v1 GA 证据。
+- [机器可读历史快照](evidence/)：`production-readiness.json`、`release-candidate.json`，不得作为当前候选结论。
 
-## 发布与证据（release/、evidence/）
+`ops/deployment-checklist.md`、`ops/ops-runbook.md`、旧 staging/rollback drill 面向历史 beta/整套 OJ 部署；Orchestrator v1 生产部署应使用 `orchestrator/operations-v1.md`。
 
-- [发布门禁](release/README.md)：发布前核对项。
-- [可核对证据](release/evidence.md)：本地验证、远端运行和已知限制。
-- [2026-07 重构记录](release/refactor-2026-07.md)：Web UI、商店、生命周期和安全加固。
-- [生产就绪证据](production-readiness.md)：门禁矩阵与密钥生命周期。
-- [发布候选证据](release-candidate.md)：发布判定与模块自评。
-- [Staging 备份/恢复/回滚演练](evidence/staging-drill.md)：演练范围和产物。
-- [机器可读证据](evidence/)：`production-readiness.json`、`release-candidate.json`。这些文件是历史快照，
-  不能替代当前提交的测试结果。
+## Service 规范与 OJ 边界
 
-## 发布与上手
+- [Service 规范](spec/service-spec.md)：历史 Service 身份契约。
+- [Set 规范](spec/set-spec.md)：推荐部署组合；不属于 v1 运行时对象。
+- [Endpoint / Link 规范](spec/endpoint-link-spec.md)：历史 Endpoint/Link 契约；v1 正式定义以 OpenAPI/Topology 文档为准。
+- [基础 Service 列表](services/README.md)：OJ 平台服务与边界。
 
-- [v0.1.0 Alpha 快速上手](alpha-quickstart.md)：历史版本下载与使用说明。该版本仍使用原生 GUI，不含当前 Web UI。
+## 历史文档
 
-## 完成度与未完成事项
+- [2026-07 重构记录](release/refactor-2026-07.md)：冻结当时实现与缺口；其中进程内 TUI、共享 token Node push、NoTls/无连接池、全局 console 锁和 Deferred provider 等表述均不代表 v1 当前状态。
+- [v0.1.0 Alpha 快速上手](alpha-quickstart.md)：历史下载与使用说明，仍使用旧原生 GUI。
 
-- [项目状态总结](completeness-summary.md)：当前能力、验证范围和生产缺口。
-- [未完成事项](unfinished/README.md)：需要继续设计或实现的内容。
+历史文档保留是为了迁移和考古。若历史表述与 v1 文档冲突，以当前 v1 源码、OpenAPI/action 契约和本页“首先阅读”中的状态文档为准。

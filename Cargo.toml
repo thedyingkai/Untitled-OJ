@@ -1,7 +1,14 @@
 [workspace]
 members = [
     "services/orchestrator/core",
+    "services/orchestrator/legacy",
+    "services/orchestrator/control-plane",
+    "services/orchestrator/storage",
+    "services/orchestrator/runtime",
+    "services/orchestrator/agent",
+    "services/orchestrator/manager",
     "services/orchestrator/backend",
+    "manager/desktop",
     "manager/tui",
 ]
 exclude = [
@@ -11,12 +18,18 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "1.0.0"
 
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 orchestrator-core = { path = "services/orchestrator/core" }
+orchestrator-legacy = { path = "services/orchestrator/legacy" }
+orchestrator-control-plane = { path = "services/orchestrator/control-plane" }
+orchestrator-storage = { path = "services/orchestrator/storage" }
+orchestrator-runtime = { path = "services/orchestrator/runtime" }
+orchestrator-agent = { path = "services/orchestrator/agent" }
+orchestrator-manager = { path = "services/orchestrator/manager" }
 regex = "1"
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

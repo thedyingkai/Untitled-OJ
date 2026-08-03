@@ -1,0 +1,196 @@
+---
+- name: Collect one fresh workload observation from every capacity worker
+  hosts: orchestrator_workers
+  become: true
+  gather_facts: false
+  strategy: linear
+  tasks:
+    - name: Install the exact runtime/host evidence collector on this worker
+      ansible.builtin.copy:
+        src: "{{ capacity_runtime_evidence_script }}"
+        dest: /opt/ojos/capacity/evidence/orchestrator-capacity-runtime-evidence.py
+        owner: root
+        group: root
+        mode: "0555"
+
+    - name: Inspect this worker's 10 isolated Engines and 200 containers
+      ansible.builtin.command:
+        argv:
+          - python3
+          - /opt/ojos/capacity/evidence/orchestrator-capacity-engine-evidence.py
+          - collect
+          - --compose-file
+          - /opt/ojos/capacity/worker/compose.yml
+          - --project-directory
+          - /opt/ojos/capacity/worker
+          - --fixture-file
+          - /opt/ojos/capacity/evidence/capacity-fixture.json
+          - --fixture-image
+          - "{{ capacity_fixture_image }}"
+          - --candidate-sha
+          - "{{ capacity_candidate_sha }}"
+          - --worker-ordinal
+          - "{{ capacity_worker_ordinal | int }}"
+          - --output
+          - "/opt/ojos/capacity/evidence/worker-{{ '%02d' | format(capacity_worker_ordinal | int) }}.json"
+      changed_when: false
+
+    - name: Fetch this worker's fresh evidence under its exact ordinal
+      ansible.builtin.fetch:
+        src: "/opt/ojos/capacity/evidence/worker-{{ '%02d' | format(capacity_worker_ordinal | int) }}.json"
+        dest: "{{ capacity_live_evidence_output_dir }}/workers/worker-{{ '%02d' | format(capacity_worker_ordinal | int) }}.json"
+        flat: true
+
+    - name: Inspect this worker's 10 actual Agent containers and host identity
+      ansible.builtin.command:
+        argv:
+          - python3
+          - /opt/ojos/capacity/evidence/orchestrator-capacity-runtime-evidence.py
+          - agents
+          - --compose-file
+          - /opt/ojos/capacity/worker/compose.yml
+          - --project-directory
+          - /opt/ojos/capacity/worker
+          - --expected-manifest
+          - /opt/ojos/capacity/evidence/runtime-expected.json
+          - --worker-ordinal
+          - "{{ capacity_worker_ordinal | int }}"
+          - --output
+          - "/opt/ojos/capacity/evidence/runtime-worker-{{ '%02d' | format(capacity_worker_ordinal | int) }}.json"
+      changed_when: false
+
+    - name: Fetch this worker's Agent and physical-host evidence
+      ansible.builtin.fetch:
+        src: "/opt/ojos/capacity/evidence/runtime-worker-{{ '%02d' | format(capacity_worker_ordinal | int) }}.json"
+        dest: "{{ capacity_live_evidence_output_dir }}/runtime/worker-{{ '%02d' | format(capacity_worker_ordinal | int) }}.json"
+        flat: true
+
+- name: Observe the actual current control-plane container and physical host
+  hosts: orchestrator_control_plane
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install the exact runtime/host evidence collector on the control plane
+      ansible.builtin.copy:
+        src: "{{ capacity_runtime_evidence_script }}"
+        dest: /opt/ojos/capacity/orchestrator-capacity-runtime-evidence.py
+        owner: root
+        group: root
+        mode: "0555"
+
+    - name: Inspect the current control-plane container image and start identity
+      ansible.builtin.command:
+        argv:
+          - python3
+          - /opt/ojos/capacity/orchestrator-capacity-runtime-evidence.py
+          - control-plane
+          - --compose-file
+          - /opt/ojos/capacity/control-plane/compose.yml
+          - --project-directory
+          - /opt/ojos/capacity/control-plane
+          - --expected-manifest
+          - /opt/ojos/capacity/runtime-expected.json
+          - --output
+          - /opt/ojos/capacity/runtime-control-plane.json
+      changed_when: false
+
+    - name: Fetch current control-plane runtime and host evidence
+      ansible.builtin.fetch:
+        src: /opt/ojos/capacity/runtime-control-plane.json
+        dest: "{{ capacity_live_evidence_output_dir }}/runtime/control-plane.json"
+        flat: true
+
+- name: Observe the actual TLS PostgreSQL container and physical host
+  hosts: orchestrator_database
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install the exact host evidence collector on PostgreSQL
+      ansible.builtin.copy:
+        src: "{{ capacity_runtime_evidence_script }}"
+        dest: /opt/ojos/capacity/orchestrator-capacity-runtime-evidence.py
+        owner: root
+        group: root
+        mode: "0555"
+
+    - name: Inspect PostgreSQL digest runtime TLS data and start identity
+      ansible.builtin.command:
+        argv:
+          - python3
+          - /opt/ojos/capacity/orchestrator-capacity-runtime-evidence.py
+          - postgres
+          - --compose-file
+          - /opt/ojos/capacity/postgres/compose.yml
+          - --project-directory
+          - /opt/ojos/capacity/postgres
+          - --expected-manifest
+          - /opt/ojos/capacity/runtime-expected.json
+          - --output
+          - /opt/ojos/capacity/runtime-postgres.json
+      changed_when: false
+
+    - name: Fetch PostgreSQL physical-host evidence
+      ansible.builtin.fetch:
+        src: /opt/ojos/capacity/runtime-postgres.json
+        dest: "{{ capacity_live_evidence_output_dir }}/runtime/postgres.json"
+        flat: true
+
+- name: Observe dedicated runner physical host identity
+  hosts: orchestrator_soak_runner
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install the exact host evidence collector on the runner
+      ansible.builtin.copy:
+        src: "{{ capacity_runtime_evidence_script }}"
+        dest: /opt/ojos/capacity/orchestrator-capacity-runtime-evidence.py
+        owner: root
+        group: root
+        mode: "0555"
+
+    - name: Collect runner physical-host evidence
+      ansible.builtin.command:
+        argv: [python3, /opt/ojos/capacity/orchestrator-capacity-runtime-evidence.py, host, --role, runner, --output, /opt/ojos/capacity/runtime-runner.json]
+      changed_when: false
+
+    - name: Fetch runner physical-host evidence
+      ansible.builtin.fetch:
+        src: /opt/ojos/capacity/runtime-runner.json
+        dest: "{{ capacity_live_evidence_output_dir }}/runtime/runner.json"
+        flat: true
+
+- name: Aggregate exactly 10 workers on the dedicated runner
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Validate and aggregate the complete 10x10x20 observation
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ capacity_engine_evidence_script }}"
+          - aggregate
+          - --input-dir
+          - "{{ capacity_live_evidence_output_dir }}/workers"
+          - --fixture-file
+          - "{{ capacity_fixture_file }}"
+          - --fixture-image
+          - "{{ capacity_fixture_image }}"
+          - --candidate-sha
+          - "{{ capacity_candidate_sha }}"
+          - --output
+          - "{{ capacity_live_evidence_output_dir }}/engine-evidence.json"
+      changed_when: false
+
+    - name: Aggregate exact current control-plane Agent and 13-host identity
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ capacity_runtime_evidence_script }}"
+          - aggregate
+          - --input-dir
+          - "{{ capacity_live_evidence_output_dir }}/runtime"
+          - --expected-manifest
+          - "{{ capacity_runtime_expected_manifest_file }}"
+          - --output
+          - "{{ capacity_live_evidence_output_dir }}/runtime-evidence.json"
+      changed_when: false

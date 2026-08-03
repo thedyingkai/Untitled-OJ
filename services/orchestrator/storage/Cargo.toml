@@ -1,0 +1,20 @@
+[package]
+name = "orchestrator-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fs2 = "0.4"
+orchestrator-control-plane.workspace = true
+orchestrator-legacy.workspace = true
+orchestrator-runtime.workspace = true
+r2d2_postgres = "0.18"
+rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+rustls-tokio-postgres = { version = "0.5", default-features = false, features = ["channel-binding", "platform-verifier", "ring", "tls12"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

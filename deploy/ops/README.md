@@ -1,93 +1,99 @@
 # 生产运维脚本
 
-本目录放生产配置检查、备份恢复和演练脚本。脚本产出的本地 artifact 便于排错；发布证据仍要绑定到候选 commit 的 GitHub Actions run。
+本目录包含整套 OJ 服务和 Orchestrator v1 的预检、备份恢复及演练工具。脚本存在不代表门禁
+已经通过；GA 证据必须来自候选 commit 对应的 CI run 和生产 profile 报告。
 
-## 上线前检查
+## Orchestrator v1 上线前检查
 
-先从 `deploy/ops/production.env.example` 准备独立环境文件，再执行：
-
-```bash
-OJOS_ENV_FILE=/etc/ojos/production.env \
-deploy/ops/preflight.sh
-```
-
-`preflight.sh` 会运行密钥策略、渲染生产 Compose、检查 judge-worker 的 nsjail/cgroup 配置，并验证业务与监控 Compose。标准执行会同时要求告警 webhook 与 Grafana 管理密码。明确不部署监控时设置 `OJOS_SKIP_MONITORING_CHECKS=1`；否则监控 Compose 路径缺失会直接失败。它需要 Bash 和 Docker Compose。
-
-`secret-check.sh` 接受直接环境变量，也接受对应的 `VAR_FILE`。它会拒绝空值、仓库内开发默认值、占位符、身份 token 复用、生产 localhost 数据库 URL 和 URL 中的默认 `postgres` 用户。它不能判断其它数据库角色是否拥有 `rolsuper`，这项权限仍需在 PostgreSQL 中核对。生产还必须启用：
-
-```text
-ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM=1
-```
-
-设置 `OJOS_SECRET_CHECK_REQUIRE_TLS=1` 后，Redis 必须使用 `rediss://`，MinIO 必须设置 `MINIO_USE_SSL=true`。
-
-## 备份与恢复
-
-备份全部状态：
+从仓库根目录的 `.env.production.example` 准备真实环境文件，然后运行：
 
 ```bash
 OJOS_ENV_FILE=/etc/ojos/production.env \
-deploy/ops/backup.sh
+bash deploy/ops/orchestrator-preflight.sh
 ```
 
-恢复必须给出备份目录和确认串：
+该预检要求生产 PostgreSQL TLS、OIDC、控制面 HTTPS、Node CA、可信 Catalog、durable
+artifact 目录、Web build、日志保留期和单主动控制面配置；缺项时 fail closed。整套 OJ Compose
+的 secret、sandbox 与监控策略仍由 `preflight.sh`/`ci-policy.sh` 检查。
+
+`deploy/compose/docker-compose.yml` 保留生产 daemon 的 fail-closed 行为。
+`deploy/compose/docker-compose.dev.yml` 是 trace/load 集成演练显式叠加的 ephemeral override，
+只允许本地开发，不得作为生产配置，也不会恢复 0.2 Node push/bearer 路径。
+
+生产 Compose 中六个证书/CA 变量填写宿主机绝对路径，Compose 会把它们只读挂载到固定的
+`/run/secrets` 目标。`ORCHESTRATOR_MIGRATION_DATABASE_URL` 在迁移容器内使用，必须带
+`sslmode=verify-full&sslrootcert=/run/secrets/orchestrator-postgres-ca.crt`；daemon 则通过
+`ORCHESTRATOR_POSTGRES_CA_CERT` 使用同一 CA。控制面证书 SAN 需覆盖公开域名和内部服务名
+`orchestrator`。私有 GitHub 下载优先使用固定透传的 `OJOS_GITHUB_TOKEN`，其次是
+`GITHUB_TOKEN`；Catalog 的自定义 `auth_secret_ref` 必须通过一个最小 Compose override
+显式注入对应变量，不要把整份生产 `env_file` 暴露给 daemon。
+
+## Orchestrator 备份与恢复
+
+备份必须在 daemon drain/停止后执行，并同时覆盖 PostgreSQL 与 artifact 目录：
 
 ```bash
-OJOS_ENV_FILE=/etc/ojos/production.env \
-OJOS_RESTORE_DIR=/var/backups/ojos/20260702T120000Z \
-OJOS_CONFIRM_RESTORE=restore-production \
-deploy/ops/restore.sh
+export ORCHESTRATOR_DATABASE_URL='postgresql://...?...&sslmode=require'
+export ORCHESTRATOR_ARTIFACT_DIR=/var/lib/ojos/orchestrator/artifacts
+export ORCHESTRATOR_BACKUP_DIR=/srv/backup/ojos-orchestrator
+export ORCHESTRATOR_HEALTH_URL=https://orchestrator.example.com
+export ORCHESTRATOR_CONFIRM_QUIESCED_BACKUP=backup-orchestrator-v1
+bash deploy/ops/orchestrator-backup.sh
 ```
 
-对指定 Operation 做真实回滚演练：
+恢复会校验 checksum、原子切换 artifact，再在单事务中恢复数据库。目标 daemon 必须停止：
 
 ```bash
-OJOS_ENV_FILE=/etc/ojos/production.env \
-ORCHESTRATOR_URL=https://orchestrator.example.com \
-OJOS_ROLLBACK_OPERATION_ID=op-release-install-20260702 \
-OJOS_CONFIRM_ROLLBACK=rollback-op-release-install-20260702 \
-OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1 \
-deploy/ops/rollback-drill.sh
+export ORCHESTRATOR_DATABASE_URL='postgresql://...?...&sslmode=require'
+export ORCHESTRATOR_ARTIFACT_DIR=/var/lib/ojos/orchestrator/artifacts
+export ORCHESTRATOR_RESTORE_DIR=/srv/backup/ojos-orchestrator/20260803T010000Z
+export ORCHESTRATOR_HEALTH_URL=https://orchestrator.example.com
+export ORCHESTRATOR_CONFIRM_RESTORE=restore-orchestrator-v1
+bash deploy/ops/orchestrator-restore.sh
+bash deploy/ops/orchestrator-preflight.sh
 ```
 
-最后一项会授权固定的本地进程或 Compose 回滚动作。只回滚 store 记录时不要设置它。
+恢复成功后仅启动一个控制面，确认 `/api/v1/healthz/ready` 返回 200，并核对 Node、Deployment、
+Topology revision/head/status、Operation/Job/Event、Catalog、artifact 与审计后再开放流量。
+Node 本地 execution ledger 不由控制面备份覆盖。
 
-也可以按 Service 发起 `release.rollback`：
+`backup.sh`/`restore.sh` 是整套 OJ 服务的备份工具，不替代上述 Orchestrator v1 专用脚本。
+
+## 功能与容量门禁
+
+- `orchestrator-docker-agent-e2e.sh`：真实 registry、Docker Engine、Node Agent 与 Store Job
+  install/start/stop/restart/uninstall 生命周期；
+- GA `release.yml` 升级门禁：由提取的 0.2 `PgOrchestratorStore` 向真实旧表写入 snapshot/runtime，
+  再由 v1 CA 验证 TLS 仓储执行一次性导入；必须得到未应用 draft、`External/Unknown`
+  runtime，且重开不得重复创建 revision 或 runtime；
+- `orchestrator-backup-restore-drill.sh`：使用与服务端相同大版本的 PostgreSQL 客户端，真实验证
+  数据库与 artifact 的联合备份、篡改后恢复、checksum、必需表和恢复前 artifact 保留；
+- `orchestrator-capacity-gate.py`：100 Nodes、2,000 Deployments、10,000 Endpoint+Link、
+  50 并发 Operation、重启恢复和 24 小时 soak；
+- `validate-orchestrator-ga-evidence.py`：验证报告 commit、profile、规模、时长和阈值，拒绝手填或
+  其他 commit 的证据；
+- Web Playwright 与 TUI contract tests：正式 action、错误、默认值、cursor、ETag、SSE 和
+  Idempotency-Key 等价；
+- `trace-e2e-drill.sh`、`basic-load-soak.sh`：整套 OJ 的短时 trace/load 演练，默认显式叠加
+  local dev Compose override，不构成 Orchestrator GA 容量证据。
+
+`manager-smoke.sh`、`staging-drill.sh` 和 `rollback-drill.sh` 仍服务于旧整栈/0.2 兼容路径，
+不得被用作 Orchestrator v1 GA 门禁。v1 rollback 通过正式 Store/Topology/Operation API 和
+Node pull Job 执行，不接受旧 driver 授权变量。
+
+## 其他整栈演练
+
+- `service-credential-drill.sh`：服务凭据 allow/deny/revoke/expire；
+- `redis-recovery-drill.sh`：Redis Stream pending claim/recovery 与 AOF 重启；
+- `alert-firing-drill.sh`：Prometheus 规则和 Alertmanager webhook；
+- `trace-e2e-drill.sh`：提交判题任务并核对跨服务 trace；
+- `basic-load-soak.sh`：登录、题目、对象存储、判题和结果查询的短时冒烟。
+
+监控栈可用真实生产 env 启动：
 
 ```bash
-OJOS_ENV_FILE=/etc/ojos/production.env \
-ORCHESTRATOR_URL=https://orchestrator.example.com \
-OJOS_ROLLBACK_SERVICE=judge-api \
-OJOS_ROLLBACK_TARGET_OPERATION_ID=op-judge-api-install-20260702 \
-OJOS_CONFIRM_ROLLBACK=rollback-judge-api \
-OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1 \
-deploy/ops/rollback-drill.sh
-```
-
-`OJOS_ROLLBACK_OPERATION_ID` 和 `OJOS_ROLLBACK_SERVICE` 只能选一个。Release 模式必须授权 driver；
-`OJOS_ROLLBACK_TARGET_OPERATION_ID` 可精确指定一次成功的 `release.install`。不指定它时，脚本默认回滚该 Service
-最近一次成功安装；也可用 `OJOS_ROLLBACK_RELEASE_VERSION` 把候选范围限定到某个版本。
-
-## 演练脚本
-
-- `staging-drill.sh`：临时 PostgreSQL 与 MinIO 的备份、恢复和 release rollback。
-- `service-credential-drill.sh`：真实 auth migration 上的 allow、deny、revoke、expire 矩阵。
-- `redis-recovery-drill.sh`：Redis Stream pending claim/recovery 和 AOF 重启。
-- `alert-firing-drill.sh`：Prometheus 规则触发与 Alertmanager webhook。
-- `manager-smoke.sh`：构建 Web UI，启动真实 daemon，检查静态入口和核心 API，再跑 TUI 最小测试。
-- `trace-e2e-drill.sh`：提交判题任务，查询 Jaeger，并记录 Redis worker 边界的 trace 元数据。
-- `basic-load-soak.sh`：覆盖登录、题目、对象存储、判题和结果查询的短时冒烟，记录成功率、延迟、队列 pending 和 worker processed。
-
-`basic-load-soak.sh` 支持 `OJOS_LOAD_MAX_P95_MS`，但它不是容量或 SLA 证明。
-
-## 监控
-
-```bash
-OJOS_ENV_FILE=/etc/ojos/production.env \
 docker compose \
   --env-file /etc/ojos/production.env \
   -f deploy/ops/monitoring/docker-compose.yml \
   up -d
 ```
-
-当前远端门禁状态见 [生产就绪证据](../../docs/production-readiness.md)。不要根据脚本存在与否判断某项演练已经通过。

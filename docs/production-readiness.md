@@ -1,79 +1,91 @@
-# 生产就绪证据
+# Orchestrator v1.0 生产就绪证据
 
-这是一份证据账本。功能门禁的 `headSha` 必须与待发布的代码基线完全一致；如果后续只改证据文档，应单独写明
-代码 SHA。任何代码、配置、lockfile、schema 或 workflow 变化都会使旧 run 失效。本地结果适合排错，不能替代
-GitHub Actions artifact。
+本文是功能与运维证据账本，不是“代码里有测试就算上线”的自评。源码、lockfile、schema、workflow 或发布文档有变化后，旧 run 不能继续代表新候选；GA 证据中的 commit 必须与待发布 commit 完全一致。
 
-## 远端基线
+## 当前结论
 
-截至 2026-08-02，本轮已验证的代码基线是
-`2a0d647ad47ccbd1b1834de95b38e55b2ef98229`，已直接推送到 `main`。
+**NO-GO。** 当前工作树实现了 v1 功能和发布门禁，真实持久升级/恢复门禁也已落地；但尚未冻结一个同时具备生产规模/24 小时证据和签名多平台制品的候选 commit。仓库版本号为 `1.0.0` 不表示 GA 已经生成或发布。
 
-| Workflow | 结果 | 已证明的部分 | 未通过或未执行的部分 |
-| --- | --- | --- | --- |
-| [Orchestrator CI 30746067945](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067945) | 通过 | Rust workspace、PostgreSQL live、judge-worker、Rust 审计、严格 nsjail、Go test/漏洞扫描、两个 Web 前端、浏览器 E2E、模型和生产策略 | 该 workflow 范围内无失败项 |
-| [Orchestrator Docker E2E 30746067935](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30746067935) | 通过 | Rust、PostgreSQL live、严格 nsjail、Go、Gateway 前端、模型、Compose 与生产策略 | push 模式按条件跳过镜像构建、trace 和 load/soak |
-| [Staging Drill 30717233049](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30717233049) | 通过 | `875586f` 的备份、恢复和回滚演练完成，artifact 已上传 | 不是本轮代码 SHA |
-| [Ops Drills Nightly 30718434686](https://github.com/thedyingkai/Untitled-OJ/actions/runs/30718434686) | 失败 | 旧 SHA 的 service 凭据生命周期与 Redis 恢复通过 | 告警触发失败，Manager 冒烟被跳过；本轮未重跑 |
+历史 `v0.1.0-alpha` 和旧 `2a0d647`/`875586f` workflow 记录只证明当时的代码，不能作为当前候选证据。`docs/evidence/*.json` 同样是历史快照。
 
-常规 CI 与 push 范围的 Docker E2E 已经闭环，但发布证据仍不完整。live PostgreSQL 首轮失败来自过期测试夹具：
-它把迁移验证误标成外部运行时接管，并在破坏性迁移失败后跳过 rollback 直接重试。最终测试改为 runtime-deferred，
-并按“失败 → 回滚 → 授权重试”的真实顺序执行；生产状态机的健康和所有权保护没有放宽。
+## 已落地的生产基础
 
-## 本地审查记录
-
-本轮审查过程中跑过以下基线检查：
-
-| 检查 | 结果 | 边界 |
+| 范围 | 当前实现 | 可核对入口 |
 | --- | --- | --- |
-| `cargo fmt --all -- --check` | 通过 | 最终提交前工作树结果 |
-| `cargo test --workspace --all-targets` | 通过 | 覆盖 Rust workspace；PostgreSQL live 测试仍依赖外部数据库 |
-| `services/judge-worker` 的 `cargo test --all-targets` 与 `cargo audit` | 通过 | 25 个测试通过，独立锁文件未命中已知漏洞 |
-| 七个 Go module 的 test、vet 与 `govulncheck` | 通过 | Go 1.26.5；gRPC 1.82.1、`x/text` 0.39.0；远端同 SHA 复验 test 与漏洞扫描 |
-| `manager/web` 的 typecheck、build 与 `npm audit` | 通过 | Node 24.14，使用当前 `package-lock.json`；远端同 SHA 复验 typecheck 与 build |
-| Gateway frontend 的 typecheck、build、`npm audit` 与浏览器 E2E | 通过 | Node 24.14；远端 artifact 已上传 |
-| `cargo clippy --workspace --all-targets -- -D warnings` | 通过 | 本地为 0 告警；现有 CI 还没有把 clippy 设为门禁 |
-| `services/judge-worker` 的严格 Clippy | 未通过 | Rust 1.92 报告 18 个既有样式告警；当前 CI 只运行 fmt、check、test，不把它设为门禁 |
-| Shell 语法与生产策略 | 通过 | 全部 `.sh` 通过 `bash -n`，`deploy/ops/ci-policy.sh` 与 Manager Web/TUI 冒烟通过；审查环境没有 `shellcheck` |
-| 容器级 E2E | 本地未执行，远端 push 范围通过 | 本机 Docker daemon 不可用；远端 run 未包含 schedule-only 的镜像、trace 和 load/soak |
+| 存储 | Desktop 使用 SQLite；远程 daemon 强制 PostgreSQL。SQLite 启用 WAL、外键、busy timeout 和旁路文件锁；PostgreSQL 使用 r2d2 连接池、证书校验 TLS、迁移 checksum 和专用 advisory-lock 连接。两者失败均不回退内存。 | `services/orchestrator/storage/`、`sqlite_contract.rs`、`postgres_contract.rs` |
+| 并发与恢复 | 持久 Operation/Job、lease CAS、heartbeat、retry、event 去重、启动恢复、SIGTERM 最长 30 秒排空；结果不可证明时进入 `NEEDS_ATTENTION`。事务只包状态转换，下载、Docker、探测和 provider I/O 在事务外。 | `services/orchestrator/control-plane/`、backend 恢复测试 |
+| Node/runtime | 一次性注册码兑换 SPIFFE Node ID 的 mTLS 证书，30 天有效、提前 7 天续签、可吊销；Node 长轮询领取本节点 Job，本地 SQLite ledger 保证幂等；Docker 走 Engine API socket/pipe 并核对 RepoDigest。 | `services/orchestrator/agent/`、`services/orchestrator/runtime/`、`backend/tests/docker_agent_v1_e2e.rs` |
+| Store | Catalog v2 信任、依赖/平台/版本选择、OCI digest、release-version 签名能力、精确 endpoint/port 绑定、导入与 Managed/External 安装、升级/回滚/卸载、健康投影和补偿；缺少 provider 时 plan 失败。 | `services/orchestrator/manager/`、Store API/contract tests |
+| Topology | 不可变 revision、强 ETag、确定性历史 diff、按精确 Runtime release 绑定的真实 Endpoint/Link probe、validate/apply/rollback saga、Status、drift、审计和按用户布局。 | storage topology contract、backend API/probe tests、Web Playwright |
+| 身份与 API | `/api/v1`、Problem Details、request id、Idempotency-Key、cursor、SSE；远程 Web OIDC Code + PKCE、TUI Device Flow、viewer/operator/admin RBAC、append-only audit。 | OpenAPI/action contract、backend auth tests、Web/TUI fixtures |
+| Desktop/UI | Tauri WebView 内嵌同源 Web UI、随机 loopback backend 与 Agent、HttpOnly bootstrap session；Web/TUI published action 对齐，持续运行测试可配置到 30 分钟。 | `manager/desktop/`、`manager/web/`、`manager/tui/` |
+| 运维 | fail-closed preflight、live/ready、Prometheus、可选 OTLP、日志保留、PostgreSQL + artifact 备份恢复、容量/恢复/soak runner。 | `docs/orchestrator/operations-v1.md`、`deploy/ops/` |
 
-这些结果证明代码基线可以继续做发布演练，不等于生产放行。
+这些条目说明实现与可重复测试入口已经存在；它们不替代候选环境的实际运行 artifact。
 
-## 生产密钥策略
+## 自动发布门禁现状
 
-`deploy/ops/secret-check.sh` 支持直接变量和 `VAR_FILE`。生产配置至少满足下表要求。
+`.github/workflows/release.yml` 已把以下步骤串成依赖图：
 
-| 配置 | 生产要求 |
-| --- | --- |
-| `JWT_SECRET` | 必填，至少 32 个字符，拒绝仓库内弱默认值 |
-| `AUTH_INTERNAL_TOKEN` | 必填，至少 32 个字符 |
-| `ORCHESTRATOR_INTERNAL_TOKEN` | 必填，至少 32 个字符 |
-| `ORCHESTRATOR_NODE_ENDPOINT` | 启用 `ORCHESTRATOR_NODE_DISPATCH` 时必填；缺失时生产预检拒绝启动 |
-| `ORCHESTRATOR_NODE_TOKEN` | 启用 node dispatch 或 Node 运行时执行上限时必填，并按节点独立配置；不能复用 JWT、内部、worker 或 service token |
-| `ORCHESTRATOR_NODE_HOST_IP` | Node 允许真实 driver 时必填；请求主机和 Endpoint host 必须与它完全一致 |
-| `ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM` | 必须启用，所有 release 包入口都校验 checksum |
-| `OJOS_WORKER_TOKEN` | 必填，至少 32 个字符 |
-| `OJOS_USER_SERVICE_TOKEN` / `OJOS_PROBLEM_SERVICE_TOKEN` / `OJOS_JUDGE_API_SERVICE_TOKEN` / `OJOS_JUDGE_WORKER_SERVICE_TOKEN` | 每个调用方使用独立凭据，均至少 32 个字符；预检会拒绝它们彼此复用或复用内部、JWT、worker token |
-| 各服务 PostgreSQL 密码和 URL | 密码至少 20 个字符；URL 不得使用默认 `postgres` 用户或 localhost。其它角色的 `rolsuper` 权限需另做数据库检查 |
-| `REDIS_PASSWORD` / `REDIS_URL` | 密码至少 20 个字符；URL 必须携带密码 |
-| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | root user 至少 8 个字符，root password 至少 32 个字符 |
-| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | access key 至少 8 个字符，secret key 至少 32 个字符 |
+```text
+contract-gates
+├─ v1 contracts / SQLite / TLS PostgreSQL / control-plane / runtime / manager / agent
+├─ real Docker registry + Agent Store Job lifecycle
+├─ Web/TUI contract + 30-minute browser soak
+└─ operations/release script validation
+        │
+        ├─ 0.2.0 compatibility artifacts
+        │       └─ upgrade-drill
+        └─ same-commit production evidence
+                └─ Windows/Linux GA build, sign, attest and publish
+```
 
-设置 `OJOS_SECRET_CHECK_REQUIRE_TLS=1` 后，`REDIS_URL` 必须使用 `rediss://`，同时要求 `MINIO_USE_SSL=true`。
+该依赖图会阻止缺少生产 evidence 的 GA build，也会验证各平台包布局、checksum、SBOM、provenance 和签名。当前状态仍是“门禁已经编码”，不是“门禁已经在某个候选 commit 上全部成功”。
 
-跨节点安装目前还会把 `ORCHESTRATOR_INTERNAL_TOKEN` 发给节点校验。它是控制面与节点共同持有的对称 secret：
-节点一旦失陷，也可能用它反向调用控制面。因此 node dispatch 还不具备单向控制面身份保证，不能据此给不受信节点
-开放生产控制面。
+## 尚缺的外部证据
 
-当前 Node 协议只接通了带双令牌和目标身份绑定的 install。`runtime_owner=node` 的升级、回滚、Service/Host
-生命周期仍会明确阻塞，因为远端 stop/rollback 协议和失败恢复还没有实现。
+### 1. 生产规模与 24 小时稳定性
 
-## 放行前仍缺什么
+必须在同一候选 commit 上完成 `.github/workflows/orchestrator-capacity.yml` 的 `production` job。有效报告至少证明：
 
-- 在 `2a0d647` 上重跑 Staging Drill 与 Ops Drills Nightly，并保留 artifact；Ops 必须实际跑过告警触发和
-  Manager Web/TUI 冒烟。
-- 运行全量 Orchestrator Docker E2E，启用镜像构建、trace 和 basic load/soak，并保存运行证据。
-- 明确运行资产交付方式。当前 Orchestrator 镜像和 alpha bundle 包含 Web 产物、schema、Service/Release manifest、模板与商店索引，不包含完整业务服务源码、Compose 文件或业务镜像。内置条目默认只能用于目录、计划和元数据注册；真正执行 local-process/container driver 需要源码 checkout，或另行提供可运行的 binary/image 和目标端运行资产。
-- 完成容量、HA/failover 与端到端 TLS 决策。`basic-load-soak.sh` 是冒烟检查，不是容量证明。
+- 100 Nodes、2,000 Deployments、10,000 Endpoint+Link、50 并发 Operations；
+- 读 p95 ≤ 200 ms、异步 mutation 接受 p95 ≤ 500 ms、事件 p95 ≤ 1 秒；
+- 真实控制面重启后 ≤ 60 秒 ready，重启前持久 Operation 仍存在；
+- 连续运行 ≥ 24 小时，且无永久 Operation、失联 lease、连接/线程泄漏，暖机后 RSS 增长 < 10%；
+- 首次 workflow attempt 的环境 sidecar 完整覆盖 qualification、每个 Operation round 和 final，
+  证明 10 worker×10 独立 Engine、2,000 个真实运行/健康容器及无 drift 网络资源身份始终一致。
 
-在这些条件满足前，发布判定应保持 `NO-GO`。
+`release.yml` 会下载 production artifact，并用 `deploy/ops/validate-orchestrator-ga-evidence.py` 重新核对 commit、profile、规模、时长和阈值。smoke 或其他 commit 的报告会被拒绝。
+
+### 2. 签名多平台 GA 制品
+
+GA build 必须实际产出并验证 Windows x64 的 MSI/portable ZIP，以及 Linux x86_64 的 DEB/AppImage/tar.gz；每个平台必须同时有 SHA256SUMS、SPDX SBOM、provenance、逐文件 Sigstore bundle 和 build provenance attestation。Windows 四个 EXE 和 MSI 必须验证结构化 RFC3161/SHA-256 timestamp token，`WebView2Loader.dll` 保留并如实报告 Microsoft 原签名。安装版与 portable 包必须分别通过独立启动 smoke，且 Desktop 不依赖仓库当前目录、不打开外部浏览器。
+
+在这些 artifact 生成、重新下载验证并与候选 commit/tag 对齐前，不得声称已经 GA。
+
+## 已闭环、候选时自动复验的升级门禁
+
+`release.yml` 的 contract gate 会在真实 TLS PostgreSQL 17 中应用 0.2 schema，再由从历史
+`PgOrchestratorStore` 提取的独立 writer 写入旧 HostService、Endpoint、Link、Topology snapshot
+和 runtime 数据。随后 v1 仓储执行 migration/import，并验证：
+
+- 旧 Topology 只导入为未应用 draft；
+- 旧 runtime 只投影为 `External/Unknown`，不伪造 digest 或运行态；
+- 第二次打开数据库不会重复创建 revision 或 runtime；
+- 旧数据确实在导入前由 0.2 writer 写入，而不是由 v1 测试伪造。
+
+同一发布门禁还使用 PostgreSQL 17 客户端执行数据库与 artifact 联合备份、校验、篡改后恢复、
+必需表核对和旧 artifact 保留。以上路径已在本地真实 PG17/TLS 环境通过；候选 commit 仍必须在
+CI 中重新运行并保留 artifact，本地结果不替代候选结果。
+
+## 证据登记规则
+
+每次候选运行至少记录：
+
+- 完整 commit SHA、workflow run ID/attempt、触发方式和时间；候选与容量证据只接受首次 attempt；
+- 使用的 profile、规模、持续时间和阈值；
+- artifact 名称与 SHA-256；签名候选还要登记 candidate manifest SHA-256、Actions artifact ID、REST `artifact.digest` 和 upload action digest；
+- 所有跳过、重试和失败步骤；
+- 若只修改证据文档，明确写出它所描述的代码 SHA，不能把文档 commit 冒充被测 commit。
+
+最终 GO/NO-GO 结论维护在 [发布候选判定](release-candidate.md)，门禁命令和故障处置见 [v1 运维手册](orchestrator/operations-v1.md)。

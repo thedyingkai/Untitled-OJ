@@ -1,134 +1,100 @@
-# Orchestrator Web UI 与插件商店
+# Orchestrator v1 Web UI
 
-Web UI 是编排器的浏览器入口。daemon 直接托管 `manager/web/dist`，页面与控制面 API 同源。前端使用
-Vue 3、TypeScript、Vite 和 Pinia；拓扑画布位于 `src/components/FlowCanvas.vue`。
+Web UI 是 Desktop WebView 与远程 daemon 共用的图形控制面。Desktop 启动内嵌 backend、随机 loopback 端口和 loopback Agent，再由原生 WebView 加载同源页面；默认路径不会打开外部浏览器。远程模式由 daemon 直接托管同一份 `manager/web/dist`。
 
-## 构建与访问
+前端只使用 `/api/v1` 正式契约。旧的 `/store/install`、`/ui/layout`、Node push/bearer 和通用 CRUD 不属于 v1 页面能力。
+
+## 构建与验证
+
+Node.js 需满足 `^22.18.0 || >=24.11.0`；CI、Docker 和 release 使用 24.11。
 
 ```bash
 cd manager/web
 npm ci
 npm run typecheck
+npm test
 npm run build
+npm run test:e2e
 ```
 
-Node.js 版本需满足 `^22.18.0 || >=24.11.0`；CI、release 和 Docker 构建固定使用 24.11。启动 daemon 后访问
-`http://<bind>/`，也可用 `--web-root` 指定其他产物目录。`npm run dev` 默认监听 Vite 的 5174 端口，并把 API
-代理到 `127.0.0.1:8090`。
+构建产物位于 `manager/web/dist`。开发模式可运行 `npm run dev`；Vite 监听 `127.0.0.1:5174`，并把控制面请求代理到 `127.0.0.1:8090`。正式 Desktop 从 bundle 内定位 Web 产物；生产 daemon 缺少 `index.html` 时在绑定端口前失败。
 
-产物不入库（`.gitignore` 的 `dist/` 覆盖 `manager/web/dist`），由交付链在构建时产出：
+## 页面与能力
 
-| 交付方式 | 产物来源 |
-| -------- | -------- |
-| Docker 镜像 | `services/orchestrator/backend/Dockerfile` 使用 `node:24.11-bookworm-slim` 构建，再拷入 `/app/manager/web/dist` |
-| 后续 tag bundle | `deploy/release/pack-alpha.sh` 把 `manager/web/dist` 放进 bundle；已发布的 `v0.1.0-alpha` 早于本次改造，不含 Web UI |
-| CI 校验 | `.github/workflows/orchestrator-ci.yml` 的 `orchestrator-web-build` job：`npm ci` + `npm run typecheck` + `npm run build` |
+页面是否显示按钮由 `/api/v1/capabilities` 返回的 published action 决定。OpenAPI、RBAC、后端路由、Web SDK、TUI 和 checked-in action fixture 必须精确一致；不可用的 provider 能力不会发布，也不会显示一个点击后才返回 `UNSUPPORTED` 的入口。
 
-## 页面
+| 页面 | 正式能力 |
+| --- | --- |
+| Store | Catalog 搜索、来源列表、注册和移除；Release 导入、校验、安装、升级、回滚和删除 |
+| Topology | draft/revision、Endpoint/Link 编辑、validate、确定性 diff、apply、rollback、status、export |
+| Deployments | RuntimeInstance 列表与详情、启动、停止、重启、卸载和真实健康 |
+| Nodes | 一次性注册码、节点列表/健康、证书吊销、drain 和移除 |
+| Operations | JSON plan、confirm、apply、cancel、retry、rollback、日志与可续传 SSE 事件 |
+| Diagnostics | 对当前已应用 Topology 快照创建报告、列表、查看及 JSON/Markdown 导出 |
 
-| 页面 | 能力 |
-| ---- | ---- |
-| 拓扑 | 画布拖拽：从服务面板拖服务入画布创建 Endpoint；从节点右侧端口拖线到另一节点创建 Link；节点坐标经 `PUT /ui/layout` 持久化到 `.ojos/ui-layout.json`；选中节点/边可做健康检查与删除 |
-| 商店 | 索引模块、GitHub Release 资产选择、手动 URL 导入、安装状态和卸载 |
-| 服务 | 按 `host + service` 展示部署实例、部署状态、最近 Endpoint 检查和检查配置；启停重启会携带准确的主机、Endpoint 与版本 |
-| 操作 | Operation 列表、确认 / 执行 / 回滚、日志实时刷新 |
+TUI 使用相同 action 和默认值。TUI 不复刻拖拽，但 Store、Topology、Deployment、Node、Operation、日志、重试、取消和诊断控制能力与 Web 等价。
 
-操作页只在记录状态为 `SUCCEEDED` 或 `FAILED`，且 daemon 明确返回
-`rollback_available=true` 时显示回滚按钮。这个字段由非空的 `rollback_plan.steps` 派生；目录预览、目录错误、
-空计划和旧 daemon 的缺省响应都按不可回滚处理。
+## Store 工作流
 
-## 商店工作流
+Store 读取已经验证的 Catalog v2。生产 Catalog 包含 semver、channel、目标平台、最低编排器版本、依赖、metadata SHA-256、OCI RepoDigest 和 Ed25519 签名；Catalog 注册表使用 RFC 8785/JCS 验签。页面不会接受浮动 tag 作为生产安装目标。
 
-1. daemon 从 `OJOS_STORE_INDEX_URL` 读取索引，默认值为仓库内的 `store/index.json`。远程索引缓存 60 秒，
-   `?refresh=1` 可强制刷新。
-2. 安装时 `POST /store/install`：
-   - `source_url` → core `import_external_release`：下载 release 包（http/https 跟随重定向，支持 GitHub Release 302；zip / tar.gz / 裸 release.yaml），解出 release.yaml，校验后合成 ServiceManifest 并注册 Service + Release 两条记录；
-   - 随后派发 `release.install` 动作（`confirm=true`），走既有 Operation 计划/执行/回滚链路。
-3. 请求可带 `version`、`checksum`、`host_ip`、`gateway_node_id`、`execute_service_driver` 和
-   `external_service_running`。同一服务有多个 release 时必须明确版本。默认索引的本地条目已经填写各自
-   `release.yaml` 的 sha256；daemon 强制校验时，页面会把 checksum 标为必填并拒绝空值提交。
+“仅导入”只持久化 Release；Docker 调用数必须为零。“安装”默认使用 `Managed + start=true`，并显式选择 `target_node_id`。请求被接受只显示 Operation ID；只有 Agent 完成拉取、digest 校验、容器创建/启动、健康门禁和投影提升后才显示 `RUNNING/HEALTHY`。
 
-“已安装”只根据 `HostService` 部署记录判断，不再把仓库中可见的 manifest 当成已安装模块。一个服务在多台
-主机上的记录会保留在 `deployments` 数组中，包括各自的版本、主机和状态。
+升级和回滚保留旧 RuntimeInstance，待新实例健康并完成 provider/Gateway 切换后再移除旧实例。失败时 Operation 显示补偿或 `NEEDS_ATTENTION`，页面不会把 imported、planned、deferred 或 HTTP 2xx 当作 installed/running。
 
-## 运行时驱动与交付物
+Release 声明的 Auth、Gateway、migration、config/secret、Redis、storage、frontend 和 API registry 是类型化 pipeline 步骤。目标 Node 未声明所需 provider 时，plan 阶段直接拒绝。External 安装不创建容器，必须先通过声明的 endpoint 健康检查。
 
-页面默认不授权运行时驱动。Service、Operation 和商店页面只有在用户勾选
-`execute_service_driver` 后，才会运行本地进程或 Docker Compose 命令；回滚需要再次授权。首次安装可以只写
-编排状态，但已有 running 固定运行时的升级必须授权，执行器会先停止旧版本，避免 PID 或容器被遗留。
+## Topology 工作流
 
-若服务已经由控制面之外的系统启动，安装请求改传 `external_service_running=true`。它不能与 driver 授权同时
-使用，Endpoint 必须可达，并且不能覆盖仍可能活动的 local、node 或 external 旧部署。成功登记后会写入
-`runtime_owner=external`；Service 页的启停、重启和卸载会拒绝用本地 driver 操作这类部署。应先在真实 owner
-一侧停止或移除运行时，再处理控制面记录。
+画布只能引用已经注册或部署的服务。拖入节点和连接 Endpoint/Link 只产生 draft revision；`apply` 才创建异步 Operation。Revision 不可变，rollback 会复制历史 Spec 生成一个新 revision，再走正常 apply saga。
 
-商店包和 alpha bundle 主要携带 `release.yaml`、`service.yaml`、schema 与 Web 产物。最小 daemon Docker
-镜像也只保留这些运行时数据，不含 Go 源码、Compose 文件、Docker CLI 或业务镜像。因此：
+画布颜色、部署状态、链路状态和 drift 来自 `TopologyStatus`，不从 Endpoint/Link 的期望字段推断。applied head 只在所有必要步骤成功后推进；补偿失败显示 `Degraded`，reconciler 会继续对账。
 
-- 已经在外部启动的服务用 `external_service_running=true` 登记，`ExternalEndpointDriver` 只负责受支持的元数据和健康动作；
-- `LocalProcessDriver` 需要发布声明中的命令、工作目录和相应源码或二进制；
-- `DockerComposeDriver` 需要 Compose 文件、Docker CLI、daemon 访问权限和相关镜像。
+坐标通过 `GET/PUT /api/v1/ui/layout?topology_id=...` 按用户、拓扑持久化，不写入 TopologySpec。旧 `.ojos/ui-layout.json` 只导入一次；保存失败会在页面显示，不会静默吞掉。
 
-要执行后两种驱动，应从完整源码工作区运行 daemon，或把经过审核的运行资产挂载进交付环境。缺少资产时驱动会
-失败，不应把“契约已导入”理解为“服务已启动”。
+## Operation 与事件
 
-## 相关环境变量
+`plan` 返回 `201`；install/apply/rollback、Deployment 生命周期等异步 mutation 返回 `202 + operation_id`。Web 自动为所有 mutation 生成 `Idempotency-Key`，集合接口跟随 cursor，Topology revision mutation 使用 ETag/`If-Match`。
 
-| 变量 | 作用 |
-| ---- | ---- |
-| `OJOS_STORE_INDEX_URL` | 商店索引地址（http(s) 或仓库内相对路径） |
-| `OJOS_GITHUB_TOKEN` / `GITHUB_TOKEN` | GitHub API 令牌（可选，提升配额、访问私有仓库） |
-| `ORCHESTRATOR_RELEASE_PACKAGE_LOAD` | `1` 时 release.install 真实下载包并开放 `/store/import`、`/store/install`；未启用时这两个商店端点直接返回 403 |
-| `ORCHESTRATOR_RELEASE_PACKAGE_ROOT` | 包缓存根（默认 repo root，缓存位于 `.orchestrator-release-cache/`） |
-| `ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM` | 生产应设为 `1`；所有 release 加载入口都必须提供请求 checksum 或 manifest checksum |
-| `ORCHESTRATOR_ALLOW_PRIVATE_RELEASE_SOURCE` | `1` 时允许包源指向 loopback / 私网 / CGNAT（内网私有镜像源场景）。link-local（含云元数据 `169.254.169.254`）与 multicast/broadcast 等**始终拒绝**，此开关不放行 |
-| `ORCHESTRATOR_INTERNAL_TOKEN` | 控制面令牌。配置后除 `GET /health` 与静态资源外所有 API 都要求请求头 `x-ojos-orchestrator-token`；Web UI 首次收到 401 会弹出令牌输入框，值存浏览器 localStorage |
-| `ORCHESTRATOR_MAX_WORKERS` | daemon 工作线程数（默认 32）；有界连接队列容量为 64，满时返回 503 |
+Operation 日志与状态来自 `text/event-stream`。客户端保存最后一个事件 ID，重连时发送 `Last-Event-ID`；每批事件和响应体都有上限。关闭日志面板、离开页面或页面隐藏时会取消请求并停止重连。
 
-daemon 对静态页面和 API 响应都发送 `frame-ancestors 'none'`、`X-Frame-Options: DENY`、
-`X-Content-Type-Options: nosniff` 与 `Referrer-Policy: no-referrer`，避免控制页被第三方站点嵌入后诱导点击。
-控制令牌保存在当前浏览器的 localStorage；只应在受信任的操作终端使用，退出共享终端前要清除站点数据。
+成功响应读取 `data` 和 `meta.request_id`；失败读取 `application/problem+json`。`FAILED`、`BLOCKED`、`NEEDS_ATTENTION` 或兼容适配器的失败结果不会被包装成成功提示。429/503 的 `Retry-After` 会保留给客户端。
 
-## 出网安全
+## 身份与会话
 
-商店链路会以 daemon 身份发起 HTTP 请求，因此下载前一律经过 `validate_outbound_url`（core `store.rs`）：只放行 http/https；域名解析后逐个 IP 校验；重定向不交给 HTTP 客户端自动跟随，而是最多手动跟 5 跳、**每跳重新校验**，且 GitHub 令牌只在第一跳发送。解压有预算上限（总量 512MB、条目 5000、单条目 64MB），超限即中止并清理缓存目录，压缩包本身上限 64MB。
+Desktop 把一次性 bootstrap secret 放在宿主与 backend 之间，仅用于换取 HttpOnly、SameSite 本地 admin 会话；secret 只能消费一次。远程 Web 使用 OIDC Authorization Code + PKCE。两种模式下 bearer/OIDC token 和 Desktop secret 都不进入 `localStorage` 或 `sessionStorage`，mutation 使用会话绑定的 CSRF header。
 
-仍有 DNS rebinding 风险：校验和连接会分别解析域名，DNS 记录可能在两次解析之间改变。HTTP 客户端禁用系统
-代理，因此不能把出口代理当作第二道过滤。
+页面权限固定为 viewer/operator/admin。viewer 只读；operator 执行日常运行操作；admin 管理 Catalog、Node 身份和高风险变更。后端在外部副作用前持久化 append-only 审计 intent，审计不可写时页面收到 problem response，操作不会被派发。
 
-## 商店索引格式
+## 防卡死约束
 
-```json
-{
-  "schema_version": 1,
-  "modules": [
-    {
-      "id": "judge-api",
-      "name": "Judge API",
-      "description": "…",
-      "kind": "backend-api",
-      "tags": ["oj"],
-      "repo": "owner/repo",
-      "source_url": "https://github.com/owner/repo/releases/download/v1.0.0/judge-api-1.0.0.zip",
-      "checksum": "sha256:…"
-    }
-  ]
-}
+- 启动和普通读取有硬超时，并支持 `AbortSignal`。
+- 全局刷新为 single-flight；旧 generation 的响应不能覆盖新状态。
+- 页面隐藏时暂停轮询，重新可见后立即刷新。
+- SSE、事件解析、集合分页、日志和内存缓存都有数量/字节上限。
+- `ResizeObserver` 只在尺寸真实变化时更新，卸载时清理 observer 和 timer，避免 render/ref 递归。
+- Store/Topology mutation 不阻塞刷新循环，Operation 状态独立追踪。
+
+Vitest 覆盖 SDK、身份、能力矩阵、状态竞态、画布和 SSE；Playwright 覆盖 Store/Topology 全流程、RBAC 拒绝、失败补偿、布局失败、Operation 重试/取消，以及持续运行。GA 门禁设置 `OJOS_E2E_SOAK_MS=1800000`，要求 Desktop/Web 连续运行 30 分钟仍可响应且没有轮询并发增长。
+
+## 代码位置
+
+```text
+manager/web/src/
+  api.ts                  /api/v1 envelope、problem、cursor、ETag、SSE
+  auth.ts                 Desktop/OIDC 会话与内存 CSRF
+  published-actions.ts    Web published action fixture
+  store.ts                Pinia 状态、single-flight 刷新、布局保存
+  components/
+    FlowCanvas.vue
+    OperationLogs.vue
+  views/
+    StoreView.vue
+    TopologyView.vue
+    ServicesView.vue
+    NodesView.vue
+    OperationsView.vue
+    DiagnosticsView.vue
 ```
 
-`repo` 与 `source_url` 至少一项：有 `repo` 时 UI 走 GitHub Release 资产选择；否则用 `source_url` 直装。
-索引中的 checksum 必须对应实际下载体；本地目录源对应其 `release.yaml` 文件。模块包用
-`deploy/release/pack-service-package.sh <service>` 生成。
-
-## daemon 新增 API
-
-| 方法与路径 | 说明 |
-| ---- | ---- |
-| `GET /store/status` | 索引地址、包加载开关、token 配置状态 |
-| `GET /store/index` | 索引与实际 HostService 安装记录的对照 |
-| `GET /store/github/releases?repo=owner/name` | GitHub Release 与资产列表 |
-| `POST /store/import` | 仅导入注册，不安装 |
-| `POST /store/install` | 导入（可选）+ 派发 release.install |
-| `GET/PUT /ui/layout` | 画布布局持久化 |
-
-静态托管：GET 未命中 API 前缀时按 `--web-root` 提供文件，`assets/` 目录带 immutable 缓存头；产物缺失时根路径返回引导页。
+生产环境变量、provider 配置、备份恢复和发布门禁见 `docs/orchestrator/operations-v1.md`。

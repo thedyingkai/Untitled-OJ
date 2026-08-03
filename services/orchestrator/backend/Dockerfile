@@ -5,8 +5,9 @@
 #
 # 运行镜像内的布局：
 #   /usr/local/bin/ojos-orchestrator-daemon   二进制
-#   /workspace                                --repo-root（platform/ services/ sets/ store/，可写）
+#   /workspace                                --repo-root（只读契约数据）
 #   /app/manager/web/dist                     --web-root（Web UI 构建产物）
+#   /var/lib/ojos/orchestrator/artifacts      持久 OCI artifact 根目录
 
 # ---------------------------------------------------------------- stage: web
 FROM node:24.11-bookworm-slim AS web
@@ -32,6 +33,8 @@ RUN npm ci --no-audit --no-fund \
 # -------------------------------------------------------------- stage: build
 FROM rust:1.89-bookworm AS build
 
+ARG GITHUB_SHA=development
+ARG OJOS_BUILD_COMMIT=${GITHUB_SHA}
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -55,7 +58,7 @@ COPY platform ./platform
 COPY sets ./sets
 COPY store ./store
 
-RUN cargo build --release -p ojos-orchestrator-daemon
+RUN OJOS_BUILD_COMMIT="$OJOS_BUILD_COMMIT" cargo build --release -p ojos-orchestrator-daemon
 
 # daemon 在 --repo-root 下只读这几类文件：platform/schemas/orchestrator（schema）、
 # services/*/{service,release}.yaml（服务契约）、sets/（服务集）、store/index.json（商店索引，
@@ -77,7 +80,11 @@ RUN set -eu; \
 # ------------------------------------------------------------ stage: runtime
 FROM debian:bookworm-slim AS runtime
 
-# ca-certificates：daemon 用 ureq + rustls 访问 GitHub / release 包源，需要系统根证书。
+ARG GITHUB_SHA=development
+ARG OJOS_BUILD_COMMIT=${GITHUB_SHA}
+LABEL org.opencontainers.image.revision="$OJOS_BUILD_COMMIT"
+
+# ca-certificates：daemon 访问 OIDC、Catalog 和 provider HTTPS endpoint。
 # curl：HEALTHCHECK 与 compose healthcheck 使用（slim 镜像默认既无 curl 也无 wget）。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -86,12 +93,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 10003 ojos \
     && useradd -u 10003 -g 10003 -M -s /usr/sbin/nologin ojos \
-    && install -d -o 10003 -g 10003 -m 0755 /workspace
+    && install -d -o 10003 -g 10003 -m 0755 /workspace \
+    && install -d -o 10003 -g 10003 -m 0750 /var/lib/ojos/orchestrator/artifacts
 
 COPY --from=build /workspace/target/release/ojos-orchestrator-daemon /usr/local/bin/ojos-orchestrator-daemon
 
-# --repo-root 必须可写：UI 布局落在 .ojos/ui-layout.json，release 包缓存落在
-# .orchestrator-release-cache/（compose 把 ORCHESTRATOR_RELEASE_PACKAGE_ROOT 也指向这里）。
+# v1 状态和 UI 布局进入 PostgreSQL；repo-root 只承载只读契约/兼容数据。
 COPY --from=build --chown=10003:10003 /runtime/ /workspace/
 
 # Web UI 产物；daemon 的 --web-root 默认是 <repo_root>/manager/web/dist，这里把它与 repo
@@ -103,11 +110,13 @@ USER 10003:10003
 
 EXPOSE 8090
 
-# GET /health 是唯一免 ORCHESTRATOR_INTERNAL_TOKEN 的路由，健康检查因此无需带令牌。
+# Override ORCHESTRATOR_HEALTHCHECK_URL with the externally valid HTTPS origin
+# in production. The v1 live/ready endpoints are auth-exempt but still use TLS.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=6 \
-    CMD curl -fsS http://127.0.0.1:8090/health || exit 1
+    CMD sh -ec 'url="${ORCHESTRATOR_HEALTHCHECK_URL:-http://127.0.0.1:8090/api/v1/healthz/ready}"; case "$url" in https://*) test -n "${ORCHESTRATOR_HEALTHCHECK_CA_CERT:-}"; curl -fsS --cacert "$ORCHESTRATOR_HEALTHCHECK_CA_CERT" "$url" ;; http://127.0.0.1:*|http://localhost:*) curl -fsS "$url" ;; *) echo "healthcheck URL must use HTTPS or loopback HTTP" >&2; exit 1 ;; esac'
 
 CMD ["ojos-orchestrator-daemon", \
      "--repo-root", "/workspace", \
      "--bind", "0.0.0.0:8090", \
-     "--web-root", "/app/manager/web/dist"]
+     "--web-root", "/app/manager/web/dist", \
+     "--artifact-root", "/var/lib/ojos/orchestrator/artifacts"]

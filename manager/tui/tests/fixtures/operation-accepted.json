@@ -1,0 +1,4 @@
+{
+  "data": {"operation_id":"op-42","status":"QUEUED"},
+  "meta": {"request_id":"req-fixture-operation","api_version":"v1"}
+}

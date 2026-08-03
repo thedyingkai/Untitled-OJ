@@ -1,0 +1,1933 @@
+---
+- name: Validate the dedicated production-capacity inventory and protected inputs
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Resolve the exact repository commit used for provisioning
+      ansible.builtin.command:
+        argv: [git, rev-parse, HEAD]
+      args:
+        chdir: "{{ capacity_repo_root }}"
+      register: capacity_repository_head
+      changed_when: false
+
+    - name: Inspect every tracked and untracked repository change
+      ansible.builtin.command:
+        argv: [git, status, --porcelain=v1, --untracked-files=all]
+      args:
+        chdir: "{{ capacity_repo_root }}"
+      register: capacity_repository_status
+      changed_when: false
+
+    - name: Require the candidate commit in a completely clean repository
+      ansible.builtin.assert:
+        that:
+          - capacity_repository_head.stdout == capacity_candidate_sha
+          - capacity_repository_status.stdout == ''
+        fail_msg: Capacity provisioning must run from the exact clean candidate commit.
+
+    - name: Require the fixed four-way host separation
+      ansible.builtin.assert:
+        that:
+          - groups['orchestrator_database'] | length == 1
+          - groups['orchestrator_control_plane'] | length == 1
+          - groups['orchestrator_soak_runner'] | length == 1
+          - groups['orchestrator_workers'] | length == 10
+          - groups['orchestrator_database'] | intersect(groups['orchestrator_control_plane']) | length == 0
+          - groups['orchestrator_database'] | intersect(groups['orchestrator_soak_runner']) | length == 0
+          - groups['orchestrator_control_plane'] | intersect(groups['orchestrator_soak_runner']) | length == 0
+          - groups['orchestrator_workers'] | intersect(groups['orchestrator_database']) | length == 0
+          - groups['orchestrator_workers'] | intersect(groups['orchestrator_control_plane']) | length == 0
+          - groups['orchestrator_workers'] | intersect(groups['orchestrator_soak_runner']) | length == 0
+          - groups['orchestrator_workers'] | map('extract', hostvars, 'capacity_worker_ordinal') | map('int') | sort | list == range(0, 10) | list
+        fail_msg: Capacity requires separate DB, control-plane and runner hosts plus 10 unique workers.
+
+    - name: Collect the fixed 13 capacity inventory hosts
+      ansible.builtin.set_fact:
+        capacity_inventory_hosts: >-
+          {{
+            groups['orchestrator_database']
+            + groups['orchestrator_control_plane']
+            + groups['orchestrator_soak_runner']
+            + groups['orchestrator_workers']
+          }}
+
+    - name: Require a concrete connection address for every capacity host
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].ansible_host is defined
+          - (hostvars[item].ansible_host | string | trim | length) > 0
+        fail_msg: "Capacity inventory host {{ item }} must define a non-empty ansible_host."
+      loop: "{{ capacity_inventory_hosts }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Collect normalized capacity connection addresses
+      ansible.builtin.set_fact:
+        capacity_inventory_addresses: >-
+          {{
+            capacity_inventory_hosts
+            | map('extract', hostvars, 'ansible_host')
+            | map('string')
+            | map('trim')
+            | map('lower')
+            | list
+          }}
+
+    - name: Require all 13 actual inventory addresses to be distinct
+      ansible.builtin.assert:
+        that:
+          - capacity_inventory_hosts | length == 13
+          - capacity_inventory_addresses | length == 13
+          - capacity_inventory_addresses | unique | list | length == 13
+        fail_msg: All 13 capacity hosts must configure distinct ansible_host address values, not only distinct inventory aliases.
+
+    - name: Require worker addresses to be literal IPv4 endpoints used by Node plans
+      ansible.builtin.assert:
+        that:
+          - >-
+            hostvars[item].ansible_host | string | trim is match(
+              '^(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])(?:\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])){3}$'
+            )
+        fail_msg: "Worker {{ item }} ansible_host must be a literal IPv4 address because it becomes the advertised Node host_ip."
+      loop: "{{ groups['orchestrator_workers'] }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Require the immutable candidate and digest-pinned images
+      ansible.builtin.assert:
+        that:
+          - capacity_candidate_sha is match('^[0-9a-f]{40}$')
+          - capacity_candidate_sha != '0000000000000000000000000000000000000000'
+          - capacity_control_plane_image is match('^[^\\s@]+@sha256:[0-9a-f]{64}$')
+          - capacity_agent_image is match('^[^\\s@]+@sha256:[0-9a-f]{64}$')
+          - capacity_fixture_image is match('^[^\\s@]+@sha256:[0-9a-f]{64}$')
+          - capacity_postgres_image is match('^[^\\s@]+@sha256:[0-9a-f]{64}$')
+          - capacity_migrate_image is match('^[^\\s@]+@sha256:[0-9a-f]{64}$')
+          - capacity_catalog_server_image is match('^[^\\s@]+@sha256:[0-9a-f]{64}$')
+          - capacity_docker_engine_image is match('^[^\\s@]+@sha256:[0-9a-f]{64}$')
+          - capacity_registry_server is match('^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?$')
+          - capacity_registry_username is match('^[A-Za-z0-9_.@-]{1,256}$')
+          - capacity_control_plane_image.split('/')[0] == capacity_registry_server
+          - capacity_agent_image.split('/')[0] == capacity_registry_server
+          - capacity_fixture_image.split('/')[0] == capacity_registry_server
+          - capacity_github_runner_expected_version == '2.336.0'
+          - capacity_github_runner_archive_url == 'https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz'
+          - capacity_github_runner_archive_sha256 == '04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d'
+          - capacity_github_cli_version == '2.97.0'
+          - capacity_github_cli_archive_url == 'https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_amd64.tar.gz'
+          - capacity_github_cli_archive_sha256 == 'a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112'
+          - capacity_jq_version == '1.7.1'
+          - capacity_jq_binary_url == 'https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64'
+          - capacity_jq_binary_sha256 == '5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5'
+          - capacity_control_plane_api_url is match('^https://[^/]+(:[0-9]+)?$')
+          - capacity_catalog_public_base_url is match('^https://[^/]+(:[0-9]+)?$')
+          - capacity_github_runner_expected_service_name is match('^actions\\.runner\\.[A-Za-z0-9_.@-]+\\.ojos-orchestrator-soak\\.service$')
+
+    - name: Parse the argv-only just-in-time runner registration helper
+      ansible.builtin.set_fact:
+        capacity_github_runner_registration_token_argv: >-
+          {{ capacity_github_runner_registration_token_argv_json | from_json }}
+        capacity_environment_observer_token_argv: >-
+          {{ capacity_environment_observer_token_argv_json | from_json }}
+        capacity_restart_helper_gate_argv: >-
+          {{ capacity_restart_helper_gate_argv_json | from_json }}
+      no_log: true
+
+    - name: Require a bounded absolute registration-token helper argv
+      ansible.builtin.assert:
+        that:
+          - capacity_github_runner_registration_token_argv | type_debug == 'list'
+          - capacity_github_runner_registration_token_argv | length >= 1
+          - capacity_github_runner_registration_token_argv | length <= 32
+          - capacity_github_runner_registration_token_argv[0] is string
+          - capacity_github_runner_registration_token_argv[0].startswith('/')
+          - capacity_environment_observer_token_argv | type_debug == 'list'
+          - capacity_environment_observer_token_argv | length >= 1
+          - capacity_environment_observer_token_argv | length <= 32
+          - capacity_environment_observer_token_argv[0] is string
+          - capacity_environment_observer_token_argv[0].startswith(capacity_github_runner_dir ~ '/protected/')
+          - capacity_restart_helper_gate_argv | type_debug == 'list'
+          - capacity_restart_helper_gate_argv | length >= 1
+          - capacity_restart_helper_gate_argv | length <= 32
+          - capacity_restart_helper_gate_argv[0] is string
+          - capacity_restart_helper_gate_argv[0].startswith(capacity_github_runner_dir ~ '/protected/')
+          - "'/../' not in capacity_environment_observer_token_argv[0]"
+          - "'/../' not in capacity_restart_helper_gate_argv[0]"
+        fail_msg: Runner registration must use a protected absolute argv-only helper.
+      no_log: true
+
+    - name: Resolve required protected helper source paths
+      ansible.builtin.set_fact:
+        capacity_runner_required_helper_sources:
+          - "{{ capacity_github_runner_registration_token_argv[0] }}"
+          - >-
+            {{
+              capacity_runner_secret_bundle_dir
+              ~ '/'
+              ~ (
+                capacity_environment_observer_token_argv[0]
+                | regex_replace(
+                    '^' ~ ((capacity_github_runner_dir ~ '/protected/') | regex_escape),
+                    ''
+                  )
+              )
+            }}
+          - >-
+            {{
+              capacity_runner_secret_bundle_dir
+              ~ '/'
+              ~ (
+                capacity_restart_helper_gate_argv[0]
+                | regex_replace(
+                    '^' ~ ((capacity_github_runner_dir ~ '/protected/') | regex_escape),
+                    ''
+                  )
+              )
+            }}
+      no_log: true
+
+    - name: Inspect required protected helper executables
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop: "{{ capacity_runner_required_helper_sources }}"
+      register: capacity_runner_required_helper_stats
+      no_log: true
+
+    - name: Require every selected helper to be a regular executable
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - not item.stat.islnk
+          - item.stat.executable
+        fail_msg: Every runner registration, token, and restart argv must select a protected regular executable.
+      loop: "{{ capacity_runner_required_helper_stats.results }}"
+      no_log: true
+
+    - name: Inspect protected controller inputs
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ capacity_postgres_secret_bundle_dir }}"
+        - "{{ capacity_control_plane_env_file }}"
+        - "{{ capacity_control_plane_secret_bundle_dir }}"
+        - "{{ capacity_catalog_signing_key_file }}"
+        - "{{ capacity_control_plane_ca_file }}"
+        - "{{ capacity_catalog_ca_file }}"
+        - "{{ capacity_image_provenance_record_file }}"
+        - "{{ capacity_registry_password_file }}"
+        - "{{ capacity_github_runner_registration_token_argv[0] }}"
+        - "{{ capacity_runner_gate_env_file }}"
+        - "{{ capacity_runner_secret_bundle_dir }}"
+        - "{{ capacity_environment_observer_inventory_file }}"
+        - "{{ capacity_environment_observer_extra_vars_file }}"
+        - "{{ capacity_repo_root }}/services/orchestrator/migrations"
+      register: protected_inputs
+      no_log: true
+
+    - name: Fail closed when a protected input is absent
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+        fail_msg: A required protected capacity input is absent.
+      loop: "{{ protected_inputs.results }}"
+      no_log: true
+
+    - name: Inspect the bounded private-registry credential input
+      ansible.builtin.stat:
+        path: "{{ capacity_registry_password_file }}"
+      register: capacity_registry_password_input
+      no_log: true
+
+    - name: Require a non-empty bounded private-registry token file
+      ansible.builtin.assert:
+        that:
+          - capacity_registry_password_input.stat.isreg
+          - capacity_registry_password_input.stat.size | int > 0
+          - capacity_registry_password_input.stat.size | int <= 16384
+          - lookup('file', capacity_registry_password_file, rstrip=True) is match('^[^\\r\\n\\x00]{1,16384}$')
+        fail_msg: The private candidate registry token must be a 1-16384 byte regular file.
+      no_log: true
+
+    - name: Read the protected runtime and migration PostgreSQL URLs
+      ansible.builtin.set_fact:
+        capacity_runtime_database_url: >-
+          {{
+            lookup(
+              'ansible.builtin.ini',
+              'ORCHESTRATOR_DATABASE_URL',
+              type='properties',
+              file=capacity_control_plane_env_file
+            )
+          }}
+        capacity_migration_database_url: >-
+          {{
+            lookup(
+              'ansible.builtin.ini',
+              'ORCHESTRATOR_MIGRATION_DATABASE_URL',
+              type='properties',
+              file=capacity_control_plane_env_file
+            )
+          }}
+      no_log: true
+
+    - name: Require one verify-full PostgreSQL identity for migration and runtime
+      ansible.builtin.assert:
+        that:
+          - capacity_runtime_database_url == capacity_migration_database_url
+          - capacity_runtime_database_url is match('^postgres(ql)?://[^\\s]+$')
+          - capacity_runtime_database_url is regex('[?&]sslmode=verify-full(?:&|$)')
+          - "'sslrootcert=/run/secrets/orchestrator-postgres-ca.crt' in capacity_runtime_database_url"
+        fail_msg: Runtime and migration must use one verify-full PostgreSQL URL and mounted CA.
+      no_log: true
+
+    - name: Read the verified immutable image provenance record
+      ansible.builtin.set_fact:
+        capacity_verified_image_provenance: "{{ lookup('file', capacity_image_provenance_record_file) | from_json }}"
+      no_log: true
+
+    - name: Require provenance identity to bind both exact candidate subjects
+      ansible.builtin.assert:
+        that:
+          - capacity_verified_image_provenance.keys() | sort | list == ['agent', 'candidate_sha', 'capacity_fixture', 'control_plane', 'github_oidc_issuer', 'repository', 'schema_version', 'source_workflow', 'source_workflow_run_attempt', 'source_workflow_run_id']
+          - capacity_verified_image_provenance.schema_version == 1
+          - capacity_verified_image_provenance.candidate_sha == capacity_candidate_sha
+          - capacity_verified_image_provenance.repository | length > 2
+          - capacity_verified_image_provenance.source_workflow == '.github/workflows/orchestrator-candidate-images.yml'
+          - capacity_verified_image_provenance.source_workflow_run_id is match('^[1-9][0-9]*$')
+          - capacity_verified_image_provenance.source_workflow_run_attempt == 1
+          - capacity_verified_image_provenance.github_oidc_issuer == 'https://token.actions.githubusercontent.com'
+          - capacity_verified_image_provenance.control_plane.keys() | sort | list == ['digest', 'reference']
+          - capacity_verified_image_provenance.agent.keys() | sort | list == ['digest', 'reference']
+          - capacity_verified_image_provenance.capacity_fixture.keys() | sort | list == ['digest', 'reference']
+          - capacity_verified_image_provenance.control_plane.reference == capacity_control_plane_image
+          - capacity_verified_image_provenance.agent.reference == capacity_agent_image
+          - capacity_verified_image_provenance.capacity_fixture.reference == capacity_fixture_image
+          - capacity_verified_image_provenance.control_plane.digest == (capacity_control_plane_image.split('@') | last)
+          - capacity_verified_image_provenance.agent.digest == (capacity_agent_image.split('@') | last)
+          - capacity_verified_image_provenance.capacity_fixture.digest == (capacity_fixture_image.split('@') | last)
+        fail_msg: Protected provenance must bind this commit, workflow run and both exact OCI subjects.
+      no_log: true
+
+    - name: Generate the canonical non-secret expected runtime manifest
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ capacity_repo_root }}/deploy/capacity/orchestrator-capacity-runtime-evidence.py"
+          - manifest
+          - --candidate-sha
+          - "{{ capacity_candidate_sha }}"
+          - --control-plane-image
+          - "{{ capacity_control_plane_image }}"
+          - --postgres-image
+          - "{{ capacity_postgres_image }}"
+          - --agent-image
+          - "{{ capacity_agent_image }}"
+          - --engine-image
+          - "{{ capacity_docker_engine_image }}"
+          - --control-plane-origin
+          - "{{ capacity_control_plane_api_url }}"
+          - --control-plane-listen-address
+          - "{{ capacity_control_plane_listen_address }}"
+          - --database-listen-address
+          - "{{ capacity_database_listen_address }}"
+          - --postgres-database
+          - "{{ capacity_postgres_database }}"
+          - --postgres-user
+          - "{{ capacity_postgres_user }}"
+          - --control-plane-env-file
+          - "{{ capacity_control_plane_env_file }}"
+          - --output
+          - "{{ capacity_fixture_output_dir }}/runtime-expected.json"
+      no_log: true
+
+    - name: Require the expected runtime manifest to be a regular SHA-bound file
+      ansible.builtin.stat:
+        path: "{{ capacity_fixture_output_dir }}/runtime-expected.json"
+        get_checksum: true
+        checksum_algorithm: sha256
+      register: capacity_runtime_expected_manifest
+
+    - name: Fail closed on a missing expected runtime manifest
+      ansible.builtin.assert:
+        that:
+          - capacity_runtime_expected_manifest.stat.isreg
+          - capacity_runtime_expected_manifest.stat.checksum is match('^[0-9a-f]{64}$')
+
+    - name: Generate and self-verify the signed Catalog v2 fixture
+      ansible.builtin.command:
+        argv:
+          - cargo
+          - run
+          - --locked
+          - --release
+          - -p
+          - orchestrator-manager
+          - --example
+          - generate_capacity_catalog
+          - --
+          - --output
+          - "{{ capacity_catalog_output_dir }}"
+          - --signing-key-file
+          - "{{ capacity_catalog_signing_key_file }}"
+          - --public-base-url
+          - "{{ capacity_catalog_public_base_url }}"
+          - --oci-image
+          - "{{ capacity_fixture_image }}"
+          - --candidate-sha
+          - "{{ capacity_candidate_sha }}"
+      args:
+        chdir: "{{ capacity_repo_root }}"
+      no_log: true
+
+    - name: Validate the four generated fixture documents exist
+      ansible.builtin.stat:
+        path: "{{ capacity_catalog_output_dir }}/{{ item }}"
+      loop:
+        - catalog.json
+        - trust.json
+        - catalog-source.json
+        - capacity-fixture.json
+      register: fixture_documents
+
+    - name: Fail closed on an incomplete fixture
+      ansible.builtin.assert:
+        that: item.stat.isreg
+      loop: "{{ fixture_documents.results }}"
+
+    - name: Render the deterministic 100-Node plan
+      ansible.builtin.template:
+        src: templates/nodes.json.j2
+        dest: "{{ capacity_fixture_output_dir }}/nodes.json"
+        mode: "0644"
+
+- name: Prepare Linux x64 hosts and Docker Compose
+  hosts: orchestrator_database:orchestrator_control_plane:orchestrator_soak_runner:orchestrator_workers
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Require Linux x86_64
+      ansible.builtin.assert:
+        that:
+          - ansible_system == 'Linux'
+          - ansible_architecture in ['x86_64', 'amd64']
+
+    - name: Require non-empty observed host identity facts
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.machine_id is defined
+          - (ansible_facts.machine_id | string | trim | length) > 0
+          - ansible_facts.default_ipv4 is defined
+          - ansible_facts.default_ipv4.address is defined
+          - (ansible_facts.default_ipv4.address | string | trim | length) > 0
+        fail_msg: Every capacity host must expose a machine-id and default IPv4 address after fact gathering.
+
+    - name: Collect observed identities from all 13 physical hosts
+      ansible.builtin.set_fact:
+        capacity_observed_machine_ids: >-
+          {{
+            (capacity_observed_machine_ids | default([]))
+            + [(hostvars[item].ansible_facts.machine_id | string | trim | lower)]
+          }}
+        capacity_observed_default_ipv4_addresses: >-
+          {{
+            (capacity_observed_default_ipv4_addresses | default([]))
+            + [(hostvars[item].ansible_facts.default_ipv4.address | string | trim | lower)]
+          }}
+      loop: "{{ ansible_play_hosts_all }}"
+      loop_control:
+        label: "{{ item }}"
+      run_once: true
+
+    - name: Require 13 distinct observed machines and default addresses
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 13
+          - capacity_observed_machine_ids | length == 13
+          - capacity_observed_machine_ids | unique | list | length == 13
+          - capacity_observed_default_ipv4_addresses | length == 13
+          - capacity_observed_default_ipv4_addresses | unique | list | length == 13
+        fail_msg: Distinct inventory aliases or DNS names must not resolve to the same physical capacity host.
+      run_once: true
+
+    - name: Install configured Docker packages
+      ansible.builtin.package:
+        name: "{{ capacity_docker_packages }}"
+        state: present
+      when: capacity_manage_docker_packages | bool
+
+    - name: Enable Docker Engine
+      ansible.builtin.service:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Verify Docker Compose v2 is available
+      ansible.builtin.command:
+        argv: [docker, compose, version]
+      changed_when: false
+
+- name: Materialize authenticated candidate-registry access
+  hosts: orchestrator_control_plane:orchestrator_workers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Create the root-only Docker client credential directory
+      ansible.builtin.file:
+        path: /etc/ojos/capacity/docker-auth
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Materialize the exact private-registry Docker client credential
+      ansible.builtin.copy:
+        content: >-
+          {{
+            {
+              'auths': {
+                capacity_registry_server: {
+                  'auth': (
+                    capacity_registry_username
+                    ~ ':'
+                    ~ lookup('file', capacity_registry_password_file, rstrip=True)
+                  ) | b64encode
+                }
+              }
+            }
+            | to_nice_json
+          }}
+        dest: /etc/ojos/capacity/docker-auth/config.json
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+- name: Configure the dedicated TLS PostgreSQL host
+  hosts: orchestrator_database
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Create PostgreSQL capacity directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /opt/ojos/capacity/postgres, owner: root, group: root, mode: "0750" }
+        - { path: /etc/ojos/capacity/postgres, owner: "999", group: "999", mode: "0750" }
+
+    - name: Install protected PostgreSQL TLS and password files
+      ansible.builtin.copy:
+        src: "{{ capacity_postgres_secret_bundle_dir }}/"
+        dest: /etc/ojos/capacity/postgres/
+        owner: "999"
+        group: "999"
+        mode: "0600"
+      no_log: true
+
+    - name: Install the immutable expected runtime manifest on PostgreSQL
+      ansible.builtin.copy:
+        src: "{{ capacity_fixture_output_dir }}/runtime-expected.json"
+        dest: /opt/ojos/capacity/runtime-expected.json
+        owner: root
+        group: root
+        mode: "0444"
+
+    - name: Render PostgreSQL Compose
+      ansible.builtin.template:
+        src: templates/postgres-compose.yml.j2
+        dest: /opt/ojos/capacity/postgres/compose.yml
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Start digest-pinned TLS PostgreSQL
+      ansible.builtin.command:
+        argv: [docker, compose, --project-directory, /opt/ojos/capacity/postgres, -f, /opt/ojos/capacity/postgres/compose.yml, up, -d, --pull, always]
+      register: postgres_up
+      changed_when: "'Started' in postgres_up.stdout or 'Created' in postgres_up.stdout"
+
+- name: Configure the single-active control-plane host and signed Catalog
+  hosts: orchestrator_control_plane
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Create control-plane capacity directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /opt/ojos/capacity/control-plane, owner: root, group: root, mode: "0750" }
+        - { path: /opt/ojos/capacity/catalog, owner: root, group: root, mode: "0755" }
+        - { path: /opt/ojos/capacity/migrations, owner: root, group: root, mode: "0755" }
+        - { path: /etc/ojos/capacity/control-plane, owner: "10003", group: "10003", mode: "0750" }
+
+    - name: Install protected control-plane configuration
+      ansible.builtin.copy:
+        src: "{{ capacity_control_plane_env_file }}"
+        dest: /etc/ojos/capacity/control-plane.env
+        owner: "10003"
+        group: "10003"
+        mode: "0600"
+      no_log: true
+
+    - name: Install the immutable expected runtime manifest on the control plane
+      ansible.builtin.copy:
+        src: "{{ capacity_fixture_output_dir }}/runtime-expected.json"
+        dest: /opt/ojos/capacity/runtime-expected.json
+        owner: root
+        group: root
+        mode: "0444"
+
+    - name: Install protected control-plane certificates and keys
+      ansible.builtin.copy:
+        src: "{{ capacity_control_plane_secret_bundle_dir }}/"
+        dest: /etc/ojos/capacity/control-plane/
+        owner: "10003"
+        group: "10003"
+        mode: "0600"
+      no_log: true
+
+    - name: Install immutable migration set
+      ansible.builtin.copy:
+        src: "{{ capacity_repo_root }}/services/orchestrator/migrations/"
+        dest: /opt/ojos/capacity/migrations/
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install signed capacity Catalog and metadata
+      ansible.builtin.copy:
+        src: "{{ capacity_catalog_output_dir }}/"
+        dest: /opt/ojos/capacity/catalog/
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Render Catalog TLS server configuration
+      ansible.builtin.template:
+        src: templates/catalog-nginx.conf.j2
+        dest: /etc/ojos/capacity/catalog-nginx.conf
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Render trusted Catalog environment override
+      ansible.builtin.template:
+        src: templates/catalog-override.env.j2
+        dest: /etc/ojos/capacity/catalog-override.env
+        owner: "10003"
+        group: "10003"
+        mode: "0600"
+      no_log: true
+
+    - name: Render the control-plane Compose
+      ansible.builtin.template:
+        src: templates/control-plane-compose.yml.j2
+        dest: /opt/ojos/capacity/control-plane/compose.yml
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Pull candidate images before identity verification
+      ansible.builtin.command:
+        argv:
+          - docker
+          - --config
+          - /etc/ojos/capacity/docker-auth
+          - compose
+          - --env-file
+          - /etc/ojos/capacity/control-plane.env
+          - --project-directory
+          - /opt/ojos/capacity/control-plane
+          - -f
+          - /opt/ojos/capacity/control-plane/compose.yml
+          - pull
+      changed_when: true
+
+    - name: Inspect the actual pulled control-plane image
+      ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ capacity_control_plane_image }}"]
+      register: control_plane_image_inspect
+      changed_when: false
+
+    - name: Require the OCI revision label to equal the candidate
+      ansible.builtin.assert:
+        that:
+          - (control_plane_image_inspect.stdout | from_json)[0].Config.Labels['org.opencontainers.image.revision'] == capacity_candidate_sha
+          - capacity_control_plane_image in (control_plane_image_inspect.stdout | from_json)[0].RepoDigests
+
+    - name: Prove the exact verify-full PostgreSQL URL and CA are ready
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --env-file
+          - /etc/ojos/capacity/control-plane.env
+          - --project-directory
+          - /opt/ojos/capacity/control-plane
+          - -f
+          - /opt/ojos/capacity/control-plane/compose.yml
+          - run
+          - --rm
+          - --no-deps
+          - database-ready
+      register: capacity_postgres_ready
+      changed_when: false
+      retries: 20
+      delay: 3
+      until: capacity_postgres_ready.rc == 0
+      no_log: true
+
+    - name: Start the single-active candidate control plane
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --env-file
+          - /etc/ojos/capacity/control-plane.env
+          - --project-directory
+          - /opt/ojos/capacity/control-plane
+          - -f
+          - /opt/ojos/capacity/control-plane/compose.yml
+          - up
+          - -d
+          - --pull
+          - never
+      register: control_plane_up
+      changed_when: "'Started' in control_plane_up.stdout or 'Created' in control_plane_up.stdout"
+
+- name: Verify direct TLS readiness before issuing one-time Node codes
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Wait for the signed Catalog over TLS
+      ansible.builtin.uri:
+        url: "{{ capacity_catalog_public_base_url }}/catalog.json"
+        method: GET
+        ca_path: "{{ capacity_catalog_ca_file }}"
+        return_content: false
+        status_code: 200
+      register: catalog_ready
+      until: catalog_ready.status == 200
+      retries: 60
+      delay: 5
+
+    - name: Wait for candidate production readiness over TLS
+      ansible.builtin.uri:
+        url: "{{ capacity_control_plane_api_url }}/api/v1/healthz/ready"
+        method: GET
+        ca_path: "{{ capacity_control_plane_ca_file }}"
+        return_content: true
+        status_code: 200
+      register: control_plane_ready
+      until:
+        - control_plane_ready.status == 200
+        - control_plane_ready.json.data.status == 'ready'
+        - control_plane_ready.json.data.build.version == '1.0.0'
+        - control_plane_ready.json.data.build.commit_sha == capacity_candidate_sha
+        - control_plane_ready.json.data.build.profile == 'production'
+        - "'x86_64' in (control_plane_ready.json.data.build.target | lower)"
+        - "'linux' in (control_plane_ready.json.data.build.target | lower)"
+      retries: 60
+      delay: 5
+
+    - name: Issue 100 one-time enrollment codes through public v1
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ capacity_repo_root }}/deploy/capacity/orchestrator-capacity-environment.py"
+          - --base-url
+          - "{{ capacity_control_plane_api_url }}"
+          - --ca-file
+          - "{{ capacity_control_plane_ca_file }}"
+          - --token-argv-json
+          - "{{ capacity_token_helper_argv_json }}"
+          - --candidate-sha
+          - "{{ capacity_candidate_sha }}"
+          - --nodes-file
+          - "{{ capacity_fixture_output_dir }}/nodes.json"
+          - issue-enrollment
+          - --output-dir
+          - "{{ capacity_fixture_output_dir }}/enrollment"
+          - --enrollment-generation
+          - "{{ capacity_enrollment_generation }}"
+      no_log: true
+
+- name: Configure 10 isolated Engines and Agents on every worker
+  hosts: orchestrator_workers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Create worker state and shared CA directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /opt/ojos/capacity/worker, owner: root, group: root, mode: "0750" }
+        - { path: /opt/ojos/capacity/evidence, owner: root, group: root, mode: "0750" }
+        - { path: /etc/ojos/capacity, owner: root, group: root, mode: "0750" }
+        - { path: /var/lib/ojos/capacity/agents, owner: "10004", group: "10004", mode: "0750" }
+
+    - name: Create independent Agent state directories
+      ansible.builtin.file:
+        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(item) }}"
+        state: directory
+        owner: "10004"
+        group: "10004"
+        mode: "0750"
+      loop: "{{ range(0, 10) | list }}"
+
+    - name: Install the immutable expected runtime manifest on every worker
+      ansible.builtin.copy:
+        src: "{{ capacity_fixture_output_dir }}/runtime-expected.json"
+        dest: /opt/ojos/capacity/evidence/runtime-expected.json
+        owner: root
+        group: root
+        mode: "0444"
+
+    - name: Create independent Agent bootstrap secret directories
+      ansible.builtin.file:
+        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(item) }}/bootstrap"
+        state: directory
+        owner: "10004"
+        group: "10004"
+        mode: "0700"
+      loop: "{{ range(0, 10) | list }}"
+
+    - name: Install the control-plane CA only
+      ansible.builtin.copy:
+        src: "{{ capacity_control_plane_ca_file }}"
+        dest: /etc/ojos/capacity/control-plane-ca.pem
+        owner: root
+        group: "10004"
+        mode: "0640"
+
+    - name: Materialize strict read-only Agent registry credentials
+      ansible.builtin.copy:
+        content: >-
+          {{
+            {
+              'schema_version': 1,
+              'registries': [
+                {
+                  'server_address': capacity_registry_server,
+                  'username': capacity_registry_username,
+                  'password': lookup('file', capacity_registry_password_file, rstrip=True)
+                }
+              ]
+            }
+            | to_nice_json
+          }}
+        dest: /etc/ojos/capacity/registry-credentials.json
+        owner: root
+        group: "10004"
+        mode: "0640"
+      no_log: true
+
+    - name: Render 10 Engine and 10 Agent services
+      ansible.builtin.template:
+        src: templates/worker-compose.yml.j2
+        dest: /opt/ojos/capacity/worker/compose.yml
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reject invalid or duplicate-key worker Compose configuration
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - /opt/ojos/capacity/worker
+          - -f
+          - /opt/ojos/capacity/worker/compose.yml
+          - config
+          - --quiet
+      changed_when: false
+
+    - name: Pull immutable worker images
+      ansible.builtin.command:
+        argv: [docker, --config, /etc/ojos/capacity/docker-auth, compose, --project-directory, /opt/ojos/capacity/worker, -f, /opt/ojos/capacity/worker/compose.yml, pull]
+      changed_when: true
+
+    - name: Inspect the actual pulled Agent image
+      ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ capacity_agent_image }}"]
+      register: agent_image_inspect
+      changed_when: false
+
+    - name: Require Agent OCI identity to equal the candidate
+      ansible.builtin.assert:
+        that:
+          - (agent_image_inspect.stdout | from_json)[0].Config.Labels['org.opencontainers.image.revision'] == capacity_candidate_sha
+          - capacity_agent_image in (agent_image_inspect.stdout | from_json)[0].RepoDigests
+
+    - name: Start each isolated Docker Engine
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - /opt/ojos/capacity/worker
+          - -f
+          - /opt/ojos/capacity/worker/compose.yml
+          - up
+          - -d
+          - --pull
+          - never
+          - "engine-{{ '%02d' | format(item) }}"
+      loop: "{{ range(0, 10) | list }}"
+      changed_when: true
+
+    - name: Detect previously enrolled durable identities
+      ansible.builtin.stat:
+        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(item) }}/identity/current.json"
+      loop: "{{ range(0, 10) | list }}"
+      register: identity_files
+
+    - name: Enroll each Agent and immediately erase its isolated one-time code
+      ansible.builtin.include_tasks: tasks/enroll-capacity-agent.yml
+      loop: "{{ range(0, 10) | list }}"
+      loop_control:
+        loop_var: capacity_engine_ordinal
+
+    # The credential file is atomically replaced by Ansible. A container keeps
+    # the old bind-mounted inode, so every convergence must recreate the Agent;
+    # otherwise an interrupted rotation can leave it using stale credentials.
+    - name: Recreate each enrolled Agent with the current registry credentials
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - /opt/ojos/capacity/worker
+          - -f
+          - /opt/ojos/capacity/worker/compose.yml
+          - up
+          - -d
+          - --pull
+          - never
+          - --force-recreate
+          - --no-deps
+          - "agent-{{ '%02d' | format(item) }}"
+      loop: "{{ range(0, 10) | list }}"
+      changed_when: true
+
+- name: Configure the dedicated self-hosted soak runner
+  hosts: orchestrator_soak_runner
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Parse selected protected helper argv in the runner host context
+      ansible.builtin.set_fact:
+        capacity_environment_observer_token_argv: >-
+          {{ capacity_environment_observer_token_argv_json | from_json }}
+        capacity_restart_helper_gate_argv: >-
+          {{ capacity_restart_helper_gate_argv_json | from_json }}
+      no_log: true
+
+    - name: Create the unprivileged runner account
+      ansible.builtin.user:
+        name: "{{ capacity_github_runner_user }}"
+        home: "{{ capacity_github_runner_dir }}"
+        create_home: true
+        shell: /bin/bash
+
+    - name: Install configured environment observer packages
+      ansible.builtin.package:
+        name: "{{ capacity_environment_observer_packages }}"
+        state: present
+      when: capacity_manage_environment_observer_packages | bool
+
+    - name: Install the checksum-pinned jq binary
+      ansible.builtin.get_url:
+        url: "{{ capacity_jq_binary_url }}"
+        dest: /usr/local/bin/jq
+        checksum: "sha256:{{ capacity_jq_binary_sha256 }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download the checksum-pinned GitHub CLI archive
+      ansible.builtin.get_url:
+        url: "{{ capacity_github_cli_archive_url }}"
+        dest: "/var/tmp/ojos-gh-{{ capacity_github_cli_version }}.tar.gz"
+        checksum: "sha256:{{ capacity_github_cli_archive_sha256 }}"
+        mode: "0644"
+
+    - name: Create the versioned GitHub CLI directory
+      ansible.builtin.file:
+        path: "/opt/ojos/github-cli-{{ capacity_github_cli_version }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Extract the checksum-pinned GitHub CLI
+      ansible.builtin.unarchive:
+        src: "/var/tmp/ojos-gh-{{ capacity_github_cli_version }}.tar.gz"
+        dest: "/opt/ojos/github-cli-{{ capacity_github_cli_version }}"
+        remote_src: true
+        extra_opts: [--strip-components=1]
+
+    - name: Publish only the pinned GitHub CLI on the runner PATH
+      ansible.builtin.file:
+        src: "/opt/ojos/github-cli-{{ capacity_github_cli_version }}/bin/gh"
+        dest: /usr/local/bin/gh
+        state: link
+        force: true
+
+    - name: Read the pinned GitHub CLI version
+      ansible.builtin.command:
+        argv: [/usr/local/bin/gh, version]
+      register: capacity_github_cli_version_output
+      changed_when: false
+
+    - name: Read jq version
+      ansible.builtin.command:
+        argv: [/usr/local/bin/jq, --version]
+      register: capacity_jq_version_output
+      changed_when: false
+
+    - name: Inspect GitHub attestation verifier flags used by the workflow
+      ansible.builtin.command:
+        argv: [/usr/local/bin/gh, attestation, verify, --help]
+      register: capacity_github_cli_attestation_help
+      changed_when: false
+
+    - name: Require the exact runner verification toolchain
+      ansible.builtin.assert:
+        that:
+          - capacity_github_cli_version_output.stdout_lines[0] is match('^gh version ' ~ (capacity_github_cli_version | regex_escape) ~ ' \\(')
+          - capacity_jq_version_output.stdout | trim == 'jq-' ~ capacity_jq_version
+          - "'--cert-oidc-issuer' in capacity_github_cli_attestation_help.stdout"
+          - "'--signer-workflow' in capacity_github_cli_attestation_help.stdout"
+          - "'--source-ref' in capacity_github_cli_attestation_help.stdout"
+          - "'--source-digest' in capacity_github_cli_attestation_help.stdout"
+          - "'--deny-self-hosted-runners' in capacity_github_cli_attestation_help.stdout"
+        fail_msg: The pinned gh/jq toolchain cannot execute the candidate attestation policy.
+
+    - name: Load the verified candidate provenance into the runner host context
+      ansible.builtin.set_fact:
+        capacity_verified_image_provenance: >-
+          {{ lookup('file', capacity_image_provenance_record_file) | from_json }}
+      no_log: true
+
+    - name: Download the externally selected runner archive
+      ansible.builtin.get_url:
+        url: "{{ capacity_github_runner_archive_url }}"
+        dest: /var/tmp/ojos-actions-runner.tar.gz
+        checksum: "sha256:{{ capacity_github_runner_archive_sha256 }}"
+        mode: "0644"
+
+    - name: Detect existing runner registration
+      ansible.builtin.stat:
+        path: "{{ capacity_github_runner_dir }}/.runner"
+      register: runner_registration
+
+    - name: Detect existing runner service installation
+      ansible.builtin.stat:
+        path: "{{ capacity_github_runner_dir }}/.service"
+      register: runner_service_installation
+
+    - name: Inspect protected runner helper inputs for the desired fingerprint
+      ansible.builtin.find:
+        paths: "{{ capacity_runner_secret_bundle_dir }}"
+        recurse: true
+        file_type: file
+        get_checksum: true
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: capacity_runner_desired_helper_files
+      no_log: true
+
+    - name: Reject symbolic links in the protected runner helper source
+      ansible.builtin.find:
+        paths: "{{ capacity_runner_secret_bundle_dir }}"
+        recurse: true
+        file_type: link
+      delegate_to: localhost
+      become: false
+      register: capacity_runner_desired_helper_links
+      no_log: true
+
+    - name: Inspect the protected gate environment for the desired fingerprint
+      ansible.builtin.stat:
+        path: "{{ capacity_runner_gate_env_file }}"
+        get_checksum: true
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: capacity_runner_desired_gate_environment
+      no_log: true
+
+    - name: Require fingerprintable protected runner inputs
+      ansible.builtin.assert:
+        that:
+          - capacity_runner_desired_helper_files.matched | int > 0
+          - capacity_runner_desired_helper_links.matched | int == 0
+          - capacity_runner_desired_gate_environment.stat.isreg
+          - capacity_runner_desired_gate_environment.stat.checksum is match('^[0-9a-f]{64}$')
+      no_log: true
+
+    - name: Build the exact protected runner environment contract
+      ansible.builtin.set_fact:
+        capacity_runner_expected_gate_environment_lines: >-
+          {{
+            [
+              'ORCHESTRATOR_GATE_EXPECTED_RUNNER_UNIT=' ~ capacity_github_runner_expected_service_name,
+              'ORCHESTRATOR_GATE_ENVIRONMENT_ARGV_JSON=' ~ capacity_environment_observer_gate_argv_json,
+              'ORCHESTRATOR_GATE_RESTART_ARGV_JSON=' ~ capacity_restart_helper_gate_argv_json,
+              'ORCHESTRATOR_GATE_CONTROL_PLANE_IMAGE=' ~ capacity_control_plane_image,
+              'ORCHESTRATOR_GATE_AGENT_IMAGE=' ~ capacity_agent_image,
+              'ORCHESTRATOR_GATE_FIXTURE_IMAGE=' ~ capacity_fixture_image,
+              'ORCHESTRATOR_GATE_IMAGE_WORKFLOW_RUN_ID=' ~ capacity_verified_image_provenance.source_workflow_run_id,
+              'ORCHESTRATOR_GATE_IMAGE_PROVENANCE_RECORD_SHA256='
+                ~ (lookup('file', capacity_image_provenance_record_file, rstrip=False) | hash('sha256'))
+            ]
+            | sort
+          }}
+        capacity_runner_actual_gate_environment_lines: >-
+          {{ lookup('file', capacity_runner_gate_env_file, rstrip=False).splitlines() | list | sort }}
+      no_log: true
+
+    - name: Require exactly eight unique protected runner environment bindings
+      ansible.builtin.assert:
+        that:
+          - capacity_runner_actual_gate_environment_lines == capacity_runner_expected_gate_environment_lines
+        fail_msg: The protected runner environment must contain exactly the eight canonical service, helper, image, run, and provenance bindings.
+      no_log: true
+
+    - name: Initialize deterministic helper fingerprint components
+      ansible.builtin.set_fact:
+        capacity_runner_desired_helper_fingerprint_components: []
+      no_log: true
+
+    - name: Collect deterministic helper fingerprint components
+      ansible.builtin.set_fact:
+        capacity_runner_desired_helper_fingerprint_components: >-
+          {{
+            capacity_runner_desired_helper_fingerprint_components
+            + [
+              (item.path | relpath(capacity_runner_secret_bundle_dir))
+              ~ ':'
+              ~ item.checksum
+            ]
+          }}
+      loop: "{{ capacity_runner_desired_helper_files.files | sort(attribute='path') }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      no_log: true
+
+    - name: Compute the desired pinned runner identity fingerprint
+      ansible.builtin.set_fact:
+        capacity_runner_desired_identity_fingerprint: >-
+          {{
+            (
+              'schema=1'
+              ~ '\narchive_url=' ~ capacity_github_runner_archive_url
+              ~ '\narchive=' ~ (capacity_github_runner_archive_sha256 | lower)
+              ~ '\nrunner_version=' ~ capacity_github_runner_expected_version
+              ~ '\nrepository=' ~ capacity_github_repository_url
+              ~ '\nrunner=ojos-orchestrator-soak'
+              ~ '\nservice=' ~ capacity_github_runner_expected_service_name
+              ~ '\nlabels=self-hosted,linux,x64,orchestrator-soak'
+              ~ '\nwork=_work'
+              ~ '\ndisableupdate=true'
+              ~ '\nuser=' ~ capacity_github_runner_user
+              ~ '\ndirectory=' ~ capacity_github_runner_dir
+            )
+            | hash('sha256')
+          }}
+      no_log: true
+
+    - name: Compute the desired protected runner configuration fingerprint
+      ansible.builtin.set_fact:
+        capacity_runner_desired_fingerprint: >-
+          {{
+            (
+              'schema=5'
+              ~ '\nidentity=' ~ capacity_runner_desired_identity_fingerprint
+              ~ '\ngithub_cli_version=' ~ capacity_github_cli_version
+              ~ '\ngithub_cli_archive_url=' ~ capacity_github_cli_archive_url
+              ~ '\ngithub_cli_archive=' ~ (capacity_github_cli_archive_sha256 | lower)
+              ~ '\ngithub_cli_observed=' ~ (capacity_github_cli_version_output.stdout_lines[0] | trim)
+              ~ '\njq_version=' ~ capacity_jq_version
+              ~ '\njq_binary_url=' ~ capacity_jq_binary_url
+              ~ '\njq_binary=' ~ (capacity_jq_binary_sha256 | lower)
+              ~ '\njq_observed=' ~ (capacity_jq_version_output.stdout | trim)
+              ~ '\ngate_env=' ~ capacity_runner_desired_gate_environment.stat.checksum
+              ~ '\nobserver_inventory=' ~ (lookup('file', capacity_environment_observer_inventory_file, rstrip=False) | hash('sha256'))
+              ~ '\nobserver_extra_vars=' ~ (lookup('file', capacity_environment_observer_extra_vars_file, rstrip=False) | hash('sha256'))
+              ~ '\nobserver_live_program=' ~ (lookup('file', capacity_repo_root ~ '/deploy/capacity/orchestrator-capacity-live-evidence.py', rstrip=False) | hash('sha256'))
+              ~ '\nobserver_engine_program=' ~ (lookup('file', capacity_repo_root ~ '/deploy/capacity/orchestrator-capacity-engine-evidence.py', rstrip=False) | hash('sha256'))
+              ~ '\nobserver_runtime_program=' ~ (lookup('file', capacity_repo_root ~ '/deploy/capacity/orchestrator-capacity-runtime-evidence.py', rstrip=False) | hash('sha256'))
+              ~ '\nobserver_environment_program=' ~ (lookup('file', capacity_repo_root ~ '/deploy/capacity/orchestrator-capacity-environment.py', rstrip=False) | hash('sha256'))
+              ~ '\nobserver_playbook=' ~ (lookup('file', capacity_repo_root ~ '/deploy/capacity/live-evidence.yml', rstrip=False) | hash('sha256'))
+              ~ '\nobserver_template=' ~ (lookup('file', capacity_repo_root ~ '/deploy/capacity/templates/environment-observer.json.j2', rstrip=False) | hash('sha256'))
+              ~ '\nobserver_nodes=' ~ (lookup('file', capacity_fixture_output_dir ~ '/nodes.json', rstrip=False) | hash('sha256'))
+              ~ '\nobserver_fixture=' ~ (lookup('file', capacity_catalog_output_dir ~ '/capacity-fixture.json', rstrip=False) | hash('sha256'))
+              ~ '\nobserver_runtime_expected=' ~ (lookup('file', capacity_fixture_output_dir ~ '/runtime-expected.json', rstrip=False) | hash('sha256'))
+              ~ '\nobserver_ca=' ~ (lookup('file', capacity_control_plane_ca_file, rstrip=False) | hash('sha256'))
+              ~ '\nimage_provenance=' ~ (lookup('file', capacity_image_provenance_record_file, rstrip=False) | hash('sha256'))
+              ~ '\nobserver_ansible=' ~ capacity_environment_observer_ansible_executable
+              ~ '\nobserver_python=' ~ capacity_environment_observer_python_executable
+              ~ '\nobserver_origin=' ~ capacity_control_plane_api_url
+              ~ '\nobserver_token_argv=' ~ capacity_environment_observer_token_argv_json
+              ~ '\nrestart_argv=' ~ capacity_restart_helper_gate_argv_json
+              ~ '\nobserver_argv=' ~ capacity_environment_observer_gate_argv_json
+              ~ '\nhelpers=' ~ (capacity_runner_desired_helper_fingerprint_components | join('\n'))
+            )
+            | hash('sha256')
+          }}
+      no_log: true
+
+    - name: Inspect the crash-persistent applied runner identity marker
+      ansible.builtin.stat:
+        path: "{{ capacity_github_runner_dir }}/.ojos-capacity-runner-identity-applied.sha256"
+      register: capacity_runner_applied_identity_marker
+
+    - name: Read the applied runner identity marker
+      ansible.builtin.slurp:
+        path: "{{ capacity_github_runner_dir }}/.ojos-capacity-runner-identity-applied.sha256"
+      when: capacity_runner_applied_identity_marker.stat.exists
+      register: capacity_runner_applied_identity_content
+      no_log: true
+
+    - name: Inspect the pending runner identity journal
+      ansible.builtin.stat:
+        path: "{{ capacity_github_runner_dir }}/.ojos-capacity-runner-identity-pending.sha256"
+      register: capacity_runner_pending_identity_marker
+
+    - name: Read the pending runner identity journal
+      ansible.builtin.slurp:
+        path: "{{ capacity_github_runner_dir }}/.ojos-capacity-runner-identity-pending.sha256"
+      when: capacity_runner_pending_identity_marker.stat.exists
+      register: capacity_runner_pending_identity_content
+      no_log: true
+
+    - name: Resolve the applied and pending runner identities
+      ansible.builtin.set_fact:
+        capacity_runner_applied_identity_fingerprint: >-
+          {{
+            capacity_runner_applied_identity_content.content
+            | default('')
+            | b64decode
+            | trim
+          }}
+        capacity_runner_pending_identity_fingerprint: >-
+          {{
+            capacity_runner_pending_identity_content.content
+            | default('')
+            | b64decode
+            | trim
+          }}
+      no_log: true
+
+    - name: Fail closed when an existing runner does not match the pinned identity
+      ansible.builtin.assert:
+        that:
+          - >-
+            not runner_registration.stat.exists
+            or capacity_runner_applied_identity_fingerprint == capacity_runner_desired_identity_fingerprint
+            or (
+              capacity_runner_applied_identity_fingerprint == ''
+              and capacity_runner_pending_identity_fingerprint == capacity_runner_desired_identity_fingerprint
+            )
+        fail_msg: Existing runner identity does not match the pinned archive and registration contract; remove it through the controlled reprovision procedure.
+
+    - name: Journal the pinned identity before first registration
+      ansible.builtin.copy:
+        content: "{{ capacity_runner_desired_identity_fingerprint }}\n"
+        dest: "{{ capacity_github_runner_dir }}/.ojos-capacity-runner-identity-pending.sha256"
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0600"
+      when: not runner_registration.stat.exists
+      no_log: true
+
+    - name: Inspect the crash-persistent applied runner fingerprint marker
+      ansible.builtin.stat:
+        path: "{{ capacity_github_runner_dir }}/.ojos-capacity-config-applied.sha256"
+      register: capacity_runner_applied_fingerprint_marker
+
+    - name: Read the applied runner fingerprint marker
+      ansible.builtin.slurp:
+        path: "{{ capacity_github_runner_dir }}/.ojos-capacity-config-applied.sha256"
+      when: capacity_runner_applied_fingerprint_marker.stat.exists
+      register: capacity_runner_applied_fingerprint_content
+      no_log: true
+
+    - name: Resolve whether the runner configuration requires a durable restart
+      ansible.builtin.set_fact:
+        capacity_runner_applied_fingerprint: >-
+          {{
+            capacity_runner_applied_fingerprint_content.content
+            | default('')
+            | b64decode
+            | trim
+          }}
+        capacity_runner_restart_required: >-
+          {{
+            (
+              capacity_runner_applied_fingerprint_content.content
+              | default('')
+              | b64decode
+              | trim
+            ) != capacity_runner_desired_fingerprint
+            or not runner_registration.stat.exists
+            or not runner_service_installation.stat.exists
+          }}
+      no_log: true
+
+    - name: Invalidate stale applied state before mutating runner configuration
+      ansible.builtin.file:
+        path: "{{ capacity_github_runner_dir }}/.ojos-capacity-config-applied.sha256"
+        state: absent
+      when: capacity_runner_restart_required | bool
+
+    - name: Extract the runner distribution
+      ansible.builtin.unarchive:
+        src: /var/tmp/ojos-actions-runner.tar.gz
+        dest: "{{ capacity_github_runner_dir }}"
+        remote_src: true
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+      when: not runner_registration.stat.exists
+      register: capacity_runner_distribution
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Read the pinned Actions Runner version
+      ansible.builtin.command:
+        argv: ["{{ capacity_github_runner_dir }}/bin/Runner.Listener", --version]
+      register: capacity_github_runner_version_output
+      changed_when: false
+
+    - name: Require the exact Node-24-capable Actions Runner release
+      ansible.builtin.assert:
+        that:
+          - capacity_github_runner_version_output.stdout | trim == capacity_github_runner_expected_version
+        fail_msg: The extracted Actions Runner does not match the pinned expected version.
+
+    - name: Acquire a just-in-time GitHub runner registration token without a shell
+      ansible.builtin.command:
+        argv: "{{ capacity_github_runner_registration_token_argv_json | from_json }}"
+        strip_empty_ends: false
+      delegate_to: localhost
+      become: false
+      register: capacity_runner_registration_token_result
+      changed_when: false
+      no_log: true
+      timeout: 30
+      when: not runner_registration.stat.exists
+
+    - name: Read trusted controller epoch immediately after token acquisition
+      ansible.builtin.command:
+        argv: [date, +%s]
+      delegate_to: localhost
+      become: false
+      register: capacity_runner_registration_epoch
+      changed_when: false
+      when: not runner_registration.stat.exists
+
+    - name: Parse the bounded registration-token response
+      ansible.builtin.set_fact:
+        capacity_runner_registration_token_payload: >-
+          {{ capacity_runner_registration_token_result.stdout | from_json }}
+      no_log: true
+      when: not runner_registration.stat.exists
+
+    - name: Require a fresh exact registration-token response
+      ansible.builtin.assert:
+        that:
+          - capacity_runner_registration_token_result.stdout | length > 0
+          - capacity_runner_registration_token_result.stdout | length <= 4096
+          - capacity_runner_registration_token_result.stdout == (capacity_runner_registration_token_result.stdout | trim)
+          - capacity_runner_registration_token_result.stderr == ''
+          - capacity_runner_registration_token_payload | type_debug == 'dict'
+          - capacity_runner_registration_token_payload.keys() | list | sort == ['expires_at', 'token']
+          - capacity_runner_registration_token_payload.token is string
+          - capacity_runner_registration_token_payload.token is match('^\\S{20,512}$')
+          - capacity_runner_registration_token_payload.expires_at | type_debug == 'int'
+          - capacity_runner_registration_token_payload.expires_at | int > (capacity_runner_registration_epoch.stdout | int) + 600
+          - capacity_runner_registration_token_payload.expires_at | int <= (capacity_runner_registration_epoch.stdout | int) + 3700
+        fail_msg: The registration helper must return one fresh bounded token with at least ten minutes remaining.
+      no_log: true
+      when: not runner_registration.stat.exists
+
+    - name: Register exact dedicated soak labels
+      ansible.builtin.command:
+        argv:
+          - "{{ capacity_github_runner_dir }}/config.sh"
+          - --unattended
+          - --replace
+          - --disableupdate
+          - --url
+          - "{{ capacity_github_repository_url }}"
+          - --token
+          - "{{ capacity_runner_registration_token_payload.token | default('') }}"
+          - --name
+          - ojos-orchestrator-soak
+          - --labels
+          - self-hosted,linux,x64,orchestrator-soak
+          - --work
+          - _work
+      become_user: "{{ capacity_github_runner_user }}"
+      when: not runner_registration.stat.exists
+      register: capacity_runner_registration
+      no_log: true
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Erase all just-in-time registration token facts after use
+      ansible.builtin.set_fact:
+        capacity_runner_registration_token_payload: {}
+        capacity_runner_registration_token_result: {}
+      no_log: true
+      when: not runner_registration.stat.exists
+
+    - name: Install protected token and restart helpers
+      ansible.builtin.copy:
+        src: "{{ capacity_runner_secret_bundle_dir }}/"
+        dest: "{{ capacity_github_runner_dir }}/protected/"
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0700"
+      register: capacity_runner_protected_helpers
+      no_log: true
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Inspect selected deployed token and restart helpers
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ capacity_environment_observer_token_argv[0] }}"
+        - "{{ capacity_restart_helper_gate_argv[0] }}"
+      register: capacity_runner_required_deployed_helper_stats
+      no_log: true
+
+    - name: Require selected deployed helpers to remain regular executables
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - not item.stat.islnk
+          - item.stat.executable
+        fail_msg: The deployed token and restart argv must resolve to protected regular executables.
+      loop: "{{ capacity_runner_required_deployed_helper_stats.results }}"
+      no_log: true
+
+    - name: Inventory deployed protected runner helpers after copying
+      ansible.builtin.find:
+        paths: "{{ capacity_github_runner_dir }}/protected"
+        recurse: true
+        file_type: file
+        get_checksum: true
+        checksum_algorithm: sha256
+      register: capacity_runner_deployed_helper_files
+      no_log: true
+
+    - name: Detect symbolic links in deployed protected runner helpers
+      ansible.builtin.find:
+        paths: "{{ capacity_github_runner_dir }}/protected"
+        recurse: true
+        file_type: link
+      register: capacity_runner_deployed_helper_links
+      no_log: true
+
+    - name: Initialize the deployed helper fingerprint components
+      ansible.builtin.set_fact:
+        capacity_runner_deployed_helper_fingerprint_components: []
+      no_log: true
+
+    - name: Collect deterministic deployed helper fingerprint components
+      ansible.builtin.set_fact:
+        capacity_runner_deployed_helper_fingerprint_components: >-
+          {{
+            capacity_runner_deployed_helper_fingerprint_components
+            + [
+              (item.path | relpath(capacity_github_runner_dir ~ '/protected'))
+              ~ ':'
+              ~ item.checksum
+            ]
+          }}
+      loop: "{{ capacity_runner_deployed_helper_files.files | sort(attribute='path') }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      no_log: true
+
+    - name: Resolve whether the deployed helper manifest is exact
+      ansible.builtin.set_fact:
+        capacity_runner_deployed_helpers_match: >-
+          {{
+            capacity_runner_deployed_helper_links.matched | int == 0
+            and capacity_runner_deployed_helper_fingerprint_components
+              == capacity_runner_desired_helper_fingerprint_components
+          }}
+      no_log: true
+
+    - name: Invalidate applied state when deployed helpers are not exact
+      ansible.builtin.file:
+        path: "{{ capacity_github_runner_dir }}/.ojos-capacity-config-applied.sha256"
+        state: absent
+      when: not capacity_runner_deployed_helpers_match | bool
+
+    - name: Fail closed on a stale missing or mismatched deployed helper
+      ansible.builtin.assert:
+        that:
+          - capacity_runner_deployed_helpers_match | bool
+        fail_msg: Deployed runner helpers do not exactly match the protected source path and SHA-256 manifest.
+      no_log: true
+
+    - name: Install protected gate environment
+      ansible.builtin.copy:
+        src: "{{ capacity_runner_gate_env_file }}"
+        dest: "{{ capacity_github_runner_dir }}/.env"
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0600"
+      register: capacity_runner_gate_environment
+      no_log: true
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Create the repository-owned environment observer directory
+      ansible.builtin.file:
+        path: "{{ capacity_environment_observer_dir }}"
+        state: directory
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0700"
+
+    - name: Install repository-owned argv-only observer programs
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ capacity_environment_observer_dir }}/{{ item.dest }}"
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0550"
+      loop:
+        - src: "{{ capacity_repo_root }}/deploy/capacity/orchestrator-capacity-live-evidence.py"
+          dest: orchestrator-capacity-live-evidence.py
+        - src: "{{ capacity_repo_root }}/deploy/capacity/orchestrator-capacity-engine-evidence.py"
+          dest: orchestrator-capacity-engine-evidence.py
+        - src: "{{ capacity_repo_root }}/deploy/capacity/orchestrator-capacity-runtime-evidence.py"
+          dest: orchestrator-capacity-runtime-evidence.py
+        - src: "{{ capacity_repo_root }}/deploy/capacity/orchestrator-capacity-environment.py"
+          dest: orchestrator-capacity-environment.py
+        - src: "{{ capacity_repo_root }}/deploy/capacity/live-evidence.yml"
+          dest: live-evidence.yml
+      register: capacity_runner_observer_programs
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Install protected observer connection and immutable fixture inputs
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ capacity_environment_observer_dir }}/{{ item.dest }}"
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0600"
+      loop:
+        - src: "{{ capacity_environment_observer_inventory_file }}"
+          dest: environment-inventory.yml
+        - src: "{{ capacity_environment_observer_extra_vars_file }}"
+          dest: environment-extra-vars.json
+        - src: "{{ capacity_fixture_output_dir }}/nodes.json"
+          dest: nodes.json
+        - src: "{{ capacity_catalog_output_dir }}/capacity-fixture.json"
+          dest: capacity-fixture.json
+        - src: "{{ capacity_control_plane_ca_file }}"
+          dest: control-plane-ca.pem
+        - src: "{{ capacity_image_provenance_record_file }}"
+          dest: candidate-image-provenance.json
+        - src: "{{ capacity_fixture_output_dir }}/runtime-expected.json"
+          dest: runtime-expected.json
+      register: capacity_runner_observer_inputs
+      no_log: true
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Build the exact deployed protected-helper hash manifest
+      ansible.builtin.set_fact:
+        capacity_runner_observer_helper_manifest: >-
+          {{
+            dict(
+              capacity_runner_deployed_helper_files.files
+              | map(attribute='path')
+              | zip(capacity_runner_deployed_helper_files.files | map(attribute='checksum'))
+            )
+          }}
+      no_log: true
+
+    - name: Commit protected-helper hashes for every observation
+      ansible.builtin.copy:
+        content: >-
+          {{
+            {
+              'schema_version': 1,
+              'files': capacity_runner_observer_helper_manifest
+            }
+            | to_nice_json
+          }}
+        dest: "{{ capacity_environment_observer_dir }}/helper-manifest.json"
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0600"
+      register: capacity_runner_observer_helper_manifest_file
+      no_log: true
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Render the protected environment observer config schema
+      ansible.builtin.template:
+        src: templates/environment-observer.json.j2
+        dest: "{{ capacity_environment_observer_dir }}/config.json"
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0600"
+      register: capacity_runner_observer_config
+      no_log: true
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Hash every applied observer program and protected input
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: true
+        checksum_algorithm: sha256
+      loop:
+        - "{{ capacity_environment_observer_dir }}/orchestrator-capacity-live-evidence.py"
+        - "{{ capacity_environment_observer_dir }}/orchestrator-capacity-engine-evidence.py"
+        - "{{ capacity_environment_observer_dir }}/orchestrator-capacity-runtime-evidence.py"
+        - "{{ capacity_environment_observer_dir }}/orchestrator-capacity-environment.py"
+        - "{{ capacity_environment_observer_dir }}/live-evidence.yml"
+        - "{{ capacity_environment_observer_dir }}/environment-inventory.yml"
+        - "{{ capacity_environment_observer_dir }}/environment-extra-vars.json"
+        - "{{ capacity_environment_observer_dir }}/nodes.json"
+        - "{{ capacity_environment_observer_dir }}/capacity-fixture.json"
+        - "{{ capacity_environment_observer_dir }}/control-plane-ca.pem"
+        - "{{ capacity_environment_observer_dir }}/candidate-image-provenance.json"
+        - "{{ capacity_environment_observer_dir }}/helper-manifest.json"
+        - "{{ capacity_environment_observer_dir }}/runtime-expected.json"
+        - "{{ capacity_environment_observer_dir }}/config.json"
+      register: capacity_runner_observer_applied_files
+      no_log: true
+
+    - name: Require every applied observer file to be regular and hashed
+      ansible.builtin.assert:
+        that:
+          - item.stat.isreg
+          - item.stat.checksum is match('^[0-9a-f]{64}$')
+      loop: "{{ capacity_runner_observer_applied_files.results }}"
+      no_log: true
+
+    - name: Initialize the applied observer manifest
+      ansible.builtin.set_fact:
+        capacity_runner_observer_applied_manifest: {}
+      no_log: true
+
+    - name: Build the exact applied observer path and SHA-256 manifest
+      ansible.builtin.set_fact:
+        capacity_runner_observer_applied_manifest: >-
+          {{
+            capacity_runner_observer_applied_manifest
+            | combine({item.item: item.stat.checksum})
+          }}
+      loop: "{{ capacity_runner_observer_applied_files.results }}"
+      no_log: true
+
+    - name: Commit the applied observer manifest
+      ansible.builtin.copy:
+        content: >-
+          {{
+            {
+              'schema_version': 1,
+              'files': capacity_runner_observer_applied_manifest
+            }
+            | to_nice_json
+          }}
+        dest: "{{ capacity_environment_observer_dir }}/applied-manifest.json"
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0600"
+      register: capacity_runner_observer_manifest
+      no_log: true
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Install the runner service
+      ansible.builtin.command:
+        argv: ["{{ capacity_github_runner_dir }}/svc.sh", install, "{{ capacity_github_runner_user }}"]
+      when: not runner_service_installation.stat.exists
+      register: capacity_runner_service_install
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Preserve a restart request for every actual runner mutation
+      ansible.builtin.set_fact:
+        capacity_runner_restart_required: >-
+          {{
+            (capacity_runner_restart_required | bool)
+            or (capacity_runner_distribution.changed | default(false))
+            or (capacity_runner_registration.changed | default(false))
+            or (capacity_runner_protected_helpers.changed | default(false))
+            or (capacity_runner_gate_environment.changed | default(false))
+            or (capacity_runner_observer_programs.changed | default(false))
+            or (capacity_runner_observer_inputs.changed | default(false))
+            or (capacity_runner_observer_helper_manifest_file.changed | default(false))
+            or (capacity_runner_observer_config.changed | default(false))
+            or (capacity_runner_observer_manifest.changed | default(false))
+            or (capacity_runner_service_install.changed | default(false))
+          }}
+      no_log: true
+
+    - name: Queue recovery when the desired fingerprint is not applied
+      ansible.builtin.debug:
+        msg: Runner configuration requires a controlled restart before its uptime can count.
+      changed_when: capacity_runner_restart_required | bool
+      notify: Restart dedicated soak runner after configuration changes
+
+    - name: Apply actual runner configuration changes before checking uptime
+      ansible.builtin.meta: flush_handlers
+
+    - name: Read the installed runner service marker
+      ansible.builtin.slurp:
+        path: "{{ capacity_github_runner_dir }}/.service"
+      register: capacity_runner_service_marker
+
+    - name: Resolve and validate the installed runner service name
+      ansible.builtin.set_fact:
+        capacity_runner_service_name: "{{ capacity_runner_service_marker.content | b64decode | trim }}"
+
+    - name: Require the expected GitHub Actions runner service name
+      ansible.builtin.assert:
+        that:
+          - capacity_runner_service_name == capacity_github_runner_expected_service_name
+
+    - name: Inspect whether the dedicated runner service is active
+      ansible.builtin.command:
+        argv: [systemctl, is-active, --quiet, "{{ capacity_runner_service_name }}"]
+      register: capacity_runner_service_active
+      failed_when: false
+      changed_when: false
+
+    - name: Start the dedicated runner service only when systemd reports inactive
+      ansible.builtin.command:
+        argv: ["{{ capacity_github_runner_dir }}/svc.sh", start]
+      when: capacity_runner_service_active.rc != 0
+      changed_when: true
+
+    - name: Require the dedicated runner service to be active
+      ansible.builtin.command:
+        argv: [systemctl, is-active, --quiet, "{{ capacity_runner_service_name }}"]
+      changed_when: false
+
+    - name: Commit the applied fingerprint only after active confirmation
+      ansible.builtin.copy:
+        content: "{{ capacity_runner_desired_fingerprint }}\n"
+        dest: "{{ capacity_github_runner_dir }}/.ojos-capacity-config-applied.sha256"
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0600"
+      no_log: true
+
+    - name: Commit the pinned runner identity only after active confirmation
+      ansible.builtin.copy:
+        content: "{{ capacity_runner_desired_identity_fingerprint }}\n"
+        dest: "{{ capacity_github_runner_dir }}/.ojos-capacity-runner-identity-applied.sha256"
+        owner: "{{ capacity_github_runner_user }}"
+        group: "{{ capacity_github_runner_user }}"
+        mode: "0600"
+      no_log: true
+
+    - name: Clear the pending runner identity journal after commit
+      ansible.builtin.file:
+        path: "{{ capacity_github_runner_dir }}/.ojos-capacity-runner-identity-pending.sha256"
+        state: absent
+
+  handlers:
+    - name: Stop the runner before applying configuration changes
+      ansible.builtin.command:
+        argv: ["{{ capacity_github_runner_dir }}/svc.sh", stop]
+      changed_when: true
+      listen: Restart dedicated soak runner after configuration changes
+
+    - name: Start the runner after applying configuration changes
+      ansible.builtin.command:
+        argv: ["{{ capacity_github_runner_dir }}/svc.sh", start]
+      changed_when: true
+      listen: Restart dedicated soak runner after configuration changes
+
+- name: Seed the real production-capacity state
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Install 2,000 real deployments and apply the 10,000-resource topology
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ capacity_repo_root }}/deploy/capacity/orchestrator-capacity-environment.py"
+          - --base-url
+          - "{{ capacity_control_plane_api_url }}"
+          - --ca-file
+          - "{{ capacity_control_plane_ca_file }}"
+          - --token-argv-json
+          - "{{ capacity_token_helper_argv_json }}"
+          - --candidate-sha
+          - "{{ capacity_candidate_sha }}"
+          - --nodes-file
+          - "{{ capacity_fixture_output_dir }}/nodes.json"
+          - seed
+          - --fixture-file
+          - "{{ capacity_catalog_output_dir }}/capacity-fixture.json"
+          - --install-concurrency
+          - "50"
+          - --operation-timeout-seconds
+          - "900"
+      register: capacity_seed
+      retries: 30
+      delay: 10
+      until: capacity_seed.rc == 0
+      async: 14400
+      poll: 30
+      no_log: true
+
+- name: Collect real candidate-bound workload evidence from all 100 Engines
+  hosts: orchestrator_workers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Create the protected Engine evidence directory
+      ansible.builtin.file:
+        path: /opt/ojos/capacity/evidence
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install the bounded argv-only Engine evidence collector
+      ansible.builtin.copy:
+        src: "{{ capacity_repo_root }}/deploy/capacity/orchestrator-capacity-engine-evidence.py"
+        dest: /opt/ojos/capacity/evidence/orchestrator-capacity-engine-evidence.py
+        owner: root
+        group: root
+        mode: "0555"
+
+    - name: Install the non-secret immutable capacity fixture contract
+      ansible.builtin.copy:
+        src: "{{ capacity_catalog_output_dir }}/capacity-fixture.json"
+        dest: /opt/ojos/capacity/evidence/capacity-fixture.json
+        owner: root
+        group: root
+        mode: "0444"
+
+    - name: Inspect every capacity container and image in this worker's 10 Engines
+      ansible.builtin.command:
+        argv:
+          - python3
+          - /opt/ojos/capacity/evidence/orchestrator-capacity-engine-evidence.py
+          - collect
+          - --compose-file
+          - /opt/ojos/capacity/worker/compose.yml
+          - --project-directory
+          - /opt/ojos/capacity/worker
+          - --fixture-file
+          - /opt/ojos/capacity/evidence/capacity-fixture.json
+          - --fixture-image
+          - "{{ capacity_fixture_image }}"
+          - --candidate-sha
+          - "{{ capacity_candidate_sha }}"
+          - --worker-ordinal
+          - "{{ capacity_worker_ordinal | int }}"
+          - --output
+          - "/opt/ojos/capacity/evidence/worker-{{ '%02d' | format(capacity_worker_ordinal | int) }}.json"
+      register: capacity_worker_engine_evidence
+      changed_when: false
+
+    - name: Require strict machine-readable worker evidence completion
+      ansible.builtin.assert:
+        that:
+          - (capacity_worker_engine_evidence.stdout | from_json).status == 'ok'
+          - (capacity_worker_engine_evidence.stdout | from_json).engine_count == 10
+          - (capacity_worker_engine_evidence.stdout | from_json).container_count == 200
+
+    - name: Fetch each worker's real Engine evidence to the controller
+      ansible.builtin.fetch:
+        src: "/opt/ojos/capacity/evidence/worker-{{ '%02d' | format(capacity_worker_ordinal | int) }}.json"
+        dest: "{{ capacity_fixture_output_dir }}/engine-evidence/workers/worker-{{ '%02d' | format(capacity_worker_ordinal | int) }}.json"
+        flat: true
+
+- name: Aggregate and bind the 10-worker Engine evidence window
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Aggregate exactly 10 workers, 100 Engines and 2,000 healthy containers
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ capacity_repo_root }}/deploy/capacity/orchestrator-capacity-engine-evidence.py"
+          - aggregate
+          - --input-dir
+          - "{{ capacity_fixture_output_dir }}/engine-evidence/workers"
+          - --fixture-file
+          - "{{ capacity_catalog_output_dir }}/capacity-fixture.json"
+          - --fixture-image
+          - "{{ capacity_fixture_image }}"
+          - --candidate-sha
+          - "{{ capacity_candidate_sha }}"
+          - --output
+          - "{{ capacity_fixture_output_dir }}/engine-evidence.json"
+      register: capacity_aggregate_engine_evidence
+      changed_when: false
+
+    - name: Require strict aggregate Engine evidence completion
+      ansible.builtin.assert:
+        that:
+          - (capacity_aggregate_engine_evidence.stdout | from_json).status == 'ok'
+          - (capacity_aggregate_engine_evidence.stdout | from_json).engine_count == 100
+          - (capacity_aggregate_engine_evidence.stdout | from_json).container_count == 2000
+
+- name: Verify and record the real production-capacity state
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Run final public-API environment preflight
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ capacity_repo_root }}/deploy/capacity/orchestrator-capacity-environment.py"
+          - --base-url
+          - "{{ capacity_control_plane_api_url }}"
+          - --ca-file
+          - "{{ capacity_control_plane_ca_file }}"
+          - --token-argv-json
+          - "{{ capacity_token_helper_argv_json }}"
+          - --candidate-sha
+          - "{{ capacity_candidate_sha }}"
+          - --nodes-file
+          - "{{ capacity_fixture_output_dir }}/nodes.json"
+          - preflight
+          - --fixture-file
+          - "{{ capacity_catalog_output_dir }}/capacity-fixture.json"
+          - --engine-evidence-file
+          - "{{ capacity_fixture_output_dir }}/engine-evidence.json"
+      register: capacity_preflight
+      no_log: true
+
+    - name: Persist the non-secret provisioning evidence summary
+      ansible.builtin.copy:
+        content: "{{ capacity_preflight.stdout }}\n"
+        dest: "{{ capacity_fixture_output_dir }}/environment-preflight.json"
+        mode: "0644"
+
+    - name: Remove local redeemed enrollment codes
+      ansible.builtin.file:
+        path: "{{ capacity_fixture_output_dir }}/enrollment"
+        state: absent

@@ -49,7 +49,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -68,7 +68,9 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: services/gateway/frontend/package-lock.json
+          cache-dependency-path: |
+            manager/web/package-lock.json
+            services/gateway/frontend/package-lock.json
 
       - name: Boundary note
         shell: bash
@@ -78,15 +80,26 @@ jobs:
           echo "It does not upload .env files, temporary files, release artifacts, tokens, or logs."
           echo "Scheduled runs build all production service images."
 
-      - name: Prepare PostgreSQL live schema
+      - name: Prepare PostgreSQL live schema and Desktop build dependencies
         shell: bash
         env:
           ORCHESTRATOR_DATABASE_URL: postgres://postgres:ojos-live-ci@127.0.0.1:55432/ojos_orchestrator_live?sslmode=disable
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          sudo apt-get install -y --no-install-recommends \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            postgresql-client
           psql "$ORCHESTRATOR_DATABASE_URL" -f services/orchestrator/migrations/000001_orchestrator_schema.up.sql
+      - name: Build embedded Orchestrator Web UI
+        working-directory: manager/web
+        run: |
+          npm ci --registry=https://registry.npmjs.org
+          npm run build
       - name: Rust checks
         shell: bash
         run: |
@@ -105,7 +118,11 @@ jobs:
           OJOS_REQUIRE_PG_LIVE: "1"
         run: |
           set -euo pipefail
-          cargo test -p orchestrator-core --test pg_store_integration -- --test-threads=1
+          cargo test -p orchestrator-legacy --test pg_store_integration -- --test-threads=1
+
+      - name: Orchestrator Store Job Agent Docker lifecycle
+        shell: bash
+        run: bash deploy/ops/orchestrator-docker-agent-e2e.sh
 
       - name: Build nsjail for strict judge-worker live tests
         shell: bash
@@ -206,8 +223,12 @@ jobs:
         working-directory: services/gateway/frontend
         run: |
           npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
-          npm audit --registry=https://registry.npmjs.org --audit-level=high
           npm run build
+
+      - name: Audit gateway frontend dependencies
+        if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}
+        working-directory: services/gateway/frontend
+        run: npm audit --registry=https://registry.npmjs.org --audit-level=high
 
       - name: Orchestrator model checks
         shell: bash

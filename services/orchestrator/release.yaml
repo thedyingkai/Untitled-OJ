@@ -1,6 +1,6 @@
 schema_version: 1
 service_name: orchestrator
-version: 0.1.0
+version: 1.0.0
 description: Release contract for orchestrator.
 service_type: agent
 source:
@@ -40,4 +40,3 @@ secrets:
 observability:
   metrics: true
   jaeger: true
-

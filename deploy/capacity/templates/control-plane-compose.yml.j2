@@ -1,0 +1,78 @@
+name: ojos-capacity-control-plane
+services:
+  database-ready:
+    image: {{ capacity_postgres_image }}
+    env_file:
+      - /etc/ojos/capacity/control-plane.env
+    environment:
+      PGDATABASE: ${ORCHESTRATOR_MIGRATION_DATABASE_URL:?protected migration URL is required}
+      PGCONNECT_TIMEOUT: "3"
+    volumes:
+      - /etc/ojos/capacity/control-plane/orchestrator-postgres-ca.crt:/run/secrets/orchestrator-postgres-ca.crt:ro
+    entrypoint: [psql]
+    command: [--no-psqlrc, --set, ON_ERROR_STOP=1, --command, "SELECT 1"]
+    restart: "no"
+
+  catalog:
+    image: {{ capacity_catalog_server_image }}
+    command: ["nginx", "-g", "daemon off;"]
+    ports:
+      - "{{ capacity_control_plane_listen_address }}:8443:8443"
+    volumes:
+      - /opt/ojos/capacity/catalog:/srv/catalog:ro
+      - /etc/ojos/capacity/catalog-nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/ojos/capacity/control-plane/catalog-tls.crt:/run/secrets/catalog-tls.crt:ro
+      - /etc/ojos/capacity/control-plane/catalog-tls.key:/run/secrets/catalog-tls.key:ro
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    image: {{ capacity_migrate_image }}
+    env_file:
+      - /etc/ojos/capacity/control-plane.env
+    volumes:
+      - /opt/ojos/capacity/migrations:/migrations:ro
+      - /etc/ojos/capacity/control-plane/orchestrator-postgres-ca.crt:/run/secrets/orchestrator-postgres-ca.crt:ro
+    command:
+      - -path
+      - /migrations
+      - -database
+      - ${ORCHESTRATOR_MIGRATION_DATABASE_URL:?protected migration URL is required}
+      - up
+    restart: "no"
+
+  orchestrator:
+    image: {{ capacity_control_plane_image }}
+    depends_on:
+      catalog: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    env_file:
+      - /etc/ojos/capacity/control-plane.env
+      - /etc/ojos/capacity/catalog-override.env
+    environment:
+      OJOS_ENVIRONMENT: production
+      ORCHESTRATOR_LEGACY_API_MODE: gone
+      ORCHESTRATOR_POSTGRES_CA_CERT: /run/secrets/orchestrator-postgres-ca.crt
+      ORCHESTRATOR_TLS_CERT: /run/secrets/orchestrator-tls.crt
+      ORCHESTRATOR_TLS_KEY: /run/secrets/orchestrator-tls.key
+      ORCHESTRATOR_NODE_CA_CERT: /run/secrets/orchestrator-node-ca.crt
+      ORCHESTRATOR_NODE_CA_KEY: /run/secrets/orchestrator-node-ca.key
+      ORCHESTRATOR_HEALTHCHECK_URL: {{ capacity_control_plane_api_url }}/api/v1/healthz/ready
+      ORCHESTRATOR_HEALTHCHECK_CA_CERT: /run/secrets/orchestrator-health-ca.crt
+    ports:
+      - "{{ capacity_control_plane_listen_address }}:8090:8090"
+    volumes:
+      - orchestrator-artifacts:/var/lib/ojos/orchestrator/artifacts
+      - /etc/ojos/capacity/control-plane:/run/secrets:ro
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: 20m, max-file: "10" }
+
+volumes:
+  orchestrator-artifacts:

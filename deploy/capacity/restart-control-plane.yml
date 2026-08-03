@@ -1,0 +1,23 @@
+---
+- name: Restart exactly one active Orchestrator control plane without a shell
+  hosts: orchestrator_control_plane
+  serial: 1
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Restart only the candidate Orchestrator container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --env-file
+          - /etc/ojos/capacity/control-plane.env
+          - --project-directory
+          - /opt/ojos/capacity/control-plane
+          - -f
+          - /opt/ojos/capacity/control-plane/compose.yml
+          - restart
+          - --timeout
+          - "30"
+          - orchestrator
+      changed_when: true
