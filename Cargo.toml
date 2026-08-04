@@ -8,6 +8,7 @@ members = [
     "services/orchestrator/agent",
     "services/orchestrator/manager",
     "services/orchestrator/backend",
+    "manager/installer",
     "manager/desktop",
     "manager/tui",
 ]
@@ -30,11 +31,13 @@ orchestrator-storage = { path = "services/orchestrator/storage" }
 orchestrator-runtime = { path = "services/orchestrator/runtime" }
 orchestrator-agent = { path = "services/orchestrator/agent" }
 orchestrator-manager = { path = "services/orchestrator/manager" }
+ojos-orchestrator-installer = { path = "manager/installer" }
 regex = "1"
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 ratatui = "0.30"

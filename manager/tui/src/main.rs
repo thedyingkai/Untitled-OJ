@@ -1479,6 +1479,7 @@ fn field_marker(selected: bool) -> &'static str {
 }
 
 fn main() -> Result<()> {
+    let _install_guard = ojos_orchestrator_installer::acquire_runtime_install_guard()?;
     configure_utf8_console()?;
     let cli = Cli::parse();
     let api_url = cli

@@ -12,15 +12,18 @@ use ojos_orchestrator_desktop::{
 use orchestrator_backend::{
     EmbeddedServerHandle, EmbeddedServerOptions, EmbeddedStorage, start_embedded_server,
 };
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::webview::{NewWindowResponse, PageLoadEvent};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use url::Url;
 
 fn main() -> anyhow::Result<()> {
+    let _install_guard = ojos_orchestrator_installer::acquire_runtime_install_guard()?;
     let config = resolve_launch_config(Cli::parse())?;
     run_tauri(config)
 }
@@ -123,6 +126,7 @@ fn start_launch_target(config: LaunchConfig, resource_dir: &Path) -> Result<Laun
 fn run_tauri(config: LaunchConfig) -> Result<()> {
     let smoke_mode = desktop_smoke_mode();
     let smoke_duration_ms = desktop_smoke_duration_ms()?;
+    let startup_signal = Arc::new(Mutex::new(startup_signal_from_environment()?));
 
     let app = tauri::Builder::default()
         .manage(ServerState(Mutex::new(EmbeddedRuntimeState {
@@ -138,6 +142,7 @@ fn run_tauri(config: LaunchConfig) -> Result<()> {
             let target_url = target.url.clone();
             let allowed_origin = target_url.clone();
             let smoke_origin = target_url.clone();
+            let startup_signal = Arc::clone(&startup_signal);
             let embedded = target.server.is_some();
             if smoke_mode && !embedded {
                 return Err(anyhow!(
@@ -168,10 +173,29 @@ fn run_tauri(config: LaunchConfig) -> Result<()> {
             })
             .on_new_window(|_url, _features| NewWindowResponse::Deny)
             .on_page_load(move |window, payload| {
-                if !smoke_mode
-                    || payload.event() != PageLoadEvent::Finished
+                if payload.event() != PageLoadEvent::Finished
                     || !same_origin(payload.url(), &smoke_origin)
                 {
+                    return;
+                }
+                if payload.url().path() == "/" {
+                    let signal = match startup_signal.lock() {
+                        Ok(mut signal) => signal.take(),
+                        Err(_) => {
+                            eprintln!("Desktop startup readiness state lock poisoned");
+                            window.app_handle().exit(1);
+                            return;
+                        }
+                    };
+                    if let Some(signal) = signal {
+                        if let Err(error) = publish_startup_ready(&signal) {
+                            eprintln!("Desktop could not acknowledge startup readiness: {error}");
+                            window.app_handle().exit(1);
+                            return;
+                        }
+                    }
+                }
+                if !smoke_mode {
                     return;
                 }
                 match payload.url().path() {
@@ -223,4 +247,65 @@ fn run_tauri(config: LaunchConfig) -> Result<()> {
         }
     });
     Ok(())
+}
+
+#[derive(Debug)]
+struct StartupSignal {
+    path: PathBuf,
+    token: String,
+}
+
+fn startup_signal_from_environment() -> Result<Option<StartupSignal>> {
+    let path = std::env::var_os("OJOS_DESKTOP_READY_FILE").map(PathBuf::from);
+    let token = std::env::var("OJOS_DESKTOP_READY_TOKEN").ok();
+    match (path, token) {
+        (None, None) => Ok(None),
+        (Some(path), Some(token)) if !token.trim().is_empty() => {
+            Ok(Some(StartupSignal { path, token }))
+        }
+        _ => anyhow::bail!(
+            "OJOS_DESKTOP_READY_FILE and OJOS_DESKTOP_READY_TOKEN must be provided together"
+        ),
+    }
+}
+
+fn publish_startup_ready(signal: &StartupSignal) -> Result<()> {
+    let parent = signal
+        .path
+        .parent()
+        .ok_or_else(|| anyhow!("Desktop readiness file has no parent directory"))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create Desktop readiness directory {}", parent.display()))?;
+    let temporary = signal
+        .path
+        .with_extension(format!("ready-{}.tmp", std::process::id()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .with_context(|| format!("create Desktop readiness file {}", temporary.display()))?;
+    file.write_all(signal.token.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    fs::rename(&temporary, &signal.path)
+        .with_context(|| format!("publish Desktop readiness file {}", signal.path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod startup_signal_tests {
+    use super::*;
+
+    #[test]
+    fn startup_readiness_is_published_atomically_with_the_exact_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ready");
+        let signal = StartupSignal {
+            path: path.clone(),
+            token: "launch-token".to_string(),
+        };
+        publish_startup_ready(&signal).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "launch-token\n");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 }

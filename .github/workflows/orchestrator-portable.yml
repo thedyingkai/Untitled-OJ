@@ -1,0 +1,250 @@
+name: Orchestrator native portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/orchestrator-portable.yml
+      - Cargo.lock
+      - Cargo.toml
+      - manager/installer/**
+      - manager/desktop/**
+      - manager/tui/**
+      - manager/web/**
+      - platform/schemas/orchestrator/**
+      - platform/shared/go/**
+      - services/**
+      - sets/**
+      - store/index.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orchestrator-portable-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Native unsigned Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: manager/web/package-lock.json
+      - name: Build native programs and Web UI
+        shell: pwsh
+        run: |
+          npm --prefix manager/web ci --no-audit --no-fund --registry=https://registry.npmjs.org
+          npm --prefix manager/web run build
+          cargo build --release --locked `
+            -p ojos-orchestrator-installer `
+            -p ojos-orchestrator-daemon `
+            -p ojos-orchestrator-tui `
+            -p orchestrator-agent `
+            -p ojos-orchestrator-desktop
+      - name: Pack and verify with the native command
+        id: pack
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP "ojos-orchestrator-1.0.0-windows-x64"
+          & target/release/ojos-orchestrator.exe pack --repo-root . --target-dir target/release --output $bundle --commit $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw "native pack failed" }
+          & (Join-Path $bundle "ojos-orchestrator.exe") verify --bundle (Join-Path $bundle "payload")
+          if ($LASTEXITCODE -ne 0) { throw "native verification failed" }
+          $instructions = Get-Content -LiteralPath (Join-Path $bundle "INSTALL.txt") -Raw
+          if ($instructions -notmatch [regex]::Escape(".\ojos-orchestrator.exe install")) { throw "Windows install instruction is not directly executable" }
+          "bundle=$bundle" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - name: Install and smoke from an unrelated directory
+        shell: pwsh
+        env:
+          BUNDLE: ${{ steps.pack.outputs.bundle }}
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP "OJOS installed 空格"
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & (Join-Path $env:BUNDLE "ojos-orchestrator.exe") install --bundle (Join-Path $env:BUNDLE "payload") --prefix $prefix --no-path
+            if ($LASTEXITCODE -ne 0) { throw "native install failed" }
+            $bin = Join-Path $prefix "bin"
+            & (Join-Path $bin "ojos-orchestrator.exe") status --json | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "installed command status failed" }
+            foreach ($name in @(
+              "ojos-orchestrator-daemon.exe",
+              "ojos-orchestrator-tui.exe",
+              "ojos-orchestrator-agent.exe",
+              "ojos-orchestrator-desktop.exe"
+            )) {
+              & (Join-Path $bin $name) --help | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "$name --help failed" }
+              & (Join-Path $bin $name) --version | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "$name --version failed" }
+            }
+            $artifact = Join-Path $env:RUNNER_TEMP "ojos-daemon-artifacts"
+            New-Item -ItemType Directory -Path $artifact | Out-Null
+            $daemon = Start-Process -FilePath (Join-Path $bin "ojos-orchestrator-daemon.exe") -ArgumentList @("--ephemeral", "--artifact-root", $artifact, "--bind", "127.0.0.1:38090") -PassThru -WindowStyle Hidden
+            try {
+              $live = $false
+              for ($attempt = 0; $attempt -lt 100; $attempt++) {
+                try {
+                  $response = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:38090/api/v1/healthz/live -TimeoutSec 2
+                  if ($response.StatusCode -eq 200) { $live = $true; break }
+                } catch {}
+                Start-Sleep -Milliseconds 100
+              }
+              if (-not $live) { throw "installed daemon did not become live" }
+              $web = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:38090/ -TimeoutSec 5
+              if ($web.Content -notmatch '<div id="app"') { throw "installed daemon did not serve the embedded Web UI" }
+              & (Join-Path $env:BUNDLE "ojos-orchestrator.exe") install --bundle (Join-Path $env:BUNDLE "payload") --prefix $prefix --no-path
+              if ($LASTEXITCODE -eq 0) { throw "upgrade succeeded while an installed daemon held the runtime lock" }
+            } finally {
+              Stop-Process -Id $daemon.Id -ErrorAction SilentlyContinue
+              Wait-Process -Id $daemon.Id -ErrorAction SilentlyContinue
+            }
+            & (Join-Path $env:BUNDLE "ojos-orchestrator.exe") install --bundle (Join-Path $env:BUNDLE "payload") --prefix $prefix --no-path
+            if ($LASTEXITCODE -ne 0) { throw "upgrade after daemon shutdown failed" }
+            $env:OJOS_DESKTOP_SMOKE = "1"
+            & (Join-Path $bin "ojos-orchestrator.exe") start --wait -- --data-dir (Join-Path $env:RUNNER_TEMP "ojos-portable-data")
+            if ($LASTEXITCODE -ne 0) { throw "installed Desktop smoke failed" }
+          } finally {
+            Pop-Location
+          }
+      - name: Archive, extract afresh, and reverify
+        id: archive
+        shell: pwsh
+        env:
+          BUNDLE: ${{ steps.pack.outputs.bundle }}
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "portable-output"
+          New-Item -ItemType Directory -Path $output | Out-Null
+          $archive = Join-Path $output "ojos-orchestrator-1.0.0-unsigned-windows-x64.zip"
+          Compress-Archive -LiteralPath $env:BUNDLE -DestinationPath $archive
+          $fresh = Join-Path $env:RUNNER_TEMP "fresh-extract"
+          Expand-Archive -LiteralPath $archive -DestinationPath $fresh
+          $extracted = Get-ChildItem -LiteralPath $fresh -Directory | Select-Object -First 1
+          & (Join-Path $extracted.FullName "ojos-orchestrator.exe") verify --bundle (Join-Path $extracted.FullName "payload")
+          if ($LASTEXITCODE -ne 0) { throw "freshly extracted bundle verification failed" }
+          $checksum = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$checksum *$(Split-Path -Leaf $archive)" | Set-Content -LiteralPath (Join-Path $output "SHA256SUMS") -Encoding ascii
+          "output=$output" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ojos-orchestrator-1.0.0-unsigned-windows-x64
+          path: ${{ steps.archive.outputs.output }}
+          if-no-files-found: error
+          retention-days: 30
+
+  linux:
+    name: Native unsigned Ubuntu 24.04 x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: manager/web/package-lock.json
+      - name: Install Linux Desktop build and smoke dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            xauth \
+            xvfb
+      - name: Build native programs and Web UI
+        run: |
+          npm --prefix manager/web ci --no-audit --no-fund --registry=https://registry.npmjs.org
+          npm --prefix manager/web run build
+          cargo build --release --locked \
+            -p ojos-orchestrator-installer \
+            -p ojos-orchestrator-daemon \
+            -p ojos-orchestrator-tui \
+            -p orchestrator-agent \
+            -p ojos-orchestrator-desktop
+      - name: Pack and verify with the native command
+        id: pack
+        run: |
+          bundle="$RUNNER_TEMP/ojos-orchestrator-1.0.0-ubuntu-24.04-x86_64"
+          target/release/ojos-orchestrator pack --repo-root . --target-dir target/release --output "$bundle" --commit "$GITHUB_SHA"
+          "$bundle/ojos-orchestrator" verify --bundle "$bundle/payload"
+          grep -Fq './ojos-orchestrator install' "$bundle/INSTALL.txt"
+          printf 'bundle=%s\n' "$bundle" >>"$GITHUB_OUTPUT"
+      - name: Archive and extract into a clean directory
+        id: archive
+        env:
+          BUNDLE: ${{ steps.pack.outputs.bundle }}
+        run: |
+          output="$RUNNER_TEMP/portable-output"
+          mkdir -p "$output"
+          archive="$output/ojos-orchestrator-1.0.0-unsigned-ubuntu-24.04-x86_64.tar.gz"
+          tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf "$archive" -C "$(dirname "$BUNDLE")" "$(basename "$BUNDLE")"
+          fresh="$RUNNER_TEMP/fresh-extract"
+          mkdir -p "$fresh"
+          tar -xzf "$archive" -C "$fresh"
+          extracted="$fresh/$(basename "$BUNDLE")"
+          "$extracted/ojos-orchestrator" verify --bundle "$extracted/payload"
+          printf 'extracted=%s\n' "$extracted" >>"$GITHUB_OUTPUT"
+          (cd "$output" && sha256sum "$(basename "$archive")" >SHA256SUMS)
+          printf 'output=%s\n' "$output" >>"$GITHUB_OUTPUT"
+      - name: Install and smoke the freshly extracted bundle
+        env:
+          BUNDLE: ${{ steps.archive.outputs.extracted }}
+        run: |
+          prefix="$RUNNER_TEMP/OJOS-installed-unicode-测试"
+          cd "$RUNNER_TEMP"
+          "$BUNDLE/ojos-orchestrator" install --bundle "$BUNDLE/payload" --prefix "$prefix" --no-path
+          "$prefix/bin/ojos-orchestrator" status --json >/dev/null
+          for name in \
+            ojos-orchestrator-daemon \
+            ojos-orchestrator-tui \
+            ojos-orchestrator-agent \
+            ojos-orchestrator-desktop; do
+            "$prefix/bin/$name" --help >/dev/null
+            "$prefix/bin/$name" --version >/dev/null
+          done
+          artifact="$RUNNER_TEMP/ojos-daemon-artifacts"
+          mkdir -p "$artifact"
+          "$prefix/bin/ojos-orchestrator-daemon" --ephemeral --artifact-root "$artifact" --bind 127.0.0.1:38091 >"$RUNNER_TEMP/daemon.log" 2>&1 &
+          daemon_pid=$!
+          trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
+          live=0
+          for attempt in $(seq 1 100); do
+            if curl --fail --silent http://127.0.0.1:38091/api/v1/healthz/live >/dev/null; then
+              live=1
+              break
+            fi
+            sleep 0.1
+          done
+          test "$live" -eq 1
+          curl --fail --silent http://127.0.0.1:38091/ | grep -q '<div id="app"'
+          if "$BUNDLE/ojos-orchestrator" install --bundle "$BUNDLE/payload" --prefix "$prefix" --no-path; then
+            echo "upgrade succeeded while an installed daemon held the runtime lock" >&2
+            exit 1
+          fi
+          kill "$daemon_pid"
+          wait "$daemon_pid" || true
+          trap - EXIT
+          "$BUNDLE/ojos-orchestrator" install --bundle "$BUNDLE/payload" --prefix "$prefix" --no-path
+          xvfb-run -a env OJOS_DESKTOP_SMOKE=1 \
+            "$prefix/bin/ojos-orchestrator" start --wait -- --data-dir "$RUNNER_TEMP/ojos-portable-data"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ojos-orchestrator-1.0.0-unsigned-ubuntu-24.04-x86_64
+          path: ${{ steps.archive.outputs.output }}
+          if-no-files-found: error
+          retention-days: 30

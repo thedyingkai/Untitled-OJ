@@ -20,6 +20,23 @@ SQLite 位于操作系统应用数据目录，默认文件名为 `orchestrator.d
 
 ## 构建与运行
 
+从 unsigned portable 包安装到当前用户目录只需要一条原生命令，不需要 MSI、安装脚本或管理员权限：
+
+```powershell
+# Windows，在解压后的包目录运行
+.\ojos-orchestrator.exe install
+# 当前终端使用完整路径；新终端可使用 ojos-orchestrator
+& "$env:LOCALAPPDATA\Programs\OJOS-Orchestrator\bin\ojos-orchestrator.exe"
+```
+
+```bash
+# Linux，在解压后的包目录运行
+./ojos-orchestrator install
+~/.local/share/ojos-orchestrator/bin/ojos-orchestrator
+```
+
+原生安装器同时放置 Desktop、daemon、TUI、Agent、Web UI、schema、Store 索引、service/release manifests、所有 release 引用的 migration，以及本地 release 所需的受跟踪源码。payload 在写入前逐文件校验 SHA-256，安装由目录外独占锁和持久 journal 保护，进程中断后会恢复旧版或发布已经完整验证的 stage。Windows 默认安装到 `%LOCALAPPDATA%\Programs\OJOS-Orchestrator` 并以原生注册表接口加入用户 PATH；Linux 默认安装到 `~/.local/share/ojos-orchestrator`，不修改 shell 配置。重复运行不会删除操作系统应用数据目录中的 SQLite、Agent identity 或 artifact。
+
 开发环境先生成 Web UI，再从仓库根目录启动：
 
 ```bash

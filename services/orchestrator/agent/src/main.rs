@@ -95,6 +95,7 @@ struct RunArgs {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _install_guard = ojos_orchestrator_installer::acquire_runtime_install_guard()?;
     match Cli::parse().command {
         Command::Enroll(arguments) => enroll(arguments).await,
         Command::Run(arguments) => run(arguments).await,

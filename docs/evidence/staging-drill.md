@@ -1,6 +1,6 @@
 # Staging 备份、恢复与回滚演练
 
-> **历史整栈演练记录，不是 Orchestrator v1 GA 证据。** 当前候选必须使用 v1 的 PostgreSQL + artifact 备份恢复、真实 0.2 → 1.0 升级和同 commit production capacity/24h 门禁；要求见[生产就绪证据](../production-readiness.md)。
+> **历史整栈演练记录，不是当前功能结论。** 当前 v1 的 PostgreSQL + artifact 备份恢复和真实 0.2 → 1.0 升级由普通功能门禁复验；只有项目需要声明 100 Node/24 小时生产规模时，才额外运行同 commit capacity 门禁。边界见[生产就绪证据](../production-readiness.md)。
 
 `deploy/ops/staging-drill.sh` 是 nightly 的一次性演练，不连接生产资源。
 

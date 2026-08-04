@@ -1,14 +1,14 @@
 # OJOS Orchestrator 文档索引
 
-当前源码是 Orchestrator `1.0.0` 发布候选，尚未发布 GA。架构和契约以 v1 文档与当前源码为准；历史 alpha、0.2 兼容记录和 `docs/evidence/*.json` 不能替代候选 commit 的运行证据。
+当前源码是 Orchestrator `1.0.0`，本地功能与 unsigned portable 交付为 GO；是否创建 GA tag/Release 是单独的发布决定。架构和契约以 v1 文档与当前源码为准；历史 alpha、0.2 兼容记录和 `docs/evidence/*.json` 不代表当前实现。
 
 ## 首先阅读
 
-- [项目状态总结](completeness-summary.md)：当前已实现能力与 GA 前唯一剩余门禁。
-- [发布候选判定](release-candidate.md)：当前 GO/NO-GO 和晋级顺序。
+- [项目状态总结](completeness-summary.md)：当前已实现能力与按需执行的规模/签名证据。
+- [交付判定](release-candidate.md)：本地功能结论、原生 CLI 安装和额外发布证据边界。
 - [Orchestrator v1.0 运维手册](orchestrator/operations-v1.md)：生产预检、Node Agent、健康/指标、备份恢复、容量和 24 小时门禁。
-- [生产就绪证据](production-readiness.md)：候选证据账本与 commit 绑定规则。
-- [未完成的上线证据](unfinished/README.md)：仍需从候选环境和发布系统取得的两类 artifact。
+- [生产就绪证据](production-readiness.md)：需要声明生产规模或签名分发时使用的证据账本。
+- [可选的上线证据](unfinished/README.md)：需要对应声明时才从外部环境取得的两类 artifact。
 
 ## 架构与契约
 

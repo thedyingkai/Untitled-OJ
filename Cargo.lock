@@ -3169,6 +3169,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
  "jsonwebtoken",
+ "ojos-orchestrator-installer",
  "orchestrator-agent",
  "orchestrator-control-plane",
  "orchestrator-legacy",
@@ -3207,6 +3208,7 @@ dependencies = [
  "getrandom 0.3.4",
  "ico",
  "ojos-orchestrator-daemon",
+ "ojos-orchestrator-installer",
  "orchestrator-agent",
  "orchestrator-runtime",
  "png 0.17.16",
@@ -3220,6 +3222,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ojos-orchestrator-installer"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fs2",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tempfile",
+ "walkdir",
+ "windows-sys 0.61.2",
+ "winreg",
+]
+
+[[package]]
 name = "ojos-orchestrator-tui"
 version = "1.0.0"
 dependencies = [
@@ -3227,6 +3246,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "crossterm",
+ "ojos-orchestrator-installer",
  "orchestrator-legacy",
  "orchestrator-manager",
  "ratatui",
@@ -3269,6 +3289,7 @@ dependencies = [
  "clap",
  "fs2",
  "hmac 0.12.1",
+ "ojos-orchestrator-installer",
  "orchestrator-control-plane",
  "orchestrator-runtime",
  "rcgen",

@@ -1,6 +1,6 @@
 # Orchestrator v1.0 可核对证据索引
 
-本页说明“到哪里核对实现和自动化”，不记录历史绿色 run。候选 commit 的 GO/NO-GO 见 [生产就绪证据](../production-readiness.md)；本地测试和其他 commit 的 artifact 不能替代该结论。
+本页说明“到哪里核对实现和自动化”，不记录历史绿色 run。本地功能与 unsigned portable 的交付结论见[交付判定](../release-candidate.md)；需要额外声明生产规模或受信任签名分发时，再按[生产就绪证据](../production-readiness.md)把对应 artifact 与 commit 绑定。
 
 ## 实现入口
 

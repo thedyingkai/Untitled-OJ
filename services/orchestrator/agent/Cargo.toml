@@ -13,6 +13,7 @@ bench = false
 async-trait = "0.1"
 base64 = "0.22"
 clap.workspace = true
+ojos-orchestrator-installer.workspace = true
 fs2 = "0.4"
 hmac = "0.12"
 orchestrator-control-plane.workspace = true

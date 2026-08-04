@@ -2,7 +2,7 @@
 
 OJOS Orchestrator 是 OJOS 的服务控制面。它负责可信 Catalog/Release、显式节点放置、Deployment 生命周期、版本化 Topology、持久 Operation/Job、观测和诊断；题目、提交、判题、用户、比赛等业务仍由各 Service 实现。
 
-当前源码版本为 `1.0.0` 发布候选，**尚未发布 GA**。剩余放行条件见[发布候选判定](docs/release-candidate.md)。
+当前源码版本为 `1.0.0`。本地功能与 portable 交付按仓库自动化判定；生产规模证明和代码签名只在需要对应容量声明或公开受信任分发时执行，不再阻塞本地功能完成。
 
 ## v1 架构
 
@@ -40,6 +40,25 @@ Store 负责安装和节点放置；Topology 只连接已经注册或部署的�
 - **daemon**（`services/orchestrator/backend`）：单一 REST/SSE 控制面。生产必须使用 PostgreSQL、TLS、OIDC、Node CA、可信 Catalog 和 durable artifact 目录。
 
 Web 与 TUI 使用相同的 published action、RBAC、默认值、Problem Details、cursor、ETag、SSE 和 Idempotency-Key 语义。TUI 不复刻拖拽画布，但控制能力一致。
+
+## 一条命令安装
+
+不需要 MSI、脚本安装器、管理员权限或云签名。下载并解压对应平台的 unsigned portable 包后，直接运行包内的原生 `ojos-orchestrator install`。它会验证目标平台、完整资源布局和每个文件的 SHA-256，再以带锁、可恢复的目录切换安装到当前用户目录；升级不会删除 Desktop SQLite、Agent ledger 或用户数据。
+
+```powershell
+# Windows；在解压后的包目录运行，默认安装到 %LOCALAPPDATA%\Programs\OJOS-Orchestrator
+.\ojos-orchestrator.exe install
+# 当前终端可直接启动；新终端可使用 ojos-orchestrator
+& "$env:LOCALAPPDATA\Programs\OJOS-Orchestrator\bin\ojos-orchestrator.exe"
+```
+
+```bash
+# Linux；在解压后的包目录运行，默认安装到 ~/.local/share/ojos-orchestrator
+./ojos-orchestrator install
+~/.local/share/ojos-orchestrator/bin/ojos-orchestrator
+```
+
+Windows 原生安装器会更新当前用户 PATH，但当前终端不会因此改变；新开终端后才能直接输入 `ojos-orchestrator`。升级前须退出正在运行的 Desktop、daemon、TUI 和 Agent；各程序持有共享运行锁，安装器不会让旧二进制混用新资源。Linux 不修改任何 shell 配置，会输出完整启动路径；需要短命令时把安装目录的 `bin` 加入自己的 PATH。Linux 包以 Ubuntu 24.04 x86_64 为当前构建基线，Desktop 运行仍要求系统已安装 WebKitGTK 4.1、GTK3、Ayatana AppIndicator、librsvg 和 libxdo；安装器会用 `ldd` 明确拒绝缺库环境。安装器本身不调用 shell、批处理或 PowerShell 脚本。
 
 ## 本地开发
 
@@ -91,15 +110,11 @@ Topology 编辑 Endpoint/Link 时创建 draft revision。validate/diff 不产生
 - 0.2 normalized 数据可 expand-only 导入：旧 topology 成为未应用 draft，旧 runtime 只标记 `External/Unknown`。
 - `0.2.0` 兼容构建保留带弃用头的旧路由；`1.0.0` 对旧 mutation 返回 `410 Gone`。旧 Node push/shared-bearer 路径不属于 v1。
 
-## GA 状态
+## 交付状态
 
-功能和自动化门禁已经进入仓库，真实 PostgreSQL 0.2.0 → 1.0.0 导入以及数据库/artifact
-恢复也已纳入 `release.yml` 并通过本地 PG17 验证。GA 仍为 **NO-GO**，直到同一候选 commit 完成：
+本地功能、持久化、真实 Docker Agent 生命周期、PostgreSQL 升级/恢复、Desktop/Web/TUI 和原生 CLI 安装均属于日常功能门禁。普通交付使用 unsigned portable ZIP/tar 和 `ojos-orchestrator install`，不依赖 MSI、Azure、专用 runner 或主机群。
 
-1. 100 Nodes、2,000 Deployments、10,000 Endpoint+Link、50 并发 Operations和完整 24 小时生产 profile 证据；
-2. Windows x64 MSI/ZIP、Linux x86_64 DEB/AppImage/tar.gz，以及 SHA256、SPDX SBOM、provenance、Sigstore/attestation 的实际构建和验证。
-
-候选 commit 仍必须重新通过自动化升级/恢复门禁；本地通过结果只证明门禁可执行，不替代候选 CI 结果。
+仓库仍保留 100 Node/24 小时容量工具和 signed-GA workflow，供未来需要声明该生产规模或面向受签名策略约束的公开分发时使用。它们是可选的额外证据，不代表 Store、Topology、Desktop 或 CLI 功能未完成。
 
 ## 文档
 

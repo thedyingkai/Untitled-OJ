@@ -10,6 +10,7 @@ clap.workspace = true
 crossterm.workspace = true
 orchestrator-legacy.workspace = true
 orchestrator-manager.workspace = true
+ojos-orchestrator-installer.workspace = true
 ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true

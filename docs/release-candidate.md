@@ -1,10 +1,10 @@
-# Orchestrator v1.0 发布候选判定
+# Orchestrator v1.0 交付判定
 
-## 当前结论：NO-GO
+## 当前结论：本地功能 GO
 
-当前源码已经达到 v1 功能候选状态，发布 workflow 也已编码功能、升级、容量和制品门禁；但尚无一个冻结 commit 同时满足全部外部证据。因此不能创建或宣称 `v1.0.0` GA。
+当前源码、自动化测试和原生 portable 安装入口已经达到 v1 本地功能交付状态。Windows/Linux 用户从解压后的 portable 包直接运行 `ojos-orchestrator install`，不需要安装脚本、MSI、Azure 签名、专用 runner 或 10×10 主机群。
 
-`Cargo.toml`、Desktop、Web 和 Service/Release manifest 中的 `1.0.0` 是候选版本一致性要求，不是发布证明。历史 `v0.1.0-alpha` 及任何旧 commit 的绿色 workflow 不能替代当前候选。
+`Cargo.toml`、Desktop、Web 和 Service/Release manifest 中的 `1.0.0` 是版本一致性要求。是否创建 tag 或 GitHub Release 是单独的发布决定，不影响本页对当前代码功能的判定。
 
 ## 功能候选判定
 
@@ -18,28 +18,26 @@
 | Desktop/Web/TUI | 已实现 | Tauri 内嵌 WebView/loopback backend/Agent，远程 OIDC Web、Device Flow TUI 和 published action 能力等价已经落地。 |
 | 运维与发布工具 | 已实现 | preflight、live/ready、指标、日志保留、备份恢复、容量 runner、兼容构建和多平台打包/签名 workflow 已存在。 |
 
-“已实现”仅表示代码和自动化入口具备，仍须由待发布 commit 的 CI 与候选环境复验。
+“已实现”表示代码、自动化入口和本地 portable 运行链路具备；候选 commit 推送后仍须由功能 CI 复验，未产生的 hosted CI 结果不在本页提前声明。
 
-## 阻止 GO 的两项外部证据
+## 可选的额外生产证据
 
-| 门禁 | 当前状态 | GO 条件 |
+| 证据 | 当前状态 | 何时需要 |
 | --- | --- | --- |
-| 同 commit 生产规模 + 24h | 缺失 | production profile 报告证明 100 Nodes、2,000 Deployments、10,000 Endpoint+Link、50 并发 Operations、全部 p95/恢复阈值及完整 24 小时稳定性，并通过 commit 绑定校验。 |
-| 签名多平台 GA 制品 | 尚未生成/发布 | Windows MSI/ZIP 与 Linux DEB/AppImage/tar.gz 及 SHA256、SPDX SBOM、provenance、Sigstore bundle、attestation 全部从同一候选 commit 生成并通过布局 smoke。 |
+| 100 Node + 24h | 未运行 | 只有对外声明“已验证 100 Node 生产容量”时才需要；不用于判断 API、Store、Topology、Agent 或 Desktop 是否正确。 |
+| MSI/Authenticode/Sigstore | 未运行 | 只有公开分发、企业签名策略或发布者信任需要时才执行；unsigned portable 与命令行安装不依赖它。 |
 
 0.2.0 → 1.0.0 真实升级不再是外部未实现项。发布 contract gate 使用历史 0.2 仓储 writer
 向真实 TLS PostgreSQL 17 旧表写入数据，再由 v1 验证 migration/import、未应用 draft、
 `External/Unknown` runtime 和重启幂等；数据库与 artifact 联合备份恢复也有真实 drill。
-这些门禁已在本地通过，但候选 commit 仍须在 release CI 中重跑，任何失败都会阻止 GA build。
+这些门禁已有本地演练入口和历史通过记录；候选 commit 的结果以对应 CI run 为准。
 
-## 晋级顺序
+## 普通 portable 交付
 
-1. 冻结唯一候选 commit；源码、schema、lockfile、workflow 和发布文档均纳入该 commit。
-2. 在该 commit 上运行 release contract/function gates，包括真实 Docker Agent 生命周期和 Web 30 分钟持续运行。
-3. 在同一 commit 上取得 production 100/2000/10000/50 + 24h 报告，并由 release workflow 重新校验。
-4. 确认该 commit 的真实持久 0.2.0 → 1.0.0 升级与联合备份恢复 gate 通过；若失败，修复后生成新候选 commit，并从第 2 步重跑。
-5. 运行 Windows/Linux GA build，下载后复核资源布局、checksum、签名、SBOM、provenance 和 attestation。
-6. 仅在上述结果全部属于同一 commit 时创建并验证 `v1.0.0` tag，发布不可变 GA assets，并把本页改为 GO，登记 run ID 和 artifact digest。
+1. 提交前在本地运行 Rust、Web、TUI、Desktop 和安装布局测试；真实 Docker Agent、PostgreSQL 由可用环境下的合同门禁覆盖；提交后的候选 commit 再由对应 CI 复验。
+2. Windows/Linux 都运行包内的原生 `ojos-orchestrator install`；从无关工作目录验证原生主命令、四个程序、真实 daemon/Web UI 和 Desktop embedded smoke。
+3. `.github/workflows/orchestrator-portable.yml` 生成包含原生 installer、逐文件 manifest 和 payload 的 unsigned ZIP/tar，并在重新解压后的干净目录再次 verify；它既不构建 MSI，也不请求云签名或容量环境。
+4. 如未来确实需要公开签名 GA，再单独运行保留的容量与 signed-GA 流程，不反向改变普通功能结论。
 
 ## v1 发布声明边界
 

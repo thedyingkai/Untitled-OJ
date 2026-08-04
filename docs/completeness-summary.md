@@ -1,6 +1,6 @@
 # Orchestrator v1.0 当前状态
 
-本文描述当前源码已经实现的功能边界，以及把这些功能作为 GA 发布前仍需取得的外部证据。源码中的版本号已经统一为 `1.0.0`，但版本号、测试工具和发布 workflow 的存在都不等于已经发布 GA；在候选 commit 的全部门禁通过并生成签名制品前，发布结论仍是 **NO-GO**。
+本文描述当前源码已经实现的功能边界。源码中的版本号已经统一为 `1.0.0`；本地功能与 unsigned portable 交付按普通 CI 和安装 smoke 判定为 GO。生产规模报告、MSI 和代码签名是按实际发行需求选择的额外证据，不再作为功能完成条件。
 
 历史 `v0.1.0-alpha` 使用旧原生 GUI，不代表当前 Desktop、Store、Topology 或 Agent 的实现。
 
@@ -48,14 +48,14 @@ Topology 不再是观察快照。Endpoint/Link 编辑产生 draft revision，app
 - Web 与 TUI 只展示 published capabilities。发布 action 矩阵要求零 `UNSUPPORTED`。
 - `0.2.0` 兼容构建保留带弃用头的旧路由；`1.0.0` 对旧 mutation 返回 `410 Gone`，旧 Node push/shared-bearer 路径不存在。
 
-## GA 前唯一剩余门禁
+## 可选的生产规模与签名证据
 
-以下事项是候选环境、长时运行或发布系统才能提供的证据，不应再扩写成已经完成的功能缺口：
+以下事项只能由候选环境、长时运行或发布系统提供，也不应写成功能缺口：
 
 1. **同一候选 commit 的生产规模与 24 小时证据**：在直接连接单主动控制面的环境中验证至少 100 Nodes、2,000 Deployments、10,000 Endpoint+Link、50 并发 Operations，以及读 p95 ≤ 200 ms、异步 mutation 接受 p95 ≤ 500 ms、SSE 事件 p95 ≤ 1 秒、真实重启恢复 ≤ 60 秒、RSS 增长 < 10% 和无永久运行任务。报告必须由 production profile 生成，并与候选 commit 精确绑定。
 2. **签名的多平台 GA 制品**：发布 workflow 已定义 Windows x64 MSI/portable ZIP 与 Linux x86_64 DEB/AppImage/tar.gz、SHA256、SPDX SBOM、provenance 和 Sigstore bundle 的构建与校验，但尚不能把 workflow 定义当成已生成、已验证或已发布的 GA 制品。
 
-两项全部绑定同一候选 commit 并通过，且该 commit 的自动化升级/恢复功能门禁再次通过后，才可以把 [发布候选判定](release-candidate.md) 从 NO-GO 改为 GO。详细执行方式见 [v1 运维手册](orchestrator/operations-v1.md) 和 [生产就绪证据](production-readiness.md)。
+只有在项目决定对外声明 100 Node 容量或发布受信任签名安装包时，才需要执行对应流程。普通本地交付使用 unsigned portable 包内的原生 `ojos-orchestrator install`；仓库没有 `sh`、`bat/cmd` 或 `ps1` 产品安装入口。详细执行方式见 [v1 运维手册](orchestrator/operations-v1.md) 和 [生产就绪证据](production-readiness.md)。
 
 真实升级/恢复已经从外部缺口转为发布功能门禁：0.2 历史仓储 writer 在 TLS PostgreSQL 17
 写入旧 schema，v1 验证一次性导入、未应用 draft、`External/Unknown` runtime 和重启幂等；

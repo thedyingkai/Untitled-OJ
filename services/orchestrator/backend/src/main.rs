@@ -14,7 +14,7 @@ use orchestrator_backend::{
 };
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -25,8 +25,10 @@ use std::time::Duration;
 #[command(about = "OJOS Orchestrator HTTP API 入口（含 Web UI 托管）")]
 #[command(version)]
 struct Cli {
-    #[arg(long, default_value = ".")]
-    repo_root: PathBuf,
+    /// Read-only runtime resources. Defaults to the portable root beside the
+    /// executable, then to the current directory for source-tree development.
+    #[arg(long)]
+    repo_root: Option<PathBuf>,
 
     #[arg(long, default_value = "127.0.0.1:8090")]
     bind: String,
@@ -45,9 +47,16 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    let _install_guard = ojos_orchestrator_installer::acquire_runtime_install_guard()?;
     configure_utf8_console()?;
     let cli = Cli::parse();
-    let repo_root = fs::canonicalize(&cli.repo_root).unwrap_or(cli.repo_root);
+    let current_dir = std::env::current_dir().ok();
+    let current_exe = std::env::current_exe().ok();
+    let repo_root = resolve_repo_root(
+        cli.repo_root,
+        current_exe.as_deref(),
+        current_dir.as_deref(),
+    )?;
     let web_root = cli
         .web_root
         .clone()
@@ -103,6 +112,48 @@ fn main() -> Result<()> {
     }
 }
 
+fn resolve_repo_root(
+    explicit: Option<PathBuf>,
+    executable: Option<&Path>,
+    current_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(explicit) = explicit {
+        return Ok(fs::canonicalize(&explicit).unwrap_or(explicit));
+    }
+
+    if let Some(executable_dir) = executable.and_then(Path::parent) {
+        for candidate in [Some(executable_dir), executable_dir.parent()]
+            .into_iter()
+            .flatten()
+        {
+            if runtime_assets_present(candidate) {
+                return Ok(fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf()));
+            }
+        }
+    }
+
+    let current_dir = current_dir.ok_or_else(|| {
+        anyhow!(
+            "cannot discover installed runtime resources and the current directory is unavailable; reinstall or pass --repo-root"
+        )
+    })?;
+    Ok(fs::canonicalize(current_dir).unwrap_or_else(|_| current_dir.to_path_buf()))
+}
+
+fn runtime_assets_present(root: &Path) -> bool {
+    root.join("platform")
+        .join("schemas")
+        .join("orchestrator")
+        .join("actions-v1.yaml")
+        .is_file()
+        && root
+            .join("manager")
+            .join("web")
+            .join("dist")
+            .join("index.html")
+            .is_file()
+}
+
 fn resolve_bind_addr(bind: &str) -> Result<SocketAddr> {
     bind.to_socket_addrs()
         .with_context(|| format!("resolve bind address {bind}"))?
@@ -133,6 +184,47 @@ unsafe extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_daemon_discovers_resources_above_its_bin_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let schema = root
+            .path()
+            .join("platform")
+            .join("schemas")
+            .join("orchestrator");
+        let web = root.path().join("manager").join("web").join("dist");
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&schema).unwrap();
+        fs::create_dir_all(&web).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(schema.join("actions-v1.yaml"), "actions: {}\n").unwrap();
+        fs::write(web.join("index.html"), "<!doctype html>").unwrap();
+
+        let resolved =
+            resolve_repo_root(None, Some(&bin.join("ojos-orchestrator-daemon")), None).unwrap();
+        assert_eq!(resolved, fs::canonicalize(root.path()).unwrap());
+    }
+
+    #[test]
+    fn explicit_daemon_repo_root_wins_over_portable_discovery() {
+        let explicit = tempfile::tempdir().unwrap();
+        let portable = tempfile::tempdir().unwrap();
+        let resolved = resolve_repo_root(
+            Some(explicit.path().to_path_buf()),
+            Some(&portable.path().join("bin").join("ojos-orchestrator-daemon")),
+            Some(portable.path()),
+        )
+        .unwrap();
+        assert_eq!(resolved, fs::canonicalize(explicit.path()).unwrap());
+    }
+
+    #[test]
+    fn daemon_source_tree_falls_back_to_current_directory() {
+        let current = tempfile::tempdir().unwrap();
+        let resolved = resolve_repo_root(None, None, Some(current.path())).unwrap();
+        assert_eq!(resolved, fs::canonicalize(current.path()).unwrap());
+    }
 
     /// 边界术语门禁：拆模块后扫描 daemon 的全部源码，而不再只看 main.rs。
     #[test]

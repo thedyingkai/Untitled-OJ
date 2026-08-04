@@ -1,10 +1,10 @@
 # Orchestrator v1.0 生产就绪证据
 
-本文是功能与运维证据账本，不是“代码里有测试就算上线”的自评。源码、lockfile、schema、workflow 或发布文档有变化后，旧 run 不能继续代表新候选；GA 证据中的 commit 必须与待发布 commit 完全一致。
+本文保留需要生产规模声明或受信任公开分发时使用的额外证据账本。它不再定义本地功能与 unsigned portable 交付是否完成；源码、lockfile、schema、workflow 或发布文档有变化后，旧的额外证据仍不能代表新 commit。
 
 ## 当前结论
 
-**NO-GO。** 当前工作树实现了 v1 功能和发布门禁，真实持久升级/恢复门禁也已落地；但尚未冻结一个同时具备生产规模/24 小时证据和签名多平台制品的候选 commit。仓库版本号为 `1.0.0` 不表示 GA 已经生成或发布。
+**本地功能 GO。** 当前工作树实现了 v1 功能、真实持久升级/恢复和无需脚本/管理员权限的 Windows/Linux 原生 CLI 安装。Linux Desktop 仍依赖发行版提供的 WebKitGTK/GTK 运行库，当前预编译 tar 明确限定 Ubuntu 24.04 x86_64 基线。100 Node/24 小时报告与签名多平台制品尚未执行，因此项目不能额外声称已经验证该规模或已经提供受信任发布者签名；这不阻塞普通本地使用。
 
 历史 `v0.1.0-alpha` 和旧 `2a0d647`/`875586f` workflow 记录只证明当时的代码，不能作为当前候选证据。`docs/evidence/*.json` 同样是历史快照。
 
@@ -23,7 +23,7 @@
 
 这些条目说明实现与可重复测试入口已经存在；它们不替代候选环境的实际运行 artifact。
 
-## 自动发布门禁现状
+## 可选 signed-GA 门禁现状
 
 `.github/workflows/release.yml` 已把以下步骤串成依赖图：
 
@@ -40,9 +40,9 @@ contract-gates
                 └─ Windows/Linux GA build, sign, attest and publish
 ```
 
-该依赖图会阻止缺少生产 evidence 的 GA build，也会验证各平台包布局、checksum、SBOM、provenance 和签名。当前状态仍是“门禁已经编码”，不是“门禁已经在某个候选 commit 上全部成功”。
+该依赖图只用于选择 signed-GA 发行方式，会阻止缺少 production evidence 的签名构建。普通 `.github/workflows/orchestrator-portable.yml` 不进入该依赖图，只构建、安装、启动 smoke 并上传 unsigned ZIP/tar 与 SHA256。
 
-## 尚缺的外部证据
+## 按需执行的外部证据
 
 ### 1. 生产规模与 24 小时稳定性
 
@@ -88,4 +88,4 @@ CI 中重新运行并保留 artifact，本地结果不替代候选结果。
 - 所有跳过、重试和失败步骤；
 - 若只修改证据文档，明确写出它所描述的代码 SHA，不能把文档 commit 冒充被测 commit。
 
-最终 GO/NO-GO 结论维护在 [发布候选判定](release-candidate.md)，门禁命令和故障处置见 [v1 运维手册](orchestrator/operations-v1.md)。
+本地功能与 unsigned portable 的交付结论维护在[交付判定](release-candidate.md)；本页只记录按需执行的生产规模与签名证据。门禁命令和故障处置见 [v1 运维手册](orchestrator/operations-v1.md)。
