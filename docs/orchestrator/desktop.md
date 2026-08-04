@@ -59,7 +59,7 @@ cargo run -p ojos-orchestrator-desktop
 ./bin/ojos-orchestrator-desktop
 ```
 
-Windows portable ZIP 同时包含 `bin/WebView2Loader.dll`。Windows 还需要 WebView2 Runtime；现代受支持版本通常已安装。Linux 使用 WebKitGTK，DEB/AppImage/tar 的运行主机仍需安装发行版对应的 WebKitGTK 运行库。
+Windows 构建若产出动态 `WebView2Loader.dll`，portable ZIP 会原样保留；标准 MSVC/Tauri 静态 loader 构建不会伪造或强制要求该 DLL。两种布局都仍需要系统 WebView2 Runtime，现代受支持 Windows 通常已安装。Linux 使用 WebKitGTK，DEB/AppImage/tar 的运行主机仍需安装发行版对应的 WebKitGTK 运行库。
 
 发布流水线会分别从 portable、MSI/DEB 与 AppImage 的实际资源布局启动 Desktop，并在不传 `--repo-root`/`--web-root` 的情况下完成 WebView、bootstrap exchange、静态资源和 v1 API smoke。
 

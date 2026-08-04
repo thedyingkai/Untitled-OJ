@@ -611,10 +611,16 @@ fn pack(
         copy_file_synced(&source, &bin_dir.join(executable_name(name)))?;
     }
     #[cfg(windows)]
-    copy_file_synced(
-        &target_dir.join("WebView2Loader.dll"),
-        &bin_dir.join("WebView2Loader.dll"),
-    )?;
+    {
+        // GNU builds can emit the dynamic WebView2 loader beside the executable,
+        // while the standard MSVC Tauri build links the loader statically and
+        // therefore has no DLL to package. Preserve a real loader when present,
+        // but never fabricate or require one for the static-loader layout.
+        let webview_loader = target_dir.join("WebView2Loader.dll");
+        if webview_loader.is_file() {
+            copy_file_synced(&webview_loader, &bin_dir.join("WebView2Loader.dll"))?;
+        }
+    }
 
     let include_roots = discover_runtime_roots(&repo_root)?;
     for relative in git_tracked_files(&repo_root, &include_roots)? {
@@ -965,11 +971,6 @@ fn validate_required_layout(root: &Path) -> Result<()> {
             "required bundle resource {relative} is missing"
         );
     }
-    #[cfg(windows)]
-    ensure!(
-        root.join("bin/WebView2Loader.dll").is_file(),
-        "WebView2Loader.dll is missing"
-    );
     let service_count = fs::read_dir(root.join("services"))?
         .filter_map(Result::ok)
         .filter(|entry| {
@@ -1820,6 +1821,31 @@ mod tests {
         };
         write_json_synced(&root.join(INSTALL_MARKER), &marker).unwrap();
         verify_installed_tree(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_static_webview_loader_layout_is_valid_without_a_dll() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("static WebView loader");
+        create_valid_install(&root);
+
+        fs::remove_file(root.join("bin/WebView2Loader.dll")).unwrap();
+        fs::remove_file(root.join(BUNDLE_MANIFEST)).unwrap();
+        fs::remove_file(root.join(INSTALL_MARKER)).unwrap();
+        let manifest = build_manifest(&root, "development").unwrap();
+        write_json_synced(&root.join(BUNDLE_MANIFEST), &manifest).unwrap();
+        let marker = InstallMarker {
+            schema_version: 1,
+            product: PRODUCT.to_string(),
+            version: manifest.version,
+            source_commit: "development".to_string(),
+            bundle_sha256: sha256_file(&root.join(BUNDLE_MANIFEST)).unwrap(),
+            installed_at: "0".to_string(),
+        };
+        write_json_synced(&root.join(INSTALL_MARKER), &marker).unwrap();
+
+        verify_installed_tree(&root).unwrap();
     }
 
     #[test]
