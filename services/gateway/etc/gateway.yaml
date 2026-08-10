@@ -1,6 +1,13 @@
 ﻿Name: gateway-service
 Host: 0.0.0.0
 Port: 8080
+Timeout: 600000
+
+# go-zero's timeout middleware buffers the complete response body. Gateway
+# proxy routes enforce their own total deadlines so downloads remain streamed.
+Middlewares:
+  Timeout: false
+  Recover: false
 
 Database:
   Url: ""
@@ -45,26 +52,31 @@ Proxy:
       Target: http://auth-service:8081
       StripPrefix: /api
       AuthMode: optional
+      TimeoutMS: 30000
 
     - Prefix: /api/judge/worker
       Target: http://judge-api:8082
       StripPrefix: /api
       AuthMode: none
+      TimeoutMS: 35000
 
     - Prefix: /api/judge
       Target: http://judge-api:8082
       StripPrefix: /api
       AuthMode: required
+      TimeoutMS: 30000
 
     - Prefix: /api/problem
       Target: http://problem-service:8083
       StripPrefix: /api
       AuthMode: required
+      TimeoutMS: 30000
 
     - Prefix: /api/users
       Target: http://user-service:8084
       StripPrefix: /api
       AuthMode: required
+      TimeoutMS: 30000
 
 ServiceStatus:
   ComposeServices:
@@ -91,3 +103,9 @@ Orchestrator:
 
 AuthService:
   Endpoint: http://auth-service:8081
+
+WorkloadIdentity:
+  PublicKeyFile: ""
+  KeyID: "workload-1"
+  Issuer: "ojos-auth/workload"
+  Audience: "ojos-gateway"

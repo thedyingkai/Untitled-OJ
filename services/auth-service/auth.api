@@ -35,6 +35,24 @@ type RegisterResp {
 	Data RegisterData `json:"data,optional"`
 }
 
+type AdminBootstrapReq {
+	BootstrapSecret string `header:"X-OJOS-Bootstrap-Secret"`
+	Username        string `json:"username"`
+	Email           string `json:"email,optional"`
+	Password        string `json:"password"`
+}
+
+type AdminBootstrapData {
+	UserId   int64  `json:"user_id"`
+	Username string `json:"username"`
+}
+
+type AdminBootstrapResp {
+	Code int                `json:"code"`
+	Msg  string             `json:"msg"`
+	Data AdminBootstrapData `json:"data,optional"`
+}
+
 type LoginReq {
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -462,6 +480,11 @@ service auth {
 
 	@handler login
 	post /login (LoginReq) returns (LoginResp)
+
+	// This route is registered only when an AdminBootstrap secret is explicitly
+	// configured. The credential is consumed permanently after the first success.
+	@handler adminBootstrap
+	post /bootstrap/admin (AdminBootstrapReq) returns (AdminBootstrapResp)
 }
 
 @server (

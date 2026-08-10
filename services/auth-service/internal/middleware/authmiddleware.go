@@ -32,6 +32,7 @@ type AuthMiddleware struct {
 	secret                 string
 	internalToken          string
 	serviceRouteAuthorizer ServiceRouteAuthorizer
+	strictDelegatedRoute   bool
 }
 
 func NewAuthMiddleware(secret string, internalToken string, authorizers ...ServiceRouteAuthorizer) *AuthMiddleware {
@@ -42,6 +43,15 @@ func NewAuthMiddleware(secret string, internalToken string, authorizers ...Servi
 	if len(authorizers) > 0 {
 		middleware.serviceRouteAuthorizer = authorizers[0]
 	}
+	return middleware
+}
+
+// NewStrictWorkloadAuthMiddleware makes the formal v2 permission provider a
+// workload-only route. In particular, the Auth internal/admin bearer cannot
+// bypass the projected ApiBinding authorization check.
+func NewStrictWorkloadAuthMiddleware(secret string, internalToken string, authorizer ServiceRouteAuthorizer) *AuthMiddleware {
+	middleware := NewAuthMiddleware(secret, internalToken, authorizer)
+	middleware.strictDelegatedRoute = true
 	return middleware
 }
 
@@ -62,6 +72,18 @@ func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 		tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 		if tokenString == "" {
 			writeAuthError(w, 40103, "empty token")
+			return
+		}
+
+		if m.strictDelegatedRoute && isDelegatedPermissionCheck(r) {
+			claims, ok := m.authorizeServiceRoute(r, tokenString)
+			if !ok {
+				writeAuthError(w, 40104, "invalid or expired token")
+				return
+			}
+			ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
+			ctx = context.WithValue(ctx, TokenContextKey, tokenString)
+			next(w, r.WithContext(ctx))
 			return
 		}
 
@@ -95,6 +117,10 @@ func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, r.WithContext(ctx))
 	}
+}
+
+func isDelegatedPermissionCheck(r *http.Request) bool {
+	return r != nil && r.Method == http.MethodPost && r.URL.Path == "/auth/admin/permission-check"
 }
 
 func (m *AuthMiddleware) authorizeServiceRoute(r *http.Request, tokenString string) (*token.Claims, bool) {

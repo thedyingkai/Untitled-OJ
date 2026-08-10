@@ -12,6 +12,27 @@ import (
 )
 
 func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
+	if serverCtx.AdminBootstrap != nil {
+		server.AddRoutes(
+			[]rest.Route{
+				{
+					Method:  http.MethodPost,
+					Path:    "/bootstrap/admin",
+					Handler: adminBootstrapHandler(serverCtx),
+				},
+			},
+			rest.WithPrefix("/auth"),
+		)
+	}
+
+	server.AddRoutes(
+		[]rest.Route{
+			{Method: http.MethodGet, Path: "/api/v1/topologies/:id", Handler: topologyProjectionHandler(serverCtx)},
+			{Method: http.MethodPut, Path: "/api/v1/topologies/:id", Handler: topologyProjectionHandler(serverCtx)},
+			{Method: http.MethodDelete, Path: "/api/v1/topologies/:id", Handler: topologyProjectionHandler(serverCtx)},
+		},
+	)
+
 	server.AddRoutes(
 		[]rest.Route{
 			{
@@ -19,7 +40,26 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Path:    "/health",
 				Handler: healthHandler(serverCtx),
 			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/auth/.well-known/workload-jwks.json",
+				Handler: workloadJWKSHandler(serverCtx),
+			},
 		},
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.WorkloadControlPlaneMiddleware},
+			[]rest.Route{
+				{
+					Method:  http.MethodPost,
+					Path:    "/internal/workload-tokens:issue",
+					Handler: workloadTokenIssueHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/auth"),
 	)
 
 	server.AddRoutes(

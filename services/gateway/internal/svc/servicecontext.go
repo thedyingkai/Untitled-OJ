@@ -5,6 +5,7 @@ package svc
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -16,7 +17,9 @@ import (
 	"ojos-gateway/internal/orchestrator/servicestatus"
 	orchestratorsnapshot "ojos-gateway/internal/orchestrator/snapshot"
 	"ojos-gateway/internal/proxy"
+	gtopology "ojos-gateway/internal/topologyprojection"
 	"ojos-shared/security/internalauth"
+	"ojos-shared/security/workload"
 
 	sharedlogger "ojos-shared/logger"
 	"ojos-shared/tracing"
@@ -40,11 +43,18 @@ type ServiceContext struct {
 	InternalSigner      *internalauth.Signer
 	Orchestrator        *orchestratorsnapshot.Client
 	AuthClient          *authclient.Client
+	TopologyProjection  *gtopology.Store
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
 	ctx := context.Background()
 	applyEnvOverrides(&c)
+	if err := validateWorkloadIdentityConfig(
+		c.WorkloadIdentity,
+		strings.EqualFold(strings.TrimSpace(os.Getenv("OJOS_ENVIRONMENT")), "production"),
+	); err != nil {
+		log.Fatalf("configure workload identity: %v", err)
+	}
 
 	zlog, err := sharedlogger.New(c.Name)
 	if err != nil {
@@ -76,6 +86,18 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		log.Fatalf("init proxy failed: %v", err)
 	}
 	serviceProxy.SetNodeID(c.Orchestrator.NodeID)
+	if strings.TrimSpace(c.WorkloadIdentity.PublicKeyFile) != "" {
+		workloadVerifier, verifyErr := workload.NewVerifierFromPEMFile(
+			c.WorkloadIdentity.PublicKeyFile,
+			c.WorkloadIdentity.KeyID,
+			c.WorkloadIdentity.Issuer,
+			c.WorkloadIdentity.Audience,
+		)
+		if verifyErr != nil {
+			log.Fatalf("configure workload identity verifier failed: %v", verifyErr)
+		}
+		serviceProxy.SetWorkloadVerifier(workloadVerifier)
+	}
 	serviceProxy.SetPermissionChecker(func(ctx context.Context, authHeader string, caller proxy.PermissionCheckCaller, permissionCode string) (bool, error) {
 		return authClient.HasSystemPermission(ctx, authHeader, authclient.PermissionCaller{
 			Type:    caller.Type,
@@ -88,6 +110,10 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	routeTableOptions := routeTableOptionsFromConfig(c.Proxy)
 	serviceStatusDriver := servicestatus.NewComposeDriver(routeTableOptions.TrustedServices, c.ServiceStatus.ComposeServices...)
 	orchestratorClient := orchestratorsnapshot.NewClient(c.Orchestrator.Endpoint, c.Orchestrator.InternalToken)
+	topologyProjection := gtopology.NewStore(redisClient, serviceProxy)
+	if err := topologyProjection.Recover(ctx); err != nil {
+		log.Fatalf("recover Gateway topology projections failed: %v", err)
+	}
 	var snapshot servicestatus.Snapshot
 	if strings.TrimSpace(c.Orchestrator.NodeID) != "" {
 		var table servicestatus.RouteTable
@@ -119,6 +145,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		InternalSigner:      internalSigner,
 		Orchestrator:        orchestratorClient,
 		AuthClient:          authClient,
+		TopologyProjection:  topologyProjection,
 	}
 }
 
@@ -188,6 +215,18 @@ func applyEnvOverrides(c *config.Config) {
 	if value := strings.TrimSpace(os.Getenv("AUTH_SERVICE_ENDPOINT")); value != "" {
 		c.AuthService.Endpoint = value
 	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_PUBLIC_KEY_FILE")); value != "" {
+		c.WorkloadIdentity.PublicKeyFile = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_KEY_ID")); value != "" {
+		c.WorkloadIdentity.KeyID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_ISSUER")); value != "" {
+		c.WorkloadIdentity.Issuer = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_AUDIENCE")); value != "" {
+		c.WorkloadIdentity.Audience = value
+	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEMS_ROOT")); value != "" {
 		c.Storage.ProblemsRoot = value
 	}
@@ -213,7 +252,18 @@ func inferServiceID(target string) string {
 	return targetURL.Hostname()
 }
 
+func validateWorkloadIdentityConfig(c config.WorkloadIdentityConfig, production bool) error {
+	if production && strings.TrimSpace(c.PublicKeyFile) == "" {
+		return fmt.Errorf("production Gateway requires the workload identity public key")
+	}
+	return nil
+}
+
 func (s *ServiceContext) Close(ctx context.Context) {
+	if s.ServiceProxy != nil {
+		s.ServiceProxy.Close()
+	}
+
 	if s.Redis != nil {
 		_ = s.Redis.Close()
 	}

@@ -46,14 +46,20 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	if err != nil {
 		panic(err)
 	}
+	permissionChecker, err := sharedperm.NewManagedOrLegacyUserChecker(
+		"user-service",
+		sharedperm.DefaultPermissionCheckBinding,
+		permissionCheckerConfig(c),
+		db,
+	)
+	if err != nil {
+		log.Fatalf("configure permission_check ApiBinding failed: %v", err)
+	}
 	return &ServiceContext{
-		Config:       c,
-		ProfileStore: profileStore,
-		DB:           db,
-		Permission: sharedperm.NewUserCheckerWithConfig(
-			permissionCheckerConfig(c),
-			db,
-		),
+		Config:                c,
+		ProfileStore:          profileStore,
+		DB:                    db,
+		Permission:            permissionChecker,
 		UserContextMiddleware: middleware.NewUserContextMiddleware().Handle,
 	}
 }

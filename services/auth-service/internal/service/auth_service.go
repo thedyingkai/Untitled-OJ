@@ -47,23 +47,7 @@ type RegisterResult struct {
 }
 
 func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (*RegisterResult, error) {
-	username := strings.TrimSpace(req.Username)
-	email := strings.TrimSpace(req.Email)
-	password := req.Password
-
-	if username == "" {
-		return nil, fmt.Errorf("%w: username is required", ErrInvalidInput)
-	}
-
-	if len(username) < 3 || len(username) > 32 {
-		return nil, fmt.Errorf("%w: username length must be between 3 and 32", ErrInvalidInput)
-	}
-
-	if len(password) < 6 {
-		return nil, fmt.Errorf("%w: password length must be at least 6", ErrInvalidInput)
-	}
-
-	hashBytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	username, email, passwordHash, err := normalizeAndHashNewUser(req.Username, req.Email, req.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +56,7 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (*Regis
 		ctx,
 		username,
 		email,
-		string(hashBytes),
+		passwordHash,
 	)
 
 	if err != nil {
@@ -87,6 +71,25 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (*Regis
 		UserID:   userID,
 		Username: username,
 	}, nil
+}
+
+func normalizeAndHashNewUser(username string, email string, password string) (string, string, string, error) {
+	username = strings.TrimSpace(username)
+	email = strings.TrimSpace(email)
+	if username == "" {
+		return "", "", "", fmt.Errorf("%w: username is required", ErrInvalidInput)
+	}
+	if len(username) < 3 || len(username) > 32 {
+		return "", "", "", fmt.Errorf("%w: username length must be between 3 and 32", ErrInvalidInput)
+	}
+	if len(password) < 6 {
+		return "", "", "", fmt.Errorf("%w: password length must be at least 6", ErrInvalidInput)
+	}
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", "", "", err
+	}
+	return username, email, string(hashBytes), nil
 }
 
 var ErrInvalidCredentials = errors.New("invalid credentials")

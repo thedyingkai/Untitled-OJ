@@ -14,3 +14,18 @@ Jwt:
 
 InternalAuth:
   Token: ""
+
+# Optional one-time initial administrator bootstrap. Configure exactly one of
+# Secret or SecretFile. Production deployments should mount a dedicated secret
+# file and remove it after the bootstrap request succeeds.
+AdminBootstrap:
+  Secret: ""
+  SecretFile: ""
+
+WorkloadIdentity:
+  PrivateKeyFile: ""
+  ControlPlaneToken: ""
+  KeyID: "workload-1"
+  Issuer: "ojos-auth/workload"
+  Audience: "ojos-gateway"
+  TTLSeconds: 900

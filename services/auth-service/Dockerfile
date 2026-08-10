@@ -1,4 +1,4 @@
-FROM golang:1.26.5
+FROM golang:1.26.5 AS build
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
@@ -25,6 +25,17 @@ COPY platform/shared/go /platform/shared/go
 
 WORKDIR /app/auth-service
 
-RUN go build -o auth .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/auth .
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=build /out/auth ./auth
+COPY --from=build /app/auth-service/etc ./etc
 
 CMD ["./auth", "-f", "etc/auth.yaml"]

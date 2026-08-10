@@ -28,6 +28,7 @@ func main() {
 
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
+	c.PrepareProxyServer()
 	sharedmw.InstallHTTPErrorHandler()
 
 	svcCtx := svc.NewServiceContext(c)

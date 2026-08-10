@@ -264,13 +264,14 @@ func (l *ServicePermissionsLogic) UserEffective(req *types.UserEffectivePermissi
 }
 
 func credentialTokenFromRegistration(req *types.RegisterServicePermissionsReq, fallback string) string {
+	_ = fallback
 	if req == nil {
-		return fallback
+		return ""
 	}
 	if token := strings.TrimSpace(req.ServiceIdentity.CredentialToken); token != "" {
 		return token
 	}
-	return fallback
+	return ""
 }
 
 func serviceIdentityDataFromRepository(item repository.ServiceIdentityDetails) types.ServiceIdentityData {

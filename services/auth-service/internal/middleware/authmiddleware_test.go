@@ -124,3 +124,37 @@ func TestAuthMiddlewareRejectsDelegatedCheckWhenGrantIsDenied(t *testing.T) {
 		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestStrictWorkloadPermissionRouteRejectsInternalAndLegacyBearers(t *testing.T) {
+	middleware := NewStrictWorkloadAuthMiddleware(
+		"jwt-secret",
+		"global-internal-token",
+		func(_ context.Context, _ string, token string, _ string, _ string) (bool, error) {
+			return token == "bound-workload-jwt", nil
+		},
+	)
+	handler := middleware.Handle(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	for _, token := range []string{"global-internal-token", "legacy-service-token"} {
+		req := httptest.NewRequest(http.MethodPost, "/auth/admin/permission-check", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-OJOS-Caller-Service", "judge-api")
+		req.Header.Set("X-OJOS-Api-Id", delegatedPermissionCheckAPI)
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("strict provider accepted %q: status=%d body=%s", token, rr.Code, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/admin/permission-check", nil)
+	req.Header.Set("Authorization", "Bearer bound-workload-jwt")
+	req.Header.Set("X-OJOS-Caller-Service", "judge-api")
+	req.Header.Set("X-OJOS-Api-Id", delegatedPermissionCheckAPI)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("strict provider rejected bound workload: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}

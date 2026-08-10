@@ -16,6 +16,26 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 		[]rest.Route{
 			{
 				Method:  http.MethodGet,
+				Path:    "/api/v1/topologies/:id",
+				Handler: topologyProjectionHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodPut,
+				Path:    "/api/v1/topologies/:id",
+				Handler: topologyProjectionHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodDelete,
+				Path:    "/api/v1/topologies/:id",
+				Handler: topologyProjectionHandler(serverCtx),
+			},
+		},
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				Method:  http.MethodGet,
 				Path:    "/api/admin/endpoint-groups",
 				Handler: adminEndpointGroupsHandler(serverCtx),
 			},

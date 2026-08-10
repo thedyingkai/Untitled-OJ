@@ -96,36 +96,43 @@ type RouteTable struct {
 }
 
 type ServiceRoute struct {
-	RouteID            string   `json:"route_id"`
-	ApiID              string   `json:"api_id,omitempty"`
-	NodeID             string   `json:"node_id,omitempty"`
-	ProviderNodeID     string   `json:"provider_node_id,omitempty"`
-	ProviderHostIP     string   `json:"provider_host_ip,omitempty"`
-	ProviderService    string   `json:"provider_service_name,omitempty"`
-	ProviderEndpoint   string   `json:"provider_endpoint,omitempty"`
-	VisibilitySource   string   `json:"visibility_source,omitempty"`
-	Distance           int      `json:"distance,omitempty"`
-	OwnerServiceID     string   `json:"owner_service_id"`
-	Prefix             string   `json:"prefix"`
-	ServiceID          string   `json:"service_id"`
-	TargetService      string   `json:"target_service"`
-	UpstreamBase       string   `json:"upstream_base,omitempty"`
-	AuthMode           string   `json:"auth_mode"`
-	RequiredPermission string   `json:"required_permission,omitempty"`
-	Methods            []string `json:"methods"`
-	Enabled            bool     `json:"enabled"`
-	ProxyEnabled       bool     `json:"proxy_enabled"`
-	Priority           int      `json:"priority"`
-	StripPrefix        string   `json:"strip_prefix,omitempty"`
-	RewritePrefix      string   `json:"rewrite_prefix,omitempty"`
-	HealthCheckID      string   `json:"health_check_id,omitempty"`
-	CreatedFrom        string   `json:"created_from"`
-	Status             string   `json:"status"`
-	ServiceStatus      string   `json:"service_status,omitempty"`
-	ServiceHealth      string   `json:"service_health,omitempty"`
-	Conflicts          []string `json:"conflicts"`
-	Warnings           []string `json:"warnings"`
-	BlockedBy          []string `json:"blocked_by"`
+	RouteID              string   `json:"route_id"`
+	ApiID                string   `json:"api_id,omitempty"`
+	BindingID            string   `json:"binding_id,omitempty"`
+	ConsumerDeploymentID string   `json:"consumer_deployment_id,omitempty"`
+	ConsumerServiceID    string   `json:"consumer_service_id,omitempty"`
+	ConsumerNodeID       string   `json:"consumer_node_id,omitempty"`
+	CredentialGeneration uint64   `json:"credential_generation,omitempty"`
+	TimeoutMS            uint64   `json:"timeout_ms,omitempty"`
+	NodeID               string   `json:"node_id,omitempty"`
+	ProviderNodeID       string   `json:"provider_node_id,omitempty"`
+	ProviderHostIP       string   `json:"provider_host_ip,omitempty"`
+	ProviderService      string   `json:"provider_service_name,omitempty"`
+	ProviderEndpoint     string   `json:"provider_endpoint,omitempty"`
+	VisibilitySource     string   `json:"visibility_source,omitempty"`
+	Distance             int      `json:"distance,omitempty"`
+	OwnerServiceID       string   `json:"owner_service_id"`
+	Prefix               string   `json:"prefix"`
+	ServiceID            string   `json:"service_id"`
+	TargetService        string   `json:"target_service"`
+	UpstreamBase         string   `json:"upstream_base,omitempty"`
+	AuthMode             string   `json:"auth_mode"`
+	ProviderAuthMode     string   `json:"provider_auth_mode,omitempty"`
+	RequiredPermission   string   `json:"required_permission,omitempty"`
+	Methods              []string `json:"methods"`
+	Enabled              bool     `json:"enabled"`
+	ProxyEnabled         bool     `json:"proxy_enabled"`
+	Priority             int      `json:"priority"`
+	StripPrefix          string   `json:"strip_prefix,omitempty"`
+	RewritePrefix        string   `json:"rewrite_prefix,omitempty"`
+	HealthCheckID        string   `json:"health_check_id,omitempty"`
+	CreatedFrom          string   `json:"created_from"`
+	Status               string   `json:"status"`
+	ServiceStatus        string   `json:"service_status,omitempty"`
+	ServiceHealth        string   `json:"service_health,omitempty"`
+	Conflicts            []string `json:"conflicts"`
+	Warnings             []string `json:"warnings"`
+	BlockedBy            []string `json:"blocked_by"`
 }
 
 type RouteTableOptions struct {
@@ -239,30 +246,34 @@ func BuildRouteTableWithOptions(snapshot Snapshot, opts RouteTableOptions) Route
 		trustedService, serviceTrusted := trusted[serviceID]
 		serviceStatus, hasServiceStatus := opts.ServiceStatuses[serviceID]
 		item := ServiceRoute{
-			RouteID:            routeID(route.ServiceID, route.Prefix),
-			ApiID:              strings.TrimSpace(route.ApiID),
-			NodeID:             strings.TrimSpace(route.NodeID),
-			ProviderNodeID:     strings.TrimSpace(route.ProviderNodeID),
-			ProviderHostIP:     strings.TrimSpace(route.ProviderHostIP),
-			ProviderService:    strings.TrimSpace(route.ProviderService),
-			ProviderEndpoint:   strings.TrimSpace(route.ProviderEndpoint),
-			VisibilitySource:   strings.TrimSpace(route.VisibilitySource),
-			Distance:           route.Distance,
-			OwnerServiceID:     route.ServiceID,
-			Prefix:             cleanPrefix(route.Prefix),
-			ServiceID:          serviceID,
-			TargetService:      serviceID,
-			UpstreamBase:       strings.TrimRight(strings.TrimSpace(route.UpstreamBase), "/"),
-			AuthMode:           normalizeRouteAuthMode(route.AuthMode),
-			RequiredPermission: normalizeRequiredPermission(route.RequiredPermission),
-			Methods:            defaultRouteMethods(),
-			Enabled:            route.Enabled,
-			Priority:           len(cleanPrefix(route.Prefix)),
-			StripPrefix:        cleanPrefix(route.StripPrefix),
-			RewritePrefix:      cleanPrefix(route.RewritePrefix),
-			HealthCheckID:      strings.TrimSpace(route.HealthCheckID),
-			CreatedFrom:        "orchestrator_snapshot",
-			Status:             "active",
+			RouteID:              routeID(route.ServiceID, route.Prefix),
+			ApiID:                strings.TrimSpace(route.ApiID),
+			BindingID:            strings.TrimSpace(route.BindingID),
+			ConsumerDeploymentID: strings.TrimSpace(route.ConsumerDeploymentID),
+			CredentialGeneration: route.CredentialGeneration,
+			TimeoutMS:            route.TimeoutMS,
+			NodeID:               strings.TrimSpace(route.NodeID),
+			ProviderNodeID:       strings.TrimSpace(route.ProviderNodeID),
+			ProviderHostIP:       strings.TrimSpace(route.ProviderHostIP),
+			ProviderService:      strings.TrimSpace(route.ProviderService),
+			ProviderEndpoint:     strings.TrimSpace(route.ProviderEndpoint),
+			VisibilitySource:     strings.TrimSpace(route.VisibilitySource),
+			Distance:             route.Distance,
+			OwnerServiceID:       route.ServiceID,
+			Prefix:               cleanPrefix(route.Prefix),
+			ServiceID:            serviceID,
+			TargetService:        serviceID,
+			UpstreamBase:         strings.TrimRight(strings.TrimSpace(route.UpstreamBase), "/"),
+			AuthMode:             normalizeRouteAuthMode(route.AuthMode),
+			RequiredPermission:   normalizeRequiredPermission(route.RequiredPermission),
+			Methods:              defaultRouteMethods(),
+			Enabled:              route.Enabled,
+			Priority:             len(cleanPrefix(route.Prefix)),
+			StripPrefix:          cleanPrefix(route.StripPrefix),
+			RewritePrefix:        cleanPrefix(route.RewritePrefix),
+			HealthCheckID:        strings.TrimSpace(route.HealthCheckID),
+			CreatedFrom:          "orchestrator_snapshot",
+			Status:               "active",
 		}
 		if serviceTrusted && item.UpstreamBase == "" {
 			item.UpstreamBase = trustedService.UpstreamBase
@@ -1131,7 +1142,7 @@ func normalizeRequiredPermission(permission string) string {
 
 func isSupportedRouteAuthMode(mode string) bool {
 	switch mode {
-	case "public", "user", "admin", "worker", "internal":
+	case "public", "user", "admin", "worker", "internal", "service", "workload":
 		return true
 	default:
 		return false

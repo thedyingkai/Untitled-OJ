@@ -5,18 +5,23 @@ package svc
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"ojos-auth-service/internal/config"
 	authmw "ojos-auth-service/internal/middleware"
 	"ojos-auth-service/internal/repository"
 	"ojos-auth-service/internal/service"
+	atopology "ojos-auth-service/internal/topologyprojection"
 
 	"ojos-shared/database"
 	sharedlogger "ojos-shared/logger"
+	"ojos-shared/security/workload"
 	"ojos-shared/tracing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,18 +37,44 @@ type ServiceContext struct {
 	DB     *pgxpool.Pool
 	Tracer *sdktrace.TracerProvider
 
-	UserRepo    *repository.UserRepository
-	AdminRepo   *repository.AdminRepository
-	AuthService *service.AuthService
+	UserRepo       *repository.UserRepository
+	AdminRepo      *repository.AdminRepository
+	AuthService    *service.AuthService
+	AdminBootstrap *service.AdminBootstrapService
 
-	AuthMiddleware rest.Middleware
-	SmokeAuth      *SmokePermissionStore
+	AuthMiddleware                 rest.Middleware
+	WorkloadControlPlaneMiddleware rest.Middleware
+	SmokeAuth                      *SmokePermissionStore
+	WorkloadIssuer                 *workload.Issuer
+	TopologyProjection             *atopology.Store
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
 	ctx := context.Background()
 	applyEnvOverrides(&c)
 	smokeMode := smokeModeEnabled()
+	adminBootstrapSecret, adminBootstrapEnabled, err := resolveAdminBootstrapSecret(c.AdminBootstrap)
+	if err != nil {
+		log.Fatalf("configure initial administrator bootstrap: %v", err)
+	}
+	if adminBootstrapEnabled {
+		if err := validateAdminBootstrapSecretSeparation(adminBootstrapSecret, map[string]string{
+			"Jwt.Secret":                         c.Jwt.Secret,
+			"InternalAuth.Token":                 c.InternalAuth.Token,
+			"WorkloadIdentity.ControlPlaneToken": c.WorkloadIdentity.ControlPlaneToken,
+		}); err != nil {
+			log.Fatalf("configure initial administrator bootstrap: %v", err)
+		}
+	}
+	// Do not retain an inline clear-text bootstrap secret in Config after the
+	// verifier has derived its digest.
+	c.AdminBootstrap.Secret = ""
+	if adminBootstrapEnabled && smokeMode {
+		log.Fatalf("initial administrator bootstrap requires PostgreSQL and is unavailable in smoke mode")
+	}
+	if err := validateWorkloadIdentityConfig(c.WorkloadIdentity, productionModeEnabled()); err != nil {
+		log.Fatalf("configure workload identity: %v", err)
+	}
 
 	zlog, err := sharedlogger.New(c.Name)
 	if err != nil {
@@ -58,6 +89,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	var db *pgxpool.Pool
 	var userRepo *repository.UserRepository
 	var adminRepo *repository.AdminRepository
+	var adminBootstrap *service.AdminBootstrapService
 	var smokeAuth *SmokePermissionStore
 	if smokeMode {
 		smokeAuth = NewSmokePermissionStore()
@@ -69,6 +101,22 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		}
 		userRepo = repository.NewUserRepository(db)
 		adminRepo = repository.NewAdminRepository(db)
+		if adminBootstrapEnabled {
+			adminBootstrapRepo := repository.NewAdminBootstrapRepository(db)
+			if err := adminBootstrapRepo.ValidateState(ctx); err != nil {
+				log.Fatalf("validate initial administrator bootstrap state: %v", err)
+			}
+			adminBootstrap, err = service.NewAdminBootstrapService(
+				adminBootstrapRepo,
+				adminBootstrapSecret,
+			)
+			if err != nil {
+				log.Fatalf("configure initial administrator bootstrap: %v", err)
+			}
+		}
+	}
+	for index := range adminBootstrapSecret {
+		adminBootstrapSecret[index] = 0
 	}
 
 	authService := service.NewAuthService(
@@ -76,7 +124,24 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		c.Jwt.Secret,
 		c.Jwt.ExpireHours,
 	)
-	serviceRouteAuthorizer := func(
+	var workloadIssuer *workload.Issuer
+	if strings.TrimSpace(c.WorkloadIdentity.PrivateKeyFile) != "" {
+		ttl := time.Duration(c.WorkloadIdentity.TTLSeconds) * time.Second
+		if ttl <= 0 {
+			ttl = workload.DefaultTTL
+		}
+		workloadIssuer, err = workload.NewIssuerFromPEMFile(
+			c.WorkloadIdentity.PrivateKeyFile,
+			c.WorkloadIdentity.KeyID,
+			c.WorkloadIdentity.Issuer,
+			c.WorkloadIdentity.Audience,
+			ttl,
+		)
+		if err != nil {
+			log.Fatalf("configure workload identity issuer failed: %v", err)
+		}
+	}
+	legacyServiceRouteAuthorizer := func(
 		ctx context.Context,
 		serviceCode string,
 		credentialToken string,
@@ -102,6 +167,25 @@ func NewServiceContext(c config.Config) *ServiceContext {
 			credentialToken,
 		)
 	}
+	topologyProjection := atopology.NewStore(db)
+	serviceRouteAuthorizer := newServiceRouteAuthorizer(
+		productionModeEnabled(),
+		workloadIssuer.Verifier(),
+		topologyProjection,
+		legacyServiceRouteAuthorizer,
+	)
+	authMiddleware := authmw.NewAuthMiddleware(
+		c.Jwt.Secret,
+		c.InternalAuth.Token,
+		serviceRouteAuthorizer,
+	)
+	if productionModeEnabled() {
+		authMiddleware = authmw.NewStrictWorkloadAuthMiddleware(
+			c.Jwt.Secret,
+			c.InternalAuth.Token,
+			serviceRouteAuthorizer,
+		)
+	}
 
 	return &ServiceContext{
 		Config: c,
@@ -110,16 +194,56 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		DB:     db,
 		Tracer: tp,
 
-		UserRepo:    userRepo,
-		AdminRepo:   adminRepo,
-		AuthService: authService,
+		UserRepo:       userRepo,
+		AdminRepo:      adminRepo,
+		AuthService:    authService,
+		AdminBootstrap: adminBootstrap,
 
-		AuthMiddleware: authmw.NewAuthMiddleware(
+		AuthMiddleware: authMiddleware.Handle,
+		WorkloadControlPlaneMiddleware: authmw.NewAuthMiddleware(
 			c.Jwt.Secret,
-			c.InternalAuth.Token,
-			serviceRouteAuthorizer,
+			c.WorkloadIdentity.ControlPlaneToken,
 		).Handle,
-		SmokeAuth: smokeAuth,
+		SmokeAuth:          smokeAuth,
+		WorkloadIssuer:     workloadIssuer,
+		TopologyProjection: topologyProjection,
+	}
+}
+
+func newServiceRouteAuthorizer(
+	production bool,
+	verifier *workload.Verifier,
+	projection *atopology.Store,
+	legacy authmw.ServiceRouteAuthorizer,
+) authmw.ServiceRouteAuthorizer {
+	return func(
+		ctx context.Context,
+		serviceCode string,
+		credentialToken string,
+		apiID string,
+		permissionCode string,
+	) (bool, error) {
+		if verifier != nil && projection != nil {
+			claims, err := verifier.Verify(credentialToken, time.Now())
+			if err == nil {
+				if strings.TrimSpace(serviceCode) != claims.ServiceID {
+					return false, nil
+				}
+				return projection.AuthorizeWorkload(
+					ctx,
+					claims.DeploymentID,
+					claims.ServiceID,
+					claims.NodeID,
+					claims.CredentialGeneration,
+					apiID,
+					permissionCode,
+				)
+			}
+		}
+		if production || legacy == nil {
+			return false, nil
+		}
+		return legacy(ctx, serviceCode, credentialToken, apiID, permissionCode)
 	}
 }
 
@@ -136,6 +260,34 @@ func applyEnvOverrides(c *config.Config) {
 	if value := strings.TrimSpace(os.Getenv("AUTH_INTERNAL_TOKEN")); value != "" {
 		c.InternalAuth.Token = value
 	}
+	if value := strings.TrimSpace(os.Getenv("AUTH_ADMIN_BOOTSTRAP_SECRET")); value != "" {
+		c.AdminBootstrap.Secret = value
+	}
+	if value := strings.TrimSpace(os.Getenv("AUTH_ADMIN_BOOTSTRAP_SECRET_FILE")); value != "" {
+		c.AdminBootstrap.SecretFile = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_PRIVATE_KEY_FILE")); value != "" {
+		c.WorkloadIdentity.PrivateKeyFile = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_CONTROL_PLANE_TOKEN")); value != "" {
+		c.WorkloadIdentity.ControlPlaneToken = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_KEY_ID")); value != "" {
+		c.WorkloadIdentity.KeyID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_ISSUER")); value != "" {
+		c.WorkloadIdentity.Issuer = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_AUDIENCE")); value != "" {
+		c.WorkloadIdentity.Audience = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_TTL_SECONDS")); value != "" {
+		ttl, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || ttl <= 0 || ttl > 3600 {
+			log.Fatalf("OJOS_WORKLOAD_TTL_SECONDS must be an integer from 1 through 3600")
+		}
+		c.WorkloadIdentity.TTLSeconds = ttl
+	}
 }
 
 func firstEnv(keys ...string) string {
@@ -150,6 +302,26 @@ func firstEnv(keys ...string) string {
 func smokeModeEnabled() bool {
 	value := strings.TrimSpace(os.Getenv("OJOS_SMOKE_MODE"))
 	return value == "1" || strings.EqualFold(value, "true")
+}
+
+func productionModeEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("OJOS_ENVIRONMENT")), "production")
+}
+
+func validateWorkloadIdentityConfig(c config.WorkloadIdentityConfig, production bool) error {
+	keyConfigured := strings.TrimSpace(c.PrivateKeyFile) != ""
+	controlPlaneConfigured := strings.TrimSpace(c.ControlPlaneToken) != ""
+	if keyConfigured != controlPlaneConfigured {
+		return fmt.Errorf("private key and dedicated control-plane token must be configured together")
+	}
+	if production && !keyConfigured {
+		return fmt.Errorf("production Auth requires a private key and dedicated control-plane token")
+	}
+	expectedTTL := int64(workload.DefaultTTL / time.Second)
+	if production && c.TTLSeconds != expectedTTL {
+		return fmt.Errorf("production workload identity TTL must be %d seconds", expectedTTL)
+	}
+	return nil
 }
 
 type SmokePermissionStore struct {

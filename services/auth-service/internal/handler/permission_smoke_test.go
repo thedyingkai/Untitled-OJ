@@ -31,7 +31,7 @@ func TestSmokePermissionCheckServiceCallerBoundaries(t *testing.T) {
 	}
 	handler := svcCtx.AuthMiddleware(userPermissionCheckHandler(svcCtx))
 
-	allowed := permissionCheckRequest("smoke-token", "judge-worker", "storage.object.get", "storage.object.read", handler)
+	allowed := permissionCheckRequest("worker-credential", "judge-worker", "storage.object.get", "storage.object.read", handler)
 	if allowed.status != http.StatusOK || !allowed.allowed {
 		t.Fatalf("allowed service caller got status=%d allowed=%v body=%s", allowed.status, allowed.allowed, allowed.body)
 	}
@@ -41,16 +41,16 @@ func TestSmokePermissionCheckServiceCallerBoundaries(t *testing.T) {
 		t.Fatalf("missing token got status=%d body=%s", missing.status, missing.body)
 	}
 
-	denied := permissionCheckRequest("smoke-token", "judge-worker", "storage.object.delete", "storage.object.delete", handler)
+	denied := permissionCheckRequest("worker-credential", "judge-worker", "storage.object.delete", "storage.object.delete", handler)
 	if denied.status != http.StatusOK || denied.allowed {
 		t.Fatalf("denied service caller got status=%d allowed=%v body=%s", denied.status, denied.allowed, denied.body)
 	}
-	unknown := permissionCheckRequest("smoke-token", "fake-worker", "storage.object.get", "storage.object.read", handler)
+	unknown := permissionCheckRequest("worker-credential", "fake-worker", "storage.object.get", "storage.object.read", handler)
 	if unknown.status != http.StatusOK || unknown.allowed {
 		t.Fatalf("unknown service caller got status=%d allowed=%v body=%s", unknown.status, unknown.allowed, unknown.body)
 	}
 	wrongToken := permissionCheckRequest("wrong-token", "judge-worker", "storage.object.get", "storage.object.read", handler)
-	if wrongToken.status != http.StatusUnauthorized {
+	if wrongToken.status != http.StatusOK || wrongToken.allowed {
 		t.Fatalf("wrong service token got status=%d body=%s", wrongToken.status, wrongToken.body)
 	}
 
@@ -100,8 +100,9 @@ func registerSmokeJudgeWorkerIdentity(handler http.HandlerFunc) registerSmokeRes
 		},
 		"default_role_bindings": []any{},
 		"service_identity": map[string]any{
-			"service_name": "judge-worker",
-			"allowed_apis": []string{"storage.object.get", "storage.object.put"},
+			"service_name":     "judge-worker",
+			"allowed_apis":     []string{"storage.object.get", "storage.object.put"},
+			"credential_token": "worker-credential",
 			"grants": []map[string]any{
 				{"api_id": "storage.object.get", "permission": "storage.object.read"},
 				{"api_id": "storage.object.put", "permission": "storage.object.write"},
@@ -127,6 +128,9 @@ func permissionCheckRequest(token string, service string, apiID string, permissi
 	})
 	req := httptest.NewRequest(http.MethodPost, "/auth/permission-check", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
+	if service != "" {
+		req.Header.Set("X-OJOS-Caller-Service", service)
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

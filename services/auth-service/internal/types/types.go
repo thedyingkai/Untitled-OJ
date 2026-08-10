@@ -364,6 +364,24 @@ type RegisterResp struct {
 	Data RegisterData `json:"data,optional"`
 }
 
+type AdminBootstrapReq struct {
+	BootstrapSecret string `header:"X-OJOS-Bootstrap-Secret"`
+	Username        string `json:"username"`
+	Email           string `json:"email,optional"`
+	Password        string `json:"password"`
+}
+
+type AdminBootstrapData struct {
+	UserId   int64  `json:"user_id"`
+	Username string `json:"username"`
+}
+
+type AdminBootstrapResp struct {
+	Code int                `json:"code"`
+	Msg  string             `json:"msg"`
+	Data AdminBootstrapData `json:"data,optional"`
+}
+
 type ResourceEdgeItem struct {
 	Id         int64  `json:"id"`
 	ParentType string `json:"parent_type"`

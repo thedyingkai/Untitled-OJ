@@ -233,6 +233,10 @@ type ServiceTopologyEdge {
 type OrchestratorRouteItem {
 	RouteId            string   `json:"route_id"`
 	ApiId              string   `json:"api_id,omitempty"`
+	BindingId          string   `json:"binding_id,omitempty"`
+	ConsumerDeploymentId string `json:"consumer_deployment_id,omitempty"`
+	CredentialGeneration uint64 `json:"credential_generation,omitempty"`
+	TimeoutMs          uint64   `json:"timeout_ms,omitempty"`
 	NodeId             string   `json:"node_id,omitempty"`
 	ProviderNodeId     string   `json:"provider_node_id,omitempty"`
 	ProviderHostIp     string   `json:"provider_host_ip,omitempty"`
