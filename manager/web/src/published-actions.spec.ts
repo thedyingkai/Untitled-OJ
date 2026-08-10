@@ -22,6 +22,35 @@ interface PublishedMatrix {
 }
 
 describe("published v1 action fixture", () => {
+  it("publishes the complete Store validation pipeline and typed Topology diff", () => {
+    const path = resolve(
+      process.cwd(),
+      "../../platform/schemas/orchestrator/openapi-v1.yaml",
+    );
+    const contract = parse(readFileSync(path, "utf8")) as any;
+    const selection = contract.components.schemas.StoreValidateRequest;
+    const install = contract.components.schemas.StoreInstallRequest;
+    const validation = contract.components.schemas.StoreValidationResult;
+
+    for (const field of [
+      "start",
+      "migration_policy",
+      "gateway_node_id",
+      "config",
+      "secret_refs",
+    ]) {
+      expect(selection.properties).toHaveProperty(field);
+      expect(install.properties).toHaveProperty(field);
+    }
+    expect(
+      contract.paths["/store/releases:validate"].post.responses["200"].$ref,
+    ).toBe("#/components/responses/StoreValidation");
+    expect(validation.required).toContain("topology_diff");
+    expect(validation.properties.topology_diff.oneOf).toContainEqual({
+      $ref: "#/components/schemas/TopologyDiff",
+    });
+  });
+
   it("matches the checked-in action/RBAC matrix byte-for-byte by field", () => {
     const path = resolve(
       process.cwd(),

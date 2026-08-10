@@ -187,12 +187,12 @@ fn run_tauri(config: LaunchConfig) -> Result<()> {
                             return;
                         }
                     };
-                    if let Some(signal) = signal {
-                        if let Err(error) = publish_startup_ready(&signal) {
-                            eprintln!("Desktop could not acknowledge startup readiness: {error}");
-                            window.app_handle().exit(1);
-                            return;
-                        }
+                    if let Some(signal) = signal
+                        && let Err(error) = publish_startup_ready(&signal)
+                    {
+                        eprintln!("Desktop could not acknowledge startup readiness: {error}");
+                        window.app_handle().exit(1);
+                        return;
                     }
                 }
                 if !smoke_mode {

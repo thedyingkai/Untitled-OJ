@@ -252,6 +252,42 @@ impl ApiError {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InstallApiBindingSelection {
+    pub name: String,
+    pub provider_deployment_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InstallTopologySelection {
+    pub topology_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct StorePipelineOptions {
+    pub start: bool,
+    pub migration_policy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_node_id: Option<String>,
+    pub config: Value,
+    pub secret_refs: BTreeMap<String, String>,
+}
+
+impl Default for StorePipelineOptions {
+    fn default() -> Self {
+        Self {
+            start: true,
+            migration_policy: "APPLY".to_string(),
+            gateway_node_id: None,
+            config: json!({}),
+            secret_refs: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StoreInstallInput {
     pub service_id: String,
     pub target_node_id: String,
@@ -267,6 +303,14 @@ pub struct StoreInstallInput {
     pub migration_policy: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_node_id: Option<String>,
+    pub config: Value,
+    pub secret_refs: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<InstallApiBindingSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topology_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topology_etag: Option<String>,
 }
 
 impl StoreInstallInput {
@@ -282,7 +326,20 @@ impl StoreInstallInput {
             start: true,
             migration_policy: "APPLY".to_string(),
             gateway_node_id: None,
+            config: json!({}),
+            secret_refs: BTreeMap::new(),
+            bindings: Vec::new(),
+            topology_id: None,
+            topology_etag: None,
         }
+    }
+
+    pub fn apply_pipeline_options(&mut self, options: &StorePipelineOptions) {
+        self.start = options.start;
+        self.migration_policy.clone_from(&options.migration_policy);
+        self.gateway_node_id.clone_from(&options.gateway_node_id);
+        self.config.clone_from(&options.config);
+        self.secret_refs.clone_from(&options.secret_refs);
     }
 }
 
@@ -668,6 +725,14 @@ impl ApiClient {
         self.read(
             "deployment.health",
             &format!("/deployments/{}/health", path_segment(deployment_id)?),
+            &[],
+        )
+    }
+
+    pub fn deployment_bindings(&self, deployment_id: &str) -> Result<ApiSuccess, ApiError> {
+        self.read(
+            "deployment.get",
+            &format!("/deployments/{}/bindings", path_segment(deployment_id)?),
             &[],
         )
     }
@@ -1449,7 +1514,11 @@ mod tests {
         assert_eq!(value["mode"], "MANAGED");
         assert_eq!(value["start"], true);
         assert_eq!(value["migration_policy"], "APPLY");
+        assert_eq!(value["config"], json!({}));
+        assert_eq!(value["secret_refs"], json!({}));
         assert!(value.get("endpoint").is_none());
+        assert!(value.get("bindings").is_none());
+        assert!(value.get("topology").is_none());
 
         let legacy_catalog_command = serde_json::to_value(CatalogSourceInput::trusted(
             "stable",
@@ -1458,6 +1527,59 @@ mod tests {
         ))
         .unwrap();
         assert!(legacy_catalog_command.get("public_key").is_none());
+    }
+
+    #[test]
+    fn managed_install_sends_explicit_bindings_and_topology_revision() {
+        let transport = FixtureTransport::from_bodies([
+            (200, include_str!("../tests/fixtures/capabilities.json")),
+            (
+                202,
+                include_str!("../tests/fixtures/operation-accepted.json"),
+            ),
+        ]);
+        let client = ApiClient::with_transport(config(), transport.clone());
+        let mut input = StoreInstallInput::managed("judge-worker", "node-b");
+        input.bindings = vec![InstallApiBindingSelection {
+            name: "judge_control".to_string(),
+            provider_deployment_id: "judge-a".to_string(),
+        }];
+        input.topology_id = Some("primary".to_string());
+        input.topology_etag = Some("\"revision-7\"".to_string());
+        input.apply_pipeline_options(&StorePipelineOptions {
+            start: false,
+            migration_policy: "DRY_RUN".to_string(),
+            gateway_node_id: Some("gateway-a".to_string()),
+            config: json!({"namespace": "contest"}),
+            secret_refs: BTreeMap::from([(
+                "signing_key".to_string(),
+                "secrets/judge/signing-key".to_string(),
+            )]),
+        });
+
+        client.install_release(input).unwrap();
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(
+            requests[1].url,
+            "https://control.example/api/v1/store/releases:install"
+        );
+        assert!(requests[1].headers.contains_key("Idempotency-Key"));
+        let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(
+            body["bindings"],
+            json!([{"name":"judge_control","provider_deployment_id":"judge-a"}])
+        );
+        assert_eq!(body["topology_id"], json!("primary"));
+        assert_eq!(body["topology_etag"], json!("\"revision-7\""));
+        assert_eq!(body["start"], json!(false));
+        assert_eq!(body["migration_policy"], json!("DRY_RUN"));
+        assert_eq!(body["gateway_node_id"], json!("gateway-a"));
+        assert_eq!(body["config"], json!({"namespace": "contest"}));
+        assert_eq!(
+            body["secret_refs"],
+            json!({"signing_key": "secrets/judge/signing-key"})
+        );
     }
 
     #[test]
@@ -1594,6 +1716,29 @@ mod tests {
         assert_eq!(requests[2].method, "GET");
         assert!(requests[2].url.ends_with("/deployments/dep-1/health"));
         assert!(!requests[2].headers.contains_key("Idempotency-Key"));
+    }
+
+    #[test]
+    fn deployment_bindings_uses_deployment_get_capability_without_mutation_headers() {
+        let transport = FixtureTransport::from_bodies([
+            (200, include_str!("../tests/fixtures/capabilities.json")),
+            (
+                200,
+                r#"{"data":{"deployment_id":"worker-b","service_id":"judge-worker","items":[{"binding_id":"binding-1","requirement_name":"judge_control","context_generation":3,"credential_generation":4,"health":"HEALTHY","drift":[]}]},"meta":{"request_id":"req-bindings","api_version":"v1"}}"#,
+            ),
+        ]);
+        let client = ApiClient::with_transport(config(), transport.clone());
+
+        let response = client.deployment_bindings("worker-b").unwrap();
+
+        assert_eq!(response.data["items"][0]["context_generation"], 3);
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(
+            requests[1].url,
+            "https://control.example/api/v1/deployments/worker-b/bindings"
+        );
+        assert_eq!(requests[1].method, "GET");
+        assert!(!requests[1].headers.contains_key("Idempotency-Key"));
     }
 
     #[test]

@@ -24,6 +24,7 @@ interface MockSnapshot {
     abortedRequests: number;
     eventRequests: number;
     layoutPutPaths: string[];
+    paths: Record<string, number>;
   };
 }
 
@@ -52,6 +53,13 @@ async function openPackage(page: Page) {
   await expect(card).toContainText("E2E API");
   await card.getByRole("button", { name: "安装", exact: true }).click();
   await expect(page.getByRole("heading", { name: "安装 E2E API" })).toBeVisible();
+  // Validation is the discovery step for required APIs. It must remain
+  // available before a topology is chosen so provider-only releases are not
+  // blocked by a consumer-only field.
+  await expect(page.getByRole("button", { name: "先校验 Release" })).toBeEnabled();
+  await page.getByLabel("Install topology").selectOption("primary");
+  await expect(page.getByLabel("Topology revision ETag")).toHaveValue("rev-1");
+  await expect(page.getByRole("button", { name: "先校验 Release" })).toBeEnabled();
   return card;
 }
 
@@ -59,20 +67,85 @@ test.beforeEach(async ({ request }) => {
   await reset(request);
 });
 
+test("Store validates and installs a provider-only release without a Topology", async ({
+  page,
+  request,
+}) => {
+  await page.goto("/#/market");
+  const card = page.getByTestId("store-package-e2e-provider");
+  await card.getByRole("button", { name: "安装", exact: true }).click();
+
+  const modal = page.locator(".modal").filter({ hasText: "安装 E2E Provider" });
+  await expect(modal.getByLabel("Install topology")).toHaveValue("");
+  const validate = modal.getByRole("button", { name: "先校验 Release" });
+  await expect(validate).toBeEnabled();
+  await validate.click();
+  await expect(modal.getByText("Release 校验通过", { exact: true })).toBeVisible();
+  await expect(modal.getByText("纯 Provider 可不选", { exact: true })).toBeVisible();
+
+  await modal.getByRole("button", { name: "安装、启动并验证健康" }).click();
+  await expect(card).toContainText("已部署 1 个");
+
+  const current = await snapshot(request);
+  const mutations = current.state.capturedMutations.filter((item) =>
+    ["/api/v1/store/releases:validate", "/api/v1/store/releases:install"].includes(
+      item.path,
+    ),
+  );
+  expect(mutations).toHaveLength(2);
+  for (const mutation of mutations) {
+    expect(mutation.body).toMatchObject({
+      service_id: "e2e-provider",
+      start: true,
+      migration_policy: "APPLY",
+      config: {},
+      secret_refs: {},
+    });
+    expect(mutation.body).not.toHaveProperty("topology");
+    expect(mutation.body).not.toHaveProperty("topology_id");
+  }
+  expect(current.state.contractViolations).toEqual([]);
+});
+
 test("Store validates a signed release and installs it to a real Running projection", async ({
   page,
   request,
 }) => {
   const card = await openPackage(page);
+  const installModal = page.locator(".modal").filter({
+    has: page.locator('[aria-label="Install topology"]'),
+  });
+  await installModal.locator("summary").filter({ hasText: "Release pipeline" }).click();
+  await installModal.getByLabel("Migration policy").selectOption("DRY_RUN");
+  await installModal.getByLabel("Gateway Node ID").fill("gateway-node-a");
+  await installModal
+    .getByLabel("Release config JSON")
+    .fill('{"namespace":"contest"}');
+  await installModal
+    .getByLabel("Secret references JSON")
+    .fill('{"signing_key":"secrets/judge/signing-key"}');
 
   await page.getByRole("button", { name: "先校验 Release" }).click();
   await expect(page.getByText("Release 校验通过", { exact: true })).toBeVisible();
+  await expect(page.getByText(/确认指纹：sha256:[0-9a-f]{64}/)).toBeVisible();
   await expect(page.getByText(/catalog-e2e-v2/)).toBeVisible();
+  await expect(page.getByText("standard-container-v1", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("gateway_control provider")).toHaveValue("dep-gateway");
 
   await page.getByRole("button", { name: "安装、启动并验证健康" }).click();
   await expect(page.getByText(/安装操作已提交：op-install-/)).toBeVisible();
   await expect(card).toContainText("已部署 1 个");
   await expect(page.getByText(/release\.install reached SUCCEEDED/)).toBeVisible();
+
+  await page.goto("/#/services");
+  const deploymentRow = page.getByRole("row").filter({ hasText: "dep-e2e-api" });
+  await deploymentRow.getByRole("button", { name: "详情" }).click();
+  const deploymentModal = page.locator(".modal").filter({ hasText: "dep-e2e-api" });
+  await expect(deploymentModal.getByText("standard-container-v1", { exact: true })).toBeVisible();
+  await expect(deploymentModal.getByText(/context 3 · credential 2/)).toBeVisible();
+  await expect(deploymentModal.getByText("已验证", { exact: true })).toBeVisible();
+  await deploymentModal.getByText("健康证据", { exact: true }).click();
+  await expect(deploymentModal.getByText(/docker-health/)).toBeVisible();
 
   const current = await snapshot(request);
   const deployment = current.state.deployments.find(
@@ -91,6 +164,13 @@ test("Store validates a signed release and installs it to a real Running project
     version: "1.2.3",
     catalog_source_id: "trusted-e2e",
     target_node_id: "desktop-local",
+    topology_id: "primary",
+    topology_etag: '"rev-1"',
+    start: true,
+    migration_policy: "DRY_RUN",
+    gateway_node_id: "gateway-node-a",
+    config: { namespace: "contest" },
+    secret_refs: { signing_key: "secrets/judge/signing-key" },
   });
   const install = current.state.capturedMutations.find(
     (item) => item.path === "/api/v1/store/releases:install",
@@ -100,7 +180,18 @@ test("Store validates a signed release and installs it to a real Running project
     target_node_id: "desktop-local",
     mode: "MANAGED",
     start: true,
-    migration_policy: "APPLY",
+    migration_policy: "DRY_RUN",
+    gateway_node_id: "gateway-node-a",
+    config: { namespace: "contest" },
+    secret_refs: { signing_key: "secrets/judge/signing-key" },
+    bindings: [
+      {
+        name: "gateway_control",
+        provider_deployment_id: "dep-gateway",
+      },
+    ],
+    topology_id: "primary",
+    topology_etag: '"rev-1"',
   });
   expect(install?.idempotency_key).not.toBe("");
   expect(current.state.contractViolations).toEqual([]);
@@ -135,6 +226,10 @@ test("Catalog management and the complete Store replacement lifecycle remain con
   const card = page.getByTestId("store-package-e2e-api");
   await card.getByRole("button", { name: "安装", exact: true }).click();
   const installModal = page.locator(".modal").filter({ hasText: "安装 E2E API" });
+  await installModal.getByLabel("Install topology").selectOption("primary");
+  await expect(installModal.getByLabel("Topology revision ETag")).toHaveValue("rev-1");
+  await installModal.getByRole("button", { name: "先校验 Release" }).click();
+  await expect(installModal.getByText("Release 校验通过", { exact: true })).toBeVisible();
   await installModal.getByRole("button", { name: "安装、启动并验证健康" }).click();
   await expect(card).toContainText("已部署 1 个");
   await installModal.getByRole("button", { name: "关闭" }).click();
@@ -159,6 +254,13 @@ test("Catalog management and the complete Store replacement lifecycle remain con
     )
     .toBe("1.2.3");
 
+  page.once("dialog", (dialog) => dialog.accept());
+  await card.getByRole("button", { name: "卸载 desktop-local" }).click();
+  await expect(
+    page.getByText(/Topology draft.*ApiBinding|ApiBinding.*Topology draft/),
+  ).toBeVisible();
+  await expect(card).toContainText("已部署 1 个");
+  await scenario(request, { activeBindingConflict: false });
   page.once("dialog", (dialog) => dialog.accept());
   await card.getByRole("button", { name: "卸载 desktop-local" }).click();
   await expect(card).not.toContainText("已部署 1 个");
@@ -190,6 +292,25 @@ test("Catalog management and the complete Store replacement lifecycle remain con
       "/api/v1/store/releases:delete",
     ]),
   );
+  const replacements = current.state.capturedMutations.filter((mutation) =>
+    [
+      "/api/v1/store/releases:upgrade",
+      "/api/v1/store/releases:rollback",
+    ].includes(mutation.path),
+  );
+  for (const replacement of replacements) {
+    expect(replacement.body).toMatchObject({
+      deployment_id: "dep-e2e-api",
+      bindings: [
+        {
+          name: "gateway_control",
+          provider_deployment_id: "dep-gateway",
+        },
+      ],
+      topology_id: "primary",
+      topology_etag: '"rev-1"',
+    });
+  }
   expect(current.state.contractViolations).toEqual([]);
 });
 
@@ -274,6 +395,15 @@ test("Store makes failed health compensation explicit and never promotes a Deplo
   await scenario(request, { failNextInstall: true });
   await openPackage(page);
 
+  await page.getByRole("button", { name: "先校验 Release" }).click();
+  await expect(page.getByText("Release 校验通过", { exact: true })).toBeVisible();
+  const prospectiveDiff = page.getByText(
+    "本次安装将产生的 Topology diff",
+    { exact: true },
+  );
+  await expect(prospectiveDiff).toBeVisible();
+  await prospectiveDiff.click();
+  await expect(page.getByText(/ADD_API_BINDING/)).toBeVisible();
   await page.getByRole("button", { name: "安装、启动并验证健康" }).click();
   await expect(page.getByText("安装失败", { exact: true })).toBeVisible();
   await expect(
@@ -304,7 +434,7 @@ test("Topology creates an immutable draft revision, validates, diffs, applies an
   await expect(page.locator('[data-node-id="127.0.0.1:8080:gateway"]')).toBeVisible();
 
   await page
-    .locator('[data-service-id="worker"]')
+    .locator('[data-service-id="dep-worker"]')
     .dragTo(page.getByTestId("flow-viewport"), {
       targetPosition: { x: 420, y: 230 },
     });
@@ -345,6 +475,75 @@ test("Topology creates an immutable draft revision, validates, diffs, applies an
     rollback_of_revision_id: "rev-1",
   });
   expect(current.state.contractViolations).toEqual([]);
+});
+
+test("Topology edits an ApiBinding by requirement and exact provider Deployment", async ({
+  page,
+  request,
+}) => {
+  await page.goto("/#/topology");
+  await expect(page.getByLabel("Current topology")).toHaveValue("primary");
+  const edge = page.locator(
+    '[data-edge-id="127.0.0.1:8080:gateway|127.0.0.1:5432:database"]',
+  );
+  await edge.locator(".edge-hit").click({ force: true });
+  await expect(page.getByText("database_control", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "编辑 / Rebind" }).click();
+  const modal = page.locator(".modal").filter({ hasText: "编辑 database_control" });
+  await modal.getByLabel("Binding provider deployment").selectOption("dep-gateway");
+  await modal.getByRole("button", { name: "保存到 draft" }).click();
+  await expect(page.getByText(/draft r3 · rev-3/)).toBeVisible();
+
+  let current = await snapshot(request);
+  let latest = current.state.revisions.at(-1) as {
+    spec?: { links?: Array<{ api_bindings?: Array<Record<string, unknown>> }> };
+  };
+  expect(latest.spec?.links?.[0]?.api_bindings).toEqual([
+    expect.objectContaining({
+      requirement: "database_control",
+      provider_deployment_id: "dep-gateway",
+      selection: "explicit",
+    }),
+  ]);
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "解除", exact: true }).click();
+  await expect(page.getByText(/draft r4 · rev-4/)).toBeVisible();
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await expect(page.getByText(/operation op-topology-apply-/)).toBeVisible();
+  current = await snapshot(request);
+  latest = current.state.revisions.at(-1) as {
+    spec?: { links?: Array<{ api_bindings?: Array<Record<string, unknown>> }> };
+  };
+  expect(latest.spec?.links?.[0]?.api_bindings).toEqual([]);
+  expect(current.state.contractViolations).toEqual([]);
+});
+
+test("Topology selection and layout scope follow an arbitrary topology ID", async ({
+  page,
+  request,
+}) => {
+  await page.goto("/#/topology");
+  const picker = page.getByLabel("Current topology");
+  await expect(picker).toHaveValue("primary");
+  await picker.selectOption("contest-a");
+  await expect(page.getByText(/draft r1 · contest-rev-1/)).toBeVisible();
+  await page.getByRole("button", { name: "自动布局", exact: true }).click();
+  await expect
+    .poll(async () => {
+      const current = await snapshot(request);
+      return Object.keys(
+        current.state.layouts["e2e-admin:contest-a"]?.positions ?? {},
+      );
+    })
+    .toEqual(["127.0.0.1:8080:gateway"]);
+  const current = await snapshot(request);
+  expect(current.metrics.paths["/api/v1/topologies/contest-a"]).toBeGreaterThan(0);
+  expect(current.metrics.layoutPutPaths).toContain(
+    "/api/v1/ui/layout?topology_id=contest-a",
+  );
+
+  await picker.selectOption("primary");
+  await expect(page.getByText(/draft r2 · rev-2/)).toBeVisible();
 });
 
 test("RBAC denial is surfaced without pretending the mutation succeeded", async ({
@@ -417,7 +616,9 @@ test("layout persistence is v1, scoped to the current user/topology, and failure
   await expect(persistence).toHaveAttribute("title", /layout database is full/);
 
   let current = await snapshot(request);
-  expect(current.metrics.layoutPutPaths).toEqual(["/api/v1/ui/layout"]);
+  expect(current.metrics.layoutPutPaths).toEqual([
+    "/api/v1/ui/layout?topology_id=primary",
+  ]);
   expect(current.state.layouts["e2e-admin:primary"].positions).toEqual({});
 
   await scenario(request, { failLayoutSave: false });

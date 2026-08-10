@@ -477,7 +477,7 @@ onBeforeUnmount(() => {
             <path d="M 0 1 L 9 5 L 0 9 z" fill="#334155" />
           </marker>
         </defs>
-        <g v-for="edge in edges" :key="edge.id">
+        <g v-for="edge in edges" :key="edge.id" :data-edge-id="edge.id">
           <!-- 命中区域 -->
           <path
             :d="edgePath(edge)"

@@ -10,9 +10,11 @@ import { api } from "../api";
 import { parseEndpointId } from "../endpoint";
 import { useOrchestrator } from "../store";
 import type {
+  ApiBinding,
   EndpointRow,
   LinkRow,
   ServiceRow,
+  TopologyApiBindingSpec,
   TopologyDiff,
   TopologyRevision,
   TopologySpec,
@@ -20,7 +22,10 @@ import type {
 
 const store = useOrchestrator();
 const canvas = ref<InstanceType<typeof FlowCanvas> | null>(null);
-const topologyId = "primary";
+const newTopologyId = ref("");
+const topologyId = computed(
+  () => store.activeTopologyId || newTopologyId.value.trim(),
+);
 const history = ref<TopologyRevision[]>([]);
 const rollbackRevisionId = ref("");
 const diffResult = ref<TopologyDiff | null>(null);
@@ -38,7 +43,7 @@ async function refreshHistory() {
     history.value = [];
     return;
   }
-  history.value = await api.topologyRevisions(topologyId);
+  history.value = await api.topologyRevisions(topologyId.value);
   if (!rollbackRevisionId.value) {
     rollbackRevisionId.value =
       store.topology.heads.applied_revision_id ?? history.value[0]?.revision_id ?? "";
@@ -60,7 +65,7 @@ async function saveSpec(spec: TopologySpec, message: string) {
   if (!store.ensureAction(editCapability.value)) return;
   if (store.topology) {
     await api.topologyCreateRevision(
-      topologyId,
+      topologyId.value,
       spec,
       store.topology.draft.revision_id,
       { changeMessage: message },
@@ -77,17 +82,25 @@ async function saveSpec(spec: TopologySpec, message: string) {
 const selectedNode = ref<string | null>(null);
 const selectedEdge = ref<string | null>(null);
 
+async function changeTopology(event: Event) {
+  const selected = (event.target as HTMLSelectElement).value;
+  selectedNode.value = null;
+  selectedEdge.value = null;
+  rollbackRevisionId.value = "";
+  diffResult.value = null;
+  validationHash.value = "";
+  topologyOperationId.value = "";
+  await store.selectTopology(selected);
+}
+
 /** 画布调色板只暴露已有部署投影对应的服务，避免把“已登记 manifest”伪装成可部署实例。 */
 const paletteServices = computed<ServiceRow[]>(() => {
-  const deployedIds = new Set(
-    store.deployments
-      .filter(
-        (deployment) =>
-          deployment.service_id && deployment.status?.toUpperCase() !== "FAILED",
-      )
-      .map((deployment) => deployment.service_id),
+  return store.services.filter(
+    (service) =>
+      store.deployments.find(
+        (deployment) => deployment.deployment_id === service.deployment_id,
+      )?.status.toUpperCase() !== "FAILED",
   );
-  return store.services.filter((service) => deployedIds.has(service.id));
 });
 
 /** 拖动中的临时坐标（避免每帧写 pinia + PUT） */
@@ -108,12 +121,15 @@ const nodes = computed<FlowNode[]>(() =>
       port: "",
       service: endpoint.service_id,
     };
-    const service = store.serviceById(endpoint.service_id);
     const deployment = store.deployments.find(
       (candidate) =>
         candidate.endpoint === endpoint.endpoint ||
-        candidate.endpoints?.includes(endpoint.endpoint),
+        candidate.endpoints?.includes(endpoint.endpoint) ||
+        endpoint.config?.deployment_id === candidate.deployment_id,
     );
+    const service = deployment
+      ? store.serviceByDeploymentId(deployment.deployment_id)
+      : undefined;
     const position =
       livePositions.value[endpoint.endpoint] ??
       store.layout.positions?.[endpoint.endpoint] ??
@@ -247,6 +263,7 @@ const paletteOpen = ref(true);
 const endpointModal = ref(false);
 const creatingEndpoint = ref(false);
 const endpointForm = ref({
+  deployment_id: "",
   service_id: "",
   host_ip: "127.0.0.1",
   port: "8080",
@@ -267,12 +284,17 @@ function onPaletteDragStart(event: DragEvent, service: ServiceRow) {
 }
 
 function onDropAt(position: { x: number; y: number }, event: DragEvent) {
-  const serviceId = event.dataTransfer?.getData("application/ojos-service");
-  if (!serviceId) return;
-  const service = store.serviceById(serviceId);
+  const deploymentId = event.dataTransfer?.getData("application/ojos-service");
+  if (!deploymentId) return;
+  const service = store.serviceByDeploymentId(deploymentId);
+  if (!service) return;
+  const parsed = parseEndpointId(service.endpoint);
   endpointForm.value = {
-    service_id: serviceId,
-    host_ip: "127.0.0.1",
+    deployment_id: deploymentId,
+    service_id: service.service_id,
+    host_ip: parsed?.host || store.deployments.find(
+      (deployment) => deployment.deployment_id === deploymentId,
+    )?.host_ip || "127.0.0.1",
     port: defaultPortFor(service),
     protocol: "http",
     health_path: "/health",
@@ -295,11 +317,11 @@ async function confirmCreateEndpoint() {
       health_path: form.health_path.trim(),
       display_name: form.service_id,
       note: "",
-      config: {},
+      config: { deployment_id: form.deployment_id },
     };
     const spec = cloneSpec() ?? {
       api_version: "v1" as const,
-      topology_id: topologyId,
+      topology_id: topologyId.value,
       root_endpoint: endpointId,
       authority: {
         root_endpoint: endpointId,
@@ -341,6 +363,187 @@ const selectedLinkRow = computed(() =>
       link.to === selectedEdgeParts.value?.target,
   ),
 );
+
+const selectedSpecLink = computed(() =>
+  store.topology?.draft.spec.links.find(
+    (link) =>
+      link.source_endpoint === selectedEdgeParts.value?.source &&
+      link.target_endpoint === selectedEdgeParts.value?.target,
+  ),
+);
+
+const selectedApiBindings = ref<ApiBinding[]>([]);
+const bindingEvidenceLoading = ref(false);
+const bindingEvidenceError = ref("");
+
+function sourceDeploymentId(): string {
+  const source = selectedEdgeParts.value?.source;
+  if (!source) return "";
+  const endpoint = store.topology?.draft.spec.endpoints.find(
+    (item) => item.endpoint === source,
+  );
+  const configuredDeployment = endpoint?.config?.deployment_id;
+  if (typeof configuredDeployment === "string" && configuredDeployment) {
+    return configuredDeployment;
+  }
+  return store.deployments.find(
+    (deployment) =>
+      deployment.endpoint === source || deployment.endpoints.includes(source),
+  )?.deployment_id ?? "";
+}
+
+async function refreshSelectedBindingEvidence() {
+  selectedApiBindings.value = [];
+  bindingEvidenceError.value = "";
+  const deploymentId = sourceDeploymentId();
+  if (!deploymentId || !store.supportsAction("deployment.get")) return;
+  bindingEvidenceLoading.value = true;
+  try {
+    const result = await api.deploymentBindings(deploymentId);
+    const requirementNames = new Set(
+      (selectedSpecLink.value?.api_bindings ?? []).map(
+        (binding) => binding.requirement,
+      ),
+    );
+    selectedApiBindings.value = result.items.filter(
+      (binding) =>
+        (binding.link_source_endpoint === selectedEdgeParts.value?.source &&
+          binding.link_target_endpoint === selectedEdgeParts.value?.target) ||
+        requirementNames.has(binding.requirement_name),
+    );
+  } catch (err) {
+    bindingEvidenceError.value = (err as Error).message;
+  } finally {
+    bindingEvidenceLoading.value = false;
+  }
+}
+
+watch(
+  () => `${selectedEdge.value ?? ""}\0${store.topology?.status?.updated_at ?? ""}`,
+  () => void refreshSelectedBindingEvidence(),
+);
+
+const bindingModal = ref(false);
+const bindingSaving = ref(false);
+const originalBindingRequirement = ref("");
+const bindingForm = ref<TopologyApiBindingSpec>({
+  requirement: "",
+  api_id: "",
+  version: ">=1.0.0 <2.0.0",
+  optional: false,
+  provider_deployment_id: "",
+  selection: "explicit",
+});
+
+const providerDeployments = computed(() =>
+  [...store.deployments]
+    .filter(
+      (deployment) =>
+        deployment.deployment_id &&
+        !["FAILED", "STOPPED"].includes(deployment.observed_state.toUpperCase()),
+    )
+    .sort((left, right) =>
+      left.deployment_id.localeCompare(right.deployment_id),
+    ),
+);
+
+function editApiBinding(binding?: TopologyApiBindingSpec) {
+  const value = binding ?? {
+    requirement: "",
+    api_id: "",
+    version: ">=1.0.0 <2.0.0",
+    optional: false,
+    provider_deployment_id: "",
+    selection: "explicit",
+  };
+  originalBindingRequirement.value = binding?.requirement ?? "";
+  bindingForm.value = JSON.parse(JSON.stringify(value)) as TopologyApiBindingSpec;
+  bindingModal.value = true;
+}
+
+async function saveApiBinding() {
+  const link = selectedSpecLink.value;
+  const requirement = bindingForm.value.requirement.trim();
+  const apiId = bindingForm.value.api_id.trim();
+  const provider = bindingForm.value.provider_deployment_id.trim();
+  if (!link || !requirement || !apiId || !provider) {
+    store.toast("err", "Binding 需要 requirement、API ID 和明确的 Provider Deployment");
+    return;
+  }
+  const spec = cloneSpec();
+  const draftLink = spec?.links.find(
+    (candidate) =>
+      candidate.source_endpoint === link.source_endpoint &&
+      candidate.target_endpoint === link.target_endpoint,
+  );
+  if (!spec || !draftLink) return;
+  const duplicate = (draftLink.api_bindings ?? []).some(
+    (binding) =>
+      binding.requirement === requirement &&
+      binding.requirement !== originalBindingRequirement.value,
+  );
+  if (duplicate) {
+    store.toast("err", `Requirement ${requirement} 已经绑定`);
+    return;
+  }
+  const next: TopologyApiBindingSpec = {
+    requirement,
+    api_id: apiId,
+    version: bindingForm.value.version.trim(),
+    optional: bindingForm.value.optional,
+    provider_deployment_id: provider,
+    selection: "explicit",
+  };
+  const bindings = [...(draftLink.api_bindings ?? [])];
+  const index = bindings.findIndex(
+    (binding) => binding.requirement === originalBindingRequirement.value,
+  );
+  if (index >= 0) bindings[index] = next;
+  else bindings.push(next);
+  bindings.sort((left, right) =>
+    left.requirement.localeCompare(right.requirement),
+  );
+  draftLink.api_bindings = bindings;
+  bindingSaving.value = true;
+  try {
+    await saveSpec(
+      spec,
+      `${index >= 0 ? "rebind" : "bind"} ${requirement} on ${link.source_endpoint} -> ${link.target_endpoint}`,
+    );
+    bindingModal.value = false;
+    store.toast("ok", `已创建包含 ${requirement} Binding 的新 draft revision`);
+  } catch (err) {
+    store.toast("err", `保存 ApiBinding 失败：${(err as Error).message}`);
+  } finally {
+    bindingSaving.value = false;
+  }
+}
+
+async function removeApiBinding(requirement: string) {
+  const link = selectedSpecLink.value;
+  const spec = cloneSpec();
+  const draftLink = spec?.links.find(
+    (candidate) =>
+      candidate.source_endpoint === link?.source_endpoint &&
+      candidate.target_endpoint === link?.target_endpoint,
+  );
+  if (!spec || !draftLink) return;
+  if (!window.confirm(`从 draft Link 中解除 ${requirement}？apply 后旧凭据会立即失效。`)) {
+    return;
+  }
+  draftLink.api_bindings = (draftLink.api_bindings ?? []).filter(
+    (binding) => binding.requirement !== requirement,
+  );
+  bindingSaving.value = true;
+  try {
+    await saveSpec(spec, `unbind ${requirement} from ${draftLink.source_endpoint}`);
+    store.toast("ok", `已创建解除 ${requirement} 的新 draft revision`);
+  } catch (err) {
+    store.toast("err", `解除 ApiBinding 失败：${(err as Error).message}`);
+  } finally {
+    bindingSaving.value = false;
+  }
+}
 
 async function deleteSelectedNode() {
   if (!store.ensureAction(editCapability.value)) return;
@@ -440,7 +643,7 @@ async function validateDraft() {
   if (!spec || !store.ensureAction("topology.validate")) return;
   busy.value = true;
   try {
-    const result = await api.topologyValidate(topologyId, spec);
+    const result = await api.topologyValidate(topologyId.value, spec);
     validationHash.value = result.content_sha256;
     store.toast("ok", `Spec 校验通过：${result.content_sha256}`);
   } catch (err) {
@@ -454,7 +657,7 @@ async function diffDraft() {
   if (!store.topology || !store.ensureAction("topology.diff")) return;
   busy.value = true;
   try {
-    diffResult.value = await api.topologyDiff(topologyId, {
+    diffResult.value = await api.topologyDiff(topologyId.value, {
       from_revision_id: store.topology.heads.applied_revision_id ?? undefined,
       to_revision_id: store.topology.draft.revision_id,
     });
@@ -470,7 +673,7 @@ async function applyDraft() {
   busy.value = true;
   try {
     const result = await api.topologyApply(
-      topologyId,
+      topologyId.value,
       store.topology.draft.revision_id,
     );
     topologyOperationId.value = result.operation_id;
@@ -492,7 +695,7 @@ async function rollbackTopology() {
   busy.value = true;
   try {
     const result = await api.topologyRollback(
-      topologyId,
+      topologyId.value,
       store.topology.draft.revision_id,
       rollbackRevisionId.value,
     );
@@ -535,6 +738,28 @@ onBeforeUnmount(() => {
     title="拓扑"
     subtitle="拖拽服务到画布创建端点，从右侧端口拖出连线建立 Link"
   >
+    <select
+      v-if="store.topologyHeads.length"
+      class="select topology-picker"
+      aria-label="Current topology"
+      :value="store.activeTopologyId"
+      @change="changeTopology"
+    >
+      <option
+        v-for="heads in store.topologyHeads"
+        :key="heads.topology_id"
+        :value="heads.topology_id"
+      >
+        {{ heads.topology_id }} · {{ heads.draft_revision_id }}
+      </option>
+    </select>
+    <input
+      v-else
+      v-model="newTopologyId"
+      class="input topology-picker"
+      aria-label="New topology ID"
+      placeholder="new topology id"
+    />
     <span
       v-if="store.layoutStatus === 'saving' || store.layoutStatus === 'error'"
       class="chip"
@@ -610,6 +835,7 @@ onBeforeUnmount(() => {
           <div class="palette-item-meta">
             <span class="chip">{{ service.kind }}</span>
             <span v-if="service.version" class="mono muted">v{{ service.version }}</span>
+            <span class="mono muted">{{ service.deployment_id }} @ {{ service.node_id }}</span>
           </div>
         </div>
         <div v-if="!paletteServices.length" class="empty">
@@ -720,6 +946,70 @@ onBeforeUnmount(() => {
         <div class="kv" v-if="selectedLinkRow">
           <span>实时健康</span><span><StatusChip :status="selectedLinkRow.health" /></span>
         </div>
+        <section
+          class="binding-inspector"
+        >
+          <div class="binding-inspector-head">
+            <h4>ApiBinding</h4>
+            <button
+              class="btn sm"
+              :disabled="bindingSaving || !store.supportsAction(editCapability)"
+              @click="editApiBinding()"
+            >新增 requirement</button>
+          </div>
+          <article
+            v-for="specBinding in selectedSpecLink?.api_bindings ?? []"
+            :key="specBinding.requirement"
+            class="binding-inspector-card"
+          >
+            <div class="binding-inspector-head">
+              <strong>{{ specBinding.requirement }}</strong>
+              <span class="mono">{{ specBinding.api_id }}</span>
+            </div>
+            <div class="binding-inspector-line">
+              <span>期望 Provider</span>
+              <span class="mono">{{ specBinding.provider_deployment_id || specBinding.selection }}</span>
+            </div>
+            <template
+              v-for="observed in selectedApiBindings.filter((binding) => binding.requirement_name === specBinding.requirement)"
+              :key="observed.binding_id"
+            >
+              <div class="binding-inspector-line">
+                <span>实际 Provider</span>
+                <span class="mono">{{ observed.provider_deployment_id || "UNBOUND" }}</span>
+              </div>
+              <div class="binding-inspector-line">
+                <span>状态</span>
+                <span><StatusChip :status="observed.health" /> {{ observed.state }}</span>
+              </div>
+              <div class="binding-inspector-line">
+                <span>代次</span>
+                <span class="mono">ctx {{ observed.context_generation || "?" }} / cred {{ observed.credential_generation || "?" }}</span>
+              </div>
+              <div v-if="observed.drift.length" class="binding-inspector-drift">
+                Drift：{{ observed.drift.join("；") }}
+              </div>
+            </template>
+            <div class="binding-inspector-actions">
+              <button class="btn sm" @click="editApiBinding(specBinding)">编辑 / Rebind</button>
+              <button
+                class="btn danger sm"
+                :disabled="bindingSaving"
+                @click="removeApiBinding(specBinding.requirement)"
+              >解除</button>
+            </div>
+          </article>
+          <p v-if="bindingEvidenceLoading" class="hint">正在读取实际 Binding…</p>
+          <p v-else-if="bindingEvidenceError" class="binding-inspector-drift">
+            Binding 证据加载失败：{{ bindingEvidenceError }}
+          </p>
+          <p
+            v-else-if="!selectedApiBindings.length"
+            class="hint"
+          >
+            当前 Link 只有 draft 期望，尚无已应用的实际 Binding。
+          </p>
+        </section>
         <div class="inspector-actions">
           <button
             class="btn sm"
@@ -781,6 +1071,55 @@ onBeforeUnmount(() => {
         @click="confirmCreateLink"
       >
         {{ creatingLink ? "创建中…" : "创建 Link" }}
+      </button>
+    </template>
+  </Modal>
+
+  <Modal
+    :open="bindingModal"
+    :title="originalBindingRequirement ? `编辑 ${originalBindingRequirement}` : '新增 ApiBinding requirement'"
+    width="620px"
+    @close="bindingModal = false"
+  >
+    <div class="field">
+      <label>Requirement 名称</label>
+      <input class="input mono" v-model="bindingForm.requirement" aria-label="Binding requirement" />
+    </div>
+    <div class="field">
+      <label>API ID</label>
+      <input class="input mono" v-model="bindingForm.api_id" aria-label="Binding API ID" placeholder="storage.object.get" />
+    </div>
+    <div class="field">
+      <label>SemVer 范围</label>
+      <input class="input mono" v-model="bindingForm.version" aria-label="Binding API version" />
+    </div>
+    <div class="field">
+      <label>Provider Deployment（精确身份）</label>
+      <select
+        class="select mono"
+        v-model="bindingForm.provider_deployment_id"
+        aria-label="Binding provider deployment"
+      >
+        <option value="">请选择 Deployment</option>
+        <option
+          v-for="deployment in providerDeployments"
+          :key="deployment.deployment_id"
+          :value="deployment.deployment_id"
+        >
+          {{ deployment.deployment_id }} · {{ deployment.service_id }} · {{ deployment.node_id }} · {{ deployment.observed_state }}
+        </option>
+      </select>
+    </div>
+    <label class="check-line">
+      <input type="checkbox" v-model="bindingForm.optional" /> 可选 requirement
+    </label>
+    <p class="hint">
+      保存只创建新的 immutable draft revision；Apply 成功后才切换实际 Binding 与凭据代次。
+    </p>
+    <template #footer>
+      <button class="btn" @click="bindingModal = false">取消</button>
+      <button class="btn primary" :disabled="bindingSaving" @click="saveApiBinding">
+        {{ bindingSaving ? "保存中…" : "保存到 draft" }}
       </button>
     </template>
   </Modal>
@@ -850,6 +1189,9 @@ onBeforeUnmount(() => {
   background: var(--bg-soft);
   color: var(--muted);
   font-size: 11px;
+}
+.topology-picker {
+  width: min(300px, 34vw);
 }
 .rollback-control {
   display: flex;
@@ -999,6 +1341,70 @@ onBeforeUnmount(() => {
 }
 .inspector-actions + .inspector-actions {
   margin-top: 8px;
+}
+
+.binding-inspector {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.binding-inspector h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+.binding-inspector-card {
+  padding: 8px;
+  margin-top: 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.binding-inspector-head,
+.binding-inspector-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.binding-inspector-head {
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+  font-size: 11.5px;
+}
+.binding-inspector-head h4 {
+  margin: 0;
+}
+.binding-inspector-head .mono {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.binding-inspector-line {
+  padding: 3px 0;
+  font-size: 10.5px;
+}
+.binding-inspector-line > span:first-child {
+  color: var(--faint);
+}
+.binding-inspector-line > span:last-child {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.binding-inspector-drift {
+  margin: 6px 0 0;
+  color: var(--warn);
+  font-size: 10.5px;
+}
+.binding-inspector-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+.check-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .link-preview {

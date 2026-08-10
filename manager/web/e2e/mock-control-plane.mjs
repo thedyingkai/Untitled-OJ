@@ -31,7 +31,7 @@ function topologySpec(version) {
     health_path: "/health",
     display_name: "Gateway",
     note: "",
-    config: {},
+    config: { deployment_id: "dep-gateway" },
   };
   const database = {
     endpoint: "127.0.0.1:5432:database",
@@ -40,7 +40,7 @@ function topologySpec(version) {
     health_path: "",
     display_name: "Database",
     note: "",
-    config: {},
+    config: { deployment_id: "dep-database" },
   };
   return {
     api_version: "v1",
@@ -65,6 +65,16 @@ function topologySpec(version) {
               config_ref: "",
               secret_ref: "db/main",
               policy: {},
+              api_bindings: [
+                {
+                  requirement: "database_control",
+                  api_id: "database.control",
+                  version: ">=1.0.0 <2.0.0",
+                  optional: false,
+                  provider_deployment_id: "dep-database",
+                  selection: "explicit",
+                },
+              ],
             },
           ],
   };
@@ -102,10 +112,41 @@ function initialMetrics() {
 function initialState() {
   const rev1 = makeRevision(1, topologySpec(1));
   const rev2 = makeRevision(2, topologySpec(2));
+  const secondarySpec = structuredClone(topologySpec(1));
+  secondarySpec.topology_id = "contest-a";
+  const secondaryRevision = {
+    ...makeRevision(1, secondarySpec),
+    topology_id: "contest-a",
+    revision_id: "contest-rev-1",
+    content_sha256: "sha256-contest-revision-1",
+    spec: secondarySpec,
+    message: "contest A topology",
+  };
+  const secondaryHeads = {
+    topology_id: "contest-a",
+    draft_revision_id: "contest-rev-1",
+    applied_revision_id: "contest-rev-1",
+    applying_revision_id: null,
+    applying_operation_id: null,
+    last_operation_id: null,
+  };
+  const secondaryStatus = {
+    topology_id: "contest-a",
+    desired_revision_id: "contest-rev-1",
+    observed_revision_id: "contest-rev-1",
+    state: "IN_SYNC",
+    deployments: [],
+    endpoints: [],
+    links: [],
+    drift: [],
+    last_operation_id: null,
+    updated_at: "2026-08-03T00:00:00Z",
+  };
   return {
     scenario: {
       failNextInstall: false,
       failLayoutSave: false,
+      activeBindingConflict: true,
       denyPath: "",
       sseDelayMs: 0,
     },
@@ -155,6 +196,8 @@ function initialState() {
         desired_state: "RUNNING",
         observed_state: "RUNNING",
         health: "HEALTHY",
+        endpoint: "127.0.0.1:8080:gateway",
+        endpoints: ["127.0.0.1:8080:gateway"],
         updated_at: "2026-08-03T00:00:00Z",
       },
       {
@@ -171,6 +214,8 @@ function initialState() {
         desired_state: "RUNNING",
         observed_state: "RUNNING",
         health: "HEALTHY",
+        endpoint: "127.0.0.1:5432:database",
+        endpoints: ["127.0.0.1:5432:database"],
         updated_at: "2026-08-03T00:00:00Z",
       },
       {
@@ -207,8 +252,27 @@ function initialState() {
         source_id: "trusted-e2e",
         catalog_id: "catalog-e2e-v2",
       },
+      {
+        module_id: "e2e-provider",
+        name: "E2E Provider",
+        description: "Signed provider-only fixture with no required API bindings",
+        kind: "backend-api",
+        tags: ["e2e", "provider"],
+        metadata_sha256:
+          "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        version: "1.0.0",
+        channel: "stable",
+        platforms: [{ os: "linux", arch: "amd64" }],
+        min_orchestrator_version: "1.0.0",
+        oci_image: "registry.example/e2e-provider@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        source_id: "trusted-e2e",
+        catalog_id: "catalog-e2e-v2",
+      },
     ],
     revisions: [rev1, rev2],
+    secondaryRevision,
+    secondaryHeads,
+    secondaryStatus,
     heads: {
       topology_id: "primary",
       draft_revision_id: "rev-2",
@@ -318,7 +382,10 @@ function initialState() {
         },
       ],
     },
-    layouts: { "e2e-admin:primary": { positions: {} } },
+    layouts: {
+      "e2e-admin:primary": { positions: {} },
+      "e2e-admin:contest-a": { positions: {} },
+    },
     diagnostics: [
       {
         report_id: "diag-1",
@@ -616,6 +683,108 @@ async function handleApi(req, res, url) {
     envelope(res, { items: state.deployments, next_cursor: null });
     return;
   }
+  const deploymentReadMatch = pathname.match(
+    /^\/api\/v1\/deployments\/([^/]+)(?:\/(health|bindings))?$/,
+  );
+  if (req.method === "GET" && deploymentReadMatch) {
+    const deploymentId = decodeURIComponent(deploymentReadMatch[1]);
+    const resource = deploymentReadMatch[2];
+    const deployment = state.deployments.find(
+      (candidate) => candidate.deployment_id === deploymentId,
+    );
+    if (!deployment) {
+      problem(res, 404, "DEPLOYMENT_NOT_FOUND", "deployment does not exist");
+      return;
+    }
+    if (resource === "health") {
+      envelope(res, {
+        deployment_id: deploymentId,
+        health: deployment.health,
+        observed_state: deployment.observed_state,
+        updated_at: deployment.updated_at,
+        evidence: {
+          source: "docker-health",
+          status: deployment.health,
+        },
+      });
+      return;
+    }
+    if (resource === "bindings") {
+      envelope(res, {
+        deployment_id: deploymentId,
+        service_id: deployment.service_id,
+        items:
+          deployment.service_id === "e2e-api"
+            ? [
+                {
+                  binding_id: "binding-e2e-gateway",
+                  requirement_name: "gateway_control",
+                  api_id: "gateway.control",
+                  api_version: "1.0.0",
+                  consumer_deployment_id: deploymentId,
+                  consumer_service_id: "e2e-api",
+                  consumer_node_id: deployment.node_id,
+                  provider_deployment_id: "dep-gateway",
+                  provider_service_id: "gateway",
+                  provider_node_id: "desktop-local",
+                  provider_endpoint: "127.0.0.1:8080:gateway",
+                  provider_path: "/api/control",
+                  virtual_endpoint: "/internal/apis/gateway.control",
+                  protocol: "http",
+                  methods: ["GET", "POST"],
+                  auth_mode: "workload",
+                  provider_auth_mode: "workload",
+                  permission: "gateway.control",
+                  topology_id: "primary",
+                  topology_revision_id: "rev-1",
+                  link_source_endpoint: "127.0.0.1:18081:e2e-api",
+                  link_target_endpoint: "127.0.0.1:8080:gateway",
+                  credential_generation: 2,
+                  context_generation: 3,
+                  desired_state: "ACTIVE",
+                  observed_state: "ACTIVE",
+                  health: "HEALTHY",
+                  drift: [],
+                  state: "ACTIVE",
+                  optional: false,
+                  updated_at: deployment.updated_at,
+                },
+              ]
+            : [],
+        provider_items: [],
+      });
+      return;
+    }
+    envelope(res, {
+      deployment: {
+        node_id: deployment.node_id,
+        instance: {
+          deployment_id: deployment.deployment_id,
+          service_id: deployment.service_id,
+          release_version: deployment.version,
+          container_id: deployment.container_id,
+          artifact_digest: deployment.artifact_digest,
+          runtime_contract: {
+            id: "standard-container-v1",
+            profile_sha256:
+              "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          },
+          runtime_policy_sha256:
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          effective_runtime_sha256:
+            "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          runtime_attested: true,
+          desired_state: deployment.desired_state,
+          observed_state: deployment.observed_state,
+          health: deployment.health,
+        },
+        management_mode: "MANAGED",
+        endpoint: "",
+        updated_at: deployment.updated_at,
+      },
+    });
+    return;
+  }
   const deploymentActionMatch = pathname.match(
     /^\/api\/v1\/deployments\/([^/]+):(start|stop|restart|uninstall)$/,
   );
@@ -627,6 +796,19 @@ async function handleApi(req, res, url) {
     );
     if (!deployment) {
       problem(res, 404, "DEPLOYMENT_NOT_FOUND", "deployment does not exist");
+      return;
+    }
+    if (
+      action === "uninstall" &&
+      deployment.service_id === "e2e-api" &&
+      state.scenario.activeBindingConflict
+    ) {
+      problem(
+        res,
+        409,
+        "DEPLOYMENT_ACTIVE_BINDINGS",
+        "deployment still participates in active API Bindings; remove the Topology Link and apply first",
+      );
       return;
     }
     const operationId = `op-deployment-${action}-${state.operations.length + 1}`;
@@ -702,6 +884,15 @@ async function handleApi(req, res, url) {
     return;
   }
   if (req.method === "POST" && pathname === "/api/v1/store/releases:validate") {
+    const providerOnly = body.service_id === "e2e-provider";
+    if (
+      !providerOnly &&
+      (body.topology_id !== "primary" || body.topology_etag !== '"rev-1"')
+    ) {
+      state.contractViolations.push(
+        "release validation omitted the explicit applied Topology revision",
+      );
+    }
     envelope(res, {
       valid: true,
       catalog_source_id: body.catalog_source_id,
@@ -710,6 +901,113 @@ async function handleApi(req, res, url) {
       target_platform: { os: "linux", arch: "amd64" },
       plan: { providers: ["docker", "health"] },
       metadata: [],
+      requirements: providerOnly ? [] : [
+        {
+          requirement_name: "gateway_control",
+          api_id: "gateway.control",
+          version: ">=1.0.0 <2.0.0",
+          optional: false,
+          selection: "nearest-healthy",
+          candidates: [
+            {
+              deployment_id: "dep-gateway",
+              service_id: "gateway",
+              node_id: "desktop-local",
+              endpoint: "127.0.0.1:8080:gateway",
+              path: "/api/control",
+              api_id: "gateway.control",
+              api_version: "1.0.0",
+              protocol: "http",
+              methods: ["GET", "POST"],
+              auth_mode: "workload",
+              permission: "gateway.control",
+              healthy: true,
+            },
+          ],
+          recommended_provider_deployment_id: "dep-gateway",
+          ambiguous: false,
+          missing: false,
+        },
+      ],
+      bindings: providerOnly ? [] : [
+        {
+          binding_id: "binding-e2e-gateway",
+          requirement_name: "gateway_control",
+          api_id: "gateway.control",
+          api_version: "1.0.0",
+          provider_deployment_id: "dep-gateway",
+          provider_service_id: "gateway",
+          provider_node_id: "desktop-local",
+          provider_endpoint: "127.0.0.1:8080:gateway",
+          provider_path: "/api/control",
+          virtual_endpoint: "/internal/apis/gateway.control",
+          protocol: "http",
+          methods: ["GET", "POST"],
+          auth_mode: "workload",
+          provider_auth_mode: "workload",
+          permission: "gateway.control",
+          credential_generation: 1,
+          context_generation: 1,
+          desired_state: "ACTIVE",
+          observed_state: "RESOLVED",
+          health: "HEALTHY",
+          drift: [],
+          state: "RESOLVED",
+          optional: false,
+        },
+      ],
+      runtime: {
+        node_id: body.target_node_id,
+        contract: {
+          id: "standard-container-v1",
+          profile_sha256:
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        },
+        facts: {
+          schema_version: 1,
+          observed_at_ms: Date.now(),
+          agent_version: "1.0.0-e2e",
+          runtime_policy_sha256:
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          allowed_contracts: [],
+          docker: {
+            engine: "docker",
+            server_version: "28.0.0-e2e",
+            operating_system: "E2E Linux",
+            os_type: "linux",
+            architecture: "amd64",
+            cgroup_version: "2",
+            memory_limit: true,
+            pids_limit: true,
+            rootless: false,
+            apparmor: true,
+            seccomp: true,
+            security_options: ["name=seccomp"],
+          },
+        },
+      },
+      topology: providerOnly
+        ? null
+        : {
+            topology_id: body.topology_id,
+            revision_id: String(body.topology_etag || "").replace(/^"|"$/g, ""),
+          },
+      topology_diff: providerOnly
+        ? null
+        : {
+            topology_id: body.topology_id,
+            from_revision_id: "rev-1",
+            to_revision_id: null,
+            from_sha256: "sha256-revision-1",
+            to_sha256: "sha256-prospective-install",
+            changes: [
+              {
+                kind: "ADD_API_BINDING",
+                requirement: "gateway_control",
+                provider_deployment_id: "dep-gateway",
+              },
+            ],
+          },
       side_effects: {
         release_imports: 0,
         operations: 0,
@@ -720,6 +1018,26 @@ async function handleApi(req, res, url) {
     return;
   }
   if (req.method === "POST" && pathname === "/api/v1/store/releases:install") {
+    const providerOnly = body.service_id === "e2e-provider";
+    if (
+      !providerOnly &&
+      !Array.isArray(body.bindings) ||
+      (!providerOnly && body.bindings.length !== 1) ||
+      (!providerOnly && body.bindings[0]?.name !== "gateway_control") ||
+      (!providerOnly && body.bindings[0]?.provider_deployment_id !== "dep-gateway")
+    ) {
+      state.contractViolations.push(
+        "release install omitted the validated explicit API Binding",
+      );
+    }
+    if (
+      !providerOnly &&
+      (body.topology_id !== "primary" || body.topology_etag !== '"rev-1"')
+    ) {
+      state.contractViolations.push(
+        "release install omitted the explicit applied Topology revision",
+      );
+    }
     if (state.scenario.failNextInstall) {
       state.scenario.failNextInstall = false;
       state.compensations.push({
@@ -743,14 +1061,16 @@ async function handleApi(req, res, url) {
         deployment_id: deploymentId,
         node_id: body.target_node_id,
         service_id: body.service_id,
-        name: "E2E API",
-        version: body.version || "1.2.3",
+        name: providerOnly ? "E2E Provider" : "E2E API",
+        version: body.version || (providerOnly ? "1.0.0" : "1.2.3"),
         kind: "backend-api",
         runtime: "docker",
         status: "RUNNING",
-        container_id: "container-e2e-api",
+        container_id: providerOnly ? "container-e2e-provider" : "container-e2e-api",
         artifact_digest:
-          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          providerOnly
+            ? "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            : "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         desired_state: "RUNNING",
         observed_state: "RUNNING",
         health: "HEALTHY",
@@ -778,6 +1098,14 @@ async function handleApi(req, res, url) {
     if (!deployment) {
       problem(res, 404, "DEPLOYMENT_NOT_FOUND", "deployment does not exist");
       return;
+    }
+    if (
+      deployment.service_id === "e2e-api" &&
+      (!Array.isArray(body.bindings) ||
+        body.bindings[0]?.name !== "gateway_control" ||
+        body.bindings[0]?.provider_deployment_id !== "dep-gateway")
+    ) {
+      state.contractViolations.push(`release ${action} dropped active API Bindings`);
     }
     deployment.version = action === "upgrade" ? "1.3.0" : "1.2.3";
     deployment.health = "HEALTHY";
@@ -810,8 +1138,19 @@ async function handleApi(req, res, url) {
     });
     return;
   }
+  if (req.method === "GET" && pathname === "/api/v1/topologies/contest-a") {
+    envelope(res, {
+      heads: state.secondaryHeads,
+      draft: state.secondaryRevision,
+      status: state.secondaryStatus,
+    });
+    return;
+  }
   if (req.method === "GET" && pathname === "/api/v1/topologies") {
-    envelope(res, { items: [state.heads], next_cursor: null });
+    envelope(res, {
+      items: [state.heads, state.secondaryHeads],
+      next_cursor: null,
+    });
     return;
   }
   if (
@@ -822,6 +1161,13 @@ async function handleApi(req, res, url) {
       items: [...state.revisions].reverse(),
       next_cursor: null,
     });
+    return;
+  }
+  if (
+    req.method === "GET" &&
+    pathname === "/api/v1/topologies/contest-a/revisions"
+  ) {
+    envelope(res, { items: [state.secondaryRevision], next_cursor: null });
     return;
   }
   if (
@@ -1089,17 +1435,29 @@ async function handleApi(req, res, url) {
     }
   }
   if (req.method === "GET" && pathname === "/api/v1/ui/layout") {
-    envelope(res, { layout: state.layouts["e2e-admin:primary"] || {} });
+    const topologyId = url.searchParams.get("topology_id");
+    if (!topologyId) {
+      state.contractViolations.push("layout read omitted topology_id");
+      problem(res, 422, "LAYOUT_TOPOLOGY_REQUIRED", "topology_id is required");
+      return;
+    }
+    envelope(res, { layout: state.layouts[`e2e-admin:${topologyId}`] || {} });
     return;
   }
   if (req.method === "PUT" && pathname === "/api/v1/ui/layout") {
-    metrics.layoutPutPaths.push(pathname);
+    const topologyId = url.searchParams.get("topology_id");
+    metrics.layoutPutPaths.push(`${pathname}?topology_id=${encodeURIComponent(topologyId || "")}`);
+    if (!topologyId) {
+      state.contractViolations.push("layout write omitted topology_id");
+      problem(res, 422, "LAYOUT_TOPOLOGY_REQUIRED", "topology_id is required");
+      return;
+    }
     if (state.scenario.failLayoutSave) {
       problem(res, 507, "LAYOUT_PERSISTENCE_FAILED", "layout database is full");
       return;
     }
-    state.layouts["e2e-admin:primary"] = structuredClone(body);
-    envelope(res, { layout: state.layouts["e2e-admin:primary"] });
+    state.layouts[`e2e-admin:${topologyId}`] = structuredClone(body);
+    envelope(res, { layout: state.layouts[`e2e-admin:${topologyId}`] });
     return;
   }
 

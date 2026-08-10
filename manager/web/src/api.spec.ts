@@ -4,6 +4,7 @@ import {
   RequestCancelledError,
   RequestTimeoutError,
   api,
+  normalizeStoreValidation,
   parseOperationEventStream,
   request,
 } from "./api";
@@ -204,6 +205,161 @@ describe("bounded orchestrator API requests", () => {
     });
   });
 
+  it("normalizes binding candidates without silently recommending an ambiguous provider", () => {
+    const result = normalizeStoreValidation({
+      valid: false,
+      catalog_id: "production",
+      target_platform: { os: "linux", arch: "amd64" },
+      requirements: [
+        {
+          name: "judge_control",
+          api_id: "judge.worker.control",
+          version: ">=1.0.0 <2.0.0",
+          candidates: [
+            {
+              deployment_id: "judge-a",
+              service_id: "judge-api",
+              node_id: "node-a",
+              api_version: "1.0.0",
+              healthy: true,
+            },
+            {
+              deployment_id: "judge-b",
+              service_id: "judge-api",
+              node_id: "node-b",
+              api_version: "1.0.0",
+              healthy: true,
+            },
+          ],
+        },
+      ],
+      side_effects: {},
+      runtime: {
+        node_id: "node-b",
+        contract: {
+          id: "judge-sandbox-v1",
+          profile_sha256: `sha256:${"a".repeat(64)}`,
+        },
+        facts: {
+          report_id: "report-node-b-1",
+          observed_at_ms: 123,
+          agent_version: "1.0.0",
+          runtime_policy_sha256: `sha256:${"b".repeat(64)}`,
+          allowed_contracts: [],
+          judge_sandbox_allowed_images: [
+            `registry.example/judge-worker@sha256:${"c".repeat(64)}`,
+          ],
+          inventory_complete: true,
+          inventory_error: "",
+          docker: {
+            engine: "docker",
+            server_version: "28.0.0",
+            os_type: "linux",
+            architecture: "amd64",
+            cgroup_version: "2",
+          },
+        },
+      },
+    });
+
+    expect(result.requirements[0]).toMatchObject({
+      name: "judge_control",
+      ambiguous: true,
+      recommended_provider_deployment_id: "",
+    });
+    expect(result.requirements[0]?.candidates).toHaveLength(2);
+    expect(result.runtime?.selected_contract?.id).toBe("judge-sandbox-v1");
+    expect(result.runtime?.docker.cgroup_version).toBe("2");
+    expect(result.runtime?.report_id).toBe("report-node-b-1");
+    expect(result.runtime?.inventory_complete).toBe(true);
+    expect(result.runtime?.judge_sandbox_allowed_images).toHaveLength(1);
+  });
+
+  it("uses the deployment binding endpoint and preserves generations and drift", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      v1Response({
+        deployment_id: "worker-b",
+        service_id: "judge-worker",
+        items: [
+          {
+            binding_id: "binding-1",
+            requirement_name: "judge_control",
+            api_id: "judge.worker.control",
+            provider_deployment_id: "judge-a",
+            credential_generation: 4,
+            context_generation: 7,
+            health: "DEGRADED",
+            drift: ["provider endpoint changed"],
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await api.deploymentBindings("worker-b");
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/v1/deployments/worker-b/bindings",
+    );
+    expect(result.items[0]).toMatchObject({
+      provider_deployment_id: "judge-a",
+      credential_generation: 4,
+      context_generation: 7,
+      drift: ["provider endpoint changed"],
+    });
+  });
+
+  it("sends explicit bindings and topology revision in validation and install", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        v1Response({
+          valid: true,
+          target_platform: { os: "linux", arch: "amd64" },
+          bindings: [],
+          side_effects: {},
+        }),
+      )
+      .mockResolvedValueOnce(v1Response({ operation_id: "op-install" }, "req-install", 202));
+    vi.stubGlobal("fetch", fetchMock);
+    const selection = {
+      bindings: [
+        { name: "judge_control", provider_deployment_id: "judge-a" },
+      ],
+      topology_id: "primary",
+      topology_etag: '"revision-7"',
+    };
+    const pipeline = {
+      start: false,
+      migration_policy: "DRY_RUN" as const,
+      gateway_node_id: "gateway-a",
+      config: { namespace: "contest" },
+      secret_refs: { signing_key: "secrets/judge/signing-key" },
+    };
+
+    await api.storeValidate({
+      service_id: "judge-worker",
+      target_node_id: "node-b",
+      ...selection,
+      ...pipeline,
+    });
+    await api.storeInstall({
+      service_id: "judge-worker",
+      target_node_id: "node-b",
+      ...selection,
+      ...pipeline,
+    });
+
+    for (const call of fetchMock.mock.calls) {
+      expect(JSON.parse(String((call[1] as RequestInit).body))).toMatchObject({
+        ...selection,
+        ...pipeline,
+      });
+      expect(((call[1] as RequestInit).headers as Record<string, string>)["Idempotency-Key"])
+        .toBeTruthy();
+    }
+  });
+
   it("uses the published Node enrollment and certificate revocation routes", async () => {
     const fetchMock = vi
       .fn()
@@ -277,6 +433,8 @@ describe("bounded orchestrator API requests", () => {
       catalog_source_id: "official",
       channel: "stable",
       target_node_id: "node-1",
+      config: {},
+      secret_refs: {},
     });
   });
 
@@ -314,6 +472,12 @@ describe("bounded orchestrator API requests", () => {
     expect((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject({
       "Idempotency-Key": expect.any(String),
     });
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toMatchObject({
+      start: true,
+      migration_policy: "APPLY",
+      config: {},
+      secret_refs: {},
+    });
   });
 
   it("imports and deletes Release metadata separately from replacement sagas", async () => {
@@ -332,7 +496,12 @@ describe("bounded orchestrator API requests", () => {
       channel: "stable",
       target_node_id: "node-1",
     });
-    await api.storeUpgrade({ deployment_id: "deployment-1" });
+    await api.storeUpgrade({
+      deployment_id: "deployment-1",
+      bindings: [
+        { name: "storage_get", provider_deployment_id: "storage-a" },
+      ],
+    });
     await api.storeRollback({ deployment_id: "deployment-2" });
     await api.deleteRelease("judge-api", "1.2.3");
 
@@ -352,6 +521,12 @@ describe("bounded orchestrator API requests", () => {
     expect(JSON.parse(String((fetchMock.mock.calls[3]?.[1] as RequestInit).body))).toEqual({
       service_id: "judge-api",
       version: "1.2.3",
+    });
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({
+      deployment_id: "deployment-1",
+      bindings: [
+        { name: "storage_get", provider_deployment_id: "storage-a" },
+      ],
     });
     for (const call of fetchMock.mock.calls) {
       expect((call[1] as RequestInit).headers).toMatchObject({
@@ -461,6 +636,11 @@ describe("bounded orchestrator API requests", () => {
                 observed_state: "RUNNING",
                 health: "HEALTHY",
               },
+              last_observed_at_ms: 1_000,
+              drift_reason: "",
+              credential_expires_at_ms: 901_000,
+              credential_last_success_at_ms: 1_000,
+              credential_last_error: "",
               updated_at: "unix-ms:1",
             },
           ],
@@ -481,6 +661,9 @@ describe("bounded orchestrator API requests", () => {
       service_id: "judge-api",
       observed_state: "RUNNING",
       endpoint_health: "HEALTHY",
+      last_observed_at_ms: 1_000,
+      credential_expires_at_ms: 901_000,
+      credential_last_success_at_ms: 1_000,
     });
   });
 
@@ -525,14 +708,16 @@ describe("bounded orchestrator API requests", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    expect(await api.getLayout()).toEqual({
+    expect(await api.getLayout("secondary-1")).toEqual({
       positions: { endpoint: { x: 10, y: 20 } },
     });
-    await api.putLayout({ positions: { endpoint: { x: 30, y: 40 } } });
+    await api.putLayout("secondary-1", {
+      positions: { endpoint: { x: 30, y: 40 } },
+    });
 
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
-      "/api/v1/ui/layout",
-      "/api/v1/ui/layout",
+      "/api/v1/ui/layout?topology_id=secondary-1",
+      "/api/v1/ui/layout?topology_id=secondary-1",
     ]);
     const put = fetchMock.mock.calls[1]?.[1] as RequestInit;
     expect(put.method).toBe("PUT");

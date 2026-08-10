@@ -18,6 +18,7 @@ import type {
   StoreIndexResponse,
   LoadStatus,
   TopologyDetail,
+  TopologyHeads,
   TopologyRevision,
 } from "./types";
 
@@ -51,6 +52,8 @@ export const useOrchestrator = defineStore("orchestrator", {
     endpoints: [] as EndpointRow[],
     links: [] as LinkRow[],
     operations: [] as OperationRow[],
+    topologyHeads: [] as TopologyHeads[],
+    activeTopologyId: "",
     topology: null as TopologyDetail | null,
     topologyRevisions: [] as TopologyRevision[],
     capabilities: [] as CapabilityRow[],
@@ -83,9 +86,9 @@ export const useOrchestrator = defineStore("orchestrator", {
         ),
       );
     },
-    serviceById(state) {
+    serviceByDeploymentId(state) {
       return (id: string) =>
-        state.services.find((service) => service.id === id);
+        state.services.find((service) => service.deployment_id === id);
     },
     supportsAction(state) {
       return (action: string) =>
@@ -138,7 +141,7 @@ export const useOrchestrator = defineStore("orchestrator", {
             capabilities,
             nodes,
             deployments,
-            topology,
+            topologyHeads,
             operations,
           ] =
             await Promise.all([
@@ -146,13 +149,24 @@ export const useOrchestrator = defineStore("orchestrator", {
               api.capabilities({ signal: controller.signal }),
               api.nodes({ signal: controller.signal }),
               api.deployments({ signal: controller.signal }),
-              api.topology("primary", { signal: controller.signal }),
+              api.topologyList({ signal: controller.signal }),
               api.operations({ signal: controller.signal }),
             ]);
+          const topologyIds = new Set(
+            topologyHeads.map((heads) => heads.topology_id),
+          );
+          const activeTopologyId = topologyIds.has(this.activeTopologyId)
+            ? this.activeTopologyId
+            : topologyHeads[0]?.topology_id ?? "";
+          const topology = activeTopologyId
+            ? await api.topology(activeTopologyId, { signal: controller.signal })
+            : null;
           if (generation !== coreRefreshGeneration) return;
           this.health = health;
           this.capabilities = capabilities;
           this.nodes = nodes;
+          this.topologyHeads = topologyHeads;
+          this.activeTopologyId = activeTopologyId;
           this.topology = topology;
 
           const endpointStatuses = new Map(
@@ -184,6 +198,7 @@ export const useOrchestrator = defineStore("orchestrator", {
                 reachable: status?.reachable ?? false,
                 display_name: endpoint.display_name,
                 note: endpoint.note,
+                config: endpoint.config,
               };
             }) ?? [];
           const linkRows: LinkRow[] =
@@ -203,27 +218,35 @@ export const useOrchestrator = defineStore("orchestrator", {
           const nodeById = new Map(nodes.map((node) => [node.node_id, node]));
           const enrichedDeployments = deployments.map((deployment) => {
             const matchingEndpoints = endpointRows.filter(
-              (endpoint) => endpoint.service_id === deployment.service_id,
+              (endpoint) =>
+                deployment.endpoint === endpoint.endpoint ||
+                deployment.endpoints.includes(endpoint.endpoint) ||
+                endpoint.config?.deployment_id === deployment.deployment_id,
             );
             const primaryEndpoint = matchingEndpoints[0];
             return {
               ...deployment,
               host_ip:
                 nodeById.get(deployment.node_id)?.host_ip || deployment.node_id,
-              endpoint: primaryEndpoint?.endpoint ?? "",
-              protocol: primaryEndpoint?.protocol ?? "",
-              health_path: primaryEndpoint?.health_path ?? "",
+              endpoint: primaryEndpoint?.endpoint ?? deployment.endpoint,
+              protocol: primaryEndpoint?.protocol ?? deployment.protocol,
+              health_path: primaryEndpoint?.health_path ?? deployment.health_path,
               endpoint_health: primaryEndpoint?.health ?? deployment.endpoint_health,
               reachable: primaryEndpoint?.reachable ?? deployment.reachable,
-              endpoint_count: matchingEndpoints.length,
-              endpoints: matchingEndpoints.map((endpoint) => endpoint.endpoint),
+              endpoint_count:
+                matchingEndpoints.length || deployment.endpoint_count,
+              endpoints: matchingEndpoints.length
+                ? matchingEndpoints.map((endpoint) => endpoint.endpoint)
+                : deployment.endpoints,
             };
           });
-          const serviceRows = new Map<string, ServiceRow>();
-          for (const deployment of enrichedDeployments) {
-            if (!deployment.service_id || serviceRows.has(deployment.service_id)) continue;
-            serviceRows.set(deployment.service_id, {
-              id: deployment.service_id,
+          const serviceRows: ServiceRow[] = enrichedDeployments
+            .filter((deployment) => !!deployment.deployment_id)
+            .map((deployment) => ({
+              id: deployment.deployment_id,
+              deployment_id: deployment.deployment_id,
+              node_id: deployment.node_id,
+              service_id: deployment.service_id,
               name: deployment.service_id,
               version: deployment.version,
               kind: deployment.kind,
@@ -231,9 +254,8 @@ export const useOrchestrator = defineStore("orchestrator", {
               runtime: deployment.runtime,
               ui: "",
               health: deployment.endpoint_health,
-            });
-          }
-          this.services = [...serviceRows.values()];
+            }));
+          this.services = serviceRows;
           this.deployments = enrichedDeployments;
           this.endpoints = endpointRows;
           this.links = linkRows;
@@ -278,10 +300,19 @@ export const useOrchestrator = defineStore("orchestrator", {
       layoutLoadController = controller;
       this.layoutStatus = "loading";
       try {
-        this.layout = await api.getLayout({ signal: controller.signal });
-        if (layoutLoadController !== controller) return;
-        this.layoutStatus = "ready";
-        this.layoutError = "";
+        const topologyId = this.activeTopologyId;
+        if (!topologyId) {
+          this.layout = {};
+          this.layoutStatus = "ready";
+          this.layoutError = "";
+        } else {
+          this.layout = await api.getLayout(topologyId, {
+            signal: controller.signal,
+          });
+          if (layoutLoadController !== controller) return;
+          this.layoutStatus = "ready";
+          this.layoutError = "";
+        }
       } catch (err) {
         if (layoutLoadController !== controller || isRequestCancelled(err)) return;
         this.layout = {};
@@ -313,9 +344,19 @@ export const useOrchestrator = defineStore("orchestrator", {
       const controller = new AbortController();
       layoutSaveController = controller;
       const snapshot = JSON.parse(JSON.stringify(this.layout)) as LayoutState;
+      const topologyId = this.activeTopologyId;
+      if (!topologyId) {
+        if (layoutSaveController === controller) layoutSaveController = null;
+        this.layoutStatus = "error";
+        this.layoutError = "必须先选择 Topology 才能保存布局";
+        this.toast("err", this.layoutError);
+        return;
+      }
       this.layoutStatus = "saving";
       try {
-        await api.putLayout(snapshot, { signal: controller.signal });
+        await api.putLayout(topologyId, snapshot, {
+          signal: controller.signal,
+        });
         if (layoutSaveController !== controller) return;
         this.layoutStatus = "ready";
         this.layoutError = "";
@@ -327,6 +368,26 @@ export const useOrchestrator = defineStore("orchestrator", {
       } finally {
         if (layoutSaveController === controller) layoutSaveController = null;
       }
+    },
+
+    async selectTopology(topologyId: string) {
+      const selected = topologyId.trim();
+      if (
+        selected &&
+        !this.topologyHeads.some((heads) => heads.topology_id === selected)
+      ) {
+        this.toast("err", `Topology ${selected} 不在当前集合中`);
+        return;
+      }
+      if (selected === this.activeTopologyId) return;
+      this.activeTopologyId = selected;
+      this.topology = null;
+      this.endpoints = [];
+      this.links = [];
+      this.layout = {};
+      this.layoutLoaded = false;
+      await this.refreshCore(true);
+      await this.loadLayout();
     },
 
     async refreshStore(refresh = false) {

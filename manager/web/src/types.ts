@@ -1,4 +1,7 @@
 export interface ServiceRow {
+  deployment_id: string;
+  node_id: string;
+  service_id: string;
   id: string;
   name: string;
   version: string;
@@ -29,6 +32,17 @@ export interface DeploymentRow {
   endpoints: string[];
   container_id: string;
   artifact_digest: string;
+  release_version: string;
+  runtime_profile: string;
+  runtime_profile_sha256: string;
+  runtime_policy_sha256: string;
+  effective_host_config_sha256: string;
+  runtime_attested: boolean;
+  last_observed_at_ms: number;
+  drift_reason: string;
+  credential_expires_at_ms: number;
+  credential_last_success_at_ms: number;
+  credential_last_error: string;
   desired_state: string;
   observed_state: string;
   updated_at: string;
@@ -45,6 +59,7 @@ export interface EndpointRow {
   reachable: boolean;
   display_name: string;
   note: string;
+  config: Record<string, unknown>;
 }
 
 export interface LinkRow {
@@ -122,7 +137,18 @@ export interface TopologyLink {
   config_ref: string;
   secret_ref: string;
   policy: Record<string, unknown>;
+  api_bindings?: TopologyApiBindingSpec[];
   [key: string]: unknown;
+}
+
+export interface TopologyApiBindingSpec {
+  /** Wire name used by TopologySpec v1. */
+  requirement: string;
+  api_id: string;
+  version: string;
+  optional: boolean;
+  provider_deployment_id: string;
+  selection: "nearest-healthy" | "same-node" | "explicit" | string;
 }
 
 export interface TopologySpec {
@@ -272,12 +298,156 @@ export interface StoreValidationResult {
   target_platform: { os: string; arch: string };
   plan: unknown;
   metadata: Array<Record<string, unknown>>;
+  bindings: ApiBinding[];
+  requirements: ApiBindingRequirementPlan[];
+  topology_confirmation_required: boolean;
+  runtime: NodeRuntimeValidation | null;
+  topology: {
+    topology_id: string;
+    revision_id: string;
+  } | null;
+  topology_diff: TopologyDiff | null;
   side_effects: {
     release_imports: number;
     operations: number;
     jobs: number;
     runtime_calls: number;
   };
+}
+
+export interface ApiProviderCandidate {
+  deployment_id: string;
+  service_id: string;
+  node_id: string;
+  endpoint: string;
+  path: string;
+  api_id: string;
+  api_version: string;
+  protocol: string;
+  methods: string[];
+  auth_mode: string;
+  permission: string;
+  healthy: boolean;
+  recommended: boolean;
+  reason: string;
+}
+
+export interface ApiBindingRequirementPlan {
+  name: string;
+  api_id: string;
+  version: string;
+  optional: boolean;
+  selection: string;
+  candidates: ApiProviderCandidate[];
+  recommended_provider_deployment_id: string;
+  ambiguous: boolean;
+  reason: string;
+}
+
+export interface ApiBinding {
+  binding_id: string;
+  requirement_name: string;
+  api_id: string;
+  api_version: string;
+  consumer_deployment_id: string;
+  consumer_service_id: string;
+  consumer_node_id: string;
+  consumer_endpoint: string;
+  provider_deployment_id: string;
+  provider_service_id: string;
+  provider_node_id: string;
+  provider_endpoint: string;
+  provider_path: string;
+  virtual_endpoint: string;
+  protocol: string;
+  methods: string[];
+  auth_mode: string;
+  provider_auth_mode: string;
+  permission: string;
+  timeout_ms: number | null;
+  topology_id: string;
+  topology_revision_id: string;
+  link_source_endpoint: string;
+  link_target_endpoint: string;
+  credential_generation: number;
+  context_generation: number;
+  desired_state: string;
+  observed_state: string;
+  health: string;
+  drift: string[];
+  last_operation_id: string;
+  state: string;
+  optional: boolean;
+  reason: string;
+  updated_at: string;
+}
+
+export interface DeploymentBindings {
+  deployment_id: string;
+  service_id: string;
+  items: ApiBinding[];
+  provider_items: ApiBinding[];
+}
+
+export interface ReplacementTopologyCas {
+  topology_id: string;
+  topology_etag: string;
+}
+
+export interface RuntimeContractInfo {
+  id: string;
+  profile_sha256: string;
+}
+
+export interface DockerRuntimeFacts {
+  engine: string;
+  server_version: string;
+  operating_system: string;
+  os_type: string;
+  architecture: string;
+  cgroup_version: string;
+  memory_limit: boolean;
+  pids_limit: boolean;
+  rootless: boolean;
+  apparmor: boolean;
+  seccomp: boolean;
+  security_options: string[];
+}
+
+export interface NodeRuntimeValidation {
+  node_id: string;
+  report_id: string;
+  observed_at_ms: number;
+  received_at_ms: number;
+  stale_after_ms: number;
+  agent_version: string;
+  runtime_policy_sha256: string;
+  allowed_contracts: RuntimeContractInfo[];
+  judge_sandbox_allowed_images: string[];
+  inventory_complete: boolean;
+  inventory_error: string;
+  selected_contract: RuntimeContractInfo | null;
+  docker: DockerRuntimeFacts;
+}
+
+export interface InstallApiBindingSelection {
+  name: string;
+  provider_deployment_id: string;
+}
+
+export type StoreMigrationPolicy = "DRY_RUN" | "APPLY";
+
+export interface StorePipelineOptions {
+  start?: boolean;
+  migration_policy?: StoreMigrationPolicy;
+  gateway_node_id?: string;
+  config?: Record<string, unknown>;
+  secret_refs?: Record<string, string>;
+}
+
+export interface InstallTopologySelection {
+  topology_id: string;
+  revision_id?: string;
 }
 
 export interface HealthInfo {

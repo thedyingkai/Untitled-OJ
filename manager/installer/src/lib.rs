@@ -58,6 +58,7 @@ fn acquire_runtime_install_guard_from(executable: &Path) -> Result<RuntimeInstal
     let lock_path = parent.join(format!(".{}.install.lock", install_name.to_string_lossy()));
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
@@ -238,7 +239,7 @@ fn default_install_root() -> Result<PathBuf> {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .ok_or_else(|| anyhow!("LOCALAPPDATA is not set"))?;
-        return Ok(base.join("Programs").join("OJOS-Orchestrator"));
+        Ok(base.join("Programs").join("OJOS-Orchestrator"))
     }
     #[cfg(target_os = "linux")]
     {
@@ -318,6 +319,7 @@ fn install(bundle: Option<&Path>, prefix: Option<&Path>, no_path: bool) -> Resul
     let lock_path = parent.join(format!(".{}.install.lock", install_name.to_string_lossy()));
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
@@ -398,13 +400,13 @@ fn install(bundle: Option<&Path>, prefix: Option<&Path>, no_path: bool) -> Resul
         journal_files.push(write_journal(&parent, &install_name, &journal)?);
         remove_older_journals(&journal_files)?;
 
-        if backup.exists() {
-            if let Err(error) = remove_verified_install_tree(&backup, &parent) {
-                eprintln!(
-                    "warning: the new installation is active, but the verified backup {} could not be removed: {error}",
-                    backup.display()
-                );
-            }
+        if backup.exists()
+            && let Err(error) = remove_verified_install_tree(&backup, &parent)
+        {
+            eprintln!(
+                "warning: the new installation is active, but the verified backup {} could not be removed: {error}",
+                backup.display()
+            );
         }
         remove_all_journals(&parent, &install_name, Some(&nonce))?;
         sync_directory(&parent)?;
@@ -424,12 +426,10 @@ fn install(bundle: Option<&Path>, prefix: Option<&Path>, no_path: bool) -> Resul
 
     let installed_bin = install_root.join("bin");
     #[cfg(windows)]
-    if !no_path {
-        if let Err(error) = windows_path::add_to_user_path(&installed_bin) {
-            eprintln!(
-                "warning: OJOS is installed, but the optional Windows user PATH update failed: {error}"
-            );
-        }
+    if !no_path && let Err(error) = windows_path::add_to_user_path(&installed_bin) {
+        eprintln!(
+            "warning: OJOS is installed, but the optional Windows user PATH update failed: {error}"
+        );
     }
     #[cfg(not(windows))]
     let _ = no_path;
@@ -1255,10 +1255,10 @@ fn recover_interrupted_install(
         if journal.stage.exists() {
             remove_verified_stage(&journal.stage, parent)?;
         }
-        if let Some(backup) = &journal.backup {
-            if backup.exists() {
-                remove_verified_install_tree(backup, parent)?;
-            }
+        if let Some(backup) = &journal.backup
+            && backup.exists()
+        {
+            remove_verified_install_tree(backup, parent)?;
         }
     } else if let Some(backup) = &journal.backup {
         if backup.exists() {
@@ -1731,7 +1731,7 @@ mod windows_path {
 
     fn decode_registry_string(bytes: &[u8]) -> Result<String> {
         ensure!(
-            bytes.len() % 2 == 0,
+            bytes.len().is_multiple_of(2),
             "Windows PATH registry value has invalid UTF-16 bytes"
         );
         let words = bytes

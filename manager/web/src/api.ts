@@ -1,6 +1,10 @@
 import type {
   AsyncOperationResult,
+  ApiBinding,
+  ApiBindingRequirementPlan,
+  ApiProviderCandidate,
   DeploymentRow,
+  DeploymentBindings,
   CapabilityRow,
   HealthInfo,
   LayoutState,
@@ -10,6 +14,11 @@ import type {
   StoreModule,
   StoreIndexResponse,
   StoreValidationResult,
+  StorePipelineOptions,
+  InstallApiBindingSelection,
+  InstallTopologySelection,
+  ReplacementTopologyCas,
+  NodeRuntimeValidation,
   TopologyDetail,
   TopologyDiff,
   TopologyHeads,
@@ -168,6 +177,12 @@ function normalizeDeployment(value: unknown): DeploymentRow {
     instance.health,
     textOr(row.endpoint_health, "UNKNOWN"),
   );
+  const runtimeContract =
+    instance.runtime_contract &&
+    typeof instance.runtime_contract === "object" &&
+    !Array.isArray(instance.runtime_contract)
+      ? (instance.runtime_contract as Record<string, unknown>)
+      : {};
   return {
     deployment_id: textOr(instance.deployment_id, textOr(row.deployment_id)),
     node_id: textOr(row.node_id),
@@ -187,9 +202,297 @@ function normalizeDeployment(value: unknown): DeploymentRow {
     endpoints: stringsOrEmpty(row.endpoints),
     container_id: textOr(instance.container_id),
     artifact_digest: textOr(instance.artifact_digest),
+    release_version: textOr(instance.release_version, textOr(row.version)),
+    runtime_profile: textOr(runtimeContract.id, textOr(row.runtime_profile)),
+    runtime_profile_sha256: textOr(
+      runtimeContract.profile_sha256,
+      textOr(row.runtime_profile_sha256),
+    ),
+    runtime_policy_sha256: textOr(
+      instance.runtime_policy_sha256,
+      textOr(row.runtime_policy_sha256),
+    ),
+    effective_host_config_sha256: textOr(
+      instance.effective_runtime_sha256,
+      textOr(row.effective_host_config_sha256, textOr(row.host_config_digest)),
+    ),
+    runtime_attested: booleanOr(
+      instance.runtime_attested,
+      booleanOr(row.runtime_attested),
+    ),
+    last_observed_at_ms: numberOr(row.last_observed_at_ms),
+    drift_reason: textOr(row.drift_reason),
+    credential_expires_at_ms: numberOr(row.credential_expires_at_ms),
+    credential_last_success_at_ms: numberOr(row.credential_last_success_at_ms),
+    credential_last_error: textOr(row.credential_last_error),
     desired_state: textOr(instance.desired_state, "UNKNOWN"),
     observed_state: observedState,
     updated_at: textOr(row.updated_at),
+  };
+}
+
+function objectOrEmpty(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function normalizeApiProviderCandidate(value: unknown): ApiProviderCandidate {
+  const row = objectOrEmpty(value);
+  return {
+    deployment_id: textOr(row.deployment_id, textOr(row.provider_deployment_id)),
+    service_id: textOr(row.service_id, textOr(row.provider_service_id)),
+    node_id: textOr(row.node_id, textOr(row.provider_node_id)),
+    endpoint: textOr(row.endpoint, textOr(row.provider_endpoint)),
+    path: textOr(row.path, textOr(row.provider_path)),
+    api_id: textOr(row.api_id),
+    api_version: textOr(row.api_version, textOr(row.version)),
+    protocol: textOr(row.protocol),
+    methods: stringsOrEmpty(row.methods),
+    auth_mode: textOr(row.auth_mode),
+    permission: textOr(row.permission),
+    healthy: booleanOr(row.healthy, textOr(row.health).toUpperCase() === "HEALTHY"),
+    recommended: booleanOr(row.recommended),
+    reason: textOr(row.reason),
+  };
+}
+
+export function normalizeApiBinding(value: unknown): ApiBinding {
+  const row = objectOrEmpty(value);
+  return {
+    binding_id: textOr(row.binding_id),
+    requirement_name: textOr(row.requirement_name, textOr(row.name)),
+    api_id: textOr(row.api_id),
+    api_version: textOr(row.api_version, textOr(row.version)),
+    consumer_deployment_id: textOr(row.consumer_deployment_id),
+    consumer_service_id: textOr(row.consumer_service_id),
+    consumer_node_id: textOr(row.consumer_node_id),
+    consumer_endpoint: textOr(row.consumer_endpoint),
+    provider_deployment_id: textOr(row.provider_deployment_id),
+    provider_service_id: textOr(row.provider_service_id),
+    provider_node_id: textOr(row.provider_node_id),
+    provider_endpoint: textOr(row.provider_endpoint),
+    provider_path: textOr(row.provider_path),
+    virtual_endpoint: textOr(row.virtual_endpoint, textOr(row.gateway_path)),
+    protocol: textOr(row.protocol),
+    methods: stringsOrEmpty(row.methods),
+    auth_mode: textOr(row.auth_mode),
+    provider_auth_mode: textOr(row.provider_auth_mode),
+    permission: textOr(row.permission),
+    timeout_ms:
+      typeof row.timeout_ms === "number" && Number.isFinite(row.timeout_ms)
+        ? row.timeout_ms
+        : null,
+    topology_id: textOr(row.topology_id),
+    topology_revision_id: textOr(row.topology_revision_id, textOr(row.revision_id)),
+    link_source_endpoint: textOr(row.link_source_endpoint),
+    link_target_endpoint: textOr(row.link_target_endpoint),
+    credential_generation: numberOr(row.credential_generation),
+    context_generation: numberOr(row.context_generation),
+    desired_state: textOr(row.desired_state),
+    observed_state: textOr(row.observed_state),
+    health: textOr(row.health, "UNKNOWN"),
+    drift: stringsOrEmpty(row.drift),
+    last_operation_id: textOr(row.last_operation_id),
+    state: textOr(row.state, textOr(row.observed_state, "UNKNOWN")),
+    optional: booleanOr(row.optional),
+    reason: textOr(row.reason),
+    updated_at: textOr(row.updated_at),
+  };
+}
+
+function normalizeBindingRequirement(
+  value: unknown,
+  resolvedBindings: ApiBinding[],
+): ApiBindingRequirementPlan {
+  const row = objectOrEmpty(value);
+  const name = textOr(row.name, textOr(row.requirement_name));
+  const rawCandidates = arrayOrEmpty<unknown>(
+    row.candidates ?? row.provider_candidates ?? row.compatible_providers,
+  );
+  const candidates = rawCandidates.map(normalizeApiProviderCandidate);
+  const resolved = resolvedBindings.find(
+    (binding) => binding.requirement_name === name,
+  );
+  if (resolved?.provider_deployment_id && candidates.length === 0) {
+    candidates.push(
+      normalizeApiProviderCandidate({
+        provider_deployment_id: resolved.provider_deployment_id,
+        provider_service_id: resolved.provider_service_id,
+        provider_node_id: resolved.provider_node_id,
+        provider_endpoint: resolved.provider_endpoint,
+        provider_path: resolved.provider_path,
+        api_id: resolved.api_id,
+        api_version: resolved.api_version,
+        protocol: resolved.protocol,
+        methods: resolved.methods,
+        auth_mode: resolved.provider_auth_mode || resolved.auth_mode,
+        permission: resolved.permission,
+        health: resolved.health,
+      }),
+    );
+  }
+  const explicitRecommendation = textOr(
+    row.recommended_provider_deployment_id,
+    textOr(row.recommended_deployment_id),
+  );
+  const markedRecommendation = candidates.find((candidate) => candidate.recommended)
+    ?.deployment_id;
+  const recommended =
+    explicitRecommendation ||
+    markedRecommendation ||
+    (candidates.length === 1 && candidates[0]?.healthy
+      ? candidates[0].deployment_id
+      : "");
+  return {
+    name,
+    api_id: textOr(row.api_id, resolved?.api_id ?? ""),
+    version: textOr(
+      row.version,
+      textOr(row.version_requirement, resolved?.api_version ?? ""),
+    ),
+    optional: booleanOr(row.optional, resolved?.optional ?? false),
+    selection: textOr(row.selection, "explicit"),
+    candidates,
+    recommended_provider_deployment_id: recommended,
+    ambiguous: booleanOr(
+      row.ambiguous,
+      candidates.filter((candidate) => candidate.healthy).length > 1 && !recommended,
+    ),
+    reason: textOr(row.reason),
+  };
+}
+
+function normalizeRuntimeValidation(value: unknown): NodeRuntimeValidation | null {
+  const row = objectOrEmpty(value);
+  if (!Object.keys(row).length) return null;
+  const facts = Object.keys(objectOrEmpty(row.facts)).length
+    ? objectOrEmpty(row.facts)
+    : row;
+  const docker = objectOrEmpty(facts.docker ?? row.docker);
+  const contracts = arrayOrEmpty<unknown>(
+    facts.allowed_contracts ?? row.allowed_contracts,
+  ).map((contract) => {
+    const item = objectOrEmpty(contract);
+    return {
+      id: textOr(item.id),
+      profile_sha256: textOr(item.profile_sha256, textOr(item.sha256)),
+    };
+  });
+  const selectedRow = objectOrEmpty(row.selected_contract ?? row.contract);
+  return {
+    node_id: textOr(row.node_id),
+    report_id: textOr(facts.report_id, textOr(row.report_id)),
+    observed_at_ms: numberOr(row.observed_at_ms, numberOr(facts.observed_at_ms)),
+    received_at_ms: numberOr(row.received_at_ms),
+    stale_after_ms: numberOr(row.stale_after_ms, 60_000),
+    agent_version: textOr(facts.agent_version, textOr(row.agent_version)),
+    runtime_policy_sha256: textOr(
+      facts.runtime_policy_sha256,
+      textOr(row.runtime_policy_sha256),
+    ),
+    allowed_contracts: contracts,
+    judge_sandbox_allowed_images: stringsOrEmpty(
+      facts.judge_sandbox_allowed_images ?? row.judge_sandbox_allowed_images,
+    ),
+    inventory_complete: booleanOr(
+      facts.inventory_complete,
+      booleanOr(row.inventory_complete),
+    ),
+    inventory_error: textOr(
+      facts.inventory_error,
+      textOr(row.inventory_error),
+    ),
+    selected_contract: Object.keys(selectedRow).length
+      ? {
+          id: textOr(selectedRow.id),
+          profile_sha256: textOr(
+            selectedRow.profile_sha256,
+            textOr(selectedRow.sha256),
+          ),
+        }
+      : null,
+    docker: {
+      engine: textOr(docker.engine),
+      server_version: textOr(docker.server_version),
+      operating_system: textOr(docker.operating_system),
+      os_type: textOr(docker.os_type),
+      architecture: textOr(docker.architecture),
+      cgroup_version: textOr(docker.cgroup_version),
+      memory_limit: booleanOr(docker.memory_limit),
+      pids_limit: booleanOr(docker.pids_limit),
+      rootless: booleanOr(docker.rootless),
+      apparmor: booleanOr(docker.apparmor),
+      seccomp: booleanOr(docker.seccomp),
+      security_options: stringsOrEmpty(docker.security_options),
+    },
+  };
+}
+
+export function normalizeStoreValidation(value: unknown): StoreValidationResult {
+  const row = objectOrEmpty(value);
+  const bindings = arrayOrEmpty<unknown>(row.bindings).map(normalizeApiBinding);
+  const plan = objectOrEmpty(row.plan);
+  const requirementValues = arrayOrEmpty<unknown>(
+    row.requirements ??
+      row.binding_requirements ??
+      plan.requirements ??
+      plan.binding_requirements,
+  );
+  const requirements = requirementValues.map((requirement) =>
+    normalizeBindingRequirement(requirement, bindings),
+  );
+  for (const binding of bindings) {
+    if (
+      binding.requirement_name &&
+      !requirements.some((requirement) => requirement.name === binding.requirement_name)
+    ) {
+      requirements.push(
+        normalizeBindingRequirement(
+          {
+            name: binding.requirement_name,
+            api_id: binding.api_id,
+            version: binding.api_version,
+            optional: binding.optional,
+          },
+          bindings,
+        ),
+      );
+    }
+  }
+  const topology = objectOrEmpty(row.topology);
+  const rawDiff = row.topology_diff ?? row.diff;
+  const sideEffects = objectOrEmpty(row.side_effects);
+  const targetPlatform = objectOrEmpty(row.target_platform);
+  return {
+    valid: booleanOr(row.valid),
+    catalog_source_id: textOr(row.catalog_source_id),
+    catalog_id: textOr(row.catalog_id),
+    verified_key_ids: stringsOrEmpty(row.verified_key_ids),
+    target_platform: {
+      os: textOr(targetPlatform.os),
+      arch: textOr(targetPlatform.arch),
+    },
+    plan: row.plan,
+    metadata: arrayOrEmpty<Record<string, unknown>>(row.metadata),
+    bindings,
+    requirements,
+    topology_confirmation_required: booleanOr(row.topology_confirmation_required),
+    runtime: normalizeRuntimeValidation(row.runtime ?? row.runtime_facts),
+    topology: Object.keys(topology).length
+      ? {
+          topology_id: textOr(topology.topology_id),
+          revision_id: textOr(topology.revision_id),
+        }
+      : null,
+    topology_diff:
+      rawDiff && typeof rawDiff === "object" ? (rawDiff as TopologyDiff) : null,
+    side_effects: {
+      release_imports: numberOr(sideEffects.release_imports),
+      operations: numberOr(sideEffects.operations),
+      jobs: numberOr(sideEffects.jobs),
+      runtime_calls: numberOr(sideEffects.runtime_calls),
+    },
   };
 }
 
@@ -856,6 +1159,18 @@ export const api = {
       undefined,
       options,
     ),
+  deploymentBindings: (deploymentId: string, options?: ApiCallOptions) =>
+    v1Request<Record<string, unknown>>(
+      "GET",
+      `/api/v1/deployments/${encodeURIComponent(deploymentId)}/bindings`,
+      undefined,
+      options,
+    ).then((data): DeploymentBindings => ({
+      deployment_id: textOr(data.deployment_id, deploymentId),
+      service_id: textOr(data.service_id),
+      items: arrayOrEmpty<unknown>(data.items ?? data.bindings).map(normalizeApiBinding),
+      provider_items: arrayOrEmpty<unknown>(data.provider_items).map(normalizeApiBinding),
+    })),
   deploymentAction: (
     deploymentId: string,
     action: "start" | "stop" | "restart" | "uninstall",
@@ -935,7 +1250,7 @@ export const api = {
       fields,
     ),
 
-  topology: async (topologyId = "primary", options?: ApiCallOptions) => {
+  topology: async (topologyId: string, options?: ApiCallOptions) => {
     try {
       return await v1Request<TopologyDetail>(
         "GET",
@@ -954,13 +1269,13 @@ export const api = {
       (data) => data.items,
       options,
     ).then(({ items }) => items),
-  topologyRevisions: (topologyId = "primary", options?: ApiCallOptions) =>
+  topologyRevisions: (topologyId: string, options?: ApiCallOptions) =>
     collectCursorItems<TopologyRevision>(
       `/api/v1/topologies/${encodeURIComponent(topologyId)}/revisions`,
       (data) => data.items,
       options,
     ).then(({ items }) => items),
-  topologyStatus: (topologyId = "primary", options?: ApiCallOptions) =>
+  topologyStatus: (topologyId: string, options?: ApiCallOptions) =>
     v1Request<{ status: TopologyStatus }>(
       "GET",
       `/api/v1/topologies/${encodeURIComponent(topologyId)}/status`,
@@ -1121,15 +1436,27 @@ export const api = {
       version?: string;
       catalog_source_id?: string;
       channel?: string;
-    },
+      endpoint?: string;
+      bindings?: InstallApiBindingSelection[];
+      topology_id?: string;
+      topology_etag?: string;
+      /** 0.2 compatibility only. */
+      topology?: InstallTopologySelection;
+    } & StorePipelineOptions,
     options?: ApiCallOptions,
   ) =>
-    v1Request<StoreValidationResult>(
+    v1Request<unknown>(
       "POST",
       "/api/v1/store/releases:validate",
-      payload,
+      {
+        start: true,
+        migration_policy: "APPLY",
+        config: {},
+        secret_refs: {},
+        ...payload,
+      },
       options,
-    ),
+    ).then(normalizeStoreValidation),
   storeInstall: (
     payload: {
       service_id: string;
@@ -1139,16 +1466,25 @@ export const api = {
       target_node_id: string;
       mode?: "MANAGED" | "EXTERNAL";
       endpoint?: string;
-      start?: boolean;
-      migration_policy?: string;
-      gateway_node_id?: string;
-    },
+      bindings?: InstallApiBindingSelection[];
+      topology_id?: string;
+      topology_etag?: string;
+      /** 0.2 compatibility only. */
+      topology?: InstallTopologySelection;
+    } & StorePipelineOptions,
     options?: ApiCallOptions,
   ) =>
     v1Request<AsyncOperationResult>(
       "POST",
       "/api/v1/store/releases:install",
-      { mode: "MANAGED", start: true, migration_policy: "APPLY", ...payload },
+      {
+        mode: "MANAGED",
+        start: true,
+        migration_policy: "APPLY",
+        config: {},
+        secret_refs: {},
+        ...payload,
+      },
       options,
     ),
   deleteRelease: (
@@ -1162,14 +1498,36 @@ export const api = {
       { service_id: serviceId, version },
       options,
     ),
-  storeUpgrade: (payload: Record<string, unknown>, options?: ApiCallOptions) =>
+  storeUpgrade: (
+    payload: {
+      deployment_id: string;
+      version?: string;
+      catalog_source_id?: string;
+      bindings?: InstallApiBindingSelection[];
+      topology_id?: string;
+      topology_etag?: string;
+      topologies?: ReplacementTopologyCas[];
+    },
+    options?: ApiCallOptions,
+  ) =>
     v1Request<AsyncOperationResult>(
       "POST",
       "/api/v1/store/releases:upgrade",
       payload,
       options,
     ),
-  storeRollback: (payload: Record<string, unknown>, options?: ApiCallOptions) =>
+  storeRollback: (
+    payload: {
+      deployment_id: string;
+      version?: string;
+      catalog_source_id?: string;
+      bindings?: InstallApiBindingSelection[];
+      topology_id?: string;
+      topology_etag?: string;
+      topologies?: ReplacementTopologyCas[];
+    },
+    options?: ApiCallOptions,
+  ) =>
     v1Request<AsyncOperationResult>(
       "POST",
       "/api/v1/store/releases:rollback",
@@ -1209,19 +1567,23 @@ export const api = {
       options,
     ),
 
-  getLayout: (options?: ApiCallOptions) =>
+  getLayout: (topologyId: string, options?: ApiCallOptions) =>
     v1Request<{ layout: LayoutState }>(
       "GET",
-      "/api/v1/ui/layout",
+      `/api/v1/ui/layout?${new URLSearchParams({ topology_id: topologyId })}`,
       undefined,
       options,
     ).then((data) =>
       data.layout && typeof data.layout === "object" ? data.layout : {},
     ),
-  putLayout: (layout: LayoutState, options?: ApiCallOptions) =>
+  putLayout: (
+    topologyId: string,
+    layout: LayoutState,
+    options?: ApiCallOptions,
+  ) =>
     v1Request<{ layout: LayoutState }>(
       "PUT",
-      "/api/v1/ui/layout",
+      `/api/v1/ui/layout?${new URLSearchParams({ topology_id: topologyId })}`,
       layout,
       options,
     ),

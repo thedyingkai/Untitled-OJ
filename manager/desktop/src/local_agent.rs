@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use orchestrator_agent::{
-    AgentLedger, AgentWorker, BuiltInReleasePipelineProvider, JobExecutor, LoopbackHttpTransport,
-    WorkerConfig,
+    AgentLedger, AgentWorker, BuiltInReleasePipelineProvider, JobExecutor,
+    LocalRuntimeContextProvider, LoopbackHttpTransport, NodeRuntimeFactsPublisher,
+    RuntimeContextProvider, WorkerConfig, WorkloadCredentialSupervisor,
+    event_connection_urls_from_env, recover_pending_runtime_contexts,
 };
 use orchestrator_runtime::{DockerEngineRuntime, RuntimeError};
 use std::path::PathBuf;
@@ -14,6 +16,7 @@ use url::Url;
 
 pub const DESKTOP_NODE_ID: &str = "desktop-local";
 const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(2);
+const RUNTIME_FACTS_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct DesktopAgentOptions {
@@ -258,7 +261,7 @@ async fn run_agent_loop(
         if *shutdown.borrow() {
             return Ok(());
         }
-        let ledger = match AgentLedger::open(&options.ledger_path) {
+        let mut ledger = match AgentLedger::open(&options.ledger_path) {
             Ok(ledger) => ledger,
             Err(error) => {
                 retry_count = retry_count.saturating_add(1);
@@ -330,6 +333,129 @@ async fn run_agent_loop(
             continue;
         }
 
+        let initial_docker_facts = match docker.runtime_facts().await {
+            Ok(facts) => facts,
+            Err(error) => {
+                retry_count = retry_count.saturating_add(1);
+                degraded(
+                    &status,
+                    retry_count,
+                    format!("probe local Docker runtime facts: {error}"),
+                    options.retry_delay,
+                );
+                if wait_or_shutdown(&mut shutdown, options.retry_delay).await {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+        let local_runtime_policy = LocalRuntimeContextProvider::standard_only(
+            initial_docker_facts.clone(),
+            options.ledger_path.with_file_name("runtime-contexts"),
+        )
+        .with_event_connections(
+            event_connection_urls_from_env()
+                .map_err(|error| format!("configure local event connections: {error}"))?,
+        );
+        let runtime_policy: Arc<dyn RuntimeContextProvider> = Arc::new(local_runtime_policy);
+        recover_pending_runtime_contexts(&mut ledger, runtime_policy.as_ref(), &docker)
+            .await
+            .map_err(|error| format!("recover Desktop managed service contexts: {error}"))?;
+        let credential_exchanger = Arc::new(
+            transport
+                .workload_credential_exchanger(DESKTOP_NODE_ID)
+                .map_err(|error| {
+                    format!("configure Desktop workload credential exchanger: {error}")
+                })?,
+        );
+        let credential_supervisor = Arc::new(WorkloadCredentialSupervisor::new(
+            credential_exchanger,
+            Arc::clone(&runtime_policy),
+        ));
+        credential_supervisor
+            .recover_active(&ledger)
+            .await
+            .map_err(|error| format!("recover Desktop workload credentials: {error}"))?;
+        let facts_publisher = transport
+            .runtime_facts_publisher(DESKTOP_NODE_ID)
+            .map_err(|error| format!("configure Desktop runtime facts publisher: {error}"))?;
+        // One process incarnation owns both the durable Job lease identity and
+        // every runtime-facts report it emits.  Reusing this value lets the
+        // control plane order reports without inventing Desktop-only
+        // semantics, while a new loop attempt gets a new incarnation after a
+        // failed Agent session.
+        let instance_id = desktop_instance_id();
+        let mut initial_report = runtime_policy.runtime_facts();
+        initial_report.observed_at_ms = desktop_now_ms();
+        initial_report.report_id = format!("{instance_id}:{}", initial_report.observed_at_ms);
+        initial_report.docker = initial_docker_facts;
+        match docker.managed_deployment_inventory(4_096).await {
+            Ok(inventory) => {
+                initial_report.inventory_complete = inventory.inventory_complete;
+                initial_report.inventory_error = inventory.inventory_error;
+                initial_report.deployment_observations = inventory.deployments;
+            }
+            Err(error) => {
+                initial_report.inventory_complete = false;
+                initial_report.inventory_error = bounded_desktop_runtime_error(&error.to_string());
+            }
+        }
+        initial_report.credential_statuses = credential_supervisor.status().await;
+        if let Err(error) = facts_publisher
+            .publish_runtime_facts(DESKTOP_NODE_ID, &initial_report)
+            .await
+        {
+            retry_count = retry_count.saturating_add(1);
+            degraded(
+                &status,
+                retry_count,
+                format!("publish initial Desktop runtime facts: {error}"),
+                options.retry_delay,
+            );
+            if wait_or_shutdown(&mut shutdown, options.retry_delay).await {
+                return Ok(());
+            }
+            continue;
+        }
+        let facts_runtime = docker.clone();
+        let facts_policy = Arc::clone(&runtime_policy);
+        let facts_credentials = Arc::clone(&credential_supervisor);
+        let facts_instance_id = instance_id.clone();
+        let facts_task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(RUNTIME_FACTS_INTERVAL).await;
+                let docker = match facts_runtime.runtime_facts().await {
+                    Ok(facts) => facts,
+                    Err(error) => {
+                        eprintln!("OJOS Desktop runtime facts probe failed: {error}");
+                        continue;
+                    }
+                };
+                let mut report = facts_policy.runtime_facts();
+                report.observed_at_ms = desktop_now_ms();
+                report.report_id = format!("{}:{}", facts_instance_id, report.observed_at_ms);
+                report.docker = docker;
+                match facts_runtime.managed_deployment_inventory(4_096).await {
+                    Ok(inventory) => {
+                        report.inventory_complete = inventory.inventory_complete;
+                        report.inventory_error = inventory.inventory_error;
+                        report.deployment_observations = inventory.deployments;
+                    }
+                    Err(error) => {
+                        report.inventory_complete = false;
+                        report.inventory_error = bounded_desktop_runtime_error(&error.to_string());
+                    }
+                }
+                report.credential_statuses = facts_credentials.status().await;
+                if let Err(error) = facts_publisher
+                    .publish_runtime_facts(DESKTOP_NODE_ID, &report)
+                    .await
+                {
+                    eprintln!("OJOS Desktop runtime facts publication failed: {error}");
+                }
+            }
+        });
+
         let artifact_fetcher = transport
             .artifact_fetcher(DESKTOP_NODE_ID)
             .map_err(|error| format!("configure Desktop artifact fetcher: {error}"))?;
@@ -337,7 +463,7 @@ async fn run_agent_loop(
         let worker = AgentWorker::new(
             WorkerConfig {
                 node_id: DESKTOP_NODE_ID.to_string(),
-                instance_id: desktop_instance_id(),
+                instance_id,
                 heartbeat_ms: 10_000,
                 lease_ms: 30_000,
                 transport_retry_ms: 1_000,
@@ -345,12 +471,20 @@ async fn run_agent_loop(
             transport.clone(),
             JobExecutor::new(docker)
                 .with_pipeline_provider(Arc::new(pipeline_provider))
-                .with_artifact_fetcher(Arc::new(artifact_fetcher)),
+                .with_artifact_fetcher(Arc::new(artifact_fetcher))
+                .with_runtime_context(
+                    Arc::clone(&runtime_policy),
+                    Arc::clone(&credential_supervisor),
+                ),
             ledger,
         );
         let mut worker = match worker {
             Ok(worker) => worker,
-            Err(error) => return Err(format!("configure Desktop agent worker: {error}")),
+            Err(error) => {
+                facts_task.abort();
+                credential_supervisor.shutdown_all().await;
+                return Err(format!("configure Desktop agent worker: {error}"));
+            }
         };
         update_status(
             &status,
@@ -359,8 +493,14 @@ async fn run_agent_loop(
             Some(retry_count),
         );
         match worker.run_until_shutdown(shutdown.clone()).await {
-            Ok(()) if *shutdown.borrow() => return Ok(()),
+            Ok(()) if *shutdown.borrow() => {
+                facts_task.abort();
+                credential_supervisor.shutdown_all().await;
+                return Ok(());
+            }
             Ok(()) => {
+                facts_task.abort();
+                credential_supervisor.shutdown_all().await;
                 retry_count = retry_count.saturating_add(1);
                 degraded(
                     &status,
@@ -370,6 +510,8 @@ async fn run_agent_loop(
                 );
             }
             Err(error) => {
+                facts_task.abort();
+                credential_supervisor.shutdown_all().await;
                 retry_count = retry_count.saturating_add(1);
                 degraded(
                     &status,
@@ -448,11 +590,112 @@ fn desktop_instance_id() -> String {
     format!("desktop-{}-{millis}", std::process::id())
 }
 
+fn desktop_now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+fn bounded_desktop_runtime_error(value: &str) -> String {
+    const MAX_CHARS: usize = 512;
+    value.chars().take(MAX_CHARS).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
+
+    #[test]
+    fn desktop_loopback_publishes_canonical_runtime_facts_with_bootstrap() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) = request.windows(4).position(|value| value == b"\r\n\r\n")
+                {
+                    let header_end = header_end + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':').and_then(|(name, value)| {
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            request
+        });
+        let transport = LoopbackHttpTransport::new_with_bootstrap(
+            &format!("http://{address}/"),
+            "desktop-bootstrap".to_string(),
+        )
+        .unwrap();
+        let publisher = transport.runtime_facts_publisher(DESKTOP_NODE_ID).unwrap();
+        let provider = LocalRuntimeContextProvider::standard_only(
+            orchestrator_runtime::DockerRuntimeFacts {
+                engine: "docker".to_string(),
+                server_version: "test".to_string(),
+                operating_system: "test".to_string(),
+                os_type: "linux".to_string(),
+                architecture: "x86_64".to_string(),
+                cgroup_version: "2".to_string(),
+                memory_limit: true,
+                pids_limit: true,
+                rootless: false,
+                apparmor: true,
+                seccomp: true,
+                security_options: vec![],
+            },
+            std::env::temp_dir().join("ojos-desktop-runtime-facts-test"),
+        );
+        let mut report = provider.runtime_facts();
+        report.report_id = "desktop-test:1".to_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(publisher.publish_runtime_facts(DESKTOP_NODE_ID, &report))
+            .unwrap();
+        let request = String::from_utf8(server.join().unwrap()).unwrap();
+        assert!(
+            request.starts_with("PUT /api/v1/agent/nodes/desktop-local/runtime-facts HTTP/1.1")
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("x-ojos-agent-bootstrap: desktop-bootstrap")
+        );
+        assert!(request.contains(orchestrator_runtime::STANDARD_RUNTIME_PROFILE_ID));
+        assert!(request.contains(r#""report_id":"desktop-test:1""#));
+        assert_eq!(RUNTIME_FACTS_INTERVAL, Duration::from_secs(30));
+    }
 
     #[test]
     fn embedded_agent_persists_execution_and_provider_state_beside_desktop_data() {

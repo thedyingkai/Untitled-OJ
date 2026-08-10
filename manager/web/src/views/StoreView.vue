@@ -4,8 +4,17 @@ import PageHeader from "../components/PageHeader.vue";
 import Modal from "../components/Modal.vue";
 import OperationLogs from "../components/OperationLogs.vue";
 import { api } from "../api";
+import { deploymentMutationMessage } from "../deployment-errors";
 import { useOrchestrator } from "../store";
-import type { DeploymentRow, StoreModule } from "../types";
+import type {
+  DeploymentRow,
+  InstallApiBindingSelection,
+  StoreModule,
+  StoreMigrationPolicy,
+  StorePipelineOptions,
+  StoreValidationResult,
+  TopologyHeads,
+} from "../types";
 
 const store = useOrchestrator();
 
@@ -45,14 +54,21 @@ function deploymentsFor(serviceId: string): DeploymentRow[] {
 const installOpen = ref(false);
 const installTarget = ref<StoreModule | null>(null);
 const targetNodeId = ref("");
+const installStart = ref(true);
+const migrationPolicy = ref<StoreMigrationPolicy>("APPLY");
+const gatewayNodeId = ref("");
+const installConfigJson = ref("{}");
+const secretRefsJson = ref("{}");
 const installing = ref(false);
 const validating = ref(false);
-const validationResult = ref<{
-  valid: boolean;
-  catalogId: string;
-  keyIds: string[];
-  platform: string;
-} | null>(null);
+const validationResult = ref<StoreValidationResult | null>(null);
+const bindingSelections = ref<Record<string, string>>({});
+const topologyHeads = ref<TopologyHeads[]>([]);
+const topologyId = ref("");
+const topologyRevisionId = ref("");
+const topologyLoading = ref(false);
+const validatedFingerprint = ref("");
+const validationConfirmationFingerprint = ref("");
 const installResult = ref<{ operationId: string | null; ok: boolean } | null>(
   null,
 );
@@ -61,8 +77,190 @@ function openInstall(module: StoreModule) {
   installTarget.value = module;
   installResult.value = null;
   validationResult.value = null;
+  bindingSelections.value = {};
+  topologyHeads.value = [];
+  topologyId.value = "";
+  topologyRevisionId.value = "";
+  installStart.value = true;
+  migrationPolicy.value = "APPLY";
+  gatewayNodeId.value = "";
+  installConfigJson.value = "{}";
+  secretRefsJson.value = "{}";
+  validatedFingerprint.value = "";
+  validationConfirmationFingerprint.value = "";
   targetNodeId.value = readyNodes.value[0]?.node_id ?? "";
   installOpen.value = true;
+  void loadTopologyOptions();
+}
+
+const selectedTopologyHead = computed(() =>
+  topologyHeads.value.find((heads) => heads.topology_id === topologyId.value),
+);
+
+const selectedRuntimeProfile = computed(
+  () => validationResult.value?.runtime?.selected_contract ?? null,
+);
+
+const profilePermissionSummary = computed(() => {
+  if (selectedRuntimeProfile.value?.id === "judge-sandbox-v1") {
+    return [
+      "privileged=true",
+      "SYS_ADMIN / NET_ADMIN / SYS_CHROOT",
+      "host cgroup namespace",
+      "apparmor=unconfined",
+      "/sys/fs/cgroup read-write",
+    ];
+  }
+  if (selectedRuntimeProfile.value?.id) {
+    return ["非 privileged", "不接受 Release 自定义 host path/capability/security option"];
+  }
+  return [];
+});
+
+const healthGateSummary = computed(() =>
+  selectedRuntimeProfile.value?.id === "judge-sandbox-v1"
+    ? "Docker HEALTHY，最长 120 秒；缺少 HEALTHCHECK 直接拒绝"
+    : "使用签名 Release 声明的 Docker 健康门禁",
+);
+
+function selectedBindings(): InstallApiBindingSelection[] {
+  return Object.entries(bindingSelections.value)
+    .filter(([, provider]) => provider.trim())
+    .map(([name, provider_deployment_id]) => ({ name, provider_deployment_id }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function selectedTopology() {
+  return topologyId.value && topologyRevisionId.value
+    ? {
+        topology_id: topologyId.value,
+        topology_etag: `"${topologyRevisionId.value}"`,
+      }
+    : undefined;
+}
+
+function parseJsonObject(
+  source: string,
+  label: string,
+): Record<string, unknown> {
+  const value = JSON.parse(source) as unknown;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} 必须是 JSON object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function selectedPipelineOptions(): StorePipelineOptions {
+  const config = parseJsonObject(installConfigJson.value, "Release config");
+  const rawSecretRefs = parseJsonObject(secretRefsJson.value, "Secret references");
+  const secret_refs: Record<string, string> = {};
+  for (const [name, reference] of Object.entries(rawSecretRefs)) {
+    if (typeof reference !== "string" || !reference.trim()) {
+      throw new Error(`Secret reference ${name} 必须是非空字符串引用`);
+    }
+    secret_refs[name] = reference.trim();
+  }
+  return {
+    start: installStart.value,
+    migration_policy: migrationPolicy.value,
+    ...(gatewayNodeId.value.trim()
+      ? { gateway_node_id: gatewayNodeId.value.trim() }
+      : {}),
+    config,
+    secret_refs,
+  };
+}
+
+const pipelineOptionsError = computed(() => {
+  try {
+    selectedPipelineOptions();
+    return "";
+  } catch (error) {
+    return (error as Error).message;
+  }
+});
+
+function currentValidationFingerprint(): string {
+  return JSON.stringify({
+    service: installTarget.value?.id ?? "",
+    version: installTarget.value?.version ?? "",
+    node: targetNodeId.value,
+    topology: selectedTopology(),
+    bindings: selectedBindings(),
+    pipeline: {
+      start: installStart.value,
+      migration_policy: migrationPolicy.value,
+      gateway_node_id: gatewayNodeId.value.trim(),
+      config: installConfigJson.value.trim(),
+      secret_refs: secretRefsJson.value.trim(),
+    },
+  });
+}
+
+async function sha256Fingerprint(value: unknown): Promise<string> {
+  const encoded = new TextEncoder().encode(JSON.stringify(value));
+  const digest = await crypto.subtle.digest("SHA-256", encoded);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+const unresolvedRequiredBindings = computed(() =>
+  (validationResult.value?.requirements ?? []).filter(
+    (requirement) =>
+      !requirement.optional && !bindingSelections.value[requirement.name]?.trim(),
+  ),
+);
+
+const topologyRequired = computed(
+  () => (validationResult.value?.requirements.length ?? 0) > 0,
+);
+
+const topologySatisfied = computed(
+  () =>
+    !topologyRequired.value ||
+    (!!topologyId.value && !!topologyRevisionId.value),
+);
+
+const installReady = computed(
+  () =>
+    !!validationResult.value?.valid &&
+    topologySatisfied.value &&
+    ((validationResult.value?.requirements.length ?? 0) === 0 ||
+      !!validationResult.value?.topology_diff) &&
+    unresolvedRequiredBindings.value.length === 0 &&
+    !pipelineOptionsError.value &&
+    validatedFingerprint.value === currentValidationFingerprint(),
+);
+
+async function loadTopologyOptions() {
+  if (!store.supportsAction("topology.export")) {
+    topologyHeads.value = [];
+    topologyId.value = "";
+    topologyRevisionId.value = "";
+    return;
+  }
+  topologyLoading.value = true;
+  try {
+    topologyHeads.value = await api.topologyList();
+    // Binding authority is a user decision. A new consumer often does not yet
+    // exist in the applied Topology, so guessing "primary" would turn a valid
+    // explicit binding plan into a misleading revision conflict.
+    topologyId.value = "";
+    topologyRevisionId.value = "";
+  } catch (err) {
+    topologyHeads.value = [];
+    topologyId.value = "";
+    topologyRevisionId.value = "";
+    store.toast("err", `Topology 选择加载失败：${(err as Error).message}`);
+  } finally {
+    topologyLoading.value = false;
+  }
+}
+
+async function onTopologyChanged() {
+  const heads = selectedTopologyHead.value;
+  topologyRevisionId.value = heads?.applied_revision_id ?? "";
 }
 
 async function runValidate() {
@@ -74,6 +272,7 @@ async function runValidate() {
   }
   validating.value = true;
   validationResult.value = null;
+  validationConfirmationFingerprint.value = "";
   try {
     const result = await api.storeValidate({
       service_id: module.id,
@@ -81,14 +280,35 @@ async function runValidate() {
       catalog_source_id: module.source_id,
       channel: module.channel,
       target_node_id: targetNodeId.value,
+      ...selectedPipelineOptions(),
+      bindings: selectedBindings(),
+      ...(selectedTopology() ?? {}),
     });
-    validationResult.value = {
-      valid: result.valid,
-      catalogId: result.catalog_id,
-      keyIds: result.verified_key_ids,
-      platform: `${result.target_platform.os}/${result.target_platform.arch}`,
-    };
-    store.toast("ok", "Release 签名、依赖、平台和 Provider 计划校验通过");
+    validationResult.value = result;
+    for (const requirement of result.requirements) {
+      if (!bindingSelections.value[requirement.name]) {
+        const resolved = result.bindings.find(
+          (binding) => binding.requirement_name === requirement.name,
+        )?.provider_deployment_id;
+        // A recommendation may be displayed for an ambiguous requirement, but
+        // only an explicit user choice may resolve it.
+        const recommended = requirement.ambiguous
+          ? ""
+          : requirement.recommended_provider_deployment_id || resolved || "";
+        if (recommended) bindingSelections.value[requirement.name] = recommended;
+      }
+    }
+    validatedFingerprint.value = currentValidationFingerprint();
+    validationConfirmationFingerprint.value = await sha256Fingerprint(
+      JSON.parse(validatedFingerprint.value),
+    );
+    if (result.requirements.length > 0 && !selectedTopology()) {
+      store.toast("info", "该 Release 是 API consumer；请选择 applied Topology 后重新校验");
+    } else if (result.valid && unresolvedRequiredBindings.value.length === 0) {
+      store.toast("ok", "Release、节点事实、Runtime Profile 和 API Binding 校验通过");
+    } else {
+      store.toast("info", "请选择所有必需 API 的 Provider，然后重新校验");
+    }
   } catch (err) {
     store.toast("err", `Release 校验失败：${(err as Error).message}`);
   } finally {
@@ -103,6 +323,10 @@ async function runInstall() {
     store.toast("err", "必须选择一个 READY Node");
     return;
   }
+  if (!installReady.value) {
+    store.toast("err", "安装参数或 Binding 已变化，请重新校验后再安装");
+    return;
+  }
   installing.value = true;
   installResult.value = null;
   try {
@@ -113,8 +337,9 @@ async function runInstall() {
       channel: module.channel,
       target_node_id: targetNodeId.value,
       mode: "MANAGED",
-      start: true,
-      migration_policy: "APPLY",
+      ...selectedPipelineOptions(),
+      bindings: selectedBindings(),
+      ...(selectedTopology() ?? {}),
     });
     installResult.value = { operationId: result.operation_id, ok: true };
     store.toast("ok", `安装操作已提交：${result.operation_id}`);
@@ -188,12 +413,80 @@ async function replaceRelease(
   const capability = action === "upgrade" ? "release.upgrade" : "release.rollback";
   if (!store.ensureAction(capability)) return;
   const label = action === "upgrade" ? "升级到最新兼容版本" : "回滚到最近一次已证明版本";
-  if (!window.confirm(`${label}：${deployment.deployment_id}？`)) return;
   replacing.value = `${action}:${deployment.deployment_id}`;
   try {
+    const bindingRoles = await api.deploymentBindings(deployment.deployment_id);
+    const affectedTopologyIds = Array.from(
+      new Set(
+        [...bindingRoles.items, ...bindingRoles.provider_items]
+          .filter(
+            (binding) =>
+              binding.desired_state === "ACTIVE" && binding.state === "ACTIVE",
+          )
+          .map((binding) => binding.topology_id)
+          .filter(Boolean),
+      ),
+    ).sort();
+    const replacementPayload: {
+      deployment_id: string;
+      bindings?: InstallApiBindingSelection[];
+      topology_id?: string;
+      topology_etag?: string;
+      topologies?: Array<{ topology_id: string; topology_etag: string }>;
+    } = {
+      deployment_id: deployment.deployment_id,
+      bindings: bindingRoles.items
+        .filter(
+          (binding) =>
+            binding.desired_state === "ACTIVE" &&
+            binding.provider_deployment_id,
+        )
+        .map((binding) => ({
+          name: binding.requirement_name,
+          provider_deployment_id: binding.provider_deployment_id,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name)),
+    };
+    if (affectedTopologyIds.length > 0) {
+      const heads = await api.topologyList();
+      const cas = affectedTopologyIds.map((topology_id) => {
+        const applied = heads.find((item) => item.topology_id === topology_id)
+          ?.applied_revision_id;
+        if (!applied) {
+          throw new Error(`Topology ${topology_id} 没有 applied head，无法安全替换`);
+        }
+        return { topology_id, topology_etag: `"${applied}"` };
+      });
+      if (cas.length === 1) {
+        replacementPayload.topology_id = cas[0].topology_id;
+        replacementPayload.topology_etag = cas[0].topology_etag;
+      } else {
+        replacementPayload.topologies = cas;
+      }
+    }
+    const fingerprint = await sha256Fingerprint(replacementPayload);
+    const bindingSummary = replacementPayload.bindings?.length
+      ? replacementPayload.bindings
+          .map((binding) => `${binding.name}=${binding.provider_deployment_id}`)
+          .join(", ")
+      : "无 consumer Binding";
+    const topologySummary = replacementPayload.topologies
+      ? replacementPayload.topologies
+          .map((topology) => `${topology.topology_id}@${topology.topology_etag}`)
+          .join(", ")
+      : replacementPayload.topology_id
+        ? `${replacementPayload.topology_id}@${replacementPayload.topology_etag}`
+        : "无受影响 Topology";
+    if (
+      !window.confirm(
+        `${label}：${deployment.deployment_id}\nBindings: ${bindingSummary}\nTopology CAS: ${topologySummary}\n确认指纹 sha256:${fingerprint}`,
+      )
+    ) {
+      return;
+    }
     const result = action === "upgrade"
-      ? await api.storeUpgrade({ deployment_id: deployment.deployment_id })
-      : await api.storeRollback({ deployment_id: deployment.deployment_id });
+      ? await api.storeUpgrade(replacementPayload)
+      : await api.storeRollback(replacementPayload);
     store.toast("ok", `${label}操作已提交：${result.operation_id}`);
     await Promise.all([store.refreshCore(true), store.refreshStore(true)]);
   } catch (err) {
@@ -217,7 +510,10 @@ async function uninstall(deployment: DeploymentRow) {
     store.toast("ok", `卸载操作已提交：${result.operation_id}`);
     await Promise.all([store.refreshCore(true), store.refreshStore(true)]);
   } catch (err) {
-    store.toast("err", `卸载失败：${(err as Error).message}`);
+    store.toast(
+      "err",
+      `卸载失败：${await deploymentMutationMessage(err, deployment.deployment_id)}`,
+    );
   } finally {
     uninstalling.value = "";
   }
@@ -524,7 +820,7 @@ const kindLabels: Record<string, string> = {
   <Modal
     :open="installOpen"
     :title="installTarget ? `安装 ${installTarget.name}` : '手动安装模块'"
-    width="560px"
+    width="820px"
     @close="installOpen = false"
   >
     <div v-if="installTarget" class="card package-summary">
@@ -546,6 +842,105 @@ const kindLabels: Record<string, string> = {
       </span>
     </div>
 
+    <div class="field">
+      <label>
+        Topology / Revision（Binding 权威来源）
+        <span v-if="topologyRequired" class="chip warn">必需</span>
+        <span v-else class="chip">纯 Provider 可不选</span>
+      </label>
+      <div class="topology-selection">
+        <select
+          class="select"
+          v-model="topologyId"
+          aria-label="Install topology"
+          :disabled="topologyLoading"
+          @change="onTopologyChanged"
+        >
+          <option value="">选择已应用的 Topology revision</option>
+          <option
+            v-for="heads in topologyHeads"
+            :key="heads.topology_id"
+            :value="heads.topology_id"
+            :disabled="!heads.applied_revision_id"
+          >
+            {{ heads.topology_id }} · applied {{ heads.applied_revision_id || "无" }}
+          </option>
+        </select>
+        <input
+          class="input mono"
+          :value="topologyRevisionId"
+          readonly
+          aria-label="Topology revision ETag"
+          placeholder="applied revision / ETag"
+        />
+      </div>
+      <span class="hint">
+        含 required API 的 consumer 必须显式选择；安装请求携带 topology_id 与强 ETag，
+        不会按服务名静默绑定。没有 required API 的纯 Provider 可先安装，再供后续 Topology 选择。
+        安装预览只显示服务端针对本次候选 Deployment 与 Binding 计算的 prospective diff。
+      </span>
+    </div>
+
+    <details class="contract-section pipeline-options">
+      <summary>Release pipeline 高级选项</summary>
+      <div class="field">
+        <label class="check">
+          <input
+            v-model="installStart"
+            type="checkbox"
+            aria-label="Start after install"
+          />
+          安装完成后启动并执行健康门禁
+        </label>
+      </div>
+      <div class="field">
+        <label>Migration policy</label>
+        <select
+          v-model="migrationPolicy"
+          class="select"
+          aria-label="Migration policy"
+        >
+          <option value="APPLY">APPLY</option>
+          <option value="DRY_RUN">DRY_RUN</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Gateway Node ID（可选）</label>
+        <input
+          v-model="gatewayNodeId"
+          class="input mono"
+          aria-label="Gateway Node ID"
+          placeholder="gateway-node-a"
+        />
+      </div>
+      <div class="field">
+        <label>Release config JSON</label>
+        <textarea
+          v-model="installConfigJson"
+          class="input mono"
+          aria-label="Release config JSON"
+          rows="5"
+          spellcheck="false"
+        />
+      </div>
+      <div class="field">
+        <label>Secret references JSON</label>
+        <textarea
+          v-model="secretRefsJson"
+          class="input mono"
+          aria-label="Secret references JSON"
+          rows="4"
+          spellcheck="false"
+        />
+        <span class="hint">
+          这里只填写 secret 引用，不填写明文。校验与安装会提交完全相同的 pipeline 参数。
+        </span>
+      </div>
+      <p v-if="pipelineOptionsError" class="binding-warning">
+        {{ pipelineOptionsError }}
+      </p>
+    </details>
+
     <div v-if="installResult" class="install-result">
       <div class="chip" :class="installResult.ok ? 'ok' : 'err'">
         {{ installResult.ok ? "动作已提交" : "安装失败" }}
@@ -563,9 +958,119 @@ const kindLabels: Record<string, string> = {
         {{ validationResult.valid ? "Release 校验通过" : "Release 校验失败" }}
       </div>
       <p class="muted" style="margin: 10px 0 0">
-        Catalog <span class="mono">{{ validationResult.catalogId }}</span>
-        · {{ validationResult.platform }}
-        · key <span class="mono">{{ validationResult.keyIds.join(", ") }}</span>
+        Catalog <span class="mono">{{ validationResult.catalog_id }}</span>
+        · {{ validationResult.target_platform.os }}/{{ validationResult.target_platform.arch }}
+        · key <span class="mono">{{ validationResult.verified_key_ids.join(", ") }}</span>
+      </p>
+      <p v-if="validationConfirmationFingerprint" class="hint mono digest-wrap">
+        本次候选 / Binding / Topology 确认指纹：sha256:{{ validationConfirmationFingerprint }}
+      </p>
+
+      <section v-if="validationResult.runtime" class="contract-section">
+        <h4>Node 真实运行时事实</h4>
+        <div class="fact-grid">
+          <span>Agent</span><span class="mono">{{ validationResult.runtime.agent_version || "未知" }}</span>
+          <span>Docker</span><span class="mono">{{ validationResult.runtime.docker.server_version || "未知" }}</span>
+          <span>平台</span><span class="mono">{{ validationResult.runtime.docker.os_type }}/{{ validationResult.runtime.docker.architecture }}</span>
+          <span>cgroup</span><span class="mono">{{ validationResult.runtime.docker.cgroup_version || "未知" }}</span>
+          <span>Policy digest</span><span class="mono digest-wrap">{{ validationResult.runtime.runtime_policy_sha256 }}</span>
+          <span>Report</span><span class="mono">{{ validationResult.runtime.report_id || "未知" }}</span>
+          <span>Observed</span><span>{{ validationResult.runtime.observed_at_ms ? new Date(validationResult.runtime.observed_at_ms).toLocaleString() : "未知" }}</span>
+          <span>Runtime inventory</span>
+          <span class="chip" :class="validationResult.runtime.inventory_complete ? 'ok' : 'warn'">
+            {{ validationResult.runtime.inventory_complete ? "完整" : validationResult.runtime.inventory_error || "不完整" }}
+          </span>
+          <span>事实有效期</span><span>{{ Math.round(validationResult.runtime.stale_after_ms / 1000) }} 秒</span>
+          <template v-if="selectedRuntimeProfile?.id === 'judge-sandbox-v1'">
+            <span>允许的 Worker OCI</span>
+            <span class="mono digest-wrap">
+              {{ validationResult.runtime.judge_sandbox_allowed_images.join("\n") || "未授权任何镜像" }}
+            </span>
+          </template>
+        </div>
+      </section>
+
+      <section v-if="selectedRuntimeProfile" class="contract-section">
+        <h4>Runtime Profile 与权限摘要</h4>
+        <div class="runtime-contract-line">
+          <span class="chip warn">{{ selectedRuntimeProfile.id }}</span>
+          <span class="mono digest-wrap">{{ selectedRuntimeProfile.profile_sha256 }}</span>
+        </div>
+        <ul class="permission-list">
+          <li v-for="permission in profilePermissionSummary" :key="permission">
+            {{ permission }}
+          </li>
+        </ul>
+        <p class="hint">健康门禁：{{ healthGateSummary }}</p>
+      </section>
+
+      <section v-if="validationResult.requirements.length" class="contract-section">
+        <h4>Required API Binding（必须显式确认）</h4>
+        <div
+          v-for="requirement in validationResult.requirements"
+          :key="requirement.name"
+          class="binding-choice"
+          :class="{ ambiguous: requirement.ambiguous }"
+        >
+          <div class="binding-choice-head">
+            <strong>{{ requirement.name }}</strong>
+            <span class="mono">{{ requirement.api_id }} {{ requirement.version }}</span>
+            <span v-if="requirement.optional" class="chip">可选</span>
+            <span v-if="requirement.ambiguous" class="chip warn">多个候选</span>
+          </div>
+          <select
+            class="select"
+            v-model="bindingSelections[requirement.name]"
+            :aria-label="`${requirement.name} provider`"
+          >
+            <option value="">
+              {{ requirement.optional ? "不绑定" : "请选择 Provider" }}
+            </option>
+            <option
+              v-for="candidate in requirement.candidates"
+              :key="candidate.deployment_id"
+              :value="candidate.deployment_id"
+              :disabled="!candidate.healthy"
+            >
+              {{ candidate.deployment_id }} · {{ candidate.service_id }} · {{ candidate.node_id }}
+              · {{ candidate.api_version }} · {{ candidate.healthy ? "HEALTHY" : "UNHEALTHY" }}
+              {{ candidate.deployment_id === requirement.recommended_provider_deployment_id ? "· 推荐" : "" }}
+            </option>
+          </select>
+          <p v-if="requirement.reason" class="hint">{{ requirement.reason }}</p>
+        </div>
+        <p v-if="unresolvedRequiredBindings.length" class="binding-warning">
+          仍有 {{ unresolvedRequiredBindings.length }} 个必需 API 未选择；禁止安装。
+        </p>
+        <p v-else-if="validatedFingerprint !== currentValidationFingerprint()" class="binding-warning">
+          Binding 选择已变化，请重新校验。
+        </p>
+      </section>
+
+      <section v-if="validationResult.bindings.length" class="contract-section">
+        <h4>服务端最终 Binding 计划</h4>
+        <div
+          v-for="binding in validationResult.bindings"
+          :key="binding.binding_id || binding.requirement_name"
+          class="binding-plan-row"
+        >
+          <span><strong>{{ binding.requirement_name }}</strong> → {{ binding.provider_deployment_id || "UNBOUND" }}</span>
+          <span class="chip" :class="binding.health === 'HEALTHY' ? 'ok' : 'warn'">
+            {{ binding.state }} / {{ binding.health }}
+          </span>
+          <span class="mono">{{ binding.virtual_endpoint }}</span>
+        </div>
+      </section>
+
+      <details v-if="validationResult.topology_diff" class="contract-section">
+        <summary>本次安装将产生的 Topology diff</summary>
+        <pre>{{ JSON.stringify(validationResult.topology_diff, null, 2) }}</pre>
+      </details>
+      <p
+        v-else-if="validationResult.requirements.length"
+        class="binding-warning"
+      >
+        服务端没有返回本次安装的 prospective topology diff，禁止安装。
       </p>
     </div>
 
@@ -577,7 +1082,9 @@ const kindLabels: Record<string, string> = {
           validating ||
           !store.supportsAction('release.validate') ||
           !installTarget ||
-          !targetNodeId
+          !targetNodeId ||
+          !!pipelineOptionsError ||
+          (topologyRequired && (!topologyId || !topologyRevisionId))
         "
         @click="runValidate"
       >
@@ -589,7 +1096,8 @@ const kindLabels: Record<string, string> = {
           installing ||
           !store.supportsAction('release.install') ||
           !installTarget ||
-          !targetNodeId
+          !targetNodeId ||
+          !installReady
         "
         @click="runInstall"
       >
@@ -845,14 +1353,17 @@ const kindLabels: Record<string, string> = {
 }
 .module-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-top: 2px;
 }
 .module-source {
   font-size: 10.5px;
+  flex: 1 1 160px;
+  min-width: 0;
   margin-left: auto;
-  max-width: 46%;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -902,6 +1413,93 @@ const kindLabels: Record<string, string> = {
   margin-top: 6px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
+}
+
+.topology-selection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.9fr);
+  gap: 8px;
+}
+
+.contract-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.contract-section h4 {
+  margin: 0 0 9px;
+  font-size: 12.5px;
+  color: var(--text-strong);
+}
+.fact-grid {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 6px 12px;
+  font-size: 12px;
+}
+.fact-grid > span:nth-child(odd) {
+  color: var(--faint);
+}
+.runtime-contract-line,
+.binding-choice-head,
+.binding-plan-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.permission-list {
+  margin: 9px 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.binding-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.binding-choice.ambiguous {
+  border-color: rgba(245, 158, 11, 0.45);
+}
+.binding-choice-head .mono {
+  color: var(--muted);
+  font-size: 11px;
+}
+.binding-warning {
+  margin: 9px 0 0;
+  color: var(--warn);
+  font-size: 12px;
+}
+.binding-plan-row {
+  justify-content: space-between;
+  padding: 7px 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.08);
+  font-size: 11.5px;
+}
+.binding-plan-row:first-of-type {
+  border-top: 0;
+}
+.digest-wrap {
+  overflow-wrap: anywhere;
+}
+.contract-section pre {
+  max-height: 220px;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 8px;
+  background: var(--bg-soft);
+  font-size: 10.5px;
+}
+
+@media (max-width: 760px) {
+  .topology-selection {
+    grid-template-columns: 1fr;
+  }
 }
 
 code {

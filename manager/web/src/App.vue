@@ -14,9 +14,10 @@ import { useOrchestrator } from "./store";
 
 const store = useOrchestrator();
 
-onMounted(() => {
+onMounted(async () => {
   store.startPolling();
-  store.loadLayout();
+  await store.refreshCore();
+  await store.loadLayout();
 });
 onUnmounted(() => store.dispose());
 

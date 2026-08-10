@@ -5,8 +5,8 @@
 //! mutate an in-process memory store.
 
 use crate::api_client::{
-    ApiClient, ApiError, ApiSuccess, CapabilitySet, CatalogSourceInput, StoreInstallInput,
-    StorePackageQuery,
+    ApiClient, ApiError, ApiSuccess, CapabilitySet, CatalogSourceInput, InstallApiBindingSelection,
+    InstallTopologySelection, StoreInstallInput, StorePackageQuery, StorePipelineOptions,
 };
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -167,6 +167,9 @@ pub enum RemoteCommand {
         version: Option<String>,
         catalog_source_id: Option<String>,
         channel: Option<String>,
+        bindings: Vec<InstallApiBindingSelection>,
+        topology: Option<InstallTopologySelection>,
+        pipeline_options_path: Option<String>,
     },
     StoreInstall {
         service_id: String,
@@ -174,16 +177,23 @@ pub enum RemoteCommand {
         version: Option<String>,
         catalog_source_id: Option<String>,
         channel: Option<String>,
+        bindings: Vec<InstallApiBindingSelection>,
+        topology: Option<InstallTopologySelection>,
+        pipeline_options_path: Option<String>,
     },
     StoreUpgrade {
         deployment_id: String,
         version: Option<String>,
         catalog_source_id: Option<String>,
+        bindings: Vec<InstallApiBindingSelection>,
+        topologies: Vec<InstallTopologySelection>,
     },
     StoreRollback {
         deployment_id: String,
         version: Option<String>,
         catalog_source_id: Option<String>,
+        bindings: Vec<InstallApiBindingSelection>,
+        topologies: Vec<InstallTopologySelection>,
     },
     StoreReleaseDelete {
         service_id: String,
@@ -303,6 +313,9 @@ pub enum RemoteCommand {
     DeploymentHealth {
         deployment_id: String,
     },
+    DeploymentBindings {
+        deployment_id: String,
+    },
     DeploymentAction {
         deployment_id: String,
         action: String,
@@ -407,22 +420,48 @@ impl RemoteCommand {
                     channel: tail.get(2).and_then(|value| optional_token(value)),
                 }
             }
-            ["store", "validate", service_id, target_node_id, tail @ ..] if tail.len() <= 3 => {
+            ["store", "validate", service_id, target_node_id, tail @ ..]
+                if (4..=6).contains(&tail.len()) =>
+            {
                 Self::StoreValidate {
                     service_id: (*service_id).to_string(),
                     target_node_id: (*target_node_id).to_string(),
                     version: tail.first().and_then(|value| optional_token(value)),
                     catalog_source_id: tail.get(1).and_then(|value| optional_token(value)),
                     channel: tail.get(2).and_then(|value| optional_token(value)),
+                    bindings: tail
+                        .get(3)
+                        .map(|value| parse_binding_selections(value))
+                        .transpose()?
+                        .unwrap_or_default(),
+                    topology: tail
+                        .get(4)
+                        .and_then(|value| optional_token(value))
+                        .map(|value| parse_topology_selection(&value))
+                        .transpose()?,
+                    pipeline_options_path: tail.get(5).and_then(|value| optional_token(value)),
                 }
             }
-            ["store", "install", service_id, target_node_id, tail @ ..] if tail.len() <= 3 => {
+            ["store", "install", service_id, target_node_id, tail @ ..]
+                if (4..=6).contains(&tail.len()) =>
+            {
                 Self::StoreInstall {
                     service_id: (*service_id).to_string(),
                     target_node_id: (*target_node_id).to_string(),
                     version: tail.first().and_then(|value| optional_token(value)),
                     catalog_source_id: tail.get(1).and_then(|value| optional_token(value)),
                     channel: tail.get(2).and_then(|value| optional_token(value)),
+                    bindings: tail
+                        .get(3)
+                        .map(|value| parse_binding_selections(value))
+                        .transpose()?
+                        .unwrap_or_default(),
+                    topology: tail
+                        .get(4)
+                        .and_then(|value| optional_token(value))
+                        .map(|value| parse_topology_selection(&value))
+                        .transpose()?,
+                    pipeline_options_path: tail.get(5).and_then(|value| optional_token(value)),
                 }
             }
             [
@@ -430,21 +469,41 @@ impl RemoteCommand {
                 action @ ("upgrade" | "rollback"),
                 deployment_id,
                 tail @ ..,
-            ] if tail.len() <= 2 => {
+            ] if tail.len() <= 4 => {
                 let deployment_id = (*deployment_id).to_string();
                 let version = tail.first().and_then(|value| optional_token(value));
                 let catalog_source_id = tail.get(1).and_then(|value| optional_token(value));
+                let legacy_topology_position = tail
+                    .get(2)
+                    .is_some_and(|value| value.contains('@') && !value.contains('='));
+                let bindings = if legacy_topology_position {
+                    Vec::new()
+                } else {
+                    tail.get(2)
+                        .map(|value| parse_binding_selections(value))
+                        .transpose()?
+                        .unwrap_or_default()
+                };
+                let topologies = tail
+                    .get(if legacy_topology_position { 2 } else { 3 })
+                    .map(|value| parse_topology_selections(value))
+                    .transpose()?
+                    .unwrap_or_default();
                 if *action == "upgrade" {
                     Self::StoreUpgrade {
                         deployment_id,
                         version,
                         catalog_source_id,
+                        bindings,
+                        topologies,
                     }
                 } else {
                     Self::StoreRollback {
                         deployment_id,
                         version,
                         catalog_source_id,
+                        bindings,
+                        topologies,
                     }
                 }
             }
@@ -665,6 +724,9 @@ impl RemoteCommand {
             ["deployment", "health", deployment_id] => Self::DeploymentHealth {
                 deployment_id: (*deployment_id).to_string(),
             },
+            ["deployment", "bindings", deployment_id] => Self::DeploymentBindings {
+                deployment_id: (*deployment_id).to_string(),
+            },
             [
                 "deployment",
                 action @ ("start" | "stop" | "restart" | "uninstall"),
@@ -744,46 +806,102 @@ impl RemoteCommand {
                 version,
                 catalog_source_id,
                 channel,
-            } => client.validate_release(catalog_selection_body(
-                service_id,
-                target_node_id,
-                version.as_deref(),
-                catalog_source_id.as_deref(),
-                channel.as_deref(),
-            )),
+                bindings,
+                topology,
+                pipeline_options_path,
+            } => {
+                let pipeline = load_store_pipeline_options(pipeline_options_path.as_deref())?;
+                let body = catalog_binding_selection_body(
+                    service_id,
+                    target_node_id,
+                    version.as_deref(),
+                    catalog_source_id.as_deref(),
+                    channel.as_deref(),
+                    StoreBindingSelection {
+                        bindings,
+                        topology: topology.as_ref(),
+                        pipeline: &pipeline,
+                    },
+                );
+                let fingerprint = selection_fingerprint(&body);
+                let response = client.validate_release(body)?;
+                Ok(with_selection_fingerprint(response, &fingerprint))
+            }
             Self::StoreInstall {
                 service_id,
                 target_node_id,
                 version,
                 catalog_source_id,
                 channel,
+                bindings,
+                topology,
+                pipeline_options_path,
             } => {
+                let pipeline = load_store_pipeline_options(pipeline_options_path.as_deref())?;
+                let fingerprint = selection_fingerprint(&catalog_binding_selection_body(
+                    service_id,
+                    target_node_id,
+                    version.as_deref(),
+                    catalog_source_id.as_deref(),
+                    channel.as_deref(),
+                    StoreBindingSelection {
+                        bindings,
+                        topology: topology.as_ref(),
+                        pipeline: &pipeline,
+                    },
+                ));
                 let mut input = StoreInstallInput::managed(service_id, target_node_id);
                 input.version.clone_from(version);
                 input.catalog_source_id.clone_from(catalog_source_id);
                 if let Some(channel) = channel {
                     input.channel.clone_from(channel);
                 }
-                client.install_release(input)
+                input.apply_pipeline_options(&pipeline);
+                input.bindings.clone_from(bindings);
+                if let Some(topology) = topology {
+                    input.topology_id = Some(topology.topology_id.clone());
+                    input.topology_etag = topology
+                        .revision_id
+                        .as_ref()
+                        .map(|revision| format!("\"{revision}\""));
+                }
+                let response = client.install_release(input)?;
+                Ok(with_selection_fingerprint(response, &fingerprint))
             }
             Self::StoreUpgrade {
                 deployment_id,
                 version,
                 catalog_source_id,
-            } => client.upgrade_release(replacement_selection_body(
-                deployment_id,
-                version.as_deref(),
-                catalog_source_id.as_deref(),
-            )),
+                bindings,
+                topologies,
+            } => {
+                let (bindings, topologies) =
+                    replacement_context(client, deployment_id, bindings, topologies)?;
+                client.upgrade_release(replacement_selection_body(
+                    deployment_id,
+                    version.as_deref(),
+                    catalog_source_id.as_deref(),
+                    &bindings,
+                    &topologies,
+                ))
+            }
             Self::StoreRollback {
                 deployment_id,
                 version,
                 catalog_source_id,
-            } => client.rollback_release(replacement_selection_body(
-                deployment_id,
-                version.as_deref(),
-                catalog_source_id.as_deref(),
-            )),
+                bindings,
+                topologies,
+            } => {
+                let (bindings, topologies) =
+                    replacement_context(client, deployment_id, bindings, topologies)?;
+                client.rollback_release(replacement_selection_body(
+                    deployment_id,
+                    version.as_deref(),
+                    catalog_source_id.as_deref(),
+                    &bindings,
+                    &topologies,
+                ))
+            }
             Self::StoreReleaseDelete {
                 service_id,
                 version,
@@ -915,6 +1033,7 @@ impl RemoteCommand {
             Self::DeploymentList { cursor } => client.list_deployments(cursor.as_deref()),
             Self::DeploymentGet { deployment_id } => client.deployment(deployment_id),
             Self::DeploymentHealth { deployment_id } => client.deployment_health(deployment_id),
+            Self::DeploymentBindings { deployment_id } => client.deployment_bindings(deployment_id),
             Self::DeploymentAction {
                 deployment_id,
                 action,
@@ -982,7 +1101,9 @@ impl RemoteCommand {
             Self::NodeDrain { .. } => Some("node.drain".to_string()),
             Self::NodeRemove { .. } => Some("node.remove".to_string()),
             Self::DeploymentList { .. } => Some("deployment.list".to_string()),
-            Self::DeploymentGet { .. } => Some("deployment.get".to_string()),
+            Self::DeploymentGet { .. } | Self::DeploymentBindings { .. } => {
+                Some("deployment.get".to_string())
+            }
             Self::DeploymentHealth { .. } => Some("deployment.health".to_string()),
             Self::DeploymentAction { action, .. } => Some(format!("deployment.{action}")),
             Self::DiagnosticList { .. } => Some("diagnostic.list".to_string()),
@@ -1327,6 +1448,9 @@ impl RemoteApp {
             (RemotePage::Deployments, KeyCode::Char('h')) => RemoteCommand::DeploymentHealth {
                 deployment_id: row.id,
             },
+            (RemotePage::Deployments, KeyCode::Char('b')) => RemoteCommand::DeploymentBindings {
+                deployment_id: row.id,
+            },
             (RemotePage::Diagnostics, KeyCode::Char('g')) => {
                 RemoteCommand::DiagnosticGet { report_id: row.id }
             }
@@ -1602,6 +1726,7 @@ fn page_help(page: RemotePage, capabilities: &CapabilitySet) -> String {
         .as_slice(),
         RemotePage::Deployments => [
             ("deployment.health", "h health"),
+            ("deployment.get", "b bindings"),
             ("deployment.start", "F5 start"),
             ("deployment.stop", "F6 stop"),
             ("deployment.restart", "F7 restart"),
@@ -1626,6 +1751,75 @@ fn page_help(page: RemotePage, capabilities: &CapabilitySet) -> String {
 fn optional_token(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty() && value != "-").then(|| value.to_string())
+}
+
+fn parse_binding_selections(source: &str) -> Result<Vec<InstallApiBindingSelection>, String> {
+    if source.trim().is_empty() || source.trim() == "-" {
+        return Ok(Vec::new());
+    }
+    let mut selections = source
+        .split(',')
+        .map(|entry| {
+            let (name, deployment) = entry.split_once('=').ok_or_else(|| {
+                "binding selections must use requirement=provider-deployment[,..]".to_string()
+            })?;
+            let name = name.trim();
+            let deployment = deployment.trim();
+            if name.is_empty()
+                || deployment.is_empty()
+                || name.chars().any(char::is_whitespace)
+                || deployment.chars().any(char::is_whitespace)
+            {
+                return Err(
+                    "binding requirement and provider deployment must be non-empty tokens"
+                        .to_string(),
+                );
+            }
+            Ok(InstallApiBindingSelection {
+                name: name.to_string(),
+                provider_deployment_id: deployment.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    selections.sort_by(|left, right| left.name.cmp(&right.name));
+    if selections
+        .windows(2)
+        .any(|pair| pair[0].name == pair[1].name)
+    {
+        return Err("a binding requirement may be selected only once".to_string());
+    }
+    Ok(selections)
+}
+
+fn parse_topology_selection(source: &str) -> Result<InstallTopologySelection, String> {
+    let (topology_id, revision_id) = source
+        .split_once('@')
+        .ok_or_else(|| "topology selection must use topology-id@applied-revision-id".to_string())?;
+    let topology_id = topology_id.trim();
+    let revision_id = revision_id.trim();
+    if topology_id.is_empty() || revision_id.is_empty() {
+        return Err("topology selection must use topology-id@applied-revision-id".to_string());
+    }
+    Ok(InstallTopologySelection {
+        topology_id: topology_id.to_string(),
+        revision_id: Some(revision_id.to_string()),
+    })
+}
+
+fn parse_topology_selections(source: &str) -> Result<Vec<InstallTopologySelection>, String> {
+    let mut selections = source
+        .split(',')
+        .map(parse_topology_selection)
+        .collect::<Result<Vec<_>, _>>()?;
+    selections.sort_by(|left, right| left.topology_id.cmp(&right.topology_id));
+    if selections.is_empty()
+        || selections
+            .windows(2)
+            .any(|pair| pair[0].topology_id == pair[1].topology_id)
+    {
+        return Err("replacement topology CAS entries must be non-empty and unique".to_string());
+    }
+    Ok(selections)
 }
 
 fn load_json_document(path: &str) -> Result<Value, ApiError> {
@@ -1662,16 +1856,257 @@ fn catalog_selection_body(
     })
 }
 
+struct StoreBindingSelection<'a> {
+    bindings: &'a [InstallApiBindingSelection],
+    topology: Option<&'a InstallTopologySelection>,
+    pipeline: &'a StorePipelineOptions,
+}
+
+fn catalog_binding_selection_body(
+    service_id: &str,
+    target_node_id: &str,
+    version: Option<&str>,
+    catalog_source_id: Option<&str>,
+    channel: Option<&str>,
+    selection: StoreBindingSelection<'_>,
+) -> Value {
+    let mut body = catalog_selection_body(
+        service_id,
+        target_node_id,
+        version,
+        catalog_source_id,
+        channel,
+    );
+    body["bindings"] = json!(selection.bindings);
+    body["start"] = json!(selection.pipeline.start);
+    body["migration_policy"] = json!(selection.pipeline.migration_policy);
+    body["config"] = selection.pipeline.config.clone();
+    body["secret_refs"] = json!(selection.pipeline.secret_refs);
+    if let Some(gateway_node_id) = &selection.pipeline.gateway_node_id {
+        body["gateway_node_id"] = json!(gateway_node_id);
+    }
+    if let Some(topology) = selection.topology {
+        body["topology_id"] = json!(topology.topology_id);
+        body["topology_etag"] = json!(
+            topology
+                .revision_id
+                .as_ref()
+                .map(|revision| format!("\"{revision}\""))
+                .unwrap_or_default()
+        );
+    }
+    body
+}
+
+fn load_store_pipeline_options(path: Option<&str>) -> Result<StorePipelineOptions, ApiError> {
+    let options = match path {
+        Some(path) => serde_json::from_value(load_json_document(path)?).map_err(|error| {
+            ApiError::InvalidRequest(format!(
+                "Store pipeline options document {path:?} is invalid: {error}"
+            ))
+        })?,
+        None => StorePipelineOptions::default(),
+    };
+    normalize_store_pipeline_options(options)
+}
+
+fn normalize_store_pipeline_options(
+    mut options: StorePipelineOptions,
+) -> Result<StorePipelineOptions, ApiError> {
+    options.migration_policy = options.migration_policy.trim().to_ascii_uppercase();
+    if !matches!(options.migration_policy.as_str(), "APPLY" | "DRY_RUN") {
+        return Err(ApiError::InvalidRequest(
+            "Store pipeline migration_policy must be APPLY or DRY_RUN".to_string(),
+        ));
+    }
+    if !options.config.is_object() {
+        return Err(ApiError::InvalidRequest(
+            "Store pipeline config must be a JSON object".to_string(),
+        ));
+    }
+    options.gateway_node_id = options
+        .gateway_node_id
+        .take()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if options
+        .secret_refs
+        .iter()
+        .any(|(name, reference)| name.trim().is_empty() || reference.trim().is_empty())
+    {
+        return Err(ApiError::InvalidRequest(
+            "Store pipeline secret_refs keys and references must be non-empty".to_string(),
+        ));
+    }
+    options.secret_refs = options
+        .secret_refs
+        .into_iter()
+        .map(|(name, reference)| (name.trim().to_string(), reference.trim().to_string()))
+        .collect();
+    Ok(options)
+}
+
+fn selection_fingerprint(selection: &Value) -> String {
+    let encoded = serde_json::to_vec(selection).expect("selection JSON is serializable");
+    let hash = encoded
+        .into_iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn with_selection_fingerprint(mut response: ApiSuccess, fingerprint: &str) -> ApiSuccess {
+    if let Some(data) = response.data.as_object_mut() {
+        data.insert(
+            "selection_fingerprint".to_string(),
+            Value::String(fingerprint.to_string()),
+        );
+    } else {
+        let result = std::mem::take(&mut response.data);
+        response.data = json!({
+            "result": result,
+            "selection_fingerprint": fingerprint,
+        });
+    }
+    response
+}
+
 fn replacement_selection_body(
     deployment_id: &str,
     version: Option<&str>,
     catalog_source_id: Option<&str>,
+    bindings: &[InstallApiBindingSelection],
+    topologies: &[InstallTopologySelection],
 ) -> Value {
-    json!({
+    let mut body = json!({
         "deployment_id": deployment_id,
         "version": version.unwrap_or_default(),
         "catalog_source_id": catalog_source_id.unwrap_or_default(),
-    })
+        "bindings": bindings,
+    });
+    let cas = topologies
+        .iter()
+        .map(|topology| {
+            json!({
+                "topology_id": topology.topology_id,
+                "topology_etag": topology.revision_id.as_ref().map(|revision| format!("\"{revision}\"")).unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if cas.len() == 1 {
+        body["topology_id"] = cas[0]["topology_id"].clone();
+        body["topology_etag"] = cas[0]["topology_etag"].clone();
+    } else if !cas.is_empty() {
+        body["topologies"] = json!(cas);
+    }
+    body
+}
+
+fn replacement_context(
+    client: &ApiClient,
+    deployment_id: &str,
+    explicit_bindings: &[InstallApiBindingSelection],
+    explicit_topologies: &[InstallTopologySelection],
+) -> Result<
+    (
+        Vec<InstallApiBindingSelection>,
+        Vec<InstallTopologySelection>,
+    ),
+    ApiError,
+> {
+    let evidence = client.deployment_bindings(deployment_id)?;
+    let bindings = if explicit_bindings.is_empty() {
+        binding_selections_from_evidence(deployment_id, &evidence.data)?
+    } else {
+        explicit_bindings.to_vec()
+    };
+    let topologies = if explicit_topologies.is_empty() {
+        let mut selections = Vec::new();
+        for topology_id in active_topology_ids(&evidence.data) {
+            let detail = client.topology(&topology_id)?;
+            let revision_id = detail
+                .data
+                .pointer("/heads/applied_revision_id")
+                .and_then(Value::as_str)
+                .filter(|revision| !revision.trim().is_empty())
+                .ok_or_else(|| {
+                    ApiError::InvalidResponse(format!(
+                        "deployment {deployment_id} has an active Binding in Topology {topology_id}, but no applied revision was returned"
+                    ))
+                })?;
+            selections.push(InstallTopologySelection {
+                topology_id,
+                revision_id: Some(revision_id.to_string()),
+            });
+        }
+        selections
+    } else {
+        explicit_topologies.to_vec()
+    };
+    Ok((bindings, topologies))
+}
+
+fn active_topology_ids(evidence: &Value) -> Vec<String> {
+    let mut topology_ids = ["items", "provider_items"]
+        .into_iter()
+        .flat_map(|key| {
+            evidence
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter(|binding| {
+            binding
+                .get("desired_state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| state == "ACTIVE")
+        })
+        .filter_map(|binding| binding.get("topology_id").and_then(Value::as_str))
+        .filter(|topology_id| !topology_id.trim().is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    topology_ids.sort();
+    topology_ids.dedup();
+    topology_ids
+}
+
+fn binding_selections_from_evidence(
+    deployment_id: &str,
+    evidence: &Value,
+) -> Result<Vec<InstallApiBindingSelection>, ApiError> {
+    let mut bindings = evidence
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|binding| {
+            binding
+                .get("desired_state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| state == "ACTIVE")
+        })
+        .filter_map(|binding| {
+            let name = binding
+                .get("requirement_name")
+                .or_else(|| binding.get("name"))?
+                .as_str()?
+                .trim();
+            let provider = binding.get("provider_deployment_id")?.as_str()?.trim();
+            (!name.is_empty() && !provider.is_empty()).then(|| InstallApiBindingSelection {
+                name: name.to_string(),
+                provider_deployment_id: provider.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    bindings.sort_by(|left, right| left.name.cmp(&right.name));
+    if bindings.windows(2).any(|pair| pair[0].name == pair[1].name) {
+        return Err(ApiError::InvalidResponse(format!(
+            "deployment {deployment_id} returned duplicate active Binding requirements"
+        )));
+    }
+    Ok(bindings)
 }
 
 fn split_command_line(source: &str) -> Result<Vec<String>, String> {
@@ -1720,7 +2155,7 @@ fn split_command_line(source: &str) -> Result<Vec<String>, String> {
 }
 
 fn command_usage() -> String {
-    "commands: store catalogs|catalog add <id> <url> <required-key-id> [env:AUTH_TOKEN_VAR|-] [padded-base64-public-key|-]|catalog remove <id>|list/search|import <service> <node> [version|-] [catalog|-] [channel]|validate|install <service> <node> [version|-] [catalog|-] [channel]|upgrade|rollback|release delete <service> <version>|uninstall <deployment>; topology list|get|draft <spec.json>|revisions|revision get/create|endpoint put/delete|link put/delete|validate <id> <spec.json>|diff|apply|rollback|status|export; operation list|plan <plan.json>|get|logs|events|confirm|apply|cancel|retry|rollback; node list|get|health|register|revoke-certificates|drain|remove; deployment list|get|health|start|stop|restart|uninstall; diagnostic list|create|get|export".to_string()
+    "commands: store catalogs|catalog add <id> <url> <required-key-id> [env:AUTH_TOKEN_VAR|-] [padded-base64-public-key|-]|catalog remove <id>|list/search|import <service> <node> [version|-] [catalog|-] [channel]|validate|install <service> <node> <version|-> <catalog|-> <channel|-> <requirement=provider,..|-> <topology@applied-revision|-> [pipeline-options.json|-]|upgrade|rollback <deployment> <version|-> <catalog|-> <requirement=provider,..|-> <topology@revision,..|->|release delete <service> <version>|uninstall <deployment>; topology list|get|draft <spec.json>|revisions|revision get/create|endpoint put/delete|link put/delete|validate <id> <spec.json>|diff|apply|rollback|status|export; operation list|plan <plan.json>|get|logs|events|confirm|apply|cancel|retry|rollback; node list|get|health|register|revoke-certificates|drain|remove; deployment list|get|health|bindings|start|stop|restart|uninstall; diagnostic list|create|get|export".to_string()
 }
 
 #[cfg(test)]
@@ -1815,15 +2250,73 @@ mod tests {
             uninstall.capability().as_deref(),
             Some("deployment.uninstall")
         );
+        assert!(RemoteCommand::parse("store install gateway node-a 1.2.3").is_err());
         assert_eq!(
-            RemoteCommand::parse("store install gateway node-a 1.2.3").unwrap(),
+            RemoteCommand::parse("store install storage-service node-a 1.2.3 - - -").unwrap(),
+            RemoteCommand::StoreInstall {
+                service_id: "storage-service".to_string(),
+                target_node_id: "node-a".to_string(),
+                version: Some("1.2.3".to_string()),
+                catalog_source_id: None,
+                channel: None,
+                bindings: Vec::new(),
+                topology: None,
+                pipeline_options_path: None,
+            }
+        );
+        assert_eq!(
+            RemoteCommand::parse("store install gateway node-a 1.2.3 - - - primary@rev-1").unwrap(),
             RemoteCommand::StoreInstall {
                 service_id: "gateway".to_string(),
                 target_node_id: "node-a".to_string(),
                 version: Some("1.2.3".to_string()),
                 catalog_source_id: None,
                 channel: None,
+                bindings: Vec::new(),
+                topology: Some(InstallTopologySelection {
+                    topology_id: "primary".to_string(),
+                    revision_id: Some("rev-1".to_string()),
+                }),
+                pipeline_options_path: None,
             }
+        );
+        assert_eq!(
+            RemoteCommand::parse(
+                "store validate judge-worker node-b 1.0.0 stable stable judge_control=judge-a,storage_get=storage-a primary@revision-7 pipeline-options.json"
+            )
+            .unwrap(),
+            RemoteCommand::StoreValidate {
+                service_id: "judge-worker".to_string(),
+                target_node_id: "node-b".to_string(),
+                version: Some("1.0.0".to_string()),
+                catalog_source_id: Some("stable".to_string()),
+                channel: Some("stable".to_string()),
+                bindings: vec![
+                    InstallApiBindingSelection {
+                        name: "judge_control".to_string(),
+                        provider_deployment_id: "judge-a".to_string(),
+                    },
+                    InstallApiBindingSelection {
+                        name: "storage_get".to_string(),
+                        provider_deployment_id: "storage-a".to_string(),
+                    },
+                ],
+                topology: Some(InstallTopologySelection {
+                    topology_id: "primary".to_string(),
+                    revision_id: Some("revision-7".to_string()),
+                }),
+                pipeline_options_path: Some("pipeline-options.json".to_string()),
+            }
+        );
+        assert!(RemoteCommand::parse(
+            "store install judge-worker node-b - - - judge_control=judge-a,judge_control=judge-b primary"
+        )
+        .is_err());
+        assert!(
+            RemoteCommand::parse(
+                "store install judge-worker node-b - - - judge_control=judge-a primary"
+            )
+            .is_err()
         );
         assert_eq!(
             RemoteCommand::parse("topology endpoint put main endpoint-a endpoint.json '\"rev-7\"'")
@@ -1876,6 +2369,8 @@ mod tests {
                 deployment_id: "dep-1".to_string(),
                 version: Some("2.0.0".to_string()),
                 catalog_source_id: Some("stable".to_string()),
+                bindings: Vec::new(),
+                topologies: Vec::new(),
             }
         );
         assert_eq!(
@@ -1917,6 +2412,12 @@ mod tests {
             RemoteCommand::DeploymentHealth { .. }
         ));
         assert_eq!(
+            RemoteCommand::parse("deployment bindings worker-b").unwrap(),
+            RemoteCommand::DeploymentBindings {
+                deployment_id: "worker-b".to_string(),
+            }
+        );
+        assert_eq!(
             RemoteCommand::parse("node register edge-1 10.0.0.8 standalone 900").unwrap(),
             RemoteCommand::NodeRegister {
                 node_id: "edge-1".to_string(),
@@ -1956,6 +2457,16 @@ mod tests {
 
     #[test]
     fn optional_store_selection_fields_use_backend_defaults_instead_of_json_null() {
+        let pipeline = StorePipelineOptions {
+            start: false,
+            migration_policy: "DRY_RUN".to_string(),
+            gateway_node_id: Some("gateway-a".to_string()),
+            config: json!({"namespace": "contest"}),
+            secret_refs: std::collections::BTreeMap::from([(
+                "signing_key".to_string(),
+                "secrets/judge/signing-key".to_string(),
+            )]),
+        };
         assert_eq!(
             catalog_selection_body("gateway", "node-a", None, None, None),
             json!({
@@ -1967,12 +2478,186 @@ mod tests {
             })
         );
         assert_eq!(
-            replacement_selection_body("dep-1", None, None),
+            catalog_binding_selection_body(
+                "judge-worker",
+                "node-b",
+                None,
+                None,
+                None,
+                StoreBindingSelection {
+                    bindings: &[InstallApiBindingSelection {
+                        name: "judge_control".to_string(),
+                        provider_deployment_id: "judge-a".to_string(),
+                    }],
+                    topology: Some(&InstallTopologySelection {
+                        topology_id: "primary".to_string(),
+                        revision_id: Some("revision-7".to_string()),
+                    }),
+                    pipeline: &pipeline,
+                },
+            ),
+            json!({
+                "service_id": "judge-worker",
+                "target_node_id": "node-b",
+                "version": "",
+                "catalog_source_id": "",
+                "channel": "stable",
+                "start": false,
+                "migration_policy": "DRY_RUN",
+                "gateway_node_id": "gateway-a",
+                "config": {"namespace": "contest"},
+                "secret_refs": {"signing_key": "secrets/judge/signing-key"},
+                "bindings": [{
+                    "name": "judge_control",
+                    "provider_deployment_id": "judge-a",
+                }],
+                "topology_id": "primary",
+                "topology_etag": "\"revision-7\"",
+            })
+        );
+        let confirmed = catalog_binding_selection_body(
+            "judge-worker",
+            "node-b",
+            Some("1.0.0"),
+            Some("stable"),
+            Some("stable"),
+            StoreBindingSelection {
+                bindings: &[InstallApiBindingSelection {
+                    name: "judge_control".to_string(),
+                    provider_deployment_id: "judge-a".to_string(),
+                }],
+                topology: Some(&InstallTopologySelection {
+                    topology_id: "primary".to_string(),
+                    revision_id: Some("revision-7".to_string()),
+                }),
+                pipeline: &pipeline,
+            },
+        );
+        let fingerprint = selection_fingerprint(&confirmed);
+        assert!(fingerprint.starts_with("fnv1a64:"));
+        assert_eq!(fingerprint.len(), 24);
+        let mut changed = confirmed;
+        changed["bindings"][0]["provider_deployment_id"] = json!("judge-b");
+        assert_ne!(fingerprint, selection_fingerprint(&changed));
+        assert_eq!(
+            replacement_selection_body("dep-1", None, None, &[], &[]),
             json!({
                 "deployment_id": "dep-1",
                 "version": "",
                 "catalog_source_id": "",
+                "bindings": [],
             })
+        );
+        assert_eq!(
+            RemoteCommand::parse(
+                "store upgrade dep-1 2.0.0 stable storage_get=storage-b contest@rev-9"
+            )
+            .unwrap(),
+            RemoteCommand::StoreUpgrade {
+                deployment_id: "dep-1".to_string(),
+                version: Some("2.0.0".to_string()),
+                catalog_source_id: Some("stable".to_string()),
+                bindings: vec![InstallApiBindingSelection {
+                    name: "storage_get".to_string(),
+                    provider_deployment_id: "storage-b".to_string(),
+                }],
+                topologies: vec![InstallTopologySelection {
+                    topology_id: "contest".to_string(),
+                    revision_id: Some("rev-9".to_string()),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn store_pipeline_options_are_strict_normalized_and_part_of_the_selection() {
+        let parsed: StorePipelineOptions = serde_json::from_value(json!({
+            "start": false,
+            "migration_policy": "dry_run",
+            "gateway_node_id": " gateway-a ",
+            "config": {"namespace": "contest"},
+            "secret_refs": {" signing_key ": " secrets/judge/signing-key "}
+        }))
+        .unwrap();
+        let normalized = normalize_store_pipeline_options(parsed).unwrap();
+        assert!(!normalized.start);
+        assert_eq!(normalized.migration_policy, "DRY_RUN");
+        assert_eq!(normalized.gateway_node_id.as_deref(), Some("gateway-a"));
+        assert_eq!(
+            normalized
+                .secret_refs
+                .get("signing_key")
+                .map(String::as_str),
+            Some("secrets/judge/signing-key")
+        );
+        assert!(matches!(
+            normalize_store_pipeline_options(StorePipelineOptions {
+                config: json!([]),
+                ..StorePipelineOptions::default()
+            }),
+            Err(ApiError::InvalidRequest(message)) if message.contains("config must be a JSON object")
+        ));
+        assert!(
+            serde_json::from_value::<StorePipelineOptions>(json!({
+                "unknown": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn replacement_preserves_active_consumer_bindings_from_deployment_evidence() {
+        let evidence = json!({
+            "items": [
+                {
+                    "requirement_name": "storage_get",
+                    "provider_deployment_id": "storage-a",
+                    "desired_state": "ACTIVE",
+                    "topology_id": "contest"
+                },
+                {
+                    "requirement_name": "judge_control",
+                    "provider_deployment_id": "judge-a",
+                    "desired_state": "ACTIVE",
+                    "topology_id": "contest"
+                },
+                {
+                    "requirement_name": "retired",
+                    "provider_deployment_id": "old-a",
+                    "desired_state": "INACTIVE"
+                }
+            ],
+            "provider_items": [{
+                "requirement_name": "problem_events",
+                "provider_deployment_id": "worker-b",
+                "desired_state": "ACTIVE",
+                "topology_id": "secondary"
+            }]
+        });
+        let bindings = binding_selections_from_evidence("worker-b", &evidence).unwrap();
+        assert_eq!(
+            bindings,
+            vec![
+                InstallApiBindingSelection {
+                    name: "judge_control".to_string(),
+                    provider_deployment_id: "judge-a".to_string(),
+                },
+                InstallApiBindingSelection {
+                    name: "storage_get".to_string(),
+                    provider_deployment_id: "storage-a".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            replacement_selection_body("worker-b", None, None, &bindings, &[])["bindings"],
+            json!([
+                {"name":"judge_control","provider_deployment_id":"judge-a"},
+                {"name":"storage_get","provider_deployment_id":"storage-a"}
+            ])
+        );
+        assert_eq!(
+            active_topology_ids(&evidence),
+            vec!["contest".to_string(), "secondary".to_string()]
         );
     }
 
