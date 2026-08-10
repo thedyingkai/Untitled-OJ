@@ -11,7 +11,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signer, SigningKey};
 use orchestrator_agent::{
     AgentClaimRequest, AgentLedger, AgentTransport, AgentWorker, ClaimResponse, HeartbeatAck,
-    JobExecutor, LoopbackHttpTransport, PollOutcome, TransportError, WorkerConfig,
+    JobExecutor, LocalRuntimeContextProvider, LoopbackHttpTransport, NodeRuntimeFactsPublisher,
+    PollOutcome, RuntimeContextProvider, TransportError, WorkerConfig,
 };
 use orchestrator_backend::{
     EmbeddedServerHandle, EmbeddedServerOptions, EmbeddedStorage, start_embedded_server,
@@ -30,7 +31,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const NODE_ID: &str = "desktop-local";
 const CATALOG_KEY_ID: &str = "docker-e2e-key";
@@ -64,6 +66,11 @@ async fn run_live_gate() -> Result<()> {
 
     let docker = DockerEngineRuntime::connect_local().context("connect to local Docker Engine")?;
     docker.ping().await.context("ping local Docker Engine")?;
+    let docker_facts = docker
+        .runtime_facts()
+        .await
+        .context("inspect local Docker Engine platform")?;
+    let target_platform = TargetPlatform::new(docker_facts.os_type, docker_facts.architecture);
 
     let repo_root = workspace_root()?;
     let scratch_root = repo_root.join(".tmp");
@@ -79,8 +86,14 @@ async fn run_live_gate() -> Result<()> {
     let artifact_root = data.path().join("artifacts");
     let ledger_path = data.path().join("agent-ledger.db");
 
-    let (trust_json, sources_json) =
-        write_catalog(&repo_root, data.path(), &service_id, &image_v1, &image_v2)?;
+    let (trust_json, sources_json) = write_catalog(
+        &repo_root,
+        data.path(),
+        &service_id,
+        &image_v1,
+        &image_v2,
+        &target_platform,
+    )?;
     let mut environment = EnvironmentGuard::default();
     environment.set("ORCHESTRATOR_CATALOG_TRUST_KEYS", &trust_json);
     environment.set("ORCHESTRATOR_CATALOG_SOURCES", &sources_json);
@@ -99,6 +112,14 @@ async fn run_live_gate() -> Result<()> {
     )?;
     let first_origin = format!("http://{}", first_server.local_addr());
     let first_session = DesktopSession::exchange(&first_origin, &first_web_bootstrap).await?;
+    publish_and_verify_agent_runtime_facts(
+        &first_session,
+        &first_origin,
+        &first_bootstrap,
+        &ledger_path,
+        "first-start",
+    )
+    .await?;
 
     let install_body = json!({
         "service_id": service_id,
@@ -187,6 +208,14 @@ async fn run_live_gate() -> Result<()> {
     )?;
     let second_origin = format!("http://{}", second_server.local_addr());
     let second_session = DesktopSession::exchange(&second_origin, &second_web_bootstrap).await?;
+    publish_and_verify_agent_runtime_facts(
+        &second_session,
+        &second_origin,
+        &second_bootstrap,
+        &ledger_path,
+        "second-start",
+    )
+    .await?;
     ensure!(
         operation_status(&second_session, &stop_operation).await? == "RUNNING",
         "control-plane restart lost the queued stop Operation"
@@ -236,10 +265,10 @@ async fn run_live_gate() -> Result<()> {
         "start did not restore RUNNING"
     );
 
-    // A lost completion response occurs after the real Docker restart and the
-    // Agent has durably recorded success. Expire the lease, restart the Agent,
-    // and require a ledger replay. The Docker StartedAt value must not change a
-    // second time, proving the runtime mutation was not blindly repeated.
+    // Lose the completion response only after the control plane has atomically
+    // committed it. A fresh Agent transport then replays the exact durable
+    // completion. The terminal replay must be accepted idempotently and the
+    // Docker StartedAt value must not change a second time.
     let restarted = second_session
         .post_json(
             &format!("/api/v1/deployments/{deployment_v1}:restart"),
@@ -250,10 +279,18 @@ async fn run_live_gate() -> Result<()> {
         .await?;
     let restart_operation = required_pointer_str(&restarted, "/data/operation_id")?;
     let restart_job_id = operation_job_id(&second_session, &restart_operation).await?;
+    let captured_completion = Arc::new(Mutex::new(None));
     let transport =
         LoopbackHttpTransport::new_with_bootstrap(&second_origin, second_bootstrap.clone())?;
-    let failed_completion =
-        run_worker_once(FailCompleteTransport { inner: transport }, &ledger_path, 30).await;
+    let failed_completion = run_worker_once(
+        FailCompleteTransport {
+            inner: transport,
+            captured_completion: Arc::clone(&captured_completion),
+        },
+        &ledger_path,
+        30,
+    )
+    .await;
     ensure!(
         matches!(failed_completion, Err(ref error) if error.to_string().contains("injected completion response loss")),
         "restart did not reach the injected completion-loss point: {failed_completion:?}"
@@ -265,22 +302,36 @@ async fn run_live_gate() -> Result<()> {
         recorded.completion.is_some(),
         "Agent did not durably finish restart before reporting it"
     );
+    ensure!(
+        operation_status(&second_session, &restart_operation).await? == "SUCCEEDED",
+        "control plane did not commit restart before the injected response loss"
+    );
     let container_id = required_pointer_str(
         &only_deployment(&second_session).await?,
         "/instance/container_id",
     )?;
     let started_at_after_first_restart = docker_started_at(&container_id)?;
-    expire_job_lease(&database_path, &restart_job_id)?;
-    tokio::time::sleep(Duration::from_millis(2_200)).await;
-    drive_operation(
-        &second_session,
-        &second_origin,
-        &second_bootstrap,
-        &ledger_path,
-        &restart_operation,
-        31,
-    )
-    .await?;
+    let (captured_node_id, captured_request) = captured_completion
+        .lock()
+        .map_err(|_| anyhow!("captured completion lock was poisoned"))?
+        .take()
+        .ok_or_else(|| anyhow!("completion request was not captured before response loss"))?;
+    ensure!(
+        captured_node_id == NODE_ID
+            && captured_request.job_id == restart_job_id
+            && captured_request.lease_token == recorded.lease_token,
+        "captured completion does not match the durable Agent ledger"
+    );
+    let replay_transport =
+        LoopbackHttpTransport::new_with_bootstrap(&second_origin, second_bootstrap.clone())?;
+    replay_transport
+        .complete(&captured_node_id, captured_request)
+        .await
+        .context("replay exact durable completion after Agent restart")?;
+    ensure!(
+        operation_status(&second_session, &restart_operation).await? == "SUCCEEDED",
+        "exact terminal completion replay changed the Operation state"
+    );
     ensure!(
         docker_started_at(&container_id)? == started_at_after_first_restart,
         "Agent ledger replay executed Docker restart twice"
@@ -317,6 +368,14 @@ async fn run_live_gate() -> Result<()> {
         "published deployment health did not reflect Docker: {health}"
     );
 
+    publish_and_verify_agent_runtime_facts(
+        &second_session,
+        &second_origin,
+        &second_bootstrap,
+        &ledger_path,
+        "before-upgrade",
+    )
+    .await?;
     let upgraded = second_session
         .post_json(
             "/api/v1/store/releases:upgrade",
@@ -354,6 +413,14 @@ async fn run_live_gate() -> Result<()> {
         "upgrade did not atomically replace the old container"
     );
 
+    publish_and_verify_agent_runtime_facts(
+        &second_session,
+        &second_origin,
+        &second_bootstrap,
+        &ledger_path,
+        "before-rollback",
+    )
+    .await?;
     let rolled_back = second_session
         .post_json(
             "/api/v1/store/releases:rollback",
@@ -388,6 +455,14 @@ async fn run_live_gate() -> Result<()> {
         "rollback did not leave exactly one proven container"
     );
 
+    publish_and_verify_agent_runtime_facts(
+        &second_session,
+        &second_origin,
+        &second_bootstrap,
+        &ledger_path,
+        "before-uninstall",
+    )
+    .await?;
     let uninstalled = second_session
         .post_json(
             &format!("/api/v1/deployments/{rolled_back_deployment}:uninstall"),
@@ -454,6 +529,7 @@ fn write_catalog(
     service_id: &str,
     image_v1: &str,
     image_v2: &str,
+    target_platform: &TargetPlatform,
 ) -> Result<(String, String)> {
     let release = |version: &str, image: &str| -> Result<(String, String)> {
         let filename = format!("{service_id}-{version}.release.yaml");
@@ -497,7 +573,7 @@ fn write_catalog(
     let (metadata_v1, checksum_v1) = release("1.0.0", image_v1)?;
     let (metadata_v2, checksum_v2) = release("2.0.0", image_v2)?;
 
-    let platforms = vec![TargetPlatform::current()];
+    let platforms = vec![target_platform.clone()];
     let catalog_release = |version: &str,
                            image: &str,
                            metadata: String,
@@ -599,6 +675,68 @@ fn shutdown_server(server: EmbeddedServerHandle) -> Result<()> {
     server
         .join_timeout(Duration::from_secs(10))
         .context("stop embedded control plane")
+}
+
+async fn publish_and_verify_agent_runtime_facts(
+    session: &DesktopSession,
+    origin: &str,
+    bootstrap: &str,
+    ledger_path: &Path,
+    report_scope: &str,
+) -> Result<()> {
+    let runtime = DockerEngineRuntime::connect_local().context("connect runtime facts Engine")?;
+    runtime.ping().await.context("ping runtime facts Engine")?;
+    let docker_facts = runtime
+        .runtime_facts()
+        .await
+        .context("inspect authenticated Docker runtime facts")?;
+    let provider = LocalRuntimeContextProvider::standard_only(
+        docker_facts.clone(),
+        ledger_path.with_file_name("runtime-contexts"),
+    );
+    let observed_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock predates the Unix epoch")?
+        .as_millis()
+        .try_into()
+        .context("runtime facts timestamp exceeds i64")?;
+    let inventory = runtime
+        .managed_deployment_inventory(4_096)
+        .await
+        .context("inspect managed Docker deployment inventory")?;
+    ensure!(
+        inventory.inventory_complete,
+        "live Docker inventory is incomplete: {}",
+        inventory.inventory_error
+    );
+
+    let mut facts = provider.runtime_facts();
+    facts.report_id = format!(
+        "docker-e2e-{report_scope}-{}-{observed_at_ms}",
+        std::process::id()
+    );
+    facts.observed_at_ms = observed_at_ms;
+    facts.docker = docker_facts;
+    facts.inventory_complete = inventory.inventory_complete;
+    facts.inventory_error = inventory.inventory_error;
+    facts.deployment_observations = inventory.deployments;
+
+    let transport = LoopbackHttpTransport::new_with_bootstrap(origin, bootstrap.to_string())?;
+    transport
+        .runtime_facts_publisher(NODE_ID.to_string())?
+        .publish_runtime_facts(NODE_ID, &facts)
+        .await
+        .context("publish authenticated Agent runtime facts")?;
+
+    let health = session
+        .get_json(&format!("/api/v1/nodes/{NODE_ID}/health"), StatusCode::OK)
+        .await?;
+    ensure!(
+        health.pointer("/data/agent_reachable") == Some(&json!(true))
+            && health.pointer("/data/ready") == Some(&json!(true)),
+        "control plane did not accept the Agent runtime report: {health}"
+    );
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -787,6 +925,7 @@ async fn run_worker_once<T: AgentTransport>(
 
 struct FailCompleteTransport<T> {
     inner: T,
+    captured_completion: Arc<Mutex<Option<(String, CompleteRequest)>>>,
 }
 
 #[async_trait]
@@ -805,9 +944,13 @@ impl<T: AgentTransport> AgentTransport for FailCompleteTransport<T> {
 
     async fn complete(
         &self,
-        _node_id: &str,
-        _request: CompleteRequest,
+        node_id: &str,
+        request: CompleteRequest,
     ) -> Result<(), TransportError> {
+        self.inner.complete(node_id, request.clone()).await?;
+        *self.captured_completion.lock().map_err(|_| {
+            TransportError::Protocol("captured completion lock was poisoned".to_string())
+        })? = Some((node_id.to_string(), request));
         Err(TransportError::Protocol(
             "injected completion response loss".to_string(),
         ))
@@ -902,24 +1045,6 @@ async fn wait_for_actual_health(runtime: &DockerEngineRuntime, container_id: &st
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     bail!("Docker container {container_id} did not become HEALTHY")
-}
-
-fn expire_job_lease(database_path: &Path, job_id: &str) -> Result<()> {
-    let connection = rusqlite::Connection::open(database_path)?;
-    connection.busy_timeout(Duration::from_secs(5))?;
-    let payload: String = connection.query_row(
-        "SELECT payload FROM orchestrator_jobs WHERE job_id = ?1 AND status = 'LEASED'",
-        [job_id],
-        |row| row.get(0),
-    )?;
-    let mut payload: Value = serde_json::from_str(&payload)?;
-    payload["lease_expires_at_ms"] = json!(0);
-    let changed = connection.execute(
-        "UPDATE orchestrator_jobs SET payload = ?2 WHERE job_id = ?1 AND status = 'LEASED'",
-        rusqlite::params![job_id, serde_json::to_string(&payload)?],
-    )?;
-    ensure!(changed == 1, "could not expire leased job {job_id}");
-    Ok(())
 }
 
 fn docker_container_count(service_id: &str) -> Result<usize> {
