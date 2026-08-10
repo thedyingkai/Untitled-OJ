@@ -400,7 +400,7 @@ jobs:
           MINIO_ROOT_PASSWORD: static-compose-minio-password
         run: |
           set -euo pipefail
-          rendered="$(docker compose --env-file .env.example -f deploy/compose/docker-compose.yml config)"
+          rendered="$(docker compose --profile legacy-development --env-file .env.example -f deploy/compose/docker-compose.yml config)"
           printf '%s\n' "$rendered" >/tmp/ojos-compose-rendered.yml
           if ! grep -q 'OJOS_RUNNER_MODE: nsjail' /tmp/ojos-compose-rendered.yml; then
             echo "judge-worker must render with OJOS_RUNNER_MODE=nsjail" >&2
@@ -410,7 +410,7 @@ jobs:
             echo "judge-worker must not default to cgroup fallback" >&2
             exit 1
           fi
-          docker compose --env-file .env.example -f deploy/compose/docker-compose.yml config --quiet
+          docker compose --profile legacy-development --env-file .env.example -f deploy/compose/docker-compose.yml config --quiet
 
       - name: Production ops gates
         shell: bash
