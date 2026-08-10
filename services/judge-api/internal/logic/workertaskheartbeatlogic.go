@@ -33,6 +33,9 @@ func (l *WorkerTaskHeartbeatLogic) WorkerTaskHeartbeat(req *types.WorkerTaskHear
 	if taskID == "" || workerID == "" || req.LeaseVersion <= 0 {
 		return nil, errors.New("invalid task lease")
 	}
+	if err := validateWorkerIdentity(l.ctx, workerID); err != nil {
+		return nil, err
+	}
 
 	repo := workerTaskRepo(l.svcCtx)
 	if repo == nil {

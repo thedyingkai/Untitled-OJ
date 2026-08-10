@@ -693,7 +693,7 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 	cfg.composeUserJWT = userJWT
 	ok("compose auth user login: user_id=%d", userID)
 
-	problemID, err := ensureComposeJudgeProblemFixture(ctx, cfg, userID)
+	problemID, err := ensureComposeJudgeProblemFixture(ctx, cfg)
 	if err != nil {
 		return fail("compose problem-service testdata chain", err)
 	}
@@ -2104,17 +2104,26 @@ func createSubmissionViaGateway(ctx context.Context, cfg smokeConfig) (int64, er
 		"language":   "cpp17",
 		"code":       submissionSourceCode,
 	}
-	var resp struct {
-		SubmissionID int64  `json:"submission_id"`
-		Status       string `json:"status"`
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		var resp struct {
+			SubmissionID int64  `json:"submission_id"`
+			Status       string `json:"status"`
+		}
+		if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.gateway.baseURL()+"/api/judge/submissions", body, composeUserHeaders(cfg), &resp); err == nil {
+			if resp.SubmissionID <= 0 {
+				return 0, fmt.Errorf("invalid submission id: %d", resp.SubmissionID)
+			}
+			return resp.SubmissionID, nil
+		} else {
+			lastErr = err
+		}
+		if wait(ctx, 250*time.Millisecond) != nil {
+			return 0, ctx.Err()
+		}
 	}
-	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.gateway.baseURL()+"/api/judge/submissions", body, composeUserHeaders(cfg), &resp); err != nil {
-		return 0, err
-	}
-	if resp.SubmissionID <= 0 {
-		return 0, fmt.Errorf("invalid submission id: %d", resp.SubmissionID)
-	}
-	return resp.SubmissionID, nil
+	return 0, fmt.Errorf("problem projection was not accepted by judge-api within 30s: %w", lastErr)
 }
 
 func waitSubmissionStatusViaGateway(ctx context.Context, cfg smokeConfig, submissionID int64) (string, error) {
@@ -2196,7 +2205,7 @@ func verifyQueueStatusAPIViaGateway(ctx context.Context, cfg smokeConfig) error 
 	return nil
 }
 
-func ensureComposeJudgeProblemFixture(ctx context.Context, cfg smokeConfig, userID int64) (int64, error) {
+func ensureComposeJudgeProblemFixture(ctx context.Context, cfg smokeConfig) (int64, error) {
 	if err := composeCommand(ctx, cfg, 90*time.Second, "run", "--rm", "judge-api-migrations"); err != nil {
 		return 0, err
 	}
@@ -2248,21 +2257,7 @@ func ensureComposeJudgeProblemFixture(ctx context.Context, cfg smokeConfig, user
 	}
 	ok("compose problem testdata stored through storage-service")
 
-	packageDir := "/data/ojos/problems/" + createResp.Slug
-	sql := fmt.Sprintf(`
-INSERT INTO problems(id, package_dir, status, visibility, created_by)
-VALUES(%d, '%s', 'ready', 'public', %d)
-ON CONFLICT(id) DO UPDATE SET
-    package_dir = EXCLUDED.package_dir,
-    status = EXCLUDED.status,
-    visibility = EXCLUDED.visibility,
-    created_by = EXCLUDED.created_by,
-    updated_at = NOW();
-`, createResp.ProblemID, strings.ReplaceAll(packageDir, "'", "''"), userID)
-	if err := composeCommand(ctx, cfg, 20*time.Second, "exec", "-T", "judge-db", "psql", "-U", "postgres", "-d", "ojos_judge", "-c", sql); err != nil {
-		return 0, err
-	}
-	ok("compose judge-api problem metadata synced: problem_id=%d", createResp.ProblemID)
+	ok("compose problem snapshot queued for automatic judge projection: problem_id=%d", createResp.ProblemID)
 	return createResp.ProblemID, nil
 }
 

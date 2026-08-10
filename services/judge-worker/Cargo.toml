@@ -15,6 +15,7 @@ tracing-opentelemetry = "0.33"
 opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
+ojos-service-context = { path = "../../platform/shared/rust/service-context" }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 libc = "0.2"

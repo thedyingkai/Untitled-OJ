@@ -5,11 +5,14 @@ package handler
 
 import (
 	"net/http"
+	"time"
 
 	"ojos-judge-api/internal/svc"
 
 	"github.com/zeromicro/go-zero/rest"
 )
+
+const workerClaimRouteTimeout = 35 * time.Second
 
 func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 	server.AddRoutes(
@@ -34,7 +37,7 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				{
 					Method:  http.MethodGet,
 					Path:    "/admin/queue/status",
-					Handler: adminQueueHandler(serverCtx),
+					Handler: adminQueueStatusHandler(serverCtx),
 				},
 				{
 					Method:  http.MethodPost,
@@ -101,52 +104,75 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 		rest.WithPrefix("/judge"),
 	)
 
+	workerRoutes := []rest.Route{
+		{
+			Method:  http.MethodGet,
+			Path:    "/worker/artifacts/problems/:id/package",
+			Handler: workerArtifactProblemPackageHandler(serverCtx),
+		},
+		{
+			Method:  http.MethodGet,
+			Path:    "/worker/artifacts/submissions/:id/source",
+			Handler: workerArtifactSubmissionSourceHandler(serverCtx),
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/worker/heartbeat",
+			Handler: workerHeartbeatHandler(serverCtx),
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/worker/register",
+			Handler: workerRegisterHandler(serverCtx),
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/worker/tasks/:task_id/fail",
+			Handler: workerFailTaskHandler(serverCtx),
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/worker/tasks/:task_id/heartbeat",
+			Handler: workerTaskHeartbeatHandler(serverCtx),
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/worker/tasks/:task_id/result",
+			Handler: workerSubmitResultHandler(serverCtx),
+		},
+	}
+	workerClaimRoutes := []rest.Route{{
+		Method:  http.MethodPost,
+		Path:    "/worker/tasks/claim",
+		Handler: workerClaimTasksHandler(serverCtx),
+	}}
+	registerWorkerRoutes(server, serverCtx, "/judge", workerRoutes, workerClaimRoutes)
+	// Service Contract v2 paths are provider-native and therefore retain the
+	// public /api prefix. The legacy /judge prefix remains for the development
+	// Compose gateway, which historically strips /api before proxying.
+	registerWorkerRoutes(server, serverCtx, "/api/judge", workerRoutes, workerClaimRoutes)
+}
+
+func registerWorkerRoutes(
+	server *rest.Server,
+	serverCtx *svc.ServiceContext,
+	prefix string,
+	workerRoutes []rest.Route,
+	workerClaimRoutes []rest.Route,
+) {
 	server.AddRoutes(
 		rest.WithMiddlewares(
 			[]rest.Middleware{serverCtx.WorkerAuthMiddleware},
-			[]rest.Route{
-				{
-					Method:  http.MethodGet,
-					Path:    "/worker/artifacts/problems/:id/package",
-					Handler: workerArtifactProblemPackageHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodGet,
-					Path:    "/worker/artifacts/submissions/:id/source",
-					Handler: workerArtifactSubmissionSourceHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/worker/heartbeat",
-					Handler: workerHeartbeatHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/worker/register",
-					Handler: workerRegisterHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/worker/tasks/:task_id/fail",
-					Handler: workerFailTaskHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/worker/tasks/:task_id/heartbeat",
-					Handler: workerTaskHeartbeatHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/worker/tasks/:task_id/result",
-					Handler: workerSubmitResultHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/worker/tasks/claim",
-					Handler: workerClaimTasksHandler(serverCtx),
-				},
-			}...,
+			workerRoutes...,
 		),
-		rest.WithPrefix("/judge"),
+		rest.WithPrefix(prefix),
+	)
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.WorkerAuthMiddleware},
+			workerClaimRoutes...,
+		),
+		rest.WithPrefix(prefix),
+		rest.WithTimeout(workerClaimRouteTimeout),
 	)
 }

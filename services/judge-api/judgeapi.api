@@ -160,10 +160,13 @@ type WorkerClaimTasksReq {
 }
 
 type WorkerArtifactRef {
-	Url         string `json:"url"`
-	Sha256      string `json:"sha256"`
-	SizeBytes   int64  `json:"size_bytes"`
-	ContentType string `json:"content_type"`
+	Url          string `json:"url,optional"`
+	Binding      string `json:"binding,optional"`
+	ApiId        string `json:"api_id,optional"`
+	RelativePath string `json:"relative_path,optional"`
+	Sha256       string `json:"sha256"`
+	SizeBytes    int64  `json:"size_bytes"`
+	ContentType  string `json:"content_type"`
 }
 
 type WorkerTaskLease {
@@ -252,27 +255,27 @@ type WorkerArtifactProblemPackageReq {
 }
 
 type AdminQueueResp {
-	TaskStream         string `json:"task_stream"`
-	ResultStream       string `json:"result_stream"`
-	Group              string `json:"group"`
-	StreamLength       int64  `json:"stream_length"`
-	ResultStreamLength int64  `json:"result_stream_length"`
-	PendingCount       int64  `json:"pending_count"`
-	ConsumerGroup      string `json:"consumer_group"`
-	ConsumerCount      int64  `json:"consumer_count"`
-	ConsumerLag        int64  `json:"consumer_lag"`
-	Lag                int64  `json:"lag"`
+	TaskStream         string               `json:"task_stream"`
+	ResultStream       string               `json:"result_stream"`
+	Group              string               `json:"group"`
+	StreamLength       int64                `json:"stream_length"`
+	ResultStreamLength int64                `json:"result_stream_length"`
+	PendingCount       int64                `json:"pending_count"`
+	ConsumerGroup      string               `json:"consumer_group"`
+	ConsumerCount      int64                `json:"consumer_count"`
+	ConsumerLag        int64                `json:"consumer_lag"`
+	Lag                int64                `json:"lag"`
 	Consumers          []AdminQueueConsumer `json:"consumers"`
-	LastId             string `json:"last_id"`
-	ResultLastId       string `json:"result_last_id"`
-	TrimStrategy       string `json:"trim_strategy"`
-	PendingOldestIdle  int64  `json:"pending_oldest_idle_ms"`
-	PendingLowestId    string `json:"pending_lowest_id"`
-	PendingHighestId   string `json:"pending_highest_id"`
-	RedisStatus        string `json:"redis_status"`
-	Scheduled          int64  `json:"scheduled"`
-	Pending            int64  `json:"pending"`
-	Judging            int64  `json:"judging"`
+	LastId             string               `json:"last_id"`
+	ResultLastId       string               `json:"result_last_id"`
+	TrimStrategy       string               `json:"trim_strategy"`
+	PendingOldestIdle  int64                `json:"pending_oldest_idle_ms"`
+	PendingLowestId    string               `json:"pending_lowest_id"`
+	PendingHighestId   string               `json:"pending_highest_id"`
+	RedisStatus        string               `json:"redis_status"`
+	Scheduled          int64                `json:"scheduled"`
+	Pending            int64                `json:"pending"`
+	Judging            int64                `json:"judging"`
 }
 
 type AdminQueueConsumer {
@@ -361,7 +364,7 @@ service judgeapi {
 	@handler adminQueue
 	get /admin/queue returns (AdminQueueResp)
 
-	@handler adminQueue
+	@handler adminQueueStatus
 	get /admin/queue/status returns (AdminQueueResp)
 
 	@handler adminWorkers
@@ -399,7 +402,8 @@ service judgeapi {
 }
 
 @server (
-	prefix: /judge
+	prefix:     /judge
+	middleware: WorkerAuthMiddleware
 )
 service judgeapi {
 	@handler workerRegister
@@ -407,9 +411,6 @@ service judgeapi {
 
 	@handler workerHeartbeat
 	post /worker/heartbeat (WorkerHeartbeatReq) returns (WorkerHeartbeatResp)
-
-	@handler workerClaimTasks
-	post /worker/tasks/claim (WorkerClaimTasksReq) returns (WorkerClaimTasksResp)
 
 	@handler workerTaskHeartbeat
 	post /worker/tasks/:task_id/heartbeat (WorkerTaskHeartbeatReq) returns (WorkerTaskHeartbeatResp)
@@ -425,4 +426,14 @@ service judgeapi {
 
 	@handler workerArtifactProblemPackage
 	get /worker/artifacts/problems/:id/package (WorkerArtifactProblemPackageReq)
+}
+
+@server (
+	prefix:     /judge
+	middleware: WorkerAuthMiddleware
+	timeout:    35s
+)
+service judgeapi {
+	@handler workerClaimTasks
+	post /worker/tasks/claim (WorkerClaimTasksReq) returns (WorkerClaimTasksResp)
 }

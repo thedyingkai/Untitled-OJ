@@ -264,6 +264,7 @@ pub async fn compile_in_sandbox(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_case_in_sandbox(
     lang: &LanguageConfig,
     source_path: &Path,
@@ -288,6 +289,7 @@ pub async fn run_case_in_sandbox(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_language_program_in_sandbox(
     lang: &LanguageConfig,
     source_path: &Path,
@@ -453,6 +455,7 @@ fn inside_work_file(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from("/work").join(file_name))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_nsjail_shell(
     work_dir: &Path,
     shell_command: &str,
@@ -474,12 +477,16 @@ async fn run_nsjail_shell(
             let _ = std::fs::set_permissions(work_dir, perms);
         }
     }
-    let time_limit_sec = ((time_limit_ms + 999) / 1000).max(1);
+    let time_limit_sec = time_limit_ms.div_ceil(1000).max(1);
     let wall_timeout = Duration::from_millis(time_limit_ms + 1000);
 
     let jail_root = PreparedJailRoot::create(work_dir)?;
 
     let mut cmd = Command::new("nsjail");
+    // A lost Judge API lease cancels the task future.  Tokio does not kill a
+    // child on future drop by default, so opt in to prevent an unleased sandbox
+    // from continuing after the worker has stopped reporting its heartbeat.
+    cmd.kill_on_drop(true);
 
     cmd.arg("--mode").arg("o");
 
@@ -656,7 +663,7 @@ async fn run_nsjail_shell(
 
     let exit_message = match exit_status.code() {
         Some(code) => format!("process exited with code {}", code),
-        None => format!("process terminated by signal"),
+        None => "process terminated by signal".to_string(),
     };
 
     let raw_message = if stderr_text.trim().is_empty() {

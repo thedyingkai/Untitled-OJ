@@ -289,8 +289,16 @@ func TestJudgeSubmissionWorkerHTTPRuntimeLoop(t *testing.T) {
 	if _, ok := objects.get("77-source-main.cpp"); !ok {
 		t.Fatalf("submission source object was not stored through internal gateway")
 	}
-	if _, ok := objects.get("77-result.json"); !ok {
-		t.Fatalf("worker result object was not stored")
+	resultPath := repo.submissions[77].ResultPath
+	resultKey := strings.TrimPrefix(resultPath, "storage://submissions/")
+	if !strings.HasPrefix(resultKey, fmt.Sprintf("judge-results-77-%d-", claimed.LeaseVersion)) {
+		t.Fatalf("worker result path is not lease-versioned: %q", resultPath)
+	}
+	if _, ok := objects.get(resultKey); !ok {
+		t.Fatalf("worker result object %q was not stored; keys=%#v", resultKey, objects.keys())
+	}
+	if _, ok := objects.get("77-result.json"); ok {
+		t.Fatal("worker must not overwrite the fixed legacy result object")
 	}
 	resultEntries, err := redisClient.XRange(ctx, "ojos:judge:result", "-", "+").Result()
 	if err != nil {
@@ -334,7 +342,8 @@ func startJudgeSubmissionHTTPServer(
 				ServiceEndpoint: storageEndpoint,
 				Bucket:          "submissions",
 			},
-			Languages: judgeRouteTestLanguages(),
+			Languages:         judgeRouteTestLanguages(),
+			ProblemProjection: config.ProblemProjectionConfig{AllowLegacyPackageDir: true},
 		},
 		SubmissionRepo:         repo,
 		Permission:             permissions,
@@ -386,8 +395,12 @@ func startJudgeRuntimeHTTPServer(
 				CallerNodeID:            "child-node",
 				ServiceToken:            "internal-token",
 			},
-			WorkerAuth: config.WorkerAuthConfig{Token: workerToken, LeaseTTLSeconds: 45},
-			Languages:  judgeRouteTestLanguages(),
+			WorkerAuth:        config.WorkerAuthConfig{Token: workerToken, LeaseTTLSeconds: 45},
+			Languages:         judgeRouteTestLanguages(),
+			ProblemProjection: config.ProblemProjectionConfig{AllowLegacyPackageDir: true},
+			WorkloadIdentity: config.WorkloadIdentityConfig{
+				AllowLegacyWorkerToken: true,
+			},
 		},
 		SubmissionRepo:         repo,
 		WorkerRepo:             repo,
@@ -395,7 +408,7 @@ func startJudgeRuntimeHTTPServer(
 		Redis:                  redisClient,
 		UserContextMiddleware:  middleware.NewUserContextMiddleware().Handle,
 		InternalAuthMiddleware: noOp,
-		WorkerAuthMiddleware:   middleware.NewWorkerAuthMiddleware(workerToken).Handle,
+		WorkerAuthMiddleware:   middleware.NewWorkerAuthMiddleware(workerToken, true).Handle,
 	})
 	go server.Start()
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -707,6 +720,36 @@ func (r *fakeJudgeRuntimeHTTPRepo) RefreshTaskLease(ctx context.Context, taskID 
 	return &lease, nil
 }
 
+func (r *fakeJudgeRuntimeHTTPRepo) RefreshClaimedTaskLease(ctx context.Context, taskID string, workerID string, leaseVersion int, leaseTTL time.Duration) (*repository.TaskLeaseView, error) {
+	lease, ok := r.leases[taskID]
+	if !ok || lease.WorkerID != workerID || lease.LeaseVersion != leaseVersion || lease.Status != "RUNNING" {
+		return nil, repository.ErrTaskLeaseInvalid
+	}
+	lease.LeaseExpiresAt = time.Now().Add(leaseTTL)
+	lease.HeartbeatAt = time.Now()
+	r.leases[taskID] = lease
+	return &lease, nil
+}
+
+func (r *fakeJudgeRuntimeHTTPRepo) ReleaseClaimedTasks(ctx context.Context, workerID string, leases []repository.TaskLeaseView, reason string) (int64, error) {
+	var released int64
+	for i := range leases {
+		current, ok := r.leases[leases[i].TaskID]
+		if !ok || current.WorkerID != workerID || current.LeaseVersion != leases[i].LeaseVersion || current.Status != "RUNNING" {
+			continue
+		}
+		current.WorkerID = ""
+		current.LeaseExpiresAt = time.Time{}
+		current.Status = "PENDING"
+		if current.Attempt > 0 {
+			current.Attempt--
+		}
+		r.leases[current.TaskID] = current
+		released++
+	}
+	return released, nil
+}
+
 func (r *fakeJudgeRuntimeHTTPRepo) GetTaskForLease(ctx context.Context, taskID string, workerID string, leaseVersion int) (*repository.TaskLeaseView, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -733,11 +776,7 @@ func (r *fakeJudgeRuntimeHTTPRepo) MarkTaskSucceeded(
 	taskID string,
 	workerID string,
 	leaseVersion int,
-	status string,
-	score int,
-	timeMS int,
-	memoryKB int,
-	message string,
+	transition repository.TaskSuccessTransition,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -748,15 +787,18 @@ func (r *fakeJudgeRuntimeHTTPRepo) MarkTaskSucceeded(
 	lease.Status = "SUCCEEDED"
 	r.leases[taskID] = lease
 	if submission, ok := r.submissions[lease.SubmissionID]; ok {
-		submission.Status = status
-		submission.Score = score
-		submission.TimeMS = timeMS
-		submission.MemoryKB = memoryKB
-		submission.Message = message
+		submission.Status = transition.Status
+		submission.Score = transition.Score
+		submission.TimeMS = transition.TimeMS
+		submission.MemoryKB = transition.MemoryKB
+		submission.Message = transition.Message
+		if transition.ResultPath != "" {
+			submission.ResultPath = transition.ResultPath
+		}
 		submission.UpdatedAt = time.Now()
 	}
 	r.succeededTaskID = taskID
-	r.succeededStatus = status
+	r.succeededStatus = transition.Status
 	return nil
 }
 
@@ -765,23 +807,24 @@ func (r *fakeJudgeRuntimeHTTPRepo) MarkTaskFailed(
 	taskID string,
 	workerID string,
 	leaseVersion int,
-	status string,
-	message string,
-	retryable bool,
-) error {
+	transition repository.TaskFailureTransition,
+) (repository.TaskFailureOutcome, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	lease, ok := r.leases[taskID]
 	if !ok || lease.WorkerID != workerID || lease.LeaseVersion != leaseVersion || lease.Status != "RUNNING" {
-		return repository.ErrTaskLeaseInvalid
+		return repository.TaskFailureOutcome{}, repository.ErrTaskLeaseInvalid
 	}
-	if retryable {
+	outcome := repository.TaskFailureOutcome{Status: transition.Status}
+	if transition.Retryable {
 		lease.Status = "PENDING"
+		outcome.Status = "PENDING"
+		outcome.RetryScheduled = true
 	} else {
 		lease.Status = "FAILED"
 	}
 	r.leases[taskID] = lease
-	r.failedStatus = status
-	r.failedMessage = message
-	return nil
+	r.failedStatus = transition.Status
+	r.failedMessage = transition.Message
+	return outcome, nil
 }

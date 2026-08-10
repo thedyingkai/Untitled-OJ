@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -156,6 +159,78 @@ func TestStorageClientCanUseInternalGatewayAPIIDs(t *testing.T) {
 	}
 }
 
+func TestManagedStorageClientUsesNamedBindingsWithoutCallerHeaders(t *testing.T) {
+	root := t.TempDir()
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.Header.Get("Authorization") != "Bearer deployment-token" {
+			http.Error(w, "missing workload token", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("X-OJOS-Caller-Service") != "" || r.Header.Get("X-OJOS-Caller-Node-Id") != "" {
+			http.Error(w, "caller headers must be derived by Gateway", http.StatusBadRequest)
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			sum := sha256.Sum256(body)
+			_ = json.NewEncoder(w).Encode(storageObjectMetadata{Bucket: "submissions", Key: "42-source-main.cpp", SizeBytes: int64(len(body)), SHA256: hex.EncodeToString(sum[:])})
+		case http.MethodHead:
+			w.Header().Set("Content-Length", "11")
+			w.Header().Set("X-OJOS-Object-Sha256", strings.Repeat("a", 64))
+		case http.MethodGet:
+			_, _ = w.Write([]byte("stored code"))
+		}
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(root, "token")
+	contextPath := filepath.Join(root, "context.json")
+	if err := os.WriteFile(tokenPath, []byte("deployment-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contextJSON, err := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"deployment":     map[string]any{"id": "judge-a", "service": "judge-api", "node": "node-a"},
+		"gateway":        map[string]any{"origin": server.URL},
+		"bindings": map[string]any{
+			"storage_put":  map[string]any{"binding_id": "put", "api_id": "storage.object.put", "base_path": "/internal/apis/storage.object.put", "timeout_ms": 300000},
+			"storage_get":  map[string]any{"binding_id": "get", "api_id": "storage.object.get", "base_path": "/internal/apis/storage.object.get", "timeout_ms": 300000},
+			"storage_head": map[string]any{"binding_id": "head", "api_id": "storage.object.head", "base_path": "/internal/apis/storage.object.head", "timeout_ms": 300000},
+		},
+		"credential_file": tokenPath,
+		"generation":      4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(contextPath, contextJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OJOS_SERVICE_CONTEXT_FILE", contextPath)
+	client := newStorageClient(config.StorageConfig{})
+	if _, err := client.putObject(context.Background(), "submissions", "42-source-main.cpp", "text/plain", strings.NewReader("stored code")); err != nil {
+		t.Fatal(err)
+	}
+	meta, body, err := client.getObject(context.Background(), "submissions", "42-source-main.cpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = body.Close()
+	if meta.SHA256 != strings.Repeat("a", 64) {
+		t.Fatalf("unexpected metadata %#v", meta)
+	}
+	want := []string{
+		"/internal/apis/storage.object.put/submissions/42-source-main.cpp",
+		"/internal/apis/storage.object.head/submissions/42-source-main.cpp",
+		"/internal/apis/storage.object.get/submissions/42-source-main.cpp",
+	}
+	if strings.Join(paths, ",") != strings.Join(want, ",") {
+		t.Fatalf("managed client bypassed named bindings: %#v", paths)
+	}
+}
+
 func TestServeStorageArtifactProxiesStorageServiceObject(t *testing.T) {
 	const body = "print('ok')\n"
 	sum := sha256.Sum256([]byte(body))
@@ -195,6 +270,9 @@ func TestServeStorageArtifactProxiesStorageServiceObject(t *testing.T) {
 	}
 	if recorder.Header().Get("X-OJOS-Artifact-Sha256") != digest {
 		t.Fatalf("missing artifact digest header")
+	}
+	if got := recorder.Header().Get("Content-Length"); got != fmt.Sprintf("%d", len(body)) {
+		t.Fatalf("artifact Content-Length = %q, want %d", got, len(body))
 	}
 }
 

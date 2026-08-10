@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+const IMPLICIT_DEFAULT_GROUP_NO: i32 = 0;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProblemManifest {
     pub schema: String,
@@ -46,7 +48,10 @@ pub struct ComponentRef {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TestsRef {
     pub root: String,
+
+    #[serde(default)]
     pub groups: String,
+
     pub cases: String,
 }
 
@@ -65,7 +70,7 @@ impl ComponentConfig {
         let serde_yaml::Value::Mapping(map) = &self.config else {
             return None;
         };
-        map.get(&serde_yaml::Value::String(key.to_string()))
+        map.get(serde_yaml::Value::String(key.to_string()))
             .and_then(|value| value.as_str())
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -76,7 +81,7 @@ impl ComponentConfig {
             return Vec::new();
         };
         let Some(serde_yaml::Value::Sequence(args)) =
-            map.get(&serde_yaml::Value::String("args".to_string()))
+            map.get(serde_yaml::Value::String("args".to_string()))
         else {
             return Vec::new();
         };
@@ -425,17 +430,20 @@ async fn validate_groups(
     package_dir: &Path,
     manifest: &ProblemManifest,
 ) -> Result<(HashSet<i32>, Vec<GroupRecord>)> {
-    let mut declared = HashSet::new();
     let groups_path = manifest.tests.groups.trim();
     if groups_path.is_empty() {
-        return Ok((declared, Vec::new()));
+        return Ok(implicit_default_groups());
     }
 
     let groups_path = safe_join(package_dir, groups_path)?;
     let groups_file: GroupsFile = read_yaml(&groups_path)
         .await
         .with_context(|| format!("load groups.yaml failed: {}", groups_path.display()))?;
+    if groups_file.groups.is_empty() {
+        return Ok(implicit_default_groups());
+    }
 
+    let mut declared = HashSet::new();
     for group in &groups_file.groups {
         if group.group_no < 0 {
             return Err(anyhow!("invalid group_no: {}", group.group_no));
@@ -464,6 +472,17 @@ async fn validate_groups(
     Ok((declared, groups_file.groups))
 }
 
+fn implicit_default_groups() -> (HashSet<i32>, Vec<GroupRecord>) {
+    (
+        HashSet::from([IMPLICIT_DEFAULT_GROUP_NO]),
+        vec![GroupRecord {
+            group_no: IMPLICIT_DEFAULT_GROUP_NO,
+            score: 100,
+            rule: "sum".to_string(),
+        }],
+    )
+}
+
 async fn validate_cases(
     tests_root: &Path,
     cases: &[CaseRecord],
@@ -483,7 +502,7 @@ async fn validate_cases(
         if case.group < 0 {
             return Err(anyhow!("case group must be non-negative: {}", case.case_no));
         }
-        if !declared_groups.is_empty() && !declared_groups.contains(&case.group) {
+        if !declared_groups.contains(&case.group) {
             return Err(anyhow!(
                 "case {} references undeclared group {}",
                 case.case_no,
@@ -587,6 +606,69 @@ mod tests {
                 .await
                 .unwrap_or_else(|err| panic!("{problem_type} should load: {err:#}"));
         }
+    }
+
+    #[tokio::test]
+    async fn load_problem_package_accepts_implicit_default_group() {
+        let package_dir = create_test_package("traditional");
+        let manifest_path = package_dir.join("problem.yaml");
+        let manifest = stdfs::read_to_string(&manifest_path).unwrap();
+        write_file(
+            &manifest_path,
+            &manifest.replace("  groups: tests/groups.yaml\n", ""),
+        );
+        write_file(
+            &package_dir.join("tests").join("cases.yaml"),
+            r#"
+cases:
+  - case_no: 1
+    input: 001.in
+    answer: 001.ans
+    score: 100
+    sample: true
+"#,
+        );
+
+        let package = load_problem_package(package_dir.to_str().unwrap())
+            .await
+            .expect("a case without an explicit group belongs to implicit group 0");
+
+        assert_eq!(package.cases[0].group, IMPLICIT_DEFAULT_GROUP_NO);
+        assert_eq!(package.groups.len(), 1);
+        assert_eq!(package.groups[0].group_no, IMPLICIT_DEFAULT_GROUP_NO);
+    }
+
+    #[tokio::test]
+    async fn load_problem_package_rejects_undeclared_group_without_groups_manifest() {
+        let package_dir = create_test_package("traditional");
+        let manifest_path = package_dir.join("problem.yaml");
+        let manifest = stdfs::read_to_string(&manifest_path).unwrap();
+        write_file(
+            &manifest_path,
+            &manifest.replace("  groups: tests/groups.yaml\n", ""),
+        );
+        write_file(
+            &package_dir.join("tests").join("cases.yaml"),
+            r#"
+cases:
+  - case_no: 1
+    input: 001.in
+    answer: 001.ans
+    score: 100
+    group: 1
+"#,
+        );
+
+        let error = load_problem_package(package_dir.to_str().unwrap())
+            .await
+            .expect_err("only implicit group 0 exists without an explicit groups manifest");
+
+        assert!(
+            error
+                .to_string()
+                .contains("case 1 references undeclared group 1"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[tokio::test]

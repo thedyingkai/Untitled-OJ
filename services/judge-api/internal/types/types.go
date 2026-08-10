@@ -220,10 +220,13 @@ type WorkerArtifactProblemPackageReq struct {
 }
 
 type WorkerArtifactRef struct {
-	Url         string `json:"url"`
-	Sha256      string `json:"sha256"`
-	SizeBytes   int64  `json:"size_bytes"`
-	ContentType string `json:"content_type"`
+	Url          string `json:"url,omitempty"`
+	Binding      string `json:"binding,optional"`
+	ApiId        string `json:"api_id,optional"`
+	RelativePath string `json:"relative_path,optional"`
+	Sha256       string `json:"sha256"`
+	SizeBytes    int64  `json:"size_bytes"`
+	ContentType  string `json:"content_type"`
 }
 
 type WorkerArtifactSourceReq struct {

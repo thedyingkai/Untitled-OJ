@@ -11,10 +11,12 @@ import (
 )
 
 var (
-	ErrWorkerNotFound   = errors.New("worker not found")
-	ErrWorkerDraining   = errors.New("worker is draining")
-	ErrTaskLeaseInvalid = errors.New("task lease is invalid")
-	ErrTaskNotFound     = errors.New("task not found")
+	ErrWorkerNotFound             = errors.New("worker not found")
+	ErrWorkerDraining             = errors.New("worker is draining")
+	ErrTaskLeaseInvalid           = errors.New("task lease is invalid")
+	ErrTaskNotFound               = errors.New("task not found")
+	ErrTaskTransitionAlreadySaved = errors.New("task transition is already saved")
+	ErrTaskFailureAlreadySaved    = ErrTaskTransitionAlreadySaved
 )
 
 type WorkerRegistration struct {
@@ -60,6 +62,27 @@ type QueueTaskCounts struct {
 	Scheduled int64
 	Pending   int64
 	Judging   int64
+}
+
+type TaskSuccessTransition struct {
+	Status        string
+	Score         int
+	TimeMS        int
+	MemoryKB      int
+	Message       string
+	ResultPath    string
+	PayloadSHA256 string
+	OutboxEventID string
+	OutboxPayload []byte
+}
+
+type TaskFailureTransition struct {
+	Status        string
+	Message       string
+	Retryable     bool
+	PayloadSHA256 string
+	OutboxEventID string
+	OutboxPayload []byte
 }
 
 func (r *Repository) UpsertWorker(ctx context.Context, w WorkerRegistration) (*WorkerView, error) {
@@ -205,6 +228,7 @@ SET
     worker_id = NULL,
     lease_expires_at = NULL,
     heartbeat_at = NULL,
+    available_at = NOW(),
     status = 'PENDING',
     error_message = '',
     updated_at = NOW()
@@ -213,37 +237,6 @@ SET
 		taskID,
 	)
 	return err
-}
-
-func (r *Repository) RecoverStaleTasks(ctx context.Context) (int64, error) {
-	tag, err := r.db.Exec(
-		ctx,
-		`
-WITH stale AS (
-    UPDATE judge_tasks
-    SET
-        status = 'PENDING',
-        worker_id = NULL,
-        lease_expires_at = NULL,
-        heartbeat_at = NOW(),
-        error_message = 'lease expired',
-        updated_at = NOW()
-    WHERE status = 'RUNNING'
-      AND lease_expires_at < NOW()
-    RETURNING submission_id
-)
-UPDATE submissions s
-SET status = 'PENDING',
-    updated_at = NOW()
-FROM stale
-WHERE s.id = stale.submission_id
-  AND s.status = 'JUDGING'
-`,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
 }
 
 func (r *Repository) ClaimTasks(
@@ -300,9 +293,10 @@ candidate AS (
     JOIN submissions s ON s.id = jt.submission_id
     WHERE jt.status = 'PENDING'
       AND s.status = 'PENDING'
+      AND jt.available_at <= NOW()
       AND (cardinality($2::text[]) = 0 OR jt.language = ANY($2::text[]))
       AND (cardinality($5::text[]) = 0 OR jt.task_id = ANY($5::text[]))
-    ORDER BY jt.id ASC
+    ORDER BY jt.available_at ASC, jt.id ASC
     FOR UPDATE SKIP LOCKED
     LIMIT $3
 ),
@@ -313,6 +307,7 @@ updated_tasks AS (
         lease_version = jt.lease_version + 1,
         lease_expires_at = NOW() + ($4::bigint * interval '1 second'),
         heartbeat_at = NOW(),
+        available_at = NOW(),
         attempt = jt.attempt + 1,
         status = 'RUNNING',
         error_message = '',
@@ -455,6 +450,135 @@ RETURNING
 	return &lease, err
 }
 
+// RefreshClaimedTaskLease finalizes a lease only after the control API has
+// finished constructing every immutable resource reference for the response.
+// Unlike a worker heartbeat, this refresh may renew an expired timestamp: the
+// lease has not been delivered to a worker yet. The worker/version/status CAS
+// prevents resurrection after stale recovery or a subsequent claim.
+func (r *Repository) RefreshClaimedTaskLease(
+	ctx context.Context,
+	taskID string,
+	workerID string,
+	leaseVersion int,
+	leaseTTL time.Duration,
+) (*TaskLeaseView, error) {
+	if leaseTTL <= 0 {
+		leaseTTL = time.Minute
+	}
+
+	var lease TaskLeaseView
+	err := r.db.QueryRow(
+		ctx,
+		`
+UPDATE judge_tasks
+SET
+    lease_expires_at = NOW() + ($4::bigint * interval '1 second'),
+    heartbeat_at = NOW(),
+    updated_at = NOW()
+WHERE task_id = $1
+  AND worker_id = $2
+  AND lease_version = $3
+  AND status = 'RUNNING'
+RETURNING
+    task_id,
+    submission_id,
+    problem_id,
+    language,
+    worker_id,
+    lease_version,
+    lease_expires_at,
+    heartbeat_at,
+    attempt,
+    status
+`,
+		taskID,
+		workerID,
+		leaseVersion,
+		int64(leaseTTL.Seconds()),
+	).Scan(
+		&lease.TaskID,
+		&lease.SubmissionID,
+		&lease.ProblemID,
+		&lease.Language,
+		&lease.WorkerID,
+		&lease.LeaseVersion,
+		&lease.LeaseExpiresAt,
+		&lease.HeartbeatAt,
+		&lease.Attempt,
+		&lease.Status,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTaskLeaseInvalid
+	}
+	return &lease, err
+}
+
+// ReleaseClaimedTasks compensates leases which were claimed but never exposed
+// in a response. Every row is guarded by worker_id + lease_version + RUNNING,
+// so a late cleanup cannot overwrite a newer claim. The unexposed claim does
+// not consume an execution attempt and is immediately eligible for retry.
+func (r *Repository) ReleaseClaimedTasks(
+	ctx context.Context,
+	workerID string,
+	leases []TaskLeaseView,
+	reason string,
+) (int64, error) {
+	if len(leases) == 0 {
+		return 0, nil
+	}
+	taskIDs := make([]string, 0, len(leases))
+	leaseVersions := make([]int32, 0, len(leases))
+	for i := range leases {
+		taskIDs = append(taskIDs, leases[i].TaskID)
+		leaseVersions = append(leaseVersions, int32(leases[i].LeaseVersion))
+	}
+
+	var released int64
+	err := r.db.QueryRow(
+		ctx,
+		`
+WITH claims AS (
+    SELECT *
+    FROM unnest($2::text[], $3::integer[]) AS claim(task_id, lease_version)
+),
+released AS (
+    UPDATE judge_tasks jt
+    SET
+        status = 'PENDING',
+        worker_id = NULL,
+        lease_expires_at = NULL,
+        heartbeat_at = NOW(),
+        attempt = GREATEST(jt.attempt - 1, 0),
+        available_at = NOW(),
+        error_message = $4,
+        updated_at = NOW()
+    FROM claims
+    WHERE jt.task_id = claims.task_id
+      AND jt.worker_id = $1
+      AND jt.lease_version = claims.lease_version
+      AND jt.status = 'RUNNING'
+    RETURNING jt.submission_id
+),
+reset_submissions AS (
+    UPDATE submissions s
+    SET
+        status = 'PENDING',
+        updated_at = NOW()
+    FROM released
+    WHERE s.id = released.submission_id
+      AND s.status = 'JUDGING'
+    RETURNING s.id
+)
+SELECT COUNT(*) FROM released
+`,
+		workerID,
+		taskIDs,
+		leaseVersions,
+		strings.TrimSpace(reason),
+	).Scan(&released)
+	return released, err
+}
+
 func (r *Repository) GetTaskForLease(
 	ctx context.Context,
 	taskID string,
@@ -502,7 +626,7 @@ WHERE task_id = $1
 	return &lease, err
 }
 
-func (r *Repository) MarkTaskSucceeded(
+func (r *Repository) markTaskSucceededLegacy(
 	ctx context.Context,
 	taskID string,
 	workerID string,
@@ -561,7 +685,80 @@ WHERE s.id = task.submission_id
 	return nil
 }
 
-func (r *Repository) MarkTaskFailed(
+func (r *Repository) taskFailureAlreadySaved(
+	ctx context.Context,
+	taskID string,
+	workerID string,
+	leaseVersion int,
+	expectedStatus string,
+	message string,
+	retryable bool,
+) (bool, error) {
+	var snapshot taskFailureSnapshot
+	err := r.db.QueryRow(
+		ctx,
+		`
+SELECT
+    status,
+    COALESCE(worker_id, ''),
+    lease_version,
+    error_message
+FROM judge_tasks
+WHERE task_id = $1
+`,
+		taskID,
+	).Scan(
+		&snapshot.Status,
+		&snapshot.WorkerID,
+		&snapshot.LeaseVersion,
+		&snapshot.Message,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return matchesSavedTaskFailure(
+		snapshot,
+		workerID,
+		leaseVersion,
+		expectedStatus,
+		message,
+		retryable,
+	), nil
+}
+
+type taskFailureSnapshot struct {
+	Status       string
+	WorkerID     string
+	LeaseVersion int
+	Message      string
+}
+
+func matchesSavedTaskFailure(
+	snapshot taskFailureSnapshot,
+	workerID string,
+	leaseVersion int,
+	expectedStatus string,
+	message string,
+	retryable bool,
+) bool {
+	if snapshot.Status != expectedStatus ||
+		snapshot.LeaseVersion != leaseVersion ||
+		snapshot.Message != message {
+		return false
+	}
+
+	// A retryable transition deliberately clears worker_id so another worker can
+	// claim the pending task.  The lease version is incremented by that next
+	// claim, therefore an empty worker with the same version is still an exact
+	// duplicate of the original fail request, not a stale worker mutating a new
+	// lease.
+	return snapshot.WorkerID == workerID || (retryable && snapshot.WorkerID == "")
+}
+
+func (r *Repository) markTaskFailedLegacy(
 	ctx context.Context,
 	taskID string,
 	workerID string,
@@ -620,6 +817,21 @@ WHERE s.id = task.submission_id
 		return err
 	}
 	if tag.RowsAffected() == 0 {
+		alreadySaved, duplicateErr := r.taskFailureAlreadySaved(
+			ctx,
+			taskID,
+			workerID,
+			leaseVersion,
+			nextTaskStatus,
+			message,
+			retryable,
+		)
+		if duplicateErr != nil {
+			return duplicateErr
+		}
+		if alreadySaved {
+			return ErrTaskFailureAlreadySaved
+		}
 		return ErrTaskLeaseInvalid
 	}
 	return nil
@@ -831,6 +1043,7 @@ SET
     worker_id = NULL,
     lease_expires_at = NULL,
     heartbeat_at = NULL,
+    available_at = NOW(),
     status = 'PENDING',
     error_message = '',
     updated_at = NOW()

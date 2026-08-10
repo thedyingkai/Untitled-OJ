@@ -199,6 +199,7 @@ async fn prepare_component(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_one_artifact_case(
     languages: &LanguagesConfig,
     lang: &LanguageConfig,
@@ -235,13 +236,12 @@ async fn run_one_artifact_case(
 
     let limit = package.limit_for(language, case);
 
-    if let Some(validator) = &components.validator {
-        if let Some(result) =
+    if let Some(validator) = &components.validator
+        && let Some(result) =
             run_custom_validator(languages, validator, &case_dir, &input_path, &limit, case).await?
-        {
-            write_text(&checker_log_path, &result.message).await?;
-            return Ok(result.with_paths(stdout_path, stderr_path, checker_log_path));
-        }
+    {
+        write_text(&checker_log_path, &result.message).await?;
+        return Ok(result.with_paths(stdout_path, stderr_path, checker_log_path));
     }
 
     let run_output = if let Some(runner) = &components.runner {
@@ -390,6 +390,7 @@ impl CaseVerdict {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn verdict_after_run(
     sandbox_output: &SandboxOutput,
     runner_report: &ComponentReport,
@@ -427,27 +428,26 @@ async fn verdict_after_run(
         return Ok(verdict);
     }
 
-    if builtin_checker_is_runner_authoritative(&package.checker) {
-        if let Some(accepted) = runner_report.accepted() {
-            if accepted {
-                let score = runner_report.score.unwrap_or(case.score);
-                write_text(checker_log_path, "accepted by runner\n").await?;
-                verdict.score = score;
-                verdict.message = runner_report.message();
-                verdict.status = "ACCEPTED".to_string();
-            } else {
-                let message =
-                    first_non_empty(&[runner_report.message(), "wrong answer".to_string()]);
-                write_text(checker_log_path, &message).await?;
-                verdict.status = runner_report
-                    .status_upper()
-                    .filter(|status| status != "OK" && status != "ACCEPTED")
-                    .unwrap_or_else(|| "WRONG_ANSWER".to_string());
-                verdict.score = runner_report.score.unwrap_or(0);
-                verdict.message = message;
-            }
-            return Ok(verdict);
+    if builtin_checker_is_runner_authoritative(&package.checker)
+        && let Some(accepted) = runner_report.accepted()
+    {
+        if accepted {
+            let score = runner_report.score.unwrap_or(case.score);
+            write_text(checker_log_path, "accepted by runner\n").await?;
+            verdict.score = score;
+            verdict.message = runner_report.message();
+            verdict.status = "ACCEPTED".to_string();
+        } else {
+            let message = first_non_empty(&[runner_report.message(), "wrong answer".to_string()]);
+            write_text(checker_log_path, &message).await?;
+            verdict.status = runner_report
+                .status_upper()
+                .filter(|status| status != "OK" && status != "ACCEPTED")
+                .unwrap_or_else(|| "WRONG_ANSWER".to_string());
+            verdict.score = runner_report.score.unwrap_or(0);
+            verdict.message = message;
         }
+        return Ok(verdict);
     }
 
     if package.checker.is_builtin("default-trim-checker")
@@ -643,6 +643,7 @@ async fn run_custom_validator(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_custom_runner(
     languages: &LanguagesConfig,
     runner: &CustomComponentRuntime,
@@ -705,6 +706,7 @@ async fn run_custom_runner(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_custom_checker(
     languages: &LanguagesConfig,
     checker: &CustomComponentRuntime,
@@ -912,15 +914,15 @@ async fn parse_component_report_from_paths(
     report_path: &Path,
     stdout_path: &Path,
 ) -> Result<ComponentReport> {
-    if let Ok(text) = fs::read_to_string(report_path).await {
-        if let Some(report) = parse_component_report(&text) {
-            return Ok(report);
-        }
+    if let Ok(text) = fs::read_to_string(report_path).await
+        && let Some(report) = parse_component_report(&text)
+    {
+        return Ok(report);
     }
-    if let Ok(text) = fs::read_to_string(stdout_path).await {
-        if let Some(report) = parse_component_report(&text) {
-            return Ok(report);
-        }
+    if let Ok(text) = fs::read_to_string(stdout_path).await
+        && let Some(report) = parse_component_report(&text)
+    {
+        return Ok(report);
     }
     Ok(ComponentReport::default())
 }
@@ -967,11 +969,7 @@ fn builtin_checker_is_runner_authoritative(checker: &ComponentConfig) -> bool {
 }
 
 fn normalize_status(status: &str) -> String {
-    status
-        .trim()
-        .replace('-', "_")
-        .replace(' ', "_")
-        .to_ascii_uppercase()
+    status.trim().replace(['-', ' '], "_").to_ascii_uppercase()
 }
 
 fn first_non_empty(values: &[String]) -> String {
@@ -1314,8 +1312,7 @@ print(a + b)
         };
         write_file(
             &package.join("problem.yaml"),
-            &format!(
-                r#"
+            r#"
 schema: ojos.problem.v1
 id: 1
 slug: verdict-matrix
@@ -1344,7 +1341,6 @@ tests:
   groups: tests/groups.yaml
   cases: tests/cases.yaml
 "#,
-            ),
         );
         write_file(
             &package.join("runner.yaml"),

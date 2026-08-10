@@ -31,6 +31,9 @@ func (l *WorkerHeartbeatLogic) WorkerHeartbeat(req *types.WorkerHeartbeatReq) (r
 	if workerID == "" {
 		return nil, errors.New("worker_id is required")
 	}
+	if err := validateWorkerIdentity(l.ctx, workerID); err != nil {
+		return nil, err
+	}
 	if req.RunningCount < 0 {
 		return nil, errors.New("running_count is invalid")
 	}

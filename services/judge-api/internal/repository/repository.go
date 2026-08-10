@@ -11,22 +11,64 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrSubmissionNotFound = errors.New("submission not found")
+var (
+	ErrSubmissionNotFound        = errors.New("submission not found")
+	ErrProblemProjectionNotReady = errors.New("problem package projection is not ready")
+)
 
 type Repository struct {
-	db *pgxpool.Pool
+	db                    *pgxpool.Pool
+	allowLegacyPackageDir bool
 }
 
-func New(db *pgxpool.Pool) *Repository {
-	return &Repository{db: db}
+type Option func(*Repository)
+
+// WithLegacyProblemPackageDir is a development-only compatibility option.
+// Production startup rejects enabling it.
+func WithLegacyProblemPackageDir(enabled bool) Option {
+	return func(repository *Repository) {
+		repository.allowLegacyPackageDir = enabled
+	}
+}
+
+func New(db *pgxpool.Pool, options ...Option) *Repository {
+	repository := &Repository{db: db}
+	for _, option := range options {
+		if option != nil {
+			option(repository)
+		}
+	}
+	return repository
 }
 
 type ProblemMeta struct {
-	ID         int64
-	PackageDir string
-	Status     string
-	Visibility string
-	CreatedBy  int64
+	ID                       int64
+	PackageDir               string
+	Status                   string
+	Visibility               string
+	CreatedBy                int64
+	AggregateVersion         int64
+	PackageRevision          int64
+	PackageArtifactURI       string
+	PackageArtifactSHA256    string
+	PackageArtifactSizeBytes int64
+	Deleted                  bool
+}
+
+func (p ProblemMeta) HasManagedPackageArtifact() bool {
+	return p.AggregateVersion > 0 &&
+		p.PackageRevision > 0 &&
+		strings.TrimSpace(p.PackageArtifactURI) != "" &&
+		isLowerHexDigest(p.PackageArtifactSHA256) &&
+		p.PackageArtifactSizeBytes > 0
+}
+
+func (p ProblemMeta) HasAnyProjectionArtifactState() bool {
+	return p.AggregateVersion != 0 ||
+		p.PackageRevision != 0 ||
+		strings.TrimSpace(p.PackageArtifactURI) != "" ||
+		strings.TrimSpace(p.PackageArtifactSHA256) != "" ||
+		p.PackageArtifactSizeBytes != 0
 }
 
 func (r *Repository) GetProblemMeta(ctx context.Context, id int64) (*ProblemMeta, error) {
@@ -40,12 +82,18 @@ SELECT
     package_dir,
     status,
     visibility,
-    COALESCE(created_by, 0)
+    COALESCE(created_by, 0),
+    aggregate_version,
+    package_revision,
+    package_artifact_uri,
+    package_artifact_sha256,
+    package_artifact_size_bytes,
+    deleted
 FROM problems
 WHERE id = $1
 `,
 		id,
-	).Scan(&p.ID, &p.PackageDir, &p.Status, &p.Visibility, &p.CreatedBy)
+	).Scan(&p.ID, &p.PackageDir, &p.Status, &p.Visibility, &p.CreatedBy, &p.AggregateVersion, &p.PackageRevision, &p.PackageArtifactURI, &p.PackageArtifactSHA256, &p.PackageArtifactSizeBytes, &p.Deleted)
 
 	if err != nil {
 		return nil, err
@@ -75,17 +123,66 @@ INSERT INTO submissions(
     memory_kb,
     message,
     created_at,
-    updated_at
+    updated_at,
+    problem_aggregate_version,
+    problem_package_revision,
+    problem_artifact_uri,
+    problem_artifact_sha256,
+    problem_artifact_size_bytes
 )
-VALUES($1, $2, $3, 'PENDING', 0, 0, 0, '', NOW(), NOW())
+SELECT
+    p.id, $2, $3, 'PENDING', 0, 0, 0, '', NOW(), NOW(),
+    p.aggregate_version,
+    p.package_revision,
+    p.package_artifact_uri,
+    p.package_artifact_sha256,
+    p.package_artifact_size_bytes
+FROM problems p
+WHERE p.id = $1
+  AND p.deleted = FALSE
+  AND (
+      (
+          p.aggregate_version > 0
+          AND p.package_revision > 0
+          AND p.package_artifact_uri <> ''
+          AND p.package_artifact_sha256 ~ '^[a-f0-9]{64}$'
+          AND p.package_artifact_size_bytes > 0
+      )
+      OR (
+          $4::boolean
+          AND p.aggregate_version = 0
+          AND p.package_revision = 0
+          AND p.package_artifact_uri = ''
+          AND p.package_artifact_sha256 = ''
+          AND p.package_artifact_size_bytes = 0
+          AND p.package_dir <> ''
+      )
+  )
 RETURNING id
 `,
 		problemID,
 		userID,
 		language,
+		r.allowLegacyPackageDir,
 	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrProblemProjectionNotReady
+	}
 
 	return id, err
+}
+
+func isLowerHexDigest(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Repository) UpdateSubmissionSource(
@@ -133,23 +230,28 @@ WHERE id = $1
 }
 
 type SubmissionView struct {
-	ID           int64
-	ProblemID    int64
-	UserID       int64
-	Language     string
-	Status       string
-	Score        int
-	TimeMS       int
-	MemoryKB     int
-	Message      string
-	CodePath     string
-	CodeSha256   string
-	ResultPath   string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	JudgedAt     *time.Time
-	CancelledAt  *time.Time
-	CancelReason string
+	ID                       int64
+	ProblemID                int64
+	UserID                   int64
+	Language                 string
+	Status                   string
+	Score                    int
+	TimeMS                   int
+	MemoryKB                 int
+	Message                  string
+	CodePath                 string
+	CodeSha256               string
+	ResultPath               string
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+	JudgedAt                 *time.Time
+	CancelledAt              *time.Time
+	CancelReason             string
+	ProblemAggregateVersion  int64
+	ProblemPackageRevision   int64
+	ProblemArtifactURI       string
+	ProblemArtifactSHA256    string
+	ProblemArtifactSizeBytes int64
 }
 
 func (r *Repository) GetSubmission(ctx context.Context, id int64) (*SubmissionView, error) {
@@ -177,7 +279,12 @@ SELECT
     updated_at,
     judged_at,
     cancelled_at,
-    cancel_reason
+    cancel_reason,
+    problem_aggregate_version,
+    problem_package_revision,
+    problem_artifact_uri,
+    problem_artifact_sha256,
+    problem_artifact_size_bytes
 FROM submissions
 WHERE id = $1
 `,
@@ -200,6 +307,11 @@ WHERE id = $1
 		&s.JudgedAt,
 		&s.CancelledAt,
 		&cancelReason,
+		&s.ProblemAggregateVersion,
+		&s.ProblemPackageRevision,
+		&s.ProblemArtifactURI,
+		&s.ProblemArtifactSHA256,
+		&s.ProblemArtifactSizeBytes,
 	)
 
 	if err != nil {

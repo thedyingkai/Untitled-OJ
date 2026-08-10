@@ -1,6 +1,9 @@
 Name: judge-api-service
 Host: 0.0.0.0
 Port: 8082
+# Ordinary API bound. The worker claim groups override this to 35 seconds in
+# judgeapi.api without widening or buffering every other response.
+Timeout: 3000
 
 Database:
   Url: ""
@@ -40,6 +43,12 @@ Storage:
 Submission:
   MaxCodeBytes: 262144
 
+ProblemProjection:
+  # Fail closed by default. Only legacy development Compose/smoke paths may
+  # explicitly opt in while migration fixtures still use package_dir, and a
+  # real service startup also requires OJOS_ENVIRONMENT=development.
+  AllowLegacyPackageDir: false
+
 Languages:
   Items:
     - Id: cpp17
@@ -66,6 +75,16 @@ Languages:
 WorkerAuth:
   Token: ""
   LeaseTTLSeconds: 60
+
+WorkloadIdentity:
+  PublicKeyFile: ""
+  KeyID: "workload-1"
+  Issuer: "ojos-auth/workload"
+  Audience: "ojos-gateway"
+  # Shared Worker tokens are a development-only compatibility path. A
+  # production deployment must provide the workload public key and leaves
+  # this disabled.
+  AllowLegacyWorkerToken: false
 
 InternalAuth:
   Enabled: true

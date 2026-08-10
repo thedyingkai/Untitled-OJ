@@ -1,10 +1,12 @@
 mod cgroup;
 mod checker;
 mod config;
+mod health;
 mod judge;
 mod problem_package;
 mod result;
 mod sandbox;
+mod service_context;
 mod telemetry;
 mod worker_link;
 
@@ -17,6 +19,10 @@ use crate::worker_link::run_worker_link;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        return health::check_ready().await;
+    }
+
     let telemetry = telemetry::init_tracing().context("initialize worker tracing failed")?;
 
     let languages_path =
@@ -33,7 +39,10 @@ async fn main() -> Result<()> {
         "judge-worker starting in worker-link mode"
     );
 
-    let result = run_worker_link(languages).await;
+    let health_state = Arc::new(health::HealthState::default());
+    let health_server = tokio::spawn(health::serve(health_state.clone()));
+    let result = run_worker_link(languages, health_state).await;
+    health_server.abort();
     telemetry.shutdown();
     result
 }

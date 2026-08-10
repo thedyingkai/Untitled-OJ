@@ -6,8 +6,11 @@ package logic
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 
+	"ojos-judge-api/internal/repository"
 	"ojos-judge-api/internal/submissionfs"
 	"ojos-judge-api/internal/svc"
 	"ojos-judge-api/internal/types"
@@ -21,6 +24,21 @@ type CreateSubmissionLogic struct {
 	logx.Logger
 	ctx    context.Context
 	svcCtx *svc.ServiceContext
+}
+
+type problemProjectionNotReadyError struct {
+	problemID int64
+	reason    string
+}
+
+func (e problemProjectionNotReadyError) Error() string {
+	return fmt.Sprintf("problem %d package projection is not ready: %s", e.problemID, e.reason)
+}
+
+func (problemProjectionNotReadyError) HTTPStatus() int { return http.StatusConflict }
+func (problemProjectionNotReadyError) ErrorCode() int  { return 40921 }
+func (e problemProjectionNotReadyError) PublicMessage() string {
+	return e.Error()
 }
 
 func NewCreateSubmissionLogic(ctx context.Context, svcCtx *svc.ServiceContext) *CreateSubmissionLogic {
@@ -81,7 +99,7 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		return nil, err
 	}
 
-	if problem.Status == "archived" {
+	if problem.Deleted || problem.Status == "archived" {
 		return nil, errors.New("problem is archived")
 	}
 
@@ -96,8 +114,8 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		}
 	}
 
-	if problem.PackageDir == "" {
-		return nil, errors.New("problem package is not ready")
+	if err := ensureSubmissionProblemProjection(l.svcCtx, problem); err != nil {
+		return nil, err
 	}
 
 	submissionID, err := submissions.CreateSubmission(
@@ -107,6 +125,12 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		language,
 	)
 	if err != nil {
+		if errors.Is(err, repository.ErrProblemProjectionNotReady) {
+			return nil, problemProjectionNotReadyError{
+				problemID: req.ProblemId,
+				reason:    "projection changed during submission creation; retry after backfill/reconcile completes",
+			}
+		}
 		return nil, err
 	}
 
@@ -167,6 +191,24 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		SubmissionId: submissionID,
 		Status:       "PENDING",
 	}, nil
+}
+
+func ensureSubmissionProblemProjection(svcCtx *svc.ServiceContext, problem *repository.ProblemMeta) error {
+	if problem == nil {
+		return problemProjectionNotReadyError{reason: "problem metadata is missing"}
+	}
+	if problem.HasManagedPackageArtifact() {
+		return nil
+	}
+	allowLegacy := svcCtx != nil && svcCtx.Config.ProblemProjection.AllowLegacyPackageDir
+	if allowLegacy && !problem.HasAnyProjectionArtifactState() && strings.TrimSpace(problem.PackageDir) != "" {
+		return nil
+	}
+	reason := "Problem -> Judge backfill/reconcile has not produced a complete immutable artifact (revision, storage URI, lowercase SHA-256, and positive size)"
+	if problem.HasAnyProjectionArtifactState() {
+		reason = "the projected artifact is incomplete or invalid; run reconcile before accepting submissions"
+	}
+	return problemProjectionNotReadyError{problemID: problem.ID, reason: reason}
 }
 
 func (l *CreateSubmissionLogic) publishSubmissionCreated(submissionID int64) error {

@@ -125,6 +125,15 @@ func TestWorkerRoutesRequireTokenAndRunClaimResultFlow(t *testing.T) {
 	if heartbeatResp.WorkerId != "worker-a" || heartbeatResp.Status != "ONLINE" {
 		t.Fatalf("unexpected heartbeat response: %#v", heartbeatResp)
 	}
+	contractHeartbeat := postJSON(t, endpoint+"/api/judge/worker/heartbeat", "secret-worker-token", map[string]any{
+		"worker_id":     "worker-a",
+		"running_count": 0,
+	})
+	defer contractHeartbeat.Body.Close()
+	if contractHeartbeat.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(contractHeartbeat.Body)
+		t.Fatalf("Service Contract v2 worker path status %d: %s", contractHeartbeat.StatusCode, string(body))
+	}
 
 	claim := postJSON(t, endpoint+"/judge/worker/tasks/claim", "secret-worker-token", map[string]any{
 		"worker_id":           "worker-a",
@@ -230,8 +239,16 @@ func TestWorkerRoutesRequireTokenAndRunClaimResultFlow(t *testing.T) {
 	if repo.succeededTaskID != "sub-88" || repo.succeededStatus != "ACCEPTED" {
 		t.Fatalf("worker result should update repo, got task=%q status=%q", repo.succeededTaskID, repo.succeededStatus)
 	}
-	if _, ok := objects.get("88-result.json"); !ok {
-		t.Fatalf("worker result should write result.json to storage-service")
+	resultPath := repo.submissions[88].ResultPath
+	resultKey := strings.TrimPrefix(resultPath, "storage://submissions/")
+	if !strings.HasPrefix(resultKey, fmt.Sprintf("judge-results-88-%d-", claimed.LeaseVersion)) {
+		t.Fatalf("worker result path is not lease-versioned: %q", resultPath)
+	}
+	if _, ok := objects.get(resultKey); !ok {
+		t.Fatalf("worker result should write %q to storage-service; keys=%#v", resultKey, objects.keys())
+	}
+	if _, ok := objects.get("88-result.json"); ok {
+		t.Fatal("worker must not overwrite the fixed legacy result object")
 	}
 	entries, err := redisClient.XRange(ctx, "ojos:judge:result", "-", "+").Result()
 	if err != nil {
@@ -321,14 +338,15 @@ func startJudgeWorkerHTTPServer(
 	}
 	RegisterHandlers(server, &svc.ServiceContext{
 		Config: config.Config{
-			Storage:    config.StorageConfig{ServiceEndpoint: storageEndpoint, Bucket: "submissions"},
-			WorkerAuth: config.WorkerAuthConfig{Token: token, LeaseTTLSeconds: 45},
+			Storage:          config.StorageConfig{ServiceEndpoint: storageEndpoint, Bucket: "submissions"},
+			WorkerAuth:       config.WorkerAuthConfig{Token: token, LeaseTTLSeconds: 45},
+			WorkloadIdentity: config.WorkloadIdentityConfig{AllowLegacyWorkerToken: true},
 		},
 		WorkerRepo:             repo,
 		Redis:                  redisClient,
 		UserContextMiddleware:  noOp,
 		InternalAuthMiddleware: noOp,
-		WorkerAuthMiddleware:   middleware.NewWorkerAuthMiddleware(token).Handle,
+		WorkerAuthMiddleware:   middleware.NewWorkerAuthMiddleware(token, true).Handle,
 	})
 	go server.Start()
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -425,6 +443,16 @@ func writeWorkerArtifacts(t *testing.T) (string, string) {
 type storageObjectMap struct {
 	mu      sync.Mutex
 	objects map[string][]byte
+}
+
+func (m *storageObjectMap) keys() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keys := make([]string, 0, len(m.objects))
+	for key := range m.objects {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func (m *storageObjectMap) put(key string, body []byte) {
@@ -657,6 +685,36 @@ func (r *fakeWorkerHTTPRepo) RefreshTaskLease(ctx context.Context, taskID string
 	return &lease, nil
 }
 
+func (r *fakeWorkerHTTPRepo) RefreshClaimedTaskLease(ctx context.Context, taskID string, workerID string, leaseVersion int, leaseTTL time.Duration) (*repository.TaskLeaseView, error) {
+	lease, ok := r.leases[taskID]
+	if !ok || lease.WorkerID != workerID || lease.LeaseVersion != leaseVersion || lease.Status != "RUNNING" {
+		return nil, repository.ErrTaskLeaseInvalid
+	}
+	lease.LeaseExpiresAt = time.Now().Add(leaseTTL)
+	lease.HeartbeatAt = time.Now()
+	r.leases[taskID] = lease
+	return &lease, nil
+}
+
+func (r *fakeWorkerHTTPRepo) ReleaseClaimedTasks(ctx context.Context, workerID string, leases []repository.TaskLeaseView, reason string) (int64, error) {
+	var released int64
+	for i := range leases {
+		current, ok := r.leases[leases[i].TaskID]
+		if !ok || current.WorkerID != workerID || current.LeaseVersion != leases[i].LeaseVersion || current.Status != "RUNNING" {
+			continue
+		}
+		current.WorkerID = ""
+		current.LeaseExpiresAt = time.Time{}
+		current.Status = "PENDING"
+		if current.Attempt > 0 {
+			current.Attempt--
+		}
+		r.leases[current.TaskID] = current
+		released++
+	}
+	return released, nil
+}
+
 func (r *fakeWorkerHTTPRepo) GetTaskForLease(ctx context.Context, taskID string, workerID string, leaseVersion int) (*repository.TaskLeaseView, error) {
 	lease, ok := r.leases[taskID]
 	if !ok || lease.WorkerID != workerID || lease.LeaseVersion != leaseVersion {
@@ -686,11 +744,7 @@ func (r *fakeWorkerHTTPRepo) MarkTaskSucceeded(
 	taskID string,
 	workerID string,
 	leaseVersion int,
-	status string,
-	score int,
-	timeMS int,
-	memoryKB int,
-	message string,
+	transition repository.TaskSuccessTransition,
 ) error {
 	lease, ok := r.leases[taskID]
 	if !ok || lease.WorkerID != workerID || lease.LeaseVersion != leaseVersion || lease.Status != "RUNNING" {
@@ -698,8 +752,11 @@ func (r *fakeWorkerHTTPRepo) MarkTaskSucceeded(
 	}
 	lease.Status = "SUCCEEDED"
 	r.leases[taskID] = lease
+	if submission, ok := r.submissions[lease.SubmissionID]; ok && transition.ResultPath != "" {
+		submission.ResultPath = transition.ResultPath
+	}
 	r.succeededTaskID = taskID
-	r.succeededStatus = status
+	r.succeededStatus = transition.Status
 	return nil
 }
 
@@ -708,23 +765,24 @@ func (r *fakeWorkerHTTPRepo) MarkTaskFailed(
 	taskID string,
 	workerID string,
 	leaseVersion int,
-	status string,
-	message string,
-	retryable bool,
-) error {
+	transition repository.TaskFailureTransition,
+) (repository.TaskFailureOutcome, error) {
 	lease, ok := r.leases[taskID]
 	if !ok || lease.WorkerID != workerID || lease.LeaseVersion != leaseVersion || lease.Status != "RUNNING" {
-		return repository.ErrTaskLeaseInvalid
+		return repository.TaskFailureOutcome{}, repository.ErrTaskLeaseInvalid
 	}
-	if retryable {
+	outcome := repository.TaskFailureOutcome{Status: transition.Status}
+	if transition.Retryable {
 		lease.Status = "PENDING"
+		outcome.Status = "PENDING"
+		outcome.RetryScheduled = true
 	} else {
 		lease.Status = "FAILED"
 	}
 	r.leases[taskID] = lease
-	r.failedStatus = status
-	r.failedMessage = message
-	return nil
+	r.failedStatus = transition.Status
+	r.failedMessage = transition.Message
+	return outcome, nil
 }
 
 func containsString(items []string, value string) bool {

@@ -32,6 +32,9 @@ func (l *WorkerFailTaskLogic) WorkerFailTask(req *types.WorkerFailTaskReq) (resp
 	if taskID == "" || workerID == "" || req.LeaseVersion <= 0 {
 		return nil, errors.New("invalid task lease")
 	}
+	if err := validateWorkerIdentity(l.ctx, workerID); err != nil {
+		return nil, err
+	}
 
 	status := "SYSTEM_ERROR"
 	errorType := strings.ToUpper(strings.TrimSpace(req.ErrorType))
@@ -43,35 +46,50 @@ func (l *WorkerFailTaskLogic) WorkerFailTask(req *types.WorkerFailTaskReq) (resp
 	if message == "" {
 		message = "worker task failed"
 	}
+	req.Message = message
+	resultEvent := workerFailureResultEvent(req, status, message)
+	transition, err := failureTransition(
+		taskID,
+		workerID,
+		errorType,
+		req.Retryable,
+		resultEvent,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	repo := workerTaskRepo(l.svcCtx)
 	if repo == nil {
 		return nil, errors.New("worker repository is not configured")
 	}
 
-	err = repo.MarkTaskFailed(
+	outcome, err := repo.MarkTaskFailed(
 		l.ctx,
 		taskID,
 		workerID,
 		req.LeaseVersion,
-		status,
-		message,
-		req.Retryable,
+		transition,
 	)
+	alreadySaved := outcome.AlreadySaved
 	if err != nil {
-		if errors.Is(err, repository.ErrTaskLeaseInvalid) {
-			return &types.WorkerFailTaskResp{Accepted: false, Status: "STALE_LEASE"}, nil
+		if errors.Is(err, repository.ErrTaskTransitionAlreadySaved) {
+			alreadySaved = true
+		} else {
+			if errors.Is(err, repository.ErrTaskLeaseInvalid) {
+				return &types.WorkerFailTaskResp{Accepted: false, Status: "STALE_LEASE"}, nil
+			}
+			return nil, err
 		}
-		return nil, err
 	}
 
-	if req.Retryable {
-		return &types.WorkerFailTaskResp{Accepted: true, Status: "PENDING"}, nil
+	if outcome.RetryScheduled {
+		return &types.WorkerFailTaskResp{Accepted: true, Status: outcome.Status}, nil
 	}
-	if err := publishJudgeResultEvent(l.ctx, l.svcCtx, taskID, workerID, workerFailureResultEvent(req, status, message)); err != nil {
+	if err := flushCommittedJudgeResult(l.ctx, l.svcCtx, taskID, workerID, resultEvent, alreadySaved); err != nil {
 		return nil, err
 	}
-	return &types.WorkerFailTaskResp{Accepted: true, Status: status}, nil
+	return &types.WorkerFailTaskResp{Accepted: true, Status: outcome.Status}, nil
 }
 
 func workerFailureResultEvent(req *types.WorkerFailTaskReq, status string, message string) *types.WorkerSubmitResultReq {

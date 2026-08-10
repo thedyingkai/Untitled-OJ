@@ -31,6 +31,9 @@ func (l *WorkerRegisterLogic) WorkerRegister(req *types.WorkerRegisterReq) (resp
 	if workerID == "" {
 		return nil, errors.New("worker_id is required")
 	}
+	if err := validateWorkerIdentity(l.ctx, workerID); err != nil {
+		return nil, err
+	}
 	if req.MaxConcurrency <= 0 {
 		req.MaxConcurrency = 1
 	}

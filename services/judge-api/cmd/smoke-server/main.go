@@ -96,7 +96,8 @@ func main() {
 				CallerNodeID:            *callerNodeID,
 				ServiceToken:            *serviceToken,
 			},
-			Submission: config.SubmissionConfig{MaxCodeBytes: 262144},
+			Submission:        config.SubmissionConfig{MaxCodeBytes: 262144},
+			ProblemProjection: config.ProblemProjectionConfig{AllowLegacyPackageDir: true},
 			Languages: config.LanguagesConfig{Items: []config.LanguageConfig{
 				{Id: "cpp17", DisplayName: "C++17", Version: "smoke", Enabled: true, SourceFile: "main.cpp"},
 				{Id: "c11", DisplayName: "C11", Version: "smoke", Enabled: true, SourceFile: "main.c"},
@@ -115,7 +116,7 @@ func main() {
 		Redis:                  redisClient,
 		UserContextMiddleware:  middleware.NewUserContextMiddleware().Handle,
 		InternalAuthMiddleware: middleware.NewInternalAuthMiddleware(false, nil).Handle,
-		WorkerAuthMiddleware:   middleware.NewWorkerAuthMiddleware(*workerToken).Handle,
+		WorkerAuthMiddleware:   middleware.NewWorkerAuthMiddleware(*workerToken, true).Handle,
 	}
 
 	server := rest.MustNewServer(svcCtx.Config.RestConf)
@@ -296,6 +297,35 @@ func (r *smokeRepo) RefreshTaskLease(ctx context.Context, taskID string, workerI
 	return &lease, nil
 }
 
+func (r *smokeRepo) RefreshClaimedTaskLease(ctx context.Context, taskID string, workerID string, leaseVersion int, leaseTTL time.Duration) (*repository.TaskLeaseView, error) {
+	return r.RefreshTaskLease(ctx, taskID, workerID, leaseVersion, leaseTTL)
+}
+
+func (r *smokeRepo) ReleaseClaimedTasks(ctx context.Context, workerID string, leases []repository.TaskLeaseView, reason string) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var released int64
+	for i := range leases {
+		current, ok := r.leases[leases[i].TaskID]
+		if !ok || current.WorkerID != workerID || current.LeaseVersion != leases[i].LeaseVersion || current.Status != "RUNNING" {
+			continue
+		}
+		current.WorkerID = ""
+		current.LeaseExpiresAt = time.Time{}
+		current.Status = "PENDING"
+		if current.Attempt > 0 {
+			current.Attempt--
+		}
+		r.leases[current.TaskID] = current
+		if submission, ok := r.submissions[current.SubmissionID]; ok && submission.Status == "JUDGING" {
+			submission.Status = "PENDING"
+			submission.UpdatedAt = time.Now()
+		}
+		released++
+	}
+	return released, nil
+}
+
 func (r *smokeRepo) GetTaskForLease(ctx context.Context, taskID string, workerID string, leaseVersion int) (*repository.TaskLeaseView, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -318,7 +348,7 @@ func (r *smokeRepo) GetSubmission(ctx context.Context, id int64) (*repository.Su
 	return &copied, nil
 }
 
-func (r *smokeRepo) MarkTaskSucceeded(ctx context.Context, taskID string, workerID string, leaseVersion int, status string, score int, timeMS int, memoryKB int, message string) error {
+func (r *smokeRepo) MarkTaskSucceeded(ctx context.Context, taskID string, workerID string, leaseVersion int, transition repository.TaskSuccessTransition) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	lease, ok := r.leases[taskID]
@@ -329,36 +359,42 @@ func (r *smokeRepo) MarkTaskSucceeded(ctx context.Context, taskID string, worker
 	r.leases[taskID] = lease
 	if submission, ok := r.submissions[lease.SubmissionID]; ok {
 		now := time.Now()
-		submission.Status = status
-		submission.Score = score
-		submission.TimeMS = timeMS
-		submission.MemoryKB = memoryKB
-		submission.Message = message
+		submission.Status = transition.Status
+		submission.Score = transition.Score
+		submission.TimeMS = transition.TimeMS
+		submission.MemoryKB = transition.MemoryKB
+		submission.Message = transition.Message
+		if transition.ResultPath != "" {
+			submission.ResultPath = transition.ResultPath
+		}
 		submission.JudgedAt = &now
 		submission.UpdatedAt = now
 	}
 	return nil
 }
 
-func (r *smokeRepo) MarkTaskFailed(ctx context.Context, taskID string, workerID string, leaseVersion int, status string, message string, retryable bool) error {
+func (r *smokeRepo) MarkTaskFailed(ctx context.Context, taskID string, workerID string, leaseVersion int, transition repository.TaskFailureTransition) (repository.TaskFailureOutcome, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	lease, ok := r.leases[taskID]
 	if !ok || lease.WorkerID != workerID || lease.LeaseVersion != leaseVersion || lease.Status != "RUNNING" {
-		return repository.ErrTaskLeaseInvalid
+		return repository.TaskFailureOutcome{}, repository.ErrTaskLeaseInvalid
 	}
-	if retryable {
+	outcome := repository.TaskFailureOutcome{Status: transition.Status}
+	if transition.Retryable {
 		lease.Status = "PENDING"
+		outcome.Status = "PENDING"
+		outcome.RetryScheduled = true
 	} else {
 		lease.Status = "FAILED"
 	}
 	r.leases[taskID] = lease
 	if submission, ok := r.submissions[lease.SubmissionID]; ok {
-		submission.Status = status
-		submission.Message = message
+		submission.Status = transition.Status
+		submission.Message = transition.Message
 		submission.UpdatedAt = time.Now()
 	}
-	return nil
+	return outcome, nil
 }
 
 func languageSupported(items []string, value string) bool {

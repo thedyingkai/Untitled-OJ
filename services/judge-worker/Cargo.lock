@@ -836,6 +836,7 @@ dependencies = [
  "chrono",
  "futures",
  "libc",
+ "ojos-service-context",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -985,6 +986,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "ojos-service-context"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "opentelemetry",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

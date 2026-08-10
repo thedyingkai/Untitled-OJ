@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"ojos-judge-api/internal/repository"
 	"ojos-judge-api/internal/svc"
@@ -16,6 +17,9 @@ import (
 func ServeWorkerSubmissionSource(ctx context.Context, svcCtx *svc.ServiceContext, w http.ResponseWriter, r *http.Request, req *types.WorkerArtifactSourceReq) error {
 	if req.Id <= 0 || strings.TrimSpace(req.TaskId) == "" || strings.TrimSpace(req.WorkerId) == "" || req.LeaseVersion <= 0 {
 		return errors.New("invalid artifact lease")
+	}
+	if err := validateWorkerIdentity(ctx, req.WorkerId); err != nil {
+		return err
 	}
 
 	repo := workerTaskRepo(svcCtx)
@@ -30,7 +34,7 @@ func ServeWorkerSubmissionSource(ctx context.Context, svcCtx *svc.ServiceContext
 		}
 		return err
 	}
-	if lease.SubmissionID != req.Id || lease.Status != "RUNNING" {
+	if lease.SubmissionID != req.Id || lease.Status != "RUNNING" || !lease.LeaseExpiresAt.After(time.Now()) {
 		return errors.New("artifact lease does not match submission")
 	}
 
@@ -54,6 +58,9 @@ func ServeWorkerProblemPackage(ctx context.Context, svcCtx *svc.ServiceContext, 
 	if req.Id <= 0 || strings.TrimSpace(req.TaskId) == "" || strings.TrimSpace(req.WorkerId) == "" || req.LeaseVersion <= 0 {
 		return errors.New("invalid artifact lease")
 	}
+	if err := validateWorkerIdentity(ctx, req.WorkerId); err != nil {
+		return err
+	}
 
 	repo := workerTaskRepo(svcCtx)
 	if repo == nil {
@@ -67,7 +74,7 @@ func ServeWorkerProblemPackage(ctx context.Context, svcCtx *svc.ServiceContext, 
 		}
 		return err
 	}
-	if lease.ProblemID != req.Id || lease.Status != "RUNNING" {
+	if lease.ProblemID != req.Id || lease.Status != "RUNNING" || !lease.LeaseExpiresAt.After(time.Now()) {
 		return errors.New("artifact lease does not match problem")
 	}
 

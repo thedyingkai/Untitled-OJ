@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"time"
 
 	"ojos-judge-api/internal/config"
@@ -14,6 +15,7 @@ import (
 	"ojos-judge-api/internal/svc"
 
 	sharedmw "ojos-shared/middleware"
+	"ojos-shared/servicehealth"
 
 	"github.com/zeromicro/go-zero/core/conf"
 	"github.com/zeromicro/go-zero/rest"
@@ -22,6 +24,13 @@ import (
 var configFile = flag.String("f", "etc/judgeapi.yaml", "the config file")
 
 func main() {
+	if handled, err := servicehealth.RunIfRequested(os.Args, "http://127.0.0.1:8082/health"); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	flag.Parse()
 
 	var c config.Config

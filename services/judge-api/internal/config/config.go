@@ -8,15 +8,17 @@ import "github.com/zeromicro/go-zero/rest"
 type Config struct {
 	rest.RestConf
 
-	Database     DatabaseConfig
-	Redis        RedisConfig
-	Jaeger       JaegerConfig
-	Storage      StorageConfig
-	AuthService  AuthServiceConfig
-	Submission   SubmissionConfig
-	Languages    LanguagesConfig
-	WorkerAuth   WorkerAuthConfig
-	InternalAuth InternalAuthConfig
+	Database          DatabaseConfig
+	Redis             RedisConfig
+	Jaeger            JaegerConfig
+	Storage           StorageConfig
+	AuthService       AuthServiceConfig
+	Submission        SubmissionConfig
+	ProblemProjection ProblemProjectionConfig `json:",optional"`
+	Languages         LanguagesConfig
+	WorkerAuth        WorkerAuthConfig
+	InternalAuth      InternalAuthConfig
+	WorkloadIdentity  WorkloadIdentityConfig `json:",optional"`
 }
 
 type DatabaseConfig struct {
@@ -69,6 +71,13 @@ type SubmissionConfig struct {
 	MaxCodeBytes int64 `json:",optional"`
 }
 
+// ProblemProjectionConfig contains only the development cutover escape hatch.
+// The default and every production deployment require a complete immutable
+// Problem -> Judge artifact projection before accepting a submission.
+type ProblemProjectionConfig struct {
+	AllowLegacyPackageDir bool `json:",optional"`
+}
+
 type LanguagesConfig struct {
 	Items []LanguageConfig `json:",optional"`
 }
@@ -90,4 +99,12 @@ type InternalAuthConfig struct {
 	Enabled              bool
 	TimestampSkewSeconds int64 `json:",optional"`
 	NonceTTLSeconds      int64 `json:",optional"`
+}
+
+type WorkloadIdentityConfig struct {
+	PublicKeyFile          string `json:",optional"`
+	KeyID                  string `json:",optional"`
+	Issuer                 string `json:",optional"`
+	Audience               string `json:",optional"`
+	AllowLegacyWorkerToken bool   `json:",optional"`
 }

@@ -18,6 +18,7 @@ import (
 
 	"ojos-judge-api/internal/config"
 	"ojos-judge-api/internal/submissionfs"
+	"ojos-shared/servicecontext"
 )
 
 const storageScheme = "storage://"
@@ -32,6 +33,8 @@ type storageClient struct {
 	callerNodeID    string
 	serviceToken    string
 	client          *http.Client
+	managed         *servicecontext.ServiceContext
+	managedErr      error
 }
 
 type storageObjectMetadata struct {
@@ -51,7 +54,8 @@ type storedSubmissionSource struct {
 
 func storageEnabled(c config.StorageConfig) bool {
 	// ServiceEndpoint is a legacy fallback; internal gateway + api_id is the default path.
-	return strings.TrimSpace(c.ServiceEndpoint) != "" || strings.TrimSpace(c.InternalGatewayEndpoint) != ""
+	managed, err := servicecontext.LoadOptional()
+	return managed != nil || err != nil || strings.TrimSpace(c.ServiceEndpoint) != "" || strings.TrimSpace(c.InternalGatewayEndpoint) != ""
 }
 
 func storeSubmissionSource(
@@ -109,8 +113,15 @@ func serveStorageArtifact(
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-OJOS-Artifact-Sha256", meta.SHA256)
 	w.Header().Set("X-OJOS-Artifact-Size", fmt.Sprintf("%d", meta.SizeBytes))
-	_, err = io.Copy(w, io.LimitReader(body, artifactPackageMaxSize+1))
-	return err
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", meta.SizeBytes))
+	written, err := io.CopyN(w, body, meta.SizeBytes)
+	if err != nil {
+		return fmt.Errorf("stream artifact after %d of %d bytes: %w", written, meta.SizeBytes, err)
+	}
+	if written != meta.SizeBytes {
+		return fmt.Errorf("stream artifact: wrote %d of %d bytes", written, meta.SizeBytes)
+	}
+	return nil
 }
 
 func putStorageObject(
@@ -200,7 +211,7 @@ func submissionResultKey(submissionID int64) string {
 }
 
 func newStorageClient(config config.StorageConfig) storageClient {
-	return storageClient{
+	result := storageClient{
 		endpoint:        strings.TrimRight(strings.TrimSpace(config.ServiceEndpoint), "/"),
 		internalGateway: strings.TrimRight(strings.TrimSpace(config.InternalGatewayEndpoint), "/"),
 		getApiID:        firstNonEmpty(config.GetApiID, "storage.object.get"),
@@ -213,6 +224,32 @@ func newStorageClient(config config.StorageConfig) storageClient {
 			Timeout: 15 * time.Second,
 		},
 	}
+	managed, err := servicecontext.LoadOptional()
+	if err != nil {
+		result.managedErr = err
+		return result
+	}
+	if managed == nil {
+		return result
+	}
+	if err := managed.RequireService("judge-api"); err != nil {
+		result.managedErr = err
+		return result
+	}
+	for _, requirement := range []string{"storage_get", "storage_put", "storage_head"} {
+		if _, err := managed.Binding(requirement); err != nil {
+			result.managedErr = fmt.Errorf("judge-api managed storage: %w", err)
+			return result
+		}
+	}
+	client, err := managed.Client()
+	if err != nil {
+		result.managedErr = err
+		return result
+	}
+	result.managed = managed
+	result.client = client
+	return result
 }
 
 func (c storageClient) putObject(
@@ -222,10 +259,13 @@ func (c storageClient) putObject(
 	contentType string,
 	body io.Reader,
 ) (*storageObjectMetadata, error) {
+	if c.managedErr != nil {
+		return nil, c.managedErr
+	}
 	if c.baseEndpoint() == "" {
 		return nil, errors.New("storage-service endpoint is empty")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.putURL(bucket, key), body)
+	req, err := c.newObjectRequest(ctx, "storage_put", http.MethodPut, bucket, key, body)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +291,9 @@ func (c storageClient) getObject(
 	bucket string,
 	key string,
 ) (*storageObjectMetadata, io.ReadCloser, error) {
+	if c.managedErr != nil {
+		return nil, nil, c.managedErr
+	}
 	if c.baseEndpoint() == "" {
 		return nil, nil, errors.New("storage-service endpoint is empty")
 	}
@@ -258,7 +301,7 @@ func (c storageClient) getObject(
 	if err != nil {
 		return nil, nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.objectURL(bucket, key), nil)
+	req, err := c.newObjectRequest(ctx, "storage_get", http.MethodGet, bucket, key, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -279,7 +322,10 @@ func (c storageClient) getMetadata(
 	bucket string,
 	key string,
 ) (*storageObjectMetadata, error) {
-	if c.internalGateway != "" {
+	if c.managedErr != nil {
+		return nil, c.managedErr
+	}
+	if c.managed != nil || c.internalGateway != "" {
 		return c.headObject(ctx, bucket, key)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.metadataURL(bucket, key), nil)
@@ -307,7 +353,10 @@ func (c storageClient) headObject(
 	bucket string,
 	key string,
 ) (*storageObjectMetadata, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.headURL(bucket, key), nil)
+	if c.managedErr != nil {
+		return nil, c.managedErr
+	}
+	req, err := c.newObjectRequest(ctx, "storage_head", http.MethodHead, bucket, key, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -331,6 +380,10 @@ func (c storageClient) headObject(
 }
 
 func (c storageClient) objectURL(bucket string, key string) string {
+	if c.managed != nil {
+		value, _ := c.managed.BindingURL("storage_get", c.relativeObjectPath(bucket, key))
+		return value
+	}
 	if c.internalGateway != "" {
 		apiID := c.getApiID
 		return c.apiURL(apiID, bucket, key)
@@ -343,6 +396,10 @@ func (c storageClient) metadataURL(bucket string, key string) string {
 }
 
 func (c storageClient) putURL(bucket string, key string) string {
+	if c.managed != nil {
+		value, _ := c.managed.BindingURL("storage_put", c.relativeObjectPath(bucket, key))
+		return value
+	}
 	if c.internalGateway != "" {
 		return c.apiURL(c.putApiID, bucket, key)
 	}
@@ -350,7 +407,34 @@ func (c storageClient) putURL(bucket string, key string) string {
 }
 
 func (c storageClient) headURL(bucket string, key string) string {
+	if c.managed != nil {
+		value, _ := c.managed.BindingURL("storage_head", c.relativeObjectPath(bucket, key))
+		return value
+	}
 	return c.apiURL(c.headApiID, bucket, key)
+}
+
+func (c storageClient) relativeObjectPath(bucket string, key string) string {
+	return "/" + url.PathEscape(bucket) + "/" + url.PathEscape(cleanStorageKey(key))
+}
+
+func (c storageClient) newObjectRequest(ctx context.Context, binding, method, bucket, key string, body io.Reader) (*http.Request, error) {
+	if c.managedErr != nil {
+		return nil, c.managedErr
+	}
+	if c.managed != nil {
+		return c.managed.NewRequest(ctx, binding, method, c.relativeObjectPath(bucket, key), body)
+	}
+	var target string
+	switch binding {
+	case "storage_put":
+		target = c.putURL(bucket, key)
+	case "storage_head":
+		target = c.headURL(bucket, key)
+	default:
+		target = c.objectURL(bucket, key)
+	}
+	return http.NewRequestWithContext(ctx, method, target, body)
 }
 
 func (c storageClient) apiURL(apiID string, bucket string, key string) string {
@@ -358,11 +442,14 @@ func (c storageClient) apiURL(apiID string, bucket string, key string) string {
 }
 
 func (c storageClient) baseEndpoint() string {
+	if c.managed != nil {
+		return c.managed.Gateway.Origin
+	}
 	return firstNonEmpty(c.internalGateway, c.endpoint)
 }
 
 func (c storageClient) addInternalGatewayHeaders(req *http.Request) {
-	if c.internalGateway == "" {
+	if c.managed != nil || c.internalGateway == "" {
 		return
 	}
 	if c.callerService != "" {

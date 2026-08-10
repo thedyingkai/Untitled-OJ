@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::trace::TraceContextExt;
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::env;
@@ -17,9 +17,40 @@ use uuid::Uuid;
 
 use crate::cgroup::CgroupRun;
 use crate::config::{LanguageConfig, LanguagesConfig};
+use crate::health::HealthState;
 use crate::judge::judge_artifacts;
 use crate::result::ResultFile;
 use crate::sandbox::nsjail_available;
+use crate::service_context::ServiceContext;
+
+#[derive(Debug)]
+struct JudgeApiResponseError {
+    status: StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for JudgeApiResponseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "judge-api returned {}: {}",
+            self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for JudgeApiResponseError {}
+
+#[derive(Debug)]
+struct TaskReportRejected(String);
+
+impl std::fmt::Display for TaskReportRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TaskReportRejected {}
 
 #[derive(Debug, Clone)]
 pub struct WorkerLinkConfig {
@@ -43,18 +74,46 @@ pub struct WorkerLinkConfig {
     pub caller_node_id: Option<String>,
     pub runner_mode: String,
     pub smoke_once: bool,
+    pub service_context: Option<ServiceContext>,
 }
 
 impl WorkerLinkConfig {
     pub fn from_env(languages: &LanguagesConfig) -> Result<Self> {
-        let worker_id = env_or("OJOS_WORKER_ID", || {
-            std::env::var("HOSTNAME").unwrap_or_else(|_| format!("worker-{}", Uuid::new_v4()))
+        let service_context = ServiceContext::load_optional()?;
+        validate_deployment_mode(
+            service_context.is_some(),
+            &std::env::var("OJOS_ENVIRONMENT").unwrap_or_default(),
+        )?;
+        if let Some(context) = service_context.as_ref() {
+            context.require_service("judge-worker")?;
+        }
+        // In managed mode the authenticated Deployment identity is the Worker
+        // identity. A release-provided environment variable must not be able to
+        // register an arbitrary logical Worker under the same JWT.
+        let worker_id = match service_context.as_ref() {
+            Some(context) => context.deployment.id.clone(),
+            None => env_or("OJOS_WORKER_ID", || {
+                std::env::var("HOSTNAME").unwrap_or_else(|_| format!("worker-{}", Uuid::new_v4()))
+            }),
+        };
+        let worker_name = env_or("OJOS_WORKER_NAME", || {
+            service_context
+                .as_ref()
+                .map(|context| {
+                    format!("{}@{}", context.deployment.service, context.deployment.node)
+                })
+                .unwrap_or_else(|| worker_id.clone())
         });
-        let worker_name = env_or("OJOS_WORKER_NAME", || worker_id.clone());
-        let judge_api_url = required_env("OJOS_JUDGE_API_URL")?
-            .trim_end_matches('/')
-            .to_string();
-        let worker_token = required_env("OJOS_WORKER_TOKEN")?;
+        let judge_api_url = match service_context.as_ref() {
+            Some(context) => context.binding_url("judge_control", "")?,
+            None => required_env("OJOS_JUDGE_API_URL")?
+                .trim_end_matches('/')
+                .to_string(),
+        };
+        let worker_token = match service_context.as_ref() {
+            Some(_) => String::new(),
+            None => required_env("OJOS_WORKER_TOKEN")?,
+        };
         let max_concurrency = env_parse("OJOS_MAX_CONCURRENCY", 1usize)?;
         let work_dir = PathBuf::from(env_or("OJOS_WORK_DIR", || {
             "/tmp/ojos-worker/work".to_string()
@@ -72,31 +131,59 @@ impl WorkerLinkConfig {
         };
         let heartbeat_interval = Duration::from_secs(env_parse("OJOS_HEARTBEAT_INTERVAL", 10u64)?);
         let task_lease_ttl = Duration::from_secs(env_parse("OJOS_TASK_LEASE_TTL", 60u64)?);
-        let redis_url = std::env::var("OJOS_REDIS_URL")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+        let redis_url = if service_context.is_some() {
+            None
+        } else {
+            std::env::var("OJOS_REDIS_URL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
         let redis_task_stream = env_or("OJOS_JUDGE_TASK_STREAM", || "ojos:judge:task".to_string());
         let redis_consumer_group =
             env_or("OJOS_JUDGE_CONSUMER_GROUP", || "judge-worker".to_string());
-        let internal_gateway_url = std::env::var("OJOS_INTERNAL_GATEWAY_URL")
-            .ok()
-            .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty());
-        let storage_api_get = env_or("OJOS_STORAGE_OBJECT_GET_API_ID", || {
-            "storage.object.get".to_string()
-        });
-        let storage_api_put = env_or("OJOS_STORAGE_OBJECT_PUT_API_ID", || {
-            "storage.object.put".to_string()
-        });
-        let service_token = std::env::var("OJOS_SERVICE_TOKEN")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let caller_node_id = std::env::var("OJOS_CALLER_NODE_ID")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+        let internal_gateway_url = service_context
+            .as_ref()
+            .map(|context| context.gateway.origin.trim_end_matches('/').to_string())
+            .or_else(|| {
+                std::env::var("OJOS_INTERNAL_GATEWAY_URL")
+                    .ok()
+                    .map(|value| value.trim().trim_end_matches('/').to_string())
+                    .filter(|value| !value.is_empty())
+            });
+        let storage_api_get = match service_context.as_ref() {
+            Some(context) => context.binding("storage_get")?.api_id.clone(),
+            None => env_or("OJOS_STORAGE_OBJECT_GET_API_ID", || {
+                "storage.object.get".to_string()
+            }),
+        };
+        let storage_api_put = match service_context.as_ref() {
+            Some(context) => context
+                .bindings
+                .get("storage_put")
+                .map(|binding| binding.api_id.clone())
+                .unwrap_or_else(|| "storage.object.put".to_string()),
+            None => env_or("OJOS_STORAGE_OBJECT_PUT_API_ID", || {
+                "storage.object.put".to_string()
+            }),
+        };
+        let service_token = if service_context.is_some() {
+            None
+        } else {
+            std::env::var("OJOS_SERVICE_TOKEN")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let caller_node_id = service_context
+            .as_ref()
+            .map(|context| context.deployment.node.clone())
+            .or_else(|| {
+                std::env::var("OJOS_CALLER_NODE_ID")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
         let runner_mode =
             normalize_runner_mode(&env_or("OJOS_RUNNER_MODE", || "nsjail".to_string()))?;
         let smoke_once = env_bool("OJOS_WORKER_SMOKE_ONCE");
@@ -122,8 +209,18 @@ impl WorkerLinkConfig {
             caller_node_id,
             runner_mode,
             smoke_once,
+            service_context,
         })
     }
+}
+
+fn validate_deployment_mode(managed: bool, environment: &str) -> Result<()> {
+    if managed || environment.trim().eq_ignore_ascii_case("development") {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "an unmanaged Judge Worker is a development-only compatibility path; production requires OJOS_SERVICE_CONTEXT_FILE, while legacy Compose must explicitly set OJOS_ENVIRONMENT=development"
+    ))
 }
 
 #[cfg(test)]
@@ -136,12 +233,17 @@ fn internal_api_url(gateway_url: &str, api_id: &str, path: &str) -> String {
     )
 }
 
-pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
+pub async fn run_worker_link(
+    languages: Arc<LanguagesConfig>,
+    health: Arc<HealthState>,
+) -> Result<()> {
     let config = Arc::new(WorkerLinkConfig::from_env(&languages)?);
     validate_runtime_preflight(&config, &languages).await?;
+    health.mark_preflight_ok(config.heartbeat_interval);
     info!(
         runner_mode = %config.runner_mode,
         supported_languages = ?config.supported_languages,
+        context_generation = config.service_context.as_ref().map(|context| context.generation),
         "worker runtime preflight passed"
     );
     if let Some(gateway_url) = &config.internal_gateway_url {
@@ -155,13 +257,16 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
     fs::create_dir_all(&config.work_dir).await?;
     fs::create_dir_all(&config.artifact_cache_dir).await?;
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(60))
-        .no_proxy()
-        .build()
-        .context("create worker http client failed")?;
+    let client = match config.service_context.as_ref() {
+        Some(context) => context.client()?,
+        None => Client::builder()
+            .timeout(Duration::from_secs(60))
+            .no_proxy()
+            .build()
+            .context("create worker http client failed")?,
+    };
 
-    register_worker(&client, &config).await?;
+    register_until_available(&client, &config, &health).await;
     let mut stream_wakeup = RedisTaskWakeup::from_config(&config).await;
 
     let semaphore = Arc::new(Semaphore::new(config.max_concurrency));
@@ -169,13 +274,17 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
         let client = client.clone();
         let config = config.clone();
         let semaphore = semaphore.clone();
+        let health = health.clone();
         tokio::spawn(async move {
             loop {
                 let running = config
                     .max_concurrency
                     .saturating_sub(semaphore.available_permits());
                 if let Err(err) = heartbeat_worker(&client, &config, running).await {
+                    health.mark_disconnected();
                     warn!(error = %err, "worker heartbeat failed");
+                } else {
+                    health.mark_registered();
                 }
                 tokio::time::sleep(config.heartbeat_interval).await;
             }
@@ -190,7 +299,15 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
             continue;
         }
 
-        let mut tasks = claim_tasks(&client, &config, available, &pending_task_events).await?;
+        let mut tasks = match claim_tasks(&client, &config, available, &pending_task_events).await {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                health.mark_disconnected();
+                warn!(%error, "worker claim failed; re-registering before retry");
+                register_until_available(&client, &config, &health).await;
+                continue;
+            }
+        };
         let traceparents = traceparents_by_task_id(&pending_task_events);
         for task in &mut tasks {
             if task.traceparent.is_none() {
@@ -243,6 +360,34 @@ pub async fn run_worker_link(languages: Arc<LanguagesConfig>) -> Result<()> {
     }
 }
 
+async fn register_until_available(
+    client: &Client,
+    config: &WorkerLinkConfig,
+    health: &HealthState,
+) {
+    let retry_delays = [
+        Duration::from_secs(1),
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+    ];
+    let mut attempt = 0_usize;
+    loop {
+        match register_worker(client, config).await {
+            Ok(()) => {
+                health.mark_registered();
+                return;
+            }
+            Err(error) => {
+                health.mark_disconnected();
+                let delay = retry_delays[attempt.min(retry_delays.len() - 1)];
+                warn!(%error, retry_after_seconds = delay.as_secs(), "worker registration failed");
+                tokio::time::sleep(delay).await;
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
 async fn execute_task(
     client: Client,
     config: Arc<WorkerLinkConfig>,
@@ -284,79 +429,281 @@ async fn execute_task_inner(
         "claimed worker task"
     );
 
-    let task_dir = config
-        .work_dir
-        .join(format!("{}-{}", task.submission_id, task.lease_version));
-    let source_path = task_dir
-        .join("source")
-        .join(source_file_name(&languages, &task.language));
-    let package_zip = task_dir.join("problem.zip");
-    let package_dir = task_dir.join("problem");
-    let result_dir = task_dir.join("result");
-
-    if task_dir.exists() {
-        let _ = fs::remove_dir_all(&task_dir).await;
-    }
-    fs::create_dir_all(source_path.parent().unwrap_or(&task_dir)).await?;
-    fs::create_dir_all(&package_dir).await?;
-    fs::create_dir_all(&result_dir).await?;
-
-    download_artifact(
-        &client,
-        &config,
-        &task.source,
-        &source_path,
-        task.traceparent.as_deref(),
-    )
-    .await?;
-    download_artifact(
-        &client,
-        &config,
-        &task.problem_package,
-        &package_zip,
-        task.traceparent.as_deref(),
-    )
-    .await?;
-    unzip_safe(&package_zip, &package_dir)?;
-
-    let heartbeat_stop = tokio::sync::watch::channel(false);
-    let heartbeat_rx = heartbeat_stop.1;
+    // The lease belongs to this execution from the instant claim returns.  Start
+    // refreshing it before any local filesystem or artifact work, and keep the
+    // heartbeat alive until Judge API has acknowledged the terminal report.
+    let (heartbeat_stop, heartbeat_rx) = tokio::sync::watch::channel(false);
     let heartbeat_client = client.clone();
     let heartbeat_config = config.clone();
     let heartbeat_task = task.clone();
-    let heartbeat_handle = tokio::spawn(async move {
+    let mut heartbeat_handle = tokio::spawn(async move {
         lease_heartbeat_loop(
             heartbeat_client,
             heartbeat_config,
             heartbeat_task,
             heartbeat_rx,
         )
-        .await;
+        .await
     });
 
-    let result = judge_artifacts(
-        languages,
-        task.submission_id,
-        &task.language,
-        &source_path,
-        &package_dir,
-        &result_dir,
+    let paths = ClaimedTaskPaths::new(&config, &languages, &task);
+
+    let execution = tokio::select! {
+        biased;
+        heartbeat = &mut heartbeat_handle => {
+            let error = heartbeat_termination_error(heartbeat);
+            let _ = fs::remove_dir_all(&paths.task_dir).await;
+            return Err(error);
+        }
+        result = execute_claimed_task(
+            &client,
+            &config,
+            languages,
+            &task,
+            &paths,
+        ) => result,
+    };
+
+    let (report, terminal_acknowledged) = match execution {
+        Ok(result) => {
+            let report = tokio::select! {
+                biased;
+                heartbeat = &mut heartbeat_handle => {
+                    let error = heartbeat_termination_error(heartbeat);
+                    let _ = fs::remove_dir_all(&paths.task_dir).await;
+                    return Err(error);
+                }
+                result = submit_result(&client, &config, &task, &result) => result,
+            };
+            let acknowledged = report.is_ok();
+            (report, acknowledged)
+        }
+        Err(failure) => {
+            let failure_message = failure.error.to_string();
+            let report = tokio::select! {
+                biased;
+                heartbeat = &mut heartbeat_handle => {
+                    let error = heartbeat_termination_error(heartbeat);
+                    let _ = fs::remove_dir_all(&paths.task_dir).await;
+                    return Err(error);
+                }
+                result = fail_task_with_retry(
+                    &client,
+                    &config,
+                    &task,
+                    failure.retryable,
+                    failure.error_type,
+                    &failure_message,
+                ) => result,
+            };
+            match report {
+                Ok(()) => (Err(failure.error), true),
+                Err(report_error) => (
+                    Err(anyhow!(
+                        "{}; reporting task failure failed: {report_error}",
+                        failure.error
+                    )),
+                    false,
+                ),
+            }
+        }
+    };
+
+    let heartbeat_stop_result = stop_lease_heartbeat(
+        heartbeat_stop,
+        &mut heartbeat_handle,
+        terminal_acknowledged,
+        &task.task_id,
     )
     .await;
+    let _ = fs::remove_dir_all(&paths.task_dir).await;
 
-    let _ = heartbeat_stop.0.send(true);
-    let _ = heartbeat_handle.await;
+    report?;
+    heartbeat_stop_result
+}
 
-    match result {
-        Ok(result) => submit_result(&client, &config, &task, &result).await?,
-        Err(err) => {
-            fail_task(&client, &config, &task, false, "SYSTEM", &err.to_string()).await?;
-            return Err(err);
+#[derive(Debug)]
+struct ClaimedTaskPaths {
+    task_dir: PathBuf,
+    source_path: PathBuf,
+    package_zip: PathBuf,
+    package_dir: PathBuf,
+    result_dir: PathBuf,
+}
+
+impl ClaimedTaskPaths {
+    fn new(config: &WorkerLinkConfig, languages: &LanguagesConfig, task: &WorkerTaskLease) -> Self {
+        let task_dir = config
+            .work_dir
+            .join(format!("{}-{}", task.submission_id, task.lease_version));
+        Self {
+            source_path: task_dir
+                .join("source")
+                .join(source_file_name(languages, &task.language)),
+            package_zip: task_dir.join("problem.zip"),
+            package_dir: task_dir.join("problem"),
+            result_dir: task_dir.join("result"),
+            task_dir,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ReportableTaskFailure {
+    error: anyhow::Error,
+    retryable: bool,
+    error_type: &'static str,
+}
+
+impl ReportableTaskFailure {
+    fn retryable(error_type: &'static str, error: anyhow::Error) -> Self {
+        Self {
+            error,
+            retryable: true,
+            error_type,
         }
     }
 
-    let _ = fs::remove_dir_all(&task_dir).await;
-    Ok(())
+    fn terminal(error_type: &'static str, error: anyhow::Error) -> Self {
+        Self {
+            error,
+            retryable: false,
+            error_type,
+        }
+    }
+}
+
+async fn execute_claimed_task(
+    client: &Client,
+    config: &WorkerLinkConfig,
+    languages: Arc<LanguagesConfig>,
+    task: &WorkerTaskLease,
+    paths: &ClaimedTaskPaths,
+) -> std::result::Result<ResultFile, ReportableTaskFailure> {
+    if paths.task_dir.exists() {
+        fs::remove_dir_all(&paths.task_dir).await.map_err(|error| {
+            ReportableTaskFailure::retryable(
+                "WORKSPACE_PREPARATION",
+                anyhow!(error).context("remove stale task workspace failed"),
+            )
+        })?;
+    }
+    fs::create_dir_all(paths.source_path.parent().unwrap_or(&paths.task_dir))
+        .await
+        .map_err(|error| {
+            ReportableTaskFailure::retryable(
+                "WORKSPACE_PREPARATION",
+                anyhow!(error).context("create task source directory failed"),
+            )
+        })?;
+    fs::create_dir_all(&paths.package_dir)
+        .await
+        .map_err(|error| {
+            ReportableTaskFailure::retryable(
+                "WORKSPACE_PREPARATION",
+                anyhow!(error).context("create task package directory failed"),
+            )
+        })?;
+    fs::create_dir_all(&paths.result_dir)
+        .await
+        .map_err(|error| {
+            ReportableTaskFailure::retryable(
+                "WORKSPACE_PREPARATION",
+                anyhow!(error).context("create task result directory failed"),
+            )
+        })?;
+
+    validate_artifact_ref(config, &task.source).map_err(|error| {
+        ReportableTaskFailure::terminal(
+            "INVALID_TASK",
+            error.context("submission source reference is invalid"),
+        )
+    })?;
+    download_artifact(
+        client,
+        config,
+        &task.source,
+        &paths.source_path,
+        task.traceparent.as_deref(),
+    )
+    .await
+    .map_err(|error| {
+        ReportableTaskFailure::retryable(
+            "ARTIFACT_DOWNLOAD",
+            error.context("download submission source failed"),
+        )
+    })?;
+    validate_artifact_ref(config, &task.problem_package).map_err(|error| {
+        ReportableTaskFailure::terminal(
+            "INVALID_TASK",
+            error.context("problem package reference is invalid"),
+        )
+    })?;
+    download_artifact(
+        client,
+        config,
+        &task.problem_package,
+        &paths.package_zip,
+        task.traceparent.as_deref(),
+    )
+    .await
+    .map_err(|error| {
+        ReportableTaskFailure::retryable(
+            "ARTIFACT_DOWNLOAD",
+            error.context("download problem package failed"),
+        )
+    })?;
+    unzip_safe(&paths.package_zip, &paths.package_dir).map_err(|error| {
+        ReportableTaskFailure::terminal(
+            "INVALID_PROBLEM_PACKAGE",
+            error.context("extract problem package failed"),
+        )
+    })?;
+
+    judge_artifacts(
+        languages,
+        task.submission_id,
+        &task.language,
+        &paths.source_path,
+        &paths.package_dir,
+        &paths.result_dir,
+    )
+    .await
+    .map_err(|error| ReportableTaskFailure::terminal("SYSTEM", error))
+}
+
+fn heartbeat_termination_error(
+    outcome: std::result::Result<Result<()>, tokio::task::JoinError>,
+) -> anyhow::Error {
+    match outcome {
+        Ok(Ok(())) => anyhow!("task lease heartbeat stopped before terminal report"),
+        Ok(Err(error)) => error,
+        Err(error) => anyhow!("task lease heartbeat task failed: {error}"),
+    }
+}
+
+async fn stop_lease_heartbeat(
+    stop: tokio::sync::watch::Sender<bool>,
+    handle: &mut tokio::task::JoinHandle<Result<()>>,
+    terminal_acknowledged: bool,
+    task_id: &str,
+) -> Result<()> {
+    let _ = stop.send(true);
+    let result = match handle.await {
+        Ok(result) => result,
+        Err(error) => Err(anyhow!("join task lease heartbeat failed: {error}")),
+    };
+    if terminal_acknowledged {
+        if let Err(error) = result {
+            // A heartbeat already in flight can observe the newly terminal task
+            // and be rejected as stale.  The terminal ACK is the authoritative
+            // outcome and must not turn a successfully reported task into a
+            // local execution failure.
+            warn!(task_id = %task_id, error = %error, "ignoring heartbeat shutdown error after terminal acknowledgement");
+        }
+        return Ok(());
+    }
+    result
 }
 
 fn trace_context_from_traceparent(traceparent: &str) -> Option<opentelemetry::Context> {
@@ -449,10 +796,10 @@ impl RedisTaskWakeup {
             .arg("MKSTREAM")
             .query_async(&mut connection)
             .await;
-        if let Err(err) = group_result {
-            if !err.to_string().contains("BUSYGROUP") {
-                return Err(err).context("create redis task stream consumer group failed");
-            }
+        if let Err(err) = group_result
+            && !err.to_string().contains("BUSYGROUP")
+        {
+            return Err(err).context("create redis task stream consumer group failed");
         }
         info!(
             stream = %stream,
@@ -835,36 +1182,67 @@ async fn lease_heartbeat_loop(
     config: Arc<WorkerLinkConfig>,
     task: WorkerTaskLease,
     mut stop: tokio::sync::watch::Receiver<bool>,
-) {
-    let every = (config.task_lease_ttl / 3).max(Duration::from_secs(5));
+) -> Result<()> {
+    let mut lease_expires_at = task.lease_expires_at.clone();
+    let mut first = true;
     loop {
+        let delay = if first {
+            Duration::ZERO
+        } else {
+            lease_heartbeat_delay(config.task_lease_ttl, lease_expires_at.as_deref())
+        };
         tokio::select! {
-            _ = stop.changed() => {
-                if *stop.borrow() {
-                    return;
+            biased;
+            changed = stop.changed() => {
+                match changed {
+                    Ok(()) if *stop.borrow() => return Ok(()),
+                    Ok(()) => {}
+                    Err(_) => return Err(anyhow!("task lease heartbeat stop channel closed")),
                 }
             }
-            _ = tokio::time::sleep(every) => {
+            _ = tokio::time::sleep(delay) => {
                 let req = WorkerTaskHeartbeatReq {
                     worker_id: config.worker_id.clone(),
                     lease_version: task.lease_version,
                 };
                 let path = format!("/judge/worker/tasks/{}/heartbeat", task.task_id);
-                if let Err(err) = post_json_with_trace::<_, WorkerTaskHeartbeatResp>(
+                let response = post_json_with_trace::<_, WorkerTaskHeartbeatResp>(
                     &client,
                     &config,
                     &path,
                     &req,
                     task.traceparent.as_deref(),
                 )
-                .await
-                {
-                    warn!(task_id = %task.task_id, error = %err, "task heartbeat failed");
-                    return;
+                .await;
+                match response {
+                    Ok(response) => {
+                        first = false;
+                        if response.lease_expires_at.is_some() {
+                            lease_expires_at = response.lease_expires_at;
+                        }
+                    }
+                    Err(err) => {
+                        warn!(task_id = %task.task_id, error = %err, "task heartbeat failed");
+                        return Err(err.context("task lease heartbeat failed"));
+                    }
                 }
             }
         }
     }
+}
+
+fn lease_heartbeat_delay(configured_ttl: Duration, lease_expires_at: Option<&str>) -> Duration {
+    let configured = configured_ttl / 3;
+    let server_remaining = lease_expires_at
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .and_then(|expires_at| {
+            let remaining = expires_at.with_timezone(&chrono::Utc) - chrono::Utc::now();
+            remaining.to_std().ok()
+        })
+        .map(|remaining| remaining / 3);
+    configured
+        .min(server_remaining.unwrap_or(configured))
+        .max(Duration::from_millis(10))
 }
 
 async fn submit_result(
@@ -899,22 +1277,50 @@ async fn submit_result(
         message: result.message.clone(),
         cases,
     };
+    let idempotency_key = task_report_idempotency_key(task, "result", &req)?;
     let path = format!("/judge/worker/tasks/{}/result", task.task_id);
-    let resp: WorkerSubmitResultResp =
-        post_json_with_trace(client, config, &path, &req, task.traceparent.as_deref()).await?;
-    if !resp.accepted {
-        return Err(anyhow!("judge-api rejected task result: {}", resp.status));
+    let mut attempt = 0_usize;
+    loop {
+        let response: Result<WorkerSubmitResultResp> = post_json_with_trace_and_idempotency(
+            client,
+            config,
+            &path,
+            &req,
+            task.traceparent.as_deref(),
+            Some(&idempotency_key),
+        )
+        .await;
+        let error = match response {
+            Ok(resp) if resp.accepted => return Ok(()),
+            Ok(resp) => {
+                TaskReportRejected(format!("judge-api rejected task result: {}", resp.status))
+                    .into()
+            }
+            Err(error) => error,
+        };
+        warn!(
+            task_id = %task.task_id,
+            lease_version = task.lease_version,
+            attempt = attempt + 1,
+            error = %error,
+            "reporting task result failed"
+        );
+        if !terminal_report_error_retryable(&error) {
+            return Err(error);
+        }
+        tokio::time::sleep(terminal_report_retry_delay(attempt)).await;
+        attempt = attempt.saturating_add(1);
     }
-    Ok(())
 }
 
-async fn fail_task(
+async fn fail_task_once(
     client: &Client,
     config: &WorkerLinkConfig,
     task: &WorkerTaskLease,
     retryable: bool,
     error_type: &str,
     message: &str,
+    idempotency_key: &str,
 ) -> Result<()> {
     let req = WorkerFailTaskReq {
         worker_id: config.worker_id.clone(),
@@ -924,9 +1330,115 @@ async fn fail_task(
         retryable,
     };
     let path = format!("/judge/worker/tasks/{}/fail", task.task_id);
-    let _: WorkerFailTaskResp =
-        post_json_with_trace(client, config, &path, &req, task.traceparent.as_deref()).await?;
+    let resp: WorkerFailTaskResp = post_json_with_trace_and_idempotency(
+        client,
+        config,
+        &path,
+        &req,
+        task.traceparent.as_deref(),
+        Some(idempotency_key),
+    )
+    .await?;
+    if !resp.accepted {
+        return Err(TaskReportRejected(format!(
+            "judge-api rejected task failure: {}",
+            resp.status
+        ))
+        .into());
+    }
     Ok(())
+}
+
+async fn fail_task_with_retry(
+    client: &Client,
+    config: &WorkerLinkConfig,
+    task: &WorkerTaskLease,
+    retryable: bool,
+    error_type: &str,
+    message: &str,
+) -> Result<()> {
+    let idempotency_payload = WorkerFailTaskReq {
+        worker_id: config.worker_id.clone(),
+        lease_version: task.lease_version,
+        error_type: error_type.to_string(),
+        message: message.to_string(),
+        retryable,
+    };
+    let idempotency_key = task_report_idempotency_key(task, "fail", &idempotency_payload)?;
+
+    let mut attempt = 0_usize;
+    loop {
+        match fail_task_once(
+            client,
+            config,
+            task,
+            retryable,
+            error_type,
+            message,
+            &idempotency_key,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                warn!(
+                    task_id = %task.task_id,
+                    lease_version = task.lease_version,
+                    attempt = attempt + 1,
+                    error = %error,
+                    "reporting task failure failed"
+                );
+                if !terminal_report_error_retryable(&error) {
+                    return Err(error);
+                }
+                tokio::time::sleep(terminal_report_retry_delay(attempt)).await;
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn terminal_report_error_retryable(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<TaskReportRejected>().is_some() {
+        return false;
+    }
+    if let Some(response) = error.downcast_ref::<JudgeApiResponseError>() {
+        return response.status == StatusCode::TOO_MANY_REQUESTS
+            || response.status.is_server_error();
+    }
+    // Transport interruption, response truncation, and decode failures are
+    // ambiguous. The lease heartbeat is the retry deadline, so keep replaying
+    // the stable receipt request until ACK or an explicit rejection.
+    true
+}
+
+fn terminal_report_retry_delay(attempt: usize) -> Duration {
+    match attempt {
+        0 => Duration::from_millis(100),
+        1 => Duration::from_secs(1),
+        2 => Duration::from_secs(5),
+        _ => Duration::from_secs(30),
+    }
+}
+
+fn task_report_idempotency_key<T>(
+    task: &WorkerTaskLease,
+    report_kind: &str,
+    payload: &T,
+) -> Result<String>
+where
+    T: Serialize + ?Sized,
+{
+    let mut hasher = Sha256::new();
+    hasher.update(task.task_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(task.lease_version.to_be_bytes());
+    hasher.update([0]);
+    hasher.update(report_kind.as_bytes());
+    hasher.update([0]);
+    hasher
+        .update(serde_json::to_vec(payload).context("serialize task report idempotency payload")?);
+    Ok(format!("judge-{report_kind}-{:x}", hasher.finalize()))
 }
 
 async fn download_artifact(
@@ -936,24 +1448,46 @@ async fn download_artifact(
     target: &Path,
     traceparent: Option<&str>,
 ) -> Result<()> {
-    let url = absolute_url(config, &artifact.url);
-    let mut request = with_traceparent(
-        client
-            .get(url)
-            .header("X-OJOS-Worker-Token", &config.worker_token),
-        traceparent,
-    );
-    if artifact.url.starts_with("/internal/apis/") {
-        request = request.header("X-OJOS-Caller-Service", "judge-worker");
-        if let Some(node_id) = &config.caller_node_id {
-            request = request
-                .header("X-OJOS-Node-Id", node_id)
-                .header("X-OJOS-Caller-Node-Id", node_id);
-        }
-        if let Some(token) = &config.service_token {
-            request = request.header("Authorization", format!("Bearer {}", token));
-        }
+    validate_artifact_ref(config, artifact)?;
+    if artifact.size_bytes <= 0 {
+        return Err(anyhow!("artifact size must be positive"));
     }
+    if let Some(context) = config.service_context.as_ref() {
+        let binding = artifact
+            .binding
+            .as_deref()
+            .ok_or_else(|| anyhow!("managed artifact binding is required"))?;
+        let api_id = artifact
+            .api_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("managed artifact api_id is required"))?;
+        let relative_path = artifact
+            .relative_path
+            .as_deref()
+            .ok_or_else(|| anyhow!("managed artifact relative_path is required"))?;
+        let declared = context.binding(binding)?;
+        if api_id != declared.api_id {
+            return Err(anyhow!(
+                "artifact API does not match the named service binding"
+            ));
+        }
+        // The shared SDK performs an atomic streaming download, reads the
+        // current rotated credential, enforces the binding timeout, and verifies
+        // both digest and size before publishing the destination file.
+        return context
+            .download_to(
+                client,
+                binding,
+                relative_path,
+                &artifact.sha256,
+                artifact.size_bytes as u64,
+                target,
+            )
+            .await;
+    }
+    let url = artifact_url(config, artifact)?;
+    let request = with_traceparent(client.get(url), traceparent);
+    let request = authorize_request(config, request, artifact.uses_internal_api()).await?;
     let mut resp = request.send().await?.error_for_status()?;
 
     let mut file = fs::File::create(target).await?;
@@ -969,9 +1503,93 @@ async fn download_artifact(
     }
     file.flush().await?;
 
+    if written != artifact.size_bytes as u64 {
+        return Err(anyhow!(
+            "artifact size mismatch: expected {}, received {}",
+            artifact.size_bytes,
+            written
+        ));
+    }
     let digest = format!("{:x}", hasher.finalize());
-    if digest != artifact.sha256 {
+    if digest != artifact.sha256.trim_start_matches("sha256:") {
         return Err(anyhow!("artifact digest mismatch"));
+    }
+    Ok(())
+}
+
+fn validate_artifact_ref(config: &WorkerLinkConfig, artifact: &WorkerArtifactRef) -> Result<()> {
+    if artifact.size_bytes <= 0 {
+        return Err(anyhow!("artifact size must be positive"));
+    }
+    let digest = artifact.sha256.trim().trim_start_matches("sha256:");
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!("artifact sha256 is invalid"));
+    }
+    if config.service_context.is_none() {
+        if artifact.url.trim().is_empty() {
+            return Err(anyhow!("legacy artifact URL is required"));
+        }
+        return Ok(());
+    }
+    if !artifact.url.trim().is_empty() {
+        return Err(anyhow!(
+            "managed artifact references must not contain a legacy URL"
+        ));
+    }
+    let binding = artifact
+        .binding
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("managed artifact binding is required"))?;
+    let api_id = artifact
+        .api_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("managed artifact api_id is required"))?;
+    let relative_path = artifact
+        .relative_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("managed artifact relative_path is required"))?;
+    if binding != "storage_get" || api_id != "storage.object.get" {
+        return Err(anyhow!(
+            "managed judge artifacts require binding storage_get with API storage.object.get"
+        ));
+    }
+    validate_artifact_relative_path(relative_path)?;
+
+    let context = config
+        .service_context
+        .as_ref()
+        .ok_or_else(|| anyhow!("managed service context is missing"))?;
+    let declared = context.binding(binding)?;
+    if api_id != declared.api_id {
+        return Err(anyhow!(
+            "artifact API {api_id} does not match binding {binding} API {}",
+            declared.api_id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_artifact_relative_path(path: &str) -> Result<()> {
+    let lower = path.to_ascii_lowercase();
+    if !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains('\\')
+        || path.contains(['?', '#'])
+        || path.chars().any(char::is_control)
+        || lower.contains("%2e")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+        || path
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(anyhow!("managed artifact relative_path is unsafe"));
     }
     Ok(())
 }
@@ -1000,21 +1618,101 @@ where
     T: Serialize + ?Sized,
     R: for<'de> Deserialize<'de>,
 {
-    let resp = with_traceparent(
-        client
-            .post(absolute_url(config, path))
-            .header("X-OJOS-Worker-Token", &config.worker_token)
-            .json(body),
-        traceparent,
-    )
-    .send()
-    .await?;
+    post_json_with_trace_and_idempotency(client, config, path, body, traceparent, None).await
+}
+
+async fn post_json_with_trace_and_idempotency<T, R>(
+    client: &Client,
+    config: &WorkerLinkConfig,
+    path: &str,
+    body: &T,
+    traceparent: Option<&str>,
+    idempotency_key: Option<&str>,
+) -> Result<R>
+where
+    T: Serialize + ?Sized,
+    R: for<'de> Deserialize<'de>,
+{
+    let managed = config.service_context.as_ref();
+    let request = match managed {
+        Some(context) => {
+            let relative_path = path.strip_prefix("/judge/worker").unwrap_or(path);
+            context
+                .request(client, "judge_control", Method::POST, relative_path)
+                .await?
+                .json(body)
+        }
+        None => client.post(absolute_url(config, path)).json(body),
+    };
+    let mut request = with_traceparent(request, traceparent);
+    if path.ends_with("/tasks/claim") {
+        request = request.header("Prefer", "wait=25");
+    }
+    if let Some(idempotency_key) = idempotency_key {
+        request = request.header("Idempotency-Key", idempotency_key);
+    }
+    let request = if managed.is_some() {
+        request
+    } else {
+        authorize_request(config, request, false).await?
+    };
+    let resp = request.send().await?;
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
-        return Err(anyhow!("judge-api returned {}: {}", status, text));
+        return Err(JudgeApiResponseError { status, body: text }.into());
     }
     serde_json::from_str(&text).with_context(|| format!("decode judge-api response: {}", text))
+}
+
+async fn authorize_request(
+    config: &WorkerLinkConfig,
+    mut request: RequestBuilder,
+    legacy_internal_api: bool,
+) -> Result<RequestBuilder> {
+    if let Some(context) = config.service_context.as_ref() {
+        return context.authorize(request).await;
+    }
+    request = request.header("X-OJOS-Worker-Token", &config.worker_token);
+    if legacy_internal_api {
+        request = request.header("X-OJOS-Caller-Service", "judge-worker");
+        if let Some(node_id) = &config.caller_node_id {
+            request = request
+                .header("X-OJOS-Node-Id", node_id)
+                .header("X-OJOS-Caller-Node-Id", node_id);
+        }
+        if let Some(token) = &config.service_token {
+            request = request.bearer_auth(token);
+        }
+    }
+    Ok(request)
+}
+
+fn artifact_url(config: &WorkerLinkConfig, artifact: &WorkerArtifactRef) -> Result<String> {
+    if let (Some(context), Some(binding), Some(relative_path)) = (
+        config.service_context.as_ref(),
+        artifact.binding.as_deref(),
+        artifact.relative_path.as_deref(),
+    ) {
+        let declared = context.binding(binding)?;
+        if let Some(api_id) = artifact.api_id.as_deref()
+            && api_id != declared.api_id
+        {
+            return Err(anyhow!(
+                "artifact API {} does not match binding {} API {}",
+                api_id,
+                binding,
+                declared.api_id
+            ));
+        }
+        return context.binding_url(binding, relative_path);
+    }
+    if artifact.url.trim().is_empty() {
+        return Err(anyhow!(
+            "artifact must contain a binding/relative_path reference or legacy url"
+        ));
+    }
+    Ok(absolute_url(config, &artifact.url))
 }
 
 fn with_traceparent(request: RequestBuilder, traceparent: Option<&str>) -> RequestBuilder {
@@ -1028,15 +1726,20 @@ fn absolute_url(config: &WorkerLinkConfig, path: &str) -> String {
     if path.starts_with("http://") || path.starts_with("https://") {
         return path.to_string();
     }
-    if path.starts_with("/internal/apis/") {
-        if let Some(gateway_url) = &config.internal_gateway_url {
-            return format!(
-                "{}/{}",
-                gateway_url.trim_end_matches('/'),
-                path.trim_start_matches('/')
-            );
-        }
+    if path.starts_with("/internal/apis/")
+        && let Some(gateway_url) = &config.internal_gateway_url
+    {
+        return format!(
+            "{}/{}",
+            gateway_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        );
     }
+    let path = if config.service_context.is_some() {
+        path.strip_prefix("/judge/worker").unwrap_or(path)
+    } else {
+        path
+    };
     format!(
         "{}/{}",
         config.judge_api_url.trim_end_matches('/'),
@@ -1194,6 +1897,8 @@ struct WorkerTaskLease {
     submission_id: i64,
     language: String,
     lease_version: i32,
+    #[serde(default)]
+    lease_expires_at: Option<String>,
     source: WorkerArtifactRef,
     problem_package: WorkerArtifactRef,
     #[serde(default)]
@@ -1202,9 +1907,22 @@ struct WorkerTaskLease {
 
 #[derive(Debug, Clone, Deserialize)]
 struct WorkerArtifactRef {
+    #[serde(default)]
     url: String,
+    #[serde(default)]
+    binding: Option<String>,
+    #[serde(default)]
+    api_id: Option<String>,
+    #[serde(default)]
+    relative_path: Option<String>,
     sha256: String,
     size_bytes: i64,
+}
+
+impl WorkerArtifactRef {
+    fn uses_internal_api(&self) -> bool {
+        self.binding.is_some() || self.url.starts_with("/internal/apis/")
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1214,7 +1932,10 @@ struct WorkerTaskHeartbeatReq {
 }
 
 #[derive(Debug, Deserialize)]
-struct WorkerTaskHeartbeatResp {}
+struct WorkerTaskHeartbeatResp {
+    #[serde(default)]
+    lease_expires_at: Option<String>,
+}
 
 #[derive(Debug, Serialize)]
 struct WorkerSubmitResultReq {
@@ -1257,7 +1978,10 @@ struct WorkerFailTaskReq {
 }
 
 #[derive(Debug, Deserialize)]
-struct WorkerFailTaskResp {}
+struct WorkerFailTaskResp {
+    accepted: bool,
+    status: String,
+}
 
 #[cfg(test)]
 mod tests {
@@ -1267,6 +1991,7 @@ mod tests {
     use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn test_worker_config(runner_mode: &str) -> WorkerLinkConfig {
@@ -1292,6 +2017,7 @@ mod tests {
             caller_node_id: None,
             runner_mode: runner_mode.to_string(),
             smoke_once: false,
+            service_context: None,
         }
     }
 
@@ -1413,6 +2139,14 @@ mod tests {
     }
 
     #[test]
+    fn production_or_implicit_unmanaged_worker_cannot_fall_back_to_shared_credentials() {
+        assert!(validate_deployment_mode(false, "production").is_err());
+        assert!(validate_deployment_mode(false, "").is_err());
+        assert!(validate_deployment_mode(false, "development").is_ok());
+        assert!(validate_deployment_mode(true, "production").is_ok());
+    }
+
+    #[test]
     fn nsjail_runner_claims_sandbox_capabilities() {
         let _config = test_worker_config("nsjail");
 
@@ -1485,6 +2219,7 @@ mod tests {
             caller_node_id: None,
             runner_mode: "nsjail".to_string(),
             smoke_once: false,
+            service_context: None,
         };
         let client = Client::builder()
             .timeout(Duration::from_secs(5))
@@ -1525,6 +2260,9 @@ mod tests {
             &config,
             &WorkerArtifactRef {
                 url: "/judge/worker/artifacts/submissions/42/source?task_id=sub-42&worker_id=worker-a&lease_version=7".to_string(),
+                binding: None,
+                api_id: None,
+                relative_path: None,
                 sha256: artifact_sha256,
                 size_bytes: artifact_body.len() as i64,
             },
@@ -1552,13 +2290,20 @@ mod tests {
             submission_id: 42,
             language: "cpp17".to_string(),
             lease_version: 7,
+            lease_expires_at: None,
             source: WorkerArtifactRef {
                 url: "/unused/source".to_string(),
+                binding: None,
+                api_id: None,
+                relative_path: None,
                 sha256: String::new(),
                 size_bytes: 0,
             },
             problem_package: WorkerArtifactRef {
                 url: "/unused/package".to_string(),
+                binding: None,
+                api_id: None,
+                relative_path: None,
                 sha256: String::new(),
                 size_bytes: 0,
             },
@@ -1592,7 +2337,7 @@ mod tests {
         )
         .await
         .expect("submit result");
-        fail_task(&client, &config, &task, false, "SYSTEM", "nsjail failed")
+        fail_task_with_retry(&client, &config, &task, false, "SYSTEM", "nsjail failed")
             .await
             .expect("fail task");
 
@@ -1670,6 +2415,7 @@ mod tests {
             caller_node_id: Some("child-node".to_string()),
             runner_mode: "nsjail".to_string(),
             smoke_once: false,
+            service_context: None,
         };
         let client = Client::builder()
             .timeout(Duration::from_secs(5))
@@ -1686,6 +2432,9 @@ mod tests {
             &config,
             &WorkerArtifactRef {
                 url: "/internal/apis/storage.object.get/submissions/42-source-main.cpp".to_string(),
+                binding: None,
+                api_id: None,
+                relative_path: None,
                 sha256: artifact_sha256,
                 size_bytes: artifact_body.len() as i64,
             },
@@ -1725,6 +2474,555 @@ mod tests {
         let _ = fs::remove_dir_all(&config.artifact_cache_dir).await;
     }
 
+    #[tokio::test]
+    async fn managed_worker_uses_named_bindings_rotated_token_and_sdk_resource_download() {
+        let artifact_body = b"managed source\n".to_vec();
+        let artifact_sha256 = format!("sha256:{:x}", Sha256::digest(&artifact_body));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind managed gateway");
+        let origin = format!(
+            "http://{}",
+            listener.local_addr().expect("managed gateway addr")
+        );
+        let server_captured = captured.clone();
+        let server_artifact = artifact_body.clone();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept managed request");
+                let request = read_http_request(&mut stream);
+                let response = if request.path
+                    == "/internal/apis/storage.object.get/submissions/42-source-main.cpp"
+                {
+                    http_response("200 OK", "text/plain", &server_artifact)
+                } else {
+                    http_response("200 OK", "application/json", b"{}")
+                };
+                server_captured
+                    .lock()
+                    .expect("managed captured requests")
+                    .push(request);
+                stream.write_all(&response).expect("managed response");
+            }
+        });
+
+        let root = std::env::temp_dir().join(format!("ojos-worker-managed-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("managed root");
+        let token_path = root.join("token");
+        std::fs::write(&token_path, "rotated-deployment-token").expect("managed token");
+        let context: ServiceContext = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "deployment": {"id": "worker-b", "service": "judge-worker", "node": "node-b"},
+            "gateway": {"origin": origin},
+            "bindings": {
+                "judge_control": {"binding_id": "control", "api_id": "judge.worker.control", "base_path": "/internal/apis/judge.worker.control", "timeout_ms": 35000},
+                "storage_get": {"binding_id": "get", "api_id": "storage.object.get", "base_path": "/internal/apis/storage.object.get", "timeout_ms": 300000}
+            },
+            "credential_file": token_path,
+            "generation": 3
+        }))
+        .expect("managed context");
+        context.validate().expect("valid managed context");
+        let mut config = test_worker_config("nsjail");
+        config.judge_api_url = context
+            .binding_url("judge_control", "")
+            .expect("control binding URL");
+        config.worker_token.clear();
+        config.service_context = Some(context.clone());
+        let client = context.client().expect("managed client");
+
+        for forbidden_url in [
+            "https://attacker.invalid/source.cpp",
+            "/internal/apis/storage.object.get/submissions/42-source-main.cpp",
+        ] {
+            let error = download_artifact(
+                &client,
+                &config,
+                &WorkerArtifactRef {
+                    url: forbidden_url.to_string(),
+                    binding: Some("storage_get".to_string()),
+                    api_id: Some("storage.object.get".to_string()),
+                    relative_path: Some("/submissions/42-source-main.cpp".to_string()),
+                    sha256: artifact_sha256.clone(),
+                    size_bytes: artifact_body.len() as i64,
+                },
+                &root.join("forbidden-source.cpp"),
+                None,
+            )
+            .await
+            .expect_err("managed worker must reject every legacy URL form");
+            assert!(error.to_string().contains("must not contain a legacy URL"));
+        }
+        let wrong_binding_error = download_artifact(
+            &client,
+            &config,
+            &WorkerArtifactRef {
+                url: String::new(),
+                binding: Some("judge_control".to_string()),
+                api_id: Some("judge.worker.control".to_string()),
+                relative_path: Some("/source.cpp".to_string()),
+                sha256: artifact_sha256.clone(),
+                size_bytes: artifact_body.len() as i64,
+            },
+            &root.join("wrong-binding-source.cpp"),
+            None,
+        )
+        .await
+        .expect_err("a valid non-storage binding must not become an artifact source");
+        assert!(
+            wrong_binding_error
+                .to_string()
+                .contains("require binding storage_get")
+        );
+
+        let _: serde_json::Value = post_json(
+            &client,
+            &config,
+            "/judge/worker/register",
+            &serde_json::json!({"worker_id": "worker-b"}),
+        )
+        .await
+        .expect("managed control call");
+        let target = root.join("source.cpp");
+        download_artifact(
+            &client,
+            &config,
+            &WorkerArtifactRef {
+                url: String::new(),
+                binding: Some("storage_get".to_string()),
+                api_id: Some("storage.object.get".to_string()),
+                relative_path: Some("/submissions/42-source-main.cpp".to_string()),
+                sha256: artifact_sha256,
+                size_bytes: artifact_body.len() as i64,
+            },
+            &target,
+            None,
+        )
+        .await
+        .expect("managed SDK download");
+
+        let requests = captured.lock().expect("managed requests").clone();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].path,
+            "/internal/apis/judge.worker.control/register"
+        );
+        assert!(requests[0].header("idempotency-key").is_some());
+        assert_eq!(
+            requests[1].path,
+            "/internal/apis/storage.object.get/submissions/42-source-main.cpp"
+        );
+        for request in &requests {
+            assert_eq!(
+                request.header("authorization"),
+                Some("Bearer rotated-deployment-token")
+            );
+            assert_eq!(request.header("x-ojos-caller-service"), None);
+            assert_eq!(request.header("x-ojos-node-id"), None);
+            assert_eq!(request.header("x-ojos-worker-token"), None);
+        }
+        assert_eq!(
+            fs::read(&target).await.expect("managed artifact"),
+            artifact_body
+        );
+        let _ = fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn claimed_task_heartbeats_during_download_longer_than_lease_and_reports_failure() {
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let (control_origin, stop_control, control_thread) =
+            start_responsive_control_server(captured.clone(), true, Duration::ZERO, 0, 0);
+        let source = b"int main() { return 0; }\n".to_vec();
+        let source_sha256 = format!("{:x}", Sha256::digest(&source));
+        let (source_origin, source_started, source_thread) =
+            start_delayed_artifact_server(source.clone(), Duration::from_millis(700));
+
+        let mut config = test_worker_config("nsjail");
+        config.judge_api_url = control_origin;
+        config.task_lease_ttl = Duration::from_millis(300);
+        let work_dir = config.work_dir.clone();
+        let task = WorkerTaskLease {
+            task_id: "sub-slow-download".to_string(),
+            submission_id: 101,
+            language: "cpp17".to_string(),
+            lease_version: 3,
+            lease_expires_at: None,
+            source: WorkerArtifactRef {
+                url: format!("{source_origin}/source.cpp"),
+                binding: None,
+                api_id: None,
+                relative_path: None,
+                sha256: source_sha256,
+                size_bytes: source.len() as i64,
+            },
+            // This deliberately fails after the slow source download.  The
+            // failure must be reported explicitly rather than waiting for lease
+            // expiry and allowing another worker to execute the same task.
+            problem_package: WorkerArtifactRef {
+                url: String::new(),
+                binding: None,
+                api_id: None,
+                relative_path: None,
+                sha256: String::new(),
+                size_bytes: 0,
+            },
+            traceparent: None,
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .no_proxy()
+            .build()
+            .expect("worker client");
+
+        let error = execute_task_inner(
+            client,
+            Arc::new(config),
+            Arc::new(test_languages_config()),
+            task,
+        )
+        .await
+        .expect_err("invalid package reference must fail the claimed task");
+        assert!(
+            format!("{error:#}").contains("artifact size must be positive"),
+            "unexpected execution error: {error:#}"
+        );
+        assert!(source_started.load(Ordering::SeqCst));
+
+        stop_control.store(true, Ordering::SeqCst);
+        control_thread.join().expect("join control server");
+        source_thread.join().expect("join source server");
+        let requests = captured.lock().expect("captured requests").clone();
+        let heartbeat_count = requests
+            .iter()
+            .filter(|request| request.path.ends_with("/heartbeat"))
+            .count();
+        assert!(
+            heartbeat_count >= 3,
+            "slow download should span multiple lease heartbeats, got {heartbeat_count}: {requests:#?}"
+        );
+        let failure = requests
+            .iter()
+            .find(|request| request.path.ends_with("/fail"))
+            .expect("preparation failure must call the formal fail API");
+        assert!(failure.body.contains("\"retryable\":false"));
+        assert!(failure.body.contains("\"error_type\":\"INVALID_TASK\""));
+        assert!(failure.header("idempotency-key").is_some());
+        let _ = fs::remove_dir_all(&work_dir).await;
+    }
+
+    #[tokio::test]
+    async fn lease_heartbeat_failure_cancels_inflight_download_without_stale_report() {
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let (control_origin, stop_control, control_thread) = start_responsive_control_server(
+            captured.clone(),
+            false,
+            Duration::from_millis(150),
+            0,
+            0,
+        );
+        let source = b"slow artifact".to_vec();
+        let source_sha256 = format!("{:x}", Sha256::digest(&source));
+        let (source_origin, source_started, source_thread) =
+            start_delayed_artifact_server(source.clone(), Duration::from_millis(800));
+
+        let mut config = test_worker_config("nsjail");
+        config.judge_api_url = control_origin;
+        config.task_lease_ttl = Duration::from_millis(300);
+        let work_dir = config.work_dir.clone();
+        let task = WorkerTaskLease {
+            task_id: "sub-lost-lease".to_string(),
+            submission_id: 102,
+            language: "cpp17".to_string(),
+            lease_version: 5,
+            lease_expires_at: None,
+            source: WorkerArtifactRef {
+                url: format!("{source_origin}/source.cpp"),
+                binding: None,
+                api_id: None,
+                relative_path: None,
+                sha256: source_sha256,
+                size_bytes: source.len() as i64,
+            },
+            problem_package: WorkerArtifactRef {
+                url: String::new(),
+                binding: None,
+                api_id: None,
+                relative_path: None,
+                sha256: String::new(),
+                size_bytes: 0,
+            },
+            traceparent: None,
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .no_proxy()
+            .build()
+            .expect("worker client");
+        let started_at = std::time::Instant::now();
+
+        let error = execute_task_inner(
+            client,
+            Arc::new(config),
+            Arc::new(test_languages_config()),
+            task,
+        )
+        .await
+        .expect_err("rejected heartbeat must cancel task work");
+        assert!(error.to_string().contains("task lease heartbeat failed"));
+        assert!(
+            started_at.elapsed() < Duration::from_millis(600),
+            "task continued after the lease was lost"
+        );
+        assert!(source_started.load(Ordering::SeqCst));
+
+        stop_control.store(true, Ordering::SeqCst);
+        control_thread.join().expect("join control server");
+        source_thread.join().expect("join source server");
+        let requests = captured.lock().expect("captured requests").clone();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.path.ends_with("/fail")
+                    && !request.path.ends_with("/result")),
+            "a worker must not report through a rejected lease: {requests:#?}"
+        );
+        let _ = fs::remove_dir_all(&work_dir).await;
+    }
+
+    #[tokio::test]
+    async fn heartbeat_stop_cancels_before_any_http_side_effect() {
+        let mut config = test_worker_config("nsjail");
+        config.judge_api_url = "http://127.0.0.1:9".to_string();
+        config.task_lease_ttl = Duration::from_millis(300);
+        let task = test_task_lease("sub-cancel-heartbeat", 1);
+        let client = Client::builder()
+            .timeout(Duration::from_secs(1))
+            .no_proxy()
+            .build()
+            .expect("worker client");
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        stop.send(true).expect("send heartbeat stop");
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            lease_heartbeat_loop(client, Arc::new(config), task, receiver),
+        )
+        .await
+        .expect("heartbeat cancellation must be prompt")
+        .expect("heartbeat cancellation must be clean");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_cadence_tracks_server_expiry_when_local_ttl_is_larger() {
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let (origin, stop_server, server_thread) =
+            start_responsive_control_server(captured.clone(), true, Duration::ZERO, 0, 0);
+        let mut config = test_worker_config("nsjail");
+        config.judge_api_url = origin;
+        config.task_lease_ttl = Duration::from_secs(30);
+        let mut task = test_task_lease("sub-server-short-ttl", 2);
+        task.lease_expires_at =
+            Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339());
+        let client = Client::builder()
+            .timeout(Duration::from_secs(1))
+            .no_proxy()
+            .build()
+            .expect("worker client");
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let heartbeat = tokio::spawn(lease_heartbeat_loop(
+            client,
+            Arc::new(config),
+            task,
+            receiver,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        stop.send(true).expect("stop heartbeat");
+        heartbeat
+            .await
+            .expect("join heartbeat")
+            .expect("heartbeat loop");
+        stop_server.store(true, Ordering::SeqCst);
+        server_thread.join().expect("join short TTL server");
+
+        let heartbeat_count = captured
+            .lock()
+            .expect("captured requests")
+            .iter()
+            .filter(|request| request.path.ends_with("/heartbeat"))
+            .count();
+        assert!(
+            heartbeat_count >= 3,
+            "server 300ms lease must override local 30s cadence; got {heartbeat_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_ack_wins_over_rejected_inflight_heartbeat() {
+        let (stop, _receiver) = tokio::sync::watch::channel(false);
+        let mut heartbeat = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Err(anyhow!(
+                "judge-api returned 409 after task entered terminal state"
+            ))
+        });
+
+        stop_lease_heartbeat(stop, &mut heartbeat, true, "sub-terminal-race")
+            .await
+            .expect("terminal acknowledgement must be authoritative");
+    }
+
+    #[tokio::test]
+    async fn fail_report_retries_with_one_stable_idempotency_key() {
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let (origin, stop_server, server_thread) =
+            start_responsive_control_server(captured.clone(), true, Duration::ZERO, 3, 0);
+        let mut config = test_worker_config("nsjail");
+        config.judge_api_url = origin;
+        let task = test_task_lease("sub-retry-fail", 8);
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .no_proxy()
+            .build()
+            .expect("worker client");
+
+        fail_task_with_retry(
+            &client,
+            &config,
+            &task,
+            true,
+            "ARTIFACT_DOWNLOAD",
+            "temporary gateway failure",
+        )
+        .await
+        .expect("second fail report attempt should succeed");
+
+        stop_server.store(true, Ordering::SeqCst);
+        server_thread.join().expect("join retry server");
+        let requests: Vec<_> = captured
+            .lock()
+            .expect("captured requests")
+            .iter()
+            .filter(|request| request.path.ends_with("/fail"))
+            .cloned()
+            .collect();
+        assert_eq!(requests.len(), 4);
+        let first_key = requests[0]
+            .header("idempotency-key")
+            .expect("first retry key");
+        assert!(first_key.starts_with("judge-fail-"));
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.header("idempotency-key") == Some(first_key))
+        );
+    }
+
+    #[tokio::test]
+    async fn result_report_retries_with_payload_bound_idempotency_key() {
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let (origin, stop_server, server_thread) =
+            start_responsive_control_server(captured.clone(), true, Duration::ZERO, 0, 3);
+        let mut config = test_worker_config("nsjail");
+        config.judge_api_url = origin;
+        let task = test_task_lease("sub-retry-result", 9);
+        let result_dir = config.work_dir.join("result-retry");
+        fs::create_dir_all(&result_dir).await.expect("result dir");
+        let stdout_path = result_dir.join("stdout.txt");
+        let stderr_path = result_dir.join("stderr.txt");
+        let checker_path = result_dir.join("checker.log");
+        fs::write(&stdout_path, "ok\n").await.expect("stdout");
+        fs::write(&stderr_path, "").await.expect("stderr");
+        fs::write(&checker_path, "matched\n")
+            .await
+            .expect("checker");
+        let result = ResultFile {
+            submission_id: 1,
+            status: "ACCEPTED".to_string(),
+            score: 100,
+            time_ms: 10,
+            memory_kb: 1024,
+            message: "accepted".to_string(),
+            cases: vec![ResultCase {
+                case_no: 1,
+                status: "ACCEPTED".to_string(),
+                score: 100,
+                time_ms: 10,
+                memory_kb: 1024,
+                stdout_path: stdout_path.to_string_lossy().to_string(),
+                stderr_path: stderr_path.to_string_lossy().to_string(),
+                checker_log_path: checker_path.to_string_lossy().to_string(),
+                message: String::new(),
+            }],
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .no_proxy()
+            .build()
+            .expect("worker client");
+
+        submit_result(&client, &config, &task, &result)
+            .await
+            .expect("second result report attempt should replay the receipt");
+
+        stop_server.store(true, Ordering::SeqCst);
+        server_thread.join().expect("join result retry server");
+        let requests: Vec<_> = captured
+            .lock()
+            .expect("captured requests")
+            .iter()
+            .filter(|request| request.path.ends_with("/result"))
+            .cloned()
+            .collect();
+        assert_eq!(requests.len(), 4);
+        let first_key = requests[0]
+            .header("idempotency-key")
+            .expect("first result retry key");
+        assert!(first_key.starts_with("judge-result-"));
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.header("idempotency-key") == Some(first_key))
+        );
+        let _ = fs::remove_dir_all(&config.work_dir).await;
+    }
+
+    #[test]
+    fn terminal_report_retry_uses_bounded_load_backoff() {
+        assert_eq!(terminal_report_retry_delay(0), Duration::from_millis(100));
+        assert_eq!(terminal_report_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(terminal_report_retry_delay(2), Duration::from_secs(5));
+        assert_eq!(terminal_report_retry_delay(3), Duration::from_secs(30));
+        assert_eq!(terminal_report_retry_delay(20), Duration::from_secs(30));
+    }
+
+    fn test_task_lease(task_id: &str, lease_version: i32) -> WorkerTaskLease {
+        WorkerTaskLease {
+            task_id: task_id.to_string(),
+            submission_id: 1,
+            language: "cpp17".to_string(),
+            lease_version,
+            lease_expires_at: None,
+            source: WorkerArtifactRef {
+                url: String::new(),
+                binding: None,
+                api_id: None,
+                relative_path: None,
+                sha256: String::new(),
+                size_bytes: 0,
+            },
+            problem_package: WorkerArtifactRef {
+                url: String::new(),
+                binding: None,
+                api_id: None,
+                relative_path: None,
+                sha256: String::new(),
+                size_bytes: 0,
+            },
+            traceparent: None,
+        }
+    }
+
     #[derive(Clone, Debug)]
     struct CapturedRequest {
         path: String,
@@ -1739,6 +3037,123 @@ mod tests {
                 .find(|(key, _)| key.eq_ignore_ascii_case(name))
                 .map(|(_, value)| value.as_str())
         }
+    }
+
+    fn start_responsive_control_server(
+        captured: Arc<Mutex<Vec<CapturedRequest>>>,
+        heartbeat_success: bool,
+        heartbeat_delay: Duration,
+        fail_responses_before_success: usize,
+        result_responses_before_success: usize,
+    ) -> (String, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind responsive control server");
+        listener
+            .set_nonblocking(true)
+            .expect("set responsive server nonblocking");
+        let addr = listener.local_addr().expect("responsive control addr");
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let fail_attempts = Arc::new(AtomicUsize::new(0));
+        let server_fail_attempts = fail_attempts.clone();
+        let result_attempts = Arc::new(AtomicUsize::new(0));
+        let server_result_attempts = result_attempts.clone();
+        let handle = std::thread::spawn(move || {
+            while !server_stop.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => panic!("accept responsive control request: {error}"),
+                };
+                // On Windows an accepted socket may inherit the listener's
+                // nonblocking flag. The request helper expects a blocking
+                // stream with a finite read timeout.
+                stream
+                    .set_nonblocking(false)
+                    .expect("set responsive stream blocking");
+                let request = read_http_request(&mut stream);
+                let response = if request.path.ends_with("/heartbeat") {
+                    std::thread::sleep(heartbeat_delay);
+                    if heartbeat_success {
+                        let lease_expires_at =
+                            (chrono::Utc::now() + chrono::Duration::milliseconds(300)).to_rfc3339();
+                        http_response(
+                            "200 OK",
+                            "application/json",
+                            format!(r#"{{"lease_expires_at":"{lease_expires_at}"}}"#).as_bytes(),
+                        )
+                    } else {
+                        http_response(
+                            "409 Conflict",
+                            "application/problem+json",
+                            br#"{"title":"task lease is invalid"}"#,
+                        )
+                    }
+                } else if request.path.ends_with("/fail") {
+                    let attempt = server_fail_attempts.fetch_add(1, Ordering::SeqCst);
+                    if attempt < fail_responses_before_success {
+                        http_response(
+                            "503 Service Unavailable",
+                            "application/problem+json",
+                            br#"{"title":"temporarily unavailable"}"#,
+                        )
+                    } else {
+                        http_response(
+                            "200 OK",
+                            "application/json",
+                            br#"{"accepted":true,"status":"PENDING"}"#,
+                        )
+                    }
+                } else if request.path.ends_with("/result") {
+                    let attempt = server_result_attempts.fetch_add(1, Ordering::SeqCst);
+                    if attempt < result_responses_before_success {
+                        http_response(
+                            "503 Service Unavailable",
+                            "application/problem+json",
+                            br#"{"title":"temporarily unavailable"}"#,
+                        )
+                    } else {
+                        http_response(
+                            "200 OK",
+                            "application/json",
+                            br#"{"accepted":true,"status":"ACCEPTED"}"#,
+                        )
+                    }
+                } else {
+                    http_response(
+                        "404 Not Found",
+                        "application/problem+json",
+                        br#"{"title":"not found"}"#,
+                    )
+                };
+                captured
+                    .lock()
+                    .expect("responsive captured requests")
+                    .push(request);
+                let _ = stream.write_all(&response);
+            }
+        });
+        (format!("http://{addr}"), stop, handle)
+    }
+
+    fn start_delayed_artifact_server(
+        body: Vec<u8>,
+        delay: Duration,
+    ) -> (String, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind delayed artifact server");
+        let addr = listener.local_addr().expect("delayed artifact addr");
+        let started = Arc::new(AtomicBool::new(false));
+        let server_started = started.clone();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept delayed artifact request");
+            server_started.store(true, Ordering::SeqCst);
+            let _request = read_http_request(&mut stream);
+            std::thread::sleep(delay);
+            let _ = stream.write_all(&http_response("200 OK", "application/octet-stream", &body));
+        });
+        (format!("http://{addr}"), started, handle)
     }
 
     fn start_worker_http_contract_server(
@@ -1795,7 +3210,7 @@ mod tests {
                 r#"{"tasks":[{"task_id":"sub-42","submission_id":42,"problem_id":7,"language":"cpp17","attempt":1,"lease_version":7,"lease_expires_at":"2026-07-01T00:00:00Z","source":{"url":"/unused/source","sha256":"","size_bytes":0,"content_type":"text/plain"},"problem_package":{"url":"/unused/package","sha256":"","size_bytes":0,"content_type":"application/zip"}}]}"#
             }
             "/judge/worker/tasks/sub-42/result" => r#"{"accepted":true,"status":"ACCEPTED"}"#,
-            "/judge/worker/tasks/sub-42/fail" => r#"{}"#,
+            "/judge/worker/tasks/sub-42/fail" => r#"{"accepted":true,"status":"SYSTEM_ERROR"}"#,
             _ => r#"{"error":"not found"}"#,
         };
         http_response("200 OK", "application/json", json.as_bytes())

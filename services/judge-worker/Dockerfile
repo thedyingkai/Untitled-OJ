@@ -41,9 +41,10 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY services/judge-worker ./judge-worker
+COPY platform/shared/rust/service-context ./platform/shared/rust/service-context
+COPY services/judge-worker ./services/judge-worker
 
-WORKDIR /app/judge-worker
+WORKDIR /app/services/judge-worker
 
 RUN test "$(cat config/runtime-lock.yaml | sed -n 's/^nsjail_commit: //p')" = "$NSJAIL_COMMIT" \
     && g++ -dumpversion | grep -Eq '^12($|\.)' \
@@ -72,5 +73,10 @@ RUN mkdir -p /opt/ojos/default-components \
     && g++ default-components/default_scorer.cpp -O2 -pipe -std=c++17 -o /opt/ojos/default-components/default-scorer
 
 RUN cargo build --release
+
+EXPOSE 9101
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
+    CMD ["./target/release/judge-worker", "healthcheck"]
 
 CMD ["./target/release/judge-worker"]

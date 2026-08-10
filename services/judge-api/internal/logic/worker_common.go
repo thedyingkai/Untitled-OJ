@@ -9,12 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"ojos-judge-api/internal/config"
+	"ojos-judge-api/internal/middleware"
 	"ojos-judge-api/internal/repository"
 	"ojos-judge-api/internal/svc"
 	"ojos-judge-api/internal/types"
@@ -56,6 +60,17 @@ func workerTaskRepo(svcCtx *svc.ServiceContext) svc.WorkerTaskRepository {
 	}
 	if svcCtx.Repo != nil {
 		return svcCtx.Repo
+	}
+	return nil
+}
+
+func validateWorkerIdentity(ctx context.Context, workerID string) error {
+	claims, managed := middleware.WorkloadClaimsFromContext(ctx)
+	if !managed {
+		return nil
+	}
+	if strings.TrimSpace(workerID) != strings.TrimSpace(claims.DeploymentID) {
+		return errors.New("worker_id does not match authenticated deployment")
 	}
 	return nil
 }
@@ -107,11 +122,6 @@ func taskLeaseToResp(
 		return types.WorkerTaskLease{}, err
 	}
 
-	problem, err := repo.GetProblemMeta(ctx, r.ProblemID)
-	if err != nil {
-		return types.WorkerTaskLease{}, err
-	}
-
 	sourcePath := fmt.Sprintf(
 		"/judge/worker/artifacts/submissions/%d/source?task_id=%s&worker_id=%s&lease_version=%d",
 		r.SubmissionID,
@@ -130,24 +140,37 @@ func taskLeaseToResp(
 		return types.WorkerTaskLease{}, err
 	}
 
-	packageZip, err := ensureProblemPackageZip(problem.ID, problem.PackageDir)
+	legacyPackagePath := fmt.Sprintf(
+		"/judge/worker/artifacts/problems/%d/package?task_id=%s&worker_id=%s&lease_version=%d",
+		r.ProblemID,
+		r.TaskID,
+		r.WorkerID,
+		r.LeaseVersion,
+	)
+	var problemPackage types.WorkerArtifactRef
+	if strings.TrimSpace(submission.ProblemArtifactURI) != "" {
+		problemPackage, err = artifactRefForProblemSnapshot(svcCtx, submission, legacyPackagePath)
+	} else {
+		problem, problemErr := repo.GetProblemMeta(ctx, r.ProblemID)
+		if problemErr != nil {
+			return types.WorkerTaskLease{}, problemErr
+		}
+		packageZip, packageErr := ensureProblemPackageZip(problem.ID, problem.PackageDir)
+		if packageErr != nil {
+			return types.WorkerTaskLease{}, packageErr
+		}
+		problemPackage, err = artifactRefForFile(packageZip, legacyPackagePath, "application/zip")
+	}
 	if err != nil {
 		return types.WorkerTaskLease{}, err
 	}
 
-	problemPackage, err := artifactRefForFile(
-		packageZip,
-		fmt.Sprintf(
-			"/judge/worker/artifacts/problems/%d/package?task_id=%s&worker_id=%s&lease_version=%d",
-			r.ProblemID,
-			r.TaskID,
-			r.WorkerID,
-			r.LeaseVersion,
-		),
-		"application/zip",
-	)
-	if err != nil {
-		return types.WorkerTaskLease{}, err
+	if _, managed := middleware.WorkloadClaimsFromContext(ctx); managed {
+		if source.Binding == "" || problemPackage.Binding == "" {
+			return types.WorkerTaskLease{}, errors.New("managed workers require storage-backed artifacts")
+		}
+		source.Url = ""
+		problemPackage.Url = ""
 	}
 
 	return types.WorkerTaskLease{
@@ -163,6 +186,55 @@ func taskLeaseToResp(
 	}, nil
 }
 
+func artifactRefForProblemSnapshot(svcCtx *svc.ServiceContext, submission *repository.SubmissionView, legacyURLPath string) (types.WorkerArtifactRef, error) {
+	if submission == nil || strings.TrimSpace(submission.ProblemArtifactSHA256) == "" || submission.ProblemArtifactSizeBytes <= 0 {
+		return types.WorkerArtifactRef{}, errors.New("submission problem artifact snapshot is incomplete")
+	}
+	uri := strings.TrimSpace(submission.ProblemArtifactURI)
+	if strings.HasPrefix(uri, "file://") {
+		if !svcCtx.Config.WorkloadIdentity.AllowLegacyWorkerToken {
+			return types.WorkerArtifactRef{}, errors.New("local problem artifacts are allowed only for the legacy development worker path")
+		}
+		return artifactRefForFile(strings.TrimPrefix(uri, "file://"), legacyURLPath, "application/zip")
+	}
+	bucket, key, ok := parseStorageRef(uri)
+	if !ok {
+		return types.WorkerArtifactRef{}, fmt.Errorf("unsupported problem artifact URI: %s", uri)
+	}
+	resourceSHA256, err := apiResourceSHA256(submission.ProblemArtifactSHA256)
+	if err != nil {
+		return types.WorkerArtifactRef{}, fmt.Errorf("invalid problem artifact digest: %w", err)
+	}
+	storageCfg := svcCtx.Config.Storage
+	storageClient := newStorageClient(storageCfg)
+	if storageClient.managedErr != nil {
+		return types.WorkerArtifactRef{}, storageClient.managedErr
+	}
+	// A managed task carries only a stable binding name plus a relative object
+	// path. Embedding even a Gateway URL would let stale topology leak into the
+	// durable task and would bypass a later Binding switch. URL remains solely
+	// for the legacy development path.
+	var artifactURL string
+	if storageClient.managed != nil || !svcCtx.Config.WorkloadIdentity.AllowLegacyWorkerToken {
+		artifactURL = ""
+	} else if strings.TrimSpace(storageCfg.InternalGatewayEndpoint) != "" {
+		artifactURL = "/internal/apis/" + url.PathEscape(firstNonEmpty(storageCfg.GetApiID, "storage.object.get")) + "/" + url.PathEscape(bucket) + "/" + url.PathEscape(cleanStorageKey(key))
+	} else if endpoint := strings.TrimRight(strings.TrimSpace(storageCfg.ServiceEndpoint), "/"); endpoint != "" {
+		artifactURL = endpoint + "/api/storage/objects/" + url.PathEscape(bucket) + "/" + url.PathEscape(cleanStorageKey(key))
+	} else {
+		return types.WorkerArtifactRef{}, errors.New("storage endpoint for problem artifact is not configured")
+	}
+	return types.WorkerArtifactRef{
+		Url:          artifactURL,
+		Binding:      "storage_get",
+		ApiId:        firstNonEmpty(storageCfg.GetApiID, "storage.object.get"),
+		RelativePath: "/" + url.PathEscape(bucket) + "/" + url.PathEscape(cleanStorageKey(key)),
+		Sha256:       resourceSHA256,
+		SizeBytes:    submission.ProblemArtifactSizeBytes,
+		ContentType:  "application/zip",
+	}, nil
+}
+
 func artifactRefForFile(path string, urlPath string, contentType string) (types.WorkerArtifactRef, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
@@ -175,9 +247,13 @@ func artifactRefForFile(path string, urlPath string, contentType string) (types.
 	if err != nil {
 		return types.WorkerArtifactRef{}, err
 	}
+	resourceSHA256, err := apiResourceSHA256(digest)
+	if err != nil {
+		return types.WorkerArtifactRef{}, err
+	}
 	return types.WorkerArtifactRef{
 		Url:         urlPath,
-		Sha256:      digest,
+		Sha256:      resourceSHA256,
 		SizeBytes:   stat.Size(),
 		ContentType: contentType,
 	}, nil
@@ -192,9 +268,15 @@ func artifactRefForSubmissionSource(
 ) (types.WorkerArtifactRef, error) {
 	bucket, key, ok := parseStorageRef(path)
 	if !ok {
+		if !svcCtx.Config.WorkloadIdentity.AllowLegacyWorkerToken {
+			return types.WorkerArtifactRef{}, errors.New("local submission artifacts are allowed only for the legacy development worker path")
+		}
 		return artifactRefForFile(path, urlPath, contentType)
 	}
 	client := newStorageClient(svcCtx.Config.Storage)
+	if client.managedErr != nil {
+		return types.WorkerArtifactRef{}, client.managedErr
+	}
 	meta, err := client.getMetadata(ctx, bucket, key)
 	if err != nil {
 		return types.WorkerArtifactRef{}, err
@@ -205,15 +287,38 @@ func artifactRefForSubmissionSource(
 	if meta.ContentType != "" {
 		contentType = meta.ContentType
 	}
-	if strings.TrimSpace(svcCtx.Config.Storage.InternalGatewayEndpoint) != "" {
+	resourceSHA256, err := apiResourceSHA256(meta.SHA256)
+	if err != nil {
+		return types.WorkerArtifactRef{}, fmt.Errorf("invalid source artifact digest: %w", err)
+	}
+	if client.managed != nil || !svcCtx.Config.WorkloadIdentity.AllowLegacyWorkerToken {
+		urlPath = ""
+	} else if strings.TrimSpace(svcCtx.Config.Storage.InternalGatewayEndpoint) != "" {
 		urlPath = "/internal/apis/" + firstNonEmpty(svcCtx.Config.Storage.GetApiID, "storage.object.get") + "/" + bucket + "/" + key
 	}
 	return types.WorkerArtifactRef{
-		Url:         urlPath,
-		Sha256:      meta.SHA256,
-		SizeBytes:   meta.SizeBytes,
-		ContentType: contentType,
+		Url:          urlPath,
+		Binding:      "storage_get",
+		ApiId:        firstNonEmpty(svcCtx.Config.Storage.GetApiID, "storage.object.get"),
+		RelativePath: "/" + bucket + "/" + key,
+		Sha256:       resourceSHA256,
+		SizeBytes:    meta.SizeBytes,
+		ContentType:  contentType,
 	}, nil
+}
+
+func apiResourceSHA256(value string) (string, error) {
+	digest := strings.ToLower(strings.TrimSpace(value))
+	digest = strings.TrimPrefix(digest, "sha256:")
+	if len(digest) != 64 {
+		return "", errors.New("sha256 must contain exactly 64 hexadecimal characters")
+	}
+	for _, char := range digest {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return "", errors.New("sha256 contains a non-hexadecimal character")
+		}
+	}
+	return "sha256:" + digest, nil
 }
 
 func ensureProblemPackageZip(problemID int64, packageDir string) (string, error) {
@@ -357,6 +462,9 @@ func writeWorkerResultArtifacts(
 	}
 
 	resultDir := filepath.Dir(submission.ResultPath)
+	if err := os.MkdirAll(resultDir, 0o755); err != nil {
+		return err
+	}
 	for _, c := range req.Cases {
 		caseName := fmt.Sprintf("%03d", c.CaseNo)
 		caseDir := filepath.Join(resultDir, "cases", caseName)
@@ -400,13 +508,63 @@ func writeWorkerResultArtifacts(
 	return os.WriteFile(submission.ResultPath, data, 0o644)
 }
 
+func stageWorkerResultArtifacts(
+	ctx context.Context,
+	storage config.StorageConfig,
+	submission *repository.SubmissionView,
+	req *types.WorkerSubmitResultReq,
+	leaseVersion int,
+	payloadSHA256 string,
+) (string, error) {
+	if submission == nil {
+		return "", errors.New("submission is required")
+	}
+	if leaseVersion <= 0 || len(payloadSHA256) != 64 {
+		return "", errors.New("worker result receipt identity is invalid")
+	}
+	resultPath := versionedWorkerResultPath(submission, leaseVersion, payloadSHA256)
+	staged := *submission
+	staged.ResultPath = resultPath
+	if err := writeWorkerResultArtifacts(ctx, storage, &staged, req); err != nil {
+		return "", err
+	}
+	return resultPath, nil
+}
+
+func versionedWorkerResultPath(
+	submission *repository.SubmissionView,
+	leaseVersion int,
+	payloadSHA256 string,
+) string {
+	if bucket, _, ok := parseStorageRef(submission.ResultPath); ok {
+		// Storage Service v1 exposes the object key as one route segment. Keep
+		// the canonical reference identical to the key that storageClient sends
+		// instead of persisting a slash-delimited name which gets flattened only
+		// on the wire and can never be read back.
+		return storageRef(bucket, cleanStorageKey(pathpkg.Join(
+			"judge-results",
+			strconv.FormatInt(submission.ID, 10),
+			strconv.Itoa(leaseVersion),
+			payloadSHA256,
+			"result.json",
+		)))
+	}
+	return filepath.Join(
+		filepath.Dir(submission.ResultPath),
+		".receipts",
+		strconv.Itoa(leaseVersion),
+		payloadSHA256,
+		"result.json",
+	)
+}
+
 func writeWorkerResultArtifactsToStorage(
 	ctx context.Context,
 	storage config.StorageConfig,
 	submission *repository.SubmissionView,
 	req *types.WorkerSubmitResultReq,
 ) error {
-	bucket, _, ok := parseStorageRef(submission.ResultPath)
+	bucket, resultKey, ok := parseStorageRef(submission.ResultPath)
 	if !ok {
 		return errors.New("submission result path is not a storage ref")
 	}
@@ -422,14 +580,21 @@ func writeWorkerResultArtifactsToStorage(
 	for _, c := range req.Cases {
 		caseName := fmt.Sprintf("%03d", c.CaseNo)
 		stdoutPath := storageRef(bucket, fmt.Sprintf("%d-cases-%s-stdout.txt", submission.ID, caseName))
+		stderrPath := storageRef(bucket, fmt.Sprintf("%d-cases-%s-stderr.txt", submission.ID, caseName))
+		checkerPath := storageRef(bucket, fmt.Sprintf("%d-cases-%s-checker.log", submission.ID, caseName))
+		cleanResultKey := cleanStorageKey(resultKey)
+		if strings.HasPrefix(cleanResultKey, "judge-results-") && strings.HasSuffix(cleanResultKey, "-result.json") {
+			casePrefix := strings.TrimSuffix(cleanResultKey, "-result.json") + "-cases-" + caseName
+			stdoutPath = storageRef(bucket, casePrefix+"-stdout.txt")
+			stderrPath = storageRef(bucket, casePrefix+"-stderr.txt")
+			checkerPath = storageRef(bucket, casePrefix+"-checker.log")
+		}
 		if err := putBoundedStorageLog(ctx, storage, stdoutPath, c.Stdout); err != nil {
 			return err
 		}
-		stderrPath := storageRef(bucket, fmt.Sprintf("%d-cases-%s-stderr.txt", submission.ID, caseName))
 		if err := putBoundedStorageLog(ctx, storage, stderrPath, c.Stderr); err != nil {
 			return err
 		}
-		checkerPath := storageRef(bucket, fmt.Sprintf("%d-cases-%s-checker.log", submission.ID, caseName))
 		if err := putBoundedStorageLog(ctx, storage, checkerPath, c.CheckerLog); err != nil {
 			return err
 		}
