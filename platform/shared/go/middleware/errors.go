@@ -10,6 +10,7 @@ import (
 	"ojos-shared/security/permission"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/zeromicro/go-zero/rest/httpx"
 )
 
@@ -38,6 +39,14 @@ func classifyHTTPError(err error) (int, int, string) {
 	var coded CodedHTTPError
 	if errors.As(err, &coded) {
 		return coded.HTTPStatus(), coded.ErrorCode(), coded.PublicMessage()
+	}
+
+	// PostgreSQL errors are server-side failures, not malformed client input.
+	// In addition to returning the correct status, keep details such as SQL,
+	// constraint names, and trigger messages out of the public response.
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) {
+		return http.StatusInternalServerError, 50000, "internal server error"
 	}
 
 	switch {

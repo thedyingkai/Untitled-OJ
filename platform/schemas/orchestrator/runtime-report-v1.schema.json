@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ojos.dev/orchestrator/runtime-report-v1.schema.json",
+  "title": "OJOS Agent runtime report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "report_id", "observed_at_ms", "agent_version",
+    "runtime_policy_sha256", "allowed_contracts", "judge_sandbox_allowed_images", "redis_connection_ids",
+    "docker", "inventory_complete", "inventory_error", "deployment_observations",
+    "credential_statuses"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "report_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "observed_at_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Agent-clock lower bound captured before Docker inventory enumeration begins."
+    },
+    "agent_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "runtime_policy_sha256": { "$ref": "#/$defs/sha256" },
+    "allowed_contracts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/runtimeContract" }
+    },
+    "judge_sandbox_allowed_images": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[^\\s@]+@sha256:[0-9a-f]{64}$" }
+    },
+    "redis_connection_ids": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$" }
+    },
+    "docker": { "$ref": "#/$defs/docker" },
+    "inventory_complete": { "type": "boolean" },
+    "inventory_error": { "type": "string", "maxLength": 512 },
+    "deployment_observations": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": { "$ref": "#/$defs/deploymentObservation" }
+    },
+    "credential_statuses": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": { "$ref": "#/$defs/credentialStatus" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "inventory_complete": { "const": true } } },
+      "then": { "properties": { "inventory_error": { "maxLength": 0 } } },
+      "else": { "properties": { "inventory_error": { "minLength": 1 } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "allowed_contracts": {
+            "contains": {
+              "type": "object",
+              "properties": { "id": { "const": "judge-sandbox-v1" } },
+              "required": ["id"]
+            }
+          }
+        }
+      },
+      "then": { "properties": { "judge_sandbox_allowed_images": { "minItems": 1 } } },
+      "else": { "properties": { "judge_sandbox_allowed_images": { "maxItems": 0 } } }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "runtimeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "profile_sha256"],
+      "properties": {
+        "id": { "enum": ["standard-container-v1", "judge-sandbox-v1"] },
+        "profile_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "deploymentObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deployment_id", "service_id", "container_id", "artifact_digest",
+        "runtime_contract", "runtime_policy_sha256", "effective_runtime_sha256",
+        "observed_state", "health", "runtime_attested", "drift_reason"
+      ],
+      "properties": {
+        "deployment_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "service_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "container_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "artifact_digest": { "type": "string", "maxLength": 512 },
+        "runtime_contract": { "$ref": "#/$defs/runtimeContract" },
+        "runtime_policy_sha256": {
+          "oneOf": [
+            { "type": "string", "maxLength": 0 },
+            { "$ref": "#/$defs/sha256" }
+          ]
+        },
+        "effective_runtime_sha256": {
+          "oneOf": [
+            { "type": "string", "maxLength": 0 },
+            { "$ref": "#/$defs/sha256" }
+          ]
+        },
+        "observed_state": { "enum": ["CREATED", "RUNNING", "STOPPED", "EXITED", "MISSING", "UNKNOWN"] },
+        "health": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "runtime_attested": { "type": "boolean" },
+        "drift_reason": { "type": "string", "maxLength": 512 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "runtime_attested": { "const": true } } },
+          "then": {
+            "properties": {
+              "artifact_digest": { "pattern": "^[^\\s@]+@sha256:[0-9a-f]{64}$" },
+              "drift_reason": { "maxLength": 0 }
+            }
+          },
+          "else": { "properties": { "drift_reason": { "minLength": 1 } } }
+        }
+      ]
+    },
+    "credentialStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment_id", "expires_at_ms", "last_success_at_ms", "last_error"],
+      "properties": {
+        "deployment_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "expires_at_ms": { "type": "integer", "minimum": 0 },
+        "last_success_at_ms": { "type": "integer", "minimum": 0 },
+        "last_error": { "type": "string", "maxLength": 512 }
+      }
+    },
+    "docker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine", "server_version", "operating_system", "os_type", "architecture",
+        "cgroup_version", "memory_limit", "pids_limit", "rootless", "apparmor",
+        "seccomp", "security_options"
+      ],
+      "properties": {
+        "engine": { "const": "docker" },
+        "server_version": { "type": "string", "minLength": 1 },
+        "operating_system": { "type": "string", "minLength": 1 },
+        "os_type": { "enum": ["linux", "windows"] },
+        "architecture": { "type": "string", "minLength": 1 },
+        "cgroup_version": { "enum": ["1", "2", "none"] },
+        "memory_limit": { "type": "boolean" },
+        "pids_limit": { "type": "boolean" },
+        "rootless": { "type": "boolean" },
+        "apparmor": { "type": "boolean" },
+        "seccomp": { "type": "boolean" },
+        "security_options": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    }
+  }
+}

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "platform/shared/rust/service-context",
     "services/orchestrator/core",
     "services/orchestrator/legacy",
     "services/orchestrator/control-plane",
@@ -40,5 +41,6 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
+url = "2"
 ratatui = "0.30"
 crossterm = "0.29"

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ojos.dev/orchestrator/service-context-v1.schema.json",
+  "title": "OJOS managed service context v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "deployment", "gateway", "bindings", "credential_file", "generation"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "service", "node"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "service": { "$ref": "#/$defs/stableId" },
+        "node": { "$ref": "#/$defs/stableId" }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin"],
+      "properties": {
+        "origin": {
+          "type": "string",
+          "pattern": "^(?:https://(?:\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)(?::[1-9][0-9]{0,4})?|http://(?:127\\.0\\.0\\.1|localhost)(?::[1-9][0-9]{0,4})?)$"
+        },
+        "ca_file": { "type": "string", "pattern": "^/" }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/stableId" },
+      "additionalProperties": { "$ref": "#/$defs/binding" }
+    },
+    "credential_file": { "const": "/run/ojos/service/token" },
+    "generation": { "type": "integer", "minimum": 1 }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binding_id", "api_id", "base_path", "timeout_ms"],
+      "properties": {
+        "binding_id": { "$ref": "#/$defs/stableId" },
+        "api_id": { "$ref": "#/$defs/stableId" },
+        "base_path": { "type": "string", "pattern": "^/internal/apis/[A-Za-z0-9][A-Za-z0-9_.:-]*$" },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 300000 }
+      }
+    }
+  }
+}

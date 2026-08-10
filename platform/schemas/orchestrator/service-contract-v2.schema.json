@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ojos.dev/schemas/orchestrator/service-contract-v2.schema.json",
+  "title": "OJOS Service Contract v2 extensions",
+  "type": "object",
+  "required": ["schema_version", "provides", "requires", "events", "runtime_contract"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "provides": { "$ref": "#/$defs/provides" },
+    "requires": { "$ref": "#/$defs/requires" },
+    "events": { "$ref": "#/$defs/events" },
+    "runtime_contract": { "$ref": "#/$defs/runtimeContract" }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "providedApi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "path", "auth", "permission"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "version": { "$ref": "#/$defs/semver" },
+        "path": { "type": "string", "pattern": "^/" },
+        "auth": {
+          "oneOf": [
+            { "enum": ["public", "user", "service", "workload"] },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mode"],
+              "properties": { "mode": { "enum": ["public", "user", "service", "workload"] } }
+            }
+          ]
+        },
+        "permission": { "$ref": "#/$defs/identifier" },
+        "protocol": { "type": "string" },
+        "port_name": { "type": "string" },
+        "methods": { "type": "array", "items": { "type": "string" } },
+        "visibility": { "type": "string" },
+        "stability": { "type": "string" },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 300000 }
+      }
+    },
+    "requiredApi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "id", "version", "timeout_ms"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "version": { "type": "string", "minLength": 1 },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 300000 },
+        "optional": { "type": "boolean", "default": false },
+        "selection": { "enum": ["nearest-healthy", "same-node", "explicit"], "default": "nearest-healthy" }
+      }
+    },
+    "publishedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "version": { "$ref": "#/$defs/semver" },
+        "schema_ref": { "type": "string" }
+      }
+    },
+    "subscribedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "consumer_group"],
+      "properties": {
+        "type": { "$ref": "#/$defs/identifier" },
+        "version": { "$ref": "#/$defs/semver" },
+        "consumer_group": { "type": "string", "minLength": 1 },
+        "optional": { "type": "boolean", "default": false }
+      }
+    },
+    "provides": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apis"],
+      "properties": {
+        "apis": { "type": "array", "items": { "$ref": "#/$defs/providedApi" } },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/publishedEvent" }, "default": [] }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apis"],
+      "properties": {
+        "apis": { "type": "array", "items": { "$ref": "#/$defs/requiredApi" } },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/subscribedEvent" }, "default": [] }
+      }
+    },
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publishes", "subscribes"],
+      "properties": {
+        "publishes": { "type": "array", "items": { "$ref": "#/$defs/publishedEvent" } },
+        "subscribes": { "type": "array", "items": { "$ref": "#/$defs/subscribedEvent" } }
+      }
+    },
+    "runtimeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": { "enum": ["standard-container-v1", "judge-sandbox-v1"] },
+        "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "binding_directory": { "type": "string", "pattern": "^/", "default": "/run/ojos/service" },
+        "identity_mode": { "enum": ["workload", "none"], "default": "workload" },
+        "credential_delivery": { "enum": ["file", "local-proxy"], "default": "file" },
+        "restart_on_change": { "type": "boolean", "default": false },
+        "env_projection": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+          "default": {}
+        }
+      }
+    }
+  }
+}

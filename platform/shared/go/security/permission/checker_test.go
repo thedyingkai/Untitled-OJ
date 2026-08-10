@@ -5,7 +5,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"ojos-shared/servicecontext"
 )
 
 func TestAuthServiceUserCheckerUsesAdminPermissionCheck(t *testing.T) {
@@ -201,5 +205,113 @@ func TestRemoteUserCheckerFallsBackWhenGatewayIsNotConfigured(t *testing.T) {
 
 	if NewRemoteUserChecker(RemoteCheckerConfig{}) != nil {
 		t.Fatal("expected nil checker when no remote route is configured")
+	}
+}
+
+func TestServiceContextUserCheckerReloadsRotatedCredential(t *testing.T) {
+	var tokens []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokens = append(tokens, r.Header.Get("Authorization"))
+		if got := r.Header.Get("X-OJOS-Caller-Service"); got != "" {
+			t.Fatalf("managed SDK must not submit caller identity header, got %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(permissionCheckResponse{
+			Code: 0,
+			Msg:  "success",
+			Data: struct {
+				Allowed bool `json:"allowed"`
+			}{Allowed: true},
+		})
+	}))
+	defer server.Close()
+
+	credentialFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(credentialFile, []byte("generation-one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	managed := &servicecontext.ServiceContext{
+		SchemaVersion: 1,
+		Deployment:    servicecontext.DeploymentIdentity{ID: "problem-a", Service: "problem-service", Node: "node-a"},
+		Gateway:       servicecontext.GatewayContext{Origin: server.URL},
+		Bindings: map[string]servicecontext.APIBinding{
+			DefaultPermissionCheckBinding: {
+				BindingID: "binding-permission", APIID: DefaultPermissionCheckApiID,
+				BasePath: "/internal/apis/" + DefaultPermissionCheckApiID, TimeoutMS: 5000,
+			},
+		},
+		CredentialFile: credentialFile,
+		Generation:     1,
+	}
+	checker, err := NewServiceContextUserChecker(managed, DefaultPermissionCheckBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"generation-one", "generation-two"} {
+		if err := os.WriteFile(credentialFile, []byte(token+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		allowed, err := checker.HasUserPermission(t.Context(), 42, "judge.submit", SystemScope())
+		if err != nil || !allowed {
+			t.Fatalf("managed permission check failed: allowed=%v err=%v", allowed, err)
+		}
+	}
+	if len(tokens) != 2 || tokens[0] != "Bearer generation-one" || tokens[1] != "Bearer generation-two" {
+		t.Fatalf("credential was not reloaded: %#v", tokens)
+	}
+}
+
+func TestServiceContextUserCheckerFailsClosedForMissingOrWrongBinding(t *testing.T) {
+	managed := &servicecontext.ServiceContext{Bindings: map[string]servicecontext.APIBinding{}}
+	if _, err := NewServiceContextUserChecker(managed, DefaultPermissionCheckBinding); err == nil {
+		t.Fatal("missing managed permission binding was accepted")
+	}
+	managed.Bindings[DefaultPermissionCheckBinding] = servicecontext.APIBinding{
+		BindingID: "wrong", APIID: "storage.object.get", BasePath: "/internal/apis/storage.object.get", TimeoutMS: 5000,
+	}
+	if _, err := NewServiceContextUserChecker(managed, DefaultPermissionCheckBinding); err == nil {
+		t.Fatal("wrong managed permission API was accepted")
+	}
+}
+
+func TestManagedOrLegacyCheckerDoesNotFallbackWhenManagedContextIsInvalid(t *testing.T) {
+	directory := t.TempDir()
+	contextFile := filepath.Join(directory, "context.json")
+	credentialFile := filepath.Join(directory, "token")
+	if err := os.WriteFile(credentialFile, []byte("token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{
+		"schema_version":  1,
+		"deployment":      map[string]any{"id": "judge-a", "service": "judge-api", "node": "node-a"},
+		"gateway":         map[string]any{"origin": "http://127.0.0.1:8080"},
+		"bindings":        map[string]any{},
+		"credential_file": credentialFile,
+		"generation":      1,
+	}
+	data, _ := json.Marshal(payload)
+	if err := os.WriteFile(contextFile, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OJOS_SERVICE_CONTEXT_FILE", contextFile)
+	checker, err := NewManagedOrLegacyUserChecker(
+		"judge-api",
+		DefaultPermissionCheckBinding,
+		RemoteCheckerConfig{AuthServiceEndpoint: "http://legacy.invalid", AuthServiceAdminToken: "legacy-admin"},
+		nil,
+	)
+	if err == nil || checker != nil {
+		t.Fatalf("managed context unexpectedly fell back to legacy checker: checker=%#v err=%v", checker, err)
+	}
+}
+
+func TestProductionPermissionCheckerRejectsUnmanagedLegacyFallback(t *testing.T) {
+	t.Setenv("OJOS_SERVICE_CONTEXT_FILE", "")
+	t.Setenv("OJOS_ENVIRONMENT", "production")
+	checker, err := NewManagedOrLegacyUserChecker(
+		"judge-api", DefaultPermissionCheckBinding,
+		RemoteCheckerConfig{AuthServiceEndpoint: "http://legacy.invalid", AuthServiceAdminToken: "legacy-admin"}, nil,
+	)
+	if err == nil || checker != nil {
+		t.Fatalf("production accepted unmanaged legacy permission route: checker=%#v err=%v", checker, err)
 	}
 }

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ojos.dev/orchestrator/api-resource-ref-v1.schema.json",
+  "title": "OJOS ApiResourceRef v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["binding", "api_id", "relative_path", "sha256", "size_bytes"],
+  "properties": {
+    "binding": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "api_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "relative_path": {
+      "type": "string",
+      "pattern": "^/(?!/)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*%2[fF]|.*%5[cC]).+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "content_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    }
+  }
+}

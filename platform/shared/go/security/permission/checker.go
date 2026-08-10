@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
+
+	"ojos-shared/servicecontext"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/zeromicro/go-zero/core/logx"
@@ -67,6 +70,13 @@ const (
 	// RouteAuthService is the fallback route: a directly configured auth-service
 	// address used while the gateway route is not configured completely.
 	RouteAuthService = "auth-service"
+
+	// RouteServiceContext is the production Service Contract v2 route. The
+	// concrete provider and the short-lived credential are supplied by the
+	// Agent-materialized context, not application configuration.
+	RouteServiceContext = "service-context"
+
+	DefaultPermissionCheckBinding = "permission_check"
 )
 
 // RemoteCheckerConfig describes how a service reaches the permission check API.
@@ -98,6 +108,15 @@ type RemoteUserChecker struct {
 	callerNodeID  string
 	token         string
 	client        *http.Client
+}
+
+// ServiceContextUserChecker addresses the permission API by requirement name.
+// ServiceContext.NewRequest reloads the workload credential for every request,
+// so token rotation never requires restarting the service.
+type ServiceContextUserChecker struct {
+	context     servicecontext.ServiceContext
+	bindingName string
+	client      *http.Client
 }
 
 type permissionCheckRequest struct {
@@ -193,6 +212,51 @@ func NewAuthServiceUserChecker(endpoint string, adminToken string) UserChecker {
 	})
 }
 
+// NewServiceContextUserChecker constructs the fail-closed managed checker. A
+// missing or incorrectly bound requirement is a configuration error rather
+// than a reason to fall back to a database or a global management token.
+func NewServiceContextUserChecker(value *servicecontext.ServiceContext, bindingName string) (UserChecker, error) {
+	if value == nil {
+		return nil, errors.New("managed service context is required")
+	}
+	bindingName = strings.TrimSpace(bindingName)
+	if bindingName == "" {
+		bindingName = DefaultPermissionCheckBinding
+	}
+	binding, err := value.Binding(bindingName)
+	if err != nil {
+		return nil, err
+	}
+	if binding.APIID != DefaultPermissionCheckApiID {
+		return nil, fmt.Errorf("binding %q resolves %s, expected %s", bindingName, binding.APIID, DefaultPermissionCheckApiID)
+	}
+	client, err := value.Client()
+	if err != nil {
+		return nil, fmt.Errorf("configure permission binding client: %w", err)
+	}
+	return ServiceContextUserChecker{context: *value, bindingName: bindingName, client: client}, nil
+}
+
+// NewManagedOrLegacyUserChecker is the service startup boundary. Managed
+// workloads must use the named ApiBinding; legacy URL/token/database routing is
+// retained only when no Service Context is present (local Compose/development).
+func NewManagedOrLegacyUserChecker(expectedService, bindingName string, cfg RemoteCheckerConfig, db *pgxpool.Pool) (UserChecker, error) {
+	value, err := servicecontext.LoadOptional()
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("OJOS_ENVIRONMENT")), "production") {
+			return nil, errors.New("production permission checks require a managed Service Context")
+		}
+		return NewUserCheckerWithConfig(cfg, db), nil
+	}
+	if err := value.RequireService(strings.TrimSpace(expectedService)); err != nil {
+		return nil, err
+	}
+	return NewServiceContextUserChecker(value, bindingName)
+}
+
 // NewUserCheckerWithConfig prefers the orchestrator-resolved gateway route, then
 // the direct auth-service route, then the local database.
 func NewUserCheckerWithConfig(cfg RemoteCheckerConfig, db *pgxpool.Pool) UserChecker {
@@ -214,6 +278,8 @@ func (p RemoteUserChecker) Route() string {
 	return p.route
 }
 
+func (p ServiceContextUserChecker) Route() string { return RouteServiceContext }
+
 func (p RemoteUserChecker) RequireUserPermission(ctx context.Context, userID int64, permissionCode string, scope Scope) error {
 	allowed, err := p.HasUserPermission(ctx, userID, permissionCode, scope)
 	if err != nil {
@@ -223,6 +289,51 @@ func (p RemoteUserChecker) RequireUserPermission(ctx context.Context, userID int
 		return ErrForbidden
 	}
 	return nil
+}
+
+func (p ServiceContextUserChecker) RequireUserPermission(ctx context.Context, userID int64, permissionCode string, scope Scope) error {
+	allowed, err := p.HasUserPermission(ctx, userID, permissionCode, scope)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func (p ServiceContextUserChecker) HasUserPermission(ctx context.Context, userID int64, permissionCode string, scope Scope) (bool, error) {
+	permissionCode = strings.TrimSpace(permissionCode)
+	if userID <= 0 {
+		return false, errors.New("invalid user id")
+	}
+	if permissionCode == "" {
+		return false, errors.New("permission code is empty")
+	}
+	scope = normalizeScope(scope)
+	body, err := json.Marshal(permissionCheckRequest{
+		UserID: userID, Permission: permissionCode, ScopeType: scope.Type, ScopeID: scope.ID,
+	})
+	if err != nil {
+		return false, err
+	}
+	response, err := p.context.DoWithOptions(
+		ctx,
+		p.client,
+		p.bindingName,
+		http.MethodPost,
+		"",
+		bytes.NewReader(body),
+		servicecontext.RequestOptions{
+			Headers:       http.Header{"Content-Type": []string{"application/json"}},
+			ContentLength: int64(len(body)),
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("permission check via %s failed: %w", RouteServiceContext, err)
+	}
+	defer response.Body.Close()
+	return decodePermissionResponse(response, RouteServiceContext)
 }
 
 func (p RemoteUserChecker) HasUserPermission(ctx context.Context, userID int64, permissionCode string, scope Scope) (bool, error) {
@@ -268,16 +379,19 @@ func (p RemoteUserChecker) HasUserPermission(ctx context.Context, userID int64, 
 	}
 	defer resp.Body.Close()
 
+	return decodePermissionResponse(resp, p.route)
+}
+
+func decodePermissionResponse(resp *http.Response, route string) (bool, error) {
 	if resp.StatusCode == http.StatusUnauthorized {
-		return false, fmt.Errorf("permission check via %s unauthorized", p.route)
+		return false, fmt.Errorf("permission check via %s unauthorized", route)
 	}
 	if resp.StatusCode == http.StatusForbidden {
 		return false, ErrForbidden
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false, fmt.Errorf("permission check via %s returned %s", p.route, resp.Status)
+		return false, fmt.Errorf("permission check via %s returned %s", route, resp.Status)
 	}
-
 	var decoded permissionCheckResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return false, err
@@ -286,7 +400,7 @@ func (p RemoteUserChecker) HasUserPermission(ctx context.Context, userID int64, 
 		if strings.TrimSpace(decoded.Msg) == "" {
 			decoded.Msg = "permission check failed"
 		}
-		return false, fmt.Errorf("permission check via %s: %s", p.route, decoded.Msg)
+		return false, fmt.Errorf("permission check via %s: %s", route, decoded.Msg)
 	}
 	return decoded.Data.Allowed, nil
 }

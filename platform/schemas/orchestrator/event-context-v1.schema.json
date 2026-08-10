@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ojos.dev/orchestrator/event-context-v1.schema.json",
+  "title": "OJOS Agent-materialized event context v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "deployment",
+    "connection_id",
+    "connection_file",
+    "stream",
+    "publish_types",
+    "subscriptions",
+    "generation"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "service", "node"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "service": { "$ref": "#/$defs/stableId" },
+        "node": { "$ref": "#/$defs/stableId" }
+      }
+    },
+    "connection_id": { "$ref": "#/$defs/stableId" },
+    "connection_file": { "const": "/run/ojos/service/event-redis.url" },
+    "stream": { "const": "ojos:events:v1" },
+    "publish_types": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/stableId" }
+    },
+    "subscriptions": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/subscription" }
+    },
+    "generation": { "type": "integer", "minimum": 1 }
+  },
+  "anyOf": [
+    { "properties": { "publish_types": { "minItems": 1 } } },
+    { "properties": { "subscriptions": { "minItems": 1 } } }
+  ],
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "subscription": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_type", "consumer_group"],
+      "properties": {
+        "event_type": { "$ref": "#/$defs/stableId" },
+        "consumer_group": { "$ref": "#/$defs/stableId" }
+      }
+    }
+  }
+}

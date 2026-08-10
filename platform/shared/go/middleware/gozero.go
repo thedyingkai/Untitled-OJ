@@ -64,6 +64,12 @@ func Recovery(log *zap.Logger, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
+				// ReverseProxy uses this sentinel after a response stream has begun.
+				// Let net/http abort the connection instead of appending a JSON error
+				// to an incomplete object body.
+				if err == http.ErrAbortHandler {
+					panic(err)
+				}
 				log.Error("panic recovered", zap.Any("error", err))
 
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
