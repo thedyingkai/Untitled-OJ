@@ -1,5 +1,13 @@
+# DEVELOPMENT COMPATIBILITY ONLY.
+#
+# Production Judge Workers are installed by Orchestrator from the signed
+# Service Contract v2 release. The Agent then supplies the fixed
+# judge-sandbox-v1 HostConfig and a read-only /run/ojos/service context.
+# This Compose file deliberately keeps the legacy URL + shared worker token
+# path so local developers can run a worker without a control plane.
 services:
   judge-worker:
+    profiles: [ "legacy-development" ]
     build:
       context: ../..
       dockerfile: services/judge-worker/Dockerfile
@@ -13,6 +21,7 @@ services:
     security_opt:
       - apparmor=unconfined
     environment:
+      OJOS_ENVIRONMENT: development
       LANGUAGES_CONFIG: config/languages.yaml
       OJOS_WORKER_ID: ${OJOS_WORKER_ID}
       OJOS_WORKER_NAME: ${OJOS_WORKER_NAME}

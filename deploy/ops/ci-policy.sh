@@ -94,6 +94,15 @@ ORCHESTRATOR_TLS_CERT=/run/secrets/orchestrator-tls.crt
 ORCHESTRATOR_TLS_KEY=/run/secrets/orchestrator-tls.key
 ORCHESTRATOR_NODE_CA_CERT=/run/secrets/orchestrator-node-ca.crt
 ORCHESTRATOR_NODE_CA_KEY=/run/secrets/orchestrator-node-ca.key
+ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT=/run/secrets/gateway-workload-ca.crt
+OJOS_WORKLOAD_PRIVATE_KEY_FILE=/run/secrets/ojos-workload-private-key.pem
+OJOS_WORKLOAD_PUBLIC_KEY_FILE=/run/secrets/ojos-workload-public-key.pem
+OJOS_WORKLOAD_KEY_ID=workload-1
+OJOS_WORKLOAD_ISSUER=ojos-auth/workload
+OJOS_WORKLOAD_AUDIENCE=ojos-gateway
+ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN=http://auth-service:8081
+ORCHESTRATOR_AUTH_WORKLOAD_TOKEN=WorkloadIssuerProd_0123456789abcdef012345
+ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN=https://gateway.invalid
 ORCHESTRATOR_ARTIFACT_DIR=/var/lib/ojos/orchestrator/artifacts
 ORCHESTRATOR_MAX_WORKERS=160
 ORCHESTRATOR_LOG_RETENTION_DAYS=30
@@ -121,13 +130,11 @@ JWT_SECRET=JwtProd_0123456789abcdef0123456789abcdef
 AUTH_INTERNAL_TOKEN=AuthIntProd_0123456789abcdef0123456789
 ORCHESTRATOR_INTERNAL_TOKEN=OrchIntProd_0123456789abcdef0123456789
 ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM=1
-OJOS_WORKER_TOKEN=WorkerAuthProd_0123456789abcdef01234567
 OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT=http://gateway:8080
 OJOS_AUTH_PERMISSION_CHECK_API_ID=auth.user.permission.check
 OJOS_USER_SERVICE_TOKEN=UserSvcProd_0123456789abcdef0123456789
 OJOS_PROBLEM_SERVICE_TOKEN=ProblemSvcProd_0123456789abcdef0123456
 OJOS_JUDGE_API_SERVICE_TOKEN=JudgeApiSvcProd_0123456789abcdef012345
-OJOS_JUDGE_WORKER_SERVICE_TOKEN=JudgeWorkerSvcProd_0123456789abcdef01
 
 MINIO_ROOT_USER=prodminioaccess
 MINIO_ROOT_PASSWORD=MinioRootProd_0123456789abcdef012345
@@ -136,18 +143,6 @@ MINIO_ACCESS_KEY=prodminioaccess
 MINIO_SECRET_KEY=MinioAccessProd_0123456789abcdef0123
 MINIO_USE_SSL=false
 OJOS_STORAGE_BUCKETS=problems,submissions,judge-artifacts,avatars
-
-OJOS_RUNNER_MODE=nsjail
-OJOS_ALLOW_CGROUP_FALLBACK=false
-OJOS_NSJAIL_NO_PIVOTROOT=false
-OJOS_WORKER_ID=worker-node-01
-OJOS_WORKER_NAME=Worker Node 01
-OJOS_JUDGE_API_URL=http://judge-api:8082
-OJOS_MAX_CONCURRENCY=1
-OJOS_SUPPORTED_LANGUAGES=cpp17,c11,python3,java17
-OJOS_HEARTBEAT_INTERVAL=10
-OJOS_TASK_LEASE_TTL=60
-OJOS_LOG_LEVEL=info
 
 OJOS_BACKUP_DIR=/var/backups/ojos
 OJOS_STORAGE_ROOT=/var/lib/ojos/storage
@@ -188,13 +183,55 @@ if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJO
 fi
 
 rendered="$(mktemp)"
+rendered_json="$(mktemp)"
+legacy_rendered="$(mktemp)"
 dev_rendered="$(mktemp)"
-trap 'rm -f "$strong_env" "$reused_service_token_env" "$wrong_migration_database_env" "$missing_postgres_ca_env" "$plaintext_health_env" "$rendered" "$dev_rendered"' EXIT
+trap 'rm -f "$strong_env" "$reused_service_token_env" "$wrong_migration_database_env" "$missing_postgres_ca_env" "$plaintext_health_env" "$rendered" "$rendered_json" "$legacy_rendered" "$dev_rendered"' EXIT
 docker compose --env-file "$strong_env" -f "$repo_root/deploy/compose/docker-compose.yml" config >"$rendered"
-grep -q 'OJOS_RUNNER_MODE: nsjail' "$rendered" || {
-  echo "ops-ci: judge-worker must render with OJOS_RUNNER_MODE=nsjail" >&2
+docker compose --env-file "$strong_env" -f "$repo_root/deploy/compose/docker-compose.yml" config --format json >"$rendered_json"
+if grep -Eq '^[[:space:]]+judge-worker:' "$rendered" || grep -q 'OJOS_RUNNER_MODE:' "$rendered"; then
+  echo "ops-ci: production Compose must not render the legacy development Judge Worker" >&2
+  exit 1
+fi
+docker compose --profile legacy-development --env-file "$repo_root/.env.example" \
+  -f "$repo_root/deploy/compose/docker-compose.yml" \
+  -f "$repo_root/deploy/compose/docker-compose.dev.yml" config >"$legacy_rendered"
+grep -Eq '^[[:space:]]+judge-worker:' "$legacy_rendered" || {
+  echo "ops-ci: the compatibility Judge Worker must require the explicit legacy-development profile" >&2
   exit 1
 }
+grep -q 'OJOS_RUNNER_MODE: nsjail' "$legacy_rendered" || {
+  echo "ops-ci: the compatibility Judge Worker must retain the nsjail runner" >&2
+  exit 1
+}
+python3 - "$rendered_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    services = json.load(stream)["services"]
+
+assert "judge-worker" not in services, "legacy Judge Worker rendered in production"
+orchestrator = services["orchestrator"]["environment"]
+auth = services["auth-service"]["environment"]
+gateway = services["gateway"]["environment"]
+judge = services["judge-api"]["environment"]
+
+assert orchestrator["OJOS_ENVIRONMENT"] == "production"
+assert orchestrator["ORCHESTRATOR_AUTH_WORKLOAD_TOKEN"]
+assert orchestrator["ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN"].startswith("https://")
+assert auth["OJOS_ENVIRONMENT"] == "production"
+assert auth["OJOS_WORKLOAD_CONTROL_PLANE_TOKEN"] == orchestrator["ORCHESTRATOR_AUTH_WORKLOAD_TOKEN"]
+assert auth["OJOS_WORKLOAD_PRIVATE_KEY_FILE"] == "/run/secrets/ojos-workload-private-key.pem"
+assert "OJOS_WORKLOAD_PUBLIC_KEY_FILE" not in auth
+assert gateway["OJOS_ENVIRONMENT"] == "production"
+assert gateway["OJOS_WORKLOAD_PUBLIC_KEY_FILE"] == "/run/secrets/ojos-workload-public-key.pem"
+assert "OJOS_WORKLOAD_PRIVATE_KEY_FILE" not in gateway
+assert judge["OJOS_ENVIRONMENT"] == "production"
+assert judge["OJOS_ALLOW_LEGACY_WORKER_TOKEN"] == "false"
+assert judge["OJOS_WORKER_TOKEN"] == ""
+assert judge["OJOS_WORKLOAD_PUBLIC_KEY_FILE"] == "/run/secrets/ojos-workload-public-key.pem"
+PY
 if grep -Eq 'ORCHESTRATOR_NODE_(DISPATCH|ENDPOINT|TOKEN|EXECUTE_SERVICE_DRIVER|HOST_IP):' "$rendered"; then
   echo "ops-ci: v1 Compose must not publish the removed Node push/bearer transport" >&2
   exit 1
@@ -226,6 +263,10 @@ for variable in \
   ORCHESTRATOR_TLS_KEY \
   ORCHESTRATOR_NODE_CA_CERT \
   ORCHESTRATOR_NODE_CA_KEY \
+  ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN \
+  ORCHESTRATOR_AUTH_WORKLOAD_TOKEN \
+  ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN \
+  ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE \
   ORCHESTRATOR_CATALOG_TRUST_KEYS \
   ORCHESTRATOR_CATALOG_SOURCES \
   ORCHESTRATOR_OIDC_ISSUER \
@@ -256,6 +297,7 @@ for assignment in \
   'ORCHESTRATOR_TLS_KEY: /run/secrets/orchestrator-tls.key' \
   'ORCHESTRATOR_NODE_CA_CERT: /run/secrets/orchestrator-node-ca.crt' \
   'ORCHESTRATOR_NODE_CA_KEY: /run/secrets/orchestrator-node-ca.key' \
+  'ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE: /run/secrets/gateway-workload-ca.crt' \
   'ORCHESTRATOR_HEALTHCHECK_URL: https://orchestrator:8090/api/v1/healthz/ready' \
   'ORCHESTRATOR_LEGACY_API_MODE: gone'
 do
@@ -286,7 +328,10 @@ for target in \
   /run/secrets/orchestrator-tls.crt \
   /run/secrets/orchestrator-tls.key \
   /run/secrets/orchestrator-node-ca.crt \
-  /run/secrets/orchestrator-node-ca.key
+  /run/secrets/orchestrator-node-ca.key \
+  /run/secrets/gateway-workload-ca.crt \
+  /run/secrets/ojos-workload-private-key.pem \
+  /run/secrets/ojos-workload-public-key.pem
 do
   awk -v target="$target" '
     index($0, "target: " target) {
@@ -353,12 +398,12 @@ grep -Fq -e 'dev-secrets/placeholder' -e 'dev-secrets\placeholder' "$dev_rendere
   echo "ops-ci: development Compose must resolve its harmless placeholder mounts" >&2
   exit 1
 }
-runner_lines="$(grep 'OJOS_RUNNER_MODE:' "$rendered" || true)"
+runner_lines="$(grep 'OJOS_RUNNER_MODE:' "$legacy_rendered" || true)"
 if [[ -n "$runner_lines" ]] && grep -v 'OJOS_RUNNER_MODE: nsjail' <<<"$runner_lines" >/dev/null; then
   echo "ops-ci: unsupported judge-worker runner mode rendered" >&2
   exit 1
 fi
-if grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: "true"' "$rendered" || grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: true' "$rendered"; then
+if grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: "true"' "$legacy_rendered" || grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: true' "$legacy_rendered"; then
   echo "ops-ci: cgroup fallback must not render enabled" >&2
   exit 1
 fi

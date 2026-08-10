@@ -107,6 +107,7 @@ services:
       orchestrator-migrations:
         condition: service_completed_successfully
     environment:
+      OJOS_ENVIRONMENT: production
       ORCHESTRATOR_DATABASE_URL: ${ORCHESTRATOR_DATABASE_URL:?set the production PostgreSQL URL with sslmode=require}
       ORCHESTRATOR_POSTGRES_CA_CERT: /run/secrets/orchestrator-postgres-ca.crt
       ORCHESTRATOR_ARTIFACT_DIR: /var/lib/ojos/orchestrator/artifacts
@@ -133,6 +134,12 @@ services:
       ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: ${ORCHESTRATOR_GATEWAY_ADMIN_TOKEN:-}
       ORCHESTRATOR_AUTH_ADMIN_ORIGIN: ${ORCHESTRATOR_AUTH_ADMIN_ORIGIN:-}
       ORCHESTRATOR_AUTH_ADMIN_TOKEN: ${ORCHESTRATOR_AUTH_ADMIN_TOKEN:-}
+      # Dedicated workload-identity path. This credential can only mint
+      # deployment JWTs; it is not the Auth admin or Orchestrator API token.
+      ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN: ${ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN:-http://auth-service:8081}
+      ORCHESTRATOR_AUTH_WORKLOAD_TOKEN: ${ORCHESTRATOR_AUTH_WORKLOAD_TOKEN:?set a dedicated Auth workload issuer token}
+      ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN: ${ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN:?set the B-node reachable HTTPS Gateway origin}
+      ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE: /run/secrets/gateway-workload-ca.crt
       ORCHESTRATOR_MAX_WORKERS: ${ORCHESTRATOR_MAX_WORKERS:-160}
       ORCHESTRATOR_LOG_RETENTION_DAYS: ${ORCHESTRATOR_LOG_RETENTION_DAYS:-30}
       ORCHESTRATOR_ARTIFACT_RETENTION_DAYS: ${ORCHESTRATOR_ARTIFACT_RETENTION_DAYS:-30}
@@ -176,6 +183,10 @@ services:
       - type: bind
         source: ${ORCHESTRATOR_NODE_CA_KEY:?set ORCHESTRATOR_NODE_CA_KEY to an absolute host key file}
         target: /run/secrets/orchestrator-node-ca.key
+        read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT:?set ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT to the Gateway CA bundle}
+        target: /run/secrets/gateway-workload-ca.crt
         read_only: true
     # v1 live/ready routes are auth-exempt. Production overrides the URL with HTTPS.
     healthcheck:
@@ -292,6 +303,7 @@ services:
       orchestrator:
         condition: service_healthy
     environment:
+      OJOS_ENVIRONMENT: production
       REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
@@ -300,13 +312,17 @@ services:
       ORCHESTRATOR_ENDPOINT: ${ORCHESTRATOR_ENDPOINT:-http://orchestrator:8090}
       ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:-ojos-local-internal}
       ORCHESTRATOR_NODE_ID: ${ORCHESTRATOR_NODE_ID:-child-node}
-      OJOS_PROBLEMS_ROOT: /data/ojos/problems
-      OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
+      OJOS_WORKLOAD_PUBLIC_KEY_FILE: /run/secrets/ojos-workload-public-key.pem
+      OJOS_WORKLOAD_KEY_ID: ${OJOS_WORKLOAD_KEY_ID:-workload-1}
+      OJOS_WORKLOAD_ISSUER: ${OJOS_WORKLOAD_ISSUER:-ojos-auth/workload}
+      OJOS_WORKLOAD_AUDIENCE: ${OJOS_WORKLOAD_AUDIENCE:-ojos-gateway}
     ports:
       - "8080:8080"
     volumes:
-      - ../../storage/problems:/data/ojos/problems:ro
-      - ../../storage/submissions:/data/ojos/submissions:ro
+      - type: bind
+        source: ${OJOS_WORKLOAD_PUBLIC_KEY_FILE:?set OJOS_WORKLOAD_PUBLIC_KEY_FILE to the Ed25519 public PEM}
+        target: /run/secrets/ojos-workload-public-key.pem
+        read_only: true
 
   auth-service:
     build:
@@ -332,10 +348,22 @@ services:
     ports:
       - "127.0.0.1:8081:8081"
     environment:
+      OJOS_ENVIRONMENT: production
       DATABASE_URL: ${AUTH_DATABASE_URL:-postgres://postgres:ojos-auth-local@auth-db:5432/ojos_auth?sslmode=disable}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_WORKLOAD_PRIVATE_KEY_FILE: /run/secrets/ojos-workload-private-key.pem
+      OJOS_WORKLOAD_CONTROL_PLANE_TOKEN: ${ORCHESTRATOR_AUTH_WORKLOAD_TOKEN:?set a dedicated Auth workload issuer token}
+      OJOS_WORKLOAD_KEY_ID: ${OJOS_WORKLOAD_KEY_ID:-workload-1}
+      OJOS_WORKLOAD_ISSUER: ${OJOS_WORKLOAD_ISSUER:-ojos-auth/workload}
+      OJOS_WORKLOAD_AUDIENCE: ${OJOS_WORKLOAD_AUDIENCE:-ojos-gateway}
+      OJOS_WORKLOAD_TTL_SECONDS: "900"
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
+    volumes:
+      - type: bind
+        source: ${OJOS_WORKLOAD_PRIVATE_KEY_FILE:?set OJOS_WORKLOAD_PRIVATE_KEY_FILE to the Ed25519 private PEM}
+        target: /run/secrets/ojos-workload-private-key.pem
+        read_only: true
 
   user-service:
     build:
@@ -413,8 +441,8 @@ services:
         no_proxy: ${OJOS_BUILD_NO_PROXY:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
-      judge-db:
-        condition: service_healthy
+      judge-api-migrations:
+        condition: service_completed_successfully
       redis:
         condition: service_started
     expose:
@@ -422,6 +450,7 @@ services:
     ports:
       - "127.0.0.1:8082:8082"
     environment:
+      OJOS_ENVIRONMENT: production
       DATABASE_URL: ${JUDGE_DATABASE_URL:-postgres://postgres:ojos-judge-local@judge-db:5432/ojos_judge?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
@@ -430,8 +459,12 @@ services:
       OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT: ${OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT:-}
       OJOS_AUTH_PERMISSION_CHECK_API_ID: ${OJOS_AUTH_PERMISSION_CHECK_API_ID:-auth.user.permission.check}
       OJOS_JUDGE_API_SERVICE_TOKEN: ${OJOS_JUDGE_API_SERVICE_TOKEN:-ojos-local-internal}
-      OJOS_SUBMISSIONS_ROOT: /data/ojos/submissions
-      OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
+      OJOS_WORKER_TOKEN: ""
+      OJOS_WORKLOAD_PUBLIC_KEY_FILE: /run/secrets/ojos-workload-public-key.pem
+      OJOS_WORKLOAD_KEY_ID: ${OJOS_WORKLOAD_KEY_ID:-workload-1}
+      OJOS_WORKLOAD_ISSUER: ${OJOS_WORKLOAD_ISSUER:-ojos-auth/workload}
+      OJOS_WORKLOAD_AUDIENCE: ${OJOS_WORKLOAD_AUDIENCE:-ojos-gateway}
+      OJOS_ALLOW_LEGACY_WORKER_TOKEN: "false"
       OJOS_INTERNAL_GATEWAY_ENDPOINT: http://gateway:8080
       OJOS_STORAGE_OBJECT_GET_API_ID: storage.object.get
       OJOS_STORAGE_OBJECT_PUT_API_ID: storage.object.put
@@ -439,11 +472,18 @@ services:
       OJOS_SERVICE_TOKEN: ${OJOS_JUDGE_API_SERVICE_TOKEN:-ojos-local-internal}
       OJOS_CALLER_SERVICE: judge-api
       OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
+      OJOS_PROBLEM_EVENT_STREAM: ${OJOS_PROBLEM_EVENT_STREAM:-ojos:integration:problem:v1}
     volumes:
-      - ../../storage/submissions:/data/ojos/submissions
-      - ../../storage/problems:/data/ojos/problems:ro
+      - type: bind
+        source: ${OJOS_WORKLOAD_PUBLIC_KEY_FILE:?set OJOS_WORKLOAD_PUBLIC_KEY_FILE to the Ed25519 public PEM}
+        target: /run/secrets/ojos-workload-public-key.pem
+        read_only: true
 
   judge-worker:
+    # Compatibility only: production B nodes run an enrolled Agent and install
+    # the signed v2 release. This profile must be selected explicitly for old
+    # single-host development (`--profile legacy-development`).
+    profiles: [ "legacy-development" ]
     build:
       context: ../..
       dockerfile: services/judge-worker/Dockerfile
@@ -472,6 +512,7 @@ services:
     security_opt:
       - apparmor=unconfined
     environment:
+      OJOS_ENVIRONMENT: development
       LANGUAGES_CONFIG: config/languages.yaml
       OJOS_JUDGE_API_URL: http://judge-api:8082
       OJOS_INTERNAL_GATEWAY_URL: http://gateway:8080
@@ -539,6 +580,8 @@ services:
       OJOS_SERVICE_TOKEN: ${OJOS_PROBLEM_SERVICE_TOKEN:-ojos-local-internal}
       OJOS_CALLER_SERVICE: problem-service
       OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
+      OJOS_PROBLEM_EVENT_STREAM: ${OJOS_PROBLEM_EVENT_STREAM:-ojos:integration:problem:v1}
+      OJOS_PROBLEM_EVENT_REPLAY_ON_START: ${OJOS_PROBLEM_EVENT_REPLAY_ON_START:-false}
     volumes:
       - ../../storage/problems:/data/ojos/problems
 

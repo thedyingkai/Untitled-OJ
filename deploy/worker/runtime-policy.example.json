@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "allowed_profiles": [
+    "standard-container-v1",
+    "judge-sandbox-v1"
+  ],
+  "service_context_root": "/var/lib/ojos-agent/runtime-contexts",
+  "judge_sandbox": {
+    "profile_sha256": "sha256:a6b35a495f88bd8e723e395d748de40fbb4dcc08619d02cf92fa580fef2a18ec",
+    "context_root": "/var/lib/ojos-agent/runtime-contexts",
+    "allowed_images": [
+      "registry.example/ojos/judge-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    ]
+  }
+}

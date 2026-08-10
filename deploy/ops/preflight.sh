@@ -41,15 +41,11 @@ if [[ -n "${OJOS_ENV_FILE:-}" ]]; then
 fi
 
 rendered="$(mktemp)"
+trap 'rm -f "$rendered"' EXIT
 docker compose "${compose_args[@]}" config >"$rendered"
 
-grep -q 'OJOS_RUNNER_MODE: nsjail' "$rendered" || die "judge-worker must render with OJOS_RUNNER_MODE=nsjail"
-runner_lines="$(grep 'OJOS_RUNNER_MODE:' "$rendered" || true)"
-if [[ -n "$runner_lines" ]] && grep -v 'OJOS_RUNNER_MODE: nsjail' <<<"$runner_lines" >/dev/null; then
-  die "unsupported judge-worker runner mode rendered in production compose"
-fi
-if grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: "true"' "$rendered" || grep -q 'OJOS_ALLOW_CGROUP_FALLBACK: true' "$rendered"; then
-  die "judge-worker must not render with cgroup fallback enabled"
+if grep -Eq '^[[:space:]]+judge-worker:' "$rendered" || grep -q 'OJOS_RUNNER_MODE:' "$rendered"; then
+  die "production Compose must not enable the legacy-development Judge Worker profile"
 fi
 if grep -Eq 'ojos-local|static-compose|local-jwt|local-worker|local-internal|minio-local|<[^>]+>' "$rendered"; then
   die "rendered compose still contains local/default placeholders"

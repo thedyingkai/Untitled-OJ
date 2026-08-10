@@ -65,7 +65,7 @@ compose_dev_file_for_docker="$(docker_cli_path "$compose_dev_file")"
 env_file_for_docker="$(docker_cli_path "$env_file")"
 
 docker_compose() {
-  MSYS2_ARG_CONV_EXCL='*' docker compose --env-file "$env_file_for_docker" \
+  MSYS2_ARG_CONV_EXCL='*' docker compose --profile legacy-development --env-file "$env_file_for_docker" \
     -f "$compose_file_for_docker" -f "$compose_dev_file_for_docker" "$@"
 }
 

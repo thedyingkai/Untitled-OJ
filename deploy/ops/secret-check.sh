@@ -153,12 +153,11 @@ load_env_file
 require_secret JWT_SECRET 32
 require_secret AUTH_INTERNAL_TOKEN 32
 require_secret ORCHESTRATOR_INTERNAL_TOKEN 32
+require_secret ORCHESTRATOR_AUTH_WORKLOAD_TOKEN 32
 require_enabled_flag ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM
-require_secret OJOS_WORKER_TOKEN 32
 require_secret OJOS_USER_SERVICE_TOKEN 32
 require_secret OJOS_PROBLEM_SERVICE_TOKEN 32
 require_secret OJOS_JUDGE_API_SERVICE_TOKEN 32
-require_secret OJOS_JUDGE_WORKER_SERVICE_TOKEN 32
 require_secret REDIS_PASSWORD 20
 require_secret MINIO_ROOT_USER 8
 require_secret MINIO_ROOT_PASSWORD 32
@@ -176,11 +175,10 @@ require_all_distinct_secrets \
   JWT_SECRET \
   AUTH_INTERNAL_TOKEN \
   ORCHESTRATOR_INTERNAL_TOKEN \
-  OJOS_WORKER_TOKEN \
+  ORCHESTRATOR_AUTH_WORKLOAD_TOKEN \
   OJOS_USER_SERVICE_TOKEN \
   OJOS_PROBLEM_SERVICE_TOKEN \
-  OJOS_JUDGE_API_SERVICE_TOKEN \
-  OJOS_JUDGE_WORKER_SERVICE_TOKEN
+  OJOS_JUDGE_API_SERVICE_TOKEN
 
 require_database_url AUTH_DATABASE_URL
 require_database_url PROBLEM_DATABASE_URL
@@ -207,6 +205,9 @@ for name in \
   ORCHESTRATOR_TLS_KEY \
   ORCHESTRATOR_NODE_CA_CERT \
   ORCHESTRATOR_NODE_CA_KEY \
+  ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT \
+  OJOS_WORKLOAD_PRIVATE_KEY_FILE \
+  OJOS_WORKLOAD_PUBLIC_KEY_FILE \
   ORCHESTRATOR_ARTIFACT_DIR
 do
   require_absolute_path "$name"
@@ -214,6 +215,9 @@ done
 healthcheck_url="$(value_for ORCHESTRATOR_HEALTHCHECK_URL)"
 [[ "$healthcheck_url" == https://* ]] || \
   die "ORCHESTRATOR_HEALTHCHECK_URL must use https:// in production"
+gateway_workload_origin="$(value_for ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN)"
+[[ "$gateway_workload_origin" == https://* ]] || \
+  die "ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN must use https:// in production"
 for removed in \
   ORCHESTRATOR_NODE_DISPATCH \
   ORCHESTRATOR_NODE_ENDPOINT \

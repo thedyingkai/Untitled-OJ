@@ -18,6 +18,7 @@ services:
       - --artifact-root
       - /var/lib/ojos/orchestrator/artifacts
     environment:
+      OJOS_ENVIRONMENT: development
       # An empty Catalog variable is still considered configured by the daemon.
       # Remove both keys entirely so ephemeral Desktop/integration startup uses
       # the local dynamic Catalog registry instead of parsing empty JSON.
@@ -27,6 +28,28 @@ services:
       ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: null
       ORCHESTRATOR_AUTH_ADMIN_ORIGIN: null
       ORCHESTRATOR_AUTH_ADMIN_TOKEN: null
+      ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN: ""
+      ORCHESTRATOR_AUTH_WORKLOAD_TOKEN: ""
+      ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN: ""
+      ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE: ""
       ORCHESTRATOR_DATABASE_URL: ""
       ORCHESTRATOR_HEALTHCHECK_URL: http://127.0.0.1:8090/api/v1/healthz/live
       ORCHESTRATOR_LEGACY_API_MODE: gone
+
+  gateway:
+    environment:
+      OJOS_ENVIRONMENT: development
+      OJOS_WORKLOAD_PUBLIC_KEY_FILE: ""
+
+  auth-service:
+    environment:
+      OJOS_ENVIRONMENT: development
+      OJOS_WORKLOAD_PRIVATE_KEY_FILE: ""
+      OJOS_WORKLOAD_CONTROL_PLANE_TOKEN: ""
+
+  judge-api:
+    environment:
+      OJOS_ENVIRONMENT: development
+      OJOS_WORKLOAD_PUBLIC_KEY_FILE: ""
+      OJOS_ALLOW_LEGACY_WORKER_TOKEN: "true"
+      OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
