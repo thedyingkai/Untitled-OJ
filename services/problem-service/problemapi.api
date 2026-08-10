@@ -27,22 +27,22 @@ type ProblemComponentInput {
 }
 
 type CreateProblemReq {
-	ProblemNo     string                 `json:"problem_no,optional"`
-	Title         string `json:"title"`
-	Slug          string `json:"slug,optional"`
-	Statement     string `json:"statement,optional"`
-	Solution      string `json:"solution,optional"`
-	TimeLimitMs   int    `json:"time_limit_ms,optional"`
-	MemoryLimitMb int    `json:"memory_limit_mb,optional"`
+	ProblemNo      string                 `json:"problem_no,optional"`
+	Title          string                 `json:"title"`
+	Slug           string                 `json:"slug,optional"`
+	Statement      string                 `json:"statement,optional"`
+	Solution       string                 `json:"solution,optional"`
+	TimeLimitMs    int                    `json:"time_limit_ms,optional"`
+	MemoryLimitMb  int                    `json:"memory_limit_mb,optional"`
 	LanguageLimits []ProblemLanguageLimit `json:"language_limits,optional"`
-	Runner        ProblemComponentInput  `json:"runner,optional"`
-	Checker       ProblemComponentInput  `json:"checker,optional"`
-	Validator     ProblemComponentInput  `json:"validator,optional"`
-	Scorer        ProblemComponentInput  `json:"scorer,optional"`
-	ProblemType   string `json:"problem_type,optional"`
-	Visibility    string `json:"visibility,optional"`
-	Difficulty    string `json:"difficulty,optional"`
-	Tags          string `json:"tags,optional"`
+	Runner         ProblemComponentInput  `json:"runner,optional"`
+	Checker        ProblemComponentInput  `json:"checker,optional"`
+	Validator      ProblemComponentInput  `json:"validator,optional"`
+	Scorer         ProblemComponentInput  `json:"scorer,optional"`
+	ProblemType    string                 `json:"problem_type,optional"`
+	Visibility     string                 `json:"visibility,optional"`
+	Difficulty     string                 `json:"difficulty,optional"`
+	Tags           string                 `json:"tags,optional"`
 }
 
 type CreateProblemResp {
@@ -52,23 +52,23 @@ type CreateProblemResp {
 }
 
 type UpdateProblemReq {
-	Id            int64  `path:"id"`
-	ProblemNo     string `json:"problem_no,optional"`
-	Title         string `json:"title,optional"`
-	Statement     string `json:"statement,optional"`
-	Solution      string `json:"solution,optional"`
-	TimeLimitMs   int    `json:"time_limit_ms,optional"`
-	MemoryLimitMb int    `json:"memory_limit_mb,optional"`
+	Id             int64                  `path:"id"`
+	ProblemNo      string                 `json:"problem_no,optional"`
+	Title          string                 `json:"title,optional"`
+	Statement      string                 `json:"statement,optional"`
+	Solution       string                 `json:"solution,optional"`
+	TimeLimitMs    int                    `json:"time_limit_ms,optional"`
+	MemoryLimitMb  int                    `json:"memory_limit_mb,optional"`
 	LanguageLimits []ProblemLanguageLimit `json:"language_limits,optional"`
-	Runner        ProblemComponentInput  `json:"runner,optional"`
-	Checker       ProblemComponentInput  `json:"checker,optional"`
-	Validator     ProblemComponentInput  `json:"validator,optional"`
-	Scorer        ProblemComponentInput  `json:"scorer,optional"`
-	ProblemType   string `json:"problem_type,optional"`
-	Visibility    string `json:"visibility,optional"`
-	Difficulty    string `json:"difficulty,optional"`
-	Tags          string `json:"tags,optional"`
-	Status        string `json:"status,optional"`
+	Runner         ProblemComponentInput  `json:"runner,optional"`
+	Checker        ProblemComponentInput  `json:"checker,optional"`
+	Validator      ProblemComponentInput  `json:"validator,optional"`
+	Scorer         ProblemComponentInput  `json:"scorer,optional"`
+	ProblemType    string                 `json:"problem_type,optional"`
+	Visibility     string                 `json:"visibility,optional"`
+	Difficulty     string                 `json:"difficulty,optional"`
+	Tags           string                 `json:"tags,optional"`
+	Status         string                 `json:"status,optional"`
 }
 
 type GetProblemReq {
@@ -76,28 +76,28 @@ type GetProblemReq {
 }
 
 type ProblemItem {
-	Id             int64           `json:"id"`
-	ProblemNo      string          `json:"problem_no"`
-	Slug           string          `json:"slug"`
-	Title          string          `json:"title"`
-	Statement      string          `json:"statement"`
-	StatementFormat string         `json:"statement_format"`
-	Solution       string          `json:"solution"`
-	SolutionFormat string          `json:"solution_format"`
-	ProblemType    string          `json:"problem_type"`
-	Visibility     string          `json:"visibility"`
-	ManifestSha256 string          `json:"manifest_sha256"`
-	SourceFormat   string          `json:"source_format"`
-	Status         string          `json:"status"`
-	Difficulty     string          `json:"difficulty"`
-	Tags           string          `json:"tags"`
-	TimeLimitMs    int             `json:"time_limit_ms"`
-	MemoryLimitMb  int             `json:"memory_limit_mb"`
-	LanguageLimits []ProblemLanguageLimit `json:"language_limits"`
-	CreatedBy      int64           `json:"created_by"`
-	CreatedAt      string          `json:"created_at"`
-	UpdatedAt      string          `json:"updated_at"`
-	Samples        []ProblemSample `json:"samples,optional"`
+	Id              int64                  `json:"id"`
+	ProblemNo       string                 `json:"problem_no"`
+	Slug            string                 `json:"slug"`
+	Title           string                 `json:"title"`
+	Statement       string                 `json:"statement"`
+	StatementFormat string                 `json:"statement_format"`
+	Solution        string                 `json:"solution"`
+	SolutionFormat  string                 `json:"solution_format"`
+	ProblemType     string                 `json:"problem_type"`
+	Visibility      string                 `json:"visibility"`
+	ManifestSha256  string                 `json:"manifest_sha256"`
+	SourceFormat    string                 `json:"source_format"`
+	Status          string                 `json:"status"`
+	Difficulty      string                 `json:"difficulty"`
+	Tags            string                 `json:"tags"`
+	TimeLimitMs     int                    `json:"time_limit_ms"`
+	MemoryLimitMb   int                    `json:"memory_limit_mb"`
+	LanguageLimits  []ProblemLanguageLimit `json:"language_limits"`
+	CreatedBy       int64                  `json:"created_by"`
+	CreatedAt       string                 `json:"created_at"`
+	UpdatedAt       string                 `json:"updated_at"`
+	Samples         []ProblemSample        `json:"samples,optional"`
 }
 
 type ProblemSample {
@@ -274,6 +274,69 @@ type DeleteProblemResp {
 	Deleted bool `json:"deleted"`
 }
 
+// Artifact GC operator responses deliberately omit claim_token and claim_until.
+// Those fields are collector credentials, not operator-facing state.
+type ArtifactGCLastFailure {
+	Message        string `json:"message"`
+	Stage          string `json:"stage"`
+	Kind           string `json:"kind"`
+	HttpStatus     int    `json:"http_status,optional"`
+	ProviderResult string `json:"provider_result,optional"`
+	Deterministic  bool   `json:"deterministic"`
+}
+
+type ArtifactGCIntentItem {
+	ArtifactUri                string                `json:"artifact_uri"`
+	ArtifactSha256             string                `json:"artifact_sha256"`
+	ArtifactSizeBytes          int64                 `json:"artifact_size_bytes"`
+	Status                     string                `json:"status"`
+	FailureCount               int                   `json:"failure_count"`
+	LastFailure                ArtifactGCLastFailure `json:"last_failure"`
+	UploadCompletedAt          string                `json:"upload_completed_at,optional"`
+	NeedsAttentionAt           string                `json:"needs_attention_at,optional"`
+	ManualReconcileRequestedAt string                `json:"manual_reconcile_requested_at,optional"`
+	LastOperatorRetryReason    string                `json:"last_operator_retry_reason,optional"`
+	LastOperatorRetryAt        string                `json:"last_operator_retry_at,optional"`
+	UpdatedAt                  string                `json:"updated_at"`
+}
+
+type ListArtifactGCIntentsReq {
+	Status string `form:"status"`
+	Cursor string `form:"cursor,optional"`
+	Limit  int    `form:"limit,optional"`
+}
+
+type ListArtifactGCIntentsResp {
+	Intents    []ArtifactGCIntentItem `json:"intents"`
+	NextCursor string                 `json:"next_cursor,optional"`
+}
+
+type ReconcileArtifactGCIntentReq {
+	IdempotencyKey    string `header:"Idempotency-Key"`
+	ArtifactUri       string `json:"artifact_uri"`
+	ArtifactSha256    string `json:"artifact_sha256"`
+	ArtifactSizeBytes int64  `json:"artifact_size_bytes"`
+	Reason            string `json:"reason"`
+}
+
+type RetryArtifactGCIntentReq {
+	IdempotencyKey       string `header:"Idempotency-Key"`
+	ArtifactUri          string `json:"artifact_uri"`
+	ExpectedFailureCount int    `json:"expected_failure_count"`
+	Reason               string `json:"reason"`
+}
+
+type ArtifactGCActionResp {
+	ActionId         int64  `json:"action_id"`
+	RequestId        string `json:"request_id"`
+	ArtifactUri      string `json:"artifact_uri"`
+	FromStatus       string `json:"from_status"`
+	ToStatus         string `json:"to_status"`
+	ReasonRecorded   bool   `json:"reason_recorded"`
+	Queued           bool   `json:"queued"`
+	IdempotentReplay bool   `json:"idempotent_replay"`
+}
+
 service problemapi {
 	@handler health
 	get /health returns (HealthResp)
@@ -319,4 +382,16 @@ service problemapi {
 
 	@handler deleteProblem
 	delete /problems/:id (DeleteProblemReq) returns (DeleteProblemResp)
+
+	@handler listArtifactGCIntents
+	get /admin/artifact-gc/intents (ListArtifactGCIntentsReq) returns (ListArtifactGCIntentsResp)
+
+	// goctl cannot tokenize an RFC action suffix. The generated slash route is
+	// replaced by the exact published /intents:reconcile route in routes.go.
+	@handler reconcileArtifactGCIntent
+	post /admin/artifact-gc/intents/reconcile (ReconcileArtifactGCIntentReq) returns (ArtifactGCActionResp)
+
+	// The published route is /intents:retry; see the note above.
+	@handler retryArtifactGCIntent
+	post /admin/artifact-gc/intents/retry (RetryArtifactGCIntentReq) returns (ArtifactGCActionResp)
 }

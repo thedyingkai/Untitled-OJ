@@ -7,7 +7,8 @@ import (
 	"context"
 	"errors"
 
-	"ojos-problem-service/internal/packagefs"
+	"ojos-problem-service/internal/packagemutation"
+	"ojos-problem-service/internal/repository"
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
 
@@ -37,18 +38,17 @@ func (l *DeleteProblemLogic) DeleteProblem(req *types.DeleteProblemReq) (resp *t
 		return nil, err
 	}
 
-	p, err := l.svcCtx.Repo.GetProblem(l.ctx, req.Id)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := l.svcCtx.Repo.DeleteProblem(l.ctx, req.Id); err != nil {
-		return nil, err
-	}
-
-	if err := packagefs.DeletePackageDir(
+	if err := packagemutation.RunDelete(
+		l.ctx,
+		l.svcCtx.Repo,
 		l.svcCtx.Config.Storage.ProblemsRoot,
-		p.PackageDir,
+		req.Id,
+		func(txRepo *repository.Repository, _ *repository.Problem, expectedAggregateVersion int64) error {
+			if err := txRepo.EnqueueProblemDeletedCAS(l.ctx, req.Id, expectedAggregateVersion); err != nil {
+				return err
+			}
+			return txRepo.DeleteProblem(l.ctx, req.Id)
+		},
 	); err != nil {
 		return nil, err
 	}

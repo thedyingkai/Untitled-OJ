@@ -8,6 +8,8 @@ import (
 	"errors"
 
 	"ojos-problem-service/internal/packagefs"
+	"ojos-problem-service/internal/packagemutation"
+	"ojos-problem-service/internal/repository"
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
 
@@ -36,21 +38,23 @@ func (l *DeleteTestCaseLogic) DeleteTestCase(req *types.DeleteTestCaseReq) (resp
 		return nil, errors.New("invalid request")
 	}
 
-	p, err := l.svcCtx.Repo.GetProblem(l.ctx, req.ProblemId)
+	_, err = packagemutation.RunExisting(
+		l.ctx,
+		l.svcCtx.Repo,
+		l.svcCtx.Config.Storage,
+		req.ProblemId,
+		func(_ *repository.Problem, stagingDir string) (packagemutation.Change, error) {
+			deleted, changed, err := packagefs.DeleteCase(stagingDir, req.CaseNo)
+			return packagemutation.Change{Files: changed, DeletedLogicalPaths: deleted}, err
+		},
+		func(txRepo *repository.Repository, _ *repository.Problem, change packagemutation.Change) error {
+			if err := txRepo.DeleteProblemFiles(l.ctx, req.ProblemId, change.DeletedLogicalPaths); err != nil {
+				return err
+			}
+			return txRepo.UpsertProblemFiles(l.ctx, req.ProblemId, change.Files)
+		},
+	)
 	if err != nil {
-		return nil, err
-	}
-
-	deleted, changed, err := packagefs.DeleteCase(p.PackageDir, req.CaseNo)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := l.svcCtx.Repo.DeleteProblemFiles(l.ctx, req.ProblemId, deleted); err != nil {
-		return nil, err
-	}
-
-	if err := l.svcCtx.Repo.UpsertProblemFiles(l.ctx, req.ProblemId, changed); err != nil {
 		return nil, err
 	}
 

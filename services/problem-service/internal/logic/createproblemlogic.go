@@ -6,11 +6,13 @@ package logic
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"ojos-problem-service/internal/packagefs"
+	"ojos-problem-service/internal/packagemutation"
 	"ojos-problem-service/internal/repository"
-	problemstorage "ojos-problem-service/internal/storage"
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
 
@@ -87,80 +89,65 @@ func (l *CreateProblemLogic) CreateProblem(req *types.CreateProblemReq) (resp *t
 		return nil, err
 	}
 
-	problemID, problemNo, err := l.svcCtx.Repo.InsertProblem(
+	problemID, err := l.svcCtx.Repo.ReserveProblemID(l.ctx)
+	if err != nil {
+		return nil, err
+	}
+	if problemNo == "" {
+		problemNo = "P" + strconv.FormatInt(problemID, 10)
+	}
+	createArg := repository.CreateProblemArg{
+		ProblemNo:       problemNo,
+		Title:           title,
+		Statement:       strings.TrimSpace(req.Statement),
+		StatementFormat: packagefs.ContentFormatMarkdownLatex,
+		Solution:        strings.TrimSpace(req.Solution),
+		SolutionFormat:  packagefs.ContentFormatMarkdownLatex,
+		ProblemType:     problemType,
+		Visibility:      visibility,
+		Difficulty:      difficulty,
+		Tags:            parseTags(req.Tags),
+		TimeLimitMs:     timeLimitMs,
+		MemoryLimitMb:   memoryLimitMb,
+		LanguageLimits:  languageLimits,
+		CreatedBy:       user.UserID,
+	}
+
+	pkg, err := packagemutation.RunCreate(
 		l.ctx,
-		repository.CreateProblemArg{
-			ProblemNo:       problemNo,
-			Title:           title,
-			Statement:       strings.TrimSpace(req.Statement),
-			StatementFormat: packagefs.ContentFormatMarkdownLatex,
-			Solution:        strings.TrimSpace(req.Solution),
-			SolutionFormat:  packagefs.ContentFormatMarkdownLatex,
-			ProblemType:     problemType,
-			Visibility:      visibility,
-			Difficulty:      difficulty,
-			Tags:            parseTags(req.Tags),
-			TimeLimitMs:     timeLimitMs,
-			MemoryLimitMb:   memoryLimitMb,
-			LanguageLimits:  languageLimits,
-			CreatedBy:       user.UserID,
+		l.svcCtx.Repo,
+		l.svcCtx.Config.Storage,
+		packagefs.CreateProblemArgs{
+			ID:             problemID,
+			ProblemNo:      problemNo,
+			Slug:           req.Slug,
+			Title:          title,
+			Statement:      req.Statement,
+			Solution:       req.Solution,
+			ProblemType:    problemType,
+			Visibility:     visibility,
+			TimeLimitMs:    timeLimitMs,
+			MemoryLimitMb:  memoryLimitMb,
+			LanguageLimits: packageLanguageLimits,
+			Components:     components,
+		},
+		func(txRepo *repository.Repository, result *packagefs.CreateProblemResult) error {
+			if err := txRepo.InsertProblemWithID(l.ctx, problemID, createArg); err != nil {
+				return err
+			}
+			if err := txRepo.UpdateProblemPackage(l.ctx, problemID, filepath.Base(result.PackageDir), result.PackageDir, result.ManifestPath, result.ManifestSha256); err != nil {
+				return err
+			}
+			if err := txRepo.UpsertProblemFiles(l.ctx, problemID, result.Files); err != nil {
+				return err
+			}
+			return txRepo.BindProblemOwner(l.ctx, user.UserID, problemID)
 		},
 	)
 	if err != nil {
 		return nil, err
 	}
-
-	pkg, err := packagefs.CreateInitialPackage(packagefs.CreateProblemArgs{
-		Root:           l.svcCtx.Config.Storage.ProblemsRoot,
-		ID:             problemID,
-		ProblemNo:      problemNo,
-		Slug:           req.Slug,
-		Title:          title,
-		Statement:      req.Statement,
-		Solution:       req.Solution,
-		ProblemType:    problemType,
-		Visibility:     visibility,
-		TimeLimitMs:    timeLimitMs,
-		MemoryLimitMb:  memoryLimitMb,
-		LanguageLimits: packageLanguageLimits,
-		Components:     components,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	slug := packagefs.Slugify(req.Slug)
-	if req.Slug == "" {
-		slug = packagefs.Slugify(title)
-	}
-	slug = pkg.PackageDir[strings.LastIndex(pkg.PackageDir, "/")+1:]
-	if strings.Contains(pkg.PackageDir, "\\") {
-		slug = pkg.PackageDir[strings.LastIndex(pkg.PackageDir, "\\")+1:]
-	}
-
-	if err := l.svcCtx.Repo.UpdateProblemPackage(
-		l.ctx,
-		problemID,
-		slug,
-		pkg.PackageDir,
-		pkg.ManifestPath,
-		pkg.ManifestSha256,
-	); err != nil {
-		return nil, err
-	}
-
-	files, err := problemstorage.SyncProblemFiles(l.ctx, l.svcCtx.Config.Storage, problemID, pkg.Files)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := l.svcCtx.Repo.UpsertProblemFiles(l.ctx, problemID, files); err != nil {
-		return nil, err
-	}
-
-	if err := l.svcCtx.Repo.BindProblemOwner(l.ctx, user.UserID, problemID); err != nil {
-		return nil, err
-	}
+	slug := filepath.Base(pkg.PackageDir)
 
 	return &types.CreateProblemResp{
 		ProblemId: problemID,

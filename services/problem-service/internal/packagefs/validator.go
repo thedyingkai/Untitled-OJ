@@ -192,10 +192,6 @@ func (i *packageInspector) validateManifest(manifest ProblemManifest) {
 	if strings.TrimSpace(manifest.Tests.Cases) == "" {
 		i.addError("empty_cases_path", "tests.cases is required", "problem.yaml")
 	}
-	if strings.TrimSpace(manifest.Tests.Groups) == "" {
-		i.addWarning("empty_groups_path", "tests.groups is empty; grouped scoring metadata is unavailable", "problem.yaml")
-	}
-
 	for locale, path := range manifest.Statement.Files {
 		if strings.TrimSpace(locale) == "" {
 			i.addError("empty_statement_locale", "statement locale is empty", "problem.yaml")
@@ -274,7 +270,7 @@ func (i *packageInspector) validateCases(manifest ProblemManifest) []CaseRecord 
 			i.addErrorForCase("invalid_group", "case group must be non-negative", path, c.No)
 		}
 		if len(groups) > 0 && !groups[c.Group] {
-			i.addWarningForCase("unknown_group", "case references a group not declared in tests/groups.yaml", path, c.No)
+			i.addErrorForCase("unknown_group", "case references a group not declared in tests/groups.yaml", path, c.No)
 		}
 		if c.TimeLimitMs != 0 || c.MemoryLimitMb != 0 {
 			i.validateLimitForCase(c.TimeLimitMs, c.MemoryLimitMb, path, c.No)
@@ -291,12 +287,15 @@ func (i *packageInspector) validateCases(manifest ProblemManifest) []CaseRecord 
 func (i *packageInspector) validateGroups(groupsPath string) map[int]bool {
 	groupsPath = strings.TrimSpace(groupsPath)
 	if groupsPath == "" {
-		return nil
+		return map[int]bool{DefaultGroupNo: true}
 	}
 
 	var groups GroupsFile
 	if !i.readYAML(groupsPath, &groups) {
 		return nil
+	}
+	if len(groups.Groups) == 0 {
+		return map[int]bool{DefaultGroupNo: true}
 	}
 
 	seen := map[int]bool{}

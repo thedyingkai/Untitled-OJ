@@ -27,6 +27,21 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 			[]rest.Middleware{serverCtx.UserContextMiddleware},
 			[]rest.Route{
 				{
+					Method:  http.MethodGet,
+					Path:    "/admin/artifact-gc/intents",
+					Handler: listArtifactGCIntentsHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/artifact-gc/intents:reconcile",
+					Handler: reconcileArtifactGCIntentHandler(serverCtx),
+				},
+				{
+					Method:  http.MethodPost,
+					Path:    "/admin/artifact-gc/intents:retry",
+					Handler: retryArtifactGCIntentHandler(serverCtx),
+				},
+				{
 					Method:  http.MethodPost,
 					Path:    "/problems",
 					Handler: createProblemHandler(serverCtx),

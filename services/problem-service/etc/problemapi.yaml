@@ -27,6 +27,13 @@ AuthService:
 Storage:
   ProblemsRoot: /data/ojos/problems
 
+# Production enables orphan-artifact GC through the storage_head and
+# storage_delete ApiBindings declared by Release v2. No Judge DB or direct
+# Storage endpoint is accepted by that path. Unmanaged development leaves GC
+# disabled unless OJOS_PROBLEM_ARTIFACT_GC_ENABLED is explicitly set.
+# OJOS_PROBLEM_ARTIFACT_GC_CLAIM_LEASE defaults to 10m and must be strictly
+# longer than the storage_delete Binding timeout plus a 60s isolation grace.
+
 InternalAuth:
   Enabled: true
   TimestampSkewSeconds: 60

@@ -1,4 +1,4 @@
-FROM golang:1.26.5
+FROM golang:1.26.5 AS build
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
@@ -25,8 +25,21 @@ COPY platform/shared/go /platform/shared/go
 
 WORKDIR /app/problem-service
 
-RUN go build -o problem-service .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/problem-service .
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=build /out/problem-service ./problem-service
+COPY --from=build /app/problem-service/etc ./etc
 
 RUN mkdir -p /data/ojos/problems
+
+HEALTHCHECK --interval=2s --timeout=5s --start-period=5s --retries=30 CMD ["./problem-service", "healthcheck"]
 
 CMD ["./problem-service", "-f", "etc/problemapi.yaml"]

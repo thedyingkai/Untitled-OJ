@@ -5,9 +5,11 @@ package logic
 
 import (
 	"context"
+	"errors"
 
 	"ojos-problem-service/internal/packagefs"
-	problemstorage "ojos-problem-service/internal/storage"
+	"ojos-problem-service/internal/packagemutation"
+	"ojos-problem-service/internal/repository"
 	"ojos-problem-service/internal/svc"
 	"ojos-problem-service/internal/types"
 
@@ -36,37 +38,42 @@ func (l *AddTestCaseLogic) AddTestCase(req *types.AddTestCaseReq) (resp *types.A
 		return nil, err
 	}
 
-	p, err := l.svcCtx.Repo.GetProblem(l.ctx, req.ProblemId)
+	change, err := packagemutation.RunExisting(
+		l.ctx,
+		l.svcCtx.Repo,
+		l.svcCtx.Config.Storage,
+		req.ProblemId,
+		func(_ *repository.Problem, stagingDir string) (packagemutation.Change, error) {
+			result, err := packagefs.AddCase(packagefs.AddCaseArgs{
+				PackageDir:    stagingDir,
+				CaseNo:        req.CaseNo,
+				Input:         req.Input,
+				Answer:        req.Answer,
+				Score:         req.Score,
+				Group:         req.Group,
+				Sample:        req.Sample,
+				Hidden:        req.Hidden,
+				TimeLimitMs:   req.TimeLimitMs,
+				MemoryLimitMb: req.MemoryLimitMb,
+			})
+			if err != nil {
+				return packagemutation.Change{}, err
+			}
+			return packagemutation.Change{Files: result.Files, Value: result.CaseNo}, nil
+		},
+		func(txRepo *repository.Repository, _ *repository.Problem, change packagemutation.Change) error {
+			return txRepo.UpsertProblemFiles(l.ctx, req.ProblemId, change.Files)
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
-
-	result, err := packagefs.AddCase(packagefs.AddCaseArgs{
-		PackageDir:    p.PackageDir,
-		CaseNo:        req.CaseNo,
-		Input:         req.Input,
-		Answer:        req.Answer,
-		Score:         req.Score,
-		Group:         req.Group,
-		Sample:        req.Sample,
-		Hidden:        req.Hidden,
-		TimeLimitMs:   req.TimeLimitMs,
-		MemoryLimitMb: req.MemoryLimitMb,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	files, err := problemstorage.SyncProblemFiles(l.ctx, l.svcCtx.Config.Storage, req.ProblemId, result.Files)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := l.svcCtx.Repo.UpsertProblemFiles(l.ctx, req.ProblemId, files); err != nil {
-		return nil, err
+	caseNo, ok := change.Value.(int)
+	if !ok {
+		return nil, errors.New("invalid add testcase mutation result")
 	}
 
 	return &types.AddTestCaseResp{
-		CaseNo: result.CaseNo,
+		CaseNo: caseNo,
 	}, nil
 }

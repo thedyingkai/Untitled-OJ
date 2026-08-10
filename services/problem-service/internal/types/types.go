@@ -20,6 +20,41 @@ type AddTestCaseResp struct {
 	CaseNo int `json:"case_no"`
 }
 
+type ArtifactGCActionResp struct {
+	ActionId         int64  `json:"action_id"`
+	RequestId        string `json:"request_id"`
+	ArtifactUri      string `json:"artifact_uri"`
+	FromStatus       string `json:"from_status"`
+	ToStatus         string `json:"to_status"`
+	ReasonRecorded   bool   `json:"reason_recorded"`
+	Queued           bool   `json:"queued"`
+	IdempotentReplay bool   `json:"idempotent_replay"`
+}
+
+type ArtifactGCIntentItem struct {
+	ArtifactUri                string                `json:"artifact_uri"`
+	ArtifactSha256             string                `json:"artifact_sha256"`
+	ArtifactSizeBytes          int64                 `json:"artifact_size_bytes"`
+	Status                     string                `json:"status"`
+	FailureCount               int                   `json:"failure_count"`
+	LastFailure                ArtifactGCLastFailure `json:"last_failure"`
+	UploadCompletedAt          string                `json:"upload_completed_at,omitempty"`
+	NeedsAttentionAt           string                `json:"needs_attention_at,omitempty"`
+	ManualReconcileRequestedAt string                `json:"manual_reconcile_requested_at,omitempty"`
+	LastOperatorRetryReason    string                `json:"last_operator_retry_reason,omitempty"`
+	LastOperatorRetryAt        string                `json:"last_operator_retry_at,omitempty"`
+	UpdatedAt                  string                `json:"updated_at"`
+}
+
+type ArtifactGCLastFailure struct {
+	Message        string `json:"message"`
+	Stage          string `json:"stage"`
+	Kind           string `json:"kind"`
+	HttpStatus     int    `json:"http_status,omitempty"`
+	ProviderResult string `json:"provider_result,omitempty"`
+	Deterministic  bool   `json:"deterministic"`
+}
+
 type CreateProblemReq struct {
 	ProblemNo      string                 `json:"problem_no,optional"`
 	Title          string                 `json:"title"`
@@ -81,6 +116,17 @@ type GetProblemResp struct {
 
 type HealthResp struct {
 	Status string `json:"status"`
+}
+
+type ListArtifactGCIntentsReq struct {
+	Status string `form:"status"`
+	Cursor string `form:"cursor,optional"`
+	Limit  int    `form:"limit,optional"`
+}
+
+type ListArtifactGCIntentsResp struct {
+	Intents    []ArtifactGCIntentItem `json:"intents"`
+	NextCursor string                 `json:"next_cursor,optional"`
 }
 
 type ListPackageCasesReq struct {
@@ -167,6 +213,15 @@ type PackageValidationResult struct {
 	Warnings []PackageValidationIssue `json:"warnings"`
 }
 
+type ProblemComponentInput struct {
+	Type       string   `json:"type,optional"`
+	Name       string   `json:"name,optional"`
+	Language   string   `json:"language,optional"`
+	SourcePath string   `json:"source_path,optional"`
+	SourceCode string   `json:"source_code,optional"`
+	Args       []string `json:"args,optional"`
+}
+
 type ProblemItem struct {
 	Id              int64                  `json:"id"`
 	ProblemNo       string                 `json:"problem_no"`
@@ -192,15 +247,6 @@ type ProblemItem struct {
 	Samples         []ProblemSample        `json:"samples,optional"`
 }
 
-type ProblemComponentInput struct {
-	Type       string   `json:"type,optional"`
-	Name       string   `json:"name,optional"`
-	Language   string   `json:"language,optional"`
-	SourcePath string   `json:"source_path,optional"`
-	SourceCode string   `json:"source_code,optional"`
-	Args       []string `json:"args,optional"`
-}
-
 type ProblemLanguageLimit struct {
 	Language      string `json:"language"`
 	TimeLimitMs   int    `json:"time_limit_ms"`
@@ -211,6 +257,21 @@ type ProblemSample struct {
 	CaseNo int    `json:"case_no"`
 	Input  string `json:"input"`
 	Output string `json:"output"`
+}
+
+type ReconcileArtifactGCIntentReq struct {
+	IdempotencyKey    string `header:"Idempotency-Key"`
+	ArtifactUri       string `json:"artifact_uri"`
+	ArtifactSha256    string `json:"artifact_sha256"`
+	ArtifactSizeBytes int64  `json:"artifact_size_bytes"`
+	Reason            string `json:"reason"`
+}
+
+type RetryArtifactGCIntentReq struct {
+	IdempotencyKey       string `header:"Idempotency-Key"`
+	ArtifactUri          string `json:"artifact_uri"`
+	ExpectedFailureCount int    `json:"expected_failure_count"`
+	Reason               string `json:"reason"`
 }
 
 type TestCaseItem struct {

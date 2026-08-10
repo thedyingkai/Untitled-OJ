@@ -130,6 +130,8 @@ type GroupRecord struct {
 	Feedback string `yaml:"feedback"`
 }
 
+const DefaultGroupNo = 0
+
 type CasesFile struct {
 	Cases []CaseRecord `yaml:"cases"`
 }
@@ -277,7 +279,7 @@ int main() {
 	files["tests/groups.yaml"] = mustYAML(GroupsFile{
 		Groups: []GroupRecord{
 			{
-				No:       0,
+				No:       DefaultGroupNo,
 				Name:     "default",
 				Score:    100,
 				Rule:     "sum",
@@ -828,6 +830,9 @@ func AddCase(arg AddCaseArgs) (*AddCaseResult, error) {
 			return nil, fmt.Errorf("case no already exists: %d", caseNo)
 		}
 	}
+	if err := validateCaseGroupReference(arg.PackageDir, caseNo, arg.Group); err != nil {
+		return nil, err
+	}
 
 	inputPath := fmt.Sprintf("%03d.in", caseNo)
 	answerPath := fmt.Sprintf("%03d.ans", caseNo)
@@ -1256,6 +1261,9 @@ func UpdateCase(arg UpdateCaseArgs) (*UpdateCaseResult, error) {
 	if arg.Answer == "" {
 		return nil, errors.New("empty answer")
 	}
+	if err := validateCaseGroupReference(arg.PackageDir, arg.CaseNo, arg.Group); err != nil {
+		return nil, err
+	}
 
 	casesPath := filepath.Join(arg.PackageDir, "tests", "cases.yaml")
 
@@ -1349,4 +1357,51 @@ func UpdateCase(arg UpdateCaseArgs) (*UpdateCaseResult, error) {
 		AnswerPath: "tests/" + answerPath,
 		Files:      files,
 	}, nil
+}
+
+func validateCaseGroupReference(packageDir string, caseNo int, groupNo int) error {
+	if groupNo < 0 {
+		return fmt.Errorf("case %d group must be non-negative", caseNo)
+	}
+	declared, err := declaredCaseGroups(packageDir)
+	if err != nil {
+		return err
+	}
+	if !declared[groupNo] {
+		return fmt.Errorf("case %d references undeclared group %d", caseNo, groupNo)
+	}
+	return nil
+}
+
+func declaredCaseGroups(packageDir string) (map[int]bool, error) {
+	var manifest ProblemManifest
+	if err := readYAML(filepath.Join(packageDir, "problem.yaml"), &manifest); err != nil {
+		return nil, fmt.Errorf("read problem manifest for case group validation: %w", err)
+	}
+	groupsPath := strings.TrimSpace(manifest.Tests.Groups)
+	if groupsPath == "" {
+		return map[int]bool{DefaultGroupNo: true}, nil
+	}
+	groupsPath, err := safeJoin(packageDir, groupsPath)
+	if err != nil {
+		return nil, err
+	}
+	var groups GroupsFile
+	if err := readYAML(groupsPath, &groups); err != nil {
+		return nil, fmt.Errorf("read case groups: %w", err)
+	}
+	if len(groups.Groups) == 0 {
+		return map[int]bool{DefaultGroupNo: true}, nil
+	}
+	declared := make(map[int]bool, len(groups.Groups))
+	for _, group := range groups.Groups {
+		if group.No < 0 {
+			return nil, fmt.Errorf("invalid group_no: %d", group.No)
+		}
+		if declared[group.No] {
+			return nil, fmt.Errorf("duplicate group_no: %d", group.No)
+		}
+		declared[group.No] = true
+	}
+	return declared, nil
 }

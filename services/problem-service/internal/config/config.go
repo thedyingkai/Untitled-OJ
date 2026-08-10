@@ -33,6 +33,7 @@ type StorageConfig struct {
 	ServiceEndpoint         string `json:",optional"`
 	InternalGatewayEndpoint string `json:",optional"`
 	PutApiID                string `json:",optional"`
+	HeadApiID               string `json:",optional"`
 	Bucket                  string `json:",optional"`
 	ServiceToken            string `json:",optional"`
 	CallerService           string `json:",optional"`
