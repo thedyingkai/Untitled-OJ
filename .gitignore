@@ -74,6 +74,7 @@ services/problem-api/problem-api.exe
 # Rust build artifacts
 target/
 services/*/target/
+/.cargo-target-*/
 
 # Frontend and Node
 node_modules/
