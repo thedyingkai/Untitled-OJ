@@ -1,6 +1,6 @@
 # OJOS Orchestrator 文档索引
 
-当前源码是 Orchestrator `1.0.0`，本地功能与 unsigned portable 交付为 GO；是否创建 GA tag/Release 是单独的发布决定。架构和契约以 v1 文档与当前源码为准；历史 alpha、0.2 兼容记录和 `docs/evidence/*.json` 不代表当前实现。
+当前源码版本是 Orchestrator `1.0.0`。唯一功能状态源是[项目状态总结](completeness-summary.md)；其他文档只定义契约、操作方式或额外证据要求，不独立宣布 GO。历史 alpha、0.2 兼容记录和 `docs/evidence/*.json` 不代表当前实现。
 
 ## 首先阅读
 
@@ -19,6 +19,8 @@
 - [Action 模型](orchestrator/action-model.md)：published action、HTTP 契约和 0.2 兼容边界。
 - [Operation/Job 模型](orchestrator/operation-model.md)：状态机、lease、恢复和补偿。
 - [Topology 模型](orchestrator/topology-model.md)：Spec/Revision/Status、diff/apply/rollback 和 drift。
+- [Service Contract v2](orchestrator/service-contract-v2.md)：Release v2、ApiBinding、ServiceContext、RuntimeReport、ApiResourceRef 和跨节点扩展规则。
+- [工作负载凭据边界](orchestrator/credential-boundary-v2.md)：Node mTLS、Deployment JWT、Gateway 校验与管理凭据隔离。
 - [编排器数据库](orchestrator/database.md)：Memory/SQLite/PostgreSQL、迁移、事务和旧数据导入。
 - [Agent protocol v1](../platform/schemas/orchestrator/agent-protocol-v1.yaml)：Node enroll、claim、heartbeat、complete 和证书生命周期。
 - [OpenAPI v1](../platform/schemas/orchestrator/openapi-v1.yaml) / [published actions](../platform/schemas/orchestrator/actions-v1.yaml)：正式机器契约。
@@ -30,11 +32,14 @@
 - [Web UI 与 Store](orchestrator/web-ui.md)：Catalog v2、Store/Topology 页面、SSE 和持续运行门禁。
 - [Web 开发说明](../manager/web/README.md)。
 - [TUI 使用说明](../manager/tui/README.md)。
+- [Service SDK](../sdk/service-sdk/README.md)：Go/Rust context client、token reload 与校验下载。
 
 ## 运维、发布与证据
 
 - [v1 运维手册](orchestrator/operations-v1.md)：远程生产唯一正式运维入口。
 - [生产运维脚本](../deploy/ops/README.md)：preflight、备份恢复、Docker Agent E2E 和 capacity/soak runner。
+- [A/B 跨机完整门禁](../deploy/cross-machine/README.md)：单机双 Engine 的 production-equivalent 业务闭环及证据边界。
+- [Judge Worker 生产部署](../deploy/worker/README.md)：B 节点 Agent、runtime policy、Catalog Release 和网络边界。
 - [可核对证据索引](release/evidence.md)：实现、测试和 workflow 入口。
 - [发布文档说明](release/README.md)：当前与历史发布记录的边界。
 - [Staging 演练历史记录](evidence/staging-drill.md)：旧整栈演练范围，仅供历史核对，不是 v1 GA 证据。
@@ -44,9 +49,9 @@
 
 ## Service 规范与 OJ 边界
 
-- [Service 规范](spec/service-spec.md)：历史 Service 身份契约。
+- [Service 规范](spec/service-spec.md)：Release v2 的当前字段与 Service v1 身份兼容边界。
 - [Set 规范](spec/set-spec.md)：推荐部署组合；不属于 v1 运行时对象。
-- [Endpoint / Link 规范](spec/endpoint-link-spec.md)：历史 Endpoint/Link 契约；v1 正式定义以 OpenAPI/Topology 文档为准。
+- [Endpoint / Link 规范](spec/endpoint-link-spec.md)：Topology v1 Endpoint/Link 与 ApiBinding 契约。
 - [基础 Service 列表](services/README.md)：OJ 平台服务与边界。
 
 ## 历史文档

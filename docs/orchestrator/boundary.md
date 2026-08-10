@@ -6,7 +6,7 @@ OJOS Orchestrator 只负责控制面编排，不承载或代理 OJ 业务请求�
 
 - `ojos-orchestrator-daemon`：远程单主动控制面。生产模式必须使用 PostgreSQL、TLS、OIDC、Node CA 和可信 Catalog；缺少任一项时在绑定端口前失败。只有显式 `--ephemeral` 才允许内存模式。
 - `ojos-orchestrator-desktop`：本地宿主。默认在应用数据目录创建 SQLite，并在同一进程启动 loopback backend 和 loopback Agent；原生 WebView 加载同源 Web UI，不打开外部浏览器。
-- `ojos-orchestrator-agent`：Node worker。只领取分配给本 Node 的持久 Job，通过 Docker Engine API 执行固定类型任务，不接受任意 shell。
+- `ojos-orchestrator-agent`：Node worker。只领取分配给本 Node 的持久 Job，通过 Docker Engine API 执行固定类型任务，物化 Deployment ServiceContext/credential，并上报不可编辑的运行时事实；不接受任意 shell。
 - `ojos-orchestrator-tui`：远程控制客户端，使用与 Web 相同的 `/api/v1` 契约。
 
 Desktop 外部连接模式只连接用户明确指定的控制面。它允许控制面 origin，以及从 `/api/v1/auth/config` 动态发现且精确匹配的 HTTPS OIDC authorization origin；其他导航和新窗口均拒绝。
@@ -19,17 +19,21 @@ Desktop 外部连接模式只连接用户明确指定的控制面。它允许控
 - `orchestrator-control-plane`：Operation、Job、lease、恢复、补偿与 reconciler 协调。
 - `orchestrator-runtime`：Docker Engine API 与固定运行时契约。
 - `orchestrator-manager`：Catalog/Release/Store 用例编排。
-- `orchestrator-agent`：Node 本地执行账本、运行时执行和类型化 provider。
+- `orchestrator-agent`：Node 本地执行账本、运行时执行、RuntimeReport、固定 runtime policy 和 Deployment context。远程 Agent 不保存 Auth/Gateway/API Registry 管理凭据。
 
 持久数据库事务只覆盖状态转换；Catalog 下载、Docker、健康探测和 provider I/O 均在事务外执行。生产持久路径没有全表内存镜像，也没有进程级 console mutex。
 
 ## 数据所有权
 
 - Store 拥有 Catalog、Release、Deployment、RuntimeInstance 和安装位置。
-- Topology 只拥有已经注册或部署服务之间的期望 Endpoint/Link，以及不可变 Revision。
+- Topology 只拥有已经注册或部署服务之间的期望 Endpoint/Link/ApiBinding，以及不可变 Revision。
+- 控制面事务仓储拥有签名 Release 的 API surface 与 applied ApiBinding；不依赖外部伪 registry 服务。
 - TopologyStatus 拥有真实健康、观测 revision、drift 和最后 Operation。
 - 每用户画布布局属于 UI state，不属于 TopologySpec。
 - Operation、Job、attempt、event、审计和诊断各自持久化，不写入 TopologySpec。
+- Agent ledger 保存本地 context generation、runtime resource 和补偿状态；控制面不持久化明文 workload token。
+
+业务数据面不经过 Orchestrator。跨 Node consumer 使用短期 Deployment JWT 经 Gateway 调用已绑定 provider；B 机 Judge Worker 不直连 A 机 PostgreSQL、Redis、MinIO 或 Judge API 私有端口。详细边界见 [Service Contract v2](service-contract-v2.md) 与[凭据边界](credential-boundary-v2.md)。
 
 旧 `topology_snapshots` 在升级时只导入为未应用 draft；旧 HostService 只能生成 `External/Unknown` 投影，不伪造容器 ID 或 RepoDigest。
 

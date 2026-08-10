@@ -8,6 +8,9 @@ on:
     paths:
       - "docs/**"
       - "README.md"
+      - "deploy/cross-machine/README.md"
+      - "deploy/worker/README.md"
+      - "sdk/service-sdk/README.md"
       - ".github/scripts/**"
       - ".github/workflows/sync-wiki.yml"
 
@@ -36,7 +39,9 @@ jobs:
             --root . \
             --output .wiki-src \
             --repository "${GITHUB_REPOSITORY}" \
-            --branch "${GITHUB_REF_NAME}"
+            --branch "${GITHUB_REF_NAME}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Push mirror to wiki
         shell: bash
@@ -64,8 +69,31 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "Wiki is already up to date."
-            exit 0
+          else
+            git commit -m "docs: sync repository docs to wiki"
+            git push
           fi
 
-          git commit -m "docs: sync repository docs to wiki"
-          git push
+          local_head="$(git rev-parse HEAD)"
+          local_tree="$(git rev-parse 'HEAD^{tree}')"
+          remote_head="$(git ls-remote "$wiki_url" HEAD | awk 'NR == 1 {print $1}')"
+          if [[ -z "$remote_head" || "$remote_head" != "$local_head" ]]; then
+            echo "Remote Wiki HEAD does not match the local mirror commit."
+            exit 1
+          fi
+
+          readback_dir="${RUNNER_TEMP}/ojos-wiki-readback"
+          rm -rf "$readback_dir"
+          git clone --depth 1 "$wiki_url" "$readback_dir"
+          remote_tree="$(git -C "$readback_dir" rev-parse 'HEAD^{tree}')"
+          if [[ "$remote_tree" != "$local_tree" ]]; then
+            echo "Remote Wiki tree does not match the pushed mirror."
+            exit 1
+          fi
+          if ! cmp --silent \
+            "$readback_dir/Source-Identity.md" \
+            "${GITHUB_WORKSPACE}/.wiki-src/Source-Identity.md"; then
+            echo "Remote Wiki Source-Identity.md did not survive push/readback."
+            exit 1
+          fi
+          echo "Remote Wiki readback verified at ${remote_head}."

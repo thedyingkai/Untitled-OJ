@@ -19,6 +19,7 @@ bash deploy/ops/orchestrator-preflight.sh
 - 配置 `ORCHESTRATOR_TLS_CERT`、`ORCHESTRATOR_TLS_KEY`、`ORCHESTRATOR_NODE_CA_CERT` 和 `ORCHESTRATOR_NODE_CA_KEY`。Node CA 私钥只提供给控制面进程。Compose 内部 readiness 直连 `https://orchestrator:8090`，因此服务端证书 SAN 必须同时覆盖公开域名和 Compose 服务名 `orchestrator`。
 - `ORCHESTRATOR_CATALOG_TRUST_KEYS` 和 `ORCHESTRATOR_CATALOG_SOURCES` 均为非空 JSON；daemon 启动时会加载并验证来源，Store 不接受任意 URL 导入。
 - Gateway/Auth Provider 要么成对配置，要么都不配置。未配置时 daemon 可以提供只读功能，但相关 Store/Topology plan 会明确失败，不会生成 deferred 或假成功。
+- Service Contract v2 生产模式还要求独立的 Auth workload issuer origin/token、Auth Ed25519 私钥、Gateway 对应公钥，以及 B 节点可访问的 HTTPS Gateway origin/CA。workload issuer token 不得复用 Auth admin 或 Orchestrator internal token，也不得下发到 Agent。
 - `manager/web/dist/index.html` 必须存在。生产 daemon 不会退回占位页面或默认内存存储。
 
 daemon 在绑定端口前依次完成 PostgreSQL TLS/schema checksum/readiness、单主动 advisory lock、OIDC discovery/JWKS、服务端证书和 Node CA、Catalog bootstrap、过期 Job/Operation 恢复。任一环节失败都会退出。
@@ -36,7 +37,7 @@ services:
 
 ## Standalone Node Agent
 
-Store 类型化 Provider 的 Node 广告与 Agent 本地配置必须使用同一个 ID：`providers.redis.connection_id` 对应 `ORCHESTRATOR_REDIS_CONNECTIONS_JSON/FILE` 的键，`providers.storage.connection_id` 对应 `ORCHESTRATOR_STORAGE_CONNECTIONS_JSON/FILE`，`providers.frontend.asset_store_id` 对应 `ORCHESTRATOR_FRONTEND_ASSET_STORES_JSON/FILE`，`providers.api_registry.registry_id` 对应 `ORCHESTRATOR_API_REGISTRIES_JSON/FILE`。ID 不一致时 plan 或 Agent 执行会明确失败，不会回退为成功；通用 HTTP provisioner 仅在显式设置 `ORCHESTRATOR_ENABLE_EXTERNAL_PROVISIONER_FALLBACK=true` 时启用。Auth/Gateway 同时接受现有的 `ORCHESTRATOR_*_ADMIN_ORIGIN` 和 `ORCHESTRATOR_*_ADMIN_ENDPOINT`，两者并存时 `ENDPOINT` 优先。
+Store 类型化 Provider 的 Node 广告与 Agent 本地配置必须使用同一个 ID：`providers.redis.connection_id` 对应 `ORCHESTRATOR_REDIS_CONNECTIONS_JSON/FILE` 的键，`providers.storage.connection_id` 对应 `ORCHESTRATOR_STORAGE_CONNECTIONS_JSON/FILE`，`providers.frontend.asset_store_id` 对应 `ORCHESTRATOR_FRONTEND_ASSET_STORES_JSON/FILE`。ID 不一致时 plan 或 Agent 执行会明确失败，不会回退为成功；通用 HTTP provisioner 仅在显式设置 `ORCHESTRATOR_ENABLE_EXTERNAL_PROVISIONER_FALLBACK=true` 时启用。API surface 直接来自控制面事务持久化的签名 Release 与已应用 ApiBinding，不存在外部 API Registry Provider；`ORCHESTRATOR_API_REGISTRIES_JSON/FILE` 是退役配置，Managed Agent 检测到后会拒绝启动。Auth/Gateway 同时接受现有的 `ORCHESTRATOR_*_ADMIN_ORIGIN` 和 `ORCHESTRATOR_*_ADMIN_ENDPOINT`，两者并存时 `ENDPOINT` 优先。
 
 Catalog 的 `runtime_capabilities` 是 release-version 级签名字段。`link-probe-v1` 只有在同一 metadata manifest 也精确声明 `orchestrator.link-probe.v1` 时有效；旧 Catalog 缺少字段视为不支持。若 Catalog 与 metadata 不一致，检查 Catalog 生成器和 metadata 包并重新签名，不能修改数据库投影绕过 `CATALOG_METADATA_CAPABILITY_MISMATCH`。
 
@@ -88,6 +89,8 @@ ojos-orchestrator-agent run \
 
 私有 OCI Registry 使用 `--registry-credentials /etc/ojos/agent/registry-credentials.json` 显式启用。文件采用严格 schema v1：`{"schema_version":1,"registries":[{"server_address":"ghcr.io","username":"...","password":"..."}]}`；最多 32 个 Registry、文件最大 64 KiB，拒绝未知字段、重复 host、URL、浮动 tag 和跨 Registry 复用。Agent 只把匹配目标 digest 引用 host 的凭据交给 Docker Engine API，不写入 Job、Operation 或日志。该文件必须由服务管理器以只读方式物化；轮换后重启 Agent，让新 worker 重新加载凭据。
 
+Judge Worker 节点还必须提供严格 `--runtime-policy` JSON。它只允许固定 profile ID/digest 和完整 OCI `repository@sha256`；没有该参数时 Agent 只允许 `standard-container-v1`。从 [`deploy/worker/runtime-policy.example.json`](../../deploy/worker/runtime-policy.example.json) 生成节点本地文件，不要把 policy、host path 或 capability 放进安装请求。
+
 Linux systemd 服务示例：
 
 ```ini
@@ -101,7 +104,8 @@ Requires=docker.service
 Type=simple
 User=ojos-agent
 Group=ojos-agent
-ExecStart=/usr/local/bin/ojos-orchestrator-agent run --control-plane https://orchestrator.example.com --identity-dir /var/lib/ojos-agent/identity --registry-credentials /etc/ojos/agent/registry-credentials.json
+Environment=OJOS_ENVIRONMENT=production
+ExecStart=/usr/local/bin/ojos-orchestrator-agent run --control-plane https://orchestrator.example.com --identity-dir /var/lib/ojos-agent/identity --registry-credentials /etc/ojos/agent/registry-credentials.json --runtime-policy /etc/ojos/agent/runtime-policy.json
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=35s
@@ -112,6 +116,8 @@ WantedBy=multi-user.target
 ```
 
 服务账号必须能够访问 Docker Unix socket；Windows 服务账号必须能够访问 Docker named pipe，并把 identity/ledger 放在例如 `C:\ProgramData\OJOS\agent` 的持久且受 ACL 保护的目录。服务管理器应发送 SIGTERM/控制台停止事件并至少留出 30 秒排空时间，不能周期性删除 identity 或 ledger。
+
+在 B 节点上，Agent/宿主需要访问控制面 Agent API 和 digest-pinned OCI registry；Judge Worker 的业务网络只允许访问 A 的 HTTPS Gateway（另加 DNS/时间同步），禁止直连 A 的 PostgreSQL、Redis、MinIO、Judge API 私有端口和控制面。Worker 的安装、Binding、健康与恢复步骤见 [Judge Worker 生产部署](../../deploy/worker/README.md)。
 
 Node 证书默认有效 30 天，控制面把 `renew_after_ms` 设为到期前 7 天。`run` 会在该时间生成新 CSR，并用当前 mTLS 身份申请候选证书；签发阶段保留旧证书有效。Agent 先把候选证书与私钥完整写入新的版本化 generation，再用新证书调用 `/api/v1/agent/certificates:activate`，由控制面原子激活新 serial 并撤销旧 serial，最后重启 worker transport。签发、落盘、activate 任一响应丢失或进程崩溃都可按本地 generation 状态安全重试，不会留下“旧证书先撤销但新证书未落盘”的失联窗口。失败按 `--renewal-retry-ms`（默认 60 秒）重试；若已无法在过期前安全重试，或加载时证书已经过期，Agent 会失败退出并要求人工重新注册，不会降级到 bearer/push 路径。即时吊销后该 Node 的新 claim、heartbeat、complete、artifact 下载和续签都会被控制面拒绝。
 

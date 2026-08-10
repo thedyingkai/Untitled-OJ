@@ -26,11 +26,12 @@ single-active control plane
 - `CatalogSource` / `ServiceRelease`：带版本、平台、依赖、校验、OCI digest 和签名的发布输入。
 - `Deployment` / `RuntimeInstance`：明确目标 Node 的运行实例、container、实际 RepoDigest、期望/观测状态和健康。
 - `TopologySpec` / `TopologyRevision` / `TopologyStatus`：期望 Endpoint/Link、不可变历史、实际健康与 drift。
+- `ApiBinding` / `ServiceContext` / `RuntimeReport`：把 Release v2 的命名 API 依赖解析到已应用 Topology，并把短期 workload 身份和真实节点能力安全物化给 Deployment。
 - `Operation` / `Job`：计划、确认、异步执行、lease、重试、补偿、日志和恢复。
 - `Node`：使用 SPIFFE Node ID mTLS 证书领取持久 Job 的独立 Agent。
 - `Diagnostic`：面向 Deployment、Topology 和 Operation 的只读诊断结果。
 
-Store 负责安装和节点放置；Topology 只连接已经注册或部署的服务，不会隐式安装服务。
+Store 负责安装和节点放置；Topology 只连接已经注册或部署的服务，不会隐式安装服务。跨节点业务调用统一遵循 [Service Contract v2](docs/orchestrator/service-contract-v2.md)：consumer 只按 requirement 名访问 Gateway，不能拼接远端服务地址或持有 A 机数据库、中间件和管理凭据。
 
 ## 正式入口
 
@@ -101,7 +102,7 @@ Store 从可信 Catalog v2 注册、搜索、导入和安装 Release。生产拒
 
 Topology 编辑 Endpoint/Link 时创建 draft revision。validate/diff 不产生外部副作用；apply/rollback 返回异步 Operation。Rollback 复制旧 Spec 创建新 revision，健康和 drift 只读自 `TopologyStatus`。画布坐标按用户/topology 单独保存，不进入 Spec。
 
-类型化 migration、config/secret、Redis、storage、frontend、Gateway/Auth 和 API registry provider 是 Release pipeline 的内部步骤。计划缺少所需 provider 时直接失败，不返回 Deferred 或假成功。
+类型化 migration、config/secret、Redis、storage、frontend 与 Gateway/Auth 投影是 Release pipeline 的内部步骤。API surface 与 `ApiBinding` 由控制面事务持久化，不依赖外部 API Registry provider。计划缺少所需 provider 或 Binding 时直接失败，不返回 Deferred 或假成功。
 
 ## 数据与兼容边界
 
@@ -112,7 +113,9 @@ Topology 编辑 Endpoint/Link 时创建 draft revision。validate/diff 不产生
 
 ## 交付状态
 
-本地功能、持久化、真实 Docker Agent 生命周期、PostgreSQL 升级/恢复、Desktop/Web/TUI 和原生 CLI 安装均属于日常功能门禁。普通交付使用 unsigned portable ZIP/tar 和 `ojos-orchestrator install`，不依赖 MSI、Azure、专用 runner 或主机群。
+功能状态只以[项目状态总结](docs/completeness-summary.md)为准。该页区分当前工作树实现、本地 pre-commit 双 Engine 证据、最终 commit 证据，以及尚未执行的容量、签名 GA 和安全验收；本 README 不单独作 GO 判定。
+
+普通交付使用 unsigned portable ZIP/tar 和 `ojos-orchestrator install`，不依赖 MSI、Azure、专用 runner 或主机群。
 
 仓库仍保留 100 Node/24 小时容量工具和 signed-GA workflow，供未来需要声明该生产规模或面向受签名策略约束的公开分发时使用。它们是可选的额外证据，不代表 Store、Topology、Desktop 或 CLI 功能未完成。
 
@@ -126,6 +129,11 @@ Topology 编辑 Endpoint/Link 时创建 draft revision。validate/diff 不产生
 - [数据库](docs/orchestrator/database.md)
 - [Operation/Job 模型](docs/orchestrator/operation-model.md)
 - [Topology 模型](docs/orchestrator/topology-model.md)
+- [Service Contract v2](docs/orchestrator/service-contract-v2.md)
+- [工作负载凭据边界](docs/orchestrator/credential-boundary-v2.md)
+- [A/B 跨机完整门禁](deploy/cross-machine/README.md)
+- [Judge Worker 生产部署](deploy/worker/README.md)
+- [Service SDK](sdk/service-sdk/README.md)
 - [Desktop](docs/orchestrator/desktop.md)
 - [Web/TUI 能力一致性](docs/orchestrator/gui-tui-parity.md)
 - [v1 运维手册](docs/orchestrator/operations-v1.md)

@@ -1,223 +1,101 @@
-# Service 规范
+# Service 与 Release v2 规范
 
-Service 是 OJOS Orchestrator 管理的最小功能单元。题目、提交、比赛、用户、权限和公告等业务能力归各 Service；Orchestrator 负责校验契约、安排运行位置，并维护 Endpoint、Link、Operation、Topology、日志和诊断报告。
+OJOS 把“服务身份”和“可部署版本”分开描述：`service.yaml` 保留稳定的 Service 身份与业务边界，`release.yaml` 使用 Service Contract v2 描述某个版本如何运行、提供什么 API、依赖什么 API/事件，以及使用哪个不可变 runtime contract。
 
-每个 Service 目录同时放置 `service.yaml` 与 `release.yaml`。前者描述“它是什么”，后者描述“这个版本怎么交付和注册”。
+机器可读真值是：
+
+- `platform/schemas/orchestrator/service-contract-v2.schema.json`；
+- `platform/schemas/orchestrator/api-binding-v1.schema.json`；
+- `platform/schemas/orchestrator/service-context-v1.schema.json`；
+- `platform/schemas/orchestrator/runtime-report-v1.schema.json`；
+- `platform/schemas/orchestrator/api-resource-ref-v1.schema.json`；
+- `platform/schemas/events/*.schema.json`。
 
 ## `service.yaml`
 
-```yaml
-schema_version: 1
-id:
-name:
-version:
-kind:
-description:
+`service.yaml` 当前仍是 schema v1 的身份兼容层，记录 Service ID、版本、类型、默认 Endpoint、业务能力、健康要求和安全上限。它不能请求任意 command、脚本、hook、`privileged`、`cap_add` 或 host mount；特殊 Docker 语义只能通过编排器内置、版本化且签名引用的 runtime profile 获得。
 
-runtime:
-  mode:
-  driver:
-  root_allowed:
-  non_root_allowed:
-  start_policy:
-  restart_policy:
+同目录校验要求 Service ID、SemVer、类型、backend protocol/port 和健康路径与 `release.yaml` 一致。`service.yaml` 不授予跨服务调用权限，也不能写全局 Topology。
 
-endpoint:
-  protocol:
-  default_port:
-  health_path:
-  expose:
-  routes:
+## `release.yaml` v2
 
-requires:
-  services:
-  links:
-  optional_links:
-  storage:
-  database:
-  queue:
-  secrets:
-
-provides:
-  capabilities:
-  endpoints: []
-  routes:
-  workers:
-  storage_buckets:
-  events:
-
-config_schema:
-resources:
-
-security:
-  allow_privileged: false
-  allow_host_mount: false
-  allow_arbitrary_command: false
-  required_secrets:
-  sandbox:
-  network_policy:
-
-source:
-  type:
-  ref:
-  build:
-  artifact:
-
-ui:
-  enabled:
-  menu_scope:
-  routes:
-  menus:
-  permissions:
-
-permissions:
-
-health:
-  checks:
-  timeout_seconds:
-  interval_seconds:
-```
-
-约束：
-
-- `schema_version` 当前只能是 `1`。
-- `id` 使用小写字母、数字和连字符；`version` 必须是 SemVer。
-- `kind` 可取 `frontend`、`backend-api`、`backend-worker`、`gateway`、`database`、`cache`、`storage`、`external`、`agent`。
-- `runtime.mode` 可取 `local-process`、`container`、`external`；`root_allowed` 与 `non_root_allowed` 至少有一个为 `true`。
-- Endpoint 协议可取 `http`、`https`、`tcp`、`postgres`、`redis`，`default_port` 必须大于 0。
-- `provides.endpoints` 必须为空。运行时 Endpoint 由 Orchestrator 按 `ip:port:service-name` 创建。
-- `source.type` 可取 `local`、`git`、`github`、`release`、`external`，`source.ref` 必填。
-- `health.checks` 不能为空，timeout 和 interval 必须大于 0。
-
-`service.yaml` 禁止任意 command、脚本、hook、`privileged`、`cap_add` 和 host mount。`allow_privileged`、`allow_host_mount`、`allow_arbitrary_command` 必须保持 `false`。secret 字段只能列名称，不能写值。
-
-## `release.yaml`
+生产 Release 使用 `schema_version: 2`。下例省略 migration、route、storage 等普通交付字段，展示正式服务契约：
 
 ```yaml
-schema_version: 1
-service_name:
-version:
-description:
-service_type:
+schema_version: 2
+service_name: example-consumer
+version: 1.2.3
+service_type: backend-worker
 
 source:
-  kind:
-  url:
-  checksum:
+  kind: url
+  url: https://catalog.example/releases/example-consumer-1.2.3.tar
+  checksum: sha256:<64-hex>
 
 runtime:
-  kind:
-  image:
-  binary:
-  system_service:
-  command:
-  args:
-  working_dir:
-  env:
-
-frontend:
-  enabled:
-  route_prefix:
-  remote_entry:
-  menu_items:
+  kind: image
+  image: registry.example/ojos/example-consumer@sha256:<64-hex>
 
 backend:
-  protocol:
-  port:
-  health_path:
+  protocol: http
+  port: 9101
+  health_path: /healthz/ready
 
-migrations:
-  - version:
-    path:
-    checksum:
-    destructive:
+provides:
+  apis: []
 
-permissions:
+requires:
+  apis:
+    - name: storage_get
+      id: storage.object.get
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 300000
 
-routes:
-  - path:
-    method:
-    target_type:
-    target:
-    permission:
+events:
+  publishes: []
+  subscribes: []
 
-apis:
-  - api_id:
-    protocol:
-    port_name:
-    path_prefix:
-    methods:
-    visibility:
-    auth_mode:
-    permission:
-    stability:
-    version:
-    grpc_service:
-    stream_name:
-    rate_limit:
-    timeout:
-    allowed_callers:
-    denied_callers:
-
-redis:
-storage:
-dependencies:
-required_apis:
-
-service_identity:
-  service_name:
-  allowed_apis:
-
-config_schema:
-secrets:
-
-observability:
-  metrics:
-  jaeger:
+runtime_contract:
+  id: standard-container-v1
+  sha256: sha256:<64-hex>
+  binding_directory: /run/ojos/service
+  identity_mode: workload
+  credential_delivery: file
+  restart_on_change: false
 ```
 
-`source.kind` 可取 `github-release`、`repo`、`url`、`local`。`runtime.kind` 可取 `image`、`binary`、`system-service`、`external`、`local-process`；local-process 必须提供受校验的 `command`，相对 `working_dir` 不能越出 package root。
+### Provided API
 
-release API 目前只接受 `auth_mode: public`、`user` 或 `service`。`service` 模式必须声明非 `public`
-permission，Gateway 才能交给 auth-service 校验调用方凭据。`internal` 仍是 Gateway 的保留模式；内部请求签名
-尚未启用，所以 manifest 校验会直接拒绝它，不会留下“安装成功但路由永远返回 403”的条目。
-`auth.user.permission.check` 是 auth-service 的保留 API ID，其它 Service 的 release 不能声明它。
+每个 `provides.apis` 项至少包含稳定 `id`、SemVer `version`、以 `/` 开头的 provider-native `path`、`auth` 和 `permission`。可选字段包括 protocol、port name、methods、visibility、stability 和不超过 300000 ms 的 timeout。生产 workload API 使用 `auth: workload`；人类用户 API 使用 `auth: user`。
 
-`rate_limit`、`timeout`、`allowed_callers` 和 `denied_callers` 目前会写入 API surface 契约，但还没有传播到
-EffectiveApiRoute，也不会由 Gateway 执行。插件不能把这些字段当成已经生效的限流、超时或调用方 ACL；当前实际
-边界仍由 visibility、Link、`auth_mode` 和 permission 决定。
+### Required API
 
-生产环境启用 `ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM=1` 后，安装请求或 manifest 必须提供 SHA-256。checksum 缺失或不匹配都会在加载阶段失败。
+每个 `requires.apis` 项至少包含：
 
-## 两份契约如何对齐
+- `name`：业务代码使用的稳定 requirement 名；
+- `id`：provider API ID；
+- `version`：非空 SemVer 范围；
+- `timeout_ms`：1–300000；
+- `optional` 与 `selection`：`nearest-healthy`、`same-node` 或 `explicit`。
 
-同目录校验会检查：
+Store validate 只从 applied Topology、签名 Release、Running/Healthy RuntimeInstance 和新鲜 RuntimeReport 中给出候选。零候选拒绝；多个候选必须显式选择；唯一推荐也必须随 Operation 确认。调用授权来自最终 applied ApiBinding，不来自 manifest 中的 caller allowlist 或共享 service token。
 
-- `service_name`、`version`、`service_type` 分别匹配 `service.yaml` 的 `id`、`version`、`kind`。
-- `backend.protocol`、`port`、`health_path` 匹配 Endpoint 声明。
-- release permissions 覆盖 Service 和 UI permissions。
-- frontend 的启用状态与 UI 一致，启用时 `route_prefix` 覆盖 UI route。
-- storage、dependency、Redis queue 和 secret 注册覆盖 `service.yaml` 的对应声明。
-- release route 覆盖 Endpoint 和 provided route。
-- `service_identity.allowed_apis` 只能引用 `required_apis` 中已经声明的 API。
+### Events
 
-`source`、构建产物和发布包是契约内容，不会因此变成新的 core 对象。内置 release 也不等于可运行部署：image/binary 为空，或 local-process 依赖仓库源码时，目标环境必须另行提供运行资产。
+事件声明使用稳定 type、SemVer、schema ref 和 consumer group。Problem/Judge 的正式事件是完整 CloudEvents snapshot/tombstone；producer transactional outbox 与 consumer inbox/projection 提供至少一次传递下的幂等，不能用跨数据库手工 SQL 替代。
 
-## 基础 Service
+### Runtime contract
 
-```text
-gateway
-auth-service
-problem-service
-user-service
-judge-api
-judge-worker
-postgresql
-redis
-storage-service
-minio
-jaeger
-orchestrator
-```
+普通服务使用 `standard-container-v1`。Judge Worker 使用 `judge-sandbox-v1`；只有签名、digest-pinned 的 Release 以及节点本地精确 allowlist 才能启用。Release 或安装请求不能覆盖 capability、mount、security option、host path 或 profile 内容。
 
-校验实现位于 `services/orchestrator/core/src/service.rs`，可参考 `sdk/templates/service.yaml` 和任一 `services/*/release.yaml`。
+## 生产 artifact 规则
+
+仓库内 `release.yaml` 可以保留 `local://`、空 image/checksum 作为源码模板，但不能直接作为生产安装输入。生产 Catalog 必须把 v2 manifest、metadata SHA-256、OCI RepoDigest、平台/最低编排器版本和 Ed25519 签名绑定在一起；Store 验证失败时在任何 Docker 或 provider 副作用前拒绝。
+
+生成签名 Catalog 的命令和约束见 [Service Contract v2](../orchestrator/service-contract-v2.md)。新增 Service 的 SDK 接入见 [Service SDK](../../sdk/service-sdk/README.md)。
+
+## v1 兼容导入
+
+旧 Release 的顶层 `apis`、`required_apis` 和 `service_identity.allowed_apis` 只用于兼容读取。导入器可以将无歧义字段转换成 `provides.apis`/`requires.apis`，但生产安装前必须得到稳定 requirement 名、SemVer 范围、timeout、provider 选择和 runtime contract；有歧义时必须拒绝，不能登记成“已安装”。

@@ -1,6 +1,20 @@
 # Problem Service
 
-`problem-service` 管题目元数据和标准题目包。数据库保存检索字段，题面、题解、测试数据和判题组件按目录写入 `Storage.ProblemsRoot`。
+`problem-service` 管题目元数据、authoring 工作区和不可变题目 artifact。`Storage.ProblemsRoot` 是本地 authoring/package build 目录，不是 Problem 与 Judge 的共享生产目录；生产题包和文件通过 Service Contract v2 的 Storage ApiBinding 写入内容寻址对象存储。
+
+## 生产 artifact 与 Judge 投影
+
+每次在线创建、更新测试数据或删除题目都遵循同一条闭环：
+
+1. 在隔离 staging 目录构建并校验题目树；确定性 ZIP 对相同输入产生完全相同的字节与 SHA-256。
+2. 通过 `storage_put` Binding 条件写入 `problems/package-sha256-<digest>.zip`；authoring 文件使用 `problem-<id>-objects-sha256-<digest>`。上传前先登记持久 intent，响应必须与预期 SHA-256/size 一致。
+3. 在一个 PostgreSQL 事务中更新 Problem、递增 `aggregate_version`/必要时的 `package_revision`、保存不可变 revision，并写入 `integration_outbox`。事务失败不会发布 snapshot；未关联上传由 GC ledger 回收。
+4. relay 将 `io.ojos.problem.snapshot.v1` 或 `io.ojos.problem.deleted.v1` CloudEvent 投递到 Redis Stream。Judge API 通过 consumer group、inbox 和幂等 projection 消费，只有更大的 aggregate version 能推进投影。
+5. Submission 创建时复制题包 revision、artifact URI、SHA-256 和 size。题目后续更新或删除不会改变已经创建的任务；删除后禁止新提交，旧任务仍可完成。
+
+生产路径不执行 Judge 数据库手工 `INSERT`，也不把 package 目录挂载给 Judge/Worker。旧数据使用可断点 backfill/reconcile，通过相同 snapshot 契约补齐。
+
+对象 GC 的 ownership、retention、最终引用检查和 `NEEDS_ATTENTION` 操作见 [Problem artifact lifecycle](ARTIFACT_LIFECYCLE.md)。
 
 ## 题目包目录
 
@@ -133,7 +147,7 @@ groups:
     feedback: full
 ```
 
-`rule` 可取 `sum`、`min`、`max`、`any`、`all_or_nothing`。case 引用了未声明的 group 时，包检查会给 warning。
+`rule` 可取 `sum`、`min`、`max`、`any`、`all_or_nothing`。省略 `tests.groups` 或提供空列表时只隐式声明默认组 `0`；case 省略 `group` 时也默认为 `0`。引用其他未声明 group 的题包无效，Problem 在发布前拒绝，Worker 也会拒绝加载。
 
 ## 判题组件
 

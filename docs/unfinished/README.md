@@ -1,6 +1,6 @@
 # Orchestrator v1.0 可选的上线证据
 
-连接池、持久化、Node 生命周期、Store、Topology、Desktop、Web/TUI 和真实升级/恢复功能已经进入 v1 代码、自动化契约和 portable 安装链路。这里保留的是未来需要特定生产规模声明或签名发行时才执行的额外证据。
+本页只列出未来作特定生产规模或签名发行声明时需要的额外证据，不维护功能完成状态。当前实现、Service Contract v2 的本地双 Engine 结果及其限制只以[项目状态总结](../completeness-summary.md)为准。
 
 下列两项不再阻塞本地功能完成、unsigned portable 构建或命令行安装。
 
@@ -34,16 +34,17 @@
 
 最终发布前还要核对 `v1.0.0` tag 与构建 commit 一致，下载后的 checksum、签名和 provenance 可重新验证。
 
-## 已收口、不要重新列为未完成
+## 功能状态不在本页维护
 
 - Desktop 默认 SQLite；生产 daemon 默认 PostgreSQL，内存只允许显式 `--ephemeral`。
 - PostgreSQL 连接池、证书校验 TLS、schema checksum、单主动 advisory lock；SQLite WAL/外键/busy timeout/文件锁。
 - v1 持久路径没有全表内存镜像和全局 console mutex，慢 I/O 不在数据库事务内执行。
-- Node 使用一次性注册码、SPIFFE ID mTLS 证书和 pull Job；旧 push/shared-token 路径不属于 v1。
+- Node 使用一次性注册码、SPIFFE ID mTLS 证书和 pull Job；Deployment 使用短期 workload JWT 与只读 ServiceContext，旧 push/shared-token 路径不属于 v1。
 - Store 缺少 provider 时在 plan 阶段失败，不返回 Deferred；Managed install 默认启动并以真实健康结果提升投影。
 - Topology 使用不可变 Revision、确定性 diff、apply/rollback saga、Status 与 drift。
 - Desktop 使用 Tauri WebView 内嵌同源 Web UI，不打开外部浏览器；TUI 是远程 `/api/v1` 客户端，不在进程内执行 mutation。
 - Web/TUI 使用 OIDC/RBAC/审计与同一 published action 契约。
+- Release v2、ApiBinding、`judge-sandbox-v1`、Problem→Judge outbox/projection 和 Gateway-only Worker 的当前证据边界见唯一状态源；本页不重复判定。
 - 真实 0.2 → v1 持久升级由历史仓储 writer、TLS PostgreSQL 17 和 v1 导入契约验证，
   数据库/artifact 联合备份恢复另有真实 drill；`release.yml` 会在每个候选 commit 上自动重跑。
 

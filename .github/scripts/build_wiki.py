@@ -18,6 +18,14 @@ REFERENCE_LINK_RE = re.compile(
     r"(?m)^(?P<prefix>[ \t]{0,3}\[[^\]\n]+\]:[ \t]*)(?P<target>\S+)(?P<suffix>.*)$"
 )
 FENCE_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})")
+FULL_COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+EXTERNAL_PAGES = (
+    (PurePosixPath("deploy/cross-machine/README.md"), "Deployment-Cross-machine-v2"),
+    (PurePosixPath("deploy/worker/README.md"), "Deployment-Judge-worker"),
+    (PurePosixPath("sdk/service-sdk/README.md"), "SDK-Service-context"),
+)
 
 
 class WikiBuildError(RuntimeError):
@@ -86,11 +94,35 @@ def fenced_segments(text: str) -> list[tuple[bool, str]]:
 
 
 class WikiBuilder:
-    def __init__(self, root: Path, output: Path, repository: str, branch: str) -> None:
+    def __init__(
+        self,
+        root: Path,
+        output: Path,
+        repository: str,
+        branch: str,
+        commit_sha: str,
+        run_url: str,
+    ) -> None:
         self.root = root.resolve()
         self.output = output.resolve()
         self.repository = repository.strip("/")
-        self.branch = branch
+        self.branch = branch.strip()
+        self.commit_sha = commit_sha.strip().lower()
+        self.run_url = run_url.strip()
+        if not REPOSITORY_RE.fullmatch(self.repository):
+            raise WikiBuildError("repository must use the owner/name form")
+        if not self.branch:
+            raise WikiBuildError("branch must not be empty")
+        if not FULL_COMMIT_SHA_RE.fullmatch(self.commit_sha):
+            raise WikiBuildError("commit SHA must contain exactly 40 hexadecimal characters")
+        parsed_run_url = urlsplit(self.run_url)
+        if (
+            parsed_run_url.scheme != "https"
+            or not parsed_run_url.netloc
+            or parsed_run_url.username is not None
+            or parsed_run_url.password is not None
+        ):
+            raise WikiBuildError("run URL must be an absolute HTTPS URL without credentials")
         self.page_for_source: dict[PurePosixPath, str] = {}
         self.rewritten_links = 0
         self.validated_links = 0
@@ -120,6 +152,13 @@ class WikiBuilder:
             self.page_for_source[source_path] = slug
             pages.append((source, source_path, slug))
 
+        for source_path, slug in EXTERNAL_PAGES:
+            source = self.root.joinpath(*source_path.parts)
+            if not source.is_file():
+                raise WikiBuildError(f"explicit Wiki source is missing: {source_path}")
+            self.page_for_source[source_path] = slug
+            pages.append((source, source_path, slug))
+
         collisions: dict[str, list[PurePosixPath]] = {}
         for _, source_path, slug in pages:
             collisions.setdefault(slug.casefold(), []).append(source_path)
@@ -133,6 +172,19 @@ class WikiBuilder:
             )
             raise WikiBuildError(f"Wiki slug collision: {details}")
         return pages
+
+    def source_identity(self) -> str:
+        return "\n".join(
+            [
+                "# Source Identity",
+                "",
+                f"- Repository: `{self.repository}`",
+                f"- Branch: `{self.branch}`",
+                f"- Commit SHA: `{self.commit_sha}`",
+                f"- Workflow run: <{self.run_url}>",
+                "",
+            ]
+        )
 
     def resolve_target(
         self, target: str, source_path: PurePosixPath, *, is_image: bool
@@ -267,7 +319,16 @@ class WikiBuilder:
             if slug != "Home":
                 sidebar_entries.append((self.title_for(original, slug), slug))
 
-        sidebar = ["# OJOS Wiki", "", "- [首页](Home)"]
+        (self.output / "Source-Identity.md").write_text(
+            self.source_identity(), encoding="utf-8", newline="\n"
+        )
+
+        sidebar = [
+            "# OJOS Wiki",
+            "",
+            "- [首页](Home)",
+            "- [Source Identity](Source-Identity)",
+        ]
         sidebar.extend(f"- [{title}]({slug})" for title, slug in sidebar_entries)
         (self.output / "_Sidebar.md").write_text(
             "\n".join(sidebar) + "\n", encoding="utf-8", newline="\n"
@@ -287,13 +348,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repository", required=True, help="GitHub owner/repository")
     parser.add_argument("--branch", default="main")
+    parser.add_argument("--commit-sha", required=True)
+    parser.add_argument("--run-url", required=True)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        WikiBuilder(args.root, args.output, args.repository, args.branch).build()
+        WikiBuilder(
+            args.root,
+            args.output,
+            args.repository,
+            args.branch,
+            args.commit_sha,
+            args.run_url,
+        ).build()
     except WikiBuildError as error:
         print(f"Wiki build failed: {error}")
         return 1

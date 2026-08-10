@@ -10,9 +10,11 @@ Spec 只保存期望状态：
 
 - `topology_id`、root Endpoint 和 authority；
 - Endpoint 的服务引用、协议、健康检查路径及声明式配置；
-- Link 的源/目标 Endpoint、协议、认证模式、scope 和声明式策略。
+- Link 的源/目标 Endpoint、协议、scope、声明式策略，以及 requirement 到 provider API 的 `api_bindings`。
 
 Spec 中引用的 `service_id` 必须已经注册。Endpoint ID、root、Link 引用和重复项在创建 revision 前统一校验。运行健康、容器 ID、Operation ID、日志、诊断及 UI 布局均不得写入 Spec。
+
+`api_bindings` 只保存用户确认的 requirement/API 选择。持久 `ApiBinding` 是 apply 后的运行投影，包含 consumer/provider Deployment、Node、Endpoint、API/version、Gateway 虚拟路径、timeout/permission、Topology revision、Link ID、credential generation、desired/observed state、健康和 drift；唯一键为 `(consumer_deployment_id, requirement_name)`。
 
 ### `TopologyRevision`
 
@@ -30,6 +32,7 @@ Status 保存真实观测状态：
 - `RECONCILING`、`IN_SYNC`、`FAILED` 或 `DEGRADED`；
 - Deployment 的 desired/observed state 和健康；
 - Gateway/Auth 管理接口报告的 Endpoint、Link 健康；
+- ApiBinding 的 Active/Staged/Degraded 状态、context generation 与断链/版本/路由 drift；
 - runtime 或 provider 的 missing/changed/unexpected/unreachable drift；
 - 最后一次 Operation 和观测时间。
 
@@ -56,12 +59,12 @@ Web 和 TUI 只能使用正式 Status 展示健康，不能从 Spec 的 Endpoint
 
 apply 在一个短事务中取得 draft 的 apply ownership、持久化 Operation 和 Job，然后在事务外执行 provider I/O：
 
-1. Gateway apply；
-2. Auth apply；
-3. 两个 provider 都返回同步、身份匹配且内容 hash 匹配的确认后，推进 applied head；
-4. Auth 拒绝时恢复 Gateway 的上一 revision；首次 apply 则删除刚创建的 Gateway 投影；
-5. provider 结果不确定时，先补偿该 provider，再补偿已经成功的步骤；
-6. 补偿成功记为 `FAILED`，applied head 保持在最后已证明的 revision；补偿失败记为 `DEGRADED/NEEDS_ATTENTION`。
+1. 根据签名 Release、健康 RuntimeInstance 和新鲜 RuntimeReport 解析并持久化 Staged ApiBinding；
+2. 暂存 Gateway consumer+API 路由与 Auth grant/generation；
+3. Agent 原子物化新的 ServiceContext/credential，consumer 通过健康门禁；
+4. 所有投影身份、revision 与内容 hash 匹配后，原子激活 Binding 并推进 applied head；
+5. 任一步骤拒绝时恢复上一 Gateway/Auth/Binding/context generation，首次 apply 则删除暂存投影；
+6. provider 结果不确定时先补偿该 provider，再补偿已成功步骤；补偿成功记为 `FAILED`，补偿失败记为 `DEGRADED/NEEDS_ATTENTION`。
 
 缺少 Gateway 或 Auth provider 时，plan/apply 在外部副作用前拒绝，不返回 deferred 或假成功。
 
@@ -71,10 +74,12 @@ apply 在一个短事务中取得 draft 的 apply ownership、持久化 Operatio
 
 Reconciler 独立读取 Gateway、Auth 和 runtime 状态。provider 不可达、revision/hash 不匹配、额外 Endpoint/Link、Deployment desired/observed 不一致都会形成显式 drift。观测结果通过 applied revision CAS 写入，旧观测不能覆盖新 apply 的 `RECONCILING` 状态。
 
+断开 Link、卸载 consumer 或切换 provider 会提升 credential generation；Gateway 每次 workload 请求读取活动 Binding，因此旧 JWT 即使尚未到期也会立即失效。provider 升级先健康新实例，再原子切换 Binding，不要求重启 consumer。
+
 ## Desktop 持久化
 
 Desktop 默认使用应用数据目录中的 SQLite。revision、heads、Status、Operation 和 Job 均写入同一持久数据库；重启不依赖内存镜像。布局保存在按用户和 topology 隔离的 UI state 中，不属于 TopologySpec。
 
 ## 上线门禁
 
-Topology v1 的定向门禁覆盖：完整 draft→revision→validate→diff→apply→status→rollback→reapply 流程、并发 revision CAS、陈旧 ETag、provider 失败补偿、补偿失败 Degraded、直接漂移观测、排队任务重启恢复，以及未知 provider 结果的 `NEEDS_ATTENTION` 恢复。
+Topology v1 的定向门禁覆盖：完整 draft→revision→validate→diff→apply→status→rollback→reapply 流程、并发 revision CAS、陈旧 ETag、Binding 零/单/多候选、断链失效、provider 原子切换、失败补偿、补偿失败 Degraded、直接漂移观测、排队任务重启恢复，以及未知 provider 结果的 `NEEDS_ATTENTION` 恢复。

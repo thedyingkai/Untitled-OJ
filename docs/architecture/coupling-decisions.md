@@ -7,7 +7,7 @@
 `services/orchestrator/core` 可以定义：
 
 - published action 与 RBAC 元数据；
-- Catalog/Release、Deployment、Topology、Operation 等领域类型；
+- Catalog/Release v2、Deployment、ApiBinding、Topology、Operation 等领域类型；
 - schema/引用/状态迁移校验；
 - 确定性 dependency plan、Topology diff 和补偿描述；
 - 与具体存储无关的错误和结果契约。
@@ -41,7 +41,7 @@ Core 不得读取文件或环境变量，不得连接数据库/HTTP/Docker，不
 | Redis | 已注册连接 ID + 确定性 namespace。 |
 | storage | 节点文件目录或 S3-compatible bucket/prefix。 |
 | frontend | 原子发布到已配置 Gateway asset store。 |
-| API registry | 使用明确 registry ID 的类型化注册。 |
+| API surface / Binding | 签名 Release 的 API 声明和已应用 ApiBinding 直接进入控制面事务仓储；不存在远程 Agent 持有管理凭据的外部 API Registry provider。 |
 
 正式 v1 的规则是 **缺少必需 provider 时 plan 失败**。`planned/deferred/skipped` 不能用作外部执行成功，也不能提升 Deployment、Topology applied head 或 RuntimeInstance observed state。通用 HTTP fallback 只有显式策略启用时可用，且仍受类型化输入和结果检查。
 
@@ -50,18 +50,21 @@ Core 不得读取文件或环境变量，不得连接数据库/HTTP/Docker，不
 ## 4. Store 与 Topology 不共享写所有权
 
 - Store 决定 Release、Deployment、RuntimeInstance、目标 Node、container 和 OCI digest。
-- Topology Spec 只引用已注册或部署的服务，描述 root、Endpoint 和 Link 的期望关系。
+- Topology Spec 只引用已注册或部署的服务，描述 root、Endpoint、Link 和命名 `api_bindings` 的期望关系。
+- 持久 ApiBinding 由已应用 revision 派生，唯一键是 `(consumer_deployment_id, requirement_name)`；Store 安装只能根据用户确认的映射创建 draft/revision，不能绕过 Topology apply 直接激活路由。
 - Topology Status 记录 provider/runtime 观测、drift 和最后 Operation。
 - Operation/Job/audit 是独立执行记录，不能塞入 Spec。
 - UI layout 按 user/topology 存储，不能影响业务 revision digest。
 
 因此 Topology apply 不会隐式安装服务；Store install 也不会直接改写 applied topology。需要连接变化时，通过 draft revision 与正常 apply 明确表达。
 
-## 5. Agent 采用 pull，不让控制面推任意命令
+## 5. Agent 采用 pull，并隔离 Node 与 workload 身份
 
 Node 用一次性注册码换取带 SPIFFE Node ID 的 mTLS 证书。Agent 只 claim 分配给自身的持久 Job，并以本地 SQLite ledger 记录 attempt、副作用结果和 replay 决策。证书可续签和即时吊销。
 
-这条边界删除了共享 `ORCHESTRATOR_INTERNAL_TOKEN` 的 Node push 语义：Node 不持有可反向调用人类控制 API 的共享控制面 token，控制面也不向 Node 发送 shell 字符串。Desktop 的 loopback Agent 复用相同 Job/runtime 语义，只是传输限定在本机。
+这条边界删除了共享 `ORCHESTRATOR_INTERNAL_TOKEN` 的 Node push 语义：Node 不持有可反向调用人类控制 API 的共享控制面 token，控制面也不向 Node 发送 shell 字符串。远程 Agent 不保存 Auth/Gateway/API Registry 管理凭据。
+
+Agent 只凭 Node mTLS 与 Deployment assignment 兑换 15 分钟 workload JWT，并在到期前原子替换 Deployment 私有 token 文件。容器只读挂载 `/run/ojos/service`；context 含 Gateway origin、CA、命名 Binding 和 generation，不含 Node 私钥或管理 token。Desktop 的 loopback Agent 复用同一 Job/runtime/context 语义，只是传输限定在本机。
 
 ## 6. 所有客户端只耦合 `/api/v1`
 
@@ -86,4 +89,4 @@ TUI 不再直接链接 Console 完成 mutation。Web 和 TUI 的差别只在交�
 
 单主动控制面、显式节点放置、Docker Engine 和最多 100 Nodes 是 v1 产品边界，不是待拆耦问题。active-active、自动 failover、自动扩缩容、Kubernetes、多租户和任意命令执行均不在本版本范围。
 
-尚待取得的只是候选环境/发布证据，见 [未完成的上线证据](../unfinished/README.md)。
+当前实现与证据边界只以[项目状态总结](../completeness-summary.md)为准；额外容量和签名要求见[可选上线证据](../unfinished/README.md)。

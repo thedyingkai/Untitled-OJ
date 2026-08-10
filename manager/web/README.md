@@ -49,7 +49,9 @@ npm run test:e2e:soak
 
 ## 会话和 API 契约
 
-业务请求和按用户/拓扑隔离的布局状态都只使用 `/api/v1`（布局为 `/api/v1/ui/layout`）。成功响应必须包含 `data` 与 `meta.request_id`，错误按 `application/problem+json` 处理；所有 mutation 自动携带 `Idempotency-Key`，Topology revision mutation 额外携带强 ETag `If-Match`，集合读取跟随 `next_cursor`。
+业务请求和按用户/拓扑隔离的布局状态都只使用 `/api/v1`（布局为 `/api/v1/ui/layout?topology_id=<selected>`，禁止回退到固定 `primary`）。成功响应必须包含 `data` 与 `meta.request_id`，错误按 `application/problem+json` 处理；所有 mutation 自动携带 `Idempotency-Key`，Topology revision mutation 额外携带当前 draft 的强 ETag `If-Match`，集合读取跟随 `next_cursor`。
+
+Topology 页以 Deployment ID 和 Endpoint ID 关联画布状态；同一 `service_id` 在不同 Node 上的实例不会合并。Link 的 ApiBinding 可按 requirement 新增、编辑、显式 rebind 或解除，保存先产生 immutable draft，Apply 后才改变实际路由和凭据。Store 安装预览只接受服务端为本次安装返回的 prospective diff，并显示本次候选映射的 SHA-256 确认指纹；升级/回滚会在确认框中列出保留的 Binding、Topology CAS 和指纹。卸载遇到 `DEPLOYMENT_ACTIVE_BINDINGS` 时会列出需要先解除并 Apply 的 Link。
 
 Desktop 使用同源一次性 bootstrap 会话；远程 Web 使用 OIDC Authorization Code + PKCE 和 HttpOnly 会话。页面不接收、不持久化 bearer token，`localStorage` 不参与身份认证。
 

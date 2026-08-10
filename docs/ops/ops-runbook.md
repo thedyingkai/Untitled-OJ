@@ -27,32 +27,23 @@ export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1},localhost,127.0.0.1,::1"
 export no_proxy="$NO_PROXY"
 ```
 
-## Gateway 路由存在性
+## ApiBinding、Gateway 与 Auth 投影
 
-查询编排器路由：
-
-```bash
-curl -fsS \
-  -H "x-ojos-orchestrator-token: $ORCHESTRATOR_INTERNAL_TOKEN" \
-  "$ORCHESTRATOR_URL/nodes/child-node/routes?include_upstream=true" | jq .
-```
-
-确认预期的 `api_id`、目标服务和所需权限都存在。如果路由缺失，检查服务的 `release.yaml`、重新安装 release，
-并查看 operation 日志。
-
-## Auth 权限注册
-
-根据生产访问策略，使用 auth 数据库或 auth admin API：
+从 Web/TUI 的 Deployment Binding 页面查看，或使用当前人类会话读取正式接口：
 
 ```bash
-psql "$AUTH_DATABASE_URL" -c "select code from permissions order by code;"
-psql "$AUTH_DATABASE_URL" -c "select role_id, permission_code from role_permissions order by permission_code;"
+curl --fail-with-body --cacert "$ORCHESTRATOR_CA_FILE" \
+  --cookie "$ORCHESTRATOR_SESSION_COOKIE" \
+  "$ORCHESTRATOR_URL/api/v1/deployments/$DEPLOYMENT_ID/bindings" | jq .
 ```
 
-如果某个服务权限缺失，确认 release install 注册了权限，并检查 auth-service 迁移状态。经 Gateway 调用
-`auth.user.permission.check` 时，还要核对调用方自己的 service credential、`X-OJOS-Caller-Service`、
-`X-OJOS-Node-Id` 和 API grant。Gateway 只会把 bearer 转发给这一条 auth-service API，不会转发给 storage
-等其他提供方。
+确认 requirement、API/version、consumer/provider Deployment、Topology revision、Gateway virtual endpoint、
+credential/context generation、desired/observed state、health 和 drift 全部匹配。缺失时检查签名 Release v2、
+当前 applied Link、provider RuntimeInstance 与 RuntimeReport，再通过 Topology draft/diff/apply 修复；不要直接写
+Gateway/Auth 数据库或伪造 `X-OJOS-Caller-*` header。
+
+Gateway 从 Deployment JWT 推导 caller 并实时校验活动 Binding/generation。Auth/Gateway 投影只由控制面管理；
+远程 Agent 与容器不持有 admin credential，缺少 workload grant 时也不能回退 admin bearer。
 
 ## Redis 队列积压
 
@@ -72,18 +63,10 @@ redis-cli -u "$REDIS_URL" XPENDING ojos:judge:task ojos-judge-workers
 
 ## Worker 消费
 
-检查 worker 日志：
-
-```bash
-docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-compose.yml logs --no-color judge-worker
-```
-
-确认：
-
-- worker 已向 judge-api 注册；
-- `OJOS_RUNNER_MODE=nsjail`；
-- 无反复的编译/运行时沙箱失败；
-- Redis stream group 有活跃 consumer。
+在 Orchestrator 的 Deployment/Operation 日志中选择 B 节点上的 Judge Worker，不要从 A 机 Compose 查询
+`judge-worker`。确认 Deployment 为 `Running/Healthy`、`judge-sandbox-v1` HostConfig digest 无 drift、
+`judge_control`/`storage_get` Binding 为 Active，且最近注册和心跳成功。B Worker 不直连 Redis；Redis consumer
+只属于 A 机 Judge API 内部实现。
 
 ## MinIO 对象读写
 
@@ -105,15 +88,10 @@ curl -fsS http://127.0.0.1:8085/health | jq .
 
 ## nsjail runner
 
-在 judge-worker 镜像内：
-
-```bash
-docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-compose.yml exec judge-worker nsjail --help >/tmp/nsjail-help.txt
-docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-compose.yml exec judge-worker cat /opt/ojos/runtime-versions.txt
-```
-
-如果 nsjail 不可用，不要切换到假 runner。重建固定版本的 worker 镜像，并在 nsjail 矩阵通过前让该服务
-远离生产流量。
+通过 Orchestrator 查看 B 节点 RuntimeReport、Deployment health evidence 与固定 HostConfig digest。Agent 的
+`judge-sandbox-v1` 启动后检查会验证 nsjail、cgroup v2、工具链和 work/cache 可写性；失败时 Deployment 不会
+提升为 Healthy。如果 nsjail 不可用，不要切换到假 runner，也不要用安装请求覆盖 capability/mount/security
+option；修复节点或发布新的签名 runtime profile。
 
 ## Pending 任务恢复
 
@@ -121,7 +99,7 @@ docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-comp
 
 1. 检查 `judge-api` 队列状态。
 2. 检查 Redis `XPENDING`。
-3. 重启 judge-worker 一次。
+3. 通过 Orchestrator 对对应 Deployment 执行一次 restart，并观察 Operation 与重新注册日志。
 4. 如果任务超过 lease TTL 仍 pending，使用受支持的 worker 恢复路径认领它，或在一次性环境中运行 Redis
    恢复演练。
 5. 在 submission 状态与 result stream 对账完成前，不要手动删除 stream 条目。
@@ -132,21 +110,14 @@ docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-comp
 deploy/ops/redis-recovery-drill.sh
 ```
 
-## 吊销 service 凭据
+## 吊销 workload 调用权
 
-如可用，使用 auth 服务控制路径；否则通过受审计的维护会话更新 auth 数据库：
+在 Topology draft 中解除对应 requirement 的 ApiBinding，核对 diff 后 apply；卸载 consumer 或 rebind provider 也会
+提升 credential generation。确认新的 TopologyStatus 为 `IN_SYNC`、Binding 为 `REVOKED/UNBOUND`，并用旧 token
+验证 Gateway 已立即拒绝。不要直接改 Auth/Gateway 数据库，也不要为恢复调用签发共享 service/worker token。
 
-```sql
-update service_credentials
-set enabled = false, revoked_at = now(), updated_at = now()
-where service_code = '<service-code>' and token_hint = '<token-hint>';
-```
-
-然后在 staging 用 service 凭据生命周期演练验证 deny 行为：
-
-```bash
-deploy/ops/service-credential-drill.sh
-```
+Node 身份泄露时还要在 Orchestrator 吊销该 Node 证书、drain 节点并重新 enroll；Deployment JWT 与 Node mTLS
+是两条独立身份链。
 
 ## 回滚
 
@@ -169,6 +140,20 @@ DeployedServiceApi、有效路由、权限和健康。schema 与外部资源副�
 `OJOS_ROLLBACK_TARGET_OPERATION_ID` 精确指定原安装，或用 `OJOS_ROLLBACK_RELEASE_VERSION` 限定版本。
 Release 模式必须设置 `OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1`。它与 `OJOS_ROLLBACK_OPERATION_ID`
 互斥，示例见 [运维脚本说明](../../deploy/ops/README.md)。
+
+## Problem 对象 GC 的删除隔离窗口
+
+生产 Release 将 `storage_delete` Binding 超时固定为 60 秒，并将
+`OJOS_PROBLEM_ARTIFACT_GC_CLAIM_LEASE` 默认设为 10 分钟。Problem Service 启动时要求 claim lease
+严格大于 DELETE 超时再加 60 秒隔离 grace；不满足时拒绝启用生产 GC。
+
+GC 在最终引用检查后、发出条件 DELETE 前会用 claim token 续满一次 lease。随后如果进程崩溃或请求超时，
+ledger 会继续保持 `DELETING`，记录重试也不会缩短现有 lease，发布方不能重新注册同一
+content-addressed URI。只有 claim lease 到期后
+其他 collector 才能重领；默认 10 分钟窗口覆盖
+60 秒请求上限和额外 60 秒 grace，避免旧 DELETE 与后续重新上传发生重叠。调整 Binding 超时或
+`OJOS_PROBLEM_ARTIFACT_GC_CLAIM_LEASE` 时必须保持这一严格不等式，不能仅依靠 SHA/size 条件删除，
+因为相同内容重新上传后的身份仍然相同。
 
 ## 备份 / 恢复
 
@@ -203,8 +188,9 @@ deploy/ops/trace-e2e-drill.sh
 curl -fsS "$JAEGER_QUERY_URL/api/traces/$TRACE_ID" | jq .
 ```
 
-预期服务包括 gateway-service、judge-api-service、storage-service 和 judge-worker。Redis Stream 传播由
-trace 元数据和 judge-worker 原生 consumer span 表示。
+预期服务包括 gateway-service、judge-api-service、storage-service 和 judge-worker。B Worker 的业务 span 只经
+Gateway；Redis Stream relay/consumer span 属于 A 机 Problem/Judge API 的 outbox/inbox 投影，不应出现在 Worker
+到 Redis 的直连链路中。
 
 ## 告警触发
 

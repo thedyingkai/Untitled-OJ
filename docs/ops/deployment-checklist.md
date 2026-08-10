@@ -9,7 +9,7 @@
 - 每个生产数据库使用 PostgreSQL 17 兼容服务。
 - Redis 8.8 兼容服务，启用密码认证和持久化。
 - MinIO `RELEASE.2025-09-07T16-13-09Z` 或兼容的 S3 端点。
-- judge-worker 镜像中提供 `nsjail`；主机必须支持所配置的 cgroup/seccomp/mount 策略。
+- B 节点由已注册的 Orchestrator Agent 运行 Judge Worker；镜像提供 `nsjail`，节点必须支持 cgroup v2，并在本地策略中允许签名的 `judge-sandbox-v1` profile/digest。
 - 运维脚本工具链：`bash`、`curl`、`jq`、`docker`、`pg_dump`、`pg_restore`、`redis-cli`、`mc`、`sha256sum`。
 - 从源码构建 Web UI 时使用 Node.js 24.11；CI 和 Dockerfile 采用同一版本。
 - 在企业代理后运行本地演练或健康探测时，配置 `NO_PROXY=localhost,127.0.0.1,::1`。
@@ -23,11 +23,13 @@
 - `JWT_SECRET`：至少 32 字符。
 - `AUTH_INTERNAL_TOKEN`：至少 32 字符。
 - `ORCHESTRATOR_INTERNAL_TOKEN`：至少 32 字符。
-- 启用 `ORCHESTRATOR_NODE_DISPATCH` 时：设置 `ORCHESTRATOR_NODE_ENDPOINT` 和独立的 `ORCHESTRATOR_NODE_TOKEN`；缺少派发地址，生产预检会失败。
-- 启用 `ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER` 时：配置本机 `ORCHESTRATOR_NODE_HOST_IP`，请求目标必须与它一致。请求已授权 driver、但目标 Node 没打开该上限时，安装会失败；只有未授权 driver 的请求可以只登记元数据。
+- B 节点准备持久 Agent identity/ledger、控制面 CA、私有 Registry 凭据和 `--runtime-policy` 文件；Node 只通过 SPIFFE mTLS pull Agent API，不配置旧 push endpoint/token 或通用 service driver。
+- `runtime-policy` 必须精确允许 `judge-sandbox-v1` profile digest 与受信任 Catalog 选中的 `repository@sha256`；浮动 tag、通配仓库、裸 digest 或安装请求自定义 HostConfig 均拒绝。
 - `ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM=1`：生产环境强制校验 release 包。
-- `OJOS_WORKER_TOKEN`：至少 32 字符。
-- `OJOS_USER_SERVICE_TOKEN`、`OJOS_PROBLEM_SERVICE_TOKEN`、`OJOS_JUDGE_API_SERVICE_TOKEN`、`OJOS_JUDGE_WORKER_SERVICE_TOKEN`：每个调用方独立签发，至少 32 字符；不能彼此复用，也不能复用 JWT、内部或 worker token。
+- `ORCHESTRATOR_AUTH_WORKLOAD_TOKEN`：Auth 与控制面专用的 workload 签发凭据，不能复用 Auth admin 或 Orchestrator internal token，且不得下发到 Agent。
+- `OJOS_WORKLOAD_PRIVATE_KEY_FILE`、`OJOS_WORKLOAD_PUBLIC_KEY_FILE`：同一 Ed25519 密钥对；私钥只挂载给 Auth，公钥只挂载给 Gateway。
+- `ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN`、`ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT`：B 节点可访问的 HTTPS Gateway 与其 CA bundle。
+- `OJOS_WORKER_TOKEN` 和各 `OJOS_*_SERVICE_TOKEN` 只属于显式 `legacy-development` Compose profile，不是 Store production 配置。
 - `AUTH_POSTGRES_PASSWORD`、`PROBLEM_POSTGRES_PASSWORD`、`JUDGE_POSTGRES_PASSWORD`、`USER_POSTGRES_PASSWORD`、`ORCHESTRATOR_POSTGRES_PASSWORD`：至少 20 字符。
 - `AUTH_DATABASE_URL`、`PROBLEM_DATABASE_URL`、`JUDGE_DATABASE_URL`、`USER_DATABASE_URL`、`ORCHESTRATOR_DATABASE_URL`：密码认证的 PostgreSQL URL，不使用默认 `postgres` 用户。预检无法识别其它被授予 `rolsuper` 的角色，上线前还要查询 `pg_roles` 核对。
 - `REDIS_PASSWORD` 和 `REDIS_URL`：密码认证的 Redis URL。
@@ -35,11 +37,9 @@
 - 标准 preflight 会检查仓库内默认监控 Compose，因此要求 `OJOS_ALERT_WEBHOOK_URL` 和 `GRAFANA_ADMIN_PASSWORD`。明确不部署监控时，设置 `OJOS_SKIP_MONITORING_CHECKS=1`；否则自定义监控 Compose 路径缺失会直接失败，避免路径拼错后悄悄跳过检查。
 - 可选的传输安全强制：设置 `OJOS_SECRET_CHECK_REQUIRE_TLS=1` 时，`REDIS_URL` 必须为 `rediss://`，`MINIO_USE_SSL` 必须为 `true`（默认关闭，取决于 PKI/证书决策）。
 
-不要把 `AUTH_INTERNAL_TOKEN` 当作业务服务凭据。经 Gateway 的用户权限校验使用
-`OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT` 和前三个 `OJOS_*_SERVICE_TOKEN`；judge-worker 的独立 token
-用于访问 storage API。Compose 会显式把这些变量注入对应容器，不会从根 `.env` 自动继承未声明变量。迁移
-`000012_grant_service_permission_check` 只登记 identity 和 grant，不签发 token；上线前应通过
-`POST /auth/admin/services/{service_code}/credentials` 分别签发并写入密钥管理系统。
+不要把 `AUTH_INTERNAL_TOKEN` 当作 workload 或业务服务凭据。Service Contract v2 的调用权限来自已应用
+ApiBinding，Agent 用 Node mTLS 兑换每 Deployment 独立的 15 分钟 JWT；容器只读取只读 service context 与
+轮换 token 文件。生产 B 节点不接收 Auth/Gateway admin token、共享 worker token 或 A 机中间件凭据。
 
 启用 `ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH=1` 时，还要设置 `GATEWAY_ENDPOINT`、`GATEWAY_ADMIN_TOKEN` 和
 `GATEWAY_NODE_ID`。缺少 Node ID 时，空路由表强制刷新会被拒绝。
@@ -64,7 +64,7 @@ OJOS_ENV_FILE=/etc/ojos/production.env deploy/ops/preflight.sh
 
 ```bash
 docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-compose.yml build \
-  orchestrator auth-service storage-service gateway problem-service judge-api judge-worker user-service
+  orchestrator auth-service storage-service gateway problem-service judge-api user-service
 ```
 
 5. 启动数据库和基础设施。
@@ -75,9 +75,11 @@ docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-comp
 docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-compose.yml up -d
 ```
 
-Compose 会直接启动业务服务。最小 orchestrator 镜像不含业务源码、Compose 文件或 Docker CLI，不能在容器内
-代替 Compose 启动其他服务。若要使用编排器的 LocalProcess/DockerCompose 生命周期驱动，应从完整源码工作区运行，
-或显式挂载审核过的运行资产和 Docker 访问能力。
+Compose 启动 A 机控制面和业务服务，但不会启动 Judge Worker。B 机安装并注册 Agent 后，通过 Store 选择 B
+节点，确认 `judge_control` 与 `storage_get` Binding，再由 Agent 按固定 profile 创建并健康验证 Worker。
+`judge-worker` Compose 服务只在显式 `--profile legacy-development` 时存在，禁止作为生产部署步骤。
+完整注册、网络边界、Catalog 和门禁流程见 [Judge Worker 生产部署](../../deploy/worker/README.md)与
+[A/B 跨机门禁](../../deploy/cross-machine/README.md)。
 
 ## 迁移步骤
 
@@ -179,9 +181,9 @@ deploy/ops/trace-e2e-drill.sh
 | --- | --- | --- |
 | Docker daemon 不可用 | `docker ps` | 启动 Docker / 服务管理器并重跑预检 |
 | 代理拦截本地 curl | `env | grep -i proxy` | 设置 `NO_PROXY=localhost,127.0.0.1,::1` |
-| nsjail 不可用 | `docker compose logs judge-worker` | 重建 judge-worker 镜像并确认 runtime lock |
+| nsjail 不可用 | Orchestrator Deployment health evidence 与 Agent 日志 | 修复 B 节点或发布新的签名 runtime profile；不要绕过 `judge-sandbox-v1` |
 | Redis 不可用 | `redis-cli -u "$REDIS_URL" ping` | 检查密码、网络、持久化和 stream group |
 | MinIO 不可用 | `curl /minio/health/live` 或 `mc ls` | 检查凭据、端点、bucket 和 policy |
 | gateway 路由缺失 | 编排器路由表 | 重新安装 release 或重载 gateway 路由 |
-| 权限拒绝 | auth 权限 / service grant | 核对 release 权限与 service 凭据授权 |
-| worker pending 不被消费 | judge 队列状态 API | 检查 worker 注册、Redis stream group、nsjail 失败和 worker token |
+| 权限拒绝 | Deployment Binding、Topology revision/generation 与 Gateway/Auth 投影 | 核对活动 Link、Release API/version、workload JWT audience/generation；不要回退 admin bearer |
+| worker pending 不被消费 | Judge 队列状态、Deployment/Binding health 和 Agent Operation 日志 | 检查 Worker 注册/心跳、长轮询、`judge-sandbox-v1`、Gateway 可达性和 workload credential；B Worker 不直连 Redis，也没有生产共享 worker token |

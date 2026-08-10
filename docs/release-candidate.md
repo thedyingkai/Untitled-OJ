@@ -1,36 +1,38 @@
 # Orchestrator v1.0 交付判定
 
-## 当前结论：本地功能 GO
+## 状态来源
 
-当前源码、自动化测试和原生 portable 安装入口已经达到 v1 本地功能交付状态。Windows/Linux 用户从解压后的 portable 包直接运行 `ojos-orchestrator install`，不需要安装脚本、MSI、Azure 签名、专用 runner 或 10×10 主机群。
+本页只定义候选判定规则，不维护第二份功能状态。当前实现、pre-commit 双 Engine run_id/证据 SHA-256、证据限制和未完成项只以[项目状态总结](completeness-summary.md)为准。
 
-`Cargo.toml`、Desktop、Web 和 Service/Release manifest 中的 `1.0.0` 是版本一致性要求。是否创建 tag 或 GitHub Release 是单独的发布决定，不影响本页对当前代码功能的判定。
+Windows/Linux 用户可以从解压后的 portable 包直接运行 `ojos-orchestrator install`；这条安装路径不依赖安装脚本、MSI、Azure 签名、专用 runner 或 10×10 主机群，但不能替代最终候选 commit 的功能复验。
 
-## 功能候选判定
+`Cargo.toml`、Desktop、Web 和 Service/Release manifest 中的 `1.0.0` 是版本一致性要求。是否创建 tag 或 GitHub Release 是单独的发布决定，不能改变或替代状态源记录的功能证据。
 
-| 范围 | 当前判定 | 说明 |
-| --- | --- | --- |
-| 正式契约 | 已实现 | `/api/v1`、OpenAPI、published action/RBAC、Problem Details、幂等、cursor、ETag 和 SSE 已进入自动契约。 |
-| 持久化与并发 | 已实现 | Desktop SQLite、生产 PostgreSQL TLS pool、schema checksum、单主动锁、持久 Job/Operation、恢复和有界过载均有实现与契约测试。 |
-| Node/runtime | 已实现 | mTLS pull Agent、本地 ledger、Docker Engine API、完整 deployment 生命周期及崩溃恢复路径已有测试入口。 |
-| Store | 已实现 | Catalog v2、OCI digest、安装默认启动、健康提升、升级/回滚/卸载、补偿和 provider fail-fast 已接入 v1。 |
-| Topology | 已实现 | immutable revision、确定性 diff、validate/apply/rollback、Status/drift、并发冲突和 UI state 已接入 v1。 |
-| Desktop/Web/TUI | 已实现 | Tauri 内嵌 WebView/loopback backend/Agent，远程 OIDC Web、Device Flow TUI 和 published action 能力等价已经落地。 |
-| 运维与发布工具 | 已实现 | preflight、live/ready、指标、日志保留、备份恢复、容量 runner、兼容构建和多平台打包/签名 workflow 已存在。 |
+## 功能候选复验范围
 
-“已实现”表示代码、自动化入口和本地 portable 运行链路具备；候选 commit 推送后仍须由功能 CI 复验，未产生的 hosted CI 结果不在本页提前声明。
+| 范围 | 候选必须证明 |
+| --- | --- |
+| 正式契约 | `/api/v1`、OpenAPI、published action/RBAC、Problem Details、幂等、cursor、ETag 和 SSE 自动契约通过。 |
+| 持久化与并发 | Desktop SQLite、生产 PostgreSQL TLS pool、schema checksum、单主动锁、持久 Job/Operation、恢复和有界过载门禁通过。 |
+| Node/runtime | mTLS pull Agent、本地 ledger、Docker Engine API、完整 Deployment 生命周期及逐点崩溃恢复通过。 |
+| Store/Topology | Catalog v2、OCI digest、安装健康提升、升级/回滚/卸载/补偿，以及 immutable revision、diff/apply/rollback、Status/drift 和并发冲突通过。 |
+| Service Contract v2 | Release v2、ApiBinding、ServiceContext、Deployment JWT、runtime facts/profile、Problem→Judge 投影和 Gateway-only Worker 在最终 clean commit 的 `full-components` 双 Engine 门禁通过。 |
+| Desktop/Web/TUI | Tauri embedded smoke、远程 OIDC Web、Device Flow TUI、持续运行和 published action 能力等价通过。 |
+| 运维与 portable | preflight、live/ready、指标、日志保留、备份恢复、兼容升级，以及 Windows/Linux portable 解压、安装、独立目录启动通过。 |
+
+各项当前结果只查阅状态源。最终候选必须在 clean checkout 上复跑合同、双 Engine、UI/TUI、Docker Agent、PostgreSQL 升级/恢复和 portable 门禁；未产生的结果不能提前登记。
 
 ## 可选的额外生产证据
 
-| 证据 | 当前状态 | 何时需要 |
-| --- | --- | --- |
-| 100 Node + 24h | 未运行 | 只有对外声明“已验证 100 Node 生产容量”时才需要；不用于判断 API、Store、Topology、Agent 或 Desktop 是否正确。 |
-| MSI/Authenticode/Sigstore | 未运行 | 只有公开分发、企业签名策略或发布者信任需要时才执行；unsigned portable 与命令行安装不依赖它。 |
+| 证据 | 何时需要 |
+| --- | --- |
+| 100 Node + 24h | 只有对外声明“已验证 100 Node 生产容量”时才需要；当前是否已有证据查状态源。 |
+| MSI/Authenticode/Sigstore | 只有公开分发、企业签名策略或发布者信任需要时才执行；当前是否已有制品查状态源。 |
 
-0.2.0 → 1.0.0 真实升级不再是外部未实现项。发布 contract gate 使用历史 0.2 仓储 writer
+0.2.0 → 1.0.0 候选复验使用历史 0.2 仓储 writer
 向真实 TLS PostgreSQL 17 旧表写入数据，再由 v1 验证 migration/import、未应用 draft、
 `External/Unknown` runtime 和重启幂等；数据库与 artifact 联合备份恢复也有真实 drill。
-这些门禁已有本地演练入口和历史通过记录；候选 commit 的结果以对应 CI run 为准。
+候选 commit 的结果必须以对应 clean checkout/CI run 为准，历史记录只用于排障。
 
 ## 普通 portable 交付
 

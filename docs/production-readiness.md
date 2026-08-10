@@ -1,10 +1,10 @@
 # Orchestrator v1.0 生产就绪证据
 
-本文保留需要生产规模声明或受信任公开分发时使用的额外证据账本。它不再定义本地功能与 unsigned portable 交付是否完成；源码、lockfile、schema、workflow 或发布文档有变化后，旧的额外证据仍不能代表新 commit。
+本文只定义需要生产规模声明或受信任公开分发时使用的额外证据，不维护功能状态。当前实现与本地证据只以[项目状态总结](completeness-summary.md)为准；源码、lockfile、schema、workflow 或发布文档变化后，旧证据不能代表新 commit。
 
-## 当前结论
+## 证据边界
 
-**本地功能 GO。** 当前工作树实现了 v1 功能、真实持久升级/恢复和无需脚本/管理员权限的 Windows/Linux 原生 CLI 安装。Linux Desktop 仍依赖发行版提供的 WebKitGTK/GTK 运行库，当前预编译 tar 明确限定 Ubuntu 24.04 x86_64 基线。100 Node/24 小时报告与签名多平台制品尚未执行，因此项目不能额外声称已经验证该规模或已经提供受信任发布者签名；这不阻塞普通本地使用。
+本地 `full-components` 双 Engine 运行属于功能证据，不是本页定义的 100 Node/24 小时、物理双主机、签名 GA 或安全验收。其 run_id、文件 SHA-256 和 pre-commit 限制统一记录在[项目状态总结](completeness-summary.md)，本页不复制当前结论。
 
 历史 `v0.1.0-alpha` 和旧 `2a0d647`/`875586f` workflow 记录只证明当时的代码，不能作为当前候选证据。`docs/evidence/*.json` 同样是历史快照。
 
@@ -15,6 +15,7 @@
 | 存储 | Desktop 使用 SQLite；远程 daemon 强制 PostgreSQL。SQLite 启用 WAL、外键、busy timeout 和旁路文件锁；PostgreSQL 使用 r2d2 连接池、证书校验 TLS、迁移 checksum 和专用 advisory-lock 连接。两者失败均不回退内存。 | `services/orchestrator/storage/`、`sqlite_contract.rs`、`postgres_contract.rs` |
 | 并发与恢复 | 持久 Operation/Job、lease CAS、heartbeat、retry、event 去重、启动恢复、SIGTERM 最长 30 秒排空；结果不可证明时进入 `NEEDS_ATTENTION`。事务只包状态转换，下载、Docker、探测和 provider I/O 在事务外。 | `services/orchestrator/control-plane/`、backend 恢复测试 |
 | Node/runtime | 一次性注册码兑换 SPIFFE Node ID 的 mTLS 证书，30 天有效、提前 7 天续签、可吊销；Node 长轮询领取本节点 Job，本地 SQLite ledger 保证幂等；Docker 走 Engine API socket/pipe 并核对 RepoDigest。 | `services/orchestrator/agent/`、`services/orchestrator/runtime/`、`backend/tests/docker_agent_v1_e2e.rs` |
+| 跨节点 Service | Release v2、ApiBinding、ServiceContext、RuntimeReport、短期 workload JWT、固定 runtime profile 和 Gateway consumer 路由；Problem/Judge 通过 outbox/inbox 与 ApiResourceRef 解耦。 | `docs/orchestrator/service-contract-v2.md`、`deploy/cross-machine/` |
 | Store | Catalog v2 信任、依赖/平台/版本选择、OCI digest、release-version 签名能力、精确 endpoint/port 绑定、导入与 Managed/External 安装、升级/回滚/卸载、健康投影和补偿；缺少 provider 时 plan 失败。 | `services/orchestrator/manager/`、Store API/contract tests |
 | Topology | 不可变 revision、强 ETag、确定性历史 diff、按精确 Runtime release 绑定的真实 Endpoint/Link probe、validate/apply/rollback saga、Status、drift、审计和按用户布局。 | storage topology contract、backend API/probe tests、Web Playwright |
 | 身份与 API | `/api/v1`、Problem Details、request id、Idempotency-Key、cursor、SSE；远程 Web OIDC Code + PKCE、TUI Device Flow、viewer/operator/admin RBAC、append-only audit。 | OpenAPI/action contract、backend auth tests、Web/TUI fixtures |

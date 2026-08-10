@@ -25,9 +25,9 @@ npm run test:e2e
 
 | 页面 | 正式能力 |
 | --- | --- |
-| Store | Catalog 搜索、来源列表、注册和移除；Release 导入、校验、安装、升级、回滚和删除 |
-| Topology | draft/revision、Endpoint/Link 编辑、validate、确定性 diff、apply、rollback、status、export |
-| Deployments | RuntimeInstance 列表与详情、启动、停止、重启、卸载和真实健康 |
+| Store | Catalog 搜索、来源列表、注册和移除；Release 导入/校验、API provider 候选、显式 Binding、Topology diff、安装、升级、回滚和删除 |
+| Topology | draft/revision、Endpoint/Link/ApiBinding 编辑、validate、确定性 diff、apply、rollback、status、export |
+| Deployments | RuntimeInstance 列表与详情、Binding、context generation、token expiry、runtime profile/HostConfig digest、启动、停止、重启、卸载和真实健康 |
 | Nodes | 一次性注册码、节点列表/健康、证书吊销、drain 和移除 |
 | Operations | JSON plan、confirm、apply、cancel、retry、rollback、日志与可续传 SSE 事件 |
 | Diagnostics | 对当前已应用 Topology 快照创建报告、列表、查看及 JSON/Markdown 导出 |
@@ -38,17 +38,19 @@ TUI 使用相同 action 和默认值。TUI 不复刻拖拽，但 Store、Topolog
 
 Store 读取已经验证的 Catalog v2。生产 Catalog 包含 semver、channel、目标平台、最低编排器版本、依赖、metadata SHA-256、OCI RepoDigest 和 Ed25519 签名；Catalog 注册表使用 RFC 8785/JCS 验签。页面不会接受浮动 tag 作为生产安装目标。
 
-“仅导入”只持久化 Release；Docker 调用数必须为零。“安装”默认使用 `Managed + start=true`，并显式选择 `target_node_id`。请求被接受只显示 Operation ID；只有 Agent 完成拉取、digest 校验、容器创建/启动、健康门禁和投影提升后才显示 `RUNNING/HEALTHY`。
+“仅导入”只持久化 Release；Docker 调用数必须为零。“安装”默认使用 `Managed + start=true`，并显式选择 `target_node_id`。Release v2 有 required API 时，页面显示健康兼容 provider、推荐项、runtime profile 权限摘要和 prospective Topology diff；零候选拒绝，多个候选必须明确选择，唯一推荐也随 Operation 一起确认。请求被接受只显示 Operation ID；只有 Agent 完成拉取、digest 校验、容器创建/启动、context 物化、Binding 与健康门禁后才显示 `RUNNING/HEALTHY`。
 
 升级和回滚保留旧 RuntimeInstance，待新实例健康并完成 provider/Gateway 切换后再移除旧实例。失败时 Operation 显示补偿或 `NEEDS_ATTENTION`，页面不会把 imported、planned、deferred 或 HTTP 2xx 当作 installed/running。
 
-Release 声明的 Auth、Gateway、migration、config/secret、Redis、storage、frontend 和 API registry 是类型化 pipeline 步骤。目标 Node 未声明所需 provider 时，plan 阶段直接拒绝。External 安装不创建容器，必须先通过声明的 endpoint 健康检查。
+Release 声明的 Auth、Gateway、migration、config/secret、Redis、storage 和 frontend 是类型化 pipeline 步骤。API surface 与 ApiBinding 直接进入控制面事务仓储，不依赖外部 API Registry。目标 Node 的真实 RuntimeReport、policy、provider 或 required API 不满足时，plan 阶段直接拒绝。External 安装不创建容器，必须先通过声明的 endpoint 健康检查。
 
 ## Topology 工作流
 
 画布只能引用已经注册或部署的服务。拖入节点和连接 Endpoint/Link 只产生 draft revision；`apply` 才创建异步 Operation。Revision 不可变，rollback 会复制历史 Spec 生成一个新 revision，再走正常 apply saga。
 
 画布颜色、部署状态、链路状态和 drift 来自 `TopologyStatus`，不从 Endpoint/Link 的期望字段推断。applied head 只在所有必要步骤成功后推进；补偿失败显示 `Degraded`，reconciler 会继续对账。
+
+Link 的 Binding 面板按 requirement 展示 consumer/provider Deployment、API/version、timeout、credential generation、健康和 drift。rebind/unlink 先生成 revision；apply 后 Gateway 路由和 workload generation 才改变。卸载仍有活动 Binding 的 Deployment 会被拒绝，并列出必须先解除的 Link。
 
 坐标通过 `GET/PUT /api/v1/ui/layout?topology_id=...` 按用户、拓扑持久化，不写入 TopologySpec。旧 `.ojos/ui-layout.json` 只导入一次；保存失败会在页面显示，不会静默吞掉。
 
@@ -97,4 +99,4 @@ manager/web/src/
     DiagnosticsView.vue
 ```
 
-生产环境变量、provider 配置、备份恢复和发布门禁见 `docs/orchestrator/operations-v1.md`。
+生产环境变量、provider 配置、备份恢复和发布门禁见 [运维手册](operations-v1.md)；当前功能状态只以[项目状态总结](../completeness-summary.md)为准。

@@ -38,5 +38,50 @@ Node identity and lifecycle, Deployment lifecycle, and Diagnostics. Mutations
 are capability-gated and carry `Idempotency-Key`; topology concurrency uses
 strong `If-Match` ETags; collection commands accept the returned cursor.
 
+Service Contract v2 installs use the same explicit Binding selection as Web.
+First run `store validate <service> <node> <version|-> <catalog|-> <channel|->
+<requirement=provider-deployment,..|-> <topology@applied-revision|->
+[pipeline-options.json]`; the response
+shows every compatible candidate, recommendation, ambiguity, Node runtime
+facts, and the selected closed Runtime Profile. Pass the confirmed mapping to
+`store install` using the same arguments. `deployment bindings <deployment>`
+(or `b` on the Deployments page) shows provider health, drift, context
+generation, and credential generation. Both validation and installation require
+an explicit applied Topology revision; the TUI never silently chooses a Topology
+or among multiple healthy providers.
+
+Append an optional `pipeline-options.json` argument to both `store validate` and
+`store install` to express the complete release pipeline without putting JSON or
+secret references into positional arguments. The same file must be reused for
+validation and installation; it has this strict shape (omitted fields use the
+shown defaults):
+
+```json
+{
+  "start": true,
+  "migration_policy": "APPLY",
+  "gateway_node_id": "gateway-node-a",
+  "config": {},
+  "secret_refs": {
+    "signing_key": "secrets/judge/signing-key"
+  }
+}
+```
+
+Use `-` for the Topology argument when a provider-only release has no Topology,
+but a pipeline options file still follows it. `secret_refs` contains references
+only; the TUI never accepts secret plaintext in this document.
+
+Upgrade and rollback read the Deployment's current active consumer Bindings
+before submitting the replacement, so an omitted mapping cannot silently drop
+them. An intentional rebind uses `store upgrade|rollback <deployment>
+<version|-> <catalog|-> <requirement=provider,..|->
+<topology@applied-revision,..|->`. Review the validation response's candidate
+set, prospective Topology diff, and the locally added deterministic
+`selection_fingerprint` before reusing the same explicit mapping for the
+mutation. The fingerprint is a change detector, not a signature or trust proof.
+Uninstall conflicts report the active
+Topology/Link requirements that must be removed and applied first.
+
 `--legacy-local` is an explicit, deprecated 0.2 compatibility console. It is
 never selected automatically and is not a production v1 authentication path.

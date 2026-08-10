@@ -1,73 +1,63 @@
-# Endpoint 与 Link 规范
+# Endpoint、Link 与 ApiBinding 规范
+
+Topology Spec 只描述期望关系；真实健康、路由、凭据与 drift 由 `TopologyStatus` 和持久 `ApiBinding` 表达。Endpoint/Link 编辑先创建不可变 draft revision，只有 apply 成功才改变业务数据面。
 
 ## Endpoint
 
-Endpoint 是运行时连接身份，格式固定为：
-
-```text
-ip:port:service-name
-```
-
-`service_name` 必须与 `service_id` 相同。Endpoint 直接绑定 Service，不再套一层 machine、installation 或 instance 对象。
-
-持久化字段如下：
+Endpoint 引用已经注册或部署的 Service。正式期望字段为：
 
 ```text
 endpoint
 service_id
 protocol
 health_path
-health
-reachable
 display_name
 note
 config
-created_at
-updated_at
 ```
 
-正式协议为 `http`、`https`、`tcp`、`postgres` 和 `redis`。健康检查规则：
-
-- `http` / `https`：对 `health_path` 发 GET，不跟随重定向。2xx/3xx 记为 `healthy`，其它 HTTP status 记为 `degraded`，连接失败记为 `unreachable`。
-- `tcp` / `postgres` / `redis`：当前只检查 TCP 能否建立连接。
-- 没有 `health_path` 时，HTTP(S) 默认检查 `/`。
-
-健康结果同时更新 `health` 与 `reachable`。可测得的耗时写入检查结果，但 Endpoint 本身不保存 `latency_ms`。
+运行时地址必须来自 RuntimeInstance/Node facts，不能由业务 manifest 或管理员 label 伪造。健康、reachable、latency、container ID、Operation、日志和画布坐标不写入 Spec。
 
 ## Link
 
-Link 的身份是一对已注册 Endpoint：
+Link 连接 source consumer Endpoint 与 target provider Endpoint：
 
-```text
-source_endpoint -> target_endpoint
+```yaml
+source_endpoint: judge-worker-b
+target_endpoint: judge-api-a
+protocol: https
+auth_mode: workload
+scope: topology
+enabled: true
+api_bindings:
+  - requirement: judge_control
+    api_id: judge.worker.control
+    version: 1.0.0
+    provider_deployment_id: deployment-judge-api-a
+    selection: explicit
 ```
 
-source 和 target 不能相同。字段如下：
+`api_bindings` 中的 requirement 必须存在于 source Deployment 的签名 Release v2，API/version 必须由 target Deployment 的精确 Release 提供。一个 consumer Deployment 的同一 requirement 最终只能有一个活动 Binding。零候选、版本不兼容、陈旧 RuntimeReport 或未确认的多候选都会使 validate/apply 在外部副作用前失败。
 
-```text
-source_endpoint
-target_endpoint
-protocol
-auth_mode
-scope
-enabled
-health
-latency_ms
-config_ref
-secret_ref
-policy
-created_at
-updated_at
-```
+停用或删除 Link 必须创建新 revision 并 apply；不能直接修改运行路由。成功 apply 会提升 consumer 的 credential/context generation，使旧 JWT 即使尚未到期也立即失效。
 
-`enabled` 默认为 `true`。`link.update` 没有提交该字段时保留原值；`link.enable` 和 `link.disable` 在 Operation 中保存切换前状态，以便准确回滚。
+## ApiBinding 运行投影
 
-自动健康检查会确认 source/target 是否存在、target 是否可达、协议族是否匹配，以及 `auth_mode`、`scope` 是否填写。结果可能是 `healthy`、`degraded`、`blocked` 或 `unreachable`，可测得的 target 延迟写入 `latency_ms`。
+持久 `ApiBinding` 至少记录：
 
-停用的 Link 不参加 reconciler 探测，也不计入诊断报告的 unhealthy 数量。旧健康值会保留作审计，`enabled=false` 才是当前生效状态。
+- binding ID、requirement、API/version；
+- consumer/provider Deployment、Service、Node 和 Endpoint；
+- Topology/revision/Link；
+- provider path、Gateway virtual endpoint、methods、auth、permission 和 timeout；
+- credential/context generation；
+- desired/observed state、health、drift、reason 与最后 Operation。
 
-## 路由和权限边界
+Gateway 以 consumer Deployment + API ID 查找活动 Binding，并从已验证 JWT 推导 caller 身份；客户端提交的 caller service/node header 会被清理，不能参与授权。
 
-Gateway 读取 Orchestrator 输出的 Endpoint、Link 与 effective API route，只代理业务流量；它不能写 Endpoint、Link 或 Topology。
+## Apply、状态与升级
 
-Link 表达“谁可以连接谁”，API surface 再约束 visibility、`auth_mode` 和 permission。service bearer 只会转发到精确的 auth permission-check API，其它 provider 不接收调用方的 service credential。
+Topology apply 先暂存 Binding、Gateway 路由和 Auth grant，再让 Agent 原子物化 context/credential。consumer 健康后才激活 Binding 并推进 applied head；失败时恢复上一 generation 和投影，补偿不确定时进入 `DEGRADED/NEEDS_ATTENTION`。
+
+provider 升级先启动并验证新 RuntimeInstance，再原子切换 Binding；consumer 不需要重启。外部修改路由、container digest、HostConfig 或 Binding 会由 reconciler 写入 Status drift。
+
+正式 Schema 见 `platform/schemas/orchestrator/openapi-v1.yaml` 与 `api-binding-v1.schema.json`，完整执行语义见 [Topology 模型](../orchestrator/topology-model.md)。
