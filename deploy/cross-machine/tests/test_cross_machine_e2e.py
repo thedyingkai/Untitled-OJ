@@ -161,6 +161,118 @@ class EngineConfigurationTests(unittest.TestCase):
     def test_linux_keeps_overlay2(self) -> None:
         self.assertEqual(gate.default_dind_storage_driver("Linux"), "overlay2")
 
+    def test_workflow_uses_the_same_digest_pinned_dind_image(self) -> None:
+        workflow = (
+            MODULE_PATH.parents[2]
+            / ".github"
+            / "workflows"
+            / "orchestrator-cross-machine-e2e.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            f"OJOS_CROSS_MACHINE_DIND_IMAGE: {gate.DEFAULT_DIND_IMAGE}", workflow
+        )
+        self.assertIn("OJOS_CROSS_MACHINE_DIND_STORAGE_DRIVER: vfs", workflow)
+
+    def test_dind_entrypoint_is_given_an_explicit_dockerd_command(self) -> None:
+        source = inspect.getsource(gate.LiveGate._start_engines)
+        self.assertIn('dind_image,\n                "dockerd",', source)
+        self.assertIn('"--tls=false"', source)
+
+    def test_wait_engine_requires_two_complete_stable_identity_probes(self) -> None:
+        engine = mock.Mock()
+        incomplete = {
+            "ID": "",
+            "Name": "engine-a",
+            "Driver": "vfs",
+            "ServerVersion": "29",
+            "OSType": "linux",
+            "DockerRootDir": "/var/lib/docker",
+        }
+        ready = {
+            **incomplete,
+            "ID": "11111111-1111-4111-8111-111111111111",
+        }
+        engine.command.side_effect = [
+            gate.Completed(["docker", "info"], 0, json.dumps(incomplete), ""),
+            gate.Completed(["docker", "info"], 0, json.dumps(ready), ""),
+            gate.Completed(["docker", "info"], 0, json.dumps(ready), ""),
+        ]
+
+        with mock.patch.object(gate.time, "monotonic", side_effect=[0, 0, 0, 0]), mock.patch.object(
+            gate.time, "sleep"
+        ):
+            observed = gate.wait_engine(engine, timeout=10)
+
+        self.assertEqual(observed, ready)
+        self.assertEqual(engine.command.call_count, 3)
+
+    def test_wait_engine_resets_stability_after_transient_command_error(self) -> None:
+        engine = mock.Mock()
+        ready = {
+            "ID": "11111111-1111-4111-8111-111111111111",
+            "Name": "engine-a",
+            "Driver": "vfs",
+            "ServerVersion": "29",
+            "OSType": "linux",
+            "DockerRootDir": "/var/lib/docker",
+        }
+        engine.command.side_effect = [
+            gate.Completed(["docker", "info"], 0, json.dumps(ready), ""),
+            gate.GateError("daemon connection reset"),
+            gate.Completed(["docker", "info"], 0, json.dumps(ready), ""),
+            gate.Completed(["docker", "info"], 0, json.dumps(ready), ""),
+        ]
+
+        with mock.patch.object(gate.time, "monotonic", side_effect=[0] * 5), mock.patch.object(
+            gate.time, "sleep"
+        ):
+            observed = gate.wait_engine(engine, timeout=10)
+
+        self.assertEqual(observed, ready)
+        self.assertEqual(engine.command.call_count, 4)
+
+    def test_volume_create_timeout_is_tracked_for_exact_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            live = gate.LiveGate(Path(directory), Path(directory) / "evidence.json", False)
+
+            def root_command(*args, **_kwargs):
+                if args[:2] == ("volume", "inspect"):
+                    return gate.Completed(["docker", *args], 1, "", "no such volume")
+                if args[:2] == ("volume", "create"):
+                    raise gate.GateError("create response was lost")
+                return gate.Completed(["docker", *args], 0, "", "")
+
+            live.root.command = mock.Mock(side_effect=root_command)
+            with self.assertRaisesRegex(gate.GateError, "response was lost"):
+                live._start_engines()
+
+            self.assertEqual(live.dind_data_volumes_created, [live.a_data_volume])
+
+    def test_preexisting_run_scoped_volume_is_never_adopted_for_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            live = gate.LiveGate(Path(directory), Path(directory) / "evidence.json", False)
+
+            def root_command(*args, **_kwargs):
+                if args[:2] == ("volume", "inspect"):
+                    return gate.Completed(["docker", *args], 0, "[]", "")
+                return gate.Completed(["docker", *args], 0, "", "")
+
+            live.root.command = mock.Mock(side_effect=root_command)
+            with self.assertRaisesRegex(gate.GateError, "already exists"):
+                live._start_engines()
+
+            self.assertEqual(live.dind_data_volumes_created, [])
+
+    def test_required_engine_identity_rejects_an_incomplete_info_response(self) -> None:
+        with self.assertRaisesRegex(gate.GateError, "ServerVersion"):
+            gate.required_engine_identity(
+                {
+                    "ID": "11111111-1111-4111-8111-111111111111",
+                    "Name": "engine-a",
+                    "Driver": "vfs",
+                }
+            )
+
     def test_checkpoint_is_atomic_running_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             evidence = Path(directory) / "evidence.json"
@@ -1593,12 +1705,23 @@ class LiveGateFailureIntegrityTests(unittest.TestCase):
             self.assertIn("container removal timed out", errors[0]["error"])
             self.assertIn("container inspection timed out", errors[0]["error"])
 
-    def test_cleanup_removes_only_run_dind_containers_and_their_anonymous_volumes(self) -> None:
+    def test_cleanup_removes_only_run_scoped_dind_containers_and_data_volumes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             live = gate.LiveGate(Path(directory), Path(directory) / "evidence.json", False)
-            live.root.command = mock.Mock(
-                return_value=gate.Completed(["docker"], 0, "", "")
-            )
+            live.dind_data_volumes_created = [
+                live.a_data_volume,
+                live.b_data_volume,
+            ]
+
+            def root_command(*args, **_kwargs):
+                output = ""
+                if args[:2] == ("volume", "inspect") and "--format" in args:
+                    output = json.dumps(
+                        {"ojos.cross-machine.run": live.run_id}
+                    )
+                return gate.Completed(["docker", *args], 0, output, "")
+
+            live.root.command = mock.Mock(side_effect=root_command)
 
             self.assertEqual(live.cleanup(), [])
 
@@ -1622,6 +1745,38 @@ class LiveGateFailureIntegrityTests(unittest.TestCase):
                         check=False,
                     ),
                     mock.call(
+                        "volume",
+                        "inspect",
+                        "--format",
+                        "{{json .Labels}}",
+                        live.a_data_volume,
+                        timeout=gate.CLEANUP_RECONCILE_INSPECT_TIMEOUT_SECONDS,
+                        check=False,
+                    ),
+                    mock.call(
+                        "volume",
+                        "rm",
+                        live.a_data_volume,
+                        timeout=gate.DIND_VOLUME_REMOVE_TIMEOUT_SECONDS,
+                        check=False,
+                    ),
+                    mock.call(
+                        "volume",
+                        "inspect",
+                        "--format",
+                        "{{json .Labels}}",
+                        live.b_data_volume,
+                        timeout=gate.CLEANUP_RECONCILE_INSPECT_TIMEOUT_SECONDS,
+                        check=False,
+                    ),
+                    mock.call(
+                        "volume",
+                        "rm",
+                        live.b_data_volume,
+                        timeout=gate.DIND_VOLUME_REMOVE_TIMEOUT_SECONDS,
+                        check=False,
+                    ),
+                    mock.call(
                         "network",
                         "rm",
                         live.outer_network,
@@ -1630,24 +1785,103 @@ class LiveGateFailureIntegrityTests(unittest.TestCase):
                     ),
                 ],
             )
-            self.assertFalse(
-                any(
-                    call.args and call.args[0] == "volume"
-                    for call in live.root.command.call_args_list
-                ),
-                "cleanup must not prune or remove named user volumes",
+
+    def test_cleanup_refuses_to_delete_a_volume_owned_by_another_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            live = gate.LiveGate(Path(directory), Path(directory) / "evidence.json", False)
+            live.a_name = "outside-run-scope"
+            live.b_name = "outside-run-scope"
+            live.outer_network = "outside-run-scope"
+            live.dind_data_volumes_created = [live.a_data_volume]
+            live.root.command = mock.Mock(
+                return_value=gate.Completed(
+                    ["docker"],
+                    0,
+                    json.dumps({"ojos.cross-machine.run": "another-run"}),
+                    "",
+                )
             )
 
-    def test_partial_dind_start_failure_still_removes_both_outer_volumes(self) -> None:
+            errors = live.cleanup()
+
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(
+                errors[0]["operation"],
+                f"verify-volume-owner/{live.a_data_volume}",
+            )
+            self.assertFalse(
+                any(call.args[:2] == ("volume", "rm") for call in live.root.command.call_args_list)
+            )
+
+    def test_cleanup_reconciles_a_lost_volume_remove_response(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            live = gate.LiveGate(Path(directory), Path(directory) / "evidence.json", False)
+            live.a_name = "outside-run-scope"
+            live.b_name = "outside-run-scope"
+            live.outer_network = "outside-run-scope"
+            live.dind_data_volumes_created = [live.a_data_volume]
+            live.root.command = mock.Mock(
+                side_effect=[
+                    gate.Completed(
+                        ["docker"],
+                        0,
+                        json.dumps({"ojos.cross-machine.run": live.run_id}),
+                        "",
+                    ),
+                    gate.GateError("volume remove response was lost"),
+                    gate.Completed(["docker"], 1, "", "no such volume"),
+                ]
+            )
+
+            self.assertEqual(live.cleanup(), [])
+            self.assertEqual(live.root.command.call_count, 3)
+
+    def test_partial_dind_start_failure_removes_both_run_scoped_data_volumes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             evidence_path = Path(directory) / "evidence.json"
             live = gate.LiveGate(Path(directory), evidence_path, full_components=False)
             live.checkpoint = mock.Mock()
             live.ensure_live_prerequisites = mock.Mock(return_value={})
             run_count = 0
+            created_volumes: set[str] = set()
 
             def root_command(*args, **_kwargs):
                 nonlocal run_count
+                if args[:2] == ("volume", "inspect"):
+                    volume = str(args[-1])
+                    if volume not in created_volumes:
+                        return gate.Completed(
+                            ["docker", *args], 1, "", "no such volume"
+                        )
+                    if "--format" in args:
+                        return gate.Completed(
+                            ["docker", *args],
+                            0,
+                            json.dumps(
+                                {"ojos.cross-machine.run": live.run_id}
+                            ),
+                            "",
+                        )
+                    return gate.Completed(
+                        ["docker", *args],
+                        0,
+                        json.dumps(
+                            [
+                                {
+                                    "Name": volume,
+                                    "Labels": {
+                                        "ojos.cross-machine.run": live.run_id
+                                    },
+                                }
+                            ]
+                        ),
+                        "",
+                    )
+                if args[:2] == ("volume", "create"):
+                    created_volumes.add(str(args[-1]))
+                    return gate.Completed(
+                        ["docker", *args], 0, str(args[-1]) + "\n", ""
+                    )
                 if args[:2] == ("run", "-d"):
                     run_count += 1
                     if run_count == 2:
@@ -1684,12 +1918,29 @@ class LiveGateFailureIntegrityTests(unittest.TestCase):
                     ),
                 ],
             )
-            self.assertFalse(
-                any(
-                    call.args and call.args[0] == "volume"
-                    for call in live.root.command.call_args_list
-                ),
-                "startup failure cleanup must not touch named user volumes",
+            volume_remove_calls = [
+                call
+                for call in live.root.command.call_args_list
+                if call.args[:2] == ("volume", "rm")
+            ]
+            self.assertEqual(
+                volume_remove_calls,
+                [
+                    mock.call(
+                        "volume",
+                        "rm",
+                        live.a_data_volume,
+                        timeout=gate.DIND_VOLUME_REMOVE_TIMEOUT_SECONDS,
+                        check=False,
+                    ),
+                    mock.call(
+                        "volume",
+                        "rm",
+                        live.b_data_volume,
+                        timeout=gate.DIND_VOLUME_REMOVE_TIMEOUT_SECONDS,
+                        check=False,
+                    ),
+                ],
             )
 
 
@@ -1915,6 +2166,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(gate.canonical_json(first), gate.canonical_json(second))
         self.assertEqual(first["requirement"], "echo")
         self.assertEqual(first["base_path"], "/internal/apis/fixture.contract.echo")
+        self.assertEqual(first["provider_path"], "/echo")
 
     def test_echo_fixture_is_optional_but_permission_authority_is_required(self) -> None:
         requirements = {
@@ -3646,6 +3898,12 @@ class ManagedContextTests(unittest.TestCase):
 
 
 def valid_evidence() -> dict:
+    run_id = "abcde12345"
+    dind_digest = gate.DEFAULT_DIND_IMAGE.rsplit("@", 1)[1]
+    image_config_id = "sha256:" + "c" * 64
+    image_repo_digests = ["docker.io/library/docker@" + dind_digest]
+    engine_a_id = "11111111-1111-4111-8111-111111111111"
+    engine_b_id = "22222222-2222-4222-8222-222222222222"
     resource = {
         "url": "",
         "binding": "storage_get",
@@ -3669,20 +3927,95 @@ def valid_evidence() -> dict:
     return {
         "schema_version": 1,
         "status": "PASSED",
+        "run_id": run_id,
         "cleanup_completed": True,
         "cleanup_errors": [],
         "engines": {
             "a": {
-                "engine_id": "engine-a",
-                "outer_container_id": "outer-a",
+                "engine_id": engine_a_id,
+                "local_engine_id": engine_a_id,
+                "engine_name": "engine-a",
+                "storage_driver": "vfs",
+                "server_version": "29.0.0",
+                "os_type": "linux",
+                "docker_root_dir": "/var/lib/docker",
+                "outer_container_id": "a" * 64,
                 "outer_ip": "172.20.0.2",
+                "host_endpoint": "tcp://127.0.0.1:32001",
+                "host_endpoint_matches_local_socket": True,
+                "data_volume": gate.safe_name(run_id, "engine-a-data"),
+                "marker_volume": gate.safe_name(run_id, "only-a"),
+                "image_config_id": image_config_id,
+                "image_repo_digests": image_repo_digests.copy(),
             },
             "b": {
-                "engine_id": "engine-b",
-                "outer_container_id": "outer-b",
+                "engine_id": engine_b_id,
+                "local_engine_id": engine_b_id,
+                "engine_name": "engine-b",
+                "storage_driver": "vfs",
+                "server_version": "29.0.0",
+                "os_type": "linux",
+                "docker_root_dir": "/var/lib/docker",
+                "outer_container_id": "b" * 64,
                 "outer_ip": "172.20.0.3",
+                "host_endpoint": "tcp://127.0.0.1:32002",
+                "host_endpoint_matches_local_socket": True,
+                "data_volume": gate.safe_name(run_id, "engine-b-data"),
+                "marker_volume": gate.safe_name(run_id, "only-b"),
+                "image_config_id": image_config_id,
+                "image_repo_digests": image_repo_digests.copy(),
             },
+            "routing_proof": "host TCP endpoint ID matches outer unix socket",
+            "storage_roots_distinct": True,
             "isolation_proof": "mutually-invisible marker volumes",
+            "dind_image": gate.DEFAULT_DIND_IMAGE,
+        },
+        "engine_probe": {
+            "a": {
+                "host_endpoint": "tcp://127.0.0.1:32001",
+                "host_engine_id": engine_a_id,
+                "local_engine_id": engine_a_id,
+                "local_identity": {
+                    "engine_id": engine_a_id,
+                    "engine_name": "engine-a",
+                    "driver": "vfs",
+                    "server_version": "29.0.0",
+                    "os_type": "linux",
+                    "docker_root_dir": "/var/lib/docker",
+                },
+                "outer_container_id": "a" * 64,
+                "data_volume": gate.safe_name(run_id, "engine-a-data"),
+                "engine_name": "engine-a",
+                "driver": "vfs",
+                "server_version": "29.0.0",
+                "os_type": "linux",
+                "docker_root_dir": "/var/lib/docker",
+                "image_config_id": image_config_id,
+                "image_repo_digests": image_repo_digests.copy(),
+            },
+            "b": {
+                "host_endpoint": "tcp://127.0.0.1:32002",
+                "host_engine_id": engine_b_id,
+                "local_engine_id": engine_b_id,
+                "local_identity": {
+                    "engine_id": engine_b_id,
+                    "engine_name": "engine-b",
+                    "driver": "vfs",
+                    "server_version": "29.0.0",
+                    "os_type": "linux",
+                    "docker_root_dir": "/var/lib/docker",
+                },
+                "outer_container_id": "b" * 64,
+                "data_volume": gate.safe_name(run_id, "engine-b-data"),
+                "engine_name": "engine-b",
+                "driver": "vfs",
+                "server_version": "29.0.0",
+                "os_type": "linux",
+                "docker_root_dir": "/var/lib/docker",
+                "image_config_id": image_config_id,
+                "image_repo_digests": image_repo_digests.copy(),
+            },
+            "dind_image": gate.DEFAULT_DIND_IMAGE,
         },
         "network_boundary": {
             "gateway_ready": True,
@@ -3829,7 +4162,7 @@ def valid_full_evidence() -> dict:
         {
             "gate": "cross-machine-service-contract-v2",
             "mode": "full-components",
-            "run_id": "0123456789",
+            "run_id": value["run_id"],
             "started_at_unix": 1_900_000_000,
             "completed_at_unix": 1_900_000_900,
             "build_identity": {
@@ -3841,7 +4174,7 @@ def valid_full_evidence() -> dict:
             "control_plane_runtime": {
                 "evidence_source": "docker-inspect",
                 "container_id": "c" * 64,
-                "engine_id": "engine-a",
+                "engine_id": value["engines"]["a"]["engine_id"],
                 "running": True,
                 "docker_health": "HEALTHY",
                 "healthcheck_url": gate.CONTROL_PLANE_HEALTHCHECK_URL,
@@ -4063,7 +4396,7 @@ def valid_full_evidence() -> dict:
             "host_config_digest": "sha256:" + "b" * 64,
             "image_repo_digest": "sha256:" + "c" * 64,
             "container_id": "0123456789abcdef",
-            "engine_id": "engine-b",
+            "engine_id": value["engines"]["b"]["engine_id"],
         },
     }
     recovered_flow = copy.deepcopy(value["component_flow"])
@@ -4176,7 +4509,7 @@ def valid_full_evidence() -> dict:
         "management_environment_inspected": True,
         "forbidden_management_environment": [],
         "container_id": "a" * 64,
-        "engine_id": "engine-a",
+        "engine_id": value["engines"]["a"]["engine_id"],
         "runtime_health_sample": "final-agent-report",
         "runtime_health": {
             "node_id": "node-a",
@@ -4193,7 +4526,7 @@ def valid_full_evidence() -> dict:
     value["managed_a_network"] = {
         "evidence_source": "live-socket-and-psql-probes",
         "source_network": "engine-a-default-bridge",
-        "engine_id": "engine-a",
+        "engine_id": value["engines"]["a"]["engine_id"],
         "postgres_plaintext_rejected": True,
         "targets": [
             {"name": name, "connected": True, "elapsed_ms": 1}
@@ -4254,7 +4587,7 @@ def valid_full_evidence() -> dict:
             "container_id": container_digit * 64,
             "image_repo_digest": "sha256:" + container_digit * 64,
             "host_config_digest": "sha256:" + container_digit * 64,
-            "engine_id": "engine-a",
+            "engine_id": value["engines"]["a"]["engine_id"],
             "desired_state": "RUNNING",
             "observed_state": "RUNNING",
             "health": "HEALTHY",
@@ -5201,8 +5534,8 @@ def valid_full_evidence() -> dict:
         "verified": True,
         "inspection_source": "docker-inspect",
         "forbidden_shared_sources": [],
-        "a_engine_id": "engine-a",
-        "b_engine_id": "engine-b",
+        "a_engine_id": value["engines"]["a"]["engine_id"],
+        "b_engine_id": value["engines"]["b"]["engine_id"],
         "gateway_mount_sources": [],
         "judge_mount_sources": [],
         "worker_mount_sources": ["/var/lib/ojos-agent/runtime-contexts/example/service"],
@@ -5314,8 +5647,56 @@ class EvidenceTests(unittest.TestCase):
 
     def test_one_engine_cannot_be_reported_as_two(self) -> None:
         value = valid_evidence()
-        value["engines"]["b"]["engine_id"] = "engine-a"
+        value["engines"]["b"]["engine_id"] = value["engines"]["a"]["engine_id"]
         with self.assertRaisesRegex(gate.GateError, "distinct"):
+            gate.verify_evidence(value)
+
+    def test_engine_probe_must_match_every_final_identity_field(self) -> None:
+        value = valid_evidence()
+        value["engine_probe"]["b"]["outer_container_id"] = "e" * 64
+        with self.assertRaisesRegex(gate.GateError, "probe does not match"):
+            gate.verify_evidence(value)
+
+        value = valid_evidence()
+        value["engine_probe"]["a"]["local_engine_id"] = value["engines"]["b"][
+            "engine_id"
+        ]
+        with self.assertRaisesRegex(gate.GateError, "probe does not match"):
+            gate.verify_evidence(value)
+
+    def test_engine_evidence_requires_run_scoped_names_and_canonical_ids(self) -> None:
+        value = valid_evidence()
+        value["engines"]["b"]["outer_container_id"] = "outer-b"
+        with self.assertRaisesRegex(gate.GateError, "not canonical"):
+            gate.verify_evidence(value)
+
+        value = valid_evidence()
+        value["engines"]["b"]["data_volume"] = "unscoped-data"
+        with self.assertRaisesRegex(gate.GateError, "data roots"):
+            gate.verify_evidence(value)
+
+    def test_engine_image_repo_digest_must_match_requested_pin(self) -> None:
+        value = valid_evidence()
+        wrong = ["docker.io/library/docker@sha256:" + "e" * 64]
+        value["engines"]["b"]["image_repo_digests"] = wrong
+        value["engine_probe"]["b"]["image_repo_digests"] = wrong
+        with self.assertRaisesRegex(gate.GateError, "does not match the pin"):
+            gate.verify_evidence(value)
+
+    def test_missing_endpoint_or_data_root_proof_is_not_a_pass(self) -> None:
+        value = valid_evidence()
+        value["engines"]["b"]["host_endpoint_matches_local_socket"] = False
+        with self.assertRaisesRegex(gate.GateError, "endpoint routing"):
+            gate.verify_evidence(value)
+
+        value = valid_evidence()
+        value["engines"]["b"]["data_volume"] = "engine-a-data"
+        with self.assertRaisesRegex(gate.GateError, "data roots"):
+            gate.verify_evidence(value)
+
+        value = valid_evidence()
+        value["engines"]["dind_image"] = "docker:29-dind"
+        with self.assertRaisesRegex(gate.GateError, "digest-pinned"):
             gate.verify_evidence(value)
 
     def test_missing_denial_is_not_a_pass(self) -> None:

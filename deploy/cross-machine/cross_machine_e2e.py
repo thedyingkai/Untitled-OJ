@@ -58,7 +58,13 @@ MAX_DIAGNOSTIC_ERROR_CHARS = 2_000
 MAX_FAILURE_LOG_CHARS = 8_000
 DIND_CONTAINER_REMOVE_TIMEOUT_SECONDS = 180
 DIND_CONTAINER_REMOVE_RETRY_TIMEOUT_SECONDS = 120
+DIND_VOLUME_REMOVE_TIMEOUT_SECONDS = 180
+DIND_VOLUME_REMOVE_RETRY_TIMEOUT_SECONDS = 120
 CLEANUP_RECONCILE_INSPECT_TIMEOUT_SECONDS = 30
+DEFAULT_DIND_IMAGE = (
+    "docker:29-dind@sha256:"
+    "e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c"
+)
 CONTROL_PLANE_HEALTHCHECK_URL = (
     "https://127.0.0.1:8090/api/v1/healthz/ready"
 )
@@ -421,6 +427,7 @@ def resolve_binding(
         "api_version": provider.version,
         "consumer_service": consumer_id,
         "provider_service": provider.service_id,
+        "provider_path": provider.path,
         "base_path": "/internal/apis/" + requirement.api_id,
         "timeout_ms": requirement.timeout_ms,
         "permission": provider.permission,
@@ -721,16 +728,212 @@ def container_ip(root: Docker, container: str, network: str) -> str:
         raise GateError(f"container {container} has no valid address on {network}: {value!r}") from exc
 
 
+def required_engine_identity(info: Mapping[str, Any]) -> tuple[str, str, str, str, str, str]:
+    fields = ("ID", "Name", "Driver", "ServerVersion", "OSType", "DockerRootDir")
+    raw_values = tuple(info.get(field) for field in fields)
+    missing = [
+        field
+        for field, value in zip(fields, raw_values, strict=True)
+        if not isinstance(value, str) or not value.strip()
+    ]
+    if missing:
+        raise GateError(f"nested Docker Engine info is incomplete: missing {missing}")
+    values = tuple(value.strip() for value in raw_values if isinstance(value, str))
+    try:
+        parsed_id = uuid.UUID(values[0])
+    except ValueError as error:
+        raise GateError("nested Docker Engine ID is not a UUID") from error
+    if parsed_id.version != 4 or str(parsed_id) != values[0]:
+        raise GateError("nested Docker Engine ID is not a canonical UUIDv4")
+    if values[4] != "linux":
+        raise GateError(f"nested Docker Engine OSType is not linux: {values[4]!r}")
+    if values[5] != "/var/lib/docker":
+        raise GateError(f"nested Docker Engine root is not /var/lib/docker: {values[5]!r}")
+    return values
+
+
 def wait_engine(engine: Docker, timeout: float = 90) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last = ""
+    stable_identity: tuple[str, str, str, str, str, str] | None = None
+    stable_observations = 0
     while time.monotonic() < deadline:
-        result = engine.command("info", "--format", "{{json .}}", timeout=5, check=False)
+        try:
+            result = engine.command("info", "--format", "{{json .}}", timeout=5, check=False)
+        except GateError as error:
+            stable_identity = None
+            stable_observations = 0
+            last = str(error)
+            time.sleep(1)
+            continue
         if result.returncode == 0:
-            return json.loads(result.stdout)
-        last = result.stderr or result.stdout
+            try:
+                info = json.loads(result.stdout)
+                if not isinstance(info, dict):
+                    raise GateError("nested Docker Engine info is not an object")
+                identity = required_engine_identity(info)
+                if identity == stable_identity:
+                    stable_observations += 1
+                else:
+                    stable_identity = identity
+                    stable_observations = 1
+                if stable_observations >= 2:
+                    return info
+                last = "nested Docker Engine identity has not remained stable for two probes"
+            except (json.JSONDecodeError, GateError) as error:
+                stable_identity = None
+                stable_observations = 0
+                last = str(error)
+        else:
+            stable_identity = None
+            stable_observations = 0
+            last = result.stderr or result.stdout
         time.sleep(1)
     raise GateError(f"nested Docker Engine did not become ready: {last[-1000:]}")
+
+
+def local_engine_info(root: Docker, container: str) -> dict[str, Any]:
+    raw = root.command(
+        "exec",
+        container,
+        "docker",
+        "info",
+        "--format",
+        "{{json .}}",
+        timeout=30,
+    ).stdout
+    try:
+        info = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise GateError(f"nested Docker Engine {container} returned invalid local info JSON") from error
+    if not isinstance(info, dict):
+        raise GateError(f"nested Docker Engine {container} local info is not an object")
+    required_engine_identity(info)
+    return info
+
+
+def docker_data_volume(root: Docker, container: str) -> str:
+    raw = root.command("inspect", "--format", "{{json .Mounts}}", container).stdout
+    try:
+        mounts = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise GateError(f"could not decode Docker mounts for {container}") from error
+    matches = [
+        mount
+        for mount in mounts
+        if isinstance(mount, Mapping)
+        and mount.get("Type") == "volume"
+        and mount.get("Destination") == "/var/lib/docker"
+    ]
+    if len(matches) != 1:
+        raise GateError(f"nested Docker Engine {container} has no unique /var/lib/docker volume")
+    name = str(matches[0].get("Name", "")).strip()
+    if not name:
+        raise GateError(f"nested Docker Engine {container} data volume has no name")
+    return name
+
+
+def require_new_run_scoped_volume(root: Docker, volume: str, run_id: str) -> None:
+    if not volume.startswith(f"{SAFE_RUN_PREFIX}{run_id}-"):
+        raise GateError(f"nested Engine data volume is not run-scoped: {volume}")
+    existing = root.command("volume", "inspect", volume, timeout=30, check=False)
+    detail = (existing.stderr or existing.stdout).strip()
+    if existing.returncode == 0:
+        raise GateError(f"nested Engine data volume already exists: {volume}")
+    if "no such volume" not in detail.casefold():
+        raise GateError(
+            f"could not prove nested Engine data volume is absent: {volume}: {detail}"
+        )
+
+
+def validate_run_scoped_volume(root: Docker, volume: str, run_id: str) -> None:
+    if not volume.startswith(f"{SAFE_RUN_PREFIX}{run_id}-"):
+        raise GateError(f"nested Engine data volume is not run-scoped: {volume}")
+    raw = root.command("volume", "inspect", volume, timeout=30).stdout
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise GateError(f"could not decode nested Engine data volume {volume}") from error
+    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], Mapping):
+        raise GateError(f"nested Engine data volume inspect is non-canonical: {volume}")
+    value = values[0]
+    labels = value.get("Labels")
+    if (
+        value.get("Name") != volume
+        or not isinstance(labels, Mapping)
+        or labels.get("ojos.cross-machine.run") != run_id
+    ):
+        raise GateError(f"nested Engine data volume is not owned by this run: {volume}")
+
+
+def outer_container_image(root: Docker, container: str) -> tuple[str, list[str]]:
+    config_id = root.command(
+        "inspect", "--format", "{{.Image}}", container
+    ).stdout.strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", config_id):
+        raise GateError(
+            f"nested Docker Engine {container} has no canonical image config ID"
+        )
+    raw = root.command(
+        "image", "inspect", "--format", "{{json .RepoDigests}}", config_id
+    ).stdout
+    try:
+        repo_digests = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise GateError(
+            f"could not decode image RepoDigests for nested Docker Engine {container}"
+        ) from error
+    if not isinstance(repo_digests, list):
+        raise GateError(
+            f"nested Docker Engine {container} image RepoDigests is not a list"
+        )
+    normalized = sorted(
+        {
+            item.strip()
+            for item in repo_digests
+            if isinstance(item, str)
+            and re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", item.strip())
+        }
+    )
+    if not normalized or len(normalized) != len(repo_digests):
+        raise GateError(
+            f"nested Docker Engine {container} image has no canonical RepoDigest proof"
+        )
+    return config_id, normalized
+
+
+def required_local_docker_endpoint(value: Any) -> str:
+    endpoint = value if isinstance(value, str) else ""
+    match = re.fullmatch(r"tcp://127\.0\.0\.1:([0-9]{1,5})", endpoint)
+    if match is None or not 1 <= int(match.group(1)) <= 65535:
+        raise GateError(f"nested Docker Engine host endpoint is invalid: {endpoint!r}")
+    return endpoint
+
+
+def required_outer_container_id(value: Any) -> str:
+    container_id = value if isinstance(value, str) else ""
+    if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+        raise GateError("nested Docker Engine outer container ID is not canonical")
+    return container_id
+
+
+def required_image_config_id(value: Any) -> str:
+    config_id = value if isinstance(value, str) else ""
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", config_id):
+        raise GateError("nested Docker Engine image config ID is not canonical")
+    return config_id
+
+
+def required_repo_digests(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise GateError("nested Docker Engine image RepoDigest proof is missing")
+    digests = [item for item in value if isinstance(item, str)]
+    if len(digests) != len(value) or digests != sorted(set(digests)) or any(
+        re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", item) is None
+        for item in digests
+    ):
+        raise GateError("nested Docker Engine image RepoDigest proof is non-canonical")
+    return digests
 
 
 def no_proxy_opener(cafile: Path | None = None) -> urllib.request.OpenerDirector:
@@ -808,10 +1011,13 @@ class LiveGate:
         self.outer_network = safe_name(self.run_id, "outer")
         self.a_name = safe_name(self.run_id, "engine-a")
         self.b_name = safe_name(self.run_id, "engine-b")
+        self.a_data_volume = safe_name(self.run_id, "engine-a-data")
+        self.b_data_volume = safe_name(self.run_id, "engine-b-data")
         self.a: Docker | None = None
         self.b: Docker | None = None
         self.a_ip = ""
         self.dind_storage_driver = configured_dind_storage_driver()
+        self.dind_data_volumes_created: list[str] = []
         self.root_images_created: list[str] = []
         self.evidence: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -923,8 +1129,31 @@ class LiveGate:
 
     def _start_engines(self) -> None:
         self.root.command("network", "create", self.outer_network)
-        dind_image = os.environ.get("OJOS_CROSS_MACHINE_DIND_IMAGE", "docker:29-dind")
-        for name, alias in ((self.a_name, "engine-a"), (self.b_name, "engine-b")):
+        dind_image = os.environ.get("OJOS_CROSS_MACHINE_DIND_IMAGE", DEFAULT_DIND_IMAGE)
+        if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", dind_image):
+            raise GateError("OJOS_CROSS_MACHINE_DIND_IMAGE must be pinned by sha256 digest")
+        for volume in (self.a_data_volume, self.b_data_volume):
+            require_new_run_scoped_volume(self.root, volume, self.run_id)
+            # Record the exact attempted target before the create request.  If
+            # the client loses the response after Docker commits the volume,
+            # cleanup still reconciles and removes only this run-scoped name.
+            self.dind_data_volumes_created.append(volume)
+            created = self.root.command(
+                "volume",
+                "create",
+                "--label",
+                "ojos.cross-machine.run=" + self.run_id,
+                volume,
+            ).stdout.strip()
+            if created != volume:
+                raise GateError(
+                    f"Docker created unexpected nested Engine data volume {created!r}"
+                )
+            validate_run_scoped_volume(self.root, volume, self.run_id)
+        for name, alias, data_volume in (
+            (self.a_name, "engine-a", self.a_data_volume),
+            (self.b_name, "engine-b", self.b_data_volume),
+        ):
             publish = ["--publish", "127.0.0.1::2375"]
             if alias == "engine-a":
                 # Docker Desktop does not route its container subnet to the
@@ -956,8 +1185,12 @@ class LiveGate:
                 alias,
                 "--env",
                 "DOCKER_TLS_CERTDIR=",
+                "--mount",
+                f"type=volume,source={data_volume},target=/var/lib/docker",
                 *publish,
                 dind_image,
+                "dockerd",
+                "--tls=false",
                 "--host=tcp://0.0.0.0:2375",
                 "--host=unix:///var/run/docker.sock",
                 "--insecure-registry=engine-a:5000",
@@ -965,15 +1198,115 @@ class LiveGate:
                 f"--storage-driver={self.dind_storage_driver}",
                 timeout=180,
             )
-        a_host = f"tcp://127.0.0.1:{docker_host_port(self.root, self.a_name, 2375)}"
-        b_host = f"tcp://127.0.0.1:{docker_host_port(self.root, self.b_name, 2375)}"
+        a_host = required_local_docker_endpoint(
+            f"tcp://127.0.0.1:{docker_host_port(self.root, self.a_name, 2375)}"
+        )
+        b_host = required_local_docker_endpoint(
+            f"tcp://127.0.0.1:{docker_host_port(self.root, self.b_name, 2375)}"
+        )
+        if a_host == b_host:
+            raise GateError("the two nested Docker Engines resolved to the same host endpoint")
         self.a, self.b = Docker(self.runner, a_host), Docker(self.runner, b_host)
         a_info, b_info = wait_engine(self.a), wait_engine(self.b)
+        a_local_info = local_engine_info(self.root, self.a_name)
+        b_local_info = local_engine_info(self.root, self.b_name)
         self.a_ip = container_ip(self.root, self.a_name, self.outer_network)
         b_ip = container_ip(self.root, self.b_name, self.outer_network)
-        a_id, b_id = str(a_info.get("ID", "")), str(b_info.get("ID", ""))
-        if not a_id or not b_id or a_id == b_id:
+        a_identity = required_engine_identity(a_info)
+        b_identity = required_engine_identity(b_info)
+        a_local_identity = required_engine_identity(a_local_info)
+        b_local_identity = required_engine_identity(b_local_info)
+        a_id, b_id = a_identity[0], b_identity[0]
+        a_local_id, b_local_id = a_local_identity[0], b_local_identity[0]
+        outer_a_id = required_outer_container_id(
+            self.root.command(
+                "inspect", "--format", "{{.Id}}", self.a_name
+            ).stdout.strip()
+        )
+        outer_b_id = required_outer_container_id(
+            self.root.command(
+                "inspect", "--format", "{{.Id}}", self.b_name
+            ).stdout.strip()
+        )
+        data_volume_a = docker_data_volume(self.root, self.a_name)
+        data_volume_b = docker_data_volume(self.root, self.b_name)
+        if data_volume_a != self.a_data_volume or data_volume_b != self.b_data_volume:
+            raise GateError("nested Docker Engine data volume does not match its run-scoped root")
+        image_config_a, image_repo_digests_a = outer_container_image(
+            self.root, self.a_name
+        )
+        image_config_b, image_repo_digests_b = outer_container_image(
+            self.root, self.b_name
+        )
+        requested_digest = dind_image.rsplit("@", 1)[1]
+        if any(
+            not any(item.endswith("@" + requested_digest) for item in repo_digests)
+            for repo_digests in (image_repo_digests_a, image_repo_digests_b)
+        ):
+            raise GateError("nested Docker Engine image RepoDigest does not match the pin")
+        self.evidence["engine_probe"] = {
+            "a": {
+                "host_endpoint": a_host,
+                "host_engine_id": a_id,
+                "local_engine_id": a_local_id,
+                "local_identity": {
+                    "engine_id": a_local_identity[0],
+                    "engine_name": a_local_identity[1],
+                    "driver": a_local_identity[2],
+                    "server_version": a_local_identity[3],
+                    "os_type": a_local_identity[4],
+                    "docker_root_dir": a_local_identity[5],
+                },
+                "outer_container_id": outer_a_id,
+                "data_volume": data_volume_a,
+                "engine_name": a_identity[1],
+                "driver": a_identity[2],
+                "server_version": a_identity[3],
+                "os_type": a_identity[4],
+                "docker_root_dir": a_identity[5],
+                "image_config_id": image_config_a,
+                "image_repo_digests": image_repo_digests_a,
+            },
+            "b": {
+                "host_endpoint": b_host,
+                "host_engine_id": b_id,
+                "local_engine_id": b_local_id,
+                "local_identity": {
+                    "engine_id": b_local_identity[0],
+                    "engine_name": b_local_identity[1],
+                    "driver": b_local_identity[2],
+                    "server_version": b_local_identity[3],
+                    "os_type": b_local_identity[4],
+                    "docker_root_dir": b_local_identity[5],
+                },
+                "outer_container_id": outer_b_id,
+                "data_volume": data_volume_b,
+                "engine_name": b_identity[1],
+                "driver": b_identity[2],
+                "server_version": b_identity[3],
+                "os_type": b_identity[4],
+                "docker_root_dir": b_identity[5],
+                "image_config_id": image_config_b,
+                "image_repo_digests": image_repo_digests_b,
+            },
+            "dind_image": dind_image,
+        }
+        atomic_json(self.evidence_path, self.evidence)
+        if a_identity != a_local_identity or b_identity != b_local_identity:
+            raise GateError(
+                "nested Docker host endpoint identity does not match its outer container local socket"
+            )
+        if a_id == b_id:
             raise GateError("the two nested Docker Engines do not have distinct identities")
+        if outer_a_id == outer_b_id:
+            raise GateError("the two nested Docker Engines do not have distinct outer containers")
+        if data_volume_a == data_volume_b:
+            raise GateError("the two nested Docker Engines share /var/lib/docker storage")
+        if (
+            image_config_a != image_config_b
+            or image_repo_digests_a != image_repo_digests_b
+        ):
+            raise GateError("the two nested Docker Engines did not use the same pinned image")
         for label, info in (("A", a_info), ("B", b_info)):
             if info.get("Driver") != self.dind_storage_driver:
                 raise GateError(
@@ -991,21 +1324,42 @@ class LiveGate:
         self.evidence["engines"] = {
             "a": {
                 "engine_id": a_id,
-                "engine_name": a_info.get("Name"),
-                "outer_container_id": self.root.command("inspect", "--format", "{{.Id}}", self.a_name).stdout.strip(),
+                "local_engine_id": a_local_id,
+                "engine_name": a_identity[1],
+                "outer_container_id": outer_a_id,
                 "outer_ip": self.a_ip,
                 "marker_volume": marker_a,
-                "storage_driver": a_info.get("Driver"),
+                "storage_driver": a_identity[2],
+                "server_version": a_identity[3],
+                "os_type": a_identity[4],
+                "docker_root_dir": a_identity[5],
+                "host_endpoint": a_host,
+                "host_endpoint_matches_local_socket": True,
+                "data_volume": data_volume_a,
+                "image_config_id": image_config_a,
+                "image_repo_digests": image_repo_digests_a,
             },
             "b": {
                 "engine_id": b_id,
-                "engine_name": b_info.get("Name"),
-                "outer_container_id": self.root.command("inspect", "--format", "{{.Id}}", self.b_name).stdout.strip(),
+                "local_engine_id": b_local_id,
+                "engine_name": b_identity[1],
+                "outer_container_id": outer_b_id,
                 "outer_ip": b_ip,
                 "marker_volume": marker_b,
-                "storage_driver": b_info.get("Driver"),
+                "storage_driver": b_identity[2],
+                "server_version": b_identity[3],
+                "os_type": b_identity[4],
+                "docker_root_dir": b_identity[5],
+                "host_endpoint": b_host,
+                "host_endpoint_matches_local_socket": True,
+                "data_volume": data_volume_b,
+                "image_config_id": image_config_b,
+                "image_repo_digests": image_repo_digests_b,
             },
+            "routing_proof": "host TCP endpoint ID matches outer unix socket",
+            "storage_roots_distinct": True,
             "isolation_proof": "mutually-invisible marker volumes",
+            "dind_image": dind_image,
         }
 
     def _run_scenario(self, temporary: Path) -> None:
@@ -1058,7 +1412,8 @@ class LiveGate:
             {
                 **third_party_binding,
                 "kind": "proxy",
-                "upstream": "http://third-party-provider:8088",
+                "upstream": "http://third-party-provider:8088"
+                + third_party_binding["provider_path"],
             },
         ]
         self.a.command(
@@ -1718,17 +2073,81 @@ class LiveGate:
             if name.startswith(SAFE_RUN_PREFIX):
                 remove(
                     f"remove-container/{name}",
-                    # docker:dind declares /var/lib/docker as an anonymous
-                    # volume.  Removing only the outer container leaks that
-                    # volume (and every nested image/layer) after each gate
-                    # run.  --volumes removes its anonymous volumes while
-                    # Docker deliberately preserves any named volume.
+                    # --volumes also removes any unexpected anonymous volumes;
+                    # the run-scoped /var/lib/docker roots are removed and
+                    # reconciled explicitly below.
                     ("rm", "--force", "--volumes", name),
                     DIND_CONTAINER_REMOVE_TIMEOUT_SECONDS,
                     ("no such container",),
                     inspect_args=("container", "inspect", name),
                     retry_timeout=DIND_CONTAINER_REMOVE_RETRY_TIMEOUT_SECONDS,
                 )
+        expected_data_volumes = {self.a_data_volume, self.b_data_volume}
+        for volume in self.dind_data_volumes_created:
+            if volume not in expected_data_volumes or not volume.startswith(
+                SAFE_RUN_PREFIX
+            ):
+                append_bounded_diagnostic_error(
+                    errors,
+                    f"remove-volume/{volume}",
+                    "refused to remove a non-run-scoped nested Engine data volume",
+                )
+                continue
+            try:
+                ownership = self.root.command(
+                    "volume",
+                    "inspect",
+                    "--format",
+                    "{{json .Labels}}",
+                    volume,
+                    timeout=CLEANUP_RECONCILE_INSPECT_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except Exception as error:
+                append_bounded_diagnostic_error(
+                    errors,
+                    f"verify-volume-owner/{volume}",
+                    error,
+                )
+                continue
+            ownership_detail = (ownership.stderr or ownership.stdout).strip()
+            if ownership.returncode != 0:
+                if "no such volume" in ownership_detail.casefold():
+                    continue
+                append_bounded_diagnostic_error(
+                    errors,
+                    f"verify-volume-owner/{volume}",
+                    ownership_detail
+                    or f"volume ownership inspection exited {ownership.returncode}",
+                )
+                continue
+            try:
+                labels = json.loads(ownership.stdout)
+            except json.JSONDecodeError as error:
+                append_bounded_diagnostic_error(
+                    errors,
+                    f"verify-volume-owner/{volume}",
+                    error,
+                )
+                continue
+            if (
+                not isinstance(labels, Mapping)
+                or labels.get("ojos.cross-machine.run") != self.run_id
+            ):
+                append_bounded_diagnostic_error(
+                    errors,
+                    f"verify-volume-owner/{volume}",
+                    "refused to remove a nested Engine data volume owned by another run",
+                )
+                continue
+            remove(
+                f"remove-volume/{volume}",
+                ("volume", "rm", volume),
+                DIND_VOLUME_REMOVE_TIMEOUT_SECONDS,
+                ("no such volume",),
+                inspect_args=("volume", "inspect", volume),
+                retry_timeout=DIND_VOLUME_REMOVE_RETRY_TIMEOUT_SECONDS,
+            )
         if self.outer_network.startswith(SAFE_RUN_PREFIX):
             remove(
                 f"remove-network/{self.outer_network}",
@@ -1760,14 +2179,144 @@ def verify_evidence(
         value.get("cleanup_completed") is not True or value.get("cleanup_errors") != []
     ):
         raise GateError("cross-machine evidence does not prove successful cleanup")
+    run_id = value.get("run_id")
+    if not isinstance(run_id, str) or re.fullmatch(r"[0-9a-f]{10}", run_id) is None:
+        raise GateError("cross-machine evidence has no canonical run ID")
     engines = value.get("engines", {})
+    if not isinstance(engines, Mapping):
+        raise GateError("cross-machine evidence engines is not an object")
     a, b = engines.get("a", {}), engines.get("b", {})
-    if not a.get("engine_id") or a.get("engine_id") == b.get("engine_id"):
+    if not isinstance(a, Mapping) or not isinstance(b, Mapping):
+        raise GateError("cross-machine evidence Engine entries are not objects")
+    if (
+        not a.get("engine_id")
+        or not b.get("engine_id")
+        or a.get("engine_id") == b.get("engine_id")
+    ):
         raise GateError("evidence does not prove two distinct Docker Engine identities")
-    if a.get("outer_container_id") == b.get("outer_container_id"):
+    if (
+        not a.get("outer_container_id")
+        or not b.get("outer_container_id")
+        or a.get("outer_container_id") == b.get("outer_container_id")
+    ):
         raise GateError("evidence reused the same outer Engine container")
+    if (
+        a.get("host_endpoint_matches_local_socket") is not True
+        or b.get("host_endpoint_matches_local_socket") is not True
+        or engines.get("routing_proof") != "host TCP endpoint ID matches outer unix socket"
+    ):
+        raise GateError("evidence does not prove nested Engine endpoint routing")
+    if (
+        not a.get("data_volume")
+        or not b.get("data_volume")
+        or a.get("data_volume") == b.get("data_volume")
+        or engines.get("storage_roots_distinct") is not True
+    ):
+        raise GateError("evidence does not prove distinct nested Engine data roots")
     if engines.get("isolation_proof") != "mutually-invisible marker volumes":
         raise GateError("evidence does not prove Engine storage isolation")
+    if not re.fullmatch(
+        r"[^\s@]+@sha256:[0-9a-f]{64}", str(engines.get("dind_image", ""))
+    ):
+        raise GateError("evidence does not identify a digest-pinned DIND image")
+    requested_dind_digest = str(engines.get("dind_image")).rsplit("@", 1)[1]
+    probe = value.get("engine_probe", {})
+    if not isinstance(probe, Mapping) or probe.get("dind_image") != engines.get(
+        "dind_image"
+    ):
+        raise GateError("evidence Engine probe does not match the pinned DIND image")
+
+    canonical_identities: list[tuple[str, str, str, str, str, str]] = []
+    canonical_endpoints: list[str] = []
+    canonical_outer_ids: list[str] = []
+    canonical_image_ids: list[str] = []
+    canonical_repo_digests: list[list[str]] = []
+    for label, engine, volume_suffix, marker_suffix in (
+        ("a", a, "engine-a-data", "only-a"),
+        ("b", b, "engine-b-data", "only-b"),
+    ):
+        if not isinstance(engine, Mapping):
+            raise GateError(f"evidence Engine {label.upper()} is not an object")
+        identity = required_engine_identity(
+            {
+                "ID": engine.get("engine_id"),
+                "Name": engine.get("engine_name"),
+                "Driver": engine.get("storage_driver"),
+                "ServerVersion": engine.get("server_version"),
+                "OSType": engine.get("os_type"),
+                "DockerRootDir": engine.get("docker_root_dir"),
+            }
+        )
+        if engine.get("local_engine_id") != identity[0]:
+            raise GateError("evidence does not prove nested Engine endpoint routing")
+        outer_id = required_outer_container_id(engine.get("outer_container_id"))
+        endpoint = required_local_docker_endpoint(engine.get("host_endpoint"))
+        expected_volume = safe_name(run_id, volume_suffix)
+        if engine.get("data_volume") != expected_volume:
+            raise GateError("evidence does not prove distinct nested Engine data roots")
+        if engine.get("marker_volume") != safe_name(run_id, marker_suffix):
+            raise GateError("evidence does not prove Engine storage isolation")
+        image_config_id = required_image_config_id(engine.get("image_config_id"))
+        repo_digests = required_repo_digests(engine.get("image_repo_digests"))
+        if not any(item.endswith("@" + requested_dind_digest) for item in repo_digests):
+            raise GateError("evidence DIND image RepoDigest does not match the pin")
+
+        side_probe = probe.get(label)
+        if not isinstance(side_probe, Mapping):
+            raise GateError(f"evidence Engine {label.upper()} probe is missing")
+        probe_identity = required_engine_identity(
+            {
+                "ID": side_probe.get("host_engine_id"),
+                "Name": side_probe.get("engine_name"),
+                "Driver": side_probe.get("driver"),
+                "ServerVersion": side_probe.get("server_version"),
+                "OSType": side_probe.get("os_type"),
+                "DockerRootDir": side_probe.get("docker_root_dir"),
+            }
+        )
+        local_probe = side_probe.get("local_identity")
+        if not isinstance(local_probe, Mapping):
+            raise GateError(f"evidence Engine {label.upper()} local probe is missing")
+        local_probe_identity = required_engine_identity(
+            {
+                "ID": local_probe.get("engine_id"),
+                "Name": local_probe.get("engine_name"),
+                "Driver": local_probe.get("driver"),
+                "ServerVersion": local_probe.get("server_version"),
+                "OSType": local_probe.get("os_type"),
+                "DockerRootDir": local_probe.get("docker_root_dir"),
+            }
+        )
+        if (
+            probe_identity != identity
+            or local_probe_identity != identity
+            or side_probe.get("local_engine_id") != identity[0]
+            or side_probe.get("host_endpoint") != endpoint
+            or side_probe.get("outer_container_id") != outer_id
+            or side_probe.get("data_volume") != expected_volume
+            or side_probe.get("image_config_id") != image_config_id
+            or side_probe.get("image_repo_digests") != repo_digests
+        ):
+            raise GateError(
+                f"evidence Engine {label.upper()} probe does not match final identity"
+            )
+        canonical_identities.append(identity)
+        canonical_endpoints.append(endpoint)
+        canonical_outer_ids.append(outer_id)
+        canonical_image_ids.append(image_config_id)
+        canonical_repo_digests.append(repo_digests)
+
+    if (
+        canonical_identities[0][0] == canonical_identities[1][0]
+        or canonical_endpoints[0] == canonical_endpoints[1]
+        or canonical_outer_ids[0] == canonical_outer_ids[1]
+    ):
+        raise GateError("evidence does not prove two independent nested Docker Engines")
+    if (
+        canonical_image_ids[0] != canonical_image_ids[1]
+        or canonical_repo_digests[0] != canonical_repo_digests[1]
+    ):
+        raise GateError("evidence nested Engines did not use the same pinned image")
     boundary = value.get("network_boundary", {})
     if not boundary.get("gateway_ready"):
         raise GateError("B did not prove A Gateway reachability")

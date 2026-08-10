@@ -66,6 +66,9 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      OJOS_CROSS_MACHINE_DIND_IMAGE: docker:29-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c
+      OJOS_CROSS_MACHINE_DIND_STORAGE_DRIVER: vfs
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
