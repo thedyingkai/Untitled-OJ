@@ -1,0 +1,125 @@
+name: Orchestrator Cross-machine Contract v2
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: "Run two real independent Docker Engines (fails if unavailable)"
+        required: true
+        default: false
+        type: boolean
+      full_components:
+        description: "Also build the real Judge Worker and run real PG/Redis component probes"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Contract and fail-closed evidence tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Unit-test the contract resolver and evidence validator
+        shell: python
+        run: |
+          import subprocess
+          import sys
+          subprocess.run(
+              [sys.executable, "-m", "unittest", "discover", "-s", "deploy/cross-machine/tests", "-p", "test_*.py", "-v"],
+              check=True,
+          )
+      - name: Validate checked-in Service Contract v2 artifacts
+        shell: python
+        run: |
+          import subprocess
+          import sys
+          subprocess.run(
+              [
+                  sys.executable,
+                  "deploy/cross-machine/cross_machine_e2e.py",
+                  "validate",
+                  "--repo-root",
+                  ".",
+                  "--evidence",
+                  "artifacts/cross-machine/contract-static.json",
+              ],
+              check=True,
+          )
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cross-machine-contract-static
+          path: artifacts/cross-machine/contract-static.json
+
+  live:
+    name: Two independent Docker Engines
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-go@v6
+        if: ${{ inputs.full_components }}
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: |
+            platform/shared/go/go.sum
+            services/problem-service/go.sum
+            services/judge-api/go.sum
+      - name: Run fail-closed cross-Engine gate
+        shell: python
+        env:
+          FULL_COMPONENTS: ${{ inputs.full_components }}
+        run: |
+          import os
+          import subprocess
+          import sys
+          argv = [
+              sys.executable,
+              "deploy/cross-machine/cross_machine_e2e.py",
+              "live",
+              "--repo-root",
+              ".",
+              "--evidence",
+              "artifacts/cross-machine/live-evidence.json",
+          ]
+          if os.environ.get("FULL_COMPONENTS", "").lower() == "true":
+              argv.append("--full-components")
+          subprocess.run(argv, check=True)
+      - name: Re-read and verify live evidence independently
+        if: ${{ success() }}
+        shell: python
+        env:
+          FULL_COMPONENTS: ${{ inputs.full_components }}
+        run: |
+          import os
+          import subprocess
+          import sys
+          argv = [
+              sys.executable,
+              "deploy/cross-machine/cross_machine_e2e.py",
+              "verify-evidence",
+              "artifacts/cross-machine/live-evidence.json",
+          ]
+          if os.environ.get("FULL_COMPONENTS", "").lower() == "true":
+              argv.append("--require-full")
+          subprocess.run(argv, check=True)
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: cross-machine-live-evidence
+          path: artifacts/cross-machine/live-evidence.json
+          if-no-files-found: error
