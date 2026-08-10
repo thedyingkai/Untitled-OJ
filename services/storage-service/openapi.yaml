@@ -1,0 +1,94 @@
+openapi: 3.1.0
+info:
+  title: OJOS Storage Service Published API
+  version: 0.1.0
+x-ojos-service:
+  id: storage-service
+  version: 0.1.0
+paths:
+  /api/storage/objects/{bucket}/{key}:
+    put:
+      operationId: putStorageObject
+      x-ojos-api:
+        id: storage.object.put
+        version: 1.0.0
+        auth: workload
+        permission: storage.object.write
+      responses:
+        "200": {description: Object stored}
+    get:
+      operationId: getStorageObject
+      x-ojos-api:
+        id: storage.object.get
+        version: 1.0.0
+        auth: workload
+        permission: storage.object.read
+      responses:
+        "200": {description: Object stream}
+    head:
+      operationId: headStorageObject
+      x-ojos-api:
+        id: storage.object.head
+        version: 1.0.0
+        auth: workload
+        permission: storage.object.read
+      responses:
+        "200":
+          description: Object metadata headers
+          headers:
+            X-OJOS-Storage-Result:
+              required: true
+              schema: {type: string, const: present}
+            X-OJOS-Object-Sha256:
+              required: true
+              schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+            Content-Length:
+              required: true
+              schema: {type: integer, minimum: 0}
+        "404":
+          description: Storage provider authoritatively confirmed that the object is absent
+          headers:
+            X-OJOS-Storage-Result:
+              required: true
+              schema: {type: string, const: object-not-found}
+    delete:
+      operationId: deleteStorageObject
+      x-ojos-api:
+        id: storage.object.delete
+        version: 1.0.0
+        auth: workload
+        permission: storage.object.delete
+      parameters:
+        - name: X-OJOS-Expected-Sha256
+          in: header
+          required: false
+          schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+        - name: X-OJOS-Expected-Size
+          in: header
+          required: false
+          schema: {type: integer, minimum: 0}
+      responses:
+        "200":
+          description: Storage provider authoritatively confirmed object deletion
+          headers:
+            X-OJOS-Storage-Result:
+              required: true
+              schema: {type: string, const: deleted}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted: {type: boolean, const: true}
+        "412": {description: Object identity did not match the conditional delete}
+  /api/storage/objects/{bucket}:
+    get:
+      operationId: listStorageObjects
+      x-ojos-api:
+        id: storage.object.get
+        version: 1.0.0
+        auth: workload
+        permission: storage.object.read
+      responses:
+        "200": {description: Object list}

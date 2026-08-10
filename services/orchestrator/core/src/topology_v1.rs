@@ -49,6 +49,31 @@ pub struct TopologyLinkSpec {
     pub secret_ref: String,
     #[serde(default)]
     pub policy: Value,
+    /// API-level bindings carried by this consumer -> provider Link. Empty is
+    /// the exact v1 meaning and keeps historical revisions byte-compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_bindings: Vec<TopologyApiBindingSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TopologyApiBindingSpec {
+    /// Stable consumer-local binding name, for example `STORAGE_GET`.
+    #[serde(rename = "requirement", alias = "name")]
+    pub requirement_name: String,
+    pub api_id: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(default)]
+    pub provider_deployment_id: String,
+    #[serde(default = "default_api_binding_selection")]
+    pub selection: String,
+}
+
+fn default_api_binding_selection() -> String {
+    "nearest-healthy".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -116,6 +141,7 @@ impl TopologySpec {
         }
 
         let mut link_ids = BTreeSet::new();
+        let mut consumer_requirements = BTreeSet::new();
         for link in &self.links {
             validate_link_spec(link, &endpoint_ids)?;
             let key = (link.source_endpoint.as_str(), link.target_endpoint.as_str());
@@ -124,6 +150,19 @@ impl TopologySpec {
                     "duplicate link {} -> {}",
                     link.source_endpoint, link.target_endpoint
                 ));
+            }
+            if link.enabled {
+                for binding in &link.api_bindings {
+                    if !consumer_requirements.insert((
+                        link.source_endpoint.as_str(),
+                        binding.requirement_name.as_str(),
+                    )) {
+                        return invalid(format!(
+                            "consumer endpoint {} binds requirement {} more than once",
+                            link.source_endpoint, binding.requirement_name
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -151,6 +190,26 @@ impl TopologySpec {
         canonical
             .endpoints
             .sort_by(|left, right| left.endpoint.cmp(&right.endpoint));
+        for link in &mut canonical.links {
+            link.api_bindings.sort_by(|left, right| {
+                (
+                    &left.requirement_name,
+                    &left.api_id,
+                    &left.version,
+                    left.optional,
+                    &left.provider_deployment_id,
+                    &left.selection,
+                )
+                    .cmp(&(
+                        &right.requirement_name,
+                        &right.api_id,
+                        &right.version,
+                        right.optional,
+                        &right.provider_deployment_id,
+                        &right.selection,
+                    ))
+            });
+        }
         canonical.links.sort_by(|left, right| {
             (&left.source_endpoint, &left.target_endpoint)
                 .cmp(&(&right.source_endpoint, &right.target_endpoint))
@@ -920,6 +979,42 @@ fn validate_link_spec(link: &TopologyLinkSpec, endpoints: &BTreeSet<&str>) -> Re
     if link.auth_mode == "secret-ref" && link.secret_ref.is_empty() {
         return invalid("secret-ref link auth_mode requires secret_ref");
     }
+    let mut binding_names = BTreeSet::new();
+    for binding in &link.api_bindings {
+        validate_binding_name(&binding.requirement_name)?;
+        validate_token("link api binding api_id", &binding.api_id, MAX_TEXT_LEN)?;
+        if !binding_names.insert(binding.requirement_name.as_str()) {
+            return invalid(format!(
+                "link {} -> {} has duplicate API binding name {}",
+                link.source_endpoint, link.target_endpoint, binding.requirement_name
+            ));
+        }
+        if !binding.version.is_empty() {
+            validate_required_text("link api binding version", &binding.version, MAX_TEXT_LEN)?;
+        }
+        if !binding.provider_deployment_id.is_empty() {
+            validate_token(
+                "link api binding provider_deployment_id",
+                &binding.provider_deployment_id,
+                MAX_TEXT_LEN,
+            )?;
+        }
+        if !matches!(
+            binding.selection.as_str(),
+            "nearest-healthy" | "same-node" | "explicit"
+        ) {
+            return invalid(format!(
+                "link API binding {} has unsupported selection policy {}",
+                binding.requirement_name, binding.selection
+            ));
+        }
+        if binding.selection == "explicit" && binding.provider_deployment_id.is_empty() {
+            return invalid(format!(
+                "explicit link API binding {} requires provider_deployment_id",
+                binding.requirement_name
+            ));
+        }
+    }
     validate_json_object("link policy", &link.policy)
 }
 
@@ -978,6 +1073,22 @@ fn validate_token(name: &str, value: &str, max_len: usize) -> Result<()> {
             || matches!(character, '-' | '.' | '+')
     }) {
         return invalid(format!("{name} contains unsupported characters"));
+    }
+    Ok(())
+}
+
+fn validate_binding_name(value: &str) -> Result<()> {
+    validate_required_text("link api binding name", value, MAX_TEXT_LEN)?;
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return invalid("link api binding name is required");
+    };
+    if !first.is_ascii_alphanumeric()
+        || !chars.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+        })
+    {
+        return invalid("link api binding name contains unsupported characters");
     }
     Ok(())
 }
@@ -1092,6 +1203,7 @@ mod tests {
             config_ref: String::new(),
             secret_ref: String::new(),
             policy: json!({}),
+            api_bindings: Vec::new(),
         }
     }
 
@@ -1122,6 +1234,43 @@ mod tests {
             reverse.content_sha256().unwrap()
         );
         assert_eq!(forward.endpoints[0].service_id, "gateway");
+    }
+
+    #[test]
+    fn canonical_spec_hash_does_not_depend_on_api_binding_order() {
+        let mut forward = spec(false);
+        forward.links[0].api_bindings = vec![
+            TopologyApiBindingSpec {
+                requirement_name: "storage_put".to_string(),
+                api_id: "storage.object.put".to_string(),
+                version: ">=1.0.0, <2.0.0".to_string(),
+                optional: false,
+                provider_deployment_id: "storage-a".to_string(),
+                selection: "explicit".to_string(),
+            },
+            TopologyApiBindingSpec {
+                requirement_name: "storage_get".to_string(),
+                api_id: "storage.object.get".to_string(),
+                version: ">=1.0.0, <2.0.0".to_string(),
+                optional: false,
+                provider_deployment_id: "storage-a".to_string(),
+                selection: "explicit".to_string(),
+            },
+        ];
+        let forward = forward.canonicalized().unwrap();
+        let mut reverse = forward.clone();
+        reverse.links[0].api_bindings.reverse();
+        let reverse = reverse.canonicalized().unwrap();
+
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward.content_sha256().unwrap(),
+            reverse.content_sha256().unwrap()
+        );
+        assert_eq!(
+            forward.links[0].api_bindings[0].requirement_name,
+            "storage_get"
+        );
     }
 
     #[test]

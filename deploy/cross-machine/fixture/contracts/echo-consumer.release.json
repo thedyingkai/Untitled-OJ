@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "service": {
+    "id": "contract-echo-consumer",
+    "version": "1.0.0"
+  },
+  "requires": {
+    "apis": [
+      {
+        "name": "echo",
+        "id": "fixture.contract.echo",
+        "version": ">=1.0.0 <2.0.0",
+        "optional": true,
+        "timeout_ms": 5000
+      },
+      {
+        "name": "permission_check",
+        "id": "auth.user.permission.check",
+        "version": ">=1.0.0 <2.0.0",
+        "optional": false,
+        "timeout_ms": 5000
+      }
+    ]
+  },
+  "runtime_contract": {
+    "id": "standard-container-v1",
+    "sha256": "sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f"
+  }
+}

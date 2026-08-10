@@ -1,0 +1,11 @@
+{
+  "link_id": "fixture-echo-link",
+  "source_endpoint": "contract-echo-consumer-b",
+  "target_endpoint": "contract-echo-provider-a",
+  "api_bindings": [
+    {
+      "requirement": "echo",
+      "api_id": "fixture.contract.echo"
+    }
+  ]
+}

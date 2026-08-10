@@ -9,9 +9,11 @@ base64 = "0.22"
 clap.workspace = true
 ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
 orchestrator-legacy.workspace = true
+orchestrator-core.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 serde_json_canonicalizer = "0.3"
 sha2 = "0.10"
 thiserror.workspace = true

@@ -283,7 +283,10 @@ fn health(
     node_id: &str,
     request_id: &str,
 ) -> Result<ApiResponse, NodeApiError> {
-    const AGENT_FRESHNESS_MS: i64 = 35_000;
+    // Agents report every 30 seconds.  Allow one missed/jittered interval and
+    // apply the Service Contract v2 rule that observations older than 60s are
+    // unavailable.
+    const AGENT_FRESHNESS_MS: i64 = 60_000;
 
     let store = durable_store.ok_or_else(storage_unavailable)?;
     let node = store
@@ -315,7 +318,13 @@ fn health(
             ) && !deployment.instance.health.eq_ignore_ascii_case("healthy")
         })
         .count();
-    let observed_at_ms = unix_ms_timestamp(&node.updated_at);
+    // NodeRecord.updated_at also changes during enrollment, drain, revocation,
+    // and other control-plane mutations.  It therefore cannot prove that an
+    // Agent is reachable.  Only an authenticated runtime report is an Agent
+    // observation, and received_at_ms is control-plane time so it is not
+    // vulnerable to Node clock skew.
+    let runtime_facts = store.node_runtime_facts(node_id).map_err(storage_error)?;
+    let observed_at_ms = runtime_facts.as_ref().map(|facts| facts.received_at_ms);
     let observation_age_ms = observed_at_ms.map(|value| now_ms().saturating_sub(value).max(0));
     let agent_reachable = observation_age_ms.is_some_and(|age| age <= AGENT_FRESHNESS_MS);
     let accepting_jobs = node.status.eq_ignore_ascii_case("READY");
@@ -328,7 +337,7 @@ fn health(
             "ready": ready,
             "accepting_jobs": accepting_jobs,
             "agent_reachable": agent_reachable,
-            "last_observed_at": node.updated_at,
+            "last_observed_at": observed_at_ms.map(|value| format!("unix-ms:{value}")),
             "observation_age_ms": observation_age_ms,
             "freshness_threshold_ms": AGENT_FRESHNESS_MS,
             "active_jobs": active_jobs,
@@ -338,10 +347,6 @@ fn health(
         }),
         request_id,
     ))
-}
-
-fn unix_ms_timestamp(value: &str) -> Option<i64> {
-    value.strip_prefix("unix-ms:")?.parse().ok()
 }
 
 fn drain(
@@ -621,6 +626,7 @@ mod tests {
     use orchestrator_legacy::NodeRecord;
     use orchestrator_storage::{
         CERTIFICATE_LIFETIME_MS, EnrollmentRedemption, NewNodeCertificate, SqliteOrchestratorStore,
+        StoredNodeRuntimeFacts,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -877,5 +883,65 @@ mod tests {
         assert_eq!(health_response.body["data"]["deployments"], 0);
         assert_eq!(health_response.body["data"]["agent_reachable"], false);
         assert_eq!(health_response.body["data"]["ready"], false);
+    }
+
+    #[test]
+    fn only_an_authenticated_runtime_report_proves_agent_reachability() {
+        let (_directory, durable, mut console) = fixture();
+        let received_at_ms = now_ms();
+        let mut node = durable.get_node("node-1").unwrap().unwrap();
+        node.updated_at = format!("unix-ms:{received_at_ms}");
+        durable.upsert_node(node).unwrap();
+
+        let before_report = route(
+            &mut console,
+            Some(&durable),
+            &request("GET", "/api/v1/nodes/node-1/health", ""),
+            "req-health-before-report",
+        )
+        .expect("node route");
+        assert_eq!(before_report.body["data"]["agent_reachable"], false);
+        assert_eq!(before_report.body["data"]["ready"], false);
+        assert_eq!(before_report.body["data"]["last_observed_at"], Value::Null);
+
+        durable
+            .put_node_runtime_facts(&StoredNodeRuntimeFacts {
+                node_id: "node-1".to_string(),
+                observed_at_ms: received_at_ms,
+                received_at_ms,
+                facts: json!({"report_id": "report-node-1"}),
+            })
+            .unwrap();
+        let after_report = route(
+            &mut console,
+            Some(&durable),
+            &request("GET", "/api/v1/nodes/node-1/health", ""),
+            "req-health-after-report",
+        )
+        .expect("node route");
+        assert_eq!(after_report.body["data"]["agent_reachable"], true);
+        assert_eq!(after_report.body["data"]["ready"], true);
+        assert_eq!(
+            after_report.body["data"]["last_observed_at"],
+            format!("unix-ms:{received_at_ms}")
+        );
+
+        durable
+            .put_node_runtime_facts(&StoredNodeRuntimeFacts {
+                node_id: "node-1".to_string(),
+                observed_at_ms: received_at_ms - 60_001,
+                received_at_ms: received_at_ms - 60_001,
+                facts: json!({"report_id": "stale-report-node-1"}),
+            })
+            .unwrap();
+        let stale_report = route(
+            &mut console,
+            Some(&durable),
+            &request("GET", "/api/v1/nodes/node-1/health", ""),
+            "req-health-stale-report",
+        )
+        .expect("node route");
+        assert_eq!(stale_report.body["data"]["agent_reachable"], false);
+        assert_eq!(stale_report.body["data"]["ready"], false);
     }
 }

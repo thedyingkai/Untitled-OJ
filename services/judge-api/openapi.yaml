@@ -1,0 +1,125 @@
+openapi: 3.1.0
+info:
+  title: OJOS Judge API Published Surface
+  version: 0.1.0
+x-ojos-service:
+  id: judge-api
+  version: 0.1.0
+servers:
+  - url: /api
+paths:
+  /judge/submissions:
+    post:
+      operationId: createSubmission
+      x-ojos-api: &submission-create
+        id: judge.submission.create
+        version: 1.0.0
+        auth: user
+        permission: judge.submit
+      responses:
+        "200": {description: Submission created}
+    get:
+      operationId: listSubmissions
+      x-ojos-api: &submission-result
+        id: judge.submission.result
+        version: 1.0.0
+        auth: user
+        permission: submission.view.own
+      responses:
+        "200": {description: Submission list}
+  /judge/submissions/{id}:
+    get:
+      operationId: getSubmission
+      x-ojos-api: *submission-result
+      responses:
+        "200": {description: Submission result}
+  /judge/submissions/{id}/cases:
+    get:
+      operationId: getSubmissionCases
+      x-ojos-api: *submission-result
+      responses:
+        "200": {description: Submission case results}
+  /judge/submissions/{id}/debug-logs:
+    get:
+      operationId: getSubmissionDebugLogs
+      x-ojos-api: *submission-result
+      responses:
+        "200": {description: Submission debug logs}
+  /judge/admin/workers:
+    get:
+      operationId: listJudgeWorkers
+      x-ojos-api:
+        id: judge.worker.status
+        version: 1.0.0
+        auth: user
+        permission: judge.worker.status
+      responses:
+        "200": {description: Worker status}
+  /judge/admin/queue:
+    get:
+      operationId: getJudgeQueue
+      x-ojos-api: &queue-status
+        id: judge.queue.status
+        version: 1.0.0
+        auth: user
+        permission: judge.admin
+      responses:
+        "200": {description: Queue status}
+  /judge/admin/queue/status:
+    get:
+      operationId: getJudgeQueueStatus
+      x-ojos-api: *queue-status
+      responses:
+        "200": {description: Queue status compatibility route}
+  /judge/worker/register:
+    post:
+      operationId: registerJudgeWorker
+      x-ojos-api: &worker-control
+        id: judge.worker.control
+        version: 1.0.0
+        auth: workload
+        permission: judge.worker
+      responses:
+        "200": {description: Worker registered}
+  /judge/worker/heartbeat:
+    post:
+      operationId: heartbeatJudgeWorker
+      x-ojos-api: *worker-control
+      responses:
+        "200": {description: Heartbeat accepted}
+  /judge/worker/tasks/claim:
+    post:
+      operationId: claimJudgeTasks
+      x-ojos-api: *worker-control
+      responses:
+        "200": {description: Claimed tasks}
+  /judge/worker/tasks/{task_id}/heartbeat:
+    post:
+      operationId: heartbeatJudgeTask
+      x-ojos-api: *worker-control
+      responses:
+        "200": {description: Task lease renewed}
+  /judge/worker/tasks/{task_id}/result:
+    post:
+      operationId: completeJudgeTask
+      x-ojos-api: *worker-control
+      responses:
+        "200": {description: Result accepted}
+  /judge/worker/tasks/{task_id}/fail:
+    post:
+      operationId: failJudgeTask
+      x-ojos-api: *worker-control
+      responses:
+        "200": {description: Failure accepted}
+  /judge/worker/artifacts/submissions/{id}/source:
+    get:
+      operationId: getWorkerSubmissionSource
+      x-ojos-api: *worker-control
+      responses:
+        "200": {description: Submission source stream}
+  /judge/worker/artifacts/problems/{id}/package:
+    get:
+      operationId: getWorkerProblemPackage
+      x-ojos-api: *worker-control
+      responses:
+        "200": {description: Problem package stream}

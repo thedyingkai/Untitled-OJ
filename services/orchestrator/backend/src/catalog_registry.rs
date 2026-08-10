@@ -33,6 +33,7 @@ const SOURCES_KEY: &str = "sources";
 const TRUST_KEYS_KEY: &str = "trust-keys";
 const TRUST_KEYS_ENV: &str = "ORCHESTRATOR_CATALOG_TRUST_KEYS";
 const SOURCES_ENV: &str = "ORCHESTRATOR_CATALOG_SOURCES";
+const HTTPS_CA_FILE_ENV: &str = "ORCHESTRATOR_CATALOG_CA_FILE";
 const DEFAULT_GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
 const FALLBACK_GITHUB_TOKEN_ENV: &str = "OJOS_GITHUB_TOKEN";
 const MAX_CATALOG_BYTES: usize = 4 * 1024 * 1024;
@@ -171,15 +172,25 @@ pub(crate) struct CatalogRegistry {
     allow_dynamic_trust: bool,
     allow_empty_sources: bool,
     source_mutation_lock: Arc<Mutex<()>>,
+    https_ca_file: Option<PathBuf>,
 }
 
 impl CatalogRegistry {
     pub(crate) fn from_env(repo_root: &Path) -> Result<Option<Self>, CatalogRegistryError> {
-        Self::from_env_values(
+        let mut registry = Self::from_env_values(
             repo_root,
             std::env::var(TRUST_KEYS_ENV).ok(),
             std::env::var(SOURCES_ENV).ok(),
-        )
+        )?;
+        if let Some(registry) = registry.as_mut() {
+            registry.https_ca_file =
+                configured_catalog_ca_file(std::env::var(HTTPS_CA_FILE_ENV).ok())?;
+            // Fail startup on an unreadable or malformed explicitly configured
+            // trust anchor instead of discovering the problem during the first
+            // catalog refresh.
+            registry.https_agent()?;
+        }
+        Ok(registry)
     }
 
     fn from_env_values(
@@ -287,6 +298,7 @@ impl CatalogRegistry {
             allow_dynamic_trust,
             allow_empty_sources,
             source_mutation_lock: Arc::new(Mutex::new(())),
+            https_ca_file: None,
         };
         for source in &registry.bootstrap_sources {
             registry.validate_source_configuration(source)?;
@@ -1119,12 +1131,7 @@ impl CatalogRegistry {
         max_bytes: usize,
     ) -> Result<Vec<u8>, CatalogRegistryError> {
         let token = github_token(url, auth_secret_ref)?;
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(15)))
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .build()
-            .into();
+        let agent = self.https_agent()?;
         let mut current = url.trim().to_string();
         let mut hops = 0_u8;
         loop {
@@ -1215,6 +1222,46 @@ impl CatalogRegistry {
             }
             return Ok(bytes);
         }
+    }
+
+    fn https_agent(&self) -> Result<ureq::Agent, CatalogRegistryError> {
+        let mut builder = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(15)))
+            .http_status_as_error(false)
+            .max_redirects(0);
+        if let Some(path) = self.https_ca_file.as_deref() {
+            let pem = fs::read(path).map_err(|error| {
+                CatalogRegistryError::configuration(format!(
+                    "read {HTTPS_CA_FILE_ENV} {}: {error}",
+                    path.display()
+                ))
+            })?;
+            let certificates = ureq::tls::parse_pem(&pem)
+                .filter_map(|item| match item {
+                    Ok(ureq::tls::PemItem::Certificate(certificate)) => Some(Ok(certificate)),
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    CatalogRegistryError::configuration(format!(
+                        "parse {HTTPS_CA_FILE_ENV} {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            if certificates.is_empty() {
+                return Err(CatalogRegistryError::configuration(format!(
+                    "{HTTPS_CA_FILE_ENV} {} contains no PEM certificate",
+                    path.display()
+                )));
+            }
+            builder = builder.tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::new_with_certs(&certificates))
+                    .build(),
+            );
+        }
+        Ok(builder.build().into())
     }
 
     fn validate_artifact_url(&self, url: &str) -> Result<(), CatalogRegistryError> {
@@ -1549,6 +1596,21 @@ fn is_https(url: &str) -> bool {
     url.trim().to_ascii_lowercase().starts_with("https://")
 }
 
+fn configured_catalog_ca_file(
+    value: Option<String>,
+) -> Result<Option<PathBuf>, CatalogRegistryError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(CatalogRegistryError::configuration(format!(
+            "{HTTPS_CA_FILE_ENV} must not be empty when configured"
+        )));
+    }
+    Ok(Some(PathBuf::from(value)))
+}
+
 fn is_github_url(url: &str) -> bool {
     let Some(rest) = url.trim().strip_prefix("https://") else {
         return false;
@@ -1827,6 +1889,52 @@ mod tests {
         .expect_err("nonblank trust keys still require a source list");
         assert_eq!(missing_sources.code(), "CATALOG_CONFIGURATION_INVALID");
         assert!(missing_sources.to_string().contains(SOURCES_ENV));
+    }
+
+    #[test]
+    fn explicit_catalog_ca_is_required_to_be_nonblank_and_valid_pem() {
+        let blank = configured_catalog_ca_file(Some(" \t ".to_string()))
+            .expect_err("blank explicit CA path must fail closed");
+        assert_eq!(blank.code(), "CATALOG_CONFIGURATION_INVALID");
+        assert!(blank.to_string().contains(HTTPS_CA_FILE_ENV));
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let signing_key = SigningKey::from_bytes(&[13_u8; 32]);
+        let mut registry = CatalogRegistry::new(root.path(), trust(&signing_key), vec![source()])
+            .expect("registry");
+        let invalid = root.path().join("invalid-ca.pem");
+        fs::write(&invalid, b"not a certificate").expect("invalid CA fixture");
+        registry.https_ca_file = Some(invalid);
+        let error = registry
+            .https_agent()
+            .expect_err("invalid CA bundle must fail before network I/O");
+        assert_eq!(error.code(), "CATALOG_CONFIGURATION_INVALID");
+        assert!(error.to_string().contains("contains no PEM certificate"));
+    }
+
+    #[test]
+    fn catalog_https_agent_uses_only_the_explicit_ca_bundle() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let signing_key = SigningKey::from_bytes(&[17_u8; 32]);
+        let mut registry = CatalogRegistry::new(root.path(), trust(&signing_key), vec![source()])
+            .expect("registry");
+        let certificate_key = rcgen::KeyPair::generate().expect("certificate key");
+        let certificate = rcgen::CertificateParams::new(vec!["catalog.test".to_string()])
+            .expect("certificate params")
+            .self_signed(&certificate_key)
+            .expect("self-signed certificate");
+        let ca_file = root.path().join("catalog-ca.pem");
+        fs::write(&ca_file, certificate.pem()).expect("CA fixture");
+        registry.https_ca_file = Some(ca_file);
+
+        let agent = registry.https_agent().expect("explicit CA agent");
+        match agent.config().tls_config().root_certs() {
+            ureq::tls::RootCerts::Specific(certificates) => {
+                assert_eq!(certificates.len(), 1);
+                assert_eq!(certificates[0].der(), certificate.der().as_ref());
+            }
+            _ => panic!("catalog agent did not install its explicit CA bundle"),
+        }
     }
 
     #[test]

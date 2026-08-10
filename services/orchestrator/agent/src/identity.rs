@@ -1325,6 +1325,7 @@ fn open_lock_file(path: &Path) -> Result<fs::File, IdentityError> {
     use std::os::unix::fs::OpenOptionsExt;
     Ok(OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .mode(0o600)
@@ -1335,6 +1336,7 @@ fn open_lock_file(path: &Path) -> Result<fs::File, IdentityError> {
 fn open_lock_file(path: &Path) -> Result<fs::File, IdentityError> {
     Ok(OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path)?)
@@ -1953,7 +1955,7 @@ mod tests {
         assert!(recovered.is_none());
         assert!(!directory.path().join("current.json").exists());
 
-        let replacement = bundle_for_request("node-1", 0x0d, &request);
+        let replacement = bundle_for_request("node-1", 0x0d, request);
         store
             .install(&replacement, &request.private_key_pem, server_ca)
             .unwrap();

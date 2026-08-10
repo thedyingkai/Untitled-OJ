@@ -1,0 +1,63 @@
+{
+  "events": {
+    "publishes": [
+      {
+        "id": "consumer.started",
+        "schema_ref": "",
+        "version": "1.0.0"
+      }
+    ],
+    "subscribes": [
+      {
+        "consumer_group": "consumer-v1",
+        "optional": false,
+        "type": "storage.updated",
+        "version": ""
+      }
+    ]
+  },
+  "provides": {
+    "apis": [
+      {
+        "auth": {
+          "mode": "workload"
+        },
+        "id": "consumer.status.get",
+        "methods": [
+          "GET"
+        ],
+        "path": "/status",
+        "permission": "consumer.status.read",
+        "port_name": "",
+        "protocol": "",
+        "stability": "",
+        "timeout_ms": null,
+        "version": "1.0.0",
+        "visibility": ""
+      }
+    ],
+    "events": []
+  },
+  "requires": {
+    "apis": [
+      {
+        "id": "storage.object.get",
+        "name": "STORAGE_GET",
+        "optional": false,
+        "selection": "",
+        "timeout_ms": 5000,
+        "version": ">=1.0.0, <2.0.0"
+      }
+    ],
+    "events": []
+  },
+  "runtime_contract": {
+    "binding_directory": "/run/ojos/service",
+    "credential_delivery": "file",
+    "env_projection": {},
+    "id": "judge-sandbox-v1",
+    "identity_mode": "workload",
+    "restart_on_change": false,
+    "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

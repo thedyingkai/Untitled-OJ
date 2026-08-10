@@ -60,16 +60,26 @@ impl RedisResourceProvisioner for RecordingRedisResourceProvisioner {
             provisioned: request
                 .resources
                 .iter()
-                .map(|resource| RedisProvisionedResource {
-                    name: resource.name.clone(),
-                    kind: resource.kind.clone(),
-                    stream: "ojos:judge:task".to_string(),
-                    consumer_group: if resource.kind == "consumer-group" {
-                        "judge-worker".to_string()
-                    } else {
-                        String::new()
-                    },
-                    status: "created".to_string(),
+                .map(|resource| {
+                    let event = crate::service_io::parse_legacy_event_redis_usage(&resource.usage);
+                    RedisProvisionedResource {
+                        name: resource.name.clone(),
+                        kind: resource.kind.clone(),
+                        stream: event
+                            .as_ref()
+                            .map(|usage| usage.stream.clone())
+                            .unwrap_or_else(|| "ojos:judge:task".to_string()),
+                        consumer_group: event.map(|usage| usage.consumer_group).unwrap_or_else(
+                            || {
+                                if resource.kind == "consumer-group" {
+                                    "judge-worker".to_string()
+                                } else {
+                                    String::new()
+                                }
+                            },
+                        ),
+                        status: "created".to_string(),
+                    }
                 })
                 .collect(),
         })
@@ -2578,12 +2588,14 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
     assert!(
         releases
             .iter()
-            .any(|(service_name, release)| *service_name == "judge-worker"
+            .any(|(service_name, release)| *service_name == "judge-api"
                 && release
                     .redis
                     .iter()
-                    .any(|redis| redis.kind == "consumer-group")),
-        "judge-worker release must declare the consumer group side of the judge queue"
+                    .any(|redis| redis.kind == "consumer-group"
+                        && crate::service_io::parse_legacy_event_redis_usage(&redis.usage)
+                            .is_some_and(|usage| usage.consumer_group == "judge-api"))),
+        "judge-api v2 event subscriptions must project to a typed Redis consumer group"
     );
 
     let auth_calls = Arc::new(Mutex::new(Vec::new()));
@@ -2758,7 +2770,7 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
     let api_surfaces = store.service_api_surfaces();
     assert_eq!(api_surfaces.len(), total_api_surfaces);
     for (service_name, api_id) in [
-        ("auth-service", "auth.permission.check"),
+        ("auth-service", "auth.user.permission.check"),
         ("gateway", "gateway.health"),
         ("gateway", "gateway.routes.reload"),
         ("judge-api", "judge.queue.status"),
@@ -2820,12 +2832,12 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
                 && permission.permission_key == "problem.view")
     );
     assert_eq!(store.service_redis_resources().len(), total_redis);
-    assert!(
-        store
-            .service_redis_resources()
-            .iter()
-            .any(|redis| redis.service_name == "judge-worker" && redis.kind == "consumer-group")
-    );
+    assert!(store.service_redis_resources().iter().any(|redis| {
+        redis.service_name == "judge-api"
+            && redis.kind == "consumer-group"
+            && crate::service_io::parse_legacy_event_redis_usage(&redis.usage)
+                .is_some_and(|usage| usage.consumer_group == "judge-api")
+    }));
     assert_eq!(store.service_storage_resources().len(), total_storage);
     assert!(
         store
@@ -3935,41 +3947,34 @@ fn release_install_api_surface_only_release_triggers_gateway_reload() {
     assert_eq!(calls[0].node_id, "child-node");
     assert_eq!(calls[0].api_count, release.apis.len());
     assert!(calls[0].force_reload);
-    for api_id in [
-        "storage.object.put",
-        "storage.object.get",
-        "storage.object.head",
-    ] {
-        assert!(
-            calls[0]
-                .effective_routes
-                .iter()
-                .any(|route| route.api_id == api_id
-                    && route.provider_endpoint == endpoint
-                    && route.provider_node_id == "root-node"
-                    && route.node_id == "child-node"
-                    && route.status == "running"),
-            "gateway publisher should receive effective route {api_id}"
-        );
-    }
+    assert!(
+        calls[0].effective_routes.is_empty(),
+        "v2 explicit APIs must not become globally effective before an ApiBinding is applied"
+    );
     drop(calls);
 
     let routes = store
         .effective_api_routes("child-node")
         .expect("child effective API routes");
+    assert!(
+        routes.is_empty(),
+        "the legacy visibility resolver must fail closed for unbound explicit APIs"
+    );
+    let surfaces = store.service_api_surfaces();
     for api_id in [
         "storage.object.put",
         "storage.object.get",
         "storage.object.head",
     ] {
         assert!(
-            routes.iter().any(|route| {
-                route.api_id == api_id
-                    && route.provider_endpoint == endpoint
-                    && route.provider_node_id == "root-node"
-                    && route.status == "running"
+            surfaces.iter().any(|surface| {
+                surface.service_name == "storage-service"
+                    && surface.api_id == api_id
+                    && surface.visibility == "explicit"
+                    && surface.auth_mode == "workload"
+                    && surface.api_version == "1.0.0"
             }),
-            "release.install should produce running effective API route {api_id}"
+            "v2 provides.apis must project to the legacy API surface registry for {api_id}"
         );
     }
 
@@ -5638,15 +5643,14 @@ fn release_install_rollback_records_migration_rollback_unsupported() {
 fn release_install_provisions_redis_resources_with_runtime_provisioner() {
     let root = repo_root();
     let service =
-        validate_service_manifest_file(&root, Path::new("services/judge-worker/service.yaml"))
+        validate_service_manifest_file(&root, Path::new("services/judge-api/service.yaml"))
             .unwrap();
     let release =
-        validate_service_release_file(&root, Path::new("services/judge-worker/release.yaml"))
-            .unwrap();
+        validate_service_release_file(&root, Path::new("services/judge-api/release.yaml")).unwrap();
     let request = ActionRequest::new(
         "op-release-redis-provision",
         "release.install",
-        [("service_id".to_string(), "judge-worker".to_string())]
+        [("service_id".to_string(), "judge-api".to_string())]
             .into_iter()
             .collect(),
     );
@@ -5682,14 +5686,27 @@ fn release_install_provisions_redis_resources_with_runtime_provisioner() {
 
     let calls = calls.lock().expect("redis provision calls");
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].service_name, "judge-worker");
+    assert_eq!(calls[0].service_name, "judge-api");
     assert_eq!(calls[0].resources.len(), release.redis.len());
-    assert_eq!(calls[0].resources[0].kind, "consumer-group");
+    assert!(calls[0].resources.iter().any(|resource| {
+        resource.kind == "consumer-group"
+            && crate::service_io::parse_legacy_event_redis_usage(&resource.usage).is_some_and(
+                |usage| {
+                    usage.stream == crate::service_io::SERVICE_CONTRACT_V2_EVENT_STREAM
+                        && usage.consumer_group == "judge-api"
+                        && usage.events
+                            == vec![
+                                "io.ojos.problem.deleted.v1".to_string(),
+                                "io.ojos.problem.snapshot.v1".to_string(),
+                            ]
+                },
+            )
+    }));
     drop(calls);
 
     let logs = store.operation_logs("op-release-redis-provision");
     assert!(logs.iter().any(|log| {
-        log.step_id == "redis-resources:judge-worker"
+        log.step_id == "redis-resources:judge-api"
             && log.data.get("status").and_then(serde_json::Value::as_str) == Some("created")
             && log
                 .data
@@ -5699,12 +5716,14 @@ fn release_install_provisions_redis_resources_with_runtime_provisioner() {
                     items.iter().any(|item| {
                         item.get("consumer_group")
                             .and_then(serde_json::Value::as_str)
-                            == Some("judge-worker")
+                            == Some("judge-api")
+                            && item.get("stream").and_then(serde_json::Value::as_str)
+                                == Some(crate::service_io::SERVICE_CONTRACT_V2_EVENT_STREAM)
                     })
                 })
     }));
     assert!(logs.iter().any(|log| {
-        log.step_id == "install-pipeline:judge-worker"
+        log.step_id == "install-pipeline:judge-api"
             && log
                 .data
                 .get("redis_resources")
@@ -5764,6 +5783,66 @@ fn tcp_redis_provisioner_creates_judge_stream_and_consumer_group() {
     assert!(command.contains("CREATE"));
     assert!(command.contains("ojos:judge:task"));
     assert!(command.contains("judge-worker"));
+    assert!(command.contains("MKSTREAM"));
+}
+
+#[test]
+fn tcp_redis_provisioner_uses_v2_event_stream_and_exact_consumer_group() {
+    let release =
+        validate_service_release_file(&repo_root(), Path::new("services/judge-api/release.yaml"))
+            .expect("judge API v2 release");
+    let projected = release
+        .redis
+        .iter()
+        .find(|resource| {
+            crate::service_io::parse_legacy_event_redis_usage(&resource.usage)
+                .is_some_and(|usage| usage.consumer_group == "judge-api")
+        })
+        .cloned()
+        .expect("typed event consumer resource");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local redis test listener");
+    let endpoint = listener.local_addr().expect("redis test addr").to_string();
+    let captured = Arc::new(Mutex::new(String::new()));
+    let captured_thread = Arc::clone(&captured);
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept redis command");
+        let mut buffer = [0_u8; 1024];
+        let bytes = stream.read(&mut buffer).expect("read redis command");
+        *captured_thread.lock().expect("captured redis command") =
+            std::str::from_utf8(&buffer[..bytes])
+                .expect("redis command utf8")
+                .to_string();
+        stream.write_all(b"+OK\r\n").expect("write redis ok");
+    });
+
+    let provisioner = TcpRedisResourceProvisioner::new(endpoint);
+    let result = provisioner
+        .provision_resources(&RedisProvisionRequest {
+            service_name: release.service_name.clone(),
+            resources: vec![ServiceRedisResource {
+                service_name: release.service_name,
+                name: projected.name.clone(),
+                kind: projected.kind.clone(),
+                usage: projected.usage.clone(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            }],
+        })
+        .expect("provision v2 event consumer resource");
+    handle.join().expect("redis listener thread");
+
+    assert_eq!(result.status, "created");
+    assert_eq!(
+        result.provisioned[0].stream,
+        crate::service_io::SERVICE_CONTRACT_V2_EVENT_STREAM
+    );
+    assert_eq!(result.provisioned[0].consumer_group, "judge-api");
+    let command = captured.lock().expect("captured redis command");
+    assert!(command.contains("XGROUP"));
+    assert!(command.contains("CREATE"));
+    assert!(command.contains(crate::service_io::SERVICE_CONTRACT_V2_EVENT_STREAM));
+    assert!(command.contains("judge-api"));
     assert!(command.contains("MKSTREAM"));
 }
 

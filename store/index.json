@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "OJOS 官方模块索引",
   "description": "OJOS Orchestrator 插件商店的默认索引。编排器本体不内置任何业务模块；每个条目要么给出 repo（GitHub 仓库，从 Release 资产安装），要么给出 source_url（直接可安装的 release 包源）。",
-  "updated_at": "2026-07-29",
+  "updated_at": "2026-08-05",
   "modules": [
     {
       "id": "gateway",
@@ -22,7 +22,7 @@
       "tags": ["core", "auth"],
       "repo": "",
       "source_url": "services/auth-service",
-      "checksum": "sha256:5a8b022407cee92bc53e55ab1bbdc757473482384482344ea2a0a4c10644cde4"
+      "checksum": "sha256:e7dad74748b0c17e130ef29e49f8ca842e07411961aef831b4d3f593c1d30b2f"
     },
     {
       "id": "user-service",
@@ -32,7 +32,7 @@
       "tags": ["core", "user"],
       "repo": "",
       "source_url": "services/user-service",
-      "checksum": "sha256:b47efab6aa274af3bf5955f3db067a18e759faf14d81d71a4fd2d866819a7475"
+      "checksum": "sha256:3525154c275439973fe0ac9f29b3075837274a98b23638e9ba25278e95959755"
     },
     {
       "id": "problem-service",
@@ -42,7 +42,7 @@
       "tags": ["oj", "problem"],
       "repo": "",
       "source_url": "services/problem-service",
-      "checksum": "sha256:941bbefc9bf1d22ab4ed909fd42f88b9c6b8b459b23838098a687c2ecb859299"
+      "checksum": "sha256:93afd2c48f5d46c197f10eea28df7c8fc578f8f437ad0f0dd691ef2550b14ea9"
     },
     {
       "id": "judge-api",
@@ -52,7 +52,7 @@
       "tags": ["oj", "judge"],
       "repo": "",
       "source_url": "services/judge-api",
-      "checksum": "sha256:c5bde22e12e1cfda24a593500381e634b7dd4ef4e6db68a5dc77bd8308243945"
+      "checksum": "sha256:aafb56b843b163e7d58ca92d9a6478da2bb171324dfa72d3f94aa53a881d0493"
     },
     {
       "id": "judge-worker",
@@ -62,7 +62,7 @@
       "tags": ["oj", "judge", "sandbox"],
       "repo": "",
       "source_url": "services/judge-worker",
-      "checksum": "sha256:394e71808b29499c1f50da0f06552df3138292d6170b6d38ed6e3ca4b60197eb"
+      "checksum": "sha256:e116806f3849a3872b4074ed14b94fc840d666e984740172d0fc487316d42e4f"
     },
     {
       "id": "storage-service",
@@ -72,7 +72,7 @@
       "tags": ["core", "storage"],
       "repo": "",
       "source_url": "services/storage-service",
-      "checksum": "sha256:b24616bf4a13460b6112fbb7b1dcaf85b4339e7d0d05abffb8130fa40b161e00"
+      "checksum": "sha256:462f4f9f9ac0104a417de16ae345234744880ab0208963a7f24fcbcd996bd2d3"
     },
     {
       "id": "postgresql",

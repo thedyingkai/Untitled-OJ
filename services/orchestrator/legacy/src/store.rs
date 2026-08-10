@@ -1,3 +1,7 @@
+use crate::service_io::{
+    legacy_release_manifest_from_contract, legacy_release_manifest_from_json_value,
+    parse_legacy_event_redis_usage,
+};
 use crate::{
     DeployedServiceApi, DiagnosticReport, DockerComposeDriver, DriverRequest, DriverResult,
     EffectiveApiRoute, Endpoint, EndpointHealthResult, EndpointProbe, ExecutionDriver,
@@ -5,13 +9,13 @@ use crate::{
     NodeRecord, Operation, OperationLock, OperationLogRecord, OperationStatus, OrchestratorError,
     RenderedServiceConfig, Result, RuntimeMode, ServiceApiSurface, ServiceFrontendEntry,
     ServiceManifest, ServiceMigrationRecord, ServicePermissionRecord, ServiceRedisResource,
-    ServiceRelease, ServiceReleaseManifest, ServiceRoute, ServiceStorageResource,
-    StaticEndpointProbe, Topology, TopologySnapshot, build_diagnostic_report, build_topology,
-    check_endpoint_health_with_probe, check_link_health, export_diagnostic_report,
-    operation_log_record, operation_step_log_record, parse_endpoint_id, start_operation,
-    succeed_operation, validate_deployed_service_api, validate_endpoint, validate_endpoint_id,
-    validate_host_service, validate_link, validate_log_view, validate_node_record,
-    validate_rendered_service_config, validate_service_api_surface,
+    ServiceRelease, ServiceReleaseContract, ServiceReleaseManifest, ServiceRoute,
+    ServiceStorageResource, StaticEndpointProbe, Topology, TopologySnapshot,
+    build_diagnostic_report, build_topology, check_endpoint_health_with_probe, check_link_health,
+    export_diagnostic_report, operation_log_record, operation_step_log_record, parse_endpoint_id,
+    start_operation, succeed_operation, validate_deployed_service_api, validate_endpoint,
+    validate_endpoint_id, validate_host_service, validate_link, validate_log_view,
+    validate_node_record, validate_rendered_service_config, validate_service_api_surface,
     validate_service_frontend_entry, validate_service_manifest, validate_service_migration_record,
     validate_service_permission_record, validate_service_redis_resource, validate_service_release,
     validate_service_release_record, validate_service_route, validate_service_storage_resource,
@@ -3216,7 +3220,9 @@ impl ReleasePackageLoader for LocalReleasePackageLoader {
                 loaded.checksum
             )));
         }
-        let manifest: ServiceReleaseManifest = serde_yaml::from_str(&loaded.text)?;
+        let manifest = legacy_release_manifest_from_contract(
+            ServiceReleaseContract::from_yaml_str(&loaded.text)?,
+        )?;
         validate_service_release(&manifest)?;
         if manifest.service_name != request.service_name || manifest.version != request.version {
             return Err(OrchestratorError::InvalidManifest(format!(
@@ -4584,7 +4590,7 @@ impl<
             None => self
                 .store
                 .get_service_release(service_name, &service.version)?
-                .map(|record| serde_json::from_value(record.manifest))
+                .map(|record| legacy_release_manifest_from_json_value(record.manifest))
                 .transpose()?,
         };
         self.execute_service_runtime_action(
@@ -6651,9 +6657,9 @@ impl<
                 && record.version == host_service.version
         });
         match record {
-            Some(record) => serde_json::from_value(record.manifest.clone())
-                .map(Some)
-                .map_err(OrchestratorError::Json),
+            Some(record) => {
+                legacy_release_manifest_from_json_value(record.manifest.clone()).map(Some)
+            }
             None => Ok(None),
         }
     }
@@ -7558,9 +7564,8 @@ fn release_manifest_from_previous_state(
         .releases
         .iter()
         .find(|record| record.version == version)
-        .map(|record| serde_json::from_value(record.manifest.clone()))
+        .map(|record| legacy_release_manifest_from_json_value(record.manifest.clone()))
         .transpose()
-        .map_err(OrchestratorError::Json)
 }
 
 fn release_record_previous_state_from_operation(
@@ -8535,6 +8540,9 @@ fn service_redis_resources_from_release(
 }
 
 fn redis_stream_name(resource: &ServiceRedisResource) -> String {
+    if let Some(event) = parse_legacy_event_redis_usage(&resource.usage) {
+        return event.stream;
+    }
     if matches!(resource.service_name.as_str(), "judge-api" | "judge-worker")
         && resource.name == "redis"
     {
@@ -8549,6 +8557,9 @@ fn redis_stream_name(resource: &ServiceRedisResource) -> String {
 }
 
 fn redis_consumer_group_name(resource: &ServiceRedisResource) -> String {
+    if let Some(event) = parse_legacy_event_redis_usage(&resource.usage) {
+        return event.consumer_group;
+    }
     if resource.service_name == "judge-worker" && resource.name == "redis" {
         "judge-worker".to_string()
     } else {

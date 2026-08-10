@@ -16,6 +16,7 @@ base64 = "0.22"
 clap.workspace = true
 ctrlc = { version = "3.4", features = ["termination"] }
 getrandom = "0.3"
+orchestrator-agent.workspace = true
 jsonwebtoken = "9.3"
 rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 orchestrator-legacy.workspace = true
@@ -30,7 +31,7 @@ semver.workspace = true
 sha2 = "0.10"
 thiserror.workspace = true
 tar = "0.4"
-time = "0.3"
+time = { version = "0.3", features = ["formatting", "parsing"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
 x509-parser = "0.18"
@@ -40,7 +41,6 @@ url = "2.5"
 [dev-dependencies]
 async-trait = "0.1"
 ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
-orchestrator-agent.workspace = true
 rand = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rsa = "0.9"

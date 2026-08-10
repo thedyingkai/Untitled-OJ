@@ -4,10 +4,12 @@
 //! 这是「插件商店」的核心能力：编排器本体不内置任何业务模块，
 //! 模块以 release 包（zip/tar/release.yaml）形式从外部源导入。
 
+use crate::service_io::legacy_release_manifest_from_contract;
 use crate::{
     EndpointDecl, OrchestratorError, OrchestratorStore, Result, RuntimeMode, ServiceHealthDecl,
-    ServiceManifest, ServiceRelease, ServiceReleaseManifest, ServiceRequires, ServiceRuntimeDecl,
-    ServiceUiDecl, SourceDecl, validate_service_manifest, validate_service_release,
+    ServiceManifest, ServiceRelease, ServiceReleaseContract, ServiceReleaseManifest,
+    ServiceRequires, ServiceRuntimeDecl, ServiceUiDecl, SourceDecl, validate_service_manifest,
+    validate_service_release,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +22,13 @@ pub struct ExternalReleaseImport {
     pub checksum: String,
     /// store 中已存在同名 Service（本次导入是覆盖更新）。
     pub replaced_existing: bool,
+    /// Exact versioned contract persisted in `ServiceRelease.manifest`.
+    ///
+    /// The public compatibility response continues to expose `release` as the
+    /// normalized v1 projection, while registration must retain v2-only API
+    /// requirements, events and runtime-contract declarations.
+    #[serde(skip)]
+    stored_manifest: serde_json::Value,
 }
 
 /// 根据下载地址推断 release source.kind。
@@ -44,22 +53,29 @@ pub fn external_release_import_from_yaml(
     source_url: &str,
     checksum: &str,
 ) -> Result<ExternalReleaseImport> {
-    let mut release: ServiceReleaseManifest =
-        serde_yaml::from_str(release_yaml).map_err(|err| {
-            OrchestratorError::InvalidManifest(format!("imported release.yaml is invalid: {err}"))
-        })?;
+    let mut contract = ServiceReleaseContract::from_yaml_str(release_yaml).map_err(|err| {
+        OrchestratorError::InvalidManifest(format!("imported release.yaml is invalid: {err}"))
+    })?;
+    let mut release = legacy_release_manifest_from_contract(contract.clone()).map_err(|err| {
+        OrchestratorError::InvalidManifest(format!("imported release.yaml is invalid: {err}"))
+    })?;
     release.source.kind = release_source_kind_for_url(source_url);
     release.source.url = source_url.trim().to_string();
     release.source.checksum = checksum.trim().to_string();
     validate_service_release(&release)?;
     let service = service_manifest_from_release(&release, source_url)?;
     validate_service_manifest(&service)?;
+    // Keep the projected legacy fields in the versioned document as well so
+    // old runtime code sees the same API/event resources after reparsing.
+    contract.release = release.clone();
+    let stored_manifest = contract.to_json_value()?;
     Ok(ExternalReleaseImport {
         service,
         release,
         source_url: source_url.trim().to_string(),
         checksum: checksum.trim().to_string(),
         replaced_existing: false,
+        stored_manifest,
     })
 }
 
@@ -150,7 +166,12 @@ pub fn register_external_release_into_store<S: OrchestratorStore>(
         service_name: import.release.service_name.clone(),
         version: import.release.version.clone(),
         release_url: import.source_url.clone(),
-        manifest: serde_json::to_value(&import.release)?,
+        manifest: if import.stored_manifest.is_object() {
+            import.stored_manifest.clone()
+        } else {
+            // Backward compatibility for a deserialized 0.2 import result.
+            serde_json::to_value(&import.release)?
+        },
         checksum: import.checksum.clone(),
         created_at: String::new(),
     };
@@ -284,5 +305,88 @@ dependencies:
         .expect("import again");
         register_external_release_into_store(&mut store, &mut second).expect("register again");
         assert!(second.replaced_existing);
+    }
+
+    #[test]
+    fn v2_registration_retains_the_full_service_contract() {
+        let release = r#"
+schema_version: 2
+service_name: v2-consumer
+version: 1.0.0
+description: Service Contract v2 import fixture.
+service_type: backend-worker
+source:
+  kind: local
+  url: local://v2-consumer
+runtime:
+  kind: image
+  image: registry.example/v2-consumer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+backend:
+  protocol: http
+  port: 9101
+  health_path: /healthz/ready
+permissions: [judge.worker]
+provides:
+  apis:
+    - id: worker.health
+      version: 1.0.0
+      path: /healthz/ready
+      methods: [GET]
+      auth: { mode: workload }
+      permission: judge.worker
+requires:
+  apis:
+    - name: judge_control
+      id: judge.worker.control
+      version: ">=1.0.0, <2.0.0"
+      timeout_ms: 35000
+events:
+  publishes: [worker.ready]
+  subscribes:
+    - type: problem.snapshot
+      consumer_group: v2-consumer
+runtime_contract:
+  id: standard-container-v1
+  sha256: sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f
+"#;
+        let mut import = external_release_import_from_yaml(
+            release,
+            "https://catalog.example/v2-consumer/release.yaml",
+            "sha256:metadata",
+        )
+        .expect("parse v2 import");
+        let mut store = crate::MemoryOrchestratorStore::default();
+        register_external_release_into_store(&mut store, &mut import).expect("register v2 import");
+
+        let record = store
+            .get_service_release("v2-consumer", "1.0.0")
+            .unwrap()
+            .expect("registered release");
+        assert_eq!(record.manifest["schema_version"], 2);
+        assert_eq!(
+            record.manifest["provides"]["apis"][0]["id"],
+            "worker.health"
+        );
+        assert_eq!(
+            record.manifest["requires"]["apis"][0]["name"],
+            "judge_control"
+        );
+        assert_eq!(record.manifest["events"]["publishes"][0], "worker.ready");
+        assert_eq!(
+            record.manifest["runtime_contract"]["id"],
+            "standard-container-v1"
+        );
+
+        let contract = ServiceReleaseContract::from_json_value(record.manifest.clone())
+            .expect("stored v2 contract reparses");
+        assert_eq!(contract.contract_version, 2);
+        assert_eq!(contract.requirements()[0].binding_name(), "judge_control");
+        assert_eq!(contract.events.subscribes.len(), 1);
+        let legacy = crate::service_io::legacy_release_manifest_from_json_value(record.manifest)
+            .expect("legacy projection remains readable");
+        assert!(legacy.redis.iter().any(|resource| {
+            crate::service_io::parse_legacy_event_redis_usage(&resource.usage)
+                .is_some_and(|usage| usage.consumer_group == "v2-consumer")
+        }));
     }
 }

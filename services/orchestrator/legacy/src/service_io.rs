@@ -1,11 +1,116 @@
 use crate::{
-    DeploymentTemplate, DeploymentTemplateService, OrchestratorError, Result, ServiceManifest,
-    ServiceReleaseManifest, sanitize_path_for_error, validate_deployment_template,
-    validate_service_manifest, validate_service_release,
+    DeploymentTemplate, DeploymentTemplateService, OrchestratorError, ReleaseEventsContract,
+    ReleaseRedisDecl, Result, ServiceManifest, ServiceReleaseContract, ServiceReleaseManifest,
+    sanitize_path_for_error, validate_deployment_template, validate_service_manifest,
+    validate_service_release,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path};
+
+pub(crate) const SERVICE_CONTRACT_V2_EVENT_STREAM: &str = "ojos:events:v1";
+const SERVICE_CONTRACT_V2_EVENT_RESOURCE_SCHEMA: &str =
+    "ojos.service-contract-v2.event-consumer.v1";
+
+/// Structured metadata carried through the legacy `usage` column while the
+/// v0.2 Redis registry is still serving the v1 install pipeline. This keeps
+/// the shared event stream and the exact consumer-group identity explicit;
+/// the runtime provisioner never has to infer either value from a service
+/// name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyEventRedisUsage {
+    pub schema: String,
+    pub stream: String,
+    pub consumer_group: String,
+    pub events: Vec<String>,
+}
+
+pub(crate) fn parse_legacy_event_redis_usage(value: &str) -> Option<LegacyEventRedisUsage> {
+    let usage = serde_json::from_str::<LegacyEventRedisUsage>(value).ok()?;
+    (usage.schema == SERVICE_CONTRACT_V2_EVENT_RESOURCE_SCHEMA
+        && usage.stream == SERVICE_CONTRACT_V2_EVENT_STREAM
+        && !usage.consumer_group.trim().is_empty())
+    .then_some(usage)
+}
+
+/// Convert the formal v2 contract into the normalized v1-shaped payload used
+/// by the legacy store. API declarations have already been projected by
+/// `ServiceReleaseContract`; event subscriptions additionally become typed
+/// consumer-group resources on the single shared event stream. Existing v1
+/// `redis` declarations are retained byte-for-byte.
+pub(crate) fn legacy_release_manifest_from_contract(
+    contract: ServiceReleaseContract,
+) -> Result<ServiceReleaseManifest> {
+    let mut release = contract.release;
+    if contract.contract_version >= 2 {
+        project_event_subscriptions(&mut release, &contract.events)?;
+    }
+    validate_service_release(&release)?;
+    Ok(release)
+}
+
+/// Read either a legacy release manifest or a full Service Contract v2 from a
+/// durable `ServiceRelease.manifest` value and return the v1-shaped projection
+/// consumed by the legacy planner/runtime pipeline.  Durable storage keeps the
+/// full v2 document; only this compatibility boundary performs the projection.
+pub(crate) fn legacy_release_manifest_from_json_value(
+    value: Value,
+) -> Result<ServiceReleaseManifest> {
+    legacy_release_manifest_from_contract(ServiceReleaseContract::from_json_value(value)?)
+}
+
+fn project_event_subscriptions(
+    release: &mut ServiceReleaseManifest,
+    events: &ReleaseEventsContract,
+) -> Result<()> {
+    let mut events_by_group = BTreeMap::<String, BTreeSet<String>>::new();
+    for subscription in &events.subscribes {
+        let group = subscription.consumer_group().trim();
+        if group.is_empty() {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "Service Contract v2 event subscriber {} requires consumer_group",
+                subscription.event_id()
+            )));
+        }
+        events_by_group
+            .entry(group.to_string())
+            .or_default()
+            .insert(subscription.event_id().to_string());
+    }
+
+    for (consumer_group, event_ids) in events_by_group {
+        let digest = Sha256::digest(consumer_group.as_bytes());
+        let name = format!("events:{}", hex_lower(&digest));
+        let usage = LegacyEventRedisUsage {
+            schema: SERVICE_CONTRACT_V2_EVENT_RESOURCE_SCHEMA.to_string(),
+            stream: SERVICE_CONTRACT_V2_EVENT_STREAM.to_string(),
+            consumer_group,
+            events: event_ids.into_iter().collect(),
+        };
+        let projected = ReleaseRedisDecl {
+            name: name.clone(),
+            kind: "consumer-group".to_string(),
+            usage: serde_json::to_string(&usage)?,
+        };
+        if let Some(existing) = release.redis.iter().find(|item| item.name == name) {
+            if existing != &projected {
+                return Err(OrchestratorError::InvalidManifest(format!(
+                    "Service Contract v2 event consumer resource {name} conflicts with legacy redis declaration"
+                )));
+            }
+            continue;
+        }
+        release.redis.push(projected);
+    }
+    Ok(())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 pub fn validate_service_manifest_file(
     repo_root: &Path,
@@ -24,8 +129,9 @@ pub fn validate_service_release_file(
 ) -> Result<ServiceReleaseManifest> {
     validate_release_path(repo_root, release_path)?;
     let text = read_text(repo_root.join(release_path), "release manifest")?;
-    let release: ServiceReleaseManifest = serde_yaml::from_str(&text)?;
-    validate_service_release(&release)?;
+    let contract = ServiceReleaseContract::from_yaml_str(&text)?;
+    let contract_version = contract.contract_version;
+    let release = legacy_release_manifest_from_contract(contract)?;
     let service_path = release_path
         .parent()
         .unwrap_or_else(|| Path::new("services"))
@@ -84,28 +190,36 @@ pub fn validate_service_release_file(
                 "release storage must cover service.yaml storage_buckets",
             )?;
         }
-        for dependency in &service.requires.services {
-            ensure(
-                release.dependencies.iter().any(|item| item == dependency),
-                "release dependencies must cover service.yaml requires.services",
-            )?;
-        }
-        for queue in &service.requires.queue {
-            ensure(
-                release.redis.iter().any(|item| item.name == *queue),
-                "release redis must cover service.yaml requires.queue",
-            )?;
-        }
-        for secret in service
-            .requires
-            .secrets
-            .iter()
-            .chain(service.security.required_secrets.iter())
-        {
-            ensure(
-                release.secrets.iter().any(|item| item == secret),
-                "release secrets must cover service.yaml secrets",
-            )?;
+        // service.yaml remains the development/0.2 descriptor.  A v2 Release
+        // replaces its service-name, queue and shared-secret dependencies
+        // with named API/event bindings and a fixed runtime contract.  Making
+        // the v2 production contract repeat the legacy declarations would
+        // reintroduce the global worker token and implicit judge-api coupling
+        // that Service Contract v2 deliberately removed.
+        if contract_version < 2 {
+            for dependency in &service.requires.services {
+                ensure(
+                    release.dependencies.iter().any(|item| item == dependency),
+                    "release dependencies must cover service.yaml requires.services",
+                )?;
+            }
+            for queue in &service.requires.queue {
+                ensure(
+                    release.redis.iter().any(|item| item.name == *queue),
+                    "release redis must cover service.yaml requires.queue",
+                )?;
+            }
+            for secret in service
+                .requires
+                .secrets
+                .iter()
+                .chain(service.security.required_secrets.iter())
+            {
+                ensure(
+                    release.secrets.iter().any(|item| item == secret),
+                    "release secrets must cover service.yaml secrets",
+                )?;
+            }
         }
         for route in service
             .endpoint

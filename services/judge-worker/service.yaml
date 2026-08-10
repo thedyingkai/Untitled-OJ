@@ -1,9 +1,12 @@
 schema_version: 1
 id: judge-worker
-name: Judge Worker
+name: Judge Worker (legacy development descriptor)
 version: 0.1.0
 kind: backend-worker
-description: 独立评测 Worker，通过 Endpoint 接入 judge-api，并在本机内部管理并发任务与 sandbox slots。
+description: >-
+  Development-only compatibility descriptor for the manual Compose entry.
+  Production installation must use release.yaml (Service Contract v2),
+  named ApiBindings, Deployment JWTs, and the fixed judge-sandbox-v1 profile.
 runtime:
   mode: container
   driver: compose
@@ -14,22 +17,18 @@ runtime:
 endpoint:
   protocol: http
   default_port: 9101
-  health_path: /health
+  health_path: /healthz/ready
   expose: false
   routes: []
 requires:
   services:
     - judge-api
-    - redis
   links:
     - id: judge-api
       protocol: http
-    - id: redis
-      protocol: redis
   storage: []
   database: []
-  queue:
-    - redis
+  queue: []
   secrets:
     - worker-token
 provides:
@@ -38,10 +37,8 @@ provides:
   routes: []
   workers:
     - judge-worker
-  storage_buckets:
-    - judge-artifacts
-  events:
-    - judge.result.uploaded
+  storage_buckets: []
+  events: []
 config_schema:
   max_parallel_jobs:
     type: integer
@@ -63,6 +60,8 @@ resources:
   gpu: optional
   network: internal
 security:
+  # The legacy descriptor cannot request privileged Docker settings. This is
+  # intentional: Store production installs must use the closed runtime profile.
   allow_privileged: false
   allow_host_mount: false
   allow_arbitrary_command: false

@@ -2309,7 +2309,6 @@ mod tests {
             }
         });
         let endpoint = format!("127.0.0.1:{port}:storage-service");
-        let expected_upstream = format!("http://127.0.0.1:{port}");
         let install = post_json(
             &mut console,
             "/releases/storage-service/install",
@@ -2324,15 +2323,15 @@ mod tests {
             }}"#
             ),
         );
-        health_server
-            .join()
-            .expect("external storage health server");
         assert_eq!(install.status, 200);
         assert_eq!(
             install.body["action_result"]["status"], "SUCCEEDED",
             "install response: {}",
             install.body
         );
+        health_server
+            .join()
+            .expect("external storage health server");
 
         let routes = get(
             &mut console,
@@ -2340,17 +2339,11 @@ mod tests {
         );
         assert_eq!(routes.status, 200);
         assert!(
-            routes.body["routes"]
-                .as_array()
-                .expect("routes")
-                .iter()
-                .any(|route| {
-                    route["api_id"] == "storage.object.get"
-                        && route["provider_node_id"] == "root-node"
-                        && route["provider_endpoint"] == endpoint
-                        && route["upstream_base"] == expected_upstream
-                })
+            routes.body["routes"].as_array().expect("routes").is_empty(),
+            "Service Contract v2 explicit APIs require an applied ApiBinding and must not inherit an ancestor route: {}",
+            routes.body,
         );
+        assert_eq!(routes.body["can_proxy"], false);
     }
 
     #[test]

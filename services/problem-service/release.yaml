@@ -1,7 +1,7 @@
-schema_version: 1
+schema_version: 2
 service_name: problem-service
 version: 0.1.0
-description: Release contract for problem-service.
+description: Problem authoring and immutable package publisher using Service Contract v2.
 service_type: backend-api
 source:
   kind: local
@@ -12,10 +12,20 @@ runtime:
   image: ""
   binary: ""
   system_service: ""
+  env:
+    OJOS_ENVIRONMENT: production
+    DATABASE_URL: "${secret.database-url}"
+    OJOS_SERVICE_CONTEXT_FILE: /run/ojos/service/context.json
+    OJOS_EVENT_CONTEXT_FILE: /run/ojos/service/events.json
+    OJOS_PROBLEM_ARTIFACT_GC_ENABLED: "true"
+    OJOS_PROBLEM_ARTIFACT_GC_DELETE: "true"
+    OJOS_PROBLEM_ARTIFACT_GC_RETENTION: 168h
+    OJOS_PROBLEM_ARTIFACT_GC_INTERVAL: 24h
+    OJOS_PROBLEM_ARTIFACT_GC_CLAIM_LEASE: 10m
 frontend:
   enabled: true
-  route_prefix: "/problems"
-  remote_entry: "/assets/problem-service/remoteEntry.js"
+  route_prefix: /problems
+  remote_entry: /assets/problem-service/remoteEntry.js
   menu_items: []
 backend:
   protocol: http
@@ -28,6 +38,24 @@ migrations:
   - version: "000002_problem_content_limits"
     path: services/problem-service/migrations/000002_problem_content_limits.up.sql
     checksum: sha256:bc8859278465da7294ee84727a1af09daea01b22e1fc1a30ecafceb56d5c2813
+  - version: "000003_problem_projection_events"
+    path: services/problem-service/migrations/000003_problem_projection_events.up.sql
+    checksum: sha256:10acf191df0c20b0aa1c06be1e54b7cf14b9596fc162d7bc59a4e35de7c4a91c
+  - version: "000004_problem_artifact_upload_intents"
+    path: services/problem-service/migrations/000004_problem_artifact_upload_intents.up.sql
+    checksum: sha256:cc8ffd0734421612af304a85743e7607ff172b35c5b6ebd385748abb729895b6
+  - version: "000005_problem_content_upload_intents"
+    path: services/problem-service/migrations/000005_problem_content_upload_intents.up.sql
+    checksum: sha256:573873b11da55a781997c18c3b59c13d77c863b77306c283d9ea8ece68211bfe
+  - version: "000006_problem_files_storage_path_index"
+    path: services/problem-service/migrations/000006_problem_files_storage_path_index.up.sql
+    checksum: sha256:1ce67c6828f6d034326186cb21250fbf2442abc98b5ec170067c529bc037b686
+  - version: "000007_problem_artifact_gc_needs_attention"
+    path: services/problem-service/migrations/000007_problem_artifact_gc_needs_attention.up.sql
+    checksum: sha256:4ac4e1e7c3d4c860f48daff94967bff3b71990ba1580987bfd7e220169c0ebf6
+  - version: "000008_problem_artifact_gc_operator_api"
+    path: services/problem-service/migrations/000008_problem_artifact_gc_operator_api.up.sql
+    checksum: sha256:5ddb58ad6493d0dfda6b72db62955bce05898d29f1ff9901b203a7ea387c631c
 permissions:
   - problem.view
   - problem.view.private
@@ -38,68 +66,114 @@ permissions:
   - problem.testdata.read
   - problem.testdata.write
 routes:
+  - path: /api/problem/admin/artifact-gc/**
+    method: ANY
+    target_type: endpoint-group
+    target: problem-service[*]
+    permission: problem.manage.data
   - path: /api/problem/**
     method: ANY
     target_type: endpoint-group
     target: problem-service[*]
     permission: problem.view
-required_apis:
-  - storage.object.put
-service_identity:
-  service_name: problem-service
-  allowed_apis:
-    - storage.object.put
-apis:
-  - api_id: problem.problem.read
-    protocol: http
-    port_name: http
-    path_prefix: /api/problem/problems
-    methods: [GET]
-    visibility: descendants
-    auth_mode: user
-    permission: problem.view
-    version: v1
-    stability: stable
-  - api_id: problem.problem.manage
-    protocol: http
-    port_name: http
-    path_prefix: /api/problem/problems
-    methods: [POST, PUT, PATCH, DELETE]
-    visibility: descendants
-    auth_mode: user
-    permission: problem.edit
-    version: v1
-    stability: stable
-  - api_id: problem.testdata.read
-    protocol: http
-    port_name: http
-    path_prefix: /api/problem/testdata
-    methods: [GET]
-    visibility: descendants
-    auth_mode: service
-    permission: problem.testdata.read
-    version: v1
-    stability: stable
-  - api_id: problem.testdata.write
-    protocol: http
-    port_name: http
-    path_prefix: /api/problem/testdata
-    methods: [POST, PUT, DELETE]
-    visibility: descendants
-    auth_mode: service
-    permission: problem.testdata.write
-    version: v1
-    stability: stable
+provides:
+  apis:
+    - id: problem.problem.read
+      version: 1.0.0
+      protocol: http
+      path: /api/problem/problems
+      methods: [GET]
+      visibility: descendants
+      auth: user
+      permission: problem.view
+      stability: stable
+    - id: problem.problem.manage
+      version: 1.0.0
+      protocol: http
+      path: /api/problem/problems
+      methods: [POST, PUT, DELETE]
+      visibility: descendants
+      auth: user
+      permission: problem.edit
+      stability: stable
+    - id: problem.testdata.read
+      version: 1.0.0
+      protocol: http
+      path: /api/problem/problems
+      methods: [GET]
+      visibility: explicit
+      auth: user
+      permission: problem.testdata.read
+      stability: stable
+    - id: problem.testdata.write
+      version: 1.0.0
+      protocol: http
+      path: /api/problem/problems
+      methods: [POST, PUT, DELETE]
+      visibility: explicit
+      auth: user
+      permission: problem.testdata.write
+      stability: stable
+    - id: problem.artifact-gc.manage
+      version: 1.0.0
+      protocol: http
+      path: /api/problem/admin/artifact-gc
+      methods: [GET, POST]
+      visibility: explicit
+      auth: user
+      permission: problem.manage.data
+      stability: stable
+requires:
+  apis:
+    - name: permission_check
+      id: auth.user.permission.check
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 5000
+    - name: storage_put
+      id: storage.object.put
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 300000
+    - name: storage_head
+      id: storage.object.head
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 300000
+    - name: storage_delete
+      id: storage.object.delete
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 60000
+events:
+  publishes:
+    - id: io.ojos.problem.snapshot.v1
+      version: 1.0.0
+      schema_ref: platform/schemas/events/problem-snapshot-v1.schema.json
+    - id: io.ojos.problem.deleted.v1
+      version: 1.0.0
+      schema_ref: platform/schemas/events/problem-deleted-v1.schema.json
+  subscribes: []
+runtime_contract:
+  id: standard-container-v1
+  sha256: sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f
+  binding_directory: /run/ojos/service
+  identity_mode: workload
+  credential_delivery: file
+  restart_on_change: false
 redis: []
 storage:
   - object_type: problem-package
     bucket: problems
 dependencies:
   - postgresql
-  - storage-service
 config_schema: {}
-secrets: []
+secrets:
+  - database-url
 observability:
   metrics: true
   jaeger: true
-

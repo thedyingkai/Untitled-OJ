@@ -1,0 +1,50 @@
+openapi: 3.1.0
+info:
+  title: OJOS User Service Published API
+  version: 0.1.0
+x-ojos-service:
+  id: user-service
+  version: 0.1.0
+paths:
+  /api/users/me:
+    get:
+      operationId: getMyUserProfile
+      x-ojos-api: &profile-read
+        id: user.profile.read
+        version: 1.0.0
+        auth: user
+        permission: user.profile.read.self
+      responses:
+        "200": {description: Current profile}
+  /api/users/{user_id}/profile:
+    get:
+      operationId: getUserProfile
+      x-ojos-api: *profile-read
+      responses:
+        "200": {description: User profile}
+    patch:
+      operationId: updateUserProfile
+      x-ojos-api: &profile-update
+        id: user.profile.update
+        version: 1.0.0
+        auth: user
+        permission: user.profile.update.self
+      responses:
+        "200": {description: User profile updated}
+  /api/users/{user_id}/stats:
+    get:
+      operationId: getUserStats
+      x-ojos-api: *profile-read
+      responses:
+        "200": {description: User statistics}
+  /api/users/{user_id}/preferences:
+    get:
+      operationId: getUserPreferences
+      x-ojos-api: *profile-read
+      responses:
+        "200": {description: User preferences}
+    patch:
+      operationId: updateUserPreferences
+      x-ojos-api: *profile-update
+      responses:
+        "200": {description: User preferences updated}

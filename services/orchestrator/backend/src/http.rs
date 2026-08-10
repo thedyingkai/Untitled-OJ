@@ -363,9 +363,24 @@ fn content_length_from_headers(headers: &BTreeMap<String, String>) -> Result<usi
         .map(|value| value.unwrap_or(0))
 }
 
-pub(crate) fn write_http_response(
+pub(crate) fn write_http_response(stream: &mut impl Write, response: ApiResponse) -> Result<()> {
+    write_http_response_with_legacy_status(stream, response, true)
+}
+
+/// Writes the frozen Agent protocol v1 body without public/legacy API
+/// decoration. Agent response schemas are closed (`additionalProperties:
+/// false`), so adding `status: "ok"` here would be a wire-contract break.
+pub(crate) fn write_agent_protocol_response(
+    stream: &mut impl Write,
+    response: ApiResponse,
+) -> Result<()> {
+    write_http_response_with_legacy_status(stream, response, false)
+}
+
+fn write_http_response_with_legacy_status(
     stream: &mut impl Write,
     mut response: ApiResponse,
+    add_legacy_status: bool,
 ) -> Result<()> {
     if matches!(response.status, 429 | 503) && !response.headers.contains_key("Retry-After") {
         response
@@ -373,7 +388,9 @@ pub(crate) fn write_http_response(
             .insert("Retry-After".to_string(), "1".to_string());
     }
     crate::observability::record_response(&response);
-    let body = if !response.content_type.starts_with("application/json")
+    let body = if response.status == 204 {
+        String::new()
+    } else if !response.content_type.starts_with("application/json")
         && !response
             .content_type
             .starts_with("application/problem+json")
@@ -384,7 +401,7 @@ pub(crate) fn write_http_response(
             .ok_or_else(|| anyhow!("non-JSON response body must be a string"))?
             .to_string()
     } else {
-        response_json(response.body)?
+        response_json(response.body, add_legacy_status)?
     };
     let status_text = status_reason_phrase(response.status);
     let extra_headers = response
@@ -431,8 +448,8 @@ fn status_reason_phrase(status: u16) -> &'static str {
     }
 }
 
-fn response_json(mut body: Value) -> Result<String> {
-    if let Some(object) = body.as_object_mut() {
+fn response_json(mut body: Value, add_legacy_status: bool) -> Result<String> {
+    if add_legacy_status && let Some(object) = body.as_object_mut() {
         ensure_status_field(object);
     }
     Ok(serde_json::to_string_pretty(&body)?)
@@ -713,6 +730,54 @@ mod tests {
         assert!(response.contains("Content-Type: text/event-stream"));
         assert!(response.ends_with("id: 1\nevent: job\ndata: {}\n\n"));
         assert!(!response.ends_with("\"id: 1\\nevent: job\\ndata: {}\\n\\n\""));
+    }
+
+    #[test]
+    fn agent_protocol_writer_preserves_the_closed_success_schema() {
+        let credential = json!({
+            "access_token": "redacted",
+            "token_type": "Bearer",
+            "expires_at_ms": 123,
+            "expires_in": 900,
+        });
+        let mut agent_wire = Vec::new();
+        write_agent_protocol_response(&mut agent_wire, ApiResponse::ok(credential.clone()))
+            .unwrap();
+        let agent_wire = String::from_utf8(agent_wire).unwrap();
+        let body = agent_wire.split_once("\r\n\r\n").unwrap().1;
+        let value: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(value, credential);
+        assert!(value.get("status").is_none());
+
+        let mut public_wire = Vec::new();
+        write_http_response(&mut public_wire, ApiResponse::ok(credential)).unwrap();
+        let public_wire = String::from_utf8(public_wire).unwrap();
+        let body = public_wire.split_once("\r\n\r\n").unwrap().1;
+        let value: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(value["status"], "ok");
+
+        let mut problem_wire = Vec::new();
+        write_agent_protocol_response(
+            &mut problem_wire,
+            ApiResponse::problem(409, "LEASE_STALE", "stale lease", "req-1", None),
+        )
+        .unwrap();
+        let problem_wire = String::from_utf8(problem_wire).unwrap();
+        let body = problem_wire.split_once("\r\n\r\n").unwrap().1;
+        assert_eq!(serde_json::from_str::<Value>(body).unwrap()["status"], 409);
+
+        let mut no_content_wire = Vec::new();
+        write_agent_protocol_response(&mut no_content_wire, ApiResponse::no_content(Value::Null))
+            .unwrap();
+        let no_content_wire = String::from_utf8(no_content_wire).unwrap();
+        assert!(no_content_wire.contains("Content-Length: 0\r\n"));
+        assert!(no_content_wire.ends_with("\r\n\r\n"));
+
+        let active = response_json(json!({"status": "ACTIVE"}), true).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&active).unwrap()["status"],
+            "ACTIVE"
+        );
     }
 
     #[test]

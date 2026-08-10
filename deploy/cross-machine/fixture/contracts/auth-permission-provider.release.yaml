@@ -1,0 +1,58 @@
+schema_version: 2
+service_name: auth-service
+version: 0.1.0
+description: Cross-machine registration contract for the actual A-side workload permission API.
+service_type: backend-api
+source:
+  kind: local
+  url: local://deploy/cross-machine/auth-permission-provider
+  checksum: ""
+runtime:
+  kind: image
+  image: ""
+  binary: ""
+  system_service: ""
+frontend:
+  enabled: false
+  route_prefix: ""
+  remote_entry: ""
+  menu_items: []
+backend:
+  protocol: http
+  port: 8081
+  health_path: /health
+migrations: []
+permissions: [auth.permission.check]
+routes: []
+provides:
+  apis:
+    - id: auth.user.permission.check
+      version: 1.0.0
+      protocol: http
+      path: /auth/admin/permission-check
+      methods: [POST]
+      visibility: explicit
+      auth: workload
+      permission: auth.permission.check
+      stability: stable
+      timeout_ms: 5000
+requires:
+  apis: []
+events:
+  publishes: []
+  subscribes: []
+runtime_contract:
+  id: standard-container-v1
+  sha256: sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f
+  binding_directory: /run/ojos/service
+  identity_mode: workload
+  credential_delivery: file
+  restart_on_change: false
+redis: []
+storage: []
+dependencies: []
+config_schema: {}
+secrets: []
+observability:
+  metrics: true
+  jaeger: true

@@ -1,13 +1,15 @@
 use crate::{
     AgentLedger, ArtifactFetcher, HttpReleasePipelineProvider, LeasedJob, LedgerError,
-    MigrationDecision, PipelineProviderError, ReleasePipelineProvider,
+    MigrationDecision, PipelineProviderError, ReleasePipelineProvider, RuntimeContextProvider,
+    RuntimePolicyError, WorkloadCredentialSupervisor,
 };
 use orchestrator_control_plane::{CompletionStatus, JobKind, NewJobEvent};
 use orchestrator_runtime::{
-    ContainerRuntime, ContainerSpec, HealthGateDecision, HealthGatePolicy, OciMigrationStep,
-    ReleasePipelinePayload, ReleaseProviderRevision, ReleaseReplacementPayload,
-    ReplacementProviderSaga, RuntimeError, RuntimeInstallPayload, RuntimeInstance,
-    RuntimeObservedState, RuntimeReplacement, TypedProvisionerStep, evaluate_health_gate,
+    BindingContextApplyPayload, ContainerRuntime, ContainerSpec, HealthGateDecision,
+    HealthGatePolicy, OciMigrationStep, ReleasePipelinePayload, ReleaseProviderRevision,
+    ReleaseReplacementPayload, ReplacementProviderSaga, RuntimeContext, RuntimeError,
+    RuntimeInstallPayload, RuntimeInstance, RuntimeObservedState, RuntimeProfile,
+    RuntimeReplacement, TypedProvisionerStep, WorkloadCredential, evaluate_health_gate,
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -60,6 +62,16 @@ pub struct JobExecutor<R> {
     runtime: Arc<R>,
     pipeline_provider: Arc<dyn ReleasePipelineProvider>,
     artifact_fetcher: Option<Arc<dyn ArtifactFetcher>>,
+    runtime_context_provider: Option<Arc<dyn RuntimeContextProvider>>,
+    workload_credentials: Option<Arc<WorkloadCredentialSupervisor>>,
+}
+
+#[derive(Clone)]
+struct MaterializedRuntimeContext {
+    deployment_id: String,
+    context: RuntimeContext,
+    credential_expires_at_ms: i64,
+    credential_active: bool,
 }
 
 impl<R> Clone for JobExecutor<R> {
@@ -68,6 +80,8 @@ impl<R> Clone for JobExecutor<R> {
             runtime: Arc::clone(&self.runtime),
             pipeline_provider: Arc::clone(&self.pipeline_provider),
             artifact_fetcher: self.artifact_fetcher.clone(),
+            runtime_context_provider: self.runtime_context_provider.clone(),
+            workload_credentials: self.workload_credentials.clone(),
         }
     }
 }
@@ -81,6 +95,8 @@ where
             runtime: Arc::new(runtime),
             pipeline_provider: Arc::new(HttpReleasePipelineProvider::from_env()),
             artifact_fetcher: None,
+            runtime_context_provider: None,
+            workload_credentials: None,
         }
     }
 
@@ -89,6 +105,8 @@ where
             runtime,
             pipeline_provider: Arc::new(HttpReleasePipelineProvider::from_env()),
             artifact_fetcher: None,
+            runtime_context_provider: None,
+            workload_credentials: None,
         }
     }
 
@@ -99,6 +117,16 @@ where
 
     pub fn with_artifact_fetcher(mut self, fetcher: Arc<dyn ArtifactFetcher>) -> Self {
         self.artifact_fetcher = Some(fetcher);
+        self
+    }
+
+    pub fn with_runtime_context(
+        mut self,
+        provider: Arc<dyn RuntimeContextProvider>,
+        credentials: Arc<WorkloadCredentialSupervisor>,
+    ) -> Self {
+        self.runtime_context_provider = Some(provider);
+        self.workload_credentials = Some(credentials);
         self
     }
 
@@ -134,6 +162,7 @@ where
                     .await
             }
             JobKind::Health => self.health(job, ledger).await,
+            JobKind::BindingContextApply => self.binding_context_apply(job, ledger).await,
             JobKind::Inventory => Ok(ExecutionOutcome::failed(
                 "inventory jobs are not part of the v1 mutation executor",
             )),
@@ -146,28 +175,680 @@ where
         }
     }
 
+    async fn binding_context_apply(
+        &self,
+        job: &LeasedJob,
+        ledger: &mut AgentLedger,
+    ) -> Result<ExecutionOutcome, LedgerError> {
+        const APPLY_STEP: u32 = 900_000;
+        let payload: BindingContextApplyPayload = match decode_payload(job) {
+            Ok(payload) => payload,
+            Err(outcome) => return Ok(outcome),
+        };
+        if let Err(error) = payload.validate() {
+            return Ok(runtime_error_outcome(&error, false));
+        }
+        let Some(current) = ledger.runtime_context_for_deployment(&payload.deployment_id)? else {
+            return Ok(ExecutionOutcome::failed(format!(
+                "deployment {} has no Agent-managed runtime context",
+                payload.deployment_id
+            )));
+        };
+        if current.state != "ACTIVE" {
+            return Ok(ExecutionOutcome::failed(format!(
+                "deployment {} runtime context is {}, not ACTIVE",
+                payload.deployment_id, current.state
+            )));
+        }
+        let current_cas = if current.binding_context_state == "REVOKED" {
+            current.previous_managed_context.as_ref()
+        } else {
+            current.managed_context.as_ref()
+        };
+        if current_cas != payload.previous_context.as_ref() {
+            return Ok(ExecutionOutcome::failed(format!(
+                "deployment {} binding context CAS is stale; Agent generation is {:?}, payload previous generation is {:?}",
+                payload.deployment_id,
+                current
+                    .managed_context
+                    .as_ref()
+                    .map(|context| context.generation),
+                payload
+                    .previous_context
+                    .as_ref()
+                    .map(|context| context.generation),
+            )));
+        }
+        if payload.context.is_none() {
+            let Some(provider) = self.runtime_context_provider.as_ref() else {
+                return Ok(ExecutionOutcome::failed(
+                    "Node has no Agent-local managed service context provider",
+                ));
+            };
+            if let Some(credentials) = self.workload_credentials.as_ref() {
+                credentials.stop_refresh(&payload.deployment_id).await;
+            }
+            return match provider.revoke_workload_credential(&current.context).await {
+                Ok(()) => {
+                    ledger.record_binding_context_transition(
+                        &payload.deployment_id,
+                        &job.job_id,
+                        payload.previous_context.as_ref(),
+                        None,
+                        true,
+                        crate::now_ms(),
+                    )?;
+                    Ok(ExecutionOutcome::success(json!({
+                        "deployment_id": payload.deployment_id,
+                        "context_generation": 0,
+                        "previous_generation": payload.previous_context.as_ref().map(|context| context.generation),
+                        "revoked": true,
+                        "container_id": current.container_id,
+                        "runtime_context_directory_preserved": true,
+                    })))
+                }
+                Err(error) => Ok(runtime_policy_outcome(&error)),
+            };
+        }
+        let desired = payload.context.as_ref().expect("context was checked");
+        let Some(provider) = self.runtime_context_provider.as_ref() else {
+            return Ok(ExecutionOutcome::failed(
+                "Node has no Agent-local managed service context provider",
+            ));
+        };
+        let Some(credentials) = self.workload_credentials.as_ref() else {
+            return Ok(ExecutionOutcome::failed(
+                "Node has no workload credential exchanger for context reconfiguration",
+            ));
+        };
+        ledger.step_started(
+            &job.job_id,
+            APPLY_STEP,
+            "apply_binding_service_context",
+            crate::now_ms(),
+        )?;
+        let previous_refresh = credentials.status_for(&payload.deployment_id).await;
+        // Quiesce the old generation before the new context/token commit. A
+        // refresh already in flight must not atomically replace the freshly
+        // materialized token after the topology generation changes.
+        credentials.stop_refresh(&payload.deployment_id).await;
+        let result = async {
+            let credential = credentials
+                .issue_initial(&payload.deployment_id, &job.job_id, &job.lease_token)
+                .await?;
+            provider
+                .reconfigure_context(
+                    &payload.deployment_id,
+                    &payload.service_id,
+                    desired,
+                    &current.context,
+                    &credential,
+                )
+                .await?;
+            ledger
+                .record_binding_context_transition(
+                    &payload.deployment_id,
+                    &job.job_id,
+                    payload.previous_context.as_ref(),
+                    Some(desired),
+                    false,
+                    crate::now_ms(),
+                )
+                .map_err(|error| {
+                    RuntimePolicyError::Compensation(format!(
+                        "persist binding context generation after atomic file commit: {error}"
+                    ))
+                })?;
+            credentials
+                .start_refresh(
+                    &payload.deployment_id,
+                    current.context.clone(),
+                    credential.expires_at_ms,
+                )
+                .await?;
+            Ok::<_, RuntimePolicyError>(credential)
+        }
+        .await;
+        match result {
+            Ok(credential) => {
+                ledger.step_succeeded(
+                    &job.job_id,
+                    APPLY_STEP,
+                    &json!({
+                        "deployment_id": payload.deployment_id,
+                        "previous_generation": payload.previous_context.as_ref().map(|context| context.generation),
+                        "context_generation": desired.generation,
+                        "credential_expires_at_ms": credential.expires_at_ms,
+                        "prior_and_new_recorded_in_job_ledger": true,
+                    }),
+                    crate::now_ms(),
+                )?;
+                Ok(ExecutionOutcome::success(json!({
+                    "deployment_id": payload.deployment_id,
+                    "context_generation": desired.generation,
+                    "credential_expires_at_ms": credential.expires_at_ms,
+                })))
+            }
+            Err(mut error) => {
+                if !matches!(&error, RuntimePolicyError::Compensation(_))
+                    && let Some(previous) = previous_refresh
+                    && let Err(resume) = credentials
+                        .start_refresh(
+                            &payload.deployment_id,
+                            current.context.clone(),
+                            previous.expires_at_ms,
+                        )
+                        .await
+                {
+                    error = RuntimePolicyError::Compensation(format!(
+                        "{error}; additionally failed to resume the previous workload credential refresh: {resume}"
+                    ));
+                }
+                ledger.step_failed(&job.job_id, APPLY_STEP, &error.to_string(), crate::now_ms())?;
+                Ok(runtime_policy_outcome(&error))
+            }
+        }
+    }
+
+    async fn prepare_runtime_context(
+        &self,
+        job: &LeasedJob,
+        ledger: &mut AgentLedger,
+        spec: &ContainerSpec,
+    ) -> Result<Option<MaterializedRuntimeContext>, ContextPreparationError> {
+        const MATERIALIZE_STEP: u32 = 800_000;
+        spec.runtime_contract.validate().map_err(|error| {
+            ContextPreparationError::Outcome(runtime_error_outcome(&error, false))
+        })?;
+        if spec.managed_service_context.is_none() {
+            if spec.runtime_contract.id == RuntimeProfile::JudgeSandboxV1 {
+                return Err(ContextPreparationError::Outcome(ExecutionOutcome::failed(
+                    "judge-sandbox-v1 requires managed_service_context",
+                )));
+            }
+            // Legacy standard-container-v1 releases do not have a Service
+            // Contract v2 identity/binding context and remain runnable.
+            return Ok(None);
+        }
+        let provider = self.runtime_context_provider.as_ref().ok_or_else(|| {
+            ContextPreparationError::Outcome(ExecutionOutcome::failed(
+                "Node has no Agent-local managed service context provider",
+            ))
+        })?;
+        let has_active_bindings = spec
+            .managed_service_context
+            .as_ref()
+            .is_some_and(|managed| !managed.bindings.is_empty());
+        let credentials = if has_active_bindings {
+            Some(self.workload_credentials.as_ref().ok_or_else(|| {
+                ContextPreparationError::Outcome(ExecutionOutcome::failed(
+                    "Node has no workload credential exchanger for this bound managed deployment",
+                ))
+            })?)
+        } else {
+            None
+        };
+        let context = provider
+            .plan_context(spec)
+            .map_err(|error| ContextPreparationError::Outcome(runtime_policy_outcome(&error)))?
+            .ok_or_else(|| {
+                ContextPreparationError::Outcome(ExecutionOutcome::failed(
+                    "managed service context provider returned no materialized context plan",
+                ))
+            })?;
+        ledger.begin_runtime_context(
+            &job.job_id,
+            &spec.deployment_id,
+            &context,
+            crate::now_ms(),
+        )?;
+        let mut effective_spec = spec.clone();
+        effective_spec.runtime_context = Some(context.clone());
+        self.prepare_managed_volume(job, ledger, &effective_spec, &context)
+            .await?;
+        ledger.step_started(
+            &job.job_id,
+            MATERIALIZE_STEP,
+            "materialize_managed_service_context",
+            crate::now_ms(),
+        )?;
+
+        let result = async {
+            if let Some(credentials) = credentials {
+                let credential = credentials
+                    .issue_initial(&spec.deployment_id, &job.job_id, &job.lease_token)
+                    .await?;
+                provider
+                    .materialize_context(spec, &context, &credential)
+                    .await?;
+                Ok::<Option<WorkloadCredential>, RuntimePolicyError>(Some(credential))
+            } else {
+                provider.materialize_unbound_context(spec, &context).await?;
+                Ok(None)
+            }
+        }
+        .await;
+        match result {
+            Ok(credential) => {
+                let credential_expires_at_ms = credential
+                    .as_ref()
+                    .map(|credential| credential.expires_at_ms)
+                    .unwrap_or(0);
+                ledger.mark_runtime_context_prepared(
+                    &spec.deployment_id,
+                    &job.job_id,
+                    crate::now_ms(),
+                )?;
+                ledger.step_succeeded(
+                    &job.job_id,
+                    MATERIALIZE_STEP,
+                    &json!({
+                        "deployment_id": spec.deployment_id,
+                        "runtime_contract": context.contract,
+                        "runtime_policy_sha256": context.runtime_policy_sha256,
+                        "credential_expires_at_ms": credential_expires_at_ms,
+                        "credential_active": credential.is_some(),
+                        "credential_persisted_in_ledger": false,
+                    }),
+                    crate::now_ms(),
+                )?;
+                Ok(Some(MaterializedRuntimeContext {
+                    deployment_id: spec.deployment_id.clone(),
+                    context,
+                    credential_expires_at_ms,
+                    credential_active: credential.is_some(),
+                }))
+            }
+            Err(error) => {
+                ledger.step_failed(
+                    &job.job_id,
+                    MATERIALIZE_STEP,
+                    &error.to_string(),
+                    crate::now_ms(),
+                )?;
+                ledger.mark_runtime_context_cleanup_needed(
+                    &spec.deployment_id,
+                    &error.to_string(),
+                    crate::now_ms(),
+                )?;
+                let mut outcome = runtime_policy_outcome(&error);
+                if let Err(compensation) = self
+                    .cleanup_runtime_context(
+                        job,
+                        ledger,
+                        MATERIALIZE_STEP + 1,
+                        &spec.deployment_id,
+                        &context,
+                    )
+                    .await
+                {
+                    match compensation {
+                        ContextCleanupError::Ledger(error) => {
+                            return Err(ContextPreparationError::Ledger(error));
+                        }
+                        ContextCleanupError::Policy(error) => {
+                            outcome.status = CompletionStatus::NeedsAttention;
+                            outcome.error_message = format!(
+                                "{}; runtime context compensation failed: {error}",
+                                outcome.error_message
+                            );
+                        }
+                    }
+                }
+                Err(ContextPreparationError::Outcome(outcome))
+            }
+        }
+    }
+
+    async fn prepare_managed_volume(
+        &self,
+        job: &LeasedJob,
+        ledger: &mut AgentLedger,
+        spec: &ContainerSpec,
+        context: &RuntimeContext,
+    ) -> Result<(), ContextPreparationError> {
+        const CREATE_VOLUME_STEP: u32 = 700_000;
+        let volume = spec.managed_volume_spec().map_err(|error| {
+            ContextPreparationError::Outcome(runtime_error_outcome(&error, false))
+        })?;
+        let Some(volume) = volume else {
+            return Ok(());
+        };
+        ledger.begin_managed_volume(&spec.deployment_id, &job.job_id, &volume, crate::now_ms())?;
+        let created = self
+            .runtime_step(
+                ledger,
+                job,
+                CREATE_VOLUME_STEP,
+                "create_managed_release_volume",
+                false,
+                self.runtime.create_managed_volume(&volume),
+            )
+            .await;
+        match created {
+            Ok(()) => {
+                ledger.mark_managed_volume_created(
+                    &spec.deployment_id,
+                    &job.job_id,
+                    crate::now_ms(),
+                )?;
+                Ok(())
+            }
+            Err(StepError::Ledger(error)) => Err(ContextPreparationError::Ledger(error)),
+            Err(StepError::Runtime(mut outcome)) => {
+                if let Err(compensation) = self
+                    .cleanup_runtime_context(
+                        job,
+                        ledger,
+                        CREATE_VOLUME_STEP + 1,
+                        &spec.deployment_id,
+                        context,
+                    )
+                    .await
+                {
+                    match compensation {
+                        ContextCleanupError::Ledger(error) => {
+                            return Err(ContextPreparationError::Ledger(error));
+                        }
+                        ContextCleanupError::Policy(error) => {
+                            outcome.status = CompletionStatus::NeedsAttention;
+                            outcome.error_message = format!(
+                                "{}; managed volume compensation failed: {error}",
+                                outcome.error_message
+                            );
+                        }
+                    }
+                }
+                Err(ContextPreparationError::Outcome(outcome))
+            }
+        }
+    }
+
+    async fn compensate_pre_container_failure(
+        &self,
+        job: &LeasedJob,
+        ledger: &mut AgentLedger,
+        mut outcome: ExecutionOutcome,
+        materialized: Option<&MaterializedRuntimeContext>,
+        step_index: u32,
+        phase: &str,
+    ) -> Result<ExecutionOutcome, LedgerError> {
+        let Some(materialized) = materialized else {
+            return Ok(outcome);
+        };
+        if let Err(error) = self
+            .cleanup_runtime_context(
+                job,
+                ledger,
+                step_index,
+                &materialized.deployment_id,
+                &materialized.context,
+            )
+            .await
+        {
+            match error {
+                ContextCleanupError::Ledger(error) => return Err(error),
+                ContextCleanupError::Policy(error) => {
+                    outcome.status = CompletionStatus::NeedsAttention;
+                    outcome.error_message = format!(
+                        "{}; {phase} failed and pre-container compensation could not remove all owned resources: {error}",
+                        outcome.error_message
+                    );
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn cleanup_runtime_context(
+        &self,
+        job: &LeasedJob,
+        ledger: &mut AgentLedger,
+        step_index: u32,
+        deployment_id: &str,
+        context: &RuntimeContext,
+    ) -> Result<(), ContextCleanupError> {
+        let provider = self.runtime_context_provider.as_ref().ok_or_else(|| {
+            ContextCleanupError::Policy(RuntimePolicyError::Compensation(
+                "runtime context provider is not configured".to_string(),
+            ))
+        })?;
+        if let Some(credentials) = self.workload_credentials.as_ref() {
+            credentials.stop_refresh(deployment_id).await;
+        }
+        ledger
+            .begin_runtime_context_cleanup(deployment_id, crate::now_ms())
+            .map_err(ContextCleanupError::Ledger)?;
+        let volume_removed = match self
+            .cleanup_managed_volume(job, ledger, step_index, deployment_id)
+            .await
+        {
+            Ok(removed) => removed,
+            Err(error) => {
+                let error_message = match &error {
+                    ContextCleanupError::Ledger(error) => error.to_string(),
+                    ContextCleanupError::Policy(error) => error.to_string(),
+                };
+                ledger
+                    .mark_runtime_context_cleanup_needed(
+                        deployment_id,
+                        &error_message,
+                        crate::now_ms(),
+                    )
+                    .map_err(ContextCleanupError::Ledger)?;
+                return Err(error);
+            }
+        };
+        let context_step = step_index.saturating_add(u32::from(volume_removed));
+        ledger
+            .step_started(
+                &job.job_id,
+                context_step,
+                "compensate_runtime_context",
+                crate::now_ms(),
+            )
+            .map_err(ContextCleanupError::Ledger)?;
+        match provider.compensate(context).await {
+            Ok(()) => {
+                ledger
+                    .finish_runtime_context_cleanup(deployment_id, crate::now_ms())
+                    .map_err(ContextCleanupError::Ledger)?;
+                ledger
+                    .step_succeeded(
+                        &job.job_id,
+                        context_step,
+                        &json!({
+                            "deployment_id": deployment_id,
+                            "credential_removed": true,
+                            "context_removed": true,
+                            "managed_volume_removed": volume_removed,
+                        }),
+                        crate::now_ms(),
+                    )
+                    .map_err(ContextCleanupError::Ledger)?;
+                Ok(())
+            }
+            Err(error) => {
+                ledger
+                    .step_failed(
+                        &job.job_id,
+                        context_step,
+                        &error.to_string(),
+                        crate::now_ms(),
+                    )
+                    .map_err(ContextCleanupError::Ledger)?;
+                ledger
+                    .mark_runtime_context_cleanup_needed(
+                        deployment_id,
+                        &error.to_string(),
+                        crate::now_ms(),
+                    )
+                    .map_err(ContextCleanupError::Ledger)?;
+                Err(ContextCleanupError::Policy(error))
+            }
+        }
+    }
+
+    async fn cleanup_managed_volume(
+        &self,
+        job: &LeasedJob,
+        ledger: &mut AgentLedger,
+        step_index: u32,
+        deployment_id: &str,
+    ) -> Result<bool, ContextCleanupError> {
+        let volume = ledger
+            .begin_managed_volume_cleanup(deployment_id, crate::now_ms())
+            .map_err(ContextCleanupError::Ledger)?;
+        let Some(volume) = volume else {
+            return Ok(false);
+        };
+        ledger
+            .step_started(
+                &job.job_id,
+                step_index,
+                "compensate_remove_managed_release_volume",
+                crate::now_ms(),
+            )
+            .map_err(ContextCleanupError::Ledger)?;
+        match self.runtime.remove_managed_volume(&volume).await {
+            Ok(()) => {
+                ledger
+                    .finish_managed_volume_cleanup(deployment_id, crate::now_ms())
+                    .map_err(ContextCleanupError::Ledger)?;
+                ledger
+                    .step_succeeded(
+                        &job.job_id,
+                        step_index,
+                        &json!({
+                            "deployment_id": deployment_id,
+                            "volume_name": volume.name,
+                            "logical_name": volume.logical_name,
+                            "lifecycle": volume.lifecycle,
+                            "ownership_verified": true,
+                        }),
+                        crate::now_ms(),
+                    )
+                    .map_err(ContextCleanupError::Ledger)?;
+                Ok(true)
+            }
+            Err(error) => {
+                ledger
+                    .step_failed(&job.job_id, step_index, &error.to_string(), crate::now_ms())
+                    .map_err(ContextCleanupError::Ledger)?;
+                ledger
+                    .mark_managed_volume_cleanup_needed(deployment_id, crate::now_ms())
+                    .map_err(ContextCleanupError::Ledger)?;
+                Err(ContextCleanupError::Policy(
+                    RuntimePolicyError::Compensation(format!(
+                        "remove owned managed volume {}: {error}",
+                        volume.name
+                    )),
+                ))
+            }
+        }
+    }
+
+    async fn activate_runtime_context(
+        &self,
+        job: &LeasedJob,
+        ledger: &mut AgentLedger,
+        spec: &ContainerSpec,
+        materialized: &MaterializedRuntimeContext,
+    ) -> Result<(), LedgerError> {
+        ledger.activate_runtime_context(&spec.deployment_id, &job.job_id, crate::now_ms())?;
+        ledger.record_binding_context_transition(
+            &spec.deployment_id,
+            &job.job_id,
+            None,
+            spec.managed_service_context.as_ref(),
+            false,
+            crate::now_ms(),
+        )?;
+        if materialized.credential_active {
+            let credentials = self.workload_credentials.as_ref().ok_or_else(|| {
+                LedgerError::InvalidState(
+                    "materialized runtime context has no credential supervisor".to_string(),
+                )
+            })?;
+            if let Err(error) = credentials
+                .start_refresh(
+                    &spec.deployment_id,
+                    materialized.context.clone(),
+                    materialized.credential_expires_at_ms,
+                )
+                .await
+            {
+                ledger.mark_runtime_context_needs_attention(
+                    &spec.deployment_id,
+                    &error.to_string(),
+                    crate::now_ms(),
+                )?;
+                return Err(LedgerError::InvalidState(format!(
+                    "start workload credential refresh for deployment {}: {error}",
+                    spec.deployment_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     async fn install(
         &self,
         job: &LeasedJob,
         ledger: &mut AgentLedger,
         cancellation: watch::Receiver<bool>,
     ) -> Result<ExecutionOutcome, LedgerError> {
-        let payload: InstallPayload = match decode_payload(job) {
+        let mut payload: InstallPayload = match decode_payload(job) {
             Ok(payload) => payload,
             Err(outcome) => return Ok(outcome),
         };
-        if let Err(error) = payload.health_gate.validate() {
+        if let Err(error) = payload
+            .spec
+            .runtime_contract
+            .validate_health_gate(&payload.health_gate)
+        {
             return Ok(runtime_error_outcome(&error, false));
+        }
+        let materialized = match self
+            .prepare_runtime_context(job, ledger, &payload.spec)
+            .await
+        {
+            Ok(context) => context,
+            Err(ContextPreparationError::Ledger(error)) => return Err(error),
+            Err(ContextPreparationError::Outcome(outcome)) => return Ok(outcome),
+        };
+        if let Some(materialized) = materialized.as_ref() {
+            payload.spec.runtime_context = Some(materialized.context.clone());
         }
         if let Some(artifact) = payload.offline_oci_artifact.as_ref() {
             let Some(fetcher) = self.artifact_fetcher.as_ref() else {
-                return Ok(ExecutionOutcome::failed(
-                    "offline OCI artifact was assigned but no authenticated artifact fetcher is configured",
-                ));
+                return self
+                    .compensate_pre_container_failure(
+                        job,
+                        ledger,
+                        ExecutionOutcome::failed(
+                            "offline OCI artifact was assigned but no authenticated artifact fetcher is configured",
+                        ),
+                        materialized.as_ref(),
+                        800_010,
+                        "offline OCI artifact selection",
+                    )
+                    .await;
             };
             let downloaded = match fetcher.download(job, artifact).await {
                 Ok(downloaded) => downloaded,
-                Err(error) => return Ok(artifact_download_outcome(error)),
+                Err(error) => {
+                    return self
+                        .compensate_pre_container_failure(
+                            job,
+                            ledger,
+                            artifact_download_outcome(error),
+                            materialized.as_ref(),
+                            800_010,
+                            "offline OCI artifact download",
+                        )
+                        .await;
+                }
             };
             if let Err(error) = self
                 .runtime_step(
@@ -181,7 +862,20 @@ where
                 )
                 .await
             {
-                return step_result(error);
+                let outcome = match error {
+                    StepError::Ledger(error) => return Err(error),
+                    StepError::Runtime(outcome) => outcome,
+                };
+                return self
+                    .compensate_pre_container_failure(
+                        job,
+                        ledger,
+                        outcome,
+                        materialized.as_ref(),
+                        800_010,
+                        "OCI archive import",
+                    )
+                    .await;
             }
         } else if let Err(error) = self
             .runtime_step(
@@ -194,7 +888,27 @@ where
             )
             .await
         {
-            return step_result(error);
+            let outcome = match error {
+                StepError::Ledger(error) => return Err(error),
+                StepError::Runtime(outcome) => outcome,
+            };
+            return self
+                .compensate_pre_container_failure(
+                    job,
+                    ledger,
+                    outcome,
+                    materialized.as_ref(),
+                    800_010,
+                    "OCI image pull",
+                )
+                .await;
+        }
+        if materialized.is_some() {
+            ledger.mark_runtime_context_creating(
+                &payload.spec.deployment_id,
+                &job.job_id,
+                crate::now_ms(),
+            )?;
         }
         let instance = match self
             .runtime_step(
@@ -208,8 +922,60 @@ where
             .await
         {
             Ok(instance) => instance,
-            Err(error) => return step_result(error),
+            Err(error) => {
+                if let Some(materialized) = materialized.as_ref() {
+                    match &error {
+                        StepError::Runtime(outcome)
+                            if outcome.status != CompletionStatus::NeedsAttention =>
+                        {
+                            if let Err(compensation) = self
+                                .cleanup_runtime_context(
+                                    job,
+                                    ledger,
+                                    800_002,
+                                    &payload.spec.deployment_id,
+                                    &materialized.context,
+                                )
+                                .await
+                            {
+                                return match compensation {
+                                    ContextCleanupError::Ledger(error) => Err(error),
+                                    ContextCleanupError::Policy(cleanup) => {
+                                        let mut outcome = match error {
+                                            StepError::Runtime(outcome) => outcome,
+                                            StepError::Ledger(_) => unreachable!(),
+                                        };
+                                        outcome.status = CompletionStatus::NeedsAttention;
+                                        outcome.error_message = format!(
+                                            "{}; runtime context compensation failed: {cleanup}",
+                                            outcome.error_message
+                                        );
+                                        Ok(outcome)
+                                    }
+                                };
+                            }
+                        }
+                        StepError::Runtime(outcome) => {
+                            ledger.mark_runtime_context_needs_attention(
+                                &payload.spec.deployment_id,
+                                &outcome.error_message,
+                                crate::now_ms(),
+                            )?;
+                        }
+                        StepError::Ledger(_) => {}
+                    }
+                }
+                return step_result(error);
+            }
         };
+        if materialized.is_some() {
+            ledger.bind_runtime_context(
+                &payload.spec.deployment_id,
+                &job.job_id,
+                &instance.container_id,
+                crate::now_ms(),
+            )?;
+        }
         if payload.start
             && let Err(error) = self
                 .runtime_step(
@@ -231,6 +997,7 @@ where
                     error,
                     payload.health_gate.compensation_timeout_ms,
                     "install",
+                    materialized.as_ref(),
                 )
                 .await;
         }
@@ -257,10 +1024,15 @@ where
                             error,
                             payload.health_gate.compensation_timeout_ms,
                             "install",
+                            materialized.as_ref(),
                         )
                         .await;
                 }
             };
+            if let Some(materialized) = materialized.as_ref() {
+                self.activate_runtime_context(job, ledger, &payload.spec, materialized)
+                    .await?;
+            }
             return Ok(ExecutionOutcome::success(json!({ "instance": inspected })));
         }
 
@@ -276,10 +1048,16 @@ where
             )
             .await
         {
-            Ok((inspected, events)) => Ok(ExecutionOutcome::success_with_events(
-                json!({ "instance": inspected }),
-                events,
-            )),
+            Ok((inspected, events)) => {
+                if let Some(materialized) = materialized.as_ref() {
+                    self.activate_runtime_context(job, ledger, &payload.spec, materialized)
+                        .await?;
+                }
+                Ok(ExecutionOutcome::success_with_events(
+                    json!({ "instance": inspected }),
+                    events,
+                ))
+            }
             Err(HealthGateError::Ledger(error)) => Err(error),
             Err(HealthGateError::Failed {
                 outcome,
@@ -293,6 +1071,7 @@ where
                     StepError::Runtime(outcome),
                     payload.health_gate.compensation_timeout_ms,
                     "install",
+                    materialized.as_ref(),
                 )
                 .await
             }
@@ -575,6 +1354,8 @@ where
                 )
                 .await;
             if let Err(provider_error) = publish {
+                let runtime_context =
+                    ledger.runtime_context_for_container(&instance.container_id)?;
                 let remove = self
                     .runtime_step(
                         ledger,
@@ -585,6 +1366,23 @@ where
                         self.runtime.remove_container(&instance.container_id, true),
                     )
                     .await;
+                let context_cleanup_error = if remove.is_ok() {
+                    if let Some(runtime_context) = runtime_context.as_ref() {
+                        self.cleanup_runtime_context(
+                            job,
+                            ledger,
+                            GATEWAY_RUNTIME_COMPENSATE_STEP + 2,
+                            &runtime_context.deployment_id,
+                            &runtime_context.context,
+                        )
+                        .await
+                        .err()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let resource_errors = self
                     .compensate_provisioners(job, ledger, &applied_provisioners)
                     .await;
@@ -616,6 +1414,18 @@ where
                         outcome.error_message,
                         step_error_message(&error)
                     );
+                }
+                if let Some(error) = context_cleanup_error {
+                    match error {
+                        ContextCleanupError::Ledger(error) => return Err(error),
+                        ContextCleanupError::Policy(error) => {
+                            outcome.status = CompletionStatus::NeedsAttention;
+                            outcome.error_message = format!(
+                                "{}; Agent runtime context compensation failed: {error}",
+                                outcome.error_message
+                            );
+                        }
+                    }
                 }
                 append_compensation_errors(&mut outcome, resource_errors, auth_compensation);
                 if applied_migration {
@@ -749,6 +1559,9 @@ where
             service_id: migration.service_name.clone(),
             generation: 1,
             image: migration.image.clone(),
+            runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
+            runtime_context: None,
+            managed_service_context: None,
             command: migration.command.clone(),
             environment: migration.environment.clone(),
             labels: std::collections::HashMap::from([
@@ -1006,6 +1819,7 @@ where
         let deadline = Instant::now() + Duration::from_millis(policy.timeout_ms);
         let mut events = Vec::new();
         let mut probe = 0_u32;
+        let mut last_observation = None;
 
         loop {
             probe = probe.saturating_add(1);
@@ -1028,19 +1842,24 @@ where
                 }
                 Err(HealthProbeError::Cancelled) => {
                     let message = format!("{action} health wait was cancelled");
-                    events.push(health_control_event(
-                        event_base + u64::from(probe),
-                        "cancelled",
-                        "WARN",
-                        &message,
-                        probe,
-                    ));
+                    push_bounded_health_event(
+                        &mut events,
+                        health_control_event(
+                            event_base + u64::from(probe),
+                            "cancelled",
+                            "WARN",
+                            &message,
+                            probe,
+                            last_observation.as_ref(),
+                        ),
+                    );
                     return Err(HealthGateError::Failed {
                         outcome: ExecutionOutcome {
                             status: CompletionStatus::Cancelled,
                             result: json!({
                                 "health_gate": "cancelled",
                                 "probe_count": probe,
+                                "last_health_observation": last_observation,
                             }),
                             error_message: message,
                             events,
@@ -1053,65 +1872,90 @@ where
                         "{action} container did not satisfy the health gate within {}ms",
                         policy.timeout_ms,
                     );
-                    events.push(health_control_event(
-                        event_base + u64::from(probe),
-                        "timeout",
-                        "ERROR",
-                        &message,
-                        probe,
-                    ));
+                    push_bounded_health_event(
+                        &mut events,
+                        health_control_event(
+                            event_base + u64::from(probe),
+                            "timeout",
+                            "ERROR",
+                            &message,
+                            probe,
+                            last_observation.as_ref(),
+                        ),
+                    );
                     return Err(HealthGateError::Failed {
-                        outcome: retryable_health_failure(&message, probe, events),
+                        outcome: retryable_health_failure(
+                            &message,
+                            probe,
+                            last_observation,
+                            events,
+                        ),
                         compensation_step: step_index.saturating_add(1),
                     });
                 }
                 Err(HealthProbeError::Runtime(outcome)) => {
-                    let message = outcome.error_message.clone();
-                    events.push(health_control_event(
-                        event_base + u64::from(probe),
-                        "probe_error",
-                        "ERROR",
-                        &message,
-                        probe,
-                    ));
+                    push_bounded_health_event(
+                        &mut events,
+                        health_control_event(
+                            event_base + u64::from(probe),
+                            "probe_error",
+                            "ERROR",
+                            "container health inspection failed",
+                            probe,
+                            last_observation.as_ref(),
+                        ),
+                    );
+                    let result = with_last_health_observation(outcome.result, last_observation);
                     return Err(HealthGateError::Failed {
-                        outcome: ExecutionOutcome { events, ..outcome },
+                        outcome: ExecutionOutcome {
+                            result,
+                            events,
+                            ..outcome
+                        },
                         compensation_step: step_index.saturating_add(1),
                     });
                 }
             };
 
             let decision = evaluate_health_gate(&inspected, policy);
-            events.push(health_probe_event(
-                event_base + u64::from(probe),
-                probe,
-                &inspected,
-                &decision,
-            ));
+            let observation = bounded_health_observation(probe, &inspected, &decision);
+            push_bounded_health_event(
+                &mut events,
+                health_probe_event(
+                    event_base + u64::from(probe),
+                    probe,
+                    &observation,
+                    &decision,
+                ),
+            );
             match decision {
                 HealthGateDecision::Ready => return Ok((inspected, events)),
-                HealthGateDecision::Failed(reason) => {
+                HealthGateDecision::Failed(_) => {
                     let missing_healthcheck = inspected.health.eq_ignore_ascii_case("NONE");
                     let status = if missing_healthcheck {
                         CompletionStatus::Failed
                     } else {
                         CompletionStatus::RetryableFailure
                     };
+                    let last_probe_reason = observation.probe_reason.clone();
                     return Err(HealthGateError::Failed {
                         outcome: ExecutionOutcome {
                             status,
                             result: json!({
                                 "health_gate": "failed",
                                 "probe_count": probe,
-                                "last_instance": inspected,
+                                "last_health_observation": observation,
+                                "last_probe_reason": last_probe_reason.clone(),
                             }),
-                            error_message: reason,
+                            error_message: last_probe_reason,
                             events,
                         },
                         compensation_step: step_index.saturating_add(1),
                     });
                 }
-                HealthGateDecision::Pending(_) => {}
+                HealthGateDecision::Pending(_) => {
+                    last_observation = Some(observation);
+                }
             }
 
             let wake_at =
@@ -1119,12 +1963,13 @@ where
             tokio::select! {
                 _ = cancellation_signal(&mut cancellation) => {
                     let message = format!("{action} health wait was cancelled");
-                    events.push(health_control_event(
+                    push_bounded_health_event(&mut events, health_control_event(
                         event_base + u64::from(probe).saturating_add(1),
                         "cancelled",
                         "WARN",
                         &message,
                         probe,
+                        last_observation.as_ref(),
                     ));
                     return Err(HealthGateError::Failed {
                         outcome: ExecutionOutcome {
@@ -1132,6 +1977,7 @@ where
                             result: json!({
                                 "health_gate": "cancelled",
                                 "probe_count": probe,
+                                "last_health_observation": last_observation,
                             }),
                             error_message: message,
                             events,
@@ -1145,15 +1991,21 @@ where
                             "{action} container did not satisfy the health gate within {}ms",
                             policy.timeout_ms,
                         );
-                        events.push(health_control_event(
+                        push_bounded_health_event(&mut events, health_control_event(
                             event_base + u64::from(probe).saturating_add(1),
                             "timeout",
                             "ERROR",
                             &message,
                             probe,
+                            last_observation.as_ref(),
                         ));
                         return Err(HealthGateError::Failed {
-                            outcome: retryable_health_failure(&message, probe, events),
+                            outcome: retryable_health_failure(
+                                &message,
+                                probe,
+                                last_observation,
+                                events,
+                            ),
                             compensation_step: step_index.saturating_add(1),
                         });
                     }
@@ -1233,6 +2085,7 @@ where
         compensation_timeout_ms: u64,
         action: &str,
         applied_migration: bool,
+        runtime_context: Option<&MaterializedRuntimeContext>,
     ) -> Result<ExecutionOutcome, LedgerError> {
         let mut outcome = self
             .compensate_uncommitted_container(
@@ -1243,6 +2096,7 @@ where
                 original_error,
                 compensation_timeout_ms,
                 action,
+                runtime_context,
             )
             .await?;
         if applied_migration {
@@ -1268,6 +2122,7 @@ where
         original_error: StepError,
         compensation_timeout_ms: u64,
         action: &str,
+        runtime_context: Option<&MaterializedRuntimeContext>,
     ) -> Result<ExecutionOutcome, LedgerError> {
         let mut original = match original_error {
             StepError::Ledger(error) => return Err(error),
@@ -1297,6 +2152,34 @@ where
             .await
         {
             Ok(()) => {
+                if let Some(runtime_context) = runtime_context
+                    && let Err(error) = self
+                        .cleanup_runtime_context(
+                            job,
+                            ledger,
+                            step_index.saturating_add(1),
+                            &runtime_context.deployment_id,
+                            &runtime_context.context,
+                        )
+                        .await
+                {
+                    return match error {
+                        ContextCleanupError::Ledger(error) => Err(error),
+                        ContextCleanupError::Policy(error) => Ok(ExecutionOutcome {
+                            status: CompletionStatus::NeedsAttention,
+                            result: json!({
+                                "action": action,
+                                "container_compensated": true,
+                                "runtime_context_compensated": false,
+                                "removed_container_id": container_id,
+                            }),
+                            error_message: format!(
+                                "{action} container was removed but runtime context compensation failed: {error}"
+                            ),
+                            events: original.events,
+                        }),
+                    };
+                }
                 // Once the container is proven absent, retrying the deterministic
                 // install is safe even when the original Docker response was
                 // ambiguous.
@@ -1421,6 +2304,13 @@ where
             Ok(payload) => payload,
             Err(outcome) => return Ok(outcome),
         };
+        let runtime_context = match ledger.runtime_context_for_container(&payload.container_id)? {
+            Some(context) => Some(context),
+            None if !payload.deployment_id.trim().is_empty() => {
+                ledger.runtime_context_for_deployment(&payload.deployment_id)?
+            }
+            None => None,
+        };
 
         let remove_step = if payload.force {
             1
@@ -1472,9 +2362,37 @@ where
         {
             return step_result(error);
         }
+        if let Some(runtime_context) = runtime_context.as_ref()
+            && let Err(error) = self
+                .cleanup_runtime_context(
+                    job,
+                    ledger,
+                    remove_step.saturating_add(1),
+                    &runtime_context.deployment_id,
+                    &runtime_context.context,
+                )
+                .await
+        {
+            return match error {
+                ContextCleanupError::Ledger(error) => Err(error),
+                ContextCleanupError::Policy(error) => Ok(ExecutionOutcome {
+                    status: CompletionStatus::NeedsAttention,
+                    result: json!({
+                        "container_id": payload.container_id,
+                        "removed": true,
+                        "runtime_context_removed": false,
+                    }),
+                    error_message: format!(
+                        "container was removed but Agent runtime context cleanup failed: {error}"
+                    ),
+                    events: vec![],
+                }),
+            };
+        }
         Ok(ExecutionOutcome::success(json!({
             "container_id": payload.container_id,
-            "removed": true
+            "removed": true,
+            "runtime_context_removed": runtime_context.is_some(),
         })))
     }
 
@@ -1630,13 +2548,73 @@ where
                 );
             }
         }
-        if *cancellation.borrow() {
+        if let Err(error) = payload
+            .new_spec
+            .runtime_contract
+            .validate_health_gate(&payload.health_gate)
+        {
             return Ok(replacement_irreversible_context(
-                replacement_cancelled(&payload, action, vec![]),
+                runtime_error_outcome(&error, false),
                 &payload,
                 action,
                 applied_migration,
             ));
+        }
+        let materialized = match self
+            .prepare_runtime_context(job, ledger, &payload.new_spec)
+            .await
+        {
+            Ok(context) => context,
+            Err(ContextPreparationError::Ledger(error)) => return Err(error),
+            Err(ContextPreparationError::Outcome(outcome)) => {
+                return Ok(replacement_irreversible_context(
+                    outcome,
+                    &payload,
+                    action,
+                    applied_migration,
+                ));
+            }
+        };
+        if let Some(materialized) = materialized.as_ref() {
+            payload.new_spec.runtime_context = Some(materialized.context.clone());
+        }
+        if *cancellation.borrow() {
+            let mut outcome = replacement_irreversible_context(
+                replacement_cancelled(&payload, action, vec![]),
+                &payload,
+                action,
+                applied_migration,
+            );
+            if let Some(materialized) = materialized.as_ref()
+                && let Err(error) = self
+                    .cleanup_runtime_context(
+                        job,
+                        ledger,
+                        800_002,
+                        &payload.new_spec.deployment_id,
+                        &materialized.context,
+                    )
+                    .await
+            {
+                match error {
+                    ContextCleanupError::Ledger(error) => return Err(error),
+                    ContextCleanupError::Policy(error) => {
+                        outcome.status = CompletionStatus::NeedsAttention;
+                        outcome.error_message = format!(
+                            "{}; runtime context compensation failed: {error}",
+                            outcome.error_message
+                        );
+                    }
+                }
+            }
+            return Ok(outcome);
+        }
+        if materialized.is_some() {
+            ledger.mark_runtime_context_creating(
+                &payload.new_spec.deployment_id,
+                &job.job_id,
+                crate::now_ms(),
+            )?;
         }
 
         let create_step = format!("create_{action}_container");
@@ -1653,6 +2631,53 @@ where
         {
             Ok(instance) => instance,
             Err(error) => {
+                if let Some(materialized) = materialized.as_ref() {
+                    match &error {
+                        StepError::Runtime(outcome)
+                            if outcome.status != CompletionStatus::NeedsAttention =>
+                        {
+                            if let Err(cleanup) = self
+                                .cleanup_runtime_context(
+                                    job,
+                                    ledger,
+                                    800_002,
+                                    &payload.new_spec.deployment_id,
+                                    &materialized.context,
+                                )
+                                .await
+                            {
+                                return match cleanup {
+                                    ContextCleanupError::Ledger(error) => Err(error),
+                                    ContextCleanupError::Policy(cleanup) => {
+                                        let mut outcome = match error {
+                                            StepError::Runtime(outcome) => outcome,
+                                            StepError::Ledger(_) => unreachable!(),
+                                        };
+                                        outcome.status = CompletionStatus::NeedsAttention;
+                                        outcome.error_message = format!(
+                                            "{}; runtime context compensation failed: {cleanup}",
+                                            outcome.error_message
+                                        );
+                                        Ok(replacement_irreversible_context(
+                                            outcome,
+                                            &payload,
+                                            action,
+                                            applied_migration,
+                                        ))
+                                    }
+                                };
+                            }
+                        }
+                        StepError::Runtime(outcome) => {
+                            ledger.mark_runtime_context_needs_attention(
+                                &payload.new_spec.deployment_id,
+                                &outcome.error_message,
+                                crate::now_ms(),
+                            )?;
+                        }
+                        StepError::Ledger(_) => {}
+                    }
+                }
                 return replacement_step_result_with_migration(
                     error,
                     &payload,
@@ -1661,6 +2686,14 @@ where
                 );
             }
         };
+        if materialized.is_some() {
+            ledger.bind_runtime_context(
+                &payload.new_spec.deployment_id,
+                &job.job_id,
+                &instance.container_id,
+                crate::now_ms(),
+            )?;
+        }
         if instance.container_id == payload.old_container_id {
             return Ok(replacement_irreversible_context(
                 ExecutionOutcome {
@@ -1694,6 +2727,7 @@ where
                     payload.health_gate.compensation_timeout_ms,
                     action,
                     applied_migration,
+                    materialized.as_ref(),
                 )
                 .await;
         }
@@ -1721,6 +2755,7 @@ where
                     payload.health_gate.compensation_timeout_ms,
                     action,
                     applied_migration,
+                    materialized.as_ref(),
                 )
                 .await;
         }
@@ -1754,6 +2789,7 @@ where
                         payload.health_gate.compensation_timeout_ms,
                         action,
                         applied_migration,
+                        materialized.as_ref(),
                     )
                     .await;
             }
@@ -1781,6 +2817,7 @@ where
                     payload.health_gate.compensation_timeout_ms,
                     action,
                     applied_migration,
+                    materialized.as_ref(),
                 )
                 .await;
         }
@@ -1809,6 +2846,7 @@ where
                             payload.health_gate.compensation_timeout_ms,
                             action,
                             applied_migration,
+                            materialized.as_ref(),
                         )
                         .await;
                 }
@@ -1848,10 +2886,41 @@ where
                     payload.health_gate.compensation_timeout_ms,
                     action,
                     applied_migration,
+                    materialized.as_ref(),
                 )
                 .await;
         }
 
+        if payload.preserve_old_until_topology_cutover {
+            if let Some(materialized) = materialized.as_ref() {
+                self.activate_runtime_context(job, ledger, &payload.new_spec, materialized)
+                    .await?;
+            }
+            if payload.provider_saga.is_some() {
+                ledger.set_provider_revision_state(
+                    &job.job_id,
+                    "COMMITTED",
+                    None,
+                    crate::now_ms(),
+                )?;
+            }
+            return Ok(ExecutionOutcome::success_with_events(
+                json!({
+                    "action": action,
+                    "instance": inspected,
+                    "replaced_deployment_id": payload.old_deployment_id,
+                    "replaced_container_id": payload.old_container_id,
+                    "old_container_preserved": true,
+                    "topology_cutover_pending": true,
+                    "provider_revision_id": payload.provider_saga.as_ref().map(|saga| &saga.desired.revision_id),
+                    "migrations": migration_results,
+                }),
+                events,
+            ));
+        }
+
+        let old_runtime_context =
+            ledger.runtime_context_for_container(&payload.old_container_id)?;
         let remove_old_name = format!("remove_replaced_container_for_{action}");
         if let Err(error) = self
             .runtime_step(
@@ -1892,6 +2961,39 @@ where
                 )?;
             }
             return Ok(outcome);
+        }
+
+        if let Some(materialized) = materialized.as_ref() {
+            self.activate_runtime_context(job, ledger, &payload.new_spec, materialized)
+                .await?;
+        }
+        if let Some(old_runtime_context) = old_runtime_context.as_ref()
+            && let Err(error) = self
+                .cleanup_runtime_context(
+                    job,
+                    ledger,
+                    remove_old_step.saturating_add(1),
+                    &old_runtime_context.deployment_id,
+                    &old_runtime_context.context,
+                )
+                .await
+        {
+            return match error {
+                ContextCleanupError::Ledger(error) => Err(error),
+                ContextCleanupError::Policy(error) => Ok(ExecutionOutcome {
+                    status: CompletionStatus::NeedsAttention,
+                    result: json!({
+                        "action": action,
+                        "old_container_removed": true,
+                        "old_runtime_context_removed": false,
+                        "new_instance": inspected,
+                    }),
+                    error_message: format!(
+                        "{action} cutover succeeded but old Agent runtime context cleanup failed: {error}"
+                    ),
+                    events,
+                }),
+            };
         }
 
         if payload.provider_saga.is_some() {
@@ -2266,6 +3368,22 @@ enum StepError {
     Runtime(ExecutionOutcome),
 }
 
+enum ContextPreparationError {
+    Ledger(LedgerError),
+    Outcome(ExecutionOutcome),
+}
+
+impl From<LedgerError> for ContextPreparationError {
+    fn from(value: LedgerError) -> Self {
+        Self::Ledger(value)
+    }
+}
+
+enum ContextCleanupError {
+    Ledger(LedgerError),
+    Policy(RuntimePolicyError),
+}
+
 enum PipelineExecutionError {
     Ledger(LedgerError),
     Outcome(ExecutionOutcome),
@@ -2302,7 +3420,34 @@ enum HealthProbeError {
 }
 
 fn validate_replacement_payload(payload: &ReleaseReplacementPayload) -> Result<(), String> {
-    payload.validate().map_err(|error| error.to_string())
+    payload.validate().map_err(|error| error.to_string())?;
+    if is_managed_service_contract_v2(&payload.new_spec)
+        && payload
+            .provider_saga
+            .as_ref()
+            .is_some_and(replacement_saga_has_control_plane_management)
+    {
+        return Err(
+            "Service Contract v2 replacement management must execute on the control plane; the Node Agent refuses Auth, Gateway, and API Registry provider state"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn replacement_saga_has_control_plane_management(saga: &ReplacementProviderSaga) -> bool {
+    [&saga.previous, &saga.desired]
+        .into_iter()
+        .any(provider_revision_has_control_plane_management)
+}
+
+fn provider_revision_has_control_plane_management(revision: &ReleaseProviderRevision) -> bool {
+    revision.auth.is_some()
+        || revision.gateway.is_some()
+        || revision
+            .provisioners
+            .iter()
+            .any(|step| matches!(step, TypedProvisionerStep::ApiRegistry { .. }))
 }
 
 fn component_applied(applied: &[String], component: &str) -> bool {
@@ -2470,45 +3615,148 @@ async fn cancellation_signal(cancellation: &mut watch::Receiver<bool>) {
     }
 }
 
+const MAX_HEALTH_GATE_EVENTS: usize = 64;
+const MAX_HEALTH_STATUS_CHARS: usize = 64;
+const MAX_HEALTH_REASON_CHARS: usize = 256;
+
+/// Credential-free evidence captured before an unhealthy container is
+/// compensated. Deliberately exclude Docker log output, command lines,
+/// environment variables, and mounts: health commands may echo secrets and
+/// the durable Operation result must stay safe and bounded.
+#[derive(Debug, Clone, Serialize)]
+struct BoundedHealthObservation {
+    probe: u32,
+    observed_state: RuntimeObservedState,
+    health: String,
+    probe_reason: String,
+}
+
 fn retryable_health_failure(
     message: &str,
     probe_count: u32,
+    last_observation: Option<BoundedHealthObservation>,
     events: Vec<NewJobEvent>,
 ) -> ExecutionOutcome {
+    let last_probe_reason = last_observation
+        .as_ref()
+        .map(|observation| observation.probe_reason.clone())
+        .unwrap_or_else(|| {
+            "container inspection did not complete before the health deadline".to_string()
+        });
     ExecutionOutcome {
         status: CompletionStatus::RetryableFailure,
         result: json!({
             "health_gate": "timeout",
             "probe_count": probe_count,
+            "last_health_observation": last_observation,
+            "last_probe_reason": last_probe_reason,
         }),
         error_message: message.to_string(),
         events,
     }
 }
 
-fn health_probe_event(
-    sequence: u64,
+fn bounded_health_observation(
     probe: u32,
     instance: &RuntimeInstance,
     decision: &HealthGateDecision,
+) -> BoundedHealthObservation {
+    let health = safe_health_status(&instance.health);
+    let probe_reason = match (decision, health) {
+        (HealthGateDecision::Pending(_), "OTHER") => {
+            "Docker returned an unrecognized health status"
+        }
+        (HealthGateDecision::Failed(_), "OTHER") => {
+            "Docker returned an invalid terminal health status"
+        }
+        (HealthGateDecision::Ready, _) => "health gate satisfied",
+        (HealthGateDecision::Pending(reason), _) | (HealthGateDecision::Failed(reason), _) => {
+            reason
+        }
+    };
+    BoundedHealthObservation {
+        probe,
+        observed_state: instance.observed_state.clone(),
+        health: bounded_health_text(health, MAX_HEALTH_STATUS_CHARS),
+        probe_reason: bounded_health_text(probe_reason, MAX_HEALTH_REASON_CHARS),
+    }
+}
+
+fn safe_health_status(value: &str) -> &'static str {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "HEALTHY" => "HEALTHY",
+        "STARTING" => "STARTING",
+        "UNHEALTHY" => "UNHEALTHY",
+        "NONE" => "NONE",
+        "UNKNOWN" | "" => "UNKNOWN",
+        _ => "OTHER",
+    }
+}
+
+fn bounded_health_text(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    let mut bounded = value
+        .chars()
+        .take(limit.saturating_sub(1))
+        .collect::<String>();
+    bounded.push('\u{2026}');
+    bounded
+}
+
+fn with_last_health_observation(
+    result: Value,
+    last_observation: Option<BoundedHealthObservation>,
+) -> Value {
+    let mut result = match result {
+        Value::Object(object) => object,
+        Value::Null => serde_json::Map::new(),
+        other => {
+            let mut object = serde_json::Map::new();
+            object.insert("runtime_failure".to_string(), other);
+            object
+        }
+    };
+    result.insert(
+        "last_health_observation".to_string(),
+        json!(last_observation),
+    );
+    Value::Object(result)
+}
+
+fn push_bounded_health_event(events: &mut Vec<NewJobEvent>, event: NewJobEvent) {
+    if events.len() >= MAX_HEALTH_GATE_EVENTS {
+        events.remove(0);
+    }
+    events.push(event);
+}
+
+fn health_probe_event(
+    sequence: u64,
+    probe: u32,
+    observation: &BoundedHealthObservation,
+    decision: &HealthGateDecision,
 ) -> NewJobEvent {
-    let (decision_name, level, reason) = match decision {
-        HealthGateDecision::Ready => ("ready", "INFO", "health gate satisfied".to_string()),
-        HealthGateDecision::Pending(reason) => ("pending", "INFO", reason.clone()),
-        HealthGateDecision::Failed(reason) => ("failed", "ERROR", reason.clone()),
+    let (decision_name, level) = match decision {
+        HealthGateDecision::Ready => ("ready", "INFO"),
+        HealthGateDecision::Pending(_) => ("pending", "INFO"),
+        HealthGateDecision::Failed(_) => ("failed", "ERROR"),
     };
     NewJobEvent {
         sequence,
         event_type: "runtime.health_probe".to_string(),
         level: level.to_string(),
-        message: format!("health probe {probe}: {decision_name} ({reason})"),
+        message: format!(
+            "health probe {probe}: {decision_name} ({})",
+            observation.probe_reason
+        ),
         data: json!({
             "probe": probe,
             "decision": decision_name,
-            "reason": reason,
-            "observed_state": instance.observed_state,
-            "health": instance.health,
-            "container_id": instance.container_id,
+            "reason": observation.probe_reason,
+            "observed_state": observation.observed_state,
+            "health": observation.health,
         }),
     }
 }
@@ -2519,6 +3767,7 @@ fn health_control_event(
     level: &str,
     message: &str,
     probe_count: u32,
+    last_observation: Option<&BoundedHealthObservation>,
 ) -> NewJobEvent {
     NewJobEvent {
         sequence,
@@ -2528,6 +3777,7 @@ fn health_control_event(
         data: json!({
             "decision": decision,
             "probe_count": probe_count,
+            "last_health_observation": last_observation,
         }),
     }
 }
@@ -2551,6 +3801,19 @@ fn validate_pipeline_payload(payload: &ReleasePipelinePayload) -> Result<(), Str
     let service_id = payload.install.spec.service_id.trim();
     if service_id.is_empty() {
         return Err("release pipeline install service_id is required".to_string());
+    }
+    if is_managed_service_contract_v2(&payload.install.spec)
+        && (payload.auth.is_some()
+            || payload.gateway.is_some()
+            || payload
+                .provisioners
+                .iter()
+                .any(|step| matches!(step, TypedProvisionerStep::ApiRegistry { .. })))
+    {
+        return Err(
+            "Service Contract v2 management must execute on the control plane; the Node Agent refuses Auth, Gateway, and API Registry steps"
+                .to_string(),
+        );
     }
     if let Some(auth) = payload.auth.as_ref()
         && auth.service_name != service_id
@@ -2591,6 +3854,15 @@ fn validate_pipeline_payload(payload: &ReleasePipelinePayload) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+fn is_managed_service_contract_v2(spec: &ContainerSpec) -> bool {
+    spec.managed_service_context.is_some()
+        || spec
+            .labels
+            .get("ojos.service_contract_version")
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|version| version >= 2)
 }
 
 fn is_sha256_checksum(value: &str) -> bool {
@@ -2698,6 +3970,8 @@ fn runtime_error_outcome(error: &RuntimeError, ambiguous_after_request: bool) ->
         | RuntimeError::InvalidReleaseReplacement(_)
         | RuntimeError::InvalidPublishedEndpoint(_)
         | RuntimeError::InvalidRegistryCredentials(_)
+        | RuntimeError::InvalidRuntimeContract(_)
+        | RuntimeError::InvalidRuntimeContext(_)
         | RuntimeError::DigestMismatch { .. }
         | RuntimeError::MissingContainerId => CompletionStatus::Failed,
         RuntimeError::EngineUnavailable(_) | RuntimeError::Engine(_) if ambiguous_after_request => {
@@ -2710,6 +3984,28 @@ fn runtime_error_outcome(error: &RuntimeError, ambiguous_after_request: bool) ->
     ExecutionOutcome {
         status,
         result: json!({ "runtime_error": error.to_string() }),
+        error_message: error.to_string(),
+        events: vec![],
+    }
+}
+
+fn runtime_policy_outcome(error: &RuntimePolicyError) -> ExecutionOutcome {
+    let status = match error {
+        RuntimePolicyError::Credential(_) | RuntimePolicyError::Publication(_) => {
+            CompletionStatus::RetryableFailure
+        }
+        RuntimePolicyError::Compensation(_) => CompletionStatus::NeedsAttention,
+        RuntimePolicyError::InvalidPolicy(_)
+        | RuntimePolicyError::ProfileNotAllowed(_)
+        | RuntimePolicyError::UnsupportedRuntime { .. }
+        | RuntimePolicyError::Materialization(_) => CompletionStatus::Failed,
+    };
+    ExecutionOutcome {
+        status,
+        result: json!({
+            "runtime_context_error": error.to_string(),
+            "credential_persisted_in_ledger": false,
+        }),
         error_message: error.to_string(),
         events: vec![],
     }
@@ -2740,6 +4036,8 @@ struct TimedContainerTarget {
 
 #[derive(Debug, Deserialize)]
 struct RemoveContainerTarget {
+    #[serde(default)]
+    deployment_id: String,
     container_id: String,
     #[serde(default)]
     force: bool,
@@ -2755,12 +4053,14 @@ mod tests {
     use async_trait::async_trait;
     use orchestrator_runtime::{
         ArtifactReference, AuthPipelineStep, GatewayPipelineStep, GatewayRouteSpec,
-        MissingHealthcheckPolicy, OciImageReference, OciMigrationStep, ReleasePipelinePayload,
-        RuntimeDesiredState, RuntimeInstallPayload, RuntimeInstance, RuntimeObservedState,
+        ManagedServiceContextSpec, MissingHealthcheckPolicy, OciImageReference, OciMigrationStep,
+        ReleasePipelinePayload, RuntimeContract, RuntimeDesiredState, RuntimeInstallPayload,
+        RuntimeInstance, RuntimeObservedState,
     };
     use sha2::{Digest, Sha256};
     use std::collections::VecDeque;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -2775,6 +4075,71 @@ mod tests {
 
     struct StaticArtifactFetcher {
         bytes: Vec<u8>,
+    }
+
+    struct UnboundContextProvider {
+        materialize_bound_calls: AtomicUsize,
+        materialize_unbound_calls: AtomicUsize,
+        context: RuntimeContext,
+        fail_materialization: bool,
+    }
+
+    #[async_trait]
+    impl RuntimeContextProvider for UnboundContextProvider {
+        fn plan_context(
+            &self,
+            _spec: &ContainerSpec,
+        ) -> Result<Option<RuntimeContext>, RuntimePolicyError> {
+            Ok(Some(self.context.clone()))
+        }
+
+        async fn materialize_context(
+            &self,
+            _spec: &ContainerSpec,
+            _context: &RuntimeContext,
+            _credential: &WorkloadCredential,
+        ) -> Result<(), RuntimePolicyError> {
+            self.materialize_bound_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_materialization {
+                Err(RuntimePolicyError::Materialization(
+                    "fixture context materialization failed".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn materialize_unbound_context(
+            &self,
+            _spec: &ContainerSpec,
+            _context: &RuntimeContext,
+        ) -> Result<(), RuntimePolicyError> {
+            self.materialize_unbound_calls
+                .fetch_add(1, Ordering::SeqCst);
+            if self.fail_materialization {
+                Err(RuntimePolicyError::Materialization(
+                    "fixture context materialization failed".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn rotate_workload_credential(
+            &self,
+            _context: &RuntimeContext,
+            _credential: &WorkloadCredential,
+        ) -> Result<(), RuntimePolicyError> {
+            Ok(())
+        }
+
+        async fn compensate(&self, _context: &RuntimeContext) -> Result<(), RuntimePolicyError> {
+            Ok(())
+        }
+
+        fn runtime_facts(&self) -> crate::NodeRuntimeFactsV1 {
+            unreachable!("runtime facts are not part of context preparation")
+        }
     }
 
     #[async_trait]
@@ -2831,6 +4196,10 @@ mod tests {
                     .unwrap_or_default(),
                 container_id: format!("container-{}", spec.deployment_id),
                 artifact_digest: spec.image.to_string(),
+                runtime_contract: spec.runtime_contract.clone(),
+                runtime_policy_sha256: String::new(),
+                effective_runtime_sha256: String::new(),
+                runtime_attested: true,
                 desired_state: RuntimeDesiredState::Stopped,
                 observed_state: RuntimeObservedState::Created,
                 health: "UNKNOWN".to_string(),
@@ -2988,6 +4357,10 @@ mod tests {
                 release_version: "1.0.0".to_string(),
                 container_id: container_id.to_string(),
                 artifact_digest: format!("ghcr.io/acme/service@sha256:{DIGEST}"),
+                runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
+                runtime_policy_sha256: String::new(),
+                effective_runtime_sha256: String::new(),
+                runtime_attested: true,
                 desired_state: RuntimeDesiredState::Running,
                 observed_state: RuntimeObservedState::Running,
                 health: "HEALTHY".to_string(),
@@ -3063,6 +4436,180 @@ mod tests {
         fail_compensation: bool,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum VolumeFailurePoint {
+        None,
+        CreateVolume,
+        Pull,
+        CreateContainer,
+        Start,
+        Health,
+        RemoveVolume,
+    }
+
+    struct VolumeLifecycleRuntime {
+        calls: Mutex<Vec<String>>,
+        failure: VolumeFailurePoint,
+    }
+
+    impl VolumeLifecycleRuntime {
+        fn new(failure: VolumeFailurePoint) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                failure,
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn clear_calls(&self) {
+            self.calls.lock().unwrap().clear();
+        }
+
+        fn instance(spec: &ContainerSpec, health: &str) -> RuntimeInstance {
+            RuntimeInstance {
+                deployment_id: spec.deployment_id.clone(),
+                service_id: spec.service_id.clone(),
+                release_version: "1.0.0".to_string(),
+                container_id: "container-judge".to_string(),
+                artifact_digest: spec.image.to_string(),
+                runtime_contract: spec.runtime_contract.clone(),
+                runtime_policy_sha256: spec
+                    .runtime_context
+                    .as_ref()
+                    .map(|context| context.runtime_policy_sha256.clone())
+                    .unwrap_or_default(),
+                effective_runtime_sha256: format!("sha256:{}", "c".repeat(64)),
+                runtime_attested: true,
+                desired_state: RuntimeDesiredState::Running,
+                observed_state: RuntimeObservedState::Running,
+                health: health.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ContainerRuntime for VolumeLifecycleRuntime {
+        async fn create_managed_volume(
+            &self,
+            spec: &orchestrator_runtime::ManagedVolumeSpec,
+        ) -> Result<(), RuntimeError> {
+            spec.validate()?;
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("volume-create:{}", spec.name));
+            if self.failure == VolumeFailurePoint::CreateVolume {
+                Err(RuntimeError::EngineUnavailable(
+                    "volume create response was lost".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn remove_managed_volume(
+            &self,
+            spec: &orchestrator_runtime::ManagedVolumeSpec,
+        ) -> Result<(), RuntimeError> {
+            spec.validate()?;
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("volume-remove:{}", spec.name));
+            if self.failure == VolumeFailurePoint::RemoveVolume {
+                Err(RuntimeError::EngineUnavailable(
+                    "volume remove response was lost".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn pull_image(&self, _image: &OciImageReference) -> Result<(), RuntimeError> {
+            self.calls.lock().unwrap().push("pull".to_string());
+            if self.failure == VolumeFailurePoint::Pull {
+                Err(RuntimeError::EngineUnavailable("pull failed".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn create_container(
+            &self,
+            spec: &ContainerSpec,
+        ) -> Result<RuntimeInstance, RuntimeError> {
+            self.calls.lock().unwrap().push("create".to_string());
+            if self.failure == VolumeFailurePoint::CreateContainer {
+                // A local contract rejection is proven to happen before the
+                // Docker create request and is therefore safe to compensate.
+                Err(RuntimeError::InvalidRuntimeContext(
+                    "fixture rejected before Docker create".to_string(),
+                ))
+            } else {
+                Ok(Self::instance(spec, "STARTING"))
+            }
+        }
+
+        async fn start_container(&self, _container_id: &str) -> Result<(), RuntimeError> {
+            self.calls.lock().unwrap().push("start".to_string());
+            if self.failure == VolumeFailurePoint::Start {
+                Err(RuntimeError::EngineUnavailable(
+                    "start response was lost".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn stop_container(
+            &self,
+            _container_id: &str,
+            _timeout_seconds: i32,
+        ) -> Result<(), RuntimeError> {
+            self.calls.lock().unwrap().push("stop".to_string());
+            Ok(())
+        }
+
+        async fn restart_container(
+            &self,
+            _container_id: &str,
+            _timeout_seconds: i32,
+        ) -> Result<(), RuntimeError> {
+            unreachable!("volume lifecycle tests do not restart")
+        }
+
+        async fn remove_container(
+            &self,
+            _container_id: &str,
+            _force: bool,
+        ) -> Result<(), RuntimeError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("container-remove".to_string());
+            Ok(())
+        }
+
+        async fn inspect_container(
+            &self,
+            _container_id: &str,
+        ) -> Result<RuntimeInstance, RuntimeError> {
+            self.calls.lock().unwrap().push("inspect".to_string());
+            let spec = judge_container_spec();
+            Ok(Self::instance(
+                &spec,
+                if self.failure == VolumeFailurePoint::Health {
+                    "UNHEALTHY"
+                } else {
+                    "HEALTHY"
+                },
+            ))
+        }
+    }
+
     #[derive(Debug, Clone, Copy, Default)]
     struct ReplacementFailures {
         pull: bool,
@@ -3128,6 +4675,10 @@ mod tests {
                     .unwrap_or_default(),
                 container_id: "container-new".to_string(),
                 artifact_digest: spec.image.to_string(),
+                runtime_contract: spec.runtime_contract.clone(),
+                runtime_policy_sha256: String::new(),
+                effective_runtime_sha256: String::new(),
+                runtime_attested: true,
                 desired_state: RuntimeDesiredState::Running,
                 observed_state: RuntimeObservedState::Running,
                 health: "STARTING".to_string(),
@@ -3368,11 +4919,99 @@ mod tests {
             service_id: "service-1".to_string(),
             generation: 1,
             image,
+            runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
+            runtime_context: None,
+            managed_service_context: None,
             command: vec![],
             environment: vec![],
             labels: Default::default(),
             published_endpoint: None,
         }
+    }
+
+    fn judge_runtime_context(root: &std::path::Path) -> RuntimeContext {
+        let component = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        RuntimeContext {
+            contract: RuntimeContract::judge_sandbox_v1(),
+            runtime_policy_sha256: format!("sha256:{}", "b".repeat(64)),
+            scratch_directory: root
+                .join(component)
+                .join("work")
+                .to_str()
+                .expect("test runtime path must be UTF-8")
+                .to_string(),
+            cache_volume_name: format!("ojos-judge-cache-{component}"),
+            service_context_directory: root
+                .join(component)
+                .join("service")
+                .to_str()
+                .expect("test runtime path must be UTF-8")
+                .to_string(),
+        }
+    }
+
+    fn judge_container_spec() -> ContainerSpec {
+        ContainerSpec {
+            deployment_id: "deployment-judge".to_string(),
+            service_id: "judge-worker".to_string(),
+            generation: 1,
+            image: OciImageReference::parse(&format!("ghcr.io/acme/judge-worker@sha256:{DIGEST}"))
+                .unwrap(),
+            runtime_contract: RuntimeContract::judge_sandbox_v1(),
+            runtime_context: None,
+            managed_service_context: Some(ManagedServiceContextSpec {
+                generation: 1,
+                node_id: "node-b".to_string(),
+                gateway_origin: "https://gateway.internal".to_string(),
+                gateway_ca_pem: None,
+                bindings: Default::default(),
+                events: None,
+            }),
+            command: Vec::new(),
+            environment: vec!["OJOS_MANAGED_WORKLOAD=true".to_string()],
+            labels: Default::default(),
+            published_endpoint: None,
+        }
+    }
+
+    fn judge_install_job(job_id: &str) -> LeasedJob {
+        let spec = judge_container_spec();
+        let lease_token = format!("lease-{job_id}");
+        LeasedJob::new_for_test(
+            job_id,
+            JobKind::Install,
+            json!({
+                "spec": spec,
+                "start": true,
+                "health_gate": HealthGatePolicy::for_runtime_contract(&RuntimeContract::judge_sandbox_v1()),
+            }),
+            &lease_token,
+        )
+    }
+
+    fn volume_lifecycle_executor(
+        context_root: &std::path::Path,
+        failure: VolumeFailurePoint,
+    ) -> (
+        JobExecutor<VolumeLifecycleRuntime>,
+        Arc<VolumeLifecycleRuntime>,
+        Arc<UnboundContextProvider>,
+    ) {
+        let runtime = Arc::new(VolumeLifecycleRuntime::new(failure));
+        let provider = Arc::new(UnboundContextProvider {
+            materialize_bound_calls: AtomicUsize::new(0),
+            materialize_unbound_calls: AtomicUsize::new(0),
+            context: judge_runtime_context(context_root),
+            fail_materialization: false,
+        });
+        let executor = JobExecutor {
+            runtime: Arc::clone(&runtime),
+            pipeline_provider: Arc::new(HttpReleasePipelineProvider::from_env()),
+            artifact_fetcher: None,
+            runtime_context_provider: Some(provider.clone()),
+            workload_credentials: None,
+        };
+        (executor, runtime, provider)
     }
 
     fn install_job() -> LeasedJob {
@@ -3424,6 +5063,15 @@ mod tests {
                 route_id: "service-1:1".to_string(),
                 path_prefix: prefix.to_string(),
                 upstream_base: "http://127.0.0.1:8080".to_string(),
+                api_id: String::new(),
+                binding_id: String::new(),
+                consumer_deployment_id: String::new(),
+                credential_generation: 1,
+                timeout_ms: 30_000,
+                provider_node_id: String::new(),
+                provider_endpoint: String::new(),
+                strip_prefix: false,
+                rewrite_prefix: String::new(),
                 methods: vec!["GET".to_string()],
                 auth_mode: "user".to_string(),
                 required_permission: "service.read".to_string(),
@@ -3501,6 +5149,15 @@ mod tests {
                     route_id: "service-1:1".to_string(),
                     path_prefix: "/service".to_string(),
                     upstream_base: "http://127.0.0.1:8080".to_string(),
+                    api_id: String::new(),
+                    binding_id: String::new(),
+                    consumer_deployment_id: String::new(),
+                    credential_generation: 1,
+                    timeout_ms: 30_000,
+                    provider_node_id: String::new(),
+                    provider_endpoint: String::new(),
+                    strip_prefix: false,
+                    rewrite_prefix: String::new(),
                     methods: vec!["GET".to_string()],
                     auth_mode: "user".to_string(),
                     required_permission: "service.read".to_string(),
@@ -3515,6 +5172,33 @@ mod tests {
         )
     }
 
+    #[test]
+    fn managed_v2_pipeline_rejects_node_side_control_plane_management() {
+        let job = pipeline_job("job-managed-v2-provider-boundary", true);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload
+            .install
+            .spec
+            .labels
+            .insert("ojos.service_contract_version".to_string(), "2".to_string());
+        let error = validate_pipeline_payload(&payload).unwrap_err();
+        assert!(error.contains("must execute on the control plane"));
+    }
+
+    #[test]
+    fn managed_v2_replacement_rejects_node_side_provider_saga() {
+        let job = replacement_job_with_provider_saga("job-managed-v2-replacement-boundary");
+        let mut payload: ReleaseReplacementPayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload
+            .new_spec
+            .labels
+            .insert("ojos.service_contract_version".to_string(), "2".to_string());
+        let error = validate_replacement_payload(&payload).unwrap_err();
+        assert!(error.contains("must execute on the control plane"));
+    }
+
     fn begin_job(ledger: &mut AgentLedger, job: &LeasedJob) {
         ledger
             .begin(
@@ -3525,6 +5209,82 @@ mod tests {
                 1,
             )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn optional_unbound_context_is_mounted_without_credential_exchange_or_refresh() {
+        let context_root = tempfile::tempdir().unwrap();
+        let context = RuntimeContext {
+            contract: RuntimeContract::standard_v1(),
+            runtime_policy_sha256: format!("sha256:{}", "a".repeat(64)),
+            scratch_directory: String::new(),
+            cache_volume_name: String::new(),
+            service_context_directory: context_root
+                .path()
+                .join("service")
+                .to_str()
+                .expect("temporary service context path must be UTF-8")
+                .to_string(),
+        };
+        let provider = Arc::new(UnboundContextProvider {
+            materialize_bound_calls: AtomicUsize::new(0),
+            materialize_unbound_calls: AtomicUsize::new(0),
+            context,
+            fail_materialization: false,
+        });
+        let executor = JobExecutor {
+            runtime: Arc::new(MockRuntime::default()),
+            pipeline_provider: Arc::new(HttpReleasePipelineProvider::from_env()),
+            artifact_fetcher: None,
+            runtime_context_provider: Some(provider.clone()),
+            workload_credentials: None,
+        };
+        let mut spec = container_spec();
+        spec.managed_service_context = Some(ManagedServiceContextSpec {
+            generation: 1,
+            node_id: "node-1".to_string(),
+            gateway_origin: "https://gateway.internal".to_string(),
+            gateway_ca_pem: None,
+            bindings: Default::default(),
+            events: None,
+        });
+        let job = LeasedJob::new_for_test(
+            "job-unbound-context",
+            JobKind::Install,
+            json!({"spec": spec, "start": true}),
+            "lease-unbound-context",
+        );
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        begin_job(&mut ledger, &job);
+        let materialized = match executor
+            .prepare_runtime_context(&job, &mut ledger, &spec)
+            .await
+        {
+            Ok(Some(materialized)) => materialized,
+            Ok(None) => panic!("optional v2 consumer must receive an empty mounted context"),
+            Err(_) => panic!("unbound context preparation must succeed without credentials"),
+        };
+        assert!(!materialized.credential_active);
+        assert_eq!(materialized.credential_expires_at_ms, 0);
+        assert_eq!(provider.materialize_unbound_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.materialize_bound_calls.load(Ordering::SeqCst), 0);
+
+        ledger
+            .mark_runtime_context_creating(&spec.deployment_id, &job.job_id, 2)
+            .unwrap();
+        ledger
+            .bind_runtime_context(&spec.deployment_id, &job.job_id, "container-1", 3)
+            .unwrap();
+        executor
+            .activate_runtime_context(&job, &mut ledger, &spec, &materialized)
+            .await
+            .unwrap();
+        let active = ledger
+            .runtime_context_for_deployment(&spec.deployment_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.binding_context_state, "ACTIVE");
+        assert!(active.managed_context.unwrap().bindings.is_empty());
     }
 
     #[tokio::test]
@@ -3547,6 +5307,254 @@ mod tests {
         assert_eq!(outcome.status, CompletionStatus::Succeeded);
         assert_eq!(runtime.calls(), ["pull", "create", "start", "inspect"]);
         assert_eq!(ledger.steps("job-1").unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn judge_install_creates_owned_volume_before_pull_and_keeps_it_only_after_health() {
+        let context_root = tempfile::tempdir().unwrap();
+        let (executor, runtime, _) =
+            volume_lifecycle_executor(context_root.path(), VolumeFailurePoint::None);
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job = judge_install_job("job-judge-volume-success");
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Succeeded);
+        assert_eq!(
+            runtime.calls(),
+            [
+                "volume-create:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pull",
+                "create",
+                "start",
+                "inspect",
+            ]
+        );
+        let run = ledger
+            .runtime_context_for_deployment("deployment-judge")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "ACTIVE");
+        assert_eq!(run.managed_volume_state, "CREATED");
+        assert!(run.managed_volume_owned);
+        assert_eq!(
+            run.managed_volume.unwrap().lifecycle,
+            orchestrator_runtime::RELEASE_VOLUME_LIFECYCLE
+        );
+    }
+
+    #[tokio::test]
+    async fn judge_precommit_failures_remove_owned_volume_in_reverse_order() {
+        let cases = [
+            (
+                VolumeFailurePoint::CreateVolume,
+                vec![
+                    "volume-create:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "volume-remove:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ],
+            ),
+            (
+                VolumeFailurePoint::Pull,
+                vec![
+                    "volume-create:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "pull",
+                    "volume-remove:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ],
+            ),
+            (
+                VolumeFailurePoint::CreateContainer,
+                vec![
+                    "volume-create:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "pull",
+                    "create",
+                    "volume-remove:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ],
+            ),
+            (
+                VolumeFailurePoint::Start,
+                vec![
+                    "volume-create:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "pull",
+                    "create",
+                    "start",
+                    "container-remove",
+                    "volume-remove:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ],
+            ),
+            (
+                VolumeFailurePoint::Health,
+                vec![
+                    "volume-create:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "pull",
+                    "create",
+                    "start",
+                    "inspect",
+                    "container-remove",
+                    "volume-remove:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ],
+            ),
+        ];
+
+        for (index, (failure, expected_calls)) in cases.into_iter().enumerate() {
+            let context_root = tempfile::tempdir().unwrap();
+            let (executor, runtime, _) = volume_lifecycle_executor(context_root.path(), failure);
+            let mut ledger = AgentLedger::open_in_memory().unwrap();
+            let job = judge_install_job(&format!("job-judge-volume-failure-{index}"));
+            begin_job(&mut ledger, &job);
+
+            let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+            assert_ne!(
+                outcome.status,
+                CompletionStatus::Succeeded,
+                "case {failure:?}"
+            );
+            assert_eq!(runtime.calls(), expected_calls, "case {failure:?}");
+            let run = ledger
+                .runtime_context_for_deployment("deployment-judge")
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.state, "CLEANED", "case {failure:?}");
+            assert_eq!(run.managed_volume_state, "CLEANED", "case {failure:?}");
+            assert!(!run.managed_volume_owned, "case {failure:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_context_failure_removes_volume_created_before_materialization() {
+        let context_root = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(VolumeLifecycleRuntime::new(VolumeFailurePoint::None));
+        let provider = Arc::new(UnboundContextProvider {
+            materialize_bound_calls: AtomicUsize::new(0),
+            materialize_unbound_calls: AtomicUsize::new(0),
+            context: judge_runtime_context(context_root.path()),
+            fail_materialization: true,
+        });
+        let executor = JobExecutor {
+            runtime: Arc::clone(&runtime),
+            pipeline_provider: Arc::new(HttpReleasePipelineProvider::from_env()),
+            artifact_fetcher: None,
+            runtime_context_provider: Some(provider),
+            workload_credentials: None,
+        };
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job = judge_install_job("job-judge-context-failure");
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Failed);
+        assert_eq!(
+            runtime.calls(),
+            [
+                "volume-create:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "volume-remove:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]
+        );
+        let run = ledger
+            .runtime_context_for_deployment("deployment-judge")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "CLEANED");
+        assert_eq!(run.managed_volume_state, "CLEANED");
+        assert!(!run.managed_volume_owned);
+    }
+
+    #[tokio::test]
+    async fn judge_uninstall_removes_container_then_owned_release_volume() {
+        let context_root = tempfile::tempdir().unwrap();
+        let (executor, runtime, _) =
+            volume_lifecycle_executor(context_root.path(), VolumeFailurePoint::None);
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let install = judge_install_job("job-judge-volume-install");
+        begin_job(&mut ledger, &install);
+        assert_eq!(
+            executor
+                .execute(&install, &mut ledger)
+                .await
+                .unwrap()
+                .status,
+            CompletionStatus::Succeeded
+        );
+        runtime.clear_calls();
+        let uninstall = LeasedJob::new_for_test(
+            "job-judge-volume-uninstall",
+            JobKind::Uninstall,
+            json!({
+                "deployment_id": "deployment-judge",
+                "container_id": "container-judge",
+                "force": true,
+            }),
+            "lease-judge-volume-uninstall",
+        );
+        begin_job(&mut ledger, &uninstall);
+
+        let outcome = executor.execute(&uninstall, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Succeeded);
+        assert_eq!(
+            runtime.calls(),
+            [
+                "container-remove",
+                "volume-remove:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]
+        );
+        let run = ledger
+            .runtime_context_for_deployment("deployment-judge")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "CLEANED");
+        assert_eq!(run.managed_volume_state, "CLEANED");
+        assert!(!run.managed_volume_owned);
+    }
+
+    #[tokio::test]
+    async fn failed_volume_cleanup_never_claims_uninstall_succeeded() {
+        let context_root = tempfile::tempdir().unwrap();
+        let (executor, runtime, _) =
+            volume_lifecycle_executor(context_root.path(), VolumeFailurePoint::RemoveVolume);
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let install = judge_install_job("job-judge-volume-install-before-cleanup-failure");
+        begin_job(&mut ledger, &install);
+        assert_eq!(
+            executor
+                .execute(&install, &mut ledger)
+                .await
+                .unwrap()
+                .status,
+            CompletionStatus::Succeeded
+        );
+        runtime.clear_calls();
+        let uninstall = LeasedJob::new_for_test(
+            "job-judge-volume-uninstall-cleanup-failure",
+            JobKind::Uninstall,
+            json!({
+                "deployment_id": "deployment-judge",
+                "container_id": "container-judge",
+                "force": true,
+            }),
+            "lease-judge-volume-uninstall-cleanup-failure",
+        );
+        begin_job(&mut ledger, &uninstall);
+
+        let outcome = executor.execute(&uninstall, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::NeedsAttention);
+        assert_eq!(
+            runtime.calls(),
+            [
+                "container-remove",
+                "volume-remove:ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]
+        );
+        let run = ledger
+            .runtime_context_for_deployment("deployment-judge")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "CLEANUP_NEEDED");
+        assert_eq!(run.managed_volume_state, "CLEANUP_NEEDED");
+        assert!(run.managed_volume_owned);
     }
 
     #[tokio::test]
@@ -3830,12 +5838,71 @@ mod tests {
 
         assert_eq!(outcome.status, CompletionStatus::RetryableFailure);
         assert_eq!(outcome.result["compensated"], json!(true));
+        assert_eq!(
+            outcome.result["failure"]["last_health_observation"]["observed_state"],
+            json!("RUNNING")
+        );
+        assert_eq!(
+            outcome.result["failure"]["last_health_observation"]["health"],
+            json!("STARTING")
+        );
+        assert_eq!(
+            outcome.result["failure"]["last_health_observation"]["probe_reason"],
+            json!("container health is STARTING")
+        );
+        assert_eq!(
+            outcome.result["failure"]["last_probe_reason"],
+            json!("container health is STARTING")
+        );
         assert_eq!(runtime.calls().last().unwrap(), "remove");
         assert!(
             outcome
                 .events
                 .iter()
                 .any(|event| event.data["decision"] == "timeout")
+        );
+    }
+
+    #[test]
+    fn health_failure_evidence_is_secret_free_and_event_history_is_bounded() {
+        let mut instance = MockRuntime::instance("container-health");
+        let secret = "healthcheck-output-must-not-be-durable".repeat(32);
+        instance.health = format!("STARTING {secret}");
+        let decision = evaluate_health_gate(&instance, &HealthGatePolicy::default());
+        let observation = bounded_health_observation(1, &instance, &decision);
+        let serialized = serde_json::to_string(&observation).unwrap();
+        let probe_event = health_probe_event(1, 1, &observation, &decision);
+        let serialized_event = serde_json::to_string(&probe_event).unwrap();
+
+        assert_eq!(observation.health, "OTHER");
+        assert_eq!(
+            observation.probe_reason,
+            "Docker returned an unrecognized health status"
+        );
+        assert!(!serialized.contains(&secret));
+        assert!(!serialized_event.contains(&secret));
+        assert!(observation.health.chars().count() <= MAX_HEALTH_STATUS_CHARS);
+        assert!(observation.probe_reason.chars().count() <= MAX_HEALTH_REASON_CHARS);
+
+        let mut events = Vec::new();
+        for sequence in 0..(MAX_HEALTH_GATE_EVENTS as u64 + 10) {
+            push_bounded_health_event(
+                &mut events,
+                health_control_event(
+                    sequence,
+                    "pending",
+                    "INFO",
+                    "bounded health evidence",
+                    sequence as u32,
+                    Some(&observation),
+                ),
+            );
+        }
+        assert_eq!(events.len(), MAX_HEALTH_GATE_EVENTS);
+        assert_eq!(events.first().unwrap().sequence, 10);
+        assert_eq!(
+            events.last().unwrap().sequence,
+            MAX_HEALTH_GATE_EVENTS as u64 + 9
         );
     }
 
@@ -3960,6 +6027,31 @@ mod tests {
             ]
         );
         assert_eq!(outcome.events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn topology_gated_replacement_preserves_old_container_after_new_health() {
+        let runtime = Arc::new(ReplacementRuntime::new(
+            &["HEALTHY"],
+            ReplacementFailures::default(),
+        ));
+        let executor = JobExecutor::from_shared(Arc::clone(&runtime));
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = replacement_job(JobKind::Upgrade, HealthGatePolicy::default());
+        job.payload["preserve_old_until_topology_cutover"] = json!(true);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Succeeded);
+        assert_eq!(outcome.result["old_container_preserved"], json!(true));
+        assert_eq!(outcome.result["topology_cutover_pending"], json!(true));
+        assert!(
+            !runtime
+                .calls()
+                .iter()
+                .any(|call| call == "remove:container-old")
+        );
     }
 
     #[tokio::test]

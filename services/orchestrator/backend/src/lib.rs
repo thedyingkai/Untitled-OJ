@@ -32,6 +32,7 @@ mod topology_api;
 mod topology_provider;
 mod topology_worker;
 mod ui_layout;
+mod workload_credentials;
 
 // 保持内部模块既有的 crate 根路径可用。
 pub(crate) use http::*;

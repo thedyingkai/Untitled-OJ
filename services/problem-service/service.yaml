@@ -21,14 +21,10 @@ endpoint:
 requires:
   services:
     - postgresql
-    - storage-service
   links:
     - id: postgresql
       protocol: postgres
-    - id: storage-service
-      protocol: http
-  storage:
-    - storage-service
+  storage: []
   database:
     - postgresql
   queue: []

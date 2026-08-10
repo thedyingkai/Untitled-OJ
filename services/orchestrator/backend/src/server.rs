@@ -14,7 +14,7 @@ use crate::durable::{DurableJobStore, DurableStore};
 use crate::http::{
     ApiRequest, ApiResponse, HttpStream, SECURITY_RESPONSE_HEADERS, WRITE_TIMEOUT,
     has_json_content_type, query_bool, query_value, read_http_request, requires_json_content_type,
-    write_http_response,
+    write_agent_protocol_response, write_http_response,
 };
 use crate::node_identity::{NodeIdentityService, NodePeerIdentity};
 use crate::observability::{self, Observability};
@@ -27,6 +27,7 @@ use crate::routes::{handle_api_request_with_internal_token, status_for_error};
 use crate::topology_provider::{
     HttpManagementProviderConfig, TopologyProviderConfig, TopologyProviderSaga,
 };
+use crate::workload_credentials::{HttpWorkloadTokenIssuer, WorkloadTokenIssuer};
 use crate::{agent_api, api_v1, market_api, static_site, topology_worker, ui_layout};
 use anyhow::{Context, Result, anyhow};
 use orchestrator_control_plane::{
@@ -85,6 +86,7 @@ struct ServerContext {
     legacy_api_mode: LegacyApiMode,
     observability: Arc<Observability>,
     history_retention: Option<HistoryRetentionPolicy>,
+    workload_token_issuer: Option<Arc<dyn WorkloadTokenIssuer>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -791,6 +793,8 @@ fn run_server(
         .internal_token
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty());
+    let workload_token_issuer = HttpWorkloadTokenIssuer::from_env()?
+        .map(|issuer| Arc::new(issuer) as Arc<dyn WorkloadTokenIssuer>);
     let desktop_session = options
         .desktop_bootstrap_secret
         .as_deref()
@@ -827,6 +831,7 @@ fn run_server(
         legacy_api_mode,
         observability,
         history_retention,
+        workload_token_issuer,
     });
 
     let production = matches!(&options.storage, EmbeddedStorage::Postgres { .. });
@@ -1147,6 +1152,18 @@ fn dispatch_request(
     // 所有变更请求（包括空 body）都必须声明 JSON 内容类型。空表单 POST 同样能被
     // 任意站点跨域直接发出，不能让它绕过最基本的 CSRF 门禁。
     if requires_json_content_type(&request) && !has_json_content_type(&request.headers) {
+        if agent_api::is_agent_path(&path) {
+            return write_agent_protocol_response(
+                stream,
+                ApiResponse::problem(
+                    415,
+                    "AGENT_CONTENT_TYPE_REQUIRED",
+                    "mutating Agent requests must send Content-Type: application/json",
+                    "req-agent-content-type",
+                    None,
+                ),
+            );
+        }
         return write_http_response(
             stream,
             ApiResponse::error(
@@ -1489,7 +1506,7 @@ fn dispatch_request(
             match stream.node_peer_identity() {
                 Ok(identity) => identity,
                 Err(error) => {
-                    return write_http_response(
+                    return write_agent_protocol_response(
                         stream,
                         ApiResponse::problem(
                             401,
@@ -1525,7 +1542,7 @@ fn dispatch_request(
                         == Some(secret)
                 });
             if !is_loopback || !bootstrap_matches {
-                return write_http_response(
+                return write_agent_protocol_response(
                     stream,
                     ApiResponse::problem(
                         401,
@@ -1540,13 +1557,17 @@ fn dispatch_request(
                 node_id: "desktop-local",
             }
         };
-        return write_http_response(
+        return write_agent_protocol_response(
             stream,
             agent_api::route_authenticated(
-                context.durable_store.as_ref(),
-                context.job_store.as_ref(),
-                Some(&context.artifact_store),
-                context.node_identity.as_deref(),
+                agent_api::AgentRouteContext {
+                    storage: context.durable_store.as_ref(),
+                    jobs: context.job_store.as_ref(),
+                    artifact_store: Some(&context.artifact_store),
+                    identity_service: context.node_identity.as_deref(),
+                    workload_token_issuer: context.workload_token_issuer.as_deref(),
+                    topology_provider: context.topology_provider.as_ref(),
+                },
                 caller,
                 request,
             ),
@@ -2144,6 +2165,27 @@ mod tests {
         assert!(
             agent_secret_reaches_the_authenticated_agent_protocol
                 .contains("AGENT_ENROLLMENT_TLS_REQUIRED")
+        );
+        let agent_missing_content_type = raw_request(
+            first.local_addr(),
+            "POST",
+            "/api/v1/agent/enroll",
+            &[(DESKTOP_AGENT_BOOTSTRAP_HEADER, "desktop-agent-bootstrap")],
+            "{}",
+        );
+        assert!(
+            agent_missing_content_type.starts_with("HTTP/1.1 415"),
+            "{agent_missing_content_type}"
+        );
+        assert!(
+            agent_missing_content_type
+                .contains("Content-Type: application/problem+json; charset=utf-8")
+        );
+        let agent_missing_content_type = response_body(&agent_missing_content_type);
+        assert_eq!(agent_missing_content_type["status"], 415);
+        assert_eq!(
+            agent_missing_content_type["code"],
+            "AGENT_CONTENT_TYPE_REQUIRED"
         );
         let body = response_body(&capabilities);
         let actions = body["data"]["actions"].as_array().expect("actions");

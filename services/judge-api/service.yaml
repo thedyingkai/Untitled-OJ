@@ -23,21 +23,17 @@ requires:
   services:
     - postgresql
     - redis
-    - problem-service
   links:
     - id: postgresql
       protocol: postgres
     - id: redis
       protocol: redis
-    - id: problem-service
-      protocol: http
   storage: []
   database:
     - postgresql
   queue:
     - redis
-  secrets:
-    - worker-token
+  secrets: []
 provides:
   capabilities:
     - judge.submit
@@ -66,8 +62,7 @@ security:
   allow_privileged: false
   allow_host_mount: false
   allow_arbitrary_command: false
-  required_secrets:
-    - worker-token
+  required_secrets: []
   sandbox: {}
   network_policy:
     egress_links_only: true

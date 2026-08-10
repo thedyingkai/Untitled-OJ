@@ -19,6 +19,39 @@ use time::OffsetDateTime;
 
 const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 10_000;
 
+const NODE_FORBIDDEN_MANAGEMENT_ENV: &[&str] = &[
+    "ORCHESTRATOR_AUTH_ADMIN_ENDPOINT",
+    "ORCHESTRATOR_AUTH_ADMIN_ORIGIN",
+    "ORCHESTRATOR_AUTH_ADMIN_TOKEN",
+    "AUTH_SERVICE_ENDPOINT",
+    "AUTH_SERVICE_ADMIN_TOKEN",
+    "ORCHESTRATOR_GATEWAY_ADMIN_ENDPOINT",
+    "ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN",
+    "ORCHESTRATOR_GATEWAY_ADMIN_TOKEN",
+    "GATEWAY_ENDPOINT",
+    "GATEWAY_ADMIN_TOKEN",
+    "ORCHESTRATOR_GATEWAY_TOKEN",
+    "ORCHESTRATOR_RELEASE_PROVISIONER_ENDPOINT",
+    "ORCHESTRATOR_RELEASE_PROVISIONER_ORIGIN",
+    "ORCHESTRATOR_RELEASE_PROVISIONER_TOKEN",
+    "ORCHESTRATOR_API_REGISTRIES_JSON",
+    "ORCHESTRATOR_API_REGISTRIES_FILE",
+];
+
+/// Defines which side of the trust boundary may execute release-management
+/// providers. Production Node Agents are always `ManagedNode`: Auth, Gateway,
+/// and generic management providers belong to the control plane and their
+/// credentials must never enter the Agent process. The former external API
+/// Registry provider is retired and rejected even in legacy mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PipelineProviderMode {
+    #[default]
+    ManagedNode,
+    /// Compatibility escape hatch for the old local Compose workflow. The
+    /// CLI exposes it only together with `OJOS_ENVIRONMENT=development`.
+    LegacyDevelopment,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineProviderConfig {
     pub auth_endpoint: Option<String>,
@@ -32,7 +65,35 @@ pub struct PipelineProviderConfig {
 }
 
 impl PipelineProviderConfig {
-    pub fn from_env() -> Self {
+    /// Safe default for every managed Agent, including Desktop's loopback
+    /// Agent. This constructor intentionally performs no management-secret
+    /// environment lookups.
+    pub fn managed_node() -> Self {
+        Self {
+            timeout_ms: DEFAULT_PROVIDER_TIMEOUT_MS,
+            ..Self::default()
+        }
+    }
+
+    /// Reads only Node-local materialization settings. Management endpoints
+    /// and credentials are intentionally not part of this lookup surface.
+    fn managed_node_from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        Self {
+            secret_directory: first_value(&mut lookup, &["ORCHESTRATOR_SECRET_DIRECTORY"])
+                .map(PathBuf::from),
+            timeout_ms: lookup("ORCHESTRATOR_PIPELINE_PROVIDER_TIMEOUT_MS")
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(DEFAULT_PROVIDER_TIMEOUT_MS)
+                .clamp(100, 60_000),
+            ..Self::default()
+        }
+    }
+
+    fn managed_node_from_env() -> Self {
+        Self::managed_node_from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_legacy_development_env() -> Self {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
@@ -117,6 +178,54 @@ pub struct RedisConnectionConfig {
     pub url: String,
 }
 
+/// Loads only the Agent-local Redis connection map needed for event context
+/// materialization. Callers receive URLs in-process; only identifier keys are
+/// ever published in runtime facts or persisted by the control plane.
+pub fn event_connection_urls_from_env() -> Result<BTreeMap<String, String>, PipelineProviderError> {
+    let configured: BTreeMap<String, RedisConnectionConfig> = json_env_or_file(
+        "ORCHESTRATOR_REDIS_CONNECTIONS_JSON",
+        "ORCHESTRATOR_REDIS_CONNECTIONS_FILE",
+    )?
+    .unwrap_or_default();
+    validated_event_connection_urls(configured)
+}
+
+fn validated_event_connection_urls(
+    configured: BTreeMap<String, RedisConnectionConfig>,
+) -> Result<BTreeMap<String, String>, PipelineProviderError> {
+    if configured.len() > 64 {
+        return Err(PipelineProviderError::Configuration(
+            "Agent-local Redis connection map exceeds 64 entries".to_string(),
+        ));
+    }
+    let mut result = BTreeMap::new();
+    for (id, connection) in configured {
+        let valid_id = !id.is_empty()
+            && id.len() <= 128
+            && id.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphanumeric()
+                    || (index > 0 && matches!(byte, b'.' | b'_' | b':' | b'-'))
+            });
+        if !valid_id {
+            return Err(PipelineProviderError::Configuration(
+                "Agent-local Redis connection ID is not a stable identifier".to_string(),
+            ));
+        }
+        if connection.url.is_empty()
+            || connection.url.len() > 64 * 1024
+            || connection.url.chars().any(char::is_whitespace)
+            || !(connection.url.starts_with("redis://") || connection.url.starts_with("rediss://"))
+            || redis::Client::open(connection.url.as_str()).is_err()
+        {
+            return Err(PipelineProviderError::Configuration(format!(
+                "Agent-local Redis connection {id} is not a valid Redis URL"
+            )));
+        }
+        result.insert(id, connection.url);
+    }
+    Ok(result)
+}
+
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StorageConnectionConfig {
@@ -148,21 +257,14 @@ pub struct FrontendAssetStoreConfig {
     pub root: PathBuf,
 }
 
-#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ApiRegistryConnectionConfig {
-    pub endpoint: String,
-    pub token: String,
-}
-
 #[derive(Clone)]
 pub struct BuiltInPipelineProviderConfig {
     pub state_database: PathBuf,
     pub redis_connections: BTreeMap<String, RedisConnectionConfig>,
     pub storage_connections: BTreeMap<String, StorageConnectionConfig>,
     pub frontend_asset_stores: BTreeMap<String, FrontendAssetStoreConfig>,
-    pub api_registries: BTreeMap<String, ApiRegistryConnectionConfig>,
     pub allow_external_provisioner_fallback: bool,
+    pub mode: PipelineProviderMode,
 }
 
 impl BuiltInPipelineProviderConfig {
@@ -172,8 +274,8 @@ impl BuiltInPipelineProviderConfig {
             redis_connections: BTreeMap::new(),
             storage_connections: BTreeMap::new(),
             frontend_asset_stores: BTreeMap::new(),
-            api_registries: BTreeMap::new(),
             allow_external_provisioner_fallback: false,
+            mode: PipelineProviderMode::ManagedNode,
         }
     }
 
@@ -196,11 +298,15 @@ impl BuiltInPipelineProviderConfig {
             "ORCHESTRATOR_FRONTEND_ASSET_STORES_FILE",
         )?
         .unwrap_or_default();
-        config.api_registries = json_env_or_file(
-            "ORCHESTRATOR_API_REGISTRIES_JSON",
-            "ORCHESTRATOR_API_REGISTRIES_FILE",
-        )?
-        .unwrap_or_default();
+        Ok(config)
+    }
+
+    fn from_legacy_development_env_with_state_database(
+        state_database: impl Into<PathBuf>,
+    ) -> Result<Self, PipelineProviderError> {
+        require_legacy_development_environment()?;
+        let mut config = Self::from_env_with_state_database_unchecked(state_database)?;
+        config.mode = PipelineProviderMode::LegacyDevelopment;
         config.allow_external_provisioner_fallback =
             first_env(&["ORCHESTRATOR_ENABLE_EXTERNAL_PROVISIONER_FALLBACK"]).is_some_and(
                 |value| {
@@ -211,6 +317,67 @@ impl BuiltInPipelineProviderConfig {
                 },
             );
         Ok(config)
+    }
+
+    fn from_env_with_state_database_unchecked(
+        state_database: impl Into<PathBuf>,
+    ) -> Result<Self, PipelineProviderError> {
+        let mut config = Self::new(state_database);
+        config.redis_connections = json_env_or_file(
+            "ORCHESTRATOR_REDIS_CONNECTIONS_JSON",
+            "ORCHESTRATOR_REDIS_CONNECTIONS_FILE",
+        )?
+        .unwrap_or_default();
+        config.storage_connections = json_env_or_file(
+            "ORCHESTRATOR_STORAGE_CONNECTIONS_JSON",
+            "ORCHESTRATOR_STORAGE_CONNECTIONS_FILE",
+        )?
+        .unwrap_or_default();
+        config.frontend_asset_stores = json_env_or_file(
+            "ORCHESTRATOR_FRONTEND_ASSET_STORES_JSON",
+            "ORCHESTRATOR_FRONTEND_ASSET_STORES_FILE",
+        )?
+        .unwrap_or_default();
+        Ok(config)
+    }
+}
+
+fn reject_node_management_environment() -> Result<(), PipelineProviderError> {
+    let configured =
+        configured_node_management_environment(|name| std::env::var_os(name).is_some());
+    if configured.is_empty() {
+        Ok(())
+    } else {
+        Err(PipelineProviderError::Configuration(format!(
+            "managed Node Agent forbids control-plane management environment variables: {}; remove them from the Agent service",
+            configured.join(", ")
+        )))
+    }
+}
+
+fn configured_node_management_environment(
+    mut is_present: impl FnMut(&str) -> bool,
+) -> Vec<&'static str> {
+    NODE_FORBIDDEN_MANAGEMENT_ENV
+        .iter()
+        .copied()
+        .filter(|name| is_present(name))
+        .collect()
+}
+
+fn require_legacy_development_environment() -> Result<(), PipelineProviderError> {
+    let environment = std::env::var("OJOS_ENVIRONMENT").unwrap_or_default();
+    validate_legacy_development_environment(&environment)
+}
+
+fn validate_legacy_development_environment(environment: &str) -> Result<(), PipelineProviderError> {
+    if environment.trim().eq_ignore_ascii_case("development") {
+        Ok(())
+    } else {
+        Err(PipelineProviderError::Configuration(
+            "legacy release providers require both --legacy-release-providers and OJOS_ENVIRONMENT=development"
+                .to_string(),
+        ))
     }
 }
 
@@ -258,6 +425,10 @@ pub enum PipelineProviderError {
     Configuration(String),
     #[error("pipeline provider {0} is not configured on this Node")]
     Unconfigured(&'static str),
+    #[error(
+        "pipeline provider {0} is control-plane-only for managed Service Contract v2 deployments"
+    )]
+    ControlPlaneOnly(&'static str),
     #[error("pipeline provider rejected the request with HTTP {status}: {body}")]
     Rejected { status: u16, body: String },
     #[error("pipeline provider request outcome is ambiguous: {0}")]
@@ -505,8 +676,34 @@ impl BuiltInReleasePipelineProvider {
         state_database: impl Into<PathBuf>,
     ) -> Result<Self, PipelineProviderError> {
         Self::new(
-            PipelineProviderConfig::from_env(),
+            PipelineProviderConfig::managed_node_from_env(),
             BuiltInPipelineProviderConfig::from_env_with_state_database(state_database)?,
+        )
+    }
+
+    /// Managed remote-Agent constructor. It refuses to start when deployment
+    /// automation accidentally injects a control-plane management variable,
+    /// while the Desktop loopback Agent may use the safe constructor above to
+    /// ignore management variables owned by its colocated control plane.
+    pub fn from_remote_agent_env_with_state_database(
+        state_database: impl Into<PathBuf>,
+    ) -> Result<Self, PipelineProviderError> {
+        reject_node_management_environment()?;
+        Self::from_env_with_state_database(state_database)
+    }
+
+    /// Explicit compatibility constructor for old local Compose development.
+    /// Production callers must use `from_env_with_state_database`.
+    pub fn from_legacy_development_env_with_state_database(
+        state_database: impl Into<PathBuf>,
+    ) -> Result<Self, PipelineProviderError> {
+        // Check the environment class before looking up even one credential.
+        require_legacy_development_environment()?;
+        Self::new(
+            PipelineProviderConfig::from_legacy_development_env(),
+            BuiltInPipelineProviderConfig::from_legacy_development_env_with_state_database(
+                state_database,
+            )?,
         )
     }
 }
@@ -749,15 +946,6 @@ fn validate_builtin_config(
         validate_provider_id("Frontend asset store", id)?;
         preflight_directory(&store.root)?;
     }
-    for (id, registry) in &config.api_registries {
-        validate_provider_id("API registry", id)?;
-        validate_http_endpoint("API registry", id, &registry.endpoint)?;
-        if registry.token.trim().is_empty() {
-            return Err(PipelineProviderError::Configuration(format!(
-                "API registry {id} requires a token"
-            )));
-        }
-    }
     Ok(())
 }
 
@@ -863,7 +1051,7 @@ impl HttpReleasePipelineProvider {
     }
 
     pub fn from_env() -> Self {
-        Self::new(PipelineProviderConfig::from_env())
+        Self::new(PipelineProviderConfig::managed_node())
     }
 
     async fn require_success(
@@ -892,10 +1080,16 @@ impl ReleasePipelineProvider for BuiltInReleasePipelineProvider {
     }
 
     async fn apply_auth(&self, step: &AuthPipelineStep) -> Result<(), PipelineProviderError> {
+        if self.config.mode == PipelineProviderMode::ManagedNode {
+            return Err(PipelineProviderError::ControlPlaneOnly("auth"));
+        }
         self.http.apply_auth(step).await
     }
 
     async fn compensate_auth(&self, service_name: &str) -> Result<(), PipelineProviderError> {
+        if self.config.mode == PipelineProviderMode::ManagedNode {
+            return Err(PipelineProviderError::ControlPlaneOnly("auth"));
+        }
         self.http.compensate_auth(service_name).await
     }
 
@@ -904,6 +1098,9 @@ impl ReleasePipelineProvider for BuiltInReleasePipelineProvider {
         desired: Option<&AuthPipelineStep>,
         previous: Option<&AuthPipelineStep>,
     ) -> Result<(), PipelineProviderError> {
+        if self.config.mode == PipelineProviderMode::ManagedNode {
+            return Err(PipelineProviderError::ControlPlaneOnly("auth"));
+        }
         self.http.restore_auth(desired, previous).await
     }
 
@@ -911,6 +1108,9 @@ impl ReleasePipelineProvider for BuiltInReleasePipelineProvider {
         &self,
         step: &GatewayPipelineStep,
     ) -> Result<(), PipelineProviderError> {
+        if self.config.mode == PipelineProviderMode::ManagedNode {
+            return Err(PipelineProviderError::ControlPlaneOnly("gateway"));
+        }
         self.http.publish_gateway(step).await
     }
 
@@ -920,6 +1120,9 @@ impl ReleasePipelineProvider for BuiltInReleasePipelineProvider {
         previous: Option<&GatewayPipelineStep>,
         restore_revision_id: &str,
     ) -> Result<(), PipelineProviderError> {
+        if self.config.mode == PipelineProviderMode::ManagedNode {
+            return Err(PipelineProviderError::ControlPlaneOnly("gateway"));
+        }
         self.http
             .restore_gateway(desired, previous, restore_revision_id)
             .await
@@ -929,6 +1132,11 @@ impl ReleasePipelineProvider for BuiltInReleasePipelineProvider {
         &self,
         step: &TypedProvisionerStep,
     ) -> Result<(), PipelineProviderError> {
+        if self.config.mode == PipelineProviderMode::ManagedNode
+            && matches!(step, TypedProvisionerStep::ApiRegistry { .. })
+        {
+            return Err(PipelineProviderError::ControlPlaneOnly("api_registry"));
+        }
         let result = self.apply_builtin_provisioner(step).await;
         if matches!(result, Err(PipelineProviderError::Unconfigured(_)))
             && self.config.allow_external_provisioner_fallback
@@ -944,6 +1152,11 @@ impl ReleasePipelineProvider for BuiltInReleasePipelineProvider {
         &self,
         step: &TypedProvisionerStep,
     ) -> Result<(), PipelineProviderError> {
+        if self.config.mode == PipelineProviderMode::ManagedNode
+            && matches!(step, TypedProvisionerStep::ApiRegistry { .. })
+        {
+            return Err(PipelineProviderError::ControlPlaneOnly("api_registry"));
+        }
         let result = self.compensate_builtin_provisioner(step).await;
         if matches!(result, Err(PipelineProviderError::Unconfigured(_)))
             && self.config.allow_external_provisioner_fallback
@@ -975,15 +1188,13 @@ impl ReleasePipelineProvider for BuiltInReleasePipelineProvider {
                 status: 422,
                 body: "provider restore requires a desired or previous state".to_string(),
             })?;
+        if self.config.mode == PipelineProviderMode::ManagedNode
+            && matches!(reference, TypedProvisionerStep::ApiRegistry { .. })
+        {
+            return Err(PipelineProviderError::ControlPlaneOnly("api_registry"));
+        }
         if matches!(reference, TypedProvisionerStep::ApiRegistry { .. }) {
-            let result = self.restore_api_registry(desired, previous).await;
-            if matches!(result, Err(PipelineProviderError::Unconfigured(_)))
-                && self.config.allow_external_provisioner_fallback
-                && self.http.config.provisioner_configured()
-            {
-                return self.http.restore_provisioner(desired, previous).await;
-            }
-            return result;
+            return Err(PipelineProviderError::ControlPlaneOnly("api_registry"));
         }
         // Built-in Redis namespaces and Storage paths are durable resources;
         // restoring a revision reconciles the old declaration in place instead
@@ -1031,7 +1242,7 @@ impl BuiltInReleasePipelineProvider {
                 metadata_sha256,
             ),
             TypedProvisionerStep::ApiRegistry { .. } => {
-                self.api_registry_request("apply", Some(step), None).await
+                Err(PipelineProviderError::ControlPlaneOnly("api_registry"))
             }
         }
     }
@@ -1057,7 +1268,7 @@ impl BuiltInReleasePipelineProvider {
                 ..
             } => self.compensate_frontend(service_name, asset_store_id, version, metadata_sha256),
             TypedProvisionerStep::ApiRegistry { .. } => {
-                self.api_registry_request("remove", Some(step), None).await
+                Err(PipelineProviderError::ControlPlaneOnly("api_registry"))
             }
         }
     }
@@ -1437,82 +1648,6 @@ impl BuiltInReleasePipelineProvider {
             && state.get("metadata_sha256").and_then(Value::as_str) == Some(metadata_sha256)
         {
             self.state.delete("frontend", &key)?;
-        }
-        Ok(())
-    }
-
-    async fn restore_api_registry(
-        &self,
-        desired: Option<&TypedProvisionerStep>,
-        previous: Option<&TypedProvisionerStep>,
-    ) -> Result<(), PipelineProviderError> {
-        self.api_registry_request("restore", desired, previous)
-            .await
-    }
-
-    async fn api_registry_request(
-        &self,
-        action: &str,
-        desired: Option<&TypedProvisionerStep>,
-        previous: Option<&TypedProvisionerStep>,
-    ) -> Result<(), PipelineProviderError> {
-        let reference = desired
-            .or(previous)
-            .ok_or_else(|| PipelineProviderError::Rejected {
-                status: 422,
-                body: "API registry request requires desired or previous state".to_string(),
-            })?;
-        let (service_name, registry_id) = match reference {
-            TypedProvisionerStep::ApiRegistry {
-                service_name,
-                registry_id,
-                ..
-            } => (service_name, registry_id),
-            _ => {
-                return Err(PipelineProviderError::Rejected {
-                    status: 422,
-                    body: "API registry request received another provider type".to_string(),
-                });
-            }
-        };
-        let registry = self
-            .config
-            .api_registries
-            .get(registry_id)
-            .ok_or(PipelineProviderError::Unconfigured("api_registry"))?;
-        let url = format!(
-            "{}/api/v1/registry/releases:{action}",
-            registry.endpoint.trim_end_matches('/')
-        );
-        let body = json!({
-            "service_name": service_name,
-            "registry_id": registry_id,
-            "desired": desired,
-            "previous": previous,
-        });
-        let idempotency = format!(
-            "provider-{}",
-            hex_sha256(serde_json::to_vec(&body).unwrap_or_default())
-        );
-        HttpReleasePipelineProvider::require_success(
-            self.client
-                .post(url)
-                .bearer_auth(&registry.token)
-                .header("Idempotency-Key", idempotency)
-                .json(&body),
-        )
-        .await?;
-        if action == "remove" {
-            self.state.delete(
-                "api_registry",
-                &provider_resource_key(service_name, registry_id),
-            )?;
-        } else {
-            self.state.put(
-                "api_registry",
-                &provider_resource_key(service_name, registry_id),
-                &body,
-            )?;
         }
         Ok(())
     }
@@ -1986,9 +2121,7 @@ fn expand_environment_template(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_runtime::{
-        ApiSurfaceSpec, RedisNamespaceSpec, StorageResourceSpec, TypedProvisionerStep,
-    };
+    use orchestrator_runtime::{RedisNamespaceSpec, StorageResourceSpec, TypedProvisionerStep};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
@@ -2002,7 +2135,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_origin_aliases_are_supported_and_endpoint_has_priority() {
+    fn legacy_admin_origin_aliases_are_supported_and_endpoint_has_priority() {
         let values = BTreeMap::from([
             (
                 "ORCHESTRATOR_AUTH_ADMIN_ENDPOINT".to_string(),
@@ -2044,6 +2177,140 @@ mod tests {
         assert_eq!(
             origin_only.gateway_endpoint.as_deref(),
             Some("https://gateway-origin.example")
+        );
+    }
+
+    #[test]
+    fn managed_node_detects_management_credentials_without_reading_their_values() {
+        let present = BTreeMap::from([
+            ("ORCHESTRATOR_AUTH_ADMIN_TOKEN", "must-not-be-read"),
+            ("ORCHESTRATOR_API_REGISTRIES_FILE", "must-not-be-opened"),
+            ("UNRELATED", "allowed"),
+        ]);
+        assert_eq!(
+            configured_node_management_environment(|name| present.contains_key(name)),
+            vec![
+                "ORCHESTRATOR_AUTH_ADMIN_TOKEN",
+                "ORCHESTRATOR_API_REGISTRIES_FILE"
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_node_reads_only_local_materialization_settings() {
+        let values = BTreeMap::from([
+            (
+                "ORCHESTRATOR_SECRET_DIRECTORY".to_string(),
+                " /var/lib/ojos-agent/secrets ".to_string(),
+            ),
+            (
+                "ORCHESTRATOR_PIPELINE_PROVIDER_TIMEOUT_MS".to_string(),
+                "7500".to_string(),
+            ),
+            (
+                "ORCHESTRATOR_AUTH_ADMIN_TOKEN".to_string(),
+                "must-not-be-read".to_string(),
+            ),
+        ]);
+        let mut requested = Vec::new();
+        let configured = PipelineProviderConfig::managed_node_from_lookup(|name| {
+            requested.push(name.to_string());
+            values.get(name).cloned()
+        });
+
+        assert_eq!(
+            configured.secret_directory,
+            Some(PathBuf::from("/var/lib/ojos-agent/secrets"))
+        );
+        assert_eq!(configured.timeout_ms, 7500);
+        assert!(configured.auth_endpoint.is_none());
+        assert!(configured.auth_admin_token.is_none());
+        assert!(!requested.iter().any(|name| name.contains("ADMIN")));
+    }
+
+    #[test]
+    fn event_connection_configuration_validates_locally_and_returns_only_explicit_ids() {
+        let secret_url = "rediss://event-user:event-secret@redis.internal:6380/4";
+        let resolved = validated_event_connection_urls(BTreeMap::from([(
+            "shared-events".to_string(),
+            RedisConnectionConfig {
+                url: secret_url.to_string(),
+            },
+        )]))
+        .unwrap();
+        assert_eq!(
+            resolved.keys().cloned().collect::<Vec<_>>(),
+            vec!["shared-events".to_string()]
+        );
+        assert_eq!(resolved["shared-events"], secret_url);
+
+        let invalid_id = validated_event_connection_urls(BTreeMap::from([(
+            "redis://not-an-id".to_string(),
+            RedisConnectionConfig {
+                url: secret_url.to_string(),
+            },
+        )]))
+        .unwrap_err();
+        assert!(!invalid_id.to_string().contains("event-secret"));
+
+        let invalid_url = validated_event_connection_urls(BTreeMap::from([(
+            "shared-events".to_string(),
+            RedisConnectionConfig {
+                url: "not-a-redis-url:event-secret".to_string(),
+            },
+        )]))
+        .unwrap_err();
+        assert!(!invalid_url.to_string().contains("event-secret"));
+    }
+
+    #[test]
+    fn legacy_management_mode_is_rejected_outside_explicit_development() {
+        assert!(validate_legacy_development_environment("development").is_ok());
+        for environment in ["", "production", "staging", "legacy"] {
+            assert_eq!(
+                validate_legacy_development_environment(environment).unwrap_err(),
+                PipelineProviderError::Configuration(
+                    "legacy release providers require both --legacy-release-providers and OJOS_ENVIRONMENT=development"
+                        .to_string(),
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_node_never_executes_control_plane_management_providers() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider = provider(provider_config(&directory));
+        let auth = AuthPipelineStep {
+            service_name: "service-api".to_string(),
+            permissions: vec![],
+            service_identity: None,
+        };
+        assert_eq!(
+            provider.apply_auth(&auth).await.unwrap_err(),
+            PipelineProviderError::ControlPlaneOnly("auth")
+        );
+
+        let gateway = GatewayPipelineStep {
+            operation_id: "operation-1".to_string(),
+            service_name: "service-api".to_string(),
+            node_id: "node-a".to_string(),
+            routes: vec![],
+        };
+        assert_eq!(
+            provider.publish_gateway(&gateway).await.unwrap_err(),
+            PipelineProviderError::ControlPlaneOnly("gateway")
+        );
+
+        let registry = TypedProvisionerStep::ApiRegistry {
+            service_name: "service-api".to_string(),
+            registry_id: "registry-main".to_string(),
+            apis: vec![],
+            required_apis: vec![],
+        };
+        assert_eq!(
+            provider.apply_provisioner(&registry).await.unwrap_err(),
+            PipelineProviderError::ControlPlaneOnly("api_registry")
         );
     }
 
@@ -2237,43 +2504,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_registry_uses_its_typed_control_interface() {
-        let (endpoint, server) = spawn_http_sequence(vec![204, 204]);
+    async fn retired_api_registry_step_has_no_external_execution_path() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = provider_config(&directory);
-        config.api_registries.insert(
-            "registry-main".to_string(),
-            ApiRegistryConnectionConfig {
-                endpoint,
-                token: "registry-token".to_string(),
-            },
-        );
+        config.mode = PipelineProviderMode::LegacyDevelopment;
         let provider = provider(config);
         let step = TypedProvisionerStep::ApiRegistry {
             service_name: "service-api".to_string(),
             registry_id: "registry-main".to_string(),
-            apis: vec![ApiSurfaceSpec {
-                api_id: "service.read".to_string(),
-                protocol: "http".to_string(),
-                path_prefix: "/api".to_string(),
-                methods: vec!["GET".to_string()],
-                visibility: "global".to_string(),
-                auth_mode: "user".to_string(),
-                permission: "service.read".to_string(),
-                version: "1".to_string(),
-            }],
+            apis: vec![],
             required_apis: vec![],
         };
-        provider.apply_provisioner(&step).await.unwrap();
-        provider.compensate_provisioner(&step).await.unwrap();
-        let requests = server.join().unwrap();
-        assert!(requests[0].starts_with("POST /api/v1/registry/releases:apply HTTP/1.1"));
-        assert!(requests[1].starts_with("POST /api/v1/registry/releases:remove HTTP/1.1"));
-        assert!(requests.iter().all(|request| {
-            request
-                .to_ascii_lowercase()
-                .contains("authorization: bearer registry-token")
-        }));
+        assert_eq!(
+            provider.apply_provisioner(&step).await.unwrap_err(),
+            PipelineProviderError::ControlPlaneOnly("api_registry")
+        );
+        assert_eq!(
+            provider.compensate_provisioner(&step).await.unwrap_err(),
+            PipelineProviderError::ControlPlaneOnly("api_registry")
+        );
+        assert_eq!(
+            provider
+                .restore_provisioner(Some(&step), None)
+                .await
+                .unwrap_err(),
+            PipelineProviderError::ControlPlaneOnly("api_registry")
+        );
     }
 
     fn spawn_http_sequence(statuses: Vec<u16>) -> (String, thread::JoinHandle<Vec<String>>) {

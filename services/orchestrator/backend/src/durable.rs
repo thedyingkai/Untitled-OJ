@@ -7,25 +7,30 @@
 
 use orchestrator_control_plane::{
     ClaimRequest, CompleteRequest, DurableOperation, HeartbeatRequest, Job, JobError, JobEvent,
-    JobStore, NewJob, OperationRepository, OperationStoreError,
+    JobStore, NewJob, OperationRepository, OperationStoreError, ResolveExpiredSuccessRequest,
 };
 use orchestrator_legacy::{
-    NodeRecord, OrchestratorStore, ServiceReleaseManifest, TopologyRevision, TopologySpec,
-    TopologyStatus, release_supports_link_probe_v1, validate_service_release,
+    ApiBindingState, NodeRecord, OrchestratorStore, ServiceReleaseContract, TopologyEndpointSpec,
+    TopologyRevision, TopologySpec, TopologyStatus, api_version_matches,
+    release_supports_link_probe_v1, validate_service_release,
 };
 use orchestrator_storage::{
-    AuditRecord, CertificateActivation, CertificateRotation, ControlPlaneAnomalyCounters,
-    EnrollmentLookup, EnrollmentRedemption, HistoryRetentionReport, IdempotencyBegin,
-    JobMetricsSnapshot, NewAuditRecord, NewNodeCertificate, NodeCertificateRecord,
-    NodeEnrollmentCode, PostgresError, PostgresJobStore, PostgresOperationStore,
-    PostgresOrchestratorStore, SqliteJobStore, SqliteOperationStore, SqliteOrchestratorStore,
-    StorageError, StoredIdempotentResponse, StoredRuntimeInstance, TopologyApplyOutcome,
-    TopologyHeads,
+    ApiBinding, AuditRecord, CertificateActivation, CertificateRotation,
+    ControlPlaneAnomalyCounters, EnrollmentLookup, EnrollmentRedemption, HistoryRetentionReport,
+    IdempotencyBegin, JobMetricsSnapshot, NewAuditRecord, NewNodeCertificate,
+    NodeCertificateRecord, NodeEnrollmentCode, PostgresError, PostgresJobStore,
+    PostgresOperationStore, PostgresOrchestratorStore, SqliteJobStore, SqliteOperationStore,
+    SqliteOrchestratorStore, StorageError, StoredIdempotentResponse, StoredNodeRuntimeFacts,
+    StoredRuntimeInstance, TopologyApplyOutcome, TopologyHeads,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
+
+pub(crate) const MANAGED_RUNTIME_REPORT_STALE_MS: i64 = 60_000;
+pub(crate) const EXTERNAL_RUNTIME_PROBE_STALE_MS: i64 = 60_000;
 
 #[derive(Debug, Clone)]
 pub(crate) enum DurableStore {
@@ -34,6 +39,26 @@ pub(crate) enum DurableStore {
 }
 
 impl DurableStore {
+    pub(crate) fn service_release_contract(
+        &self,
+        service_id: &str,
+        version: &str,
+    ) -> Result<Option<ServiceReleaseContract>, DurableError> {
+        let releases = match self {
+            Self::Sqlite(store) => store.list_service_releases(),
+            Self::Postgres(store) => store.list_service_releases(),
+        }
+        .map_err(|error| DurableError::Storage(error.to_string()))?;
+        releases
+            .into_iter()
+            .find(|release| release.service_name == service_id && release.version == version)
+            .map(|release| {
+                ServiceReleaseContract::from_json_value(release.manifest)
+                    .map_err(|error| DurableError::Invariant(error.to_string()))
+            })
+            .transpose()
+    }
+
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Sqlite(_) => "sqlite",
@@ -229,7 +254,15 @@ impl DurableStore {
             .collect::<std::collections::BTreeMap<_, _>>();
         let mut capable_endpoints = BTreeSet::new();
         let mut release_capability_cache = BTreeMap::<(&str, &str), Result<bool, String>>::new();
-        for link in spec.links.iter().filter(|link| link.enabled) {
+        // API-bound Links are enforced through the consumer/provider binding
+        // state machine and Gateway health. Requiring the legacy inbound
+        // link-probe endpoint as well would make non-listening consumers (for
+        // example judge-worker) impossible to connect.
+        for link in spec
+            .links
+            .iter()
+            .filter(|link| link.enabled && link.api_bindings.is_empty())
+        {
             let service_id = endpoint_services
                 .get(link.source_endpoint.as_str())
                 .ok_or_else(|| {
@@ -265,9 +298,10 @@ impl DurableStore {
                     let release = releases_by_identity
                         .get(&(*service_id, release_version))
                         .ok_or_else(|| "the exact release record is missing".to_string())?;
-                    let manifest: ServiceReleaseManifest =
-                        serde_json::from_value(release.manifest.clone())
-                            .map_err(|error| format!("release manifest is invalid: {error}"))?;
+                    let manifest =
+                        ServiceReleaseContract::from_json_value(release.manifest.clone())
+                            .map_err(|error| format!("release manifest is invalid: {error}"))?
+                            .release;
                     validate_service_release(&manifest)
                         .map_err(|error| format!("release manifest is invalid: {error}"))?;
                     if manifest.service_name.as_str() != *service_id
@@ -295,6 +329,350 @@ impl DurableStore {
             capable_endpoints.insert(link.source_endpoint.clone());
         }
         Ok(capable_endpoints)
+    }
+
+    pub(crate) fn validate_topology_api_bindings(
+        &self,
+        spec: &TopologySpec,
+    ) -> Result<(), TopologyApiBindingError> {
+        if spec.links.iter().all(|link| link.api_bindings.is_empty()) {
+            return Ok(());
+        }
+        let runtime_instances = self
+            .runtime_instances(None)
+            .map_err(|error| TopologyApiBindingError::Storage(error.to_string()))?;
+        let releases = match self {
+            Self::Sqlite(store) => store.list_service_releases(),
+            Self::Postgres(store) => store.list_service_releases(),
+        }
+        .map_err(|error| TopologyApiBindingError::Storage(error.to_string()))?;
+        let mut contracts = BTreeMap::new();
+        for release in releases {
+            let contract = ServiceReleaseContract::from_json_value(release.manifest.clone())
+                .map_err(|error| {
+                    TopologyApiBindingError::Contract(format!(
+                        "release {}@{} has invalid Service Contract: {error}",
+                        release.service_name, release.version
+                    ))
+                })?;
+            contracts.insert((release.service_name, release.version), contract);
+        }
+        let endpoint_specs = spec
+            .endpoints
+            .iter()
+            .map(|endpoint| (endpoint.endpoint.as_str(), endpoint))
+            .collect::<BTreeMap<_, _>>();
+        for link in spec
+            .links
+            .iter()
+            .filter(|link| link.enabled && !link.api_bindings.is_empty())
+        {
+            let source = exact_runtime_for_topology_endpoint(
+                &runtime_instances,
+                endpoint_specs[link.source_endpoint.as_str()],
+            )?;
+            let target = exact_runtime_for_topology_endpoint(
+                &runtime_instances,
+                endpoint_specs[link.target_endpoint.as_str()],
+            )?;
+            ensure_running_healthy_runtime(self, source, "consumer")?;
+            ensure_running_healthy_runtime(self, target, "provider")?;
+            let source_contract = contracts
+                .get(&(
+                    source.instance.service_id.clone(),
+                    source.instance.release_version.clone(),
+                ))
+                .ok_or_else(|| {
+                    TopologyApiBindingError::Contract(format!(
+                        "consumer deployment {} has no exact registered release {}@{}",
+                        source.instance.deployment_id,
+                        source.instance.service_id,
+                        source.instance.release_version
+                    ))
+                })?;
+            let target_contract = contracts
+                .get(&(
+                    target.instance.service_id.clone(),
+                    target.instance.release_version.clone(),
+                ))
+                .ok_or_else(|| {
+                    TopologyApiBindingError::Contract(format!(
+                        "provider deployment {} has no exact registered release {}@{}",
+                        target.instance.deployment_id,
+                        target.instance.service_id,
+                        target.instance.release_version
+                    ))
+                })?;
+
+            for binding in &link.api_bindings {
+                let requirement = source_contract
+                    .requirements()
+                    .iter()
+                    .find(|requirement| requirement.binding_name() == binding.requirement_name)
+                    .ok_or_else(|| {
+                        TopologyApiBindingError::Binding(format!(
+                            "consumer release {}@{} does not require binding {}",
+                            source.instance.service_id,
+                            source.instance.release_version,
+                            binding.requirement_name
+                        ))
+                    })?;
+                if requirement.api_id() != binding.api_id {
+                    return Err(TopologyApiBindingError::Binding(format!(
+                        "binding {} API {} does not match consumer requirement {}",
+                        binding.requirement_name,
+                        binding.api_id,
+                        requirement.api_id()
+                    )));
+                }
+                if !binding.provider_deployment_id.is_empty()
+                    && binding.provider_deployment_id != target.instance.deployment_id
+                {
+                    return Err(TopologyApiBindingError::Binding(format!(
+                        "binding {} selects provider {}, but Link targets deployment {}",
+                        binding.requirement_name,
+                        binding.provider_deployment_id,
+                        target.instance.deployment_id
+                    )));
+                }
+                let version_requirement = if binding.version.trim().is_empty() {
+                    requirement.version_requirement()
+                } else {
+                    binding.version.as_str()
+                };
+                let provided = target_contract.release.apis.iter().find(|api| {
+                    api.api_id == binding.api_id
+                        && api_version_matches(version_requirement, &api.version)
+                        && api.protocol == link.protocol
+                });
+                let Some(provided) = provided else {
+                    return Err(TopologyApiBindingError::Binding(format!(
+                        "provider release {}@{} does not provide {} matching version {} and protocol {}",
+                        target.instance.service_id,
+                        target.instance.release_version,
+                        binding.api_id,
+                        version_requirement,
+                        link.protocol
+                    )));
+                };
+                if !matches!(provided.auth_mode.as_str(), "workload" | "public") {
+                    return Err(TopologyApiBindingError::Binding(format!(
+                        "provider {} API {} uses unsupported {} auth; workload consumers cannot delegate end-user identity",
+                        target.instance.deployment_id, binding.api_id, provided.auth_mode
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolves one immutable TopologySpec to the exact durable binding rows
+    /// that will be staged by the apply saga. Provider selection is entirely
+    /// explicit in the Link: this function never searches for or silently
+    /// chooses a different deployment.
+    pub(crate) fn resolve_topology_api_bindings(
+        &self,
+        spec: &TopologySpec,
+        revision_id: &str,
+        operation_id: &str,
+    ) -> Result<Vec<ApiBinding>, TopologyApiBindingError> {
+        self.validate_topology_api_bindings(spec)?;
+        let runtime_instances = self
+            .runtime_instances(None)
+            .map_err(|error| TopologyApiBindingError::Storage(error.to_string()))?;
+        let releases = match self {
+            Self::Sqlite(store) => store.list_service_releases(),
+            Self::Postgres(store) => store.list_service_releases(),
+        }
+        .map_err(|error| TopologyApiBindingError::Storage(error.to_string()))?;
+        let mut contracts = BTreeMap::new();
+        for release in releases {
+            let contract = ServiceReleaseContract::from_json_value(release.manifest.clone())
+                .map_err(|error| TopologyApiBindingError::Contract(error.to_string()))?;
+            contracts.insert((release.service_name, release.version), contract);
+        }
+        let endpoint_specs = spec
+            .endpoints
+            .iter()
+            .map(|endpoint| (endpoint.endpoint.as_str(), endpoint))
+            .collect::<BTreeMap<_, _>>();
+        let now = durable_now_marker();
+        let mut desired = Vec::new();
+        for link in spec
+            .links
+            .iter()
+            .filter(|link| link.enabled && !link.api_bindings.is_empty())
+        {
+            let source = exact_runtime_for_topology_endpoint(
+                &runtime_instances,
+                endpoint_specs[link.source_endpoint.as_str()],
+            )?;
+            let target = exact_runtime_for_topology_endpoint(
+                &runtime_instances,
+                endpoint_specs[link.target_endpoint.as_str()],
+            )?;
+            ensure_running_healthy_runtime(self, source, "consumer")?;
+            ensure_running_healthy_runtime(self, target, "provider")?;
+            let source_contract = contracts
+                .get(&(
+                    source.instance.service_id.clone(),
+                    source.instance.release_version.clone(),
+                ))
+                .ok_or_else(|| {
+                    TopologyApiBindingError::Contract(format!(
+                        "consumer deployment {} has no exact release contract",
+                        source.instance.deployment_id
+                    ))
+                })?;
+            let target_contract = contracts
+                .get(&(
+                    target.instance.service_id.clone(),
+                    target.instance.release_version.clone(),
+                ))
+                .ok_or_else(|| {
+                    TopologyApiBindingError::Contract(format!(
+                        "provider deployment {} has no exact release contract",
+                        target.instance.deployment_id
+                    ))
+                })?;
+            for selection in &link.api_bindings {
+                let requirement = source_contract
+                    .requirements()
+                    .iter()
+                    .find(|requirement| requirement.binding_name() == selection.requirement_name)
+                    .ok_or_else(|| {
+                        TopologyApiBindingError::Binding(format!(
+                            "consumer {} does not declare requirement {}",
+                            source.instance.deployment_id, selection.requirement_name
+                        ))
+                    })?;
+                let version_requirement = if selection.version.trim().is_empty() {
+                    requirement.version_requirement()
+                } else {
+                    selection.version.as_str()
+                };
+                let provider_api = target_contract
+                    .release
+                    .apis
+                    .iter()
+                    .find(|api| {
+                        api.api_id == selection.api_id
+                            && api.protocol == link.protocol
+                            && api_version_matches(version_requirement, &api.version)
+                    })
+                    .ok_or_else(|| {
+                        TopologyApiBindingError::Binding(format!(
+                            "provider {} does not expose {} matching {}",
+                            target.instance.deployment_id, selection.api_id, version_requirement
+                        ))
+                    })?;
+                if !matches!(provider_api.auth_mode.as_str(), "workload" | "public") {
+                    return Err(TopologyApiBindingError::Binding(format!(
+                        "provider {} API {} uses unsupported {} auth; workload consumers cannot delegate end-user identity",
+                        target.instance.deployment_id, selection.api_id, provider_api.auth_mode
+                    )));
+                }
+                desired.push(ApiBinding {
+                    binding_id: topology_binding_id(
+                        &source.instance.deployment_id,
+                        &selection.requirement_name,
+                    ),
+                    requirement_name: selection.requirement_name.clone(),
+                    api_id: selection.api_id.clone(),
+                    api_version: provider_api.version.clone(),
+                    consumer_deployment_id: source.instance.deployment_id.clone(),
+                    consumer_service_id: source.instance.service_id.clone(),
+                    consumer_node_id: source.node_id.clone(),
+                    consumer_endpoint: source.endpoint.clone(),
+                    provider_deployment_id: target.instance.deployment_id.clone(),
+                    provider_service_id: target.instance.service_id.clone(),
+                    provider_node_id: target.node_id.clone(),
+                    provider_endpoint: target.endpoint.clone(),
+                    provider_path: provider_api.path_prefix.clone(),
+                    virtual_endpoint: format!("/internal/apis/{}", selection.api_id),
+                    protocol: provider_api.protocol.clone(),
+                    methods: provider_api.methods.clone(),
+                    auth_mode: "workload".to_string(),
+                    provider_auth_mode: provider_api.auth_mode.clone(),
+                    permission: provider_api.permission.clone(),
+                    timeout_ms: requirement.timeout_ms().or(Some(30_000)),
+                    topology_id: spec.topology_id.clone(),
+                    topology_revision_id: revision_id.to_string(),
+                    link_source_endpoint: link.source_endpoint.clone(),
+                    link_target_endpoint: link.target_endpoint.clone(),
+                    credential_ref: String::new(),
+                    credential_generation: 1,
+                    context_generation: 1,
+                    desired_state: "ACTIVE".to_string(),
+                    observed_state: "PENDING".to_string(),
+                    health: "UNKNOWN".to_string(),
+                    drift: Vec::new(),
+                    last_operation_id: operation_id.to_string(),
+                    state: ApiBindingState::Pending,
+                    optional: requirement.optional(),
+                    reason: String::new(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                });
+            }
+        }
+        desired.sort_by(|left, right| {
+            (&left.consumer_deployment_id, &left.requirement_name)
+                .cmp(&(&right.consumer_deployment_id, &right.requirement_name))
+        });
+        let current = self
+            .api_bindings_for_topology(&spec.topology_id)
+            .map_err(|error| TopologyApiBindingError::Storage(error.to_string()))?;
+        Ok(stage_binding_generations(
+            desired,
+            current,
+            revision_id,
+            operation_id,
+            &now,
+        ))
+    }
+
+    pub(crate) fn stage_precomputed_topology_api_bindings(
+        &self,
+        topology_id: &str,
+        revision_id: &str,
+        operation_id: &str,
+        mut bindings: Vec<ApiBinding>,
+    ) -> Result<Vec<ApiBinding>, TopologyApiBindingError> {
+        let now = durable_now_marker();
+        for binding in &mut bindings {
+            if binding.state == ApiBindingState::Unbound && binding.optional {
+                continue;
+            }
+            if !matches!(
+                binding.state,
+                ApiBindingState::Resolved | ApiBindingState::Active
+            ) {
+                return Err(TopologyApiBindingError::Binding(format!(
+                    "precomputed binding {} is not resolved",
+                    binding.binding_id
+                )));
+            }
+            binding.topology_id = topology_id.to_string();
+            binding.topology_revision_id = revision_id.to_string();
+            binding.last_operation_id = operation_id.to_string();
+            binding.desired_state = "ACTIVE".to_string();
+            binding.observed_state = "PENDING".to_string();
+            binding.health = "UNKNOWN".to_string();
+            binding.state = ApiBindingState::Pending;
+            binding.updated_at = now.clone();
+        }
+        bindings.retain(|binding| binding.state != ApiBindingState::Unbound);
+        let current = self
+            .api_bindings_for_topology(topology_id)
+            .map_err(|error| TopologyApiBindingError::Storage(error.to_string()))?;
+        Ok(stage_binding_generations(
+            bindings,
+            current,
+            revision_id,
+            operation_id,
+            &now,
+        ))
     }
 
     pub(crate) fn get_node(&self, node_id: &str) -> Result<Option<NodeRecord>, DurableError> {
@@ -584,6 +962,139 @@ impl DurableStore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finish_topology_apply_fenced(
+        &self,
+        topology_id: &str,
+        revision_id: &str,
+        operation_id: &str,
+        outcome: TopologyApplyOutcome,
+        updated_at: &str,
+        job_id: &str,
+        lease_token: &str,
+        now_ms: i64,
+    ) -> Result<TopologyHeads, DurableError> {
+        match self {
+            Self::Sqlite(store) => store
+                .finish_topology_apply_fenced(
+                    topology_id,
+                    revision_id,
+                    operation_id,
+                    outcome,
+                    updated_at,
+                    job_id,
+                    lease_token,
+                    now_ms,
+                )
+                .map_err(Into::into),
+            Self::Postgres(store) => store
+                .finish_topology_apply_fenced(
+                    topology_id,
+                    revision_id,
+                    operation_id,
+                    outcome,
+                    updated_at,
+                    job_id,
+                    lease_token,
+                    now_ms,
+                )
+                .map_err(Into::into),
+        }
+    }
+
+    pub(crate) fn finish_topology_apply_group_fenced(
+        &self,
+        members: &[orchestrator_storage::TopologyApplyGroupMember],
+        operation_id: &str,
+        updated_at: &str,
+        job_id: &str,
+        lease_token: &str,
+        now_ms: i64,
+    ) -> Result<Vec<TopologyHeads>, DurableError> {
+        match self {
+            Self::Sqlite(store) => store
+                .finish_topology_apply_group_fenced(
+                    members,
+                    operation_id,
+                    updated_at,
+                    job_id,
+                    lease_token,
+                    now_ms,
+                )
+                .map_err(Into::into),
+            Self::Postgres(store) => store
+                .finish_topology_apply_group_fenced(
+                    members,
+                    operation_id,
+                    updated_at,
+                    job_id,
+                    lease_token,
+                    now_ms,
+                )
+                .map_err(Into::into),
+        }
+    }
+
+    pub(crate) fn resolve_expired_topology_apply_group_success(
+        &self,
+        members: &[orchestrator_storage::TopologyApplyGroupMember],
+        operation_id: &str,
+        job_id: &str,
+        now_ms: i64,
+        result: Value,
+    ) -> Result<Option<Job>, DurableError> {
+        match self {
+            Self::Sqlite(store) => store
+                .resolve_expired_topology_apply_group_success(
+                    members,
+                    operation_id,
+                    job_id,
+                    now_ms,
+                    result,
+                )
+                .map_err(Into::into),
+            Self::Postgres(store) => store
+                .resolve_expired_topology_apply_group_success(
+                    members,
+                    operation_id,
+                    job_id,
+                    now_ms,
+                    result,
+                )
+                .map_err(Into::into),
+        }
+    }
+
+    pub(crate) fn compensate_completed_topology_apply(
+        &self,
+        topology_id: &str,
+        revision_id: &str,
+        previous_revision_id: &str,
+        operation_id: &str,
+        updated_at: &str,
+    ) -> Result<TopologyHeads, DurableError> {
+        match self {
+            Self::Sqlite(store) => store
+                .compensate_completed_topology_apply(
+                    topology_id,
+                    revision_id,
+                    previous_revision_id,
+                    operation_id,
+                    updated_at,
+                )
+                .map_err(Into::into),
+            Self::Postgres(store) => store
+                .compensate_completed_topology_apply(
+                    topology_id,
+                    revision_id,
+                    previous_revision_id,
+                    operation_id,
+                    updated_at,
+                )
+                .map_err(Into::into),
+        }
+    }
+
     pub(crate) fn topology_heads(
         &self,
         topology_id: &str,
@@ -717,6 +1228,258 @@ impl DurableStore {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn put_node_runtime_facts(
+        &self,
+        value: &StoredNodeRuntimeFacts,
+    ) -> Result<(), DurableError> {
+        match self {
+            Self::Sqlite(store) => store.put_node_runtime_facts(value).map_err(Into::into),
+            Self::Postgres(store) => store.put_node_runtime_facts(value).map_err(Into::into),
+        }
+    }
+
+    pub(crate) fn apply_node_runtime_report(
+        &self,
+        value: &StoredNodeRuntimeFacts,
+        expected_managed_deployment_ids: Option<&[String]>,
+        runtime_instances: &[(StoredRuntimeInstance, StoredRuntimeInstance)],
+    ) -> Result<(), DurableError> {
+        match self {
+            Self::Sqlite(store) => store
+                .apply_node_runtime_report(
+                    value,
+                    expected_managed_deployment_ids,
+                    runtime_instances,
+                )
+                .map_err(Into::into),
+            Self::Postgres(store) => store
+                .apply_node_runtime_report(
+                    value,
+                    expected_managed_deployment_ids,
+                    runtime_instances,
+                )
+                .map_err(Into::into),
+        }
+    }
+
+    pub(crate) fn node_runtime_facts(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<StoredNodeRuntimeFacts>, DurableError> {
+        match self {
+            Self::Sqlite(store) => store.node_runtime_facts(node_id).map_err(Into::into),
+            Self::Postgres(store) => store.node_runtime_facts(node_id).map_err(Into::into),
+        }
+    }
+
+    pub(crate) fn managed_runtime_report_unavailable_reason(
+        &self,
+        runtime: &StoredRuntimeInstance,
+        at_ms: i64,
+    ) -> Result<Option<String>, DurableError> {
+        if runtime.management_mode != orchestrator_storage::RuntimeManagementMode::Managed {
+            return Ok(None);
+        }
+        let Some(facts) = self.node_runtime_facts(&runtime.node_id)? else {
+            return Ok(Some(
+                "managed deployment has no authenticated Node runtime report".to_string(),
+            ));
+        };
+        if facts.is_stale_at(at_ms, MANAGED_RUNTIME_REPORT_STALE_MS) {
+            return Ok(Some(format!(
+                "authenticated Node runtime report is older than {} seconds",
+                MANAGED_RUNTIME_REPORT_STALE_MS / 1_000
+            )));
+        }
+        if facts
+            .facts
+            .get("inventory_complete")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Ok(Some(
+                "latest authenticated Node runtime report has an incomplete Docker inventory"
+                    .to_string(),
+            ));
+        }
+        if runtime.last_observed_at_ms <= 0 || runtime.last_observed_at_ms < facts.observed_at_ms {
+            return Ok(Some(
+                "deployment has no observation from the latest complete Node runtime report"
+                    .to_string(),
+            ));
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn runtime_with_current_evidence(
+        &self,
+        mut runtime: StoredRuntimeInstance,
+        at_ms: i64,
+    ) -> Result<StoredRuntimeInstance, DurableError> {
+        if let Some(reason) = self.managed_runtime_report_unavailable_reason(&runtime, at_ms)? {
+            runtime.instance.observed_state = orchestrator_runtime::RuntimeObservedState::Unknown;
+            runtime.instance.health = "UNKNOWN".to_string();
+            runtime.instance.runtime_attested = false;
+            runtime.drift_reason = merge_runtime_evidence(&runtime.drift_reason, &reason);
+        }
+        if runtime.management_mode == orchestrator_storage::RuntimeManagementMode::External {
+            let unavailable = if runtime.external_probe_protocol.trim().is_empty() {
+                Some("external deployment has no persisted health probe contract".to_string())
+            } else if runtime.last_observed_at_ms <= 0
+                || at_ms.saturating_sub(runtime.last_observed_at_ms)
+                    > EXTERNAL_RUNTIME_PROBE_STALE_MS
+            {
+                Some(format!(
+                    "external health probe evidence is older than {} seconds",
+                    EXTERNAL_RUNTIME_PROBE_STALE_MS / 1_000
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = unavailable {
+                runtime.instance.observed_state =
+                    orchestrator_runtime::RuntimeObservedState::Unknown;
+                runtime.instance.health = "UNKNOWN".to_string();
+                runtime.drift_reason = merge_runtime_evidence(&runtime.drift_reason, &reason);
+            }
+        }
+        Ok(runtime)
+    }
+
+    pub(crate) fn binding_with_current_runtime_evidence(
+        &self,
+        mut binding: ApiBinding,
+        at_ms: i64,
+    ) -> Result<ApiBinding, DurableError> {
+        if binding.desired_state != "ACTIVE"
+            || !matches!(
+                binding.state,
+                ApiBindingState::Resolved | ApiBindingState::Active
+            )
+        {
+            return Ok(binding);
+        }
+        let mut unavailable = Vec::new();
+        for (role, deployment_id) in [
+            ("consumer", binding.consumer_deployment_id.as_str()),
+            ("provider", binding.provider_deployment_id.as_str()),
+        ] {
+            let Some(runtime) = self.runtime_instance(deployment_id)? else {
+                unavailable.push(format!("{role} deployment {deployment_id} is missing"));
+                continue;
+            };
+            let runtime = self.runtime_with_current_evidence(runtime, at_ms)?;
+            let (expected_service_id, expected_node_id) = if role == "consumer" {
+                (
+                    binding.consumer_service_id.as_str(),
+                    binding.consumer_node_id.as_str(),
+                )
+            } else {
+                (
+                    binding.provider_service_id.as_str(),
+                    binding.provider_node_id.as_str(),
+                )
+            };
+            if runtime.instance.service_id != expected_service_id
+                || runtime.node_id != expected_node_id
+            {
+                unavailable.push(format!(
+                    "{role} deployment {deployment_id} assignment changed from service {expected_service_id} on Node {expected_node_id} to service {} on Node {}",
+                    runtime.instance.service_id, runtime.node_id
+                ));
+                continue;
+            }
+            if runtime.instance.desired_state != orchestrator_runtime::RuntimeDesiredState::Running
+                || runtime.instance.observed_state
+                    != orchestrator_runtime::RuntimeObservedState::Running
+                || !runtime.instance.health.eq_ignore_ascii_case("HEALTHY")
+                || !runtime.drift_reason.trim().is_empty()
+                || (runtime.management_mode == orchestrator_storage::RuntimeManagementMode::Managed
+                    && !runtime.instance.runtime_attested)
+            {
+                let detail = if runtime.drift_reason.trim().is_empty() {
+                    "runtime is not desired Running, observed Running/Healthy".to_string()
+                } else {
+                    runtime.drift_reason
+                };
+                unavailable.push(format!(
+                    "{role} deployment {deployment_id} is unavailable: {detail}"
+                ));
+            }
+        }
+        if !unavailable.is_empty() {
+            binding.observed_state = "ERROR".to_string();
+            binding.health = "DEGRADED".to_string();
+            for reason in unavailable {
+                let reason = bounded_runtime_evidence(&reason);
+                if !binding.drift.contains(&reason) {
+                    binding.drift.push(reason);
+                }
+            }
+            binding.reason = bounded_runtime_evidence(&binding.drift.join("; "));
+        }
+        Ok(binding)
+    }
+
+    pub(crate) fn api_bindings_for_deployment(
+        &self,
+        deployment_id: &str,
+    ) -> Result<Vec<ApiBinding>, DurableError> {
+        match self {
+            Self::Sqlite(store) => store
+                .api_bindings_for_deployment(deployment_id)
+                .map_err(Into::into),
+            Self::Postgres(store) => store
+                .api_bindings_for_deployment(deployment_id)
+                .map_err(Into::into),
+        }
+    }
+
+    pub(crate) fn api_bindings_for_topology(
+        &self,
+        topology_id: &str,
+    ) -> Result<Vec<ApiBinding>, DurableError> {
+        match self {
+            Self::Sqlite(store) => store
+                .api_bindings_for_topology(topology_id)
+                .map_err(Into::into),
+            Self::Postgres(store) => store
+                .api_bindings_for_topology(topology_id)
+                .map_err(Into::into),
+        }
+    }
+
+    pub(crate) fn replace_deployment_api_bindings(
+        &self,
+        deployment_id: &str,
+        bindings: &[ApiBinding],
+    ) -> Result<(), DurableError> {
+        match self {
+            Self::Sqlite(store) => store
+                .replace_deployment_api_bindings(deployment_id, bindings)
+                .map_err(Into::into),
+            Self::Postgres(store) => store
+                .replace_deployment_api_bindings(deployment_id, bindings)
+                .map_err(Into::into),
+        }
+    }
+
+    pub(crate) fn replace_topology_api_bindings(
+        &self,
+        topology_id: &str,
+        bindings: &[ApiBinding],
+    ) -> Result<(), DurableError> {
+        match self {
+            Self::Sqlite(store) => store
+                .replace_topology_api_bindings(topology_id, bindings)
+                .map_err(Into::into),
+            Self::Postgres(store) => store
+                .replace_topology_api_bindings(topology_id, bindings)
+                .map_err(Into::into),
+        }
+    }
+
     pub(crate) fn purge_terminal_history(
         &self,
         completed_before_ms: i64,
@@ -754,6 +1517,40 @@ impl DurableStore {
             Self::Postgres(store) => store.get_state(namespace, key).map_err(Into::into),
         }
     }
+
+    pub(crate) fn delete_state(&self, namespace: &str, key: &str) -> Result<bool, DurableError> {
+        match self {
+            Self::Sqlite(store) => store.delete_state(namespace, key).map_err(Into::into),
+            Self::Postgres(store) => store.delete_state(namespace, key).map_err(Into::into),
+        }
+    }
+}
+
+fn merge_runtime_evidence(existing: &str, reason: &str) -> String {
+    if existing.trim().is_empty() {
+        bounded_runtime_evidence(reason)
+    } else if existing.contains(reason) {
+        bounded_runtime_evidence(existing)
+    } else {
+        bounded_runtime_evidence(&format!("{existing}; {reason}"))
+    }
+}
+
+fn bounded_runtime_evidence(value: &str) -> String {
+    const MAX_BYTES: usize = 512;
+    let mut bounded = String::new();
+    for character in value.chars() {
+        let printable = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if bounded.len() + printable.len_utf8() > MAX_BYTES {
+            break;
+        }
+        bounded.push(printable);
+    }
+    bounded.trim().to_string()
 }
 
 fn current_time_ms() -> i64 {
@@ -816,10 +1613,27 @@ impl JobStore for DurableJobStore {
         }
     }
 
+    fn resolve_expired_success(
+        &mut self,
+        request: ResolveExpiredSuccessRequest,
+    ) -> Result<Job, JobError> {
+        match self {
+            Self::Sqlite(store) => store.resolve_expired_success(request),
+            Self::Postgres(store) => store.resolve_expired_success(request),
+        }
+    }
+
     fn request_cancel(&mut self, job_id: &str, now_ms: i64) -> Result<Job, JobError> {
         match self {
             Self::Sqlite(store) => store.request_cancel(job_id, now_ms),
             Self::Postgres(store) => store.request_cancel(job_id, now_ms),
+        }
+    }
+
+    fn expired_leases(&self, now_ms: i64) -> Result<Vec<Job>, JobError> {
+        match self {
+            Self::Sqlite(store) => store.expired_leases(now_ms),
+            Self::Postgres(store) => store.expired_leases(now_ms),
         }
     }
 
@@ -967,6 +1781,249 @@ pub(crate) enum LinkProbeBindingError {
     Storage(String),
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum TopologyApiBindingError {
+    #[error("{0}")]
+    Binding(String),
+    #[error("{0}")]
+    Contract(String),
+    #[error("durable storage error: {0}")]
+    Storage(String),
+}
+
+fn exact_runtime_for_endpoint<'a>(
+    instances: &'a [StoredRuntimeInstance],
+    endpoint: &str,
+    service_id: &str,
+) -> Result<&'a StoredRuntimeInstance, TopologyApiBindingError> {
+    let matching = instances
+        .iter()
+        .filter(|instance| {
+            instance.endpoint == endpoint && instance.instance.service_id == service_id
+        })
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [instance] => Ok(*instance),
+        _ => Err(TopologyApiBindingError::Binding(format!(
+            "endpoint {endpoint} for service {service_id} requires exactly one runtime projection; found {}",
+            matching.len()
+        ))),
+    }
+}
+
+fn exact_runtime_for_topology_endpoint<'a>(
+    instances: &'a [StoredRuntimeInstance],
+    endpoint: &TopologyEndpointSpec,
+) -> Result<&'a StoredRuntimeInstance, TopologyApiBindingError> {
+    let configured_deployment = endpoint
+        .config
+        .as_object()
+        .and_then(|config| config.get("deployment_id"))
+        .and_then(Value::as_str)
+        .filter(|deployment_id| !deployment_id.trim().is_empty());
+    if let Some(deployment_id) = configured_deployment {
+        let matching = instances
+            .iter()
+            .filter(|instance| {
+                instance.instance.deployment_id == deployment_id
+                    && instance.instance.service_id == endpoint.service_id
+            })
+            .collect::<Vec<_>>();
+        return match matching.as_slice() {
+            [instance] => Ok(*instance),
+            _ => Err(TopologyApiBindingError::Binding(format!(
+                "endpoint {} selects deployment {deployment_id}, but found {} exact runtime projections",
+                endpoint.endpoint,
+                matching.len()
+            ))),
+        };
+    }
+    exact_runtime_for_endpoint(instances, &endpoint.endpoint, &endpoint.service_id)
+}
+
+fn ensure_running_healthy_runtime(
+    storage: &DurableStore,
+    runtime: &StoredRuntimeInstance,
+    role: &str,
+) -> Result<(), TopologyApiBindingError> {
+    let runtime = storage
+        .runtime_with_current_evidence(runtime.clone(), current_time_ms())
+        .map_err(|error| TopologyApiBindingError::Storage(error.to_string()))?;
+    if runtime.instance.desired_state != orchestrator_runtime::RuntimeDesiredState::Running
+        || runtime.instance.observed_state != orchestrator_runtime::RuntimeObservedState::Running
+        || !runtime.instance.health.eq_ignore_ascii_case("HEALTHY")
+        || !runtime.drift_reason.is_empty()
+        || (runtime.management_mode == orchestrator_storage::RuntimeManagementMode::Managed
+            && !runtime.instance.runtime_attested)
+    {
+        let evidence_detail = if runtime.drift_reason.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", runtime.drift_reason)
+        };
+        return Err(TopologyApiBindingError::Binding(format!(
+            "{role} deployment {} is not desired Running, observed Running/Healthy, and runtime-attested without drift{evidence_detail}",
+            runtime.instance.deployment_id,
+        )));
+    }
+    if runtime.management_mode == orchestrator_storage::RuntimeManagementMode::Managed
+        && let Some(reason) = storage
+            .managed_runtime_report_unavailable_reason(&runtime, current_time_ms())
+            .map_err(|error| TopologyApiBindingError::Storage(error.to_string()))?
+    {
+        return Err(TopologyApiBindingError::Binding(format!(
+            "{role} deployment {} has unavailable runtime evidence: {reason}",
+            runtime.instance.deployment_id,
+        )));
+    }
+    Ok(())
+}
+
+fn topology_binding_id(deployment_id: &str, requirement_name: &str) -> String {
+    let digest = Sha256::digest(format!("{deployment_id}\0{requirement_name}").as_bytes());
+    format!("binding-{digest:x}")
+}
+
+fn durable_now_marker() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("unix-ms:{millis}")
+}
+
+/// A workload JWT carries one deployment-wide credential generation. If any
+/// route for a consumer changes, every still-active sibling is therefore
+/// staged with the same next generation. This makes old tokens fail every API
+/// immediately after the Gateway atomically switches the route table.
+fn stage_binding_generations(
+    mut desired: Vec<ApiBinding>,
+    current: Vec<ApiBinding>,
+    revision_id: &str,
+    operation_id: &str,
+    now: &str,
+) -> Vec<ApiBinding> {
+    let mut consumers = current
+        .iter()
+        .map(|binding| binding.consumer_deployment_id.clone())
+        .chain(
+            desired
+                .iter()
+                .map(|binding| binding.consumer_deployment_id.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    let desired_keys = desired
+        .iter()
+        .map(|binding| {
+            (
+                binding.consumer_deployment_id.clone(),
+                binding.requirement_name.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+
+    for consumer in std::mem::take(&mut consumers) {
+        let mut wanted = desired
+            .iter()
+            .filter(|binding| binding.consumer_deployment_id == consumer)
+            .collect::<Vec<_>>();
+        let mut active = current
+            .iter()
+            .filter(|binding| {
+                binding.consumer_deployment_id == consumer
+                    && binding.desired_state == "ACTIVE"
+                    && binding.state == ApiBindingState::Active
+            })
+            .collect::<Vec<_>>();
+        wanted.sort_by_key(|binding| binding.requirement_name.as_str());
+        active.sort_by_key(|binding| binding.requirement_name.as_str());
+        let changed = wanted.len() != active.len()
+            || wanted
+                .iter()
+                .zip(active.iter())
+                .any(|(wanted, active)| !same_binding_route(wanted, active));
+        let previous_generation = current
+            .iter()
+            .filter(|binding| binding.consumer_deployment_id == consumer)
+            .map(|binding| {
+                binding
+                    .credential_generation
+                    .max(binding.context_generation)
+            })
+            .max()
+            .unwrap_or(0);
+        let generation = if changed {
+            previous_generation.saturating_add(1).max(1)
+        } else {
+            previous_generation.max(1)
+        };
+        for binding in desired
+            .iter_mut()
+            .filter(|binding| binding.consumer_deployment_id == consumer)
+        {
+            binding.credential_generation = generation;
+            binding.context_generation = generation;
+            if let Some(existing) = current
+                .iter()
+                .find(|existing| existing.binding_id == binding.binding_id)
+            {
+                binding.created_at = existing.created_at.clone();
+            }
+        }
+        for existing in current.iter().filter(|binding| {
+            binding.consumer_deployment_id == consumer
+                && binding.desired_state == "ACTIVE"
+                && !desired_keys.contains(&(
+                    binding.consumer_deployment_id.clone(),
+                    binding.requirement_name.clone(),
+                ))
+        }) {
+            let mut revoked = existing.clone();
+            revoked.topology_revision_id = revision_id.to_string();
+            revoked.credential_generation = generation;
+            revoked.context_generation = generation;
+            revoked.desired_state = "REVOKED".to_string();
+            revoked.observed_state = "PENDING".to_string();
+            revoked.health = "UNKNOWN".to_string();
+            revoked.drift.clear();
+            revoked.last_operation_id = operation_id.to_string();
+            revoked.state = ApiBindingState::Pending;
+            revoked.updated_at = now.to_string();
+            desired.push(revoked);
+        }
+    }
+    desired.sort_by(|left, right| {
+        (&left.consumer_deployment_id, &left.requirement_name)
+            .cmp(&(&right.consumer_deployment_id, &right.requirement_name))
+    });
+    desired
+}
+
+fn same_binding_route(left: &ApiBinding, right: &ApiBinding) -> bool {
+    left.requirement_name == right.requirement_name
+        && left.api_id == right.api_id
+        && left.api_version == right.api_version
+        && left.consumer_deployment_id == right.consumer_deployment_id
+        && left.consumer_service_id == right.consumer_service_id
+        && left.consumer_node_id == right.consumer_node_id
+        && left.consumer_endpoint == right.consumer_endpoint
+        && left.provider_deployment_id == right.provider_deployment_id
+        && left.provider_service_id == right.provider_service_id
+        && left.provider_node_id == right.provider_node_id
+        && left.provider_endpoint == right.provider_endpoint
+        && left.provider_path == right.provider_path
+        && left.virtual_endpoint == right.virtual_endpoint
+        && left.protocol == right.protocol
+        && left.methods == right.methods
+        && left.auth_mode == right.auth_mode
+        && left.provider_auth_mode == right.provider_auth_mode
+        && left.permission == right.permission
+        && left.timeout_ms == right.timeout_ms
+        && left.link_source_endpoint == right.link_source_endpoint
+        && left.link_target_endpoint == right.link_target_endpoint
+        && left.optional == right.optional
+}
+
 impl From<StorageError> for DurableError {
     fn from(error: StorageError) -> Self {
         match error {
@@ -986,5 +2043,322 @@ impl From<PostgresError> for DurableError {
             PostgresError::Domain(detail) => Self::Domain(detail),
             other => Self::Storage(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod binding_generation_tests {
+    use super::*;
+
+    fn binding(requirement: &str, provider: &str, generation: u64) -> ApiBinding {
+        ApiBinding {
+            binding_id: topology_binding_id("consumer-1", requirement),
+            requirement_name: requirement.to_string(),
+            api_id: format!("api.{requirement}"),
+            api_version: "1.0.0".to_string(),
+            consumer_deployment_id: "consumer-1".to_string(),
+            consumer_service_id: "consumer".to_string(),
+            consumer_node_id: "node-b".to_string(),
+            consumer_endpoint: "10.0.0.2:9000:consumer".to_string(),
+            provider_deployment_id: provider.to_string(),
+            provider_service_id: "provider".to_string(),
+            provider_node_id: "node-a".to_string(),
+            provider_endpoint: "10.0.0.1:8080:provider".to_string(),
+            provider_path: format!("/{requirement}"),
+            virtual_endpoint: format!("/internal/apis/api.{requirement}"),
+            protocol: "http".to_string(),
+            methods: vec!["GET".to_string()],
+            auth_mode: "workload".to_string(),
+            provider_auth_mode: "workload".to_string(),
+            permission: format!("permission.{requirement}"),
+            timeout_ms: Some(5_000),
+            topology_id: "primary".to_string(),
+            topology_revision_id: "revision-1".to_string(),
+            link_source_endpoint: "10.0.0.2:9000:consumer".to_string(),
+            link_target_endpoint: "10.0.0.1:8080:provider".to_string(),
+            credential_ref: String::new(),
+            credential_generation: generation,
+            context_generation: generation,
+            desired_state: "ACTIVE".to_string(),
+            observed_state: "ACTIVE".to_string(),
+            health: "HEALTHY".to_string(),
+            drift: Vec::new(),
+            last_operation_id: "operation-1".to_string(),
+            state: ApiBindingState::Active,
+            optional: false,
+            reason: String::new(),
+            created_at: "unix-ms:1".to_string(),
+            updated_at: "unix-ms:1".to_string(),
+        }
+    }
+
+    #[test]
+    fn one_route_change_bumps_every_sibling_generation() {
+        let current = vec![
+            binding("alpha", "provider-a", 7),
+            binding("beta", "provider-a", 7),
+        ];
+        let mut desired = current.clone();
+        desired[0].provider_deployment_id = "provider-b".to_string();
+        desired[0].provider_endpoint = "10.0.0.3:8080:provider".to_string();
+        desired[0].link_target_endpoint = desired[0].provider_endpoint.clone();
+        for binding in &mut desired {
+            binding.state = ApiBindingState::Resolved;
+            binding.observed_state = "RESOLVED".to_string();
+        }
+        let staged =
+            stage_binding_generations(desired, current, "revision-2", "operation-2", "unix-ms:2");
+        assert_eq!(staged.len(), 2);
+        assert!(staged.iter().all(|binding| {
+            binding.credential_generation == 8 && binding.context_generation == 8
+        }));
+    }
+
+    #[test]
+    fn removed_requirement_is_staged_revoked_with_new_generation() {
+        let current = vec![
+            binding("alpha", "provider-a", 3),
+            binding("beta", "provider-a", 3),
+        ];
+        let staged = stage_binding_generations(
+            vec![current[0].clone()],
+            current,
+            "revision-2",
+            "operation-2",
+            "unix-ms:2",
+        );
+        let removed = staged
+            .iter()
+            .find(|binding| binding.requirement_name == "beta")
+            .expect("removed requirement remains as a revocation record");
+        assert_eq!(removed.desired_state, "REVOKED");
+        assert_eq!(removed.state, ApiBindingState::Pending);
+        assert_eq!(removed.credential_generation, 4);
+        assert!(staged.iter().all(|binding| binding.context_generation == 4));
+    }
+
+    #[test]
+    fn stale_external_probe_degrades_binding_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DurableStore::Sqlite(
+            SqliteOrchestratorStore::open(directory.path().join("external-binding.db")).unwrap(),
+        );
+        let evidence_at_ms = 120_000_i64;
+        for (deployment_id, service_id, observed_at_ms) in [
+            ("consumer-1", "consumer", evidence_at_ms),
+            (
+                "provider-a",
+                "provider",
+                evidence_at_ms - EXTERNAL_RUNTIME_PROBE_STALE_MS - 1,
+            ),
+        ] {
+            let node_id = if deployment_id == "consumer-1" {
+                "node-b"
+            } else {
+                "node-a"
+            };
+            let runtime: StoredRuntimeInstance = serde_json::from_value(json!({
+                "node_id": node_id,
+                "instance": {
+                    "deployment_id": deployment_id,
+                    "service_id": service_id,
+                    "release_version": "1.0.0",
+                    "container_id": "",
+                    "artifact_digest": format!("sha256:{}", "a".repeat(64)),
+                    "desired_state": "RUNNING",
+                    "observed_state": "RUNNING",
+                    "health": "HEALTHY"
+                },
+                "management_mode": "EXTERNAL",
+                "endpoint": format!("https://{service_id}.example"),
+                "external_probe_protocol": "https",
+                "external_probe_health_path": "/healthz/ready",
+                "last_observed_at_ms": observed_at_ms,
+                "updated_at": format!("unix-ms:{observed_at_ms}")
+            }))
+            .unwrap();
+            store.put_runtime_instance(&runtime).unwrap();
+        }
+        let projected = store
+            .binding_with_current_runtime_evidence(binding("read", "provider-a", 1), evidence_at_ms)
+            .unwrap();
+        assert_eq!(projected.observed_state, "ERROR");
+        assert_eq!(projected.health, "DEGRADED");
+        assert!(projected.reason.contains("older than 60 seconds"));
+    }
+
+    #[test]
+    fn changed_runtime_assignment_degrades_the_exact_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DurableStore::Sqlite(
+            SqliteOrchestratorStore::open(directory.path().join("assignment-binding.db")).unwrap(),
+        );
+        let evidence_at_ms = 120_000_i64;
+        for (deployment_id, service_id, node_id) in [
+            ("consumer-1", "consumer", "node-b"),
+            ("provider-a", "provider", "node-reassigned"),
+        ] {
+            let runtime: StoredRuntimeInstance = serde_json::from_value(json!({
+                "node_id": node_id,
+                "instance": {
+                    "deployment_id": deployment_id,
+                    "service_id": service_id,
+                    "release_version": "1.0.0",
+                    "container_id": "",
+                    "artifact_digest": format!("sha256:{}", "a".repeat(64)),
+                    "desired_state": "RUNNING",
+                    "observed_state": "RUNNING",
+                    "health": "HEALTHY"
+                },
+                "management_mode": "EXTERNAL",
+                "endpoint": format!("https://{service_id}.example"),
+                "external_probe_protocol": "https",
+                "external_probe_health_path": "/healthz/ready",
+                "last_observed_at_ms": evidence_at_ms,
+                "updated_at": format!("unix-ms:{evidence_at_ms}")
+            }))
+            .unwrap();
+            store.put_runtime_instance(&runtime).unwrap();
+        }
+        let projected = store
+            .binding_with_current_runtime_evidence(binding("read", "provider-a", 1), evidence_at_ms)
+            .unwrap();
+        assert_eq!(projected.observed_state, "ERROR");
+        assert_eq!(projected.health, "DEGRADED");
+        assert!(projected.reason.contains("assignment changed"));
+        assert!(projected.reason.contains("node-reassigned"));
+    }
+
+    #[test]
+    fn topology_binding_resolver_rejects_unattested_or_drifted_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DurableStore::Sqlite(
+            SqliteOrchestratorStore::open(directory.path().join("binding-runtime.db")).unwrap(),
+        );
+        let facts_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        for node_id in ["node-consumer", "node-provider"] {
+            store
+                .put_node_runtime_facts(&StoredNodeRuntimeFacts {
+                    node_id: node_id.to_string(),
+                    observed_at_ms: facts_now,
+                    received_at_ms: facts_now,
+                    facts: json!({
+                        "schema_version": 1,
+                        "report_id": format!("report-{node_id}"),
+                        "inventory_complete": true
+                    }),
+                })
+                .unwrap();
+        }
+        let runtime = |deployment: &str, service: &str, attested: bool, drift: &str| {
+            serde_json::from_value::<StoredRuntimeInstance>(json!({
+                "node_id": format!("node-{service}"),
+                "instance": {
+                    "deployment_id": deployment,
+                    "service_id": service,
+                    "release_version": "1.0.0",
+                    "container_id": format!("container-{service}"),
+                    "artifact_digest": format!("registry.example/{service}@sha256:{}", "a".repeat(64)),
+                    "runtime_attested": attested,
+                    "desired_state": "RUNNING",
+                    "observed_state": "RUNNING",
+                    "health": "HEALTHY"
+                },
+                "management_mode": "MANAGED",
+                "endpoint": "",
+                "last_observed_at_ms": facts_now,
+                "drift_reason": drift,
+                "updated_at": "unix-ms:1"
+            }))
+            .unwrap()
+        };
+        store
+            .put_runtime_instance(&runtime("deployment-consumer", "consumer", true, ""))
+            .unwrap();
+        store
+            .put_runtime_instance(&runtime("deployment-provider", "provider", false, ""))
+            .unwrap();
+        let spec: TopologySpec = serde_json::from_value(json!({
+            "api_version": "v1",
+            "topology_id": "runtime-attestation",
+            "root_endpoint": "10.0.0.1:9000:consumer",
+            "authority": {
+                "root_endpoint": "10.0.0.1:9000:consumer",
+                "exposure_policy": "private"
+            },
+            "endpoints": [
+                {
+                    "endpoint": "10.0.0.1:9000:consumer",
+                    "service_id": "consumer",
+                    "protocol": "http",
+                    "config": {"deployment_id": "deployment-consumer"}
+                },
+                {
+                    "endpoint": "10.0.0.2:9000:provider",
+                    "service_id": "provider",
+                    "protocol": "http",
+                    "config": {"deployment_id": "deployment-provider"}
+                }
+            ],
+            "links": [{
+                "source_endpoint": "10.0.0.1:9000:consumer",
+                "target_endpoint": "10.0.0.2:9000:provider",
+                "protocol": "http",
+                "auth_mode": "workload",
+                "scope": "api",
+                "enabled": true,
+                "policy": {},
+                "api_bindings": [{
+                    "requirement": "provider_api",
+                    "api_id": "provider.api",
+                    "provider_deployment_id": "deployment-provider",
+                    "selection": "explicit"
+                }]
+            }]
+        }))
+        .unwrap();
+        let unattested = store
+            .resolve_topology_api_bindings(&spec, "revision-1", "operation-1")
+            .unwrap_err()
+            .to_string();
+        assert!(unattested.contains("runtime-attested"), "{unattested}");
+
+        store
+            .put_runtime_instance(&runtime(
+                "deployment-provider",
+                "provider",
+                true,
+                "HostConfig drift",
+            ))
+            .unwrap();
+        let drifted = store
+            .resolve_topology_api_bindings(&spec, "revision-1", "operation-1")
+            .unwrap_err()
+            .to_string();
+        assert!(drifted.contains("without drift"), "{drifted}");
+
+        store
+            .put_runtime_instance(&runtime("deployment-provider", "provider", true, ""))
+            .unwrap();
+        store
+            .put_node_runtime_facts(&StoredNodeRuntimeFacts {
+                node_id: "node-provider".to_string(),
+                observed_at_ms: facts_now - 60_001,
+                received_at_ms: facts_now - 60_001,
+                facts: json!({
+                    "schema_version": 1,
+                    "report_id": "stale-provider",
+                    "inventory_complete": true
+                }),
+            })
+            .unwrap();
+        let stale = store
+            .resolve_topology_api_bindings(&spec, "revision-1", "operation-1")
+            .unwrap_err()
+            .to_string();
+        assert!(stale.contains("older than 60 seconds"), "{stale}");
     }
 }

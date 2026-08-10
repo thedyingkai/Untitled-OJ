@@ -1,7 +1,9 @@
 use orchestrator_legacy::{
-    TopologyEndpointStatus, TopologyLinkStatus, TopologySpec, validate_endpoint_id,
+    ApiBinding, ApiBindingState, TopologyEndpointStatus, TopologyLinkStatus, TopologySpec,
+    parse_endpoint_id, validate_endpoint_id,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::io::Read;
 use std::time::Duration;
@@ -209,6 +211,11 @@ pub(crate) struct TopologyProviderObservation {
     pub(crate) state: TopologyProviderObservedState,
     pub(crate) observed_revision_id: Option<String>,
     pub(crate) observed_content_sha256: Option<String>,
+    /// Digest of the provider's effective route/grant projection.  Older
+    /// providers may omit this field while rolling forward, but an omitted
+    /// digest never matches desired state and is therefore repaired
+    /// fail-closed by the reconciler.
+    pub(crate) observed_projection_sha256: Option<String>,
     pub(crate) endpoints: Vec<TopologyEndpointStatus>,
     pub(crate) links: Vec<TopologyLinkStatus>,
     pub(crate) detail: String,
@@ -221,16 +228,23 @@ impl TopologyProviderObservation {
             state: TopologyProviderObservedState::Unreachable,
             observed_revision_id: None,
             observed_content_sha256: None,
+            observed_projection_sha256: None,
             endpoints: Vec::new(),
             links: Vec::new(),
             detail: detail.into(),
         }
     }
 
-    pub(crate) fn matches(&self, revision_id: &str, content_sha256: &str) -> bool {
+    pub(crate) fn matches(
+        &self,
+        revision_id: &str,
+        content_sha256: &str,
+        projection_sha256: &str,
+    ) -> bool {
         self.state == TopologyProviderObservedState::Present
             && self.observed_revision_id.as_deref() == Some(revision_id)
             && self.observed_content_sha256.as_deref() == Some(content_sha256)
+            && self.observed_projection_sha256.as_deref() == Some(projection_sha256)
     }
 }
 
@@ -259,6 +273,17 @@ pub(crate) struct TopologyProviderSaga {
     agent: Agent,
     max_request_bytes: usize,
     max_response_bytes: usize,
+}
+
+/// Runtime availability changes do not create a new immutable Topology
+/// revision, but they still have to update the exact Gateway route and Auth
+/// grant projection for that revision.  Revocation is deliberately ordered
+/// Gateway-first, while restoration is Auth-first, so a partial provider
+/// failure can only leave the workload denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeProjectionOrder {
+    RevokeFirst,
+    GrantFirst,
 }
 
 impl TopologyProviderSaga {
@@ -291,6 +316,7 @@ impl TopologyProviderSaga {
     /// If Auth fails, Gateway is restored to `previous`, or deleted when this is
     /// the first applied revision. A successful compensation yields `FAILED`; a
     /// failed compensation yields `DEGRADED` and must be reconciled later.
+    #[cfg(test)]
     pub(crate) fn apply(
         &self,
         topology_id: &str,
@@ -298,6 +324,30 @@ impl TopologyProviderSaga {
         spec: &TopologySpec,
         previous_revision_id: Option<&str>,
         previous: Option<&TopologySpec>,
+        operation_id: &str,
+    ) -> Result<TopologyProviderApplyReceipt, TopologyProviderApplyFailure> {
+        self.apply_with_bindings(
+            topology_id,
+            revision_id,
+            spec,
+            &[],
+            previous_revision_id,
+            previous,
+            &[],
+            operation_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_with_bindings(
+        &self,
+        topology_id: &str,
+        revision_id: &str,
+        spec: &TopologySpec,
+        bindings: &[ApiBinding],
+        previous_revision_id: Option<&str>,
+        previous: Option<&TopologySpec>,
+        previous_bindings: &[ApiBinding],
         operation_id: &str,
     ) -> Result<TopologyProviderApplyReceipt, TopologyProviderApplyFailure> {
         self.validate_apply(
@@ -318,6 +368,9 @@ impl TopologyProviderSaga {
         // Pre-serialize and size-check every possible request before the first
         // external side effect. This prevents a local validation error from
         // stranding a partially applied topology.
+        let desired_projection = provider_projection(bindings).map_err(validation_failure)?;
+        let previous_projection =
+            provider_projection(previous_bindings).map_err(validation_failure)?;
         let gateway_apply = self.encode_request(&ProviderRequest {
             api_version: PROVIDER_API_VERSION,
             provider: ProviderKind::Gateway.as_str(),
@@ -328,6 +381,8 @@ impl TopologyProviderSaga {
             desired_content_sha256: Some(&desired_sha256),
             operation_id,
             spec: Some(spec),
+            routes: &desired_projection.routes,
+            grants: &desired_projection.grants,
         })?;
         let auth_apply = self.encode_request(&ProviderRequest {
             api_version: PROVIDER_API_VERSION,
@@ -339,6 +394,8 @@ impl TopologyProviderSaga {
             desired_content_sha256: Some(&desired_sha256),
             operation_id,
             spec: Some(spec),
+            routes: &desired_projection.routes,
+            grants: &desired_projection.grants,
         })?;
         let compensation_action = if previous.is_some() {
             ProviderAction::RestorePrevious
@@ -355,6 +412,8 @@ impl TopologyProviderSaga {
             desired_content_sha256: previous_sha256.as_deref(),
             operation_id,
             spec: previous,
+            routes: &previous_projection.routes,
+            grants: &previous_projection.grants,
         })?;
         let auth_compensation = self.encode_request(&ProviderRequest {
             api_version: PROVIDER_API_VERSION,
@@ -366,6 +425,8 @@ impl TopologyProviderSaga {
             desired_content_sha256: previous_sha256.as_deref(),
             operation_id,
             spec: previous,
+            routes: &previous_projection.routes,
+            grants: &previous_projection.grants,
         })?;
         let desired_state = ExpectedProviderState::present(revision_id, &desired_sha256);
         let compensated_state = match (previous_revision_id, previous_sha256.as_deref()) {
@@ -512,6 +573,113 @@ impl TopologyProviderSaga {
         })
     }
 
+    /// Reprojects the runtime-effective bindings of an already-applied,
+    /// immutable revision.  This is intentionally separate from the topology
+    /// apply saga: a stopped, unhealthy, stale, missing, or reassigned runtime
+    /// must lose its live route without manufacturing a new revision.
+    ///
+    /// No compensation restores the previous projection.  In revoke order the
+    /// Gateway is narrowed before Auth; in grant order Auth is populated before
+    /// Gateway.  Therefore every partial failure remains fail-closed and can be
+    /// retried idempotently by the reconciler.
+    pub(crate) fn apply_runtime_projection(
+        &self,
+        topology_id: &str,
+        revision_id: &str,
+        spec: &TopologySpec,
+        bindings: &[ApiBinding],
+        operation_id: &str,
+        order: RuntimeProjectionOrder,
+    ) -> Result<(), String> {
+        spec.validate().map_err(|error| error.to_string())?;
+        if spec.topology_id != topology_id {
+            return Err("runtime projection TopologySpec belongs to another topology".to_string());
+        }
+        validate_identifier("topology_id", topology_id, 256)?;
+        validate_identifier("revision_id", revision_id, 512)?;
+        validate_operation_id(operation_id)?;
+        if bindings.iter().any(|binding| {
+            binding.topology_id != topology_id
+                || binding.topology_revision_id != revision_id
+                || binding.desired_state != "ACTIVE"
+                || binding.state != ApiBindingState::Active
+        }) {
+            return Err(
+                "runtime projection accepts only ACTIVE bindings owned by the applied revision"
+                    .to_string(),
+            );
+        }
+
+        let content_sha256 = spec.content_sha256().map_err(|error| error.to_string())?;
+        let projection = provider_projection(bindings)?;
+        let gateway_body = self
+            .encode_request(&ProviderRequest {
+                api_version: PROVIDER_API_VERSION,
+                provider: ProviderKind::Gateway.as_str(),
+                action: ProviderAction::Apply.as_str(),
+                topology_id,
+                attempted_revision_id: revision_id,
+                desired_revision_id: Some(revision_id),
+                desired_content_sha256: Some(&content_sha256),
+                operation_id,
+                spec: Some(spec),
+                routes: &projection.routes,
+                grants: &projection.grants,
+            })
+            .map_err(|error| error.to_string())?;
+        let auth_body = self
+            .encode_request(&ProviderRequest {
+                api_version: PROVIDER_API_VERSION,
+                provider: ProviderKind::Auth.as_str(),
+                action: ProviderAction::Apply.as_str(),
+                topology_id,
+                attempted_revision_id: revision_id,
+                desired_revision_id: Some(revision_id),
+                desired_content_sha256: Some(&content_sha256),
+                operation_id,
+                spec: Some(spec),
+                routes: &projection.routes,
+                grants: &projection.grants,
+            })
+            .map_err(|error| error.to_string())?;
+        let expected = ExpectedProviderState::present(revision_id, &content_sha256);
+        let gateway = || {
+            self.call_provider(
+                &self.gateway,
+                ProviderKind::Gateway,
+                ProviderAction::Apply,
+                topology_id,
+                operation_id,
+                &gateway_body,
+                expected,
+            )
+            .map_err(|error| error.to_string())
+        };
+        let auth = || {
+            self.call_provider(
+                &self.auth,
+                ProviderKind::Auth,
+                ProviderAction::Apply,
+                topology_id,
+                operation_id,
+                &auth_body,
+                expected,
+            )
+            .map_err(|error| error.to_string())
+        };
+        match order {
+            RuntimeProjectionOrder::RevokeFirst => {
+                gateway()?;
+                auth()?;
+            }
+            RuntimeProjectionOrder::GrantFirst => {
+                auth()?;
+                gateway()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Reads both provider projections independently.  Network I/O is bounded
     /// by the same per-request timeout as apply and must be invoked outside a
     /// database transaction.
@@ -527,6 +695,101 @@ impl TopologyProviderSaga {
         TopologyProvidersObservation {
             gateway: observe(&self.gateway, ProviderKind::Gateway),
             auth: observe(&self.auth, ProviderKind::Auth),
+        }
+    }
+
+    /// Restores the previously proven provider projection after both provider
+    /// applies succeeded but the consumer health gate failed. Gateway is
+    /// restored first so newly-issued or old workload tokens lose the failed
+    /// route immediately; Auth is then brought to the same revision.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn compensate_applied_revision(
+        &self,
+        topology_id: &str,
+        attempted_revision_id: &str,
+        previous_revision_id: Option<&str>,
+        previous: Option<&TopologySpec>,
+        previous_bindings: &[ApiBinding],
+        operation_id: &str,
+    ) -> Result<(), String> {
+        if previous_revision_id.is_some() != previous.is_some() {
+            return Err("previous revision and spec must be supplied together".to_string());
+        }
+        let previous_sha256 = previous
+            .map(TopologySpec::content_sha256)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let projection = provider_projection(previous_bindings)?;
+        let action = if previous.is_some() {
+            ProviderAction::RestorePrevious
+        } else {
+            ProviderAction::Delete
+        };
+        let expected = match (previous_revision_id, previous_sha256.as_deref()) {
+            (Some(revision), Some(hash)) => ExpectedProviderState::present(revision, hash),
+            (None, None) => ExpectedProviderState::absent(),
+            _ => return Err("previous revision state is incomplete".to_string()),
+        };
+        let gateway_body = self
+            .encode_request(&ProviderRequest {
+                api_version: PROVIDER_API_VERSION,
+                provider: ProviderKind::Gateway.as_str(),
+                action: action.as_str(),
+                topology_id,
+                attempted_revision_id,
+                desired_revision_id: previous_revision_id,
+                desired_content_sha256: previous_sha256.as_deref(),
+                operation_id,
+                spec: previous,
+                routes: &projection.routes,
+                grants: &projection.grants,
+            })
+            .map_err(|error| error.to_string())?;
+        let auth_body = self
+            .encode_request(&ProviderRequest {
+                api_version: PROVIDER_API_VERSION,
+                provider: ProviderKind::Auth.as_str(),
+                action: action.as_str(),
+                topology_id,
+                attempted_revision_id,
+                desired_revision_id: previous_revision_id,
+                desired_content_sha256: previous_sha256.as_deref(),
+                operation_id,
+                spec: previous,
+                routes: &projection.routes,
+                grants: &projection.grants,
+            })
+            .map_err(|error| error.to_string())?;
+        let gateway = self.call_provider(
+            &self.gateway,
+            ProviderKind::Gateway,
+            action,
+            topology_id,
+            operation_id,
+            &gateway_body,
+            expected,
+        );
+        let auth = self.call_provider(
+            &self.auth,
+            ProviderKind::Auth,
+            action,
+            topology_id,
+            operation_id,
+            &auth_body,
+            expected,
+        );
+        match (gateway, auth) {
+            (Ok(()), Ok(())) => Ok(()),
+            (gateway, auth) => Err(format!(
+                "post-health compensation failed; Gateway: {}; Auth: {}",
+                gateway
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "succeeded".to_string()),
+                auth.err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "succeeded".to_string())
+            )),
         }
     }
 
@@ -820,10 +1083,203 @@ struct ProviderRequest<'a> {
     action: &'static str,
     topology_id: &'a str,
     attempted_revision_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     desired_revision_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     desired_content_sha256: Option<&'a str>,
     operation_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     spec: Option<&'a TopologySpec>,
+    routes: &'a [ProviderBindingRoute],
+    grants: &'a [ProviderBindingGrant],
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ProviderBindingRoute {
+    binding_id: String,
+    requirement_name: String,
+    consumer_deployment_id: String,
+    consumer_service_id: String,
+    consumer_node_id: String,
+    credential_generation: u64,
+    api_id: String,
+    provider_deployment_id: String,
+    provider_service_id: String,
+    provider_node_id: String,
+    provider_endpoint: String,
+    upstream_base: String,
+    provider_path: String,
+    virtual_path: String,
+    auth_mode: String,
+    provider_auth_mode: String,
+    permission: String,
+    methods: Vec<String>,
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ProviderBindingGrant {
+    binding_id: String,
+    requirement_name: String,
+    consumer_deployment_id: String,
+    consumer_service_id: String,
+    consumer_node_id: String,
+    credential_generation: u64,
+    api_id: String,
+    permission: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderProjection {
+    routes: Vec<ProviderBindingRoute>,
+    grants: Vec<ProviderBindingGrant>,
+}
+
+impl ProviderProjection {
+    /// Produces the cross-language canonical representation used by Gateway,
+    /// Auth and the control plane.  Request order is deliberately irrelevant:
+    /// providers persist by binding id, so the digest follows the same stable
+    /// ordering and serializes the typed `{routes,grants}` object only.
+    fn canonical_json(mut self) -> Result<Vec<u8>, String> {
+        self.routes
+            .sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+        self.grants
+            .sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+        let encoded = serde_json::to_vec(&self)
+            .map_err(|error| format!("serialize provider projection digest: {error}"))?;
+        Ok(go_json_compatible_string_escaping(encoded))
+    }
+
+    fn canonical_sha256(self) -> Result<String, String> {
+        Ok(format!("{:x}", Sha256::digest(self.canonical_json()?)))
+    }
+}
+
+/// Go's `encoding/json` deliberately escapes the three HTML-sensitive ASCII
+/// characters plus the two JavaScript line separators.  The providers use
+/// that encoder while Rust uses `serde_json`, so normalize those five byte
+/// sequences explicitly to keep the digest cross-language for every valid
+/// UTF-8 identifier/path, not only the common ASCII subset.
+fn go_json_compatible_string_escaping(encoded: Vec<u8>) -> Vec<u8> {
+    let mut normalized = Vec::with_capacity(encoded.len());
+    let mut index = 0;
+    while index < encoded.len() {
+        match encoded[index] {
+            b'<' => normalized.extend_from_slice(br"\u003c"),
+            b'>' => normalized.extend_from_slice(br"\u003e"),
+            b'&' => normalized.extend_from_slice(br"\u0026"),
+            0xe2 if encoded.get(index + 1) == Some(&0x80)
+                && matches!(encoded.get(index + 2), Some(0xa8 | 0xa9)) =>
+            {
+                let suffix = if encoded[index + 2] == 0xa8 {
+                    b'8'
+                } else {
+                    b'9'
+                };
+                normalized.extend_from_slice(br"\u202");
+                normalized.push(suffix);
+                index += 2;
+            }
+            byte => normalized.push(byte),
+        }
+        index += 1;
+    }
+    normalized
+}
+
+pub(crate) fn provider_projection_sha256(bindings: &[ApiBinding]) -> Result<String, String> {
+    provider_projection(bindings)?.canonical_sha256()
+}
+
+#[cfg(test)]
+pub(crate) fn provider_projection_sha256_from_json(
+    routes: &serde_json::Value,
+    grants: &serde_json::Value,
+) -> Result<String, String> {
+    ProviderProjection {
+        routes: serde_json::from_value(routes.clone())
+            .map_err(|error| format!("decode provider routes for digest: {error}"))?,
+        grants: serde_json::from_value(grants.clone())
+            .map_err(|error| format!("decode provider grants for digest: {error}"))?,
+    }
+    .canonical_sha256()
+}
+
+fn provider_projection(bindings: &[ApiBinding]) -> Result<ProviderProjection, String> {
+    let mut projection = ProviderProjection::default();
+    for binding in bindings.iter().filter(|binding| {
+        binding.desired_state == "ACTIVE"
+            && matches!(
+                binding.state,
+                ApiBindingState::Pending | ApiBindingState::Resolved | ApiBindingState::Active
+            )
+    }) {
+        binding.validate().map_err(|error| error.to_string())?;
+        if binding.auth_mode != "workload" {
+            return Err(format!(
+                "binding {} must use workload Gateway authentication",
+                binding.binding_id
+            ));
+        }
+        let identity = parse_endpoint_id(&binding.provider_endpoint)
+            .map_err(|error| format!("binding provider endpoint is invalid: {error}"))?;
+        let host = if identity.host.contains(':') {
+            format!("[{}]", identity.host)
+        } else {
+            identity.host.to_string()
+        };
+        projection.routes.push(ProviderBindingRoute {
+            binding_id: binding.binding_id.clone(),
+            requirement_name: binding.requirement_name.clone(),
+            consumer_deployment_id: binding.consumer_deployment_id.clone(),
+            consumer_service_id: binding.consumer_service_id.clone(),
+            consumer_node_id: binding.consumer_node_id.clone(),
+            credential_generation: binding.credential_generation,
+            api_id: binding.api_id.clone(),
+            provider_deployment_id: binding.provider_deployment_id.clone(),
+            provider_service_id: binding.provider_service_id.clone(),
+            provider_node_id: binding.provider_node_id.clone(),
+            provider_endpoint: binding.provider_endpoint.clone(),
+            upstream_base: format!("{}://{host}:{}", binding.protocol, identity.port),
+            provider_path: binding.provider_path.clone(),
+            virtual_path: binding.virtual_endpoint.clone(),
+            auth_mode: binding.auth_mode.clone(),
+            provider_auth_mode: binding.provider_auth_mode.clone(),
+            permission: binding.permission.clone(),
+            methods: binding.methods.clone(),
+            timeout_ms: binding.timeout_ms.unwrap_or(30_000),
+        });
+        projection.grants.push(ProviderBindingGrant {
+            binding_id: binding.binding_id.clone(),
+            requirement_name: binding.requirement_name.clone(),
+            consumer_deployment_id: binding.consumer_deployment_id.clone(),
+            consumer_service_id: binding.consumer_service_id.clone(),
+            consumer_node_id: binding.consumer_node_id.clone(),
+            credential_generation: binding.credential_generation,
+            api_id: binding.api_id.clone(),
+            permission: binding.permission.clone(),
+        });
+    }
+    projection.routes.sort_by(|left, right| {
+        (&left.consumer_deployment_id, &left.requirement_name)
+            .cmp(&(&right.consumer_deployment_id, &right.requirement_name))
+    });
+    projection.grants.sort_by(|left, right| {
+        (&left.consumer_deployment_id, &left.requirement_name)
+            .cmp(&(&right.consumer_deployment_id, &right.requirement_name))
+    });
+    let unique = projection
+        .routes
+        .iter()
+        .map(|route| (&route.consumer_deployment_id, &route.requirement_name))
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique.len() != projection.routes.len() {
+        return Err("provider projection contains duplicate consumer requirements".to_string());
+    }
+    Ok(projection)
 }
 
 #[derive(Deserialize)]
@@ -848,6 +1304,8 @@ struct ProviderStatus {
     topology_id: String,
     observed_revision_id: Option<String>,
     observed_content_sha256: Option<String>,
+    #[serde(default)]
+    observed_projection_sha256: Option<String>,
     absent: bool,
     #[serde(default)]
     endpoints: Vec<TopologyEndpointStatus>,
@@ -873,6 +1331,7 @@ impl ProviderStatus {
         if self.absent {
             if self.observed_revision_id.is_some()
                 || self.observed_content_sha256.is_some()
+                || self.observed_projection_sha256.is_some()
                 || !self.endpoints.is_empty()
                 || !self.links.is_empty()
             {
@@ -886,6 +1345,7 @@ impl ProviderStatus {
                 state: TopologyProviderObservedState::Absent,
                 observed_revision_id: None,
                 observed_content_sha256: None,
+                observed_projection_sha256: None,
                 endpoints: Vec::new(),
                 links: Vec::new(),
                 detail: String::new(),
@@ -904,13 +1364,17 @@ impl ProviderStatus {
                 provider.as_str()
             )
         })?;
-        if content_sha256.len() != 64
-            || !content_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
+        if !is_lowercase_sha256(&content_sha256) {
             return Err(format!(
                 "{} observe response contained an invalid content hash",
+                provider.as_str()
+            ));
+        }
+        if let Some(projection_sha256) = self.observed_projection_sha256.as_deref()
+            && !is_lowercase_sha256(projection_sha256)
+        {
+            return Err(format!(
+                "{} observe response contained an invalid projection hash",
                 provider.as_str()
             ));
         }
@@ -970,6 +1434,7 @@ impl ProviderStatus {
             state: TopologyProviderObservedState::Present,
             observed_revision_id: Some(revision_id),
             observed_content_sha256: Some(content_sha256),
+            observed_projection_sha256: self.observed_projection_sha256,
             endpoints,
             links,
             detail: String::new(),
@@ -1138,6 +1603,13 @@ fn validate_identifier(name: &str, value: &str, max_len: usize) -> Result<(), St
     Ok(())
 }
 
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn validate_observed_text(name: &str, value: &str, max_len: usize) -> Result<(), String> {
     if value.is_empty()
         || value != value.trim()
@@ -1246,6 +1718,7 @@ mod tests {
                 config_ref: String::new(),
                 secret_ref: String::new(),
                 policy: json!({}),
+                api_bindings: Vec::new(),
             }],
         )
         .expect("valid topology")
@@ -1262,6 +1735,95 @@ mod tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn canonical_projection_digest_matches_the_go_contract() {
+        assert_eq!(
+            ProviderProjection::default().canonical_sha256().unwrap(),
+            "fa9d28278a0d02b19bfebeae5afd5aa6dde1c685d8396acc8defe8832848865c"
+        );
+        let projection = ProviderProjection {
+            routes: vec![ProviderBindingRoute {
+                binding_id: "binding-1".to_string(),
+                requirement_name: "storage_get".to_string(),
+                consumer_deployment_id: "worker-b".to_string(),
+                consumer_service_id: "judge-worker".to_string(),
+                consumer_node_id: "node-b".to_string(),
+                credential_generation: 3,
+                api_id: "storage.object.get".to_string(),
+                provider_deployment_id: "storage-a".to_string(),
+                provider_service_id: "storage".to_string(),
+                provider_node_id: "node-a".to_string(),
+                provider_endpoint: "10.0.0.1:8080:storage".to_string(),
+                upstream_base: "https://10.0.0.1:8080".to_string(),
+                provider_path: "/objects".to_string(),
+                virtual_path: "/internal/apis/storage.object.get".to_string(),
+                auth_mode: "workload".to_string(),
+                provider_auth_mode: "workload".to_string(),
+                permission: "storage.object.read".to_string(),
+                methods: vec!["GET".to_string()],
+                timeout_ms: 300_000,
+            }],
+            grants: vec![ProviderBindingGrant {
+                binding_id: "binding-1".to_string(),
+                requirement_name: "storage_get".to_string(),
+                consumer_deployment_id: "worker-b".to_string(),
+                consumer_service_id: "judge-worker".to_string(),
+                consumer_node_id: "node-b".to_string(),
+                credential_generation: 3,
+                api_id: "storage.object.get".to_string(),
+                permission: "storage.object.read".to_string(),
+            }],
+        };
+        assert_eq!(
+            projection.clone().canonical_sha256().unwrap(),
+            "afcaf1f6a8b8be8ae64fa9f7e14d645e3a66657fdeac42cfe8db349b2ba0efbd"
+        );
+        let mut escaped = projection;
+        escaped.routes[0].consumer_service_id = "judge<&>\u{2028}\u{2029}".to_string();
+        let canonical = String::from_utf8(escaped.canonical_json().unwrap()).unwrap();
+        assert!(
+            canonical.contains(r#""consumer_service_id":"judge\u003c\u0026\u003e\u2028\u2029""#)
+        );
+    }
+
+    #[test]
+    fn missing_or_tampered_projection_digest_never_matches_present_state() {
+        let revision_id = "primary:r1:0123456789abcdef";
+        let content_sha256 = "a".repeat(64);
+        let expected_projection_sha256 = "b".repeat(64);
+        let status = |projection_sha256: Option<&str>| {
+            let mut value = json!({
+                "api_version": "v1",
+                "provider": "gateway",
+                "topology_id": "primary",
+                "observed_revision_id": revision_id,
+                "observed_content_sha256": content_sha256,
+                "absent": false,
+                "endpoints": [],
+                "links": []
+            });
+            if let Some(projection_sha256) = projection_sha256 {
+                value["observed_projection_sha256"] = json!(projection_sha256);
+            }
+            serde_json::from_value::<ProviderStatus>(value)
+                .unwrap()
+                .verify(ProviderKind::Gateway, "primary")
+                .unwrap()
+        };
+
+        let matching = status(Some(&expected_projection_sha256));
+        assert!(matching.matches(revision_id, &content_sha256, &expected_projection_sha256));
+        let legacy_missing = status(None);
+        assert_eq!(legacy_missing.state, TopologyProviderObservedState::Present);
+        assert!(legacy_missing.observed_projection_sha256.is_none());
+        assert!(!legacy_missing.matches(revision_id, &content_sha256, &expected_projection_sha256));
+        assert!(!status(Some(&"c".repeat(64))).matches(
+            revision_id,
+            &content_sha256,
+            &expected_projection_sha256
+        ));
     }
 
     #[test]
@@ -1303,6 +1865,58 @@ mod tests {
             )
             .unwrap();
         assert_eq!(receipt.state, TopologyProviderApplyState::Succeeded);
+        join_mock(gateway);
+        join_mock(auth);
+    }
+
+    #[test]
+    fn runtime_revocation_is_gateway_first_and_never_restores_the_old_route() {
+        let gateway = spawn_mock(vec![ExpectedCall {
+            provider: "gateway",
+            action: "apply",
+            method: "PUT",
+            status: 503,
+        }]);
+        // A revoke implementation that contacted Auth first would fail to
+        // reach the Gateway mock and make this test time out.
+        let auth = spawn_mock(Vec::new());
+        let saga = saga(&gateway.origin, &auth.origin);
+        let error = saga
+            .apply_runtime_projection(
+                "primary",
+                "primary:r2:0123456789abcdef",
+                &topology("applied"),
+                &[],
+                "runtime-revoke-1",
+                RuntimeProjectionOrder::RevokeFirst,
+            )
+            .unwrap_err();
+        assert!(error.contains("gateway apply returned HTTP 503"));
+        join_mock(gateway);
+        join_mock(auth);
+    }
+
+    #[test]
+    fn runtime_restoration_is_auth_first_and_keeps_gateway_denied_on_failure() {
+        let gateway = spawn_mock(Vec::new());
+        let auth = spawn_mock(vec![ExpectedCall {
+            provider: "auth",
+            action: "apply",
+            method: "PUT",
+            status: 503,
+        }]);
+        let saga = saga(&gateway.origin, &auth.origin);
+        let error = saga
+            .apply_runtime_projection(
+                "primary",
+                "primary:r2:0123456789abcdef",
+                &topology("applied"),
+                &[],
+                "runtime-grant-1",
+                RuntimeProjectionOrder::GrantFirst,
+            )
+            .unwrap_err();
+        assert!(error.contains("auth apply returned HTTP 503"));
         join_mock(gateway);
         join_mock(auth);
     }
@@ -1531,6 +2145,7 @@ mod tests {
     fn observe_requires_fresh_matching_state_from_both_providers() {
         let revision_id = "primary:r2:0123456789abcdef";
         let content_sha256 = topology("desired").content_sha256().unwrap();
+        let projection_sha256 = provider_projection_sha256(&[]).unwrap();
         let gateway = spawn_observe_mock(
             "gateway",
             200,
@@ -1540,6 +2155,7 @@ mod tests {
                 "topology_id": "primary",
                 "observed_revision_id": revision_id,
                 "observed_content_sha256": content_sha256.clone(),
+                "observed_projection_sha256": projection_sha256.clone(),
                 "absent": false,
                 "endpoints": [{
                     "endpoint": "127.0.0.1:8080:gateway",
@@ -1568,6 +2184,7 @@ mod tests {
                 "topology_id": "primary",
                 "observed_revision_id": revision_id,
                 "observed_content_sha256": content_sha256,
+                "observed_projection_sha256": projection_sha256,
                 "absent": false,
                 "links": [{
                     "source_endpoint": "127.0.0.1:8080:gateway",
@@ -1580,11 +2197,59 @@ mod tests {
             }),
         );
         let observation = saga(&gateway.origin, &auth.origin).observe("primary");
-        assert!(observation.gateway.matches(revision_id, &content_sha256));
-        assert!(observation.auth.matches(revision_id, &content_sha256));
+        assert!(
+            observation
+                .gateway
+                .matches(revision_id, &content_sha256, &projection_sha256)
+        );
+        assert!(
+            observation
+                .auth
+                .matches(revision_id, &content_sha256, &projection_sha256)
+        );
         assert_eq!(observation.gateway.endpoints.len(), 1);
         assert_eq!(observation.gateway.links.len(), 1);
         assert_eq!(observation.auth.links.len(), 1);
+        join_mock(gateway);
+        join_mock(auth);
+    }
+
+    #[test]
+    fn observe_accepts_present_projection_with_empty_status_arrays() {
+        let revision_id = "primary:r1:0123456789abcdef";
+        let content_sha256 = topology("empty bindings").content_sha256().unwrap();
+        let projection_sha256 = provider_projection_sha256(&[]).unwrap();
+        let status = |provider| {
+            json!({
+                "api_version": "v1",
+                "provider": provider,
+                "topology_id": "primary",
+                "observed_revision_id": revision_id,
+                "observed_content_sha256": content_sha256,
+                "observed_projection_sha256": projection_sha256,
+                "absent": false,
+                "endpoints": [],
+                "links": [],
+            })
+        };
+        let gateway = spawn_observe_mock("gateway", 200, status("gateway"));
+        let auth = spawn_observe_mock("auth", 200, status("auth"));
+
+        let observation = saga(&gateway.origin, &auth.origin).observe("primary");
+        assert!(
+            observation
+                .gateway
+                .matches(revision_id, &content_sha256, &projection_sha256)
+        );
+        assert!(
+            observation
+                .auth
+                .matches(revision_id, &content_sha256, &projection_sha256)
+        );
+        assert!(observation.gateway.endpoints.is_empty());
+        assert!(observation.gateway.links.is_empty());
+        assert!(observation.auth.endpoints.is_empty());
+        assert!(observation.auth.links.is_empty());
         join_mock(gateway);
         join_mock(auth);
     }
@@ -1600,6 +2265,7 @@ mod tests {
                 "topology_id": "primary",
                 "observed_revision_id": "primary:r1:old",
                 "observed_content_sha256": "a".repeat(64),
+                "observed_projection_sha256": "c".repeat(64),
                 "absent": false,
             }),
         );
@@ -1616,7 +2282,7 @@ mod tests {
         assert!(
             !observation
                 .gateway
-                .matches("primary:r2:new", &"b".repeat(64))
+                .matches("primary:r2:new", &"b".repeat(64), &"d".repeat(64))
         );
         assert_eq!(
             observation.auth.state,
@@ -1654,9 +2320,9 @@ mod tests {
                 assert!(body["attempted_revision_id"].as_str().is_some());
                 assert!(body["operation_id"].as_str().is_some());
                 if expected.action == "delete" {
-                    assert!(body["spec"].is_null());
-                    assert!(body["desired_revision_id"].is_null());
-                    assert!(body["desired_content_sha256"].is_null());
+                    assert!(body.get("spec").is_none());
+                    assert!(body.get("desired_revision_id").is_none());
+                    assert!(body.get("desired_content_sha256").is_none());
                 } else if expected.action == "restore_previous" {
                     assert!(body["spec"].is_object());
                     assert_ne!(body["desired_revision_id"], body["attempted_revision_id"]);

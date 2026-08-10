@@ -134,7 +134,9 @@ impl<'a, S: OrchestratorStore, P: EndpointProbe + Clone> OrchestratorActionDispa
             .store
             .list_service_releases()?
             .into_iter()
-            .map(|record| serde_json::from_value(record.manifest).map_err(OrchestratorError::Json))
+            .map(|record| {
+                crate::service_io::legacy_release_manifest_from_json_value(record.manifest)
+            })
             .collect::<Result<Vec<_>>>()?;
         let endpoints = self.store.list_endpoints()?;
         let topology = self
@@ -609,7 +611,7 @@ impl OrchestratorActionConsole {
         store: impl OrchestratorStore + Send + 'static,
     ) -> Result<Self> {
         let repo_root = repo_root.into();
-        let context = load_operation_workbench_context(&repo_root)?;
+        let context = crate::workbench::load_operation_workbench_context_from_repo(&repo_root)?;
         let schemas = context.schemas.clone();
         let memory_store = memory_store_from_context(&context)?;
         let mut external_store = SharedOrchestratorStore::new(kind.into(), store);
@@ -1468,7 +1470,28 @@ pub(crate) fn sync_repo_manifest_registry_to_store(
         store.put_service(service.clone())?;
     }
     for release in &context.releases {
-        store.upsert_service_release(service_release_record(release)?)?;
+        let incoming = service_release_record(release)?;
+        let existing_contract_version = store
+            .get_service_release(&incoming.service_name, &incoming.version)?
+            .and_then(|record| {
+                record
+                    .manifest
+                    .get("schema_version")
+                    .and_then(Value::as_u64)
+            })
+            .unwrap_or(1);
+        let incoming_contract_version = incoming
+            .manifest
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .unwrap_or(1);
+        // Repository discovery currently exposes the normalized v1
+        // projection. It may seed a missing row, but must never downgrade a
+        // trusted Catalog v2 document already persisted for the same release.
+        if existing_contract_version > incoming_contract_version {
+            continue;
+        }
+        store.upsert_service_release(incoming)?;
     }
     Ok(())
 }
@@ -2572,7 +2595,9 @@ pub fn default_console_request(action: &str) -> Result<ActionRequest> {
 
 #[cfg(test)]
 mod trusted_release_document_tests {
-    use super::OrchestratorActionConsole;
+    use super::{OrchestratorActionConsole, sync_repo_manifest_registry_to_store};
+    use crate::OrchestratorStore;
+    use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
 
     fn workspace_root() -> PathBuf {
@@ -2605,6 +2630,75 @@ mod trusted_release_document_tests {
         assert_eq!(
             console.service_releases().expect("releases after"),
             releases_before
+        );
+    }
+
+    #[test]
+    fn registered_v2_document_keeps_versioned_contract_sections() {
+        let root = workspace_root();
+        let bytes = std::fs::read(root.join("services/judge-worker/release.yaml"))
+            .expect("read v2 release fixture");
+        let checksum = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let mut console =
+            OrchestratorActionConsole::load_with_database_url(&root, None).expect("console");
+
+        console
+            .register_external_release_document(
+                &bytes,
+                "https://catalog.example/judge-worker/release.yaml",
+                &checksum,
+            )
+            .expect("register v2 document");
+
+        let record = console
+            .service_releases()
+            .expect("registered releases")
+            .into_iter()
+            .find(|release| release.service_name == "judge-worker" && release.version == "0.1.0")
+            .expect("judge-worker release record");
+        assert_eq!(record.manifest["schema_version"], 2);
+        assert!(record.manifest["provides"].is_object());
+        assert_eq!(
+            record.manifest["requires"]["apis"][0]["name"],
+            "judge_control"
+        );
+        assert!(record.manifest["events"].is_object());
+        assert_eq!(
+            record.manifest["runtime_contract"]["id"],
+            "judge-sandbox-v1"
+        );
+    }
+
+    #[test]
+    fn repository_bootstrap_cannot_downgrade_an_imported_v2_record() {
+        let root = workspace_root();
+        let bytes = std::fs::read(root.join("services/judge-worker/release.yaml"))
+            .expect("read v2 release fixture");
+        let checksum = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let mut import = crate::external_release_import_from_yaml(
+            text,
+            "https://catalog.example/judge-worker/release.yaml",
+            &checksum,
+        )
+        .expect("v2 import");
+        let mut store = crate::MemoryOrchestratorStore::new();
+        crate::register_external_release_into_store(&mut store, &mut import)
+            .expect("register imported v2 release");
+        let context = crate::workbench::load_operation_workbench_context_from_repo(&root)
+            .expect("repository context");
+
+        sync_repo_manifest_registry_to_store(&mut store, &context)
+            .expect("repository bootstrap sync");
+
+        let record = store
+            .get_service_release("judge-worker", "0.1.0")
+            .unwrap()
+            .expect("judge-worker release record");
+        assert_eq!(record.manifest["schema_version"], 2);
+        assert_eq!(
+            record.manifest["requires"]["apis"][0]["name"],
+            "judge_control"
         );
     }
 }

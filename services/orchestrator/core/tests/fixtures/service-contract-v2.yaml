@@ -1,0 +1,41 @@
+schema_version: 2
+service_name: consumer
+version: 1.0.0
+description: Service Contract v2 golden fixture
+service_type: backend-api
+source:
+  kind: url
+  url: https://example.invalid/consumer.release.yaml
+runtime:
+  kind: image
+  image: example.invalid/consumer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+backend:
+  protocol: http
+  port: 8080
+permissions:
+  - consumer.status.read
+provides:
+  apis:
+    - id: consumer.status.get
+      version: 1.0.0
+      path: /status
+      methods: [GET]
+      auth:
+        mode: workload
+      permission: consumer.status.read
+requires:
+  apis:
+    - name: STORAGE_GET
+      id: storage.object.get
+      version: ">=1.0.0, <2.0.0"
+      timeout_ms: 5000
+events:
+  publishes:
+    - id: consumer.started
+      version: 1.0.0
+  subscribes:
+    - type: storage.updated
+      consumer_group: consumer-v1
+runtime_contract:
+  id: judge-sandbox-v1
+  sha256: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb

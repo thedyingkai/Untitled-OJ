@@ -1,0 +1,241 @@
+openapi: 3.1.0
+info:
+  title: OJOS Problem Service Published API
+  version: 0.1.0
+x-ojos-service:
+  id: problem-service
+  version: 0.1.0
+servers:
+  - url: /api
+paths:
+  /problem/problems:
+    get:
+      operationId: listProblems
+      x-ojos-api: &problem-read
+        id: problem.problem.read
+        version: 1.0.0
+        auth: user
+        permission: problem.view
+      responses:
+        "200": {description: Problem list}
+    post:
+      operationId: createProblem
+      x-ojos-api: &problem-manage
+        id: problem.problem.manage
+        version: 1.0.0
+        auth: user
+        permission: problem.edit
+      responses:
+        "200": {description: Problem created}
+  /problem/problems/{id}:
+    get:
+      operationId: getProblem
+      x-ojos-api: *problem-read
+      responses:
+        "200": {description: Problem}
+    put:
+      operationId: updateProblem
+      x-ojos-api: *problem-manage
+      responses:
+        "200": {description: Problem updated}
+    delete:
+      operationId: deleteProblem
+      x-ojos-api: *problem-manage
+      responses:
+        "200": {description: Problem deleted}
+  /problem/problems/{id}/package:
+    get:
+      operationId: getProblemPackage
+      x-ojos-api: &testdata-read
+        id: problem.testdata.read
+        version: 1.0.0
+        auth: user
+        permission: problem.testdata.read
+      responses:
+        "200": {description: Problem package}
+  /problem/problems/{id}/package/cases:
+    get:
+      operationId: listProblemPackageCases
+      x-ojos-api: *testdata-read
+      responses:
+        "200": {description: Problem package cases}
+  /problem/problems/{id}/test-cases:
+    get:
+      operationId: listProblemTestCases
+      x-ojos-api: *testdata-read
+      responses:
+        "200": {description: Test cases}
+    post:
+      operationId: addProblemTestCase
+      x-ojos-api: &testdata-write
+        id: problem.testdata.write
+        version: 1.0.0
+        auth: user
+        permission: problem.testdata.write
+      responses:
+        "200": {description: Test case added}
+  /problem/problems/{id}/test-cases/{case_no}:
+    put:
+      operationId: updateProblemTestCase
+      x-ojos-api: *testdata-write
+      responses:
+        "200": {description: Test case updated}
+    delete:
+      operationId: deleteProblemTestCase
+      x-ojos-api: *testdata-write
+      responses:
+        "200": {description: Test case deleted}
+  /problem/admin/artifact-gc/intents:
+    get:
+      operationId: listArtifactGCIntents
+      summary: List a bounded page of artifact GC intents in one state
+      x-ojos-api: &artifact-gc-manage
+        id: problem.artifact-gc.manage
+        version: 1.0.0
+        auth: user
+        permission: problem.manage.data
+      parameters:
+        - name: status
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [PENDING, DELETING, NEEDS_ATTENTION]
+        - name: cursor
+          in: query
+          required: false
+          description: Exclusive artifact_uri cursor returned by the previous page.
+          schema: {type: string}
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 200, default: 100}
+      responses:
+        "200":
+          description: Stable artifact URI ordered page. Collector claim credentials are never returned.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ArtifactGCIntentList"}
+        "401": {description: User authentication required}
+        "403": {description: Missing system-scope problem.manage.data}
+        "503": {description: Artifact GC operator is disabled or unavailable}
+  /problem/admin/artifact-gc/intents:reconcile:
+    post:
+      operationId: reconcileArtifactGCIntent
+      summary: Durably request immediate reconciliation of one completed upload
+      x-ojos-api: *artifact-gc-manage
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ArtifactGCReconcileRequest"}
+      responses:
+        "202":
+          description: Durable action recorded and the serialized background collector was notified.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ArtifactGCAction"}
+        "400": {description: Invalid request or missing Idempotency-Key}
+        "401": {description: User authentication required}
+        "403": {description: Missing system-scope problem.manage.data}
+        "409": {description: Stale identity, state, or conflicting idempotency replay}
+        "503": {description: Artifact GC operator is disabled or unavailable}
+  /problem/admin/artifact-gc/intents:retry:
+    post:
+      operationId: retryArtifactGCIntent
+      summary: Retry one NEEDS_ATTENTION intent with optimistic failure-count concurrency
+      x-ojos-api: *artifact-gc-manage
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ArtifactGCRetryRequest"}
+      responses:
+        "202":
+          description: NEEDS_ATTENTION was moved to PENDING, audited, and queued for targeted reconciliation.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ArtifactGCAction"}
+        "400": {description: Invalid request or missing Idempotency-Key}
+        "401": {description: User authentication required}
+        "403": {description: Missing system-scope problem.manage.data}
+        "409": {description: Stale failure count, state, or conflicting idempotency replay}
+        "503": {description: Artifact GC operator is disabled or unavailable}
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 255}
+  schemas:
+    ArtifactGCLastFailure:
+      type: object
+      required: [message, stage, kind, deterministic]
+      properties:
+        message: {type: string}
+        stage: {type: string}
+        kind:
+          type: string
+          enum: [TRANSIENT, PROVIDER_HTTP, OBJECT_IDENTITY_MISMATCH, REFERENCE_IDENTITY_MISMATCH, REFERENCED_OBJECT_MISSING, LEDGER, DETERMINISTIC, ""]
+        http_status: {type: integer, minimum: 100, maximum: 599}
+        provider_result: {type: string, description: Bounded classification such as HTTP_404; never a response body or credential.}
+        deterministic: {type: boolean}
+    ArtifactGCIntent:
+      type: object
+      required: [artifact_uri, artifact_sha256, artifact_size_bytes, status, failure_count, last_failure, updated_at]
+      properties:
+        artifact_uri: {type: string}
+        artifact_sha256: {type: string, pattern: "^[a-f0-9]{64}$"}
+        artifact_size_bytes: {type: integer, minimum: 0}
+        status: {type: string, enum: [PENDING, DELETING, NEEDS_ATTENTION]}
+        failure_count: {type: integer, minimum: 0}
+        last_failure: {$ref: "#/components/schemas/ArtifactGCLastFailure"}
+        upload_completed_at: {type: string, format: date-time}
+        needs_attention_at: {type: string, format: date-time}
+        manual_reconcile_requested_at: {type: string, format: date-time}
+        last_operator_retry_reason: {type: string}
+        last_operator_retry_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ArtifactGCIntentList:
+      type: object
+      required: [intents]
+      properties:
+        intents:
+          type: array
+          maxItems: 200
+          items: {$ref: "#/components/schemas/ArtifactGCIntent"}
+        next_cursor: {type: string}
+    ArtifactGCReconcileRequest:
+      type: object
+      additionalProperties: false
+      required: [artifact_uri, artifact_sha256, artifact_size_bytes, reason]
+      properties:
+        artifact_uri: {type: string}
+        artifact_sha256: {type: string, pattern: "^[a-f0-9]{64}$"}
+        artifact_size_bytes: {type: integer, minimum: 0}
+        reason: {type: string, minLength: 1, maxLength: 2000}
+    ArtifactGCRetryRequest:
+      type: object
+      additionalProperties: false
+      required: [artifact_uri, expected_failure_count, reason]
+      properties:
+        artifact_uri: {type: string}
+        expected_failure_count: {type: integer, minimum: 1}
+        reason: {type: string, minLength: 1, maxLength: 2000}
+    ArtifactGCAction:
+      type: object
+      required: [action_id, request_id, artifact_uri, from_status, to_status, reason_recorded, queued, idempotent_replay]
+      properties:
+        action_id: {type: integer, format: int64}
+        request_id: {type: string}
+        artifact_uri: {type: string}
+        from_status: {type: string, enum: [PENDING, NEEDS_ATTENTION]}
+        to_status: {type: string, enum: [PENDING]}
+        reason_recorded: {type: boolean, const: true}
+        queued: {type: boolean, const: true}
+        idempotent_replay: {type: boolean}

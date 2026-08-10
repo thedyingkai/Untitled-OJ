@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "service": {
+    "id": "contract-echo-provider",
+    "version": "1.0.0"
+  },
+  "provides": {
+    "apis": [
+      {
+        "id": "fixture.contract.echo",
+        "version": "1.0.0",
+        "path": "/echo",
+        "auth": "workload",
+        "permission": "fixture.echo"
+      }
+    ]
+  },
+  "runtime_contract": {
+    "id": "standard-container-v1",
+    "sha256": "sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f"
+  }
+}

@@ -4,6 +4,7 @@
 //! `orchestrator-core`. SQLite writes use short transactions and never rebuild
 //! a shadow in-memory store after a mutation.
 
+mod api_bindings;
 mod audit;
 mod idempotency;
 mod jobs;
@@ -11,14 +12,17 @@ mod legacy_import;
 mod node_identity;
 mod operations;
 mod postgres;
+mod postgres_api_bindings;
 mod postgres_audit;
 mod postgres_idempotency;
 mod postgres_jobs;
 mod postgres_operations;
+mod postgres_runtime_facts;
 mod postgres_runtime_instances;
 mod postgres_store;
 mod postgres_topology;
 mod retention;
+mod runtime_facts;
 mod runtime_instances;
 mod sqlite;
 mod topology;
@@ -33,6 +37,7 @@ pub use node_identity::{
     NewNodeCertificate, NodeCertificateRecord, NodeEnrollmentCode, classify_enrollment_replay,
 };
 pub use operations::{ControlPlaneAnomalyCounters, SqliteOperationStore};
+pub use orchestrator_legacy::{ApiBinding, ApiBindingState};
 pub use postgres::{
     AdvisoryLockGuard, DEFAULT_CONTROL_PLANE_LOCK_KEY, PooledPostgresConnection, PostgresError,
     PostgresOptions, PostgresPool, PostgresPreflight, PostgresReadinessReport, PostgresResult,
@@ -42,9 +47,10 @@ pub use postgres_jobs::PostgresJobStore;
 pub use postgres_operations::PostgresOperationStore;
 pub use postgres_store::PostgresOrchestratorStore;
 pub use retention::HistoryRetentionReport;
+pub use runtime_facts::StoredNodeRuntimeFacts;
 pub use runtime_instances::{RuntimeManagementMode, StoredRuntimeInstance};
 pub use sqlite::{
     AppliedMigration, ReadinessReport, SqliteOptions, SqliteOrchestratorStore, StorageError,
     StorageResult, SynchronousMode,
 };
-pub use topology::{TopologyApplyOutcome, TopologyHeads};
+pub use topology::{TopologyApplyGroupMember, TopologyApplyOutcome, TopologyHeads};

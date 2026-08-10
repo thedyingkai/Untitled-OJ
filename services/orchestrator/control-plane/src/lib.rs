@@ -63,6 +63,10 @@ pub enum JobKind {
     Rollback,
     Health,
     Inventory,
+    /// Re-materializes an existing Deployment's Service Context after a
+    /// topology Binding generation changes. This is a remote Agent job, not a
+    /// control-plane provider mutation.
+    BindingContextApply,
     TopologyApply,
     /// Control-plane health validation and projection for a non-managed endpoint.
     ExternalHealth,
@@ -70,6 +74,14 @@ pub enum JobKind {
     NodeDrain,
     /// Internal control-plane job. It is never claimable by a remote Agent.
     NodeRemove,
+}
+
+impl JobKind {
+    /// Whether an unknown outcome after lease expiry can be repeated without
+    /// risking a duplicate external side effect.
+    pub fn is_retry_safe_after_lease_expiry(&self) -> bool {
+        matches!(self, Self::Health | Self::Inventory | Self::ExternalHealth)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -182,6 +194,19 @@ pub struct CompleteRequest {
     pub events: Vec<NewJobEvent>,
 }
 
+/// Internal reconciliation request used only when durable side-effect
+/// evidence proves that an expired lease completed successfully.
+///
+/// `result` is both the successful Job result and the durable evidence the
+/// caller has already validated. The store deliberately cannot accept a
+/// target status or an unexpired lease through this path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResolveExpiredSuccessRequest {
+    pub job_id: String,
+    pub now_ms: i64,
+    pub result: Value,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum JobError {
     #[error("job persistence error: {0}")]
@@ -207,7 +232,14 @@ pub trait JobStore {
     fn claim(&mut self, request: ClaimRequest) -> Result<Option<Job>, JobError>;
     fn heartbeat(&mut self, request: HeartbeatRequest) -> Result<Job, JobError>;
     fn complete(&mut self, request: CompleteRequest) -> Result<Job, JobError>;
+    fn resolve_expired_success(
+        &mut self,
+        request: ResolveExpiredSuccessRequest,
+    ) -> Result<Job, JobError>;
     fn request_cancel(&mut self, job_id: &str, now_ms: i64) -> Result<Job, JobError>;
+    /// Returns an immutable snapshot ordered by status, lease deadline, then
+    /// Job ID. `CANCEL_REQUESTED` sorts before `LEASED` in every backend.
+    fn expired_leases(&self, now_ms: i64) -> Result<Vec<Job>, JobError>;
     fn recover_expired(&mut self, now_ms: i64) -> Result<Vec<Job>, JobError>;
     fn get(&self, job_id: &str) -> Result<Option<Job>, JobError>;
     fn list(&self) -> Result<Vec<Job>, JobError>;
@@ -453,6 +485,49 @@ impl JobStore for MemoryJobStore {
         Ok(job.clone())
     }
 
+    fn resolve_expired_success(
+        &mut self,
+        request: ResolveExpiredSuccessRequest,
+    ) -> Result<Job, JobError> {
+        validate_expired_success_result(&request.result)?;
+        let fingerprint = successful_completion_fingerprint(&request.result);
+        let job = self
+            .jobs
+            .get_mut(&request.job_id)
+            .ok_or_else(|| JobError::NotFound(request.job_id.clone()))?;
+        if job.status == JobStatus::Succeeded {
+            if job.result.as_ref() == Some(&request.result)
+                && job.completion_fingerprint.as_deref() == Some(fingerprint.as_str())
+            {
+                return Ok(job.clone());
+            }
+            return Err(JobError::InvalidTransition {
+                from: job.status.clone(),
+                to: "SUCCEEDED_FROM_EXPIRED_EVIDENCE",
+            });
+        }
+        if !matches!(job.status, JobStatus::Leased | JobStatus::CancelRequested) {
+            return Err(JobError::InvalidTransition {
+                from: job.status.clone(),
+                to: "SUCCEEDED_FROM_EXPIRED_EVIDENCE",
+            });
+        }
+        if job
+            .lease_expires_at_ms
+            .is_none_or(|deadline| deadline > request.now_ms)
+        {
+            return Err(JobError::StaleLease);
+        }
+
+        job.status = JobStatus::Succeeded;
+        job.result = Some(request.result);
+        job.error_message = None;
+        job.completion_fingerprint = Some(fingerprint);
+        job.completed_at_ms = Some(request.now_ms);
+        job.updated_at_ms = request.now_ms;
+        Ok(job.clone())
+    }
+
     fn request_cancel(&mut self, job_id: &str, now_ms: i64) -> Result<Job, JobError> {
         let job = self
             .jobs
@@ -477,16 +552,45 @@ impl JobStore for MemoryJobStore {
         Ok(job.clone())
     }
 
+    fn expired_leases(&self, now_ms: i64) -> Result<Vec<Job>, JobError> {
+        let mut expired = self
+            .jobs
+            .values()
+            .filter(|job| {
+                matches!(job.status, JobStatus::Leased | JobStatus::CancelRequested)
+                    && job
+                        .lease_expires_at_ms
+                        .is_some_and(|deadline| deadline <= now_ms)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        expired.sort_by(|left, right| {
+            (
+                expired_lease_status_order(&left.status),
+                left.lease_expires_at_ms,
+                left.job_id.as_str(),
+            )
+                .cmp(&(
+                    expired_lease_status_order(&right.status),
+                    right.lease_expires_at_ms,
+                    right.job_id.as_str(),
+                ))
+        });
+        Ok(expired)
+    }
+
     fn recover_expired(&mut self, now_ms: i64) -> Result<Vec<Job>, JobError> {
+        let expired_job_ids = self
+            .expired_leases(now_ms)?
+            .into_iter()
+            .map(|job| job.job_id)
+            .collect::<Vec<_>>();
         let mut recovered = Vec::new();
-        for job in self.jobs.values_mut() {
-            let expired = matches!(job.status, JobStatus::Leased | JobStatus::CancelRequested)
-                && job
-                    .lease_expires_at_ms
-                    .is_some_and(|deadline| deadline <= now_ms);
-            if !expired {
-                continue;
-            }
+        for job_id in expired_job_ids {
+            let job = self
+                .jobs
+                .get_mut(&job_id)
+                .expect("expired lease snapshot references an existing Job");
             recover_expired_job(job, now_ms);
             recovered.push(job.clone());
         }
@@ -524,20 +628,33 @@ fn recover_expired_job(job: &mut Job, now_ms: i64) {
         job.error_message =
             Some("worker lease expired while cancellation outcome was unknown".to_string());
         job.completed_at_ms = Some(now_ms);
-    } else if job.attempt < job.max_attempts {
+    } else if job.kind.is_retry_safe_after_lease_expiry() && job.attempt < job.max_attempts {
         job.status = JobStatus::RetryWait;
         job.available_at_ms = now_ms + retry_backoff_ms(job.attempt);
         job.error_message =
             Some("worker lease expired; awaiting ledger reconciliation".to_string());
     } else {
         job.status = JobStatus::NeedsAttention;
-        job.error_message = Some("worker lease expired and retry budget was exhausted".to_string());
+        job.error_message = Some(if job.kind.is_retry_safe_after_lease_expiry() {
+            "worker lease expired and retry budget was exhausted".to_string()
+        } else {
+            "worker lease expired with an unknown side-effect outcome; automatic retry is forbidden"
+                .to_string()
+        });
         job.completed_at_ms = Some(now_ms);
     }
     job.lease_owner = None;
     job.lease_token = None;
     job.lease_expires_at_ms = None;
     job.updated_at_ms = now_ms;
+}
+
+fn expired_lease_status_order(status: &JobStatus) -> u8 {
+    match status {
+        JobStatus::CancelRequested => 0,
+        JobStatus::Leased => 1,
+        _ => 2,
+    }
 }
 
 pub fn canonical_payload_sha256(payload: &Value) -> String {
@@ -587,6 +704,19 @@ fn completion_fingerprint(status: &CompletionStatus, result: &Value, error: &str
         "error": error,
     });
     canonical_payload_sha256(&value)
+}
+
+fn successful_completion_fingerprint(result: &Value) -> String {
+    completion_fingerprint(&CompletionStatus::Succeeded, result, "")
+}
+
+fn validate_expired_success_result(result: &Value) -> Result<(), JobError> {
+    if result.is_null() {
+        return Err(JobError::InvalidJob(
+            "expired success resolution requires durable result evidence".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -668,7 +798,9 @@ mod tests {
     #[test]
     fn expired_requests_recover_the_lease_before_returning_stale() {
         let mut store = MemoryJobStore::default();
-        store.enqueue(new_job("heartbeat"), 0).unwrap();
+        let mut heartbeat_job = new_job("heartbeat");
+        heartbeat_job.kind = JobKind::Health;
+        store.enqueue(heartbeat_job, 0).unwrap();
         claim(&mut store, "current-heartbeat", 0);
 
         let stale_before_deadline = store.heartbeat(HeartbeatRequest {
@@ -697,7 +829,9 @@ mod tests {
             JobStatus::RetryWait
         );
 
-        store.enqueue(new_job("complete"), 0).unwrap();
+        let mut completion_job = new_job("complete");
+        completion_job.kind = JobKind::Health;
+        store.enqueue(completion_job, 0).unwrap();
         claim(&mut store, "current-complete", 0);
         let stale_after_deadline = store.complete(CompleteRequest {
             job_id: "complete".to_string(),
@@ -762,9 +896,112 @@ mod tests {
     }
 
     #[test]
+    fn expired_success_resolution_is_narrow_auditable_and_idempotent() {
+        let mut store = MemoryJobStore::default();
+        let mut job = new_job("expired-success");
+        job.max_attempts = 2;
+        store.enqueue(job, 0).unwrap();
+        claim(&mut store, "lease-1", 0);
+        store
+            .complete(CompleteRequest {
+                job_id: "expired-success".to_string(),
+                lease_token: "lease-1".to_string(),
+                status: CompletionStatus::RetryableFailure,
+                result: json!({}),
+                error_message: "known retryable failure".to_string(),
+                now_ms: 0,
+                events: Vec::new(),
+            })
+            .unwrap();
+        let leased = claim(&mut store, "lease-2", 1_000);
+        assert!(leased.error_message.is_some());
+        let result = json!({
+            "topology_id": "primary",
+            "revision_id": "revision-1",
+            "durable_evidence": {"applied_head": "revision-1"}
+        });
+        let request = ResolveExpiredSuccessRequest {
+            job_id: leased.job_id.clone(),
+            now_ms: 31_000,
+            result: result.clone(),
+        };
+
+        let resolved = store.resolve_expired_success(request.clone()).unwrap();
+        assert_eq!(resolved.status, JobStatus::Succeeded);
+        assert_eq!(resolved.result, Some(result));
+        assert_eq!(resolved.error_message, None);
+        assert_eq!(resolved.attempt, leased.attempt);
+        assert_eq!(resolved.started_at_ms, leased.started_at_ms);
+        assert_eq!(resolved.lease_owner, leased.lease_owner);
+        assert_eq!(resolved.lease_token, leased.lease_token);
+        assert_eq!(resolved.lease_expires_at_ms, leased.lease_expires_at_ms);
+        assert_eq!(store.resolve_expired_success(request).unwrap(), resolved);
+    }
+
+    #[test]
+    fn expired_success_resolution_rejects_live_and_ambiguous_jobs() {
+        let mut store = MemoryJobStore::default();
+        store.enqueue(new_job("live"), 0).unwrap();
+        claim(&mut store, "live-lease", 0);
+        assert_eq!(
+            store.resolve_expired_success(ResolveExpiredSuccessRequest {
+                job_id: "live".to_string(),
+                now_ms: 29_999,
+                result: json!({"durable_evidence": "too-early"}),
+            }),
+            Err(JobError::StaleLease)
+        );
+
+        let mut attention = new_job("attention");
+        attention.max_attempts = 1;
+        store.enqueue(attention, 0).unwrap();
+        claim(&mut store, "attention-lease", 0);
+        store.recover_expired(30_000).unwrap();
+        assert!(matches!(
+            store.resolve_expired_success(ResolveExpiredSuccessRequest {
+                job_id: "attention".to_string(),
+                now_ms: 30_001,
+                result: json!({"durable_evidence": "late"}),
+            }),
+            Err(JobError::InvalidTransition {
+                from: JobStatus::NeedsAttention,
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.resolve_expired_success(ResolveExpiredSuccessRequest {
+                job_id: "live".to_string(),
+                now_ms: 30_000,
+                result: Value::Null,
+            }),
+            Err(JobError::InvalidJob(_))
+        ));
+    }
+
+    #[test]
+    fn expired_cancel_request_can_resolve_from_durable_success_evidence() {
+        let mut store = MemoryJobStore::default();
+        store.enqueue(new_job("cancel-race"), 0).unwrap();
+        claim(&mut store, "cancel-race-lease", 0);
+        let cancelling = store.request_cancel("cancel-race", 1).unwrap();
+        assert_eq!(cancelling.status, JobStatus::CancelRequested);
+
+        let resolved = store
+            .resolve_expired_success(ResolveExpiredSuccessRequest {
+                job_id: "cancel-race".to_string(),
+                now_ms: 30_000,
+                result: json!({"durable_evidence": "side-effect-committed"}),
+            })
+            .unwrap();
+        assert_eq!(resolved.status, JobStatus::Succeeded);
+        assert_eq!(resolved.lease_token, cancelling.lease_token);
+    }
+
+    #[test]
     fn expired_lease_requeues_then_requires_attention() {
         let mut store = MemoryJobStore::default();
         let mut job = new_job("1");
+        job.kind = JobKind::Health;
         job.max_attempts = 2;
         store.enqueue(job, 0).unwrap();
         claim(&mut store, "lease-1", 0);
@@ -773,6 +1010,105 @@ mod tests {
         claim(&mut store, "lease-2", 31_000);
         let second = store.recover_expired(61_000).unwrap();
         assert_eq!(second[0].status, JobStatus::NeedsAttention);
+    }
+
+    #[test]
+    fn mutating_jobs_never_retry_an_unknown_expired_lease_outcome() {
+        let kinds = [
+            JobKind::Install,
+            JobKind::ReleasePipeline,
+            JobKind::Upgrade,
+            JobKind::Start,
+            JobKind::Stop,
+            JobKind::Restart,
+            JobKind::Uninstall,
+            JobKind::Rollback,
+            JobKind::BindingContextApply,
+            JobKind::TopologyApply,
+            JobKind::NodeDrain,
+            JobKind::NodeRemove,
+        ];
+        for (index, kind) in kinds.into_iter().enumerate() {
+            let mut store = MemoryJobStore::default();
+            let mut job = new_job(&format!("mutating-{index}"));
+            job.kind = kind;
+            job.max_attempts = 3;
+            store.enqueue(job, 0).unwrap();
+            claim(&mut store, "lease", 0);
+
+            let recovered = store.recover_expired(30_000).unwrap();
+            assert_eq!(recovered[0].status, JobStatus::NeedsAttention);
+            assert_eq!(recovered[0].attempt, 1);
+            assert!(
+                store
+                    .claim(ClaimRequest {
+                        node_id: "node-a".to_string(),
+                        instance_id: "second-worker".to_string(),
+                        lease_token: "second-lease".to_string(),
+                        now_ms: 60_000,
+                        lease_ms: 30_000,
+                    })
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn every_observation_kind_can_retry_an_expired_lease_within_budget() {
+        for (index, kind) in [JobKind::Health, JobKind::Inventory, JobKind::ExternalHealth]
+            .into_iter()
+            .enumerate()
+        {
+            let mut store = MemoryJobStore::default();
+            let mut job = new_job(&format!("observation-{index}"));
+            job.kind = kind;
+            job.max_attempts = 2;
+            store.enqueue(job, 0).unwrap();
+            claim(&mut store, "lease", 0);
+            assert_eq!(
+                store.recover_expired(30_000).unwrap()[0].status,
+                JobStatus::RetryWait
+            );
+        }
+    }
+
+    #[test]
+    fn expired_lease_query_is_read_only_and_stably_ordered_in_memory() {
+        let mut store = MemoryJobStore::default();
+        for id in ["query-b", "query-a", "query-future"] {
+            let mut job = new_job(id);
+            job.kind = JobKind::Health;
+            store.enqueue(job, 0).unwrap();
+            store
+                .claim(ClaimRequest {
+                    node_id: "node-a".to_string(),
+                    instance_id: format!("worker-{id}"),
+                    lease_token: format!("lease-{id}"),
+                    now_ms: 0,
+                    lease_ms: if id == "query-future" { 20_000 } else { 10_000 },
+                })
+                .unwrap()
+                .unwrap();
+        }
+        store.request_cancel("query-b", 1).unwrap();
+
+        let expired = store.expired_leases(10_000).unwrap();
+        assert_eq!(
+            expired
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["query-b", "query-a"]
+        );
+        assert_eq!(
+            store.get("query-a").unwrap().unwrap().status,
+            JobStatus::Leased
+        );
+        assert_eq!(
+            store.get("query-b").unwrap().unwrap().status,
+            JobStatus::CancelRequested
+        );
     }
 
     #[test]

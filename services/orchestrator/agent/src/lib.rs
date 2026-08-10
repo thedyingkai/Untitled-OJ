@@ -9,6 +9,7 @@ mod executor;
 mod identity;
 mod ledger;
 mod pipeline;
+mod runtime_policy;
 mod transport;
 mod worker;
 
@@ -20,16 +21,24 @@ pub use identity::{
 };
 pub use ledger::{
     AgentLedger, BeginDecision, JobRun, JobStep, LedgerError, LedgerRunState, MigrationDecision,
-    MigrationRun, ProviderRevisionRun, StoredCompletion,
+    MigrationRun, ProviderRevisionRun, RuntimeContextRun, StoredCompletion,
 };
 pub use pipeline::{
-    ApiRegistryConnectionConfig, BuiltInPipelineProviderConfig, BuiltInReleasePipelineProvider,
-    FrontendAssetStoreConfig, HttpReleasePipelineProvider, PipelineProviderConfig,
-    PipelineProviderError, RedisConnectionConfig, ReleasePipelineProvider, StorageConnectionConfig,
+    BuiltInPipelineProviderConfig, BuiltInReleasePipelineProvider, FrontendAssetStoreConfig,
+    HttpReleasePipelineProvider, PipelineProviderConfig, PipelineProviderError,
+    PipelineProviderMode, RedisConnectionConfig, ReleasePipelineProvider, StorageConnectionConfig,
+    event_connection_urls_from_env,
+};
+pub use runtime_policy::{
+    CredentialRefreshStatus, LocalRuntimeContextProvider, NodeRuntimeFactsPublisher,
+    NodeRuntimeFactsV1, RuntimeContextProvider, RuntimePolicyError,
+    WorkloadCredentialExchangeRequest, WorkloadCredentialExchanger, WorkloadCredentialSupervisor,
+    recover_pending_runtime_contexts,
 };
 pub use transport::{
     AgentClaimRequest, AgentTransport, ArtifactFetcher, ClaimResponse, DownloadedArtifact,
-    EnrollmentClient, HeartbeatAck, HttpArtifactFetcher, HttpMtlsTransport, LeasedJob,
+    EnrollmentClient, HeartbeatAck, HttpArtifactFetcher, HttpMtlsTransport,
+    HttpNodeRuntimeFactsPublisher, HttpWorkloadCredentialExchanger, LeasedJob,
     LoopbackHttpTransport, NodeCertificateBundle, TransportError,
 };
 pub use worker::{AgentWorker, PollOutcome, WorkerConfig, WorkerError};

@@ -1,0 +1,64 @@
+schema_version: 2
+service_name: contract-echo-consumer
+version: 1.0.0
+description: Generic third-party consumer that uses only its named Service Context binding.
+service_type: backend-worker
+source:
+  kind: local
+  url: local://deploy/cross-machine/fixture/echo-consumer
+  checksum: ""
+runtime:
+  kind: image
+  image: ""
+  binary: ""
+  system_service: ""
+  args: ["consumer-service", "--port", "8080", "--context", "/run/ojos/service/context.json"]
+frontend:
+  enabled: false
+  route_prefix: ""
+  remote_entry: ""
+  menu_items: []
+backend:
+  protocol: http
+  port: 8080
+  health_path: /health
+migrations: []
+permissions: []
+routes: []
+provides:
+  apis: []
+requires:
+  apis:
+    - name: echo
+      id: fixture.contract.echo
+      version: ">=1.0.0, <2.0.0"
+      # This fixture intentionally exercises Link revoke/restore after install.
+      # The permission authority remains required; only the tested Echo edge
+      # may be absent while the consumer reports its unbound state.
+      optional: true
+      selection: explicit
+      timeout_ms: 5000
+    - name: permission_check
+      id: auth.user.permission.check
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 5000
+events:
+  publishes: []
+  subscribes: []
+runtime_contract:
+  id: standard-container-v1
+  sha256: sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f
+  binding_directory: /run/ojos/service
+  identity_mode: workload
+  credential_delivery: file
+  restart_on_change: false
+redis: []
+storage: []
+dependencies: []
+config_schema: {}
+secrets: []
+observability:
+  metrics: false
+  jaeger: false

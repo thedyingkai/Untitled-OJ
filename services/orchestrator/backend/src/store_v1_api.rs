@@ -6,23 +6,30 @@ use crate::catalog_registry::{
 use crate::durable::{DurableError, DurableStore};
 use crate::http::{ApiRequest, ApiResponse, query_value};
 use crate::{market_api, routes::status_for_error};
+use orchestrator_agent::NodeRuntimeFactsV1;
 use orchestrator_control_plane::{
     DurableOperation, DurableOperationStatus, JobKind, JobStore, OperationCoordinator,
     OperationRepository, PlanOperation, PlannedJob, PlannedJobCondition,
 };
 use orchestrator_legacy::{
-    ActionRequest, NodeRecord, OrchestratorActionConsole, ServiceRelease, ServiceReleaseManifest,
-    parse_endpoint_id, validate_endpoint_id, validate_service_release,
+    ActionRequest, ApiBinding, ApiBindingResolutionRequest, ApiBindingState, ApiProviderCandidate,
+    NodeRecord, OrchestratorActionConsole, ServiceRelease, ServiceReleaseContract,
+    ServiceReleaseManifest, TopologyApiBindingSpec, TopologyEndpointSpec, TopologyLinkSpec,
+    TopologySpec, api_version_matches, diff_topology_specs, parse_endpoint_id,
+    resolve_api_binding_candidate, validate_endpoint_id, validate_service_release,
 };
 use orchestrator_manager::MigrationPolicyV2;
 use orchestrator_manager::catalog_v2::{ReleaseChannel, TargetPlatform};
 use orchestrator_runtime::{
-    ApiSurfaceSpec, ArtifactReference, AuthPipelineStep, AuthServiceIdentitySpec, ContainerSpec,
-    GatewayPipelineStep, GatewayRouteSpec, HealthGatePolicy, OciImageReference, OciMigrationStep,
-    PublishedEndpoint, PublishedPortProtocol, RedisNamespaceSpec, ReleasePipelinePayload,
-    ReleaseProviderRevision, ReleaseReplacementPayload, ReplacementProviderSaga,
-    RuntimeInstallPayload, RuntimeMaterializationStep, RuntimeObservedState, StorageResourceSpec,
-    TypedProvisionerStep,
+    ArtifactReference, AuthPipelineStep, AuthServiceIdentitySpec, BindingContextApplyPayload,
+    ContainerSpec, GatewayPipelineStep, GatewayRouteSpec, HealthGatePolicy,
+    MANAGED_EVENT_STREAM_V1, ManagedApiBinding, ManagedEventBinding, ManagedEventSubscription,
+    ManagedServiceContextProjection, ManagedServiceContextSpec, OciImageReference,
+    OciMigrationStep, PublishedEndpoint, PublishedPortProtocol, RedisNamespaceSpec,
+    ReleasePipelinePayload, ReleaseProviderRevision, ReleaseReplacementPayload,
+    ReplacementProviderSaga, RuntimeContract, RuntimeInstallPayload, RuntimeMaterializationStep,
+    RuntimeObservedState, RuntimeProfile, StorageResourceSpec, TypedProvisionerStep,
+    stable_container_name,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -36,6 +43,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static STORE_PLAN_LOCK: Mutex<()> = Mutex::new(());
 const CONTROL_PLANE_NODE_ID: &str = "control-plane";
+const NODE_RUNTIME_FACTS_STALE_MS: i64 = 60_000;
 
 pub(crate) fn route(
     _state: &market_api::StoreState,
@@ -100,7 +108,7 @@ pub(crate) fn route(
                     None,
                 ));
             };
-            validate_release_catalog(storage, catalog_registry, request, request_id)
+            validate_release_catalog(console, storage, catalog_registry, request, request_id)
         }
         ("POST", "/api/v1/store/releases:install") => {
             let Some(storage) = storage else {
@@ -454,7 +462,7 @@ fn import_release(
                 format!("target Node {node_id} was not found"),
             )
         })?;
-    let platform = target_platform(&node)?;
+    let platform = target_platform(storage, &node)?;
     let resolved = registry
         .resolve_install_plan(
             storage,
@@ -512,15 +520,44 @@ struct ValidateReleaseRequest {
     version: String,
     #[serde(default = "default_release_channel")]
     channel: String,
+    #[serde(default)]
+    endpoint: String,
+    #[serde(default)]
+    bindings: Vec<InstallBindingSelection>,
+    #[serde(default)]
+    topology_id: String,
+    #[serde(default)]
+    topology_etag: String,
+    /// Compatibility input for 0.2 clients. New clients use the two explicit
+    /// fields above so the optimistic-concurrency token cannot be mistaken for
+    /// an arbitrary revision selector.
+    #[serde(default)]
+    topology: Option<InstallTopologySelection>,
+    #[serde(default = "default_true")]
+    start: bool,
+    #[serde(default = "default_apply_policy")]
+    migration_policy: String,
+    #[serde(default)]
+    gateway_node_id: String,
+    #[serde(default)]
+    config: Value,
+    #[serde(default)]
+    secret_refs: BTreeMap<String, String>,
 }
 
 fn validate_release_catalog(
+    console: &OrchestratorActionConsole,
     storage: &DurableStore,
     registry: &CatalogRegistry,
     request: &ApiRequest,
     request_id: &str,
 ) -> Result<ApiResponse, StoreApiError> {
-    let input: ValidateReleaseRequest = parse_body(request)?;
+    let mut input: ValidateReleaseRequest = parse_body(request)?;
+    input.topology = normalize_store_topology_selection(
+        &input.topology_id,
+        &input.topology_etag,
+        input.topology.as_ref(),
+    )?;
     let service_id = required_text(&input.service_id, "service_id")?;
     let node_id = required_text(&input.target_node_id, "target_node_id")?;
     let node = storage
@@ -533,19 +570,8 @@ fn validate_release_catalog(
                 format!("target Node {node_id} was not found"),
             )
         })?;
-    if !node
-        .labels
-        .get("runtime")
-        .and_then(Value::as_str)
-        .is_some_and(|runtime| runtime.eq_ignore_ascii_case("docker"))
-    {
-        return Err(StoreApiError::new(
-            422,
-            "STORE_DOCKER_CAPABILITY_REQUIRED",
-            format!("target Node {node_id} does not advertise runtime=docker"),
-        ));
-    }
-    let platform = target_platform(&node)?;
+    ensure_ready_docker_node(storage, &node)?;
+    let platform = target_platform(storage, &node)?;
     let resolved = registry
         .resolve_install_plan(
             storage,
@@ -559,6 +585,135 @@ fn validate_release_catalog(
     let documents = registry
         .fetch_release_documents(storage, &resolved)
         .map_err(catalog_registry_error)?;
+    let root_document = documents
+        .iter()
+        .find(|document| {
+            document.selection.module_id == service_id
+                && document.selection.release.version == resolved.plan.root.version
+        })
+        .ok_or_else(|| {
+            StoreApiError::new(
+                500,
+                "CATALOG_PLAN_INVALID",
+                "resolved validation plan does not contain its requested root metadata",
+            )
+        })?;
+    let contract = release_contract_from_document(root_document)?;
+    let runtime_contract = ensure_release_runtime_supported(
+        storage,
+        &node,
+        &contract,
+        root_document.selection.release.oci_image.as_str(),
+    )?;
+    let runtime_facts = node_runtime_facts(storage, &node.node_id)?;
+    let planned_deployment_id =
+        deployment_id(service_id, &resolved.plan.root.version, &node.node_id);
+    let effective_endpoint = effective_managed_endpoint(&input.endpoint, &node, &contract.release)?;
+    let (bindings_resolvable, requirements) = preview_install_api_bindings(
+        console,
+        storage,
+        &contract,
+        &node.node_id,
+        &effective_endpoint,
+        &input.bindings,
+        input.topology.as_ref(),
+    )?;
+    let topology_confirmation_required =
+        !contract.requirements().is_empty() && input.topology.is_none();
+    let bindings_valid = bindings_resolvable && !topology_confirmation_required;
+    let binding_plan = if bindings_valid {
+        resolve_install_api_bindings(
+            console,
+            storage,
+            &contract,
+            &planned_deployment_id,
+            &node.node_id,
+            &effective_endpoint,
+            &input.bindings,
+            input.topology.as_ref(),
+            false,
+        )?
+    } else {
+        Vec::new()
+    };
+    if contract.contract_version >= 2 {
+        let image = OciImageReference::parse(root_document.selection.release.oci_image.as_str())
+            .map_err(|error| {
+                StoreApiError::new(
+                    422,
+                    "STORE_IMMUTABLE_IMAGE_REQUIRED",
+                    format!("validation release image is not immutable: {error}"),
+                )
+            })?;
+        let mut preview_spec = container_spec(
+            &planned_deployment_id,
+            service_id,
+            &resolved.plan.root.version,
+            &root_document.checksum,
+            &node,
+            image,
+            runtime_contract.clone(),
+            &contract.release,
+            managed_published_endpoint(&effective_endpoint, service_id, &node, &contract.release)?,
+        );
+        preview_spec.labels.insert(
+            "ojos.service_contract_version".to_string(),
+            contract.contract_version.to_string(),
+        );
+        if bindings_valid
+            && (!contract.requirements().is_empty()
+                || !contract.events.publishes.is_empty()
+                || !contract.events.subscribes.is_empty())
+        {
+            preview_spec.managed_service_context = managed_service_context_spec(
+                storage,
+                &contract,
+                &node.node_id,
+                &binding_plan,
+                true,
+            )?;
+        }
+        let preview_health_gate =
+            HealthGatePolicy::for_runtime_contract(&preview_spec.runtime_contract);
+        let preview_install = RuntimeInstallPayload {
+            spec: preview_spec,
+            start: input.start,
+            health_gate: preview_health_gate,
+            offline_oci_artifact: None,
+        };
+        let _validated_pipeline = release_pipeline_payload(
+            &contract.release,
+            &contract,
+            &preview_install,
+            &binding_plan,
+            &node,
+            &format!("store-validate-{request_id}"),
+            &input.migration_policy,
+            &input.gateway_node_id,
+            &input.config,
+            &input.secret_refs,
+        )?;
+    }
+    let topology_diff = if bindings_valid {
+        input
+            .topology
+            .as_ref()
+            .map(|selection| {
+                let (current, _) = selected_topology_spec(storage, selection)?;
+                let proposed = preview_store_install_topology_spec(
+                    current.clone(),
+                    &contract,
+                    &planned_deployment_id,
+                    &node.node_id,
+                    &effective_endpoint,
+                    &binding_plan,
+                )?;
+                diff_topology_specs(Some(&current), &proposed).map_err(core_error)
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let metadata = documents
         .iter()
         .map(|document| {
@@ -578,13 +733,26 @@ fn validate_release_catalog(
     Ok(success(
         200,
         json!({
-            "valid": true,
+            "valid": bindings_valid,
             "catalog_source_id": resolved.source_id,
             "catalog_id": resolved.catalog_id,
             "verified_key_ids": resolved.verified_key_ids,
             "target_platform": platform,
             "plan": resolved.plan,
             "metadata": metadata,
+            "bindings": binding_plan,
+            "requirements": requirements,
+            "topology_confirmation_required": topology_confirmation_required,
+            "runtime": {
+                "node_id": node.node_id,
+                "contract": runtime_contract,
+                "facts": runtime_facts,
+            },
+            "topology": input.topology.as_ref().map(|selection| json!({
+                "topology_id": selection.topology_id,
+                "revision_id": selection.revision_id,
+            })),
+            "topology_diff": topology_diff,
             "side_effects": {
                 "release_imports": 0,
                 "operations": 0,
@@ -627,6 +795,123 @@ struct InstallReleaseRequest {
     config: Value,
     #[serde(default)]
     secret_refs: BTreeMap<String, String>,
+    #[serde(default)]
+    bindings: Vec<InstallBindingSelection>,
+    #[serde(default)]
+    topology_id: String,
+    #[serde(default)]
+    topology_etag: String,
+    #[serde(default)]
+    topology: Option<InstallTopologySelection>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallBindingSelection {
+    name: String,
+    provider_deployment_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InstallTopologySelection {
+    pub(crate) topology_id: String,
+    #[serde(default)]
+    pub(crate) revision_id: String,
+}
+
+fn normalize_store_topology_selection(
+    topology_id: &str,
+    topology_etag: &str,
+    compatibility: Option<&InstallTopologySelection>,
+) -> Result<Option<InstallTopologySelection>, StoreApiError> {
+    let topology_id = topology_id.trim();
+    let topology_etag = topology_etag.trim();
+    if topology_id.is_empty() && topology_etag.is_empty() {
+        let Some(compatibility) = compatibility else {
+            return Ok(None);
+        };
+        let compatibility_id = required_text(&compatibility.topology_id, "topology.topology_id")?;
+        let compatibility_revision =
+            required_text(&compatibility.revision_id, "topology.revision_id")?;
+        return Ok(Some(InstallTopologySelection {
+            topology_id: compatibility_id.to_string(),
+            revision_id: compatibility_revision.to_string(),
+        }));
+    }
+    if topology_id.is_empty() || topology_etag.is_empty() {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_TOPOLOGY_CONCURRENCY_REQUIRED",
+            "topology_id and topology_etag must be supplied together",
+        ));
+    }
+    let revision_id = strong_topology_etag(topology_etag)?;
+    if let Some(compatibility) = compatibility
+        && (compatibility.topology_id.trim() != topology_id
+            || (!compatibility.revision_id.trim().is_empty()
+                && compatibility.revision_id.trim() != revision_id))
+    {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_TOPOLOGY_INPUT_CONFLICT",
+            "explicit topology_id/topology_etag conflicts with compatibility topology input",
+        ));
+    }
+    Ok(Some(InstallTopologySelection {
+        topology_id: topology_id.to_string(),
+        revision_id: revision_id.to_string(),
+    }))
+}
+
+fn strong_topology_etag(value: &str) -> Result<&str, StoreApiError> {
+    value
+        .trim()
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .filter(|value| !value.is_empty() && !value.contains('"'))
+        .ok_or_else(|| {
+            StoreApiError::new(
+                422,
+                "STORE_TOPOLOGY_ETAG_INVALID",
+                "topology_etag must be a strong quoted revision ETag",
+            )
+        })
+}
+
+fn normalize_replacement_topologies(
+    single: Option<&InstallTopologySelection>,
+    group: &[ReplacementTopologyCas],
+) -> Result<Vec<InstallTopologySelection>, StoreApiError> {
+    if group.is_empty() {
+        return Ok(single.into_iter().cloned().collect());
+    }
+    if single.is_some() {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_TOPOLOGY_INPUT_CONFLICT",
+            "use either topology_id/topology_etag (or compatibility topology) or topologies, not both",
+        ));
+    }
+    let mut selections = Vec::with_capacity(group.len());
+    let mut seen = BTreeSet::new();
+    for entry in group {
+        let topology_id = required_text(&entry.topology_id, "topologies[].topology_id")?;
+        let revision_id = strong_topology_etag(&entry.topology_etag)?;
+        if !seen.insert(topology_id.to_string()) {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_REPLACEMENT_TOPOLOGY_DUPLICATE",
+                format!("topology {topology_id} appears more than once"),
+            ));
+        }
+        selections.push(InstallTopologySelection {
+            topology_id: topology_id.to_string(),
+            revision_id: revision_id.to_string(),
+        });
+    }
+    selections.sort_by(|left, right| left.topology_id.cmp(&right.topology_id));
+    Ok(selections)
 }
 
 fn default_managed_mode() -> String {
@@ -653,7 +938,12 @@ fn install_release(
     request: &ApiRequest,
     request_id: &str,
 ) -> Result<ApiResponse, StoreApiError> {
-    let input: InstallReleaseRequest = parse_body(request)?;
+    let mut input: InstallReleaseRequest = parse_body(request)?;
+    input.topology = normalize_store_topology_selection(
+        &input.topology_id,
+        &input.topology_etag,
+        input.topology.as_ref(),
+    )?;
     if !input.source_url.trim().is_empty() || !input.checksum.trim().is_empty() {
         return Err(StoreApiError::new(
             422,
@@ -708,11 +998,11 @@ fn install_release(
         })
         .transpose()?;
     if !external {
-        ensure_ready_docker_node(node.as_ref().expect("managed node was required"))?;
+        ensure_ready_docker_node(storage, node.as_ref().expect("managed node was required"))?;
     }
     let platform = node
         .as_ref()
-        .map(target_platform)
+        .map(|node| target_platform(storage, node))
         .transpose()?
         .unwrap_or_else(host_platform);
     let service_id = required_text(&input.service_id, "service_id")?.to_string();
@@ -743,8 +1033,68 @@ fn install_release(
                 "target_node_id is required when an External release has managed dependencies to install",
             )
         })?;
-        ensure_ready_docker_node(dependency_node)?;
+        ensure_ready_docker_node(storage, dependency_node)?;
     }
+    if let Some(node) = node.as_ref() {
+        for document in &documents {
+            let managed_on_target = !external
+                || external_missing_dependencies.iter().any(|dependency| {
+                    dependency.module_id == document.selection.module_id
+                        && dependency.release.version == document.selection.release.version
+                });
+            if managed_on_target {
+                let contract = release_contract_from_document(document)?;
+                ensure_release_runtime_supported(
+                    storage,
+                    node,
+                    &contract,
+                    document.selection.release.oci_image.as_str(),
+                )?;
+            }
+        }
+    }
+
+    // A Managed install must prove its complete outbound contract before even
+    // publishing the release metadata. Legacy required_apis are normalized to
+    // stable names by ServiceReleaseContract, but they do not receive a
+    // PENDING compatibility escape hatch: the exact healthy provider must
+    // already be represented by the selected applied Topology.
+    let managed_binding_preflight = if external {
+        None
+    } else {
+        let root_document = documents
+            .iter()
+            .find(|document| {
+                document.selection.module_id == service_id
+                    && document.selection.release.version == resolved.plan.root.version
+            })
+            .ok_or_else(|| {
+                StoreApiError::new(
+                    500,
+                    "CATALOG_PLAN_INVALID",
+                    "resolved install plan does not contain its requested root metadata",
+                )
+            })?;
+        let contract = release_contract_from_document(root_document)?;
+        let node = node
+            .as_ref()
+            .expect("managed install requires a target Node");
+        input.endpoint = effective_managed_endpoint(&input.endpoint, node, &contract.release)?;
+        let deployment_id = deployment_id(&service_id, &resolved.plan.root.version, &node.node_id);
+        let bindings = resolve_install_api_bindings(
+            console,
+            storage,
+            &contract,
+            &deployment_id,
+            &node.node_id,
+            &input.endpoint,
+            &input.bindings,
+            input.topology.as_ref(),
+            false,
+        )?;
+        ensure_managed_api_bindings_ready(storage, &contract, &bindings, input.topology.as_ref())?;
+        Some((deployment_id, bindings))
+    };
 
     // All catalog, signature, dependency, metadata, checksum, and OCI checks
     // have completed before durable publication begins. Publication is atomic
@@ -761,10 +1111,11 @@ fn install_release(
                 .map_err(core_error)?,
         );
     }
-    let selected = select_release(
+    let selected = select_catalog_document_release(
         console,
+        &documents,
         &service_id,
-        Some(&resolved.plan.root.version.to_string()),
+        &resolved.plan.root.version,
     )?;
     ensure_release_checksum(&selected.record)?;
     let root_release = resolved
@@ -816,8 +1167,32 @@ fn install_release(
         );
     }
     let node = node.expect("managed install requires a target Node");
-    let root_deployment_id = deployment_id(&service_id, &selected.version, &node.node_id);
+    let (root_deployment_id, mut binding_plan) = managed_binding_preflight
+        .expect("managed binding preflight must run before release publication");
     let operation_id = operation_id("store-install", &root_deployment_id, request)?;
+    let topology_apply = input
+        .topology
+        .as_ref()
+        .map(|selection| {
+            propose_store_install_topology(
+                storage,
+                selection,
+                &selected.contract,
+                &root_deployment_id,
+                &node.node_id,
+                &input.endpoint,
+                &binding_plan,
+                &operation_id,
+                None,
+            )
+        })
+        .transpose()?;
+    if let Some(topology) = &topology_apply {
+        binding_plan = production_binding_plan(topology.staged_bindings.iter().filter(|binding| {
+            binding.consumer_deployment_id == root_deployment_id
+                && binding.desired_state == "ACTIVE"
+        }));
+    }
     let existing = storage.runtime_instances(None).map_err(storage_error)?;
     let missing = resolved
         .plan
@@ -849,14 +1224,32 @@ fn install_release(
         })
         .collect::<BTreeMap<_, _>>();
     let mut jobs = Vec::new();
+    if let Some(topology) = &topology_apply {
+        jobs.push(PlannedJob {
+            step_id: "topology-binding-prepare".to_string(),
+            node_id: CONTROL_PLANE_NODE_ID.to_string(),
+            kind: JobKind::TopologyApply,
+            depends_on: vec![],
+            condition: PlannedJobCondition::OnSuccess,
+            payload: json!({
+                "topology_id": topology.topology_id,
+                "revision_id": topology.revision_id,
+                "phase": "PREPARE",
+                "bindings": topology.staged_bindings,
+                "previous_bindings": topology.previous_bindings,
+            }),
+            max_attempts: 1,
+        });
+    }
     let mut planned_deployments = Vec::new();
     let mut root_spec = None;
     let empty_secret_refs = BTreeMap::new();
     for selection in &missing {
-        let release = select_release(
+        let release = select_catalog_document_release(
             console,
+            &documents,
             &selection.module_id,
-            Some(&selection.release.version.to_string()),
+            &selection.release.version,
         )?;
         ensure_release_checksum(&release.record)?;
         let release_image = OciImageReference::parse(selection.release.oci_image.as_str())
@@ -881,13 +1274,14 @@ fn install_release(
             release_image.digest(),
             Some(&operation_id),
         )?;
-        let spec = container_spec(
+        let mut spec = container_spec(
             &release_deployment_id,
             &selection.module_id,
             &selection.release.version,
             &release.record.checksum,
             &node,
             release_image,
+            release_runtime_contract(&release.contract)?,
             &release.manifest,
             if selection.module_id == service_id {
                 managed_published_endpoint(
@@ -900,9 +1294,31 @@ fn install_release(
                 None
             },
         );
+        spec.labels.insert(
+            "ojos.service_contract_version".to_string(),
+            release.contract.contract_version.to_string(),
+        );
+        let deployment_bindings = if selection.module_id == service_id {
+            binding_plan.as_slice()
+        } else {
+            &[]
+        };
+        if selection.module_id == service_id
+            || !release.contract.events.publishes.is_empty()
+            || !release.contract.events.subscribes.is_empty()
+        {
+            spec.managed_service_context = managed_service_context_spec(
+                storage,
+                &release.contract,
+                &node.node_id,
+                deployment_bindings,
+                true,
+            )?;
+        }
         if selection.module_id == service_id {
             root_spec = Some(spec.clone());
         }
+        let health_gate = HealthGatePolicy::for_runtime_contract(&spec.runtime_contract);
         let runtime_install = RuntimeInstallPayload {
             spec,
             start: if selection.module_id == service_id {
@@ -910,7 +1326,7 @@ fn install_release(
             } else {
                 true
             },
-            health_gate: HealthGatePolicy::default(),
+            health_gate,
             offline_oci_artifact: offline_artifact_for_release(
                 storage,
                 artifact_store,
@@ -921,7 +1337,9 @@ fn install_release(
         };
         let pipeline = release_pipeline_payload(
             &release.manifest,
+            &release.contract,
             &runtime_install,
+            deployment_bindings,
             &node,
             &operation_id,
             &input.migration_policy,
@@ -962,12 +1380,15 @@ fn install_release(
                 3,
             )
         };
-        let depends_on = selection
+        let mut depends_on: Vec<String> = selection
             .release
             .dependencies
             .iter()
             .filter_map(|dependency| install_steps.get(&dependency.module_id).cloned())
             .collect();
+        if selection.module_id == service_id && topology_apply.is_some() {
+            depends_on.push("topology-binding-prepare".to_string());
+        }
         let step_id = install_steps
             .get(&selection.module_id)
             .expect("missing releases were indexed")
@@ -985,6 +1406,18 @@ fn install_release(
             release_deployment_id,
             selection.release.oci_image.digest().as_str().to_string(),
         ));
+    }
+    if let Some(topology) = &topology_apply {
+        let root_step = install_steps.get(&service_id).cloned().ok_or_else(|| {
+            StoreApiError::new(500, "CATALOG_PLAN_INVALID", "root install step is missing")
+        })?;
+        append_install_topology_jobs(
+            &mut jobs,
+            topology,
+            &root_step,
+            &node.node_id,
+            &root_deployment_id,
+        );
     }
     // Every install/pipeline step compensates its own partially-created runtime
     // resources.  Successfully installed dependencies are intentionally retained:
@@ -1027,6 +1460,12 @@ fn install_release(
             "catalog_id": resolved.catalog_id,
             "catalog_verified_key_ids": resolved.verified_key_ids,
             "catalog_plan": resolved.plan,
+            "bindings": binding_plan,
+            "topology": input.topology.as_ref().map(|selection| json!({
+                "topology_id": selection.topology_id,
+                "selected_revision_id": selection.revision_id,
+                "proposed_revision_id": topology_apply.as_ref().map(|topology| topology.revision_id.as_str()),
+            })),
             "auto_enqueue": true,
         }),
         jobs,
@@ -1038,13 +1477,38 @@ fn install_release(
     for (planned_deployment_id, digest) in &planned_deployments {
         ensure_deployment_available(storage, planned_deployment_id, digest, Some(&operation_id))?;
     }
-    let operation = enqueue_plan(storage, plan)?;
+    if let Some(topology) = &topology_apply {
+        storage
+            .begin_topology_apply(
+                &topology.topology_id,
+                &topology.revision_id,
+                &operation_id,
+                &now_marker(),
+            )
+            .map_err(storage_error)?;
+    }
+    let operation = match enqueue_plan(storage, plan) {
+        Ok(operation) => operation,
+        Err(error) => {
+            if let Some(topology) = &topology_apply {
+                let _ = storage.finish_topology_apply(
+                    &topology.topology_id,
+                    &topology.revision_id,
+                    &operation_id,
+                    orchestrator_storage::TopologyApplyOutcome::Failed,
+                    &now_marker(),
+                );
+            }
+            return Err(error);
+        }
+    };
     Ok(success(
         202,
         json!({
             "operation_id": operation_id,
             "operation": operation,
             "deployment_id": root_deployment_id,
+            "bindings": binding_plan,
             "endpoint": spec
                 .published_endpoint
                 .as_ref()
@@ -1062,6 +1526,67 @@ fn install_release(
         }),
         request_id,
     ))
+}
+
+fn append_install_topology_jobs(
+    jobs: &mut Vec<PlannedJob>,
+    topology: &StoreTopologyApplyPlan,
+    root_step: &str,
+    node_id: &str,
+    root_deployment_id: &str,
+) {
+    jobs.push(PlannedJob {
+        step_id: "topology-binding-finalize-success".to_string(),
+        node_id: CONTROL_PLANE_NODE_ID.to_string(),
+        kind: JobKind::TopologyApply,
+        depends_on: vec![root_step.to_string()],
+        condition: PlannedJobCondition::OnSuccess,
+        payload: json!({
+            "topology_id": topology.topology_id,
+            "revision_id": topology.revision_id,
+            "phase": "FINALIZE",
+            "bindings": topology.staged_bindings,
+            "previous_bindings": topology.previous_bindings,
+        }),
+        max_attempts: 1,
+    });
+    jobs.push(PlannedJob {
+        step_id: "topology-binding-finalize-failure".to_string(),
+        node_id: CONTROL_PLANE_NODE_ID.to_string(),
+        kind: JobKind::TopologyApply,
+        // ABORT is needed both when the root install fails and when FINALIZE
+        // itself fails. An unbound successful branch is treated as skipped by
+        // OnFailure, so this one dependency set covers both paths.
+        depends_on: vec![
+            root_step.to_string(),
+            "topology-binding-finalize-success".to_string(),
+        ],
+        condition: PlannedJobCondition::OnFailure,
+        payload: json!({
+            "topology_id": topology.topology_id,
+            "revision_id": topology.revision_id,
+            "phase": "ABORT",
+            "bindings": topology.staged_bindings,
+            "previous_bindings": topology.previous_bindings,
+        }),
+        max_attempts: 1,
+    });
+    jobs.push(PlannedJob {
+        step_id: "remove-root-after-topology-abort".to_string(),
+        node_id: node_id.to_string(),
+        kind: JobKind::Uninstall,
+        depends_on: vec![
+            root_step.to_string(),
+            "topology-binding-finalize-failure".to_string(),
+        ],
+        condition: PlannedJobCondition::OnSuccess,
+        payload: json!({
+            "deployment_id": root_deployment_id,
+            "container_id": stable_container_name(root_deployment_id),
+            "force": true,
+        }),
+        max_attempts: 3,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1084,16 +1609,56 @@ fn enqueue_external_install(
     artifact_store: Option<&ArtifactStore>,
 ) -> Result<ApiResponse, StoreApiError> {
     let endpoint = input.endpoint.trim();
+    if release_runtime_contract(&selected.contract)?.id == RuntimeProfile::JudgeSandboxV1 {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_EXTERNAL_RUNTIME_PROFILE_FORBIDDEN",
+            "judge-sandbox-v1 requires a Managed Agent assignment so runtime policy, HostConfig attestation, context materialization, and compensation remain provable",
+        ));
+    }
+    if !selected.contract.events.publishes.is_empty()
+        || !selected.contract.events.subscribes.is_empty()
+    {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_EXTERNAL_EVENT_CONTEXT_REQUIRED",
+            "Event Contract v2 requires an Agent-materialized event context; install this release as Managed",
+        ));
+    }
     let root_external_deployment_id = deployment_id(
         service_id,
         &selected.version,
         &format!("external:{endpoint}"),
     );
+    let consumer_node_id = node.map(|node| node.node_id.as_str()).unwrap_or("external");
+    let binding_plan = resolve_install_api_bindings(
+        console,
+        storage,
+        &selected.contract,
+        &root_external_deployment_id,
+        consumer_node_id,
+        endpoint,
+        &input.bindings,
+        input.topology.as_ref(),
+        false,
+    )?;
     let operation_id = operation_id(
         "store-external-install",
         &root_external_deployment_id,
         request,
     )?;
+    if binding_plan.iter().any(|binding| {
+        matches!(
+            binding.state,
+            ApiBindingState::Resolved | ApiBindingState::Active
+        )
+    }) {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_EXTERNAL_BINDING_CONTEXT_REQUIRED",
+            "External consumers cannot receive an Agent-materialized workload context; install this release as Managed or remove its API requirements",
+        ));
+    }
     let image = image.to_string();
     let channel = parse_release_channel(&input.channel)?;
     let install_steps = missing_dependencies
@@ -1114,10 +1679,11 @@ fn enqueue_external_install(
         let node = node.expect("missing External dependencies require a validated Node");
         let empty_secret_refs = BTreeMap::new();
         for selection in missing_dependencies {
-            let release = select_release(
+            let release = select_catalog_document_release(
                 console,
+                documents,
                 &selection.module_id,
-                Some(&selection.release.version.to_string()),
+                &selection.release.version,
             )?;
             ensure_release_checksum(&release.record)?;
             let release_image = OciImageReference::parse(selection.release.oci_image.as_str())
@@ -1142,20 +1708,37 @@ fn enqueue_external_install(
                 release_image.digest(),
                 Some(&operation_id),
             )?;
-            let spec = container_spec(
+            let mut spec = container_spec(
                 &dependency_deployment_id,
                 &selection.module_id,
                 &selection.release.version,
                 &release.record.checksum,
                 node,
                 release_image,
+                release_runtime_contract(&release.contract)?,
                 &release.manifest,
                 None,
             );
+            spec.labels.insert(
+                "ojos.service_contract_version".to_string(),
+                release.contract.contract_version.to_string(),
+            );
+            if !release.contract.events.publishes.is_empty()
+                || !release.contract.events.subscribes.is_empty()
+            {
+                spec.managed_service_context = managed_service_context_spec(
+                    storage,
+                    &release.contract,
+                    &node.node_id,
+                    &[],
+                    true,
+                )?;
+            }
+            let health_gate = HealthGatePolicy::for_runtime_contract(&spec.runtime_contract);
             let runtime_install = RuntimeInstallPayload {
                 spec,
                 start: true,
-                health_gate: HealthGatePolicy::default(),
+                health_gate,
                 offline_oci_artifact: offline_artifact_for_release(
                     storage,
                     artifact_store,
@@ -1166,7 +1749,9 @@ fn enqueue_external_install(
             };
             let pipeline = release_pipeline_payload(
                 &release.manifest,
+                &release.contract,
                 &runtime_install,
+                &[],
                 node,
                 &operation_id,
                 &input.migration_policy,
@@ -1267,6 +1852,11 @@ fn enqueue_external_install(
             "catalog_id": resolved.catalog_id,
             "catalog_verified_key_ids": resolved.verified_key_ids,
             "catalog_plan": resolved.plan,
+            "bindings": binding_plan,
+            "topology": input.topology.as_ref().map(|selection| json!({
+                "topology_id": selection.topology_id,
+                "revision_id": selection.revision_id,
+            })),
             "auto_enqueue": true,
         }),
         jobs,
@@ -1293,6 +1883,7 @@ fn enqueue_external_install(
             "operation_id": operation_id,
             "operation": operation,
             "deployment_id": root_external_deployment_id,
+            "bindings": binding_plan,
             "release": {
                 "service_id": service_id,
                 "version": selected.version,
@@ -1407,6 +1998,26 @@ struct ReplaceReleaseRequest {
     config: Value,
     #[serde(default)]
     secret_refs: BTreeMap<String, String>,
+    #[serde(default)]
+    bindings: Vec<InstallBindingSelection>,
+    #[serde(default)]
+    topology_id: String,
+    #[serde(default)]
+    topology_etag: String,
+    /// Strong-CAS inputs for provider replacements referenced by more than
+    /// one applied topology. Entries are normalized and processed in
+    /// topology-id order so the resulting Operation plan is deterministic.
+    #[serde(default)]
+    topologies: Vec<ReplacementTopologyCas>,
+    #[serde(default)]
+    topology: Option<InstallTopologySelection>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplacementTopologyCas {
+    topology_id: String,
+    topology_etag: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1432,7 +2043,14 @@ fn replace_release(
     request_id: &str,
     action: ReplacementAction,
 ) -> Result<ApiResponse, StoreApiError> {
-    let input: ReplaceReleaseRequest = parse_body(request)?;
+    let mut input: ReplaceReleaseRequest = parse_body(request)?;
+    input.topology = normalize_store_topology_selection(
+        &input.topology_id,
+        &input.topology_etag,
+        input.topology.as_ref(),
+    )?;
+    let replacement_topologies =
+        normalize_replacement_topologies(input.topology.as_ref(), &input.topologies)?;
     let current_deployment_id = required_text(&input.deployment_id, "deployment_id")?;
     let current = storage
         .runtime_instance(current_deployment_id)
@@ -1468,8 +2086,8 @@ fn replace_release(
                 ),
             )
         })?;
-    ensure_ready_docker_node(&node)?;
-    let platform = target_platform(&node)?;
+    ensure_ready_docker_node(storage, &node)?;
+    let platform = target_platform(storage, &node)?;
     let history = release_history(storage, &current.instance.service_id)?;
     let current_proof = history
         .iter()
@@ -1636,6 +2254,21 @@ fn replace_release(
         .map_err(catalog_registry_error)?;
     let missing_dependencies =
         missing_resolved_dependencies(storage, &resolved, &current.instance.service_id)?;
+    for document in &documents {
+        let deployed_by_operation = document.selection.module_id == current.instance.service_id
+            || missing_dependencies.iter().any(|dependency| {
+                dependency.module_id == document.selection.module_id
+                    && dependency.release.version == document.selection.release.version
+            });
+        if deployed_by_operation {
+            ensure_release_runtime_supported(
+                storage,
+                &node,
+                &release_contract_from_document(document)?,
+                document.selection.release.oci_image.as_str(),
+            )?;
+        }
+    }
     let mut imported = Vec::with_capacity(documents.len());
     for document in &documents {
         imported.push(
@@ -1648,10 +2281,11 @@ fn replace_release(
                 .map_err(core_error)?,
         );
     }
-    let selected = select_release(
+    let selected = select_catalog_document_release(
         console,
+        &documents,
         &current.instance.service_id,
-        Some(&root_release.release.version.to_string()),
+        &root_release.release.version,
     )?;
     ensure_release_checksum(&selected.record)?;
     let image =
@@ -1667,47 +2301,256 @@ fn replace_release(
         &root_release.release.version,
         &node.node_id,
     );
-    let replacement_endpoint = if input.endpoint.trim().is_empty() {
+    let operation_target = format!("{}->{}", current.instance.deployment_id, new_deployment_id);
+    let operation_id = operation_id(action.operation_prefix(), &operation_target, request)?;
+    let requested_replacement_endpoint = if input.endpoint.trim().is_empty() {
         current.endpoint.as_str()
     } else {
         input.endpoint.trim()
     };
+    let replacement_endpoint = if !current.endpoint.trim().is_empty()
+        && endpoint_socket(&current.endpoint) == endpoint_socket(requested_replacement_endpoint)
+    {
+        allocate_replacement_endpoint(
+            storage,
+            &current.endpoint,
+            &current.instance.service_id,
+            &new_deployment_id,
+        )?
+    } else {
+        requested_replacement_endpoint.to_string()
+    };
     let published_endpoint = managed_published_endpoint(
-        replacement_endpoint,
+        &replacement_endpoint,
         &current.instance.service_id,
         &node,
         &selected.manifest,
     )?;
-    if let Some(endpoint) = published_endpoint.as_ref()
-        && !current.endpoint.trim().is_empty()
-        && endpoint_socket(&current.endpoint) == endpoint_socket(&endpoint.endpoint)
-    {
-        return Err(StoreApiError::new(
-            409,
-            "STORE_REPLACEMENT_ENDPOINT_CUTOVER_UNSUPPORTED",
-            format!(
-                "{} cannot reuse published endpoint {} while the proven old container remains Running; specify a different host port for an explicit coexistence cutover",
-                action.action_id(),
-                current.endpoint
-            ),
-        ));
-    }
-    let spec = container_spec(
+    let mut spec = container_spec(
         &new_deployment_id,
         &current.instance.service_id,
         &root_release.release.version,
         &selected.record.checksum,
         &node,
         image,
+        release_runtime_contract(&selected.contract)?,
         &selected.manifest,
         published_endpoint,
     );
-    let operation_target = format!("{}->{}", current.instance.deployment_id, new_deployment_id);
-    let operation_id = operation_id(action.operation_prefix(), &operation_target, request)?;
+    spec.labels.insert(
+        "ojos.service_contract_version".to_string(),
+        selected.contract.contract_version.to_string(),
+    );
+    let current_consumer_bindings = active_consumer_bindings(storage, current_deployment_id)?;
+    let current_provider_bindings = active_provider_bindings(storage, current_deployment_id)?;
+    let is_topology_consumer =
+        !current_consumer_bindings.is_empty() || !selected.contract.requirements().is_empty();
+    let is_topology_provider = !current_provider_bindings.is_empty();
+    let mut replacement_bindings = Vec::new();
+    let mut topology_applies = Vec::new();
+    let mut topology_bootstrap_bindings = BTreeMap::<String, Vec<ApiBinding>>::new();
+    let mut binding_context_transitions = Vec::new();
+    if is_topology_consumer || is_topology_provider {
+        let provider_consumers = current_provider_bindings
+            .iter()
+            .map(|binding| binding.consumer_deployment_id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut replacement_scope_bindings = current_consumer_bindings.clone();
+        replacement_scope_bindings.extend(current_provider_bindings.iter().cloned());
+        for consumer in &provider_consumers {
+            replacement_scope_bindings.extend(active_consumer_bindings(storage, consumer)?);
+        }
+        replacement_scope_bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+        replacement_scope_bindings.dedup_by(|left, right| left.binding_id == right.binding_id);
+        let topologies = require_matching_replacement_topologies(
+            &replacement_topologies,
+            &replacement_scope_bindings,
+        )?;
+        for topology in &topologies {
+            selected_topology_spec(storage, topology)?;
+        }
+
+        let mut consumer_bindings_by_topology = BTreeMap::<String, Vec<ApiBinding>>::new();
+        if is_topology_consumer {
+            // Existing requirement/provider choices are the deterministic
+            // defaults; explicit request mappings override them. This avoids
+            // silently choosing another healthy provider during replacement.
+            let mut effective_selections = current_consumer_bindings
+                .iter()
+                .map(|binding| {
+                    (
+                        binding.requirement_name.clone(),
+                        binding.provider_deployment_id.clone(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            for binding in &input.bindings {
+                effective_selections
+                    .insert(binding.name.clone(), binding.provider_deployment_id.clone());
+            }
+            let effective_selections = effective_selections
+                .into_iter()
+                .map(|(name, provider_deployment_id)| InstallBindingSelection {
+                    name,
+                    provider_deployment_id,
+                })
+                .collect::<Vec<_>>();
+            replacement_bindings = resolve_install_api_bindings(
+                console,
+                storage,
+                &selected.contract,
+                &new_deployment_id,
+                &node.node_id,
+                &replacement_endpoint,
+                &effective_selections,
+                None,
+                true,
+            )?;
+            for binding in replacement_bindings.iter_mut().filter(|binding| {
+                binding.desired_state == "ACTIVE"
+                    && matches!(
+                        binding.state,
+                        ApiBindingState::Resolved | ApiBindingState::Active
+                    )
+            }) {
+                let topology_id = current_consumer_bindings
+                    .iter()
+                    .find(|current| current.requirement_name == binding.requirement_name)
+                    .map(|current| current.topology_id.clone())
+                    .or_else(|| {
+                        (topologies.len() == 1).then(|| topologies[0].topology_id.clone())
+                    })
+                    .ok_or_else(|| {
+                        StoreApiError::new(
+                            422,
+                            "STORE_REPLACEMENT_BINDING_TOPOLOGY_AMBIGUOUS",
+                            format!(
+                                "new requirement {} needs an explicit topology, but replacement spans multiple topologies",
+                                binding.requirement_name
+                            ),
+                        )
+                    })?;
+                binding.topology_id = topology_id.clone();
+                binding.link_source_endpoint = replacement_endpoint.clone();
+                consumer_bindings_by_topology
+                    .entry(topology_id)
+                    .or_default()
+                    .push(binding.clone());
+            }
+        }
+
+        for topology in topologies {
+            let consumer_bindings = consumer_bindings_by_topology
+                .get(&topology.topology_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let provider_affected = current_provider_bindings
+                .iter()
+                .any(|binding| binding.topology_id == topology.topology_id);
+            let planned = match (!consumer_bindings.is_empty(), provider_affected) {
+                (true, true) => propose_dual_role_replacement_topology(
+                    storage,
+                    topology,
+                    &selected.contract,
+                    current_deployment_id,
+                    &new_deployment_id,
+                    &node.node_id,
+                    &replacement_endpoint,
+                    consumer_bindings,
+                    &operation_id,
+                )?,
+                (true, false) => propose_store_install_topology(
+                    storage,
+                    topology,
+                    &selected.contract,
+                    &new_deployment_id,
+                    &node.node_id,
+                    &replacement_endpoint,
+                    consumer_bindings,
+                    &operation_id,
+                    Some(current_deployment_id),
+                )?,
+                (false, true) => propose_provider_replacement_topology(
+                    storage,
+                    topology,
+                    &selected.contract,
+                    current_deployment_id,
+                    &new_deployment_id,
+                    &node.node_id,
+                    &replacement_endpoint,
+                    &operation_id,
+                )?,
+                (false, false) => {
+                    propose_generation_sibling_topology(storage, topology, &operation_id)?
+                }
+            };
+            if !consumer_bindings.is_empty() && provider_affected {
+                let bootstrap = stage_replacement_consumer_bootstrap(
+                    storage,
+                    &planned,
+                    current_deployment_id,
+                    &new_deployment_id,
+                    &replacement_endpoint,
+                    consumer_bindings,
+                    &operation_id,
+                )?;
+                topology_bootstrap_bindings.insert(planned.topology_id.clone(), bootstrap);
+            }
+            topology_applies.push(planned);
+        }
+        let mut generation_consumers = provider_consumers.clone();
+        if is_topology_consumer {
+            generation_consumers.insert(new_deployment_id.clone());
+        }
+        align_group_binding_generations(storage, &mut topology_applies, &generation_consumers)?;
+        if is_topology_consumer {
+            replacement_bindings = production_binding_plan(
+                topology_applies
+                    .iter()
+                    .flat_map(|topology| topology.staged_bindings.iter())
+                    .filter(|binding| {
+                        binding.consumer_deployment_id == new_deployment_id
+                            && binding.desired_state == "ACTIVE"
+                    }),
+            );
+            replacement_bindings
+                .sort_by(|left, right| left.requirement_name.cmp(&right.requirement_name));
+        }
+        let existing_context_consumers = provider_consumers
+            .into_iter()
+            .filter(|consumer| consumer != current_deployment_id)
+            .collect::<BTreeSet<_>>();
+        if !existing_context_consumers.is_empty() {
+            binding_context_transitions = binding_context_transition_plans(
+                storage,
+                &topology_applies,
+                &existing_context_consumers,
+            )?;
+        }
+    } else if !replacement_topologies.is_empty() {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_REPLACEMENT_TOPOLOGY_UNUSED",
+            "replacement supplied topology concurrency fields but the deployment has no API Binding role",
+        ));
+    }
+    if is_topology_consumer
+        || !selected.contract.events.publishes.is_empty()
+        || !selected.contract.events.subscribes.is_empty()
+    {
+        spec.managed_service_context = managed_service_context_spec(
+            storage,
+            &selected.contract,
+            &node.node_id,
+            &replacement_bindings,
+            true,
+        )?;
+    }
+    let replacement_health_gate = HealthGatePolicy::for_runtime_contract(&spec.runtime_contract);
     let replacement_install = RuntimeInstallPayload {
         spec: spec.clone(),
         start: true,
-        health_gate: HealthGatePolicy::default(),
+        health_gate: replacement_health_gate.clone(),
         offline_oci_artifact: offline_artifact_for_release(
             storage,
             artifact_store,
@@ -1718,7 +2561,9 @@ fn replace_release(
     };
     let desired_pipeline = release_pipeline_payload(
         &selected.manifest,
+        &selected.contract,
         &replacement_install,
+        &replacement_bindings,
         &node,
         &operation_id,
         &input.migration_policy,
@@ -1758,11 +2603,12 @@ fn replace_release(
         old_container_id: current.instance.container_id.clone(),
         new_spec: spec.clone(),
         start: true,
-        health_gate: HealthGatePolicy::default(),
+        health_gate: replacement_health_gate,
         offline_oci_artifact: replacement_install.offline_oci_artifact,
         materialization,
         migrations,
         provider_saga,
+        preserve_old_until_topology_cutover: !topology_applies.is_empty(),
     };
     payload.validate().map_err(|error| {
         StoreApiError::new(
@@ -1790,10 +2636,11 @@ fn replace_release(
     let mut planned_dependency_deployments = Vec::new();
     let empty_secret_refs = BTreeMap::new();
     for dependency in &missing_dependencies {
-        let release = select_release(
+        let release = select_catalog_document_release(
             console,
+            &documents,
             &dependency.module_id,
-            Some(&dependency.release.version.to_string()),
+            &dependency.release.version,
         )?;
         ensure_release_checksum(&release.record)?;
         let dependency_image = OciImageReference::parse(dependency.release.oci_image.as_str())
@@ -1818,20 +2665,32 @@ fn replace_release(
             dependency_image.digest(),
             Some(&operation_id),
         )?;
-        let dependency_spec = container_spec(
+        let mut dependency_spec = container_spec(
             &dependency_deployment_id,
             &dependency.module_id,
             &dependency.release.version,
             &release.record.checksum,
             &node,
             dependency_image,
+            release_runtime_contract(&release.contract)?,
             &release.manifest,
             None,
         );
+        dependency_spec.labels.insert(
+            "ojos.service_contract_version".to_string(),
+            release.contract.contract_version.to_string(),
+        );
+        if !release.contract.events.publishes.is_empty()
+            || !release.contract.events.subscribes.is_empty()
+        {
+            dependency_spec.managed_service_context =
+                managed_service_context_spec(storage, &release.contract, &node.node_id, &[], true)?;
+        }
+        let health_gate = HealthGatePolicy::for_runtime_contract(&dependency_spec.runtime_contract);
         let install = RuntimeInstallPayload {
             spec: dependency_spec,
             start: true,
-            health_gate: HealthGatePolicy::default(),
+            health_gate,
             offline_oci_artifact: offline_artifact_for_release(
                 storage,
                 artifact_store,
@@ -1842,7 +2701,9 @@ fn replace_release(
         };
         let pipeline = release_pipeline_payload(
             &release.manifest,
+            &release.contract,
             &install,
+            &[],
             &node,
             &operation_id,
             &input.migration_policy,
@@ -1901,17 +2762,78 @@ fn replace_release(
         .iter()
         .map(|job| job.step_id.clone())
         .collect::<Vec<_>>();
-    jobs.push(PlannedJob {
-        step_id: format!(
-            "runtime-{}",
-            match action {
-                ReplacementAction::Upgrade => "upgrade",
-                ReplacementAction::Rollback => "rollback",
+    let runtime_step = format!(
+        "runtime-{}",
+        match action {
+            ReplacementAction::Upgrade => "upgrade",
+            ReplacementAction::Rollback => "rollback",
+        }
+    );
+    let prepare_steps = topology_applies
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("topology-binding-prepare-{index}"))
+        .collect::<Vec<_>>();
+    let finalize_step = "topology-binding-finalize-group".to_string();
+    let abort_steps = topology_applies
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("topology-binding-abort-{index}"))
+        .collect::<Vec<_>>();
+    let context_apply_steps = binding_context_transitions
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("binding-context-apply-{index}"))
+        .collect::<Vec<_>>();
+    let context_health_steps = binding_context_transitions
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("binding-context-health-{index}"))
+        .collect::<Vec<_>>();
+    let mut bootstrap_steps = Vec::new();
+    if is_topology_consumer {
+        for (index, topology) in topology_applies.iter().enumerate() {
+            if !topology.staged_bindings.iter().any(|binding| {
+                binding.consumer_deployment_id == new_deployment_id
+                    && binding.desired_state == "ACTIVE"
+            }) {
+                continue;
             }
-        ),
+            let step_id = if is_topology_provider {
+                format!("topology-binding-bootstrap-{index}")
+            } else {
+                prepare_steps[index].clone()
+            };
+            let bindings = topology_bootstrap_bindings
+                .get(&topology.topology_id)
+                .unwrap_or(&topology.staged_bindings);
+            jobs.push(PlannedJob {
+                step_id: step_id.clone(),
+                node_id: CONTROL_PLANE_NODE_ID.to_string(),
+                kind: JobKind::TopologyApply,
+                depends_on: dependency_steps.clone(),
+                condition: PlannedJobCondition::OnSuccess,
+                payload: json!({
+                    "topology_id": topology.topology_id.clone(),
+                    "revision_id": topology.revision_id,
+                    "phase": "PREPARE",
+                    "bindings": bindings,
+                    "previous_bindings": topology.previous_bindings,
+                }),
+                max_attempts: 1,
+            });
+            bootstrap_steps.push(step_id);
+        }
+    }
+    jobs.push(PlannedJob {
+        step_id: runtime_step.clone(),
         node_id: node.node_id.clone(),
         kind: action.job_kind(),
-        depends_on: dependency_steps,
+        depends_on: if !bootstrap_steps.is_empty() {
+            bootstrap_steps.clone()
+        } else {
+            dependency_steps
+        },
         condition: PlannedJobCondition::OnSuccess,
         payload: serde_json::to_value(&payload).map_err(|error| {
             StoreApiError::new(
@@ -1922,6 +2844,136 @@ fn replace_release(
         })?,
         max_attempts: 3,
     });
+    if !topology_applies.is_empty() {
+        if is_topology_provider {
+            for (index, topology) in topology_applies.iter().enumerate() {
+                jobs.push(PlannedJob {
+                    step_id: prepare_steps[index].clone(),
+                    node_id: CONTROL_PLANE_NODE_ID.to_string(),
+                    kind: JobKind::TopologyApply,
+                    depends_on: vec![runtime_step.clone()],
+                    condition: PlannedJobCondition::OnSuccess,
+                    payload: json!({
+                        "topology_id": topology.topology_id,
+                        "revision_id": topology.revision_id,
+                        "phase": "PREPARE",
+                        "bindings": topology.staged_bindings,
+                        "previous_bindings": topology.previous_bindings,
+                    }),
+                    max_attempts: 1,
+                });
+            }
+        }
+        for (index, transition) in binding_context_transitions.iter().enumerate() {
+            jobs.push(PlannedJob {
+                step_id: context_apply_steps[index].clone(),
+                node_id: transition.node_id.clone(),
+                kind: JobKind::BindingContextApply,
+                depends_on: prepare_steps.clone(),
+                condition: PlannedJobCondition::OnSuccess,
+                payload: serde_json::to_value(&transition.forward).map_err(|error| {
+                    StoreApiError::new(
+                        500,
+                        "STORE_BINDING_CONTEXT_INVALID",
+                        format!("serialize binding context apply: {error}"),
+                    )
+                })?,
+                max_attempts: 1,
+            });
+            jobs.push(PlannedJob {
+                step_id: context_health_steps[index].clone(),
+                node_id: transition.node_id.clone(),
+                kind: JobKind::Health,
+                depends_on: vec![context_apply_steps[index].clone()],
+                condition: PlannedJobCondition::OnSuccess,
+                payload: json!({"container_id": transition.container_id}),
+                max_attempts: 3,
+            });
+        }
+        let mut finalize_dependencies = vec![runtime_step.clone()];
+        finalize_dependencies.extend(prepare_steps.iter().cloned());
+        finalize_dependencies.extend(context_health_steps.iter().cloned());
+        jobs.push(PlannedJob {
+            step_id: finalize_step.clone(),
+            node_id: CONTROL_PLANE_NODE_ID.to_string(),
+            kind: JobKind::TopologyApply,
+            depends_on: finalize_dependencies.clone(),
+            condition: PlannedJobCondition::OnSuccess,
+            payload: json!({
+                "phase": "FINALIZE_GROUP",
+                "group": topology_applies.iter().map(|topology| json!({
+                    "topology_id": topology.topology_id,
+                    "revision_id": topology.revision_id,
+                })).collect::<Vec<_>>(),
+            }),
+            max_attempts: 1,
+        });
+        let mut abort_dependencies = finalize_dependencies;
+        abort_dependencies.extend(bootstrap_steps.iter().cloned());
+        abort_dependencies.push(finalize_step.clone());
+        for (index, topology) in topology_applies.iter().enumerate() {
+            jobs.push(PlannedJob {
+                step_id: abort_steps[index].clone(),
+                node_id: CONTROL_PLANE_NODE_ID.to_string(),
+                kind: JobKind::TopologyApply,
+                depends_on: abort_dependencies.clone(),
+                condition: PlannedJobCondition::OnFailure,
+                payload: json!({
+                    "topology_id": topology.topology_id,
+                    "revision_id": topology.revision_id,
+                    "phase": "ABORT",
+                    "bindings": topology.staged_bindings,
+                    "previous_bindings": topology.previous_bindings,
+                }),
+                max_attempts: 1,
+            });
+        }
+        for (index, transition) in binding_context_transitions.iter().enumerate() {
+            let mut depends_on = abort_steps.clone();
+            depends_on.push(context_apply_steps[index].clone());
+            jobs.push(PlannedJob {
+                step_id: format!("binding-context-rollback-{index}"),
+                node_id: transition.node_id.clone(),
+                kind: JobKind::BindingContextApply,
+                depends_on,
+                condition: PlannedJobCondition::OnSuccess,
+                payload: serde_json::to_value(&transition.rollback).map_err(|error| {
+                    StoreApiError::new(
+                        500,
+                        "STORE_BINDING_CONTEXT_INVALID",
+                        format!("serialize binding context rollback: {error}"),
+                    )
+                })?,
+                max_attempts: 1,
+            });
+        }
+        jobs.push(PlannedJob {
+            step_id: "remove-old-after-topology-cutover".to_string(),
+            node_id: node.node_id.clone(),
+            kind: JobKind::Uninstall,
+            depends_on: vec![finalize_step],
+            condition: PlannedJobCondition::OnSuccess,
+            payload: json!({
+                "deployment_id": current.instance.deployment_id,
+                "container_id": current.instance.container_id,
+                "force": false,
+            }),
+            max_attempts: 3,
+        });
+        jobs.push(PlannedJob {
+            step_id: "remove-new-after-topology-abort".to_string(),
+            node_id: node.node_id.clone(),
+            kind: JobKind::Uninstall,
+            depends_on: abort_steps.clone(),
+            condition: PlannedJobCondition::OnSuccess,
+            payload: json!({
+                "deployment_id": new_deployment_id,
+                "container_id": stable_container_name(&new_deployment_id),
+                "force": true,
+            }),
+            max_attempts: 3,
+        });
+    }
     let plan = PlanOperation {
         operation_id: operation_id.clone(),
         action: action.action_id().to_string(),
@@ -1959,6 +3011,18 @@ fn replace_release(
             "catalog_id": resolved.catalog_id,
             "catalog_verified_key_ids": resolved.verified_key_ids,
             "catalog_plan": resolved.plan,
+            "bindings": replacement_bindings,
+            "topologies": topology_applies.iter().map(|topology| {
+                let selected_revision_id = replacement_topologies
+                    .iter()
+                    .find(|selection| selection.topology_id == topology.topology_id)
+                    .map(|selection| selection.revision_id.as_str());
+                json!({
+                    "topology_id": topology.topology_id,
+                    "selected_revision_id": selected_revision_id,
+                    "proposed_revision_id": topology.revision_id,
+                })
+            }).collect::<Vec<_>>(),
             "auto_enqueue": true,
         }),
         jobs,
@@ -1988,7 +3052,42 @@ fn replace_release(
             Some(&operation_id),
         )?;
     }
-    let operation = enqueue_plan(storage, plan)?;
+    let mut begun_topologies: Vec<&StoreTopologyApplyPlan> = Vec::new();
+    for topology in &topology_applies {
+        if let Err(error) = storage.begin_topology_apply(
+            &topology.topology_id,
+            &topology.revision_id,
+            &operation_id,
+            &now_marker(),
+        ) {
+            for begun in begun_topologies.iter().rev() {
+                let _ = storage.finish_topology_apply(
+                    &begun.topology_id,
+                    &begun.revision_id,
+                    &operation_id,
+                    orchestrator_storage::TopologyApplyOutcome::Failed,
+                    &now_marker(),
+                );
+            }
+            return Err(storage_error(error));
+        }
+        begun_topologies.push(topology);
+    }
+    let operation = match enqueue_plan(storage, plan) {
+        Ok(operation) => operation,
+        Err(error) => {
+            for topology in begun_topologies.iter().rev() {
+                let _ = storage.finish_topology_apply(
+                    &topology.topology_id,
+                    &topology.revision_id,
+                    &operation_id,
+                    orchestrator_storage::TopologyApplyOutcome::Failed,
+                    &now_marker(),
+                );
+            }
+            return Err(error);
+        }
+    };
     Ok(success(
         202,
         json!({
@@ -2334,6 +3433,7 @@ fn delete_release_metadata(
 struct SelectedRelease {
     record: ServiceRelease,
     manifest: ServiceReleaseManifest,
+    contract: ServiceReleaseContract,
     version: semver::Version,
 }
 
@@ -2374,8 +3474,8 @@ fn select_release(
         {
             continue;
         }
-        let manifest: ServiceReleaseManifest = serde_json::from_value(record.manifest.clone())
-            .map_err(|error| {
+        let contract =
+            ServiceReleaseContract::from_json_value(record.manifest.clone()).map_err(|error| {
                 StoreApiError::new(
                     422,
                     "STORE_RELEASE_INVALID",
@@ -2384,6 +3484,7 @@ fn select_release(
                     ),
                 )
             })?;
+        let manifest = contract.release.clone();
         validate_service_release(&manifest).map_err(core_error)?;
         if manifest.service_name != record.service_name || manifest.version != record.version {
             return Err(StoreApiError::new(
@@ -2398,6 +3499,7 @@ fn select_release(
         candidates.push(SelectedRelease {
             record,
             manifest,
+            contract,
             version,
         });
     }
@@ -2412,6 +3514,2404 @@ fn select_release(
             ),
         )
     })
+}
+
+/// Select a release for a trusted Catalog operation from the documents verified
+/// for this exact request. New imports persist the full versioned contract, but
+/// pre-migration v1 records can still exist and durable state must never replace
+/// the current Catalog's signed runtime, event, Auth, or Gateway semantics.
+fn select_catalog_document_release(
+    console: &OrchestratorActionConsole,
+    documents: &[VerifiedReleaseDocument],
+    service_id: &str,
+    version: &semver::Version,
+) -> Result<SelectedRelease, StoreApiError> {
+    let document = documents
+        .iter()
+        .find(|document| {
+            document.selection.module_id == service_id
+                && document.selection.release.version == *version
+        })
+        .ok_or_else(|| {
+            StoreApiError::new(
+                500,
+                "CATALOG_PLAN_INVALID",
+                format!(
+                    "resolved Catalog plan has no verified metadata for {service_id}@{version}"
+                ),
+            )
+        })?;
+    let mut selected = select_release(console, service_id, Some(&version.to_string()))?;
+    let contract = release_contract_from_document(document)?;
+    if contract.release.service_name != service_id
+        || contract.release.version != version.to_string()
+    {
+        return Err(StoreApiError::new(
+            500,
+            "CATALOG_PLAN_INVALID",
+            format!(
+                "verified metadata identity {}@{} does not match Catalog selection {service_id}@{version}",
+                contract.release.service_name, contract.release.version
+            ),
+        ));
+    }
+    selected.manifest = contract.release.clone();
+    selected.record.manifest = contract.to_json_value().map_err(core_error)?;
+    selected.record.release_url = document.source_url.clone();
+    selected.record.checksum = document.checksum.clone();
+    selected.contract = contract;
+    Ok(selected)
+}
+
+fn release_contract_from_document(
+    document: &VerifiedReleaseDocument,
+) -> Result<ServiceReleaseContract, StoreApiError> {
+    let text = std::str::from_utf8(&document.bytes).map_err(|error| {
+        StoreApiError::new(
+            422,
+            "STORE_RELEASE_INVALID",
+            format!(
+                "release {}@{} metadata is not UTF-8: {error}",
+                document.selection.module_id, document.selection.release.version
+            ),
+        )
+    })?;
+    let contract = ServiceReleaseContract::from_yaml_str(text).map_err(|error| {
+        StoreApiError::new(
+            422,
+            "STORE_RELEASE_INVALID",
+            format!(
+                "release {}@{} has an invalid Service Contract: {error}",
+                document.selection.module_id, document.selection.release.version
+            ),
+        )
+    })?;
+    if contract.release.service_name != document.selection.module_id
+        || contract.release.version != document.selection.release.version.to_string()
+    {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_RELEASE_IDENTITY_MISMATCH",
+            format!(
+                "catalog release {}@{} does not match Service Contract {}@{}",
+                document.selection.module_id,
+                document.selection.release.version,
+                contract.release.service_name,
+                contract.release.version
+            ),
+        ));
+    }
+    Ok(contract)
+}
+
+#[derive(Debug, Clone)]
+struct TopologyBindingContext {
+    topology_id: String,
+    revision_id: String,
+    source_endpoint: String,
+    target_endpoint: String,
+    api_id: String,
+    version: String,
+    optional: bool,
+    provider_deployment_id: String,
+    selection: String,
+}
+
+fn topology_contains_provider_candidate(
+    spec: &TopologySpec,
+    candidate: &ApiProviderCandidate,
+) -> bool {
+    spec.endpoints.iter().any(|endpoint| {
+        endpoint.endpoint == candidate.endpoint
+            && endpoint.service_id == candidate.service_id
+            && endpoint
+                .config
+                .as_object()
+                .and_then(|config| config.get("deployment_id"))
+                .and_then(Value::as_str)
+                .filter(|deployment_id| !deployment_id.trim().is_empty())
+                .is_none_or(|deployment_id| deployment_id == candidate.deployment_id)
+    })
+}
+
+fn preview_install_api_bindings(
+    console: &OrchestratorActionConsole,
+    storage: &DurableStore,
+    contract: &ServiceReleaseContract,
+    consumer_node_id: &str,
+    requested_consumer_endpoint: &str,
+    selections: &[InstallBindingSelection],
+    topology: Option<&InstallTopologySelection>,
+) -> Result<(bool, Vec<Value>), StoreApiError> {
+    let mut selections_by_name = BTreeMap::new();
+    for selection in selections {
+        let name = required_text(&selection.name, "bindings[].name")?.to_string();
+        let provider = required_text(
+            &selection.provider_deployment_id,
+            "bindings[].provider_deployment_id",
+        )?
+        .to_string();
+        if selections_by_name.insert(name.clone(), provider).is_some() {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_DUPLICATE",
+                format!("binding selection {name} is declared more than once"),
+            ));
+        }
+    }
+
+    let (topology_spec, topology_revision_id) = topology
+        .map(|selection| selected_topology_spec(storage, selection))
+        .transpose()?
+        .map_or((None, String::new()), |(spec, revision_id)| {
+            (Some(spec), revision_id)
+        });
+    let consumer_endpoint = topology_spec
+        .as_ref()
+        .map(|spec| {
+            topology_consumer_endpoint(
+                spec,
+                &contract.release.service_name,
+                requested_consumer_endpoint,
+            )
+        })
+        .transpose()?
+        .unwrap_or_else(|| requested_consumer_endpoint.trim().to_string());
+    let topology_bindings = topology_spec
+        .as_ref()
+        .map(|spec| topology_binding_contexts(spec, &topology_revision_id, &consumer_endpoint))
+        .transpose()?
+        .unwrap_or_default();
+    let all_candidates = provider_candidates(console, storage)?;
+    let mut requirements = Vec::with_capacity(contract.requirements().len());
+    let mut valid = true;
+    let mut used_selections = BTreeSet::new();
+    let mut used_topology_bindings = BTreeSet::new();
+
+    for requirement in contract.requirements() {
+        let name = requirement.binding_name();
+        let explicit_provider = selections_by_name.get(name).cloned().unwrap_or_default();
+        if !explicit_provider.is_empty() {
+            used_selections.insert(name.to_string());
+        }
+        let topology_binding = topology_bindings.get(name);
+        if let Some(binding) = topology_binding {
+            used_topology_bindings.insert(name.to_string());
+            if binding.api_id != requirement.api_id() {
+                return Err(StoreApiError::new(
+                    422,
+                    "STORE_BINDING_API_MISMATCH",
+                    format!(
+                        "topology binding {name} declares {}, but release requires {}",
+                        binding.api_id,
+                        requirement.api_id()
+                    ),
+                ));
+            }
+        }
+        let provider_deployment_id = match topology_binding {
+            Some(binding)
+                if !binding.provider_deployment_id.is_empty()
+                    && !explicit_provider.is_empty()
+                    && binding.provider_deployment_id != explicit_provider =>
+            {
+                return Err(StoreApiError::new(
+                    409,
+                    "STORE_BINDING_PROVIDER_CONFLICT",
+                    format!(
+                        "binding {name} selects conflicting providers {} and {}",
+                        binding.provider_deployment_id, explicit_provider
+                    ),
+                ));
+            }
+            Some(binding) if !binding.provider_deployment_id.is_empty() => {
+                binding.provider_deployment_id.clone()
+            }
+            _ => explicit_provider,
+        };
+        let optional = topology_binding
+            .map(|binding| binding.optional)
+            .unwrap_or_else(|| requirement.optional());
+        let selection = topology_binding
+            .map(|binding| binding.selection.as_str())
+            .unwrap_or_else(|| requirement.selection())
+            .to_string();
+        let version_requirement = topology_binding
+            .map(|binding| binding.version.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| requirement.version_requirement())
+            .to_string();
+        let auth_incompatible = all_candidates.iter().any(|candidate| {
+            candidate.healthy
+                && candidate.api_id == requirement.api_id()
+                && api_version_matches(&version_requirement, &candidate.api_version)
+                && !provider_auth_supported(contract.contract_version, &candidate.auth_mode)
+                && topology_spec
+                    .as_ref()
+                    .is_none_or(|spec| topology_contains_provider_candidate(spec, candidate))
+        });
+        let mut candidates = all_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.healthy
+                    && candidate.api_id == requirement.api_id()
+                    && api_version_matches(&version_requirement, &candidate.api_version)
+                    && provider_auth_supported(contract.contract_version, &candidate.auth_mode)
+                    && (selection != "same-node" || candidate.node_id == consumer_node_id)
+                    && topology_spec
+                        .as_ref()
+                        .is_none_or(|spec| topology_contains_provider_candidate(spec, candidate))
+                    && topology_binding.is_none_or(|binding| {
+                        candidate.endpoint == binding.target_endpoint
+                            && (binding.provider_deployment_id.is_empty()
+                                || candidate.deployment_id == binding.provider_deployment_id)
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            left.deployment_id
+                .cmp(&right.deployment_id)
+                .then_with(|| left.endpoint.cmp(&right.endpoint))
+        });
+        let selection_missing = !provider_deployment_id.is_empty()
+            && !candidates
+                .iter()
+                .any(|candidate| candidate.deployment_id == provider_deployment_id);
+        let ambiguous = provider_deployment_id.is_empty() && candidates.len() > 1;
+        let missing = candidates.is_empty() || selection_missing;
+        if ambiguous || selection_missing || (!optional && missing) {
+            valid = false;
+        }
+        let recommended_provider_deployment_id =
+            if !provider_deployment_id.is_empty() && !selection_missing {
+                Some(provider_deployment_id.clone())
+            } else if candidates.len() == 1 {
+                Some(candidates[0].deployment_id.clone())
+            } else {
+                None
+            };
+        requirements.push(json!({
+            "requirement_name": name,
+            "api_id": requirement.api_id(),
+            "version": version_requirement,
+            "optional": optional,
+            "selection": selection,
+            "candidates": candidates,
+            "recommended_provider_deployment_id": recommended_provider_deployment_id,
+            "ambiguous": ambiguous,
+            "missing": missing,
+            "reason": if missing && auth_incompatible {
+                "matching providers use a non-workload upstream auth mode; production ApiBindings support only workload or public upstream auth"
+            } else {
+                ""
+            },
+        }));
+    }
+    if let Some(unused) = selections_by_name
+        .keys()
+        .find(|name| !used_selections.contains(*name))
+    {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_BINDING_UNKNOWN",
+            format!("bindings[] references undeclared requirement {unused}"),
+        ));
+    }
+    if let Some(unused) = topology_bindings
+        .keys()
+        .find(|name| !used_topology_bindings.contains(*name))
+    {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_BINDING_UNKNOWN",
+            format!("topology api_bindings references undeclared requirement {unused}"),
+        ));
+    }
+    Ok((valid, requirements))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_install_api_bindings(
+    console: &OrchestratorActionConsole,
+    storage: &DurableStore,
+    contract: &ServiceReleaseContract,
+    consumer_deployment_id: &str,
+    consumer_node_id: &str,
+    requested_consumer_endpoint: &str,
+    selections: &[InstallBindingSelection],
+    topology: Option<&InstallTopologySelection>,
+    allow_removed_topology_requirements: bool,
+) -> Result<Vec<ApiBinding>, StoreApiError> {
+    let mut selections_by_name = BTreeMap::new();
+    for selection in selections {
+        let name = required_text(&selection.name, "bindings[].name")?.to_string();
+        let provider = required_text(
+            &selection.provider_deployment_id,
+            "bindings[].provider_deployment_id",
+        )?
+        .to_string();
+        if selections_by_name.insert(name.clone(), provider).is_some() {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_DUPLICATE",
+                format!("binding selection {name} is declared more than once"),
+            ));
+        }
+    }
+
+    let (topology_spec, topology_revision_id) = topology
+        .map(|selection| selected_topology_spec(storage, selection))
+        .transpose()?
+        .map_or((None, String::new()), |(spec, revision_id)| {
+            (Some(spec), revision_id)
+        });
+    let consumer_endpoint = topology_spec
+        .as_ref()
+        .map(|spec| {
+            topology_consumer_endpoint(
+                spec,
+                &contract.release.service_name,
+                requested_consumer_endpoint,
+            )
+        })
+        .transpose()?
+        .unwrap_or_else(|| requested_consumer_endpoint.trim().to_string());
+    let topology_bindings = topology_spec
+        .as_ref()
+        .map(|spec| topology_binding_contexts(spec, &topology_revision_id, &consumer_endpoint))
+        .transpose()?
+        .unwrap_or_default();
+    let candidates = provider_candidates(console, storage)?;
+    let mut resolved = Vec::with_capacity(contract.requirements().len());
+    let mut used_selections = BTreeSet::new();
+    let mut used_topology_bindings = BTreeSet::new();
+
+    for requirement in contract.requirements() {
+        let name = requirement.binding_name();
+        let explicit_provider = selections_by_name.get(name).cloned().unwrap_or_default();
+        if !explicit_provider.is_empty() {
+            used_selections.insert(name.to_string());
+        }
+        let topology_binding = topology_bindings.get(name);
+        if let Some(binding) = topology_binding {
+            used_topology_bindings.insert(name.to_string());
+            if binding.api_id != requirement.api_id() {
+                return Err(StoreApiError::new(
+                    422,
+                    "STORE_BINDING_API_MISMATCH",
+                    format!(
+                        "topology binding {name} declares {}, but release requires {}",
+                        binding.api_id,
+                        requirement.api_id()
+                    ),
+                ));
+            }
+        }
+        let provider_deployment_id = match topology_binding {
+            Some(binding)
+                if !binding.provider_deployment_id.is_empty()
+                    && !explicit_provider.is_empty()
+                    && binding.provider_deployment_id != explicit_provider =>
+            {
+                return Err(StoreApiError::new(
+                    409,
+                    "STORE_BINDING_PROVIDER_CONFLICT",
+                    format!(
+                        "binding {name} selects conflicting providers {} and {}",
+                        binding.provider_deployment_id, explicit_provider
+                    ),
+                ));
+            }
+            Some(binding) if !binding.provider_deployment_id.is_empty() => {
+                binding.provider_deployment_id.clone()
+            }
+            _ => explicit_provider,
+        };
+        let optional = topology_binding
+            .map(|binding| binding.optional)
+            .unwrap_or_else(|| requirement.optional());
+        let selection = topology_binding
+            .map(|binding| binding.selection.as_str())
+            .unwrap_or_else(|| requirement.selection())
+            .to_string();
+        let version_requirement = topology_binding
+            .map(|binding| binding.version.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| requirement.version_requirement())
+            .to_string();
+
+        let rejected_auth = candidates.iter().any(|candidate| {
+            candidate.api_id == requirement.api_id()
+                && api_version_matches(&version_requirement, &candidate.api_version)
+                && !provider_auth_supported(contract.contract_version, &candidate.auth_mode)
+                && topology_spec
+                    .as_ref()
+                    .is_none_or(|spec| topology_contains_provider_candidate(spec, candidate))
+                && topology_binding.is_none_or(|binding| {
+                    candidate.endpoint == binding.target_endpoint
+                        && (binding.provider_deployment_id.is_empty()
+                            || candidate.deployment_id == binding.provider_deployment_id)
+                })
+        });
+        let candidate_pool = candidates
+            .iter()
+            .filter(|candidate| {
+                provider_auth_supported(contract.contract_version, &candidate.auth_mode)
+                    && topology_spec
+                        .as_ref()
+                        .is_none_or(|spec| topology_contains_provider_candidate(spec, candidate))
+                    && topology_binding.is_none_or(|binding| {
+                        candidate.endpoint == binding.target_endpoint
+                            && (binding.provider_deployment_id.is_empty()
+                                || candidate.deployment_id == binding.provider_deployment_id)
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if rejected_auth && candidate_pool.is_empty() {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_PROVIDER_AUTH_UNSUPPORTED",
+                format!(
+                    "requirement {name} has only non-workload providers; production Deployment SDK calls support workload or public upstream auth"
+                ),
+            ));
+        }
+        let request = ApiBindingResolutionRequest {
+            requirement_name: name.to_string(),
+            api_id: requirement.api_id().to_string(),
+            version_requirement: version_requirement.clone(),
+            consumer_node_id: consumer_node_id.to_string(),
+            provider_deployment_id,
+            optional,
+            selection,
+        };
+        let candidate =
+            resolve_api_binding_candidate(&request, &candidate_pool).map_err(|error| {
+                StoreApiError::new(422, "STORE_BINDING_UNRESOLVED", error.to_string())
+            })?;
+        let now = now_marker();
+        let binding = match candidate {
+            Some(candidate) => ApiBinding {
+                binding_id: binding_id(consumer_deployment_id, name),
+                requirement_name: name.to_string(),
+                api_id: requirement.api_id().to_string(),
+                api_version: candidate.api_version,
+                consumer_deployment_id: consumer_deployment_id.to_string(),
+                consumer_service_id: contract.release.service_name.clone(),
+                consumer_node_id: consumer_node_id.to_string(),
+                consumer_endpoint: consumer_endpoint.clone(),
+                provider_deployment_id: candidate.deployment_id,
+                provider_service_id: candidate.service_id,
+                provider_node_id: candidate.node_id,
+                provider_endpoint: candidate.endpoint,
+                provider_path: candidate.path,
+                virtual_endpoint: format!("/internal/apis/{}", requirement.api_id()),
+                protocol: candidate.protocol,
+                methods: candidate.methods,
+                // `/internal/apis/*` is always a workload-authenticated
+                // consumer surface. `provider_auth_mode` separately records
+                // how Gateway must authenticate (or not authenticate) to the
+                // selected upstream provider. A public upstream therefore
+                // still needs a Deployment credential for scoped routing.
+                auth_mode: "workload".to_string(),
+                provider_auth_mode: candidate.auth_mode,
+                permission: candidate.permission,
+                timeout_ms: requirement.timeout_ms(),
+                topology_id: topology_binding
+                    .map(|binding| binding.topology_id.clone())
+                    .unwrap_or_default(),
+                topology_revision_id: topology_binding
+                    .map(|binding| binding.revision_id.clone())
+                    .unwrap_or_default(),
+                link_source_endpoint: topology_binding
+                    .map(|binding| binding.source_endpoint.clone())
+                    .unwrap_or_default(),
+                link_target_endpoint: topology_binding
+                    .map(|binding| binding.target_endpoint.clone())
+                    .unwrap_or_default(),
+                credential_ref: String::new(),
+                credential_generation: 1,
+                context_generation: 1,
+                desired_state: "ACTIVE".to_string(),
+                observed_state: "RESOLVED".to_string(),
+                health: "UNKNOWN".to_string(),
+                drift: Vec::new(),
+                last_operation_id: String::new(),
+                state: ApiBindingState::Resolved,
+                optional,
+                reason: String::new(),
+                created_at: now.clone(),
+                updated_at: now,
+            },
+            None => unbound_binding(
+                consumer_deployment_id,
+                &contract.release.service_name,
+                consumer_node_id,
+                &consumer_endpoint,
+                name,
+                requirement.api_id(),
+                &version_requirement,
+                "no healthy provider currently satisfies this optional requirement",
+            ),
+        };
+        binding.validate().map_err(|error| {
+            StoreApiError::new(
+                500,
+                "STORE_BINDING_INVALID",
+                format!("resolved binding {name} is invalid: {error}"),
+            )
+        })?;
+        resolved.push(binding);
+    }
+
+    if let Some(unused) = selections_by_name
+        .keys()
+        .find(|name| !used_selections.contains(*name))
+    {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_BINDING_UNKNOWN",
+            format!("bindings[] references undeclared requirement {unused}"),
+        ));
+    }
+    if !allow_removed_topology_requirements
+        && let Some(unused) = topology_bindings
+            .keys()
+            .find(|name| !used_topology_bindings.contains(*name))
+    {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_BINDING_UNKNOWN",
+            format!("topology api_bindings references undeclared requirement {unused}"),
+        ));
+    }
+    resolved.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+    Ok(resolved)
+}
+
+fn production_binding_plan<'a>(
+    bindings: impl IntoIterator<Item = &'a ApiBinding>,
+) -> Vec<ApiBinding> {
+    let mut planned = bindings
+        .into_iter()
+        .map(|binding| {
+            let mut planned = binding.clone();
+            // PENDING belongs only to the internal Topology PREPARE payload.
+            // Public Store plans and Agent contexts carry a proven provider
+            // resolution; activation remains represented by the Operation.
+            if planned.state == ApiBindingState::Pending {
+                planned.state = ApiBindingState::Resolved;
+                planned.observed_state = "RESOLVED".to_string();
+            }
+            planned
+        })
+        .collect::<Vec<_>>();
+    planned.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+    planned
+}
+
+fn ensure_managed_api_bindings_ready(
+    storage: &DurableStore,
+    contract: &ServiceReleaseContract,
+    bindings: &[ApiBinding],
+    topology: Option<&InstallTopologySelection>,
+) -> Result<(), StoreApiError> {
+    if contract.requirements().is_empty() {
+        return Ok(());
+    }
+    let topology = topology.ok_or_else(|| {
+        StoreApiError::new(
+            422,
+            "STORE_BINDING_TOPOLOGY_REQUIRED",
+            "required APIs must be confirmed through an immutable applied Topology revision",
+        )
+    })?;
+    let (spec, _) = selected_topology_spec(storage, topology)?;
+
+    if let Some(binding) = bindings.iter().find(|binding| {
+        matches!(
+            binding.state,
+            ApiBindingState::Pending | ApiBindingState::Error
+        )
+    }) {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_BINDING_NOT_READY",
+            format!(
+                "requirement {} cannot enter a production plan in {:?} state",
+                binding.requirement_name, binding.state
+            ),
+        ));
+    }
+
+    for requirement in contract.requirements() {
+        let matches = bindings
+            .iter()
+            .filter(|binding| binding.requirement_name == requirement.binding_name())
+            .collect::<Vec<_>>();
+        let [binding] = matches.as_slice() else {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_UNRESOLVED",
+                format!(
+                    "requirement {} must resolve to exactly one binding",
+                    requirement.binding_name()
+                ),
+            ));
+        };
+        if binding.state == ApiBindingState::Unbound && requirement.optional() {
+            continue;
+        }
+        if !matches!(
+            binding.state,
+            ApiBindingState::Resolved | ApiBindingState::Active
+        ) || binding.provider_deployment_id.trim().is_empty()
+            || binding.provider_endpoint.trim().is_empty()
+        {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_UNRESOLVED",
+                format!(
+                    "required API binding {} has no healthy resolved provider",
+                    requirement.binding_name()
+                ),
+            ));
+        }
+        let provider_endpoint = spec.endpoints.iter().find(|endpoint| {
+            endpoint.endpoint == binding.provider_endpoint
+                && endpoint.service_id == binding.provider_service_id
+        });
+        let Some(provider_endpoint) = provider_endpoint else {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_PROVIDER_NOT_APPLIED",
+                format!(
+                    "provider deployment {} endpoint {} is not present in applied topology {}",
+                    binding.provider_deployment_id, binding.provider_endpoint, spec.topology_id
+                ),
+            ));
+        };
+        if let Some(configured_deployment_id) = provider_endpoint
+            .config
+            .as_object()
+            .and_then(|config| config.get("deployment_id"))
+            .and_then(Value::as_str)
+            .filter(|deployment_id| !deployment_id.trim().is_empty())
+            && configured_deployment_id != binding.provider_deployment_id
+        {
+            return Err(StoreApiError::new(
+                409,
+                "STORE_BINDING_PROVIDER_NOT_APPLIED",
+                format!(
+                    "applied topology endpoint {} selects deployment {}, not requested provider {}",
+                    provider_endpoint.endpoint,
+                    configured_deployment_id,
+                    binding.provider_deployment_id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn provider_auth_supported(_contract_version: u32, auth_mode: &str) -> bool {
+    // Compatibility manifests may still describe legacy service/internal
+    // provider authentication, but a production ApiBinding always uses the
+    // workload identity path (or an explicitly public upstream). Legacy auth
+    // remains importable and usable by development Compose only.
+    matches!(auth_mode, "workload" | "public")
+}
+
+pub(crate) fn selected_topology_spec(
+    storage: &DurableStore,
+    selection: &InstallTopologySelection,
+) -> Result<(TopologySpec, String), StoreApiError> {
+    let topology_id = required_text(&selection.topology_id, "topology.topology_id")?;
+    let heads = storage
+        .topology_heads(topology_id)
+        .map_err(storage_error)?
+        .ok_or_else(|| {
+            StoreApiError::new(
+                404,
+                "STORE_BINDING_TOPOLOGY_NOT_FOUND",
+                format!("topology {topology_id} was not found"),
+            )
+        })?;
+    if heads.applying_revision_id.is_some() {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_BINDING_TOPOLOGY_APPLYING",
+            format!("topology {topology_id} already has an apply in progress"),
+        ));
+    }
+    let revision_id = heads.applied_revision_id.ok_or_else(|| {
+        StoreApiError::new(
+            409,
+            "STORE_BINDING_TOPOLOGY_NOT_APPLIED",
+            format!(
+                "topology {topology_id} has no applied head; apply its initial revision before installing a bound service"
+            ),
+        )
+    })?;
+    if selection.revision_id.trim() != revision_id {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_BINDING_TOPOLOGY_ETAG_CONFLICT",
+            format!(
+                "topology {topology_id} applied head is {revision_id}, but install confirmed {}",
+                selection.revision_id.trim()
+            ),
+        ));
+    }
+    if heads.draft_revision_id != revision_id {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_BINDING_TOPOLOGY_DRAFT_DIVERGED",
+            format!(
+                "topology {topology_id} has unapplied draft {}; apply or discard it before Store creates a deployment Binding revision",
+                heads.draft_revision_id
+            ),
+        ));
+    }
+    let revision = storage
+        .topology_revision(topology_id, &revision_id)
+        .map_err(storage_error)?
+        .ok_or_else(|| {
+            StoreApiError::new(
+                404,
+                "STORE_BINDING_TOPOLOGY_REVISION_NOT_FOUND",
+                format!("topology {topology_id} revision {revision_id} was not found"),
+            )
+        })?;
+    Ok((revision.spec().clone(), revision_id))
+}
+
+fn topology_consumer_endpoint(
+    spec: &TopologySpec,
+    service_id: &str,
+    requested: &str,
+) -> Result<String, StoreApiError> {
+    if !requested.trim().is_empty() {
+        validate_endpoint_id(requested.trim()).map_err(|error| {
+            StoreApiError::new(
+                422,
+                "STORE_BINDING_CONSUMER_ENDPOINT_INVALID",
+                format!("consumer endpoint is invalid: {error}"),
+            )
+        })?;
+        let identity = parse_endpoint_id(requested.trim()).map_err(|error| {
+            StoreApiError::new(
+                422,
+                "STORE_BINDING_CONSUMER_ENDPOINT_INVALID",
+                error.to_string(),
+            )
+        })?;
+        if identity.service_name != service_id {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_CONSUMER_ENDPOINT_MISMATCH",
+                format!(
+                    "consumer endpoint service {} must match {service_id}",
+                    identity.service_name
+                ),
+            ));
+        }
+        if spec.endpoints.iter().any(|endpoint| {
+            endpoint.endpoint == requested.trim() && endpoint.service_id == service_id
+        }) {
+            return Ok(requested.trim().to_string());
+        }
+        // Store will add this exact endpoint to the proposed immutable
+        // revision. Resolution still uses only explicitly selected providers.
+        return Ok(requested.trim().to_string());
+    }
+    let endpoints = spec
+        .endpoints
+        .iter()
+        .filter(|endpoint| endpoint.service_id == service_id)
+        .map(|endpoint| endpoint.endpoint.clone())
+        .collect::<Vec<_>>();
+    match endpoints.as_slice() {
+        [endpoint] => Ok(endpoint.clone()),
+        [] => Err(StoreApiError::new(
+            422,
+            "STORE_BINDING_CONSUMER_ENDPOINT_REQUIRED",
+            format!(
+                "topology {} has no endpoint for consumer service {service_id}",
+                spec.topology_id
+            ),
+        )),
+        _ => Err(StoreApiError::new(
+            409,
+            "STORE_BINDING_CONSUMER_ENDPOINT_AMBIGUOUS",
+            format!(
+                "topology {} has multiple endpoints for {service_id}; install endpoint is required",
+                spec.topology_id
+            ),
+        )),
+    }
+}
+
+fn topology_binding_contexts(
+    spec: &TopologySpec,
+    revision_id: &str,
+    consumer_endpoint: &str,
+) -> Result<BTreeMap<String, TopologyBindingContext>, StoreApiError> {
+    let mut bindings = BTreeMap::new();
+    for link in spec
+        .links
+        .iter()
+        .filter(|link| link.enabled && link.source_endpoint == consumer_endpoint)
+    {
+        for binding in &link.api_bindings {
+            let context = TopologyBindingContext {
+                topology_id: spec.topology_id.clone(),
+                revision_id: revision_id.to_string(),
+                source_endpoint: link.source_endpoint.clone(),
+                target_endpoint: link.target_endpoint.clone(),
+                api_id: binding.api_id.clone(),
+                version: binding.version.clone(),
+                optional: binding.optional,
+                provider_deployment_id: binding.provider_deployment_id.clone(),
+                selection: binding.selection.clone(),
+            };
+            if bindings
+                .insert(binding.requirement_name.clone(), context)
+                .is_some()
+            {
+                return Err(StoreApiError::new(
+                    409,
+                    "STORE_BINDING_TOPOLOGY_AMBIGUOUS",
+                    format!(
+                        "topology {} binds requirement {} through more than one Link",
+                        spec.topology_id, binding.requirement_name
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(bindings)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoreTopologyApplyPlan {
+    pub(crate) topology_id: String,
+    pub(crate) revision_id: String,
+    pub(crate) staged_bindings: Vec<ApiBinding>,
+    pub(crate) previous_bindings: Vec<ApiBinding>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BindingContextTransitionPlan {
+    pub(crate) deployment_id: String,
+    pub(crate) node_id: String,
+    pub(crate) container_id: String,
+    pub(crate) forward: BindingContextApplyPayload,
+    pub(crate) rollback: BindingContextApplyPayload,
+}
+
+/// A validated, materializable view of bindings that are still staged by a
+/// Topology apply. The durable rows remain `PENDING`; only these private clones
+/// are represented as `RESOLVED` while constructing the desired Agent context.
+/// Keeping this conversion behind a distinct type prevents ordinary context
+/// callers from treating an arbitrary uncommitted binding as available.
+#[derive(Debug, Clone)]
+struct StagedApplyDesiredContextBindings(Vec<ApiBinding>);
+
+impl StagedApplyDesiredContextBindings {
+    fn from_plans(
+        plans: &[StoreTopologyApplyPlan],
+        deployment_id: &str,
+    ) -> Result<Self, StoreApiError> {
+        let mut materializable = Vec::new();
+        let mut requirements = BTreeSet::new();
+        let mut operation_id = None::<String>;
+        for plan in plans {
+            for binding in plan.staged_bindings.iter().filter(|binding| {
+                binding.consumer_deployment_id == deployment_id && binding.desired_state == "ACTIVE"
+            }) {
+                if binding.state != ApiBindingState::Pending
+                    || binding.observed_state != "PENDING"
+                    || binding.topology_id != plan.topology_id
+                    || binding.topology_revision_id != plan.revision_id
+                    || binding.last_operation_id.trim().is_empty()
+                {
+                    return Err(StoreApiError::new(
+                        409,
+                        "STORE_STAGED_BINDING_CONTEXT_INVALID",
+                        format!(
+                            "binding {} is not a valid staged activation for topology {} revision {}",
+                            binding.binding_id, plan.topology_id, plan.revision_id
+                        ),
+                    ));
+                }
+                match operation_id.as_deref() {
+                    Some(expected) if expected != binding.last_operation_id => {
+                        return Err(StoreApiError::new(
+                            409,
+                            "STORE_STAGED_BINDING_CONTEXT_INVALID",
+                            format!(
+                                "consumer {deployment_id} staged bindings span more than one Operation"
+                            ),
+                        ));
+                    }
+                    None => operation_id = Some(binding.last_operation_id.clone()),
+                    Some(_) => {}
+                }
+                if !requirements.insert(binding.requirement_name.clone()) {
+                    return Err(StoreApiError::new(
+                        409,
+                        "STORE_BINDING_REQUIREMENT_CONFLICT",
+                        format!(
+                            "consumer {deployment_id} requirement {} is staged more than once",
+                            binding.requirement_name
+                        ),
+                    ));
+                }
+
+                let mut resolved_view = binding.clone();
+                resolved_view.state = ApiBindingState::Resolved;
+                resolved_view.observed_state = "RESOLVED".to_string();
+                resolved_view.validate().map_err(|error| {
+                    StoreApiError::new(
+                        409,
+                        "STORE_STAGED_BINDING_CONTEXT_INVALID",
+                        format!(
+                            "binding {} cannot materialize a desired Service Context: {error}",
+                            binding.binding_id
+                        ),
+                    )
+                })?;
+                materializable.push(resolved_view);
+            }
+        }
+        materializable.sort_by(|left, right| {
+            left.requirement_name
+                .cmp(&right.requirement_name)
+                .then_with(|| left.binding_id.cmp(&right.binding_id))
+        });
+        Ok(Self(materializable))
+    }
+
+    fn as_slice(&self) -> &[ApiBinding] {
+        &self.0
+    }
+}
+
+pub(crate) fn propose_generation_sibling_topology(
+    storage: &DurableStore,
+    selection: &InstallTopologySelection,
+    operation_id: &str,
+) -> Result<StoreTopologyApplyPlan, StoreApiError> {
+    let (spec, expected_draft) = selected_topology_spec(storage, selection)?;
+    let topology_id = spec.topology_id.clone();
+    let revision = storage
+        .create_next_topology_revision(
+            &topology_id,
+            &expected_draft,
+            spec,
+            now_marker(),
+            "store-replacement".to_string(),
+            "reproject deployment-wide binding credential generation".to_string(),
+        )
+        .map_err(storage_error)?;
+    let previous_bindings = storage
+        .api_bindings_for_topology(&topology_id)
+        .map_err(storage_error)?;
+    let desired = previous_bindings
+        .iter()
+        .filter(|binding| {
+            binding.desired_state == "ACTIVE" && binding.state == ApiBindingState::Active
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let staged_bindings = storage
+        .stage_precomputed_topology_api_bindings(
+            &topology_id,
+            revision.revision_id(),
+            operation_id,
+            desired,
+        )
+        .map_err(|error| {
+            StoreApiError::new(422, "STORE_BINDING_TOPOLOGY_INVALID", error.to_string())
+        })?;
+    Ok(StoreTopologyApplyPlan {
+        topology_id,
+        revision_id: revision.revision_id().to_string(),
+        staged_bindings,
+        previous_bindings,
+    })
+}
+
+pub(crate) fn align_group_binding_generations(
+    storage: &DurableStore,
+    plans: &mut [StoreTopologyApplyPlan],
+    affected_consumers: &BTreeSet<String>,
+) -> Result<(), StoreApiError> {
+    let planned_topologies = plans
+        .iter()
+        .map(|plan| plan.topology_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut seen_requirements = BTreeSet::new();
+    for consumer in affected_consumers {
+        let current = active_consumer_bindings(storage, consumer)?;
+        let current_topologies = current
+            .iter()
+            .map(|binding| binding.topology_id.clone())
+            .filter(|topology_id| !topology_id.is_empty())
+            .collect::<BTreeSet<_>>();
+        if !current_topologies.is_subset(&planned_topologies) {
+            return Err(StoreApiError::new(
+                409,
+                "STORE_REPLACEMENT_SIBLING_TOPOLOGY_REQUIRED",
+                format!(
+                    "consumer {consumer} has deployment-wide sibling bindings in {:?}; every sibling topology requires one strong CAS entry",
+                    current_topologies
+                        .difference(&planned_topologies)
+                        .collect::<Vec<_>>()
+                ),
+            ));
+        }
+        let binding_generation = current
+            .iter()
+            .map(|binding| {
+                binding
+                    .credential_generation
+                    .max(binding.context_generation)
+            })
+            .max()
+            .unwrap_or(0);
+        let projected_generation = storage
+            .get_state::<ManagedServiceContextProjection>("managed-service-context-v1", consumer)
+            .map_err(storage_error)?
+            .map(|projection| {
+                projection
+                    .current
+                    .as_ref()
+                    .unwrap_or(&projection.last_nonempty)
+                    .generation
+                    .max(projection.last_nonempty.generation)
+            })
+            .unwrap_or(0);
+        let next_generation = binding_generation
+            .max(projected_generation)
+            .saturating_add(1)
+            .max(1);
+        for plan in plans.iter_mut() {
+            for binding in plan.staged_bindings.iter_mut().filter(|binding| {
+                binding.consumer_deployment_id == *consumer && binding.desired_state == "ACTIVE"
+            }) {
+                if !seen_requirements.insert((consumer.clone(), binding.requirement_name.clone())) {
+                    return Err(StoreApiError::new(
+                        409,
+                        "STORE_BINDING_REQUIREMENT_CONFLICT",
+                        format!(
+                            "consumer {consumer} requirement {} is active in more than one topology",
+                            binding.requirement_name
+                        ),
+                    ));
+                }
+                binding.credential_generation = next_generation;
+                binding.context_generation = next_generation;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn binding_context_transition_plans(
+    storage: &DurableStore,
+    plans: &[StoreTopologyApplyPlan],
+    affected_consumers: &BTreeSet<String>,
+) -> Result<Vec<BindingContextTransitionPlan>, StoreApiError> {
+    let mut transitions = Vec::new();
+    for deployment_id in affected_consumers {
+        let runtime = storage
+            .runtime_instance(deployment_id)
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                StoreApiError::new(
+                    409,
+                    "STORE_BINDING_CONSUMER_RUNTIME_MISSING",
+                    format!("consumer deployment {deployment_id} has no runtime projection"),
+                )
+            })?;
+        if runtime.management_mode != orchestrator_storage::RuntimeManagementMode::Managed {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_EXTERNAL_BINDING_CONTEXT_REQUIRED",
+                format!(
+                    "consumer deployment {deployment_id} is External and cannot receive a managed binding context"
+                ),
+            ));
+        }
+        let contract = storage
+            .service_release_contract(
+                &runtime.instance.service_id,
+                &runtime.instance.release_version,
+            )
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                StoreApiError::new(
+                    409,
+                    "STORE_BINDING_CONSUMER_RELEASE_MISSING",
+                    format!(
+                        "consumer deployment {deployment_id} has no exact release contract {}@{}",
+                        runtime.instance.service_id, runtime.instance.release_version
+                    ),
+                )
+            })?;
+        let previous_bindings = active_consumer_bindings(storage, deployment_id)?;
+        let desired_bindings = StagedApplyDesiredContextBindings::from_plans(plans, deployment_id)?;
+        let derived_previous = managed_service_context_spec(
+            storage,
+            &contract,
+            &runtime.node_id,
+            &previous_bindings,
+            false,
+        )?;
+        let persisted = storage
+            .get_state::<ManagedServiceContextProjection>(
+                "managed-service-context-v1",
+                deployment_id,
+            )
+            .map_err(storage_error)?;
+        if let (Some(projected), Some(derived)) = (
+            persisted
+                .as_ref()
+                .and_then(|projection| projection.current.as_ref()),
+            derived_previous.as_ref(),
+        ) && projected != derived
+        {
+            return Err(StoreApiError::new(
+                409,
+                "STORE_BINDING_CONTEXT_PROJECTION_DRIFT",
+                format!(
+                    "consumer deployment {deployment_id} persisted Agent context does not match active ApiBindings"
+                ),
+            ));
+        }
+        let previous = persisted
+            .map(|projection| projection.last_nonempty)
+            .or(derived_previous)
+            .ok_or_else(|| {
+                StoreApiError::new(
+                    409,
+                    "STORE_BINDING_PREVIOUS_CONTEXT_REQUIRED",
+                    format!("consumer deployment {deployment_id} has no previous managed context"),
+                )
+            })?;
+        let desired = managed_service_context_spec(
+            storage,
+            &contract,
+            &runtime.node_id,
+            desired_bindings.as_slice(),
+            false,
+        )?;
+        let forward = BindingContextApplyPayload {
+            deployment_id: deployment_id.clone(),
+            service_id: runtime.instance.service_id.clone(),
+            context: desired.clone(),
+            previous_context: Some(previous.clone()),
+        };
+        let rollback = BindingContextApplyPayload {
+            deployment_id: deployment_id.clone(),
+            service_id: runtime.instance.service_id.clone(),
+            context: Some(previous.clone()),
+            previous_context: desired.or(Some(previous)),
+        };
+        forward.validate().map_err(|error| {
+            StoreApiError::new(500, "STORE_BINDING_CONTEXT_INVALID", error.to_string())
+        })?;
+        rollback.validate().map_err(|error| {
+            StoreApiError::new(500, "STORE_BINDING_CONTEXT_INVALID", error.to_string())
+        })?;
+        transitions.push(BindingContextTransitionPlan {
+            deployment_id: deployment_id.clone(),
+            node_id: runtime.node_id,
+            container_id: runtime.instance.container_id,
+            forward,
+            rollback,
+        });
+    }
+    transitions.sort_by(|left, right| left.deployment_id.cmp(&right.deployment_id));
+    Ok(transitions)
+}
+
+fn active_consumer_bindings(
+    storage: &DurableStore,
+    deployment_id: &str,
+) -> Result<Vec<ApiBinding>, StoreApiError> {
+    let mut bindings = storage
+        .api_bindings_for_deployment(deployment_id)
+        .map_err(storage_error)?
+        .into_iter()
+        .filter(|binding| {
+            binding.desired_state == "ACTIVE" && binding.state == ApiBindingState::Active
+        })
+        .collect::<Vec<_>>();
+    bindings.sort_by(|left, right| left.requirement_name.cmp(&right.requirement_name));
+    Ok(bindings)
+}
+
+fn active_provider_bindings(
+    storage: &DurableStore,
+    deployment_id: &str,
+) -> Result<Vec<ApiBinding>, StoreApiError> {
+    let mut bindings = Vec::new();
+    for heads in storage.list_topology_heads().map_err(storage_error)? {
+        bindings.extend(
+            storage
+                .api_bindings_for_topology(&heads.topology_id)
+                .map_err(storage_error)?
+                .into_iter()
+                .filter(|binding| {
+                    binding.provider_deployment_id == deployment_id
+                        && binding.desired_state == "ACTIVE"
+                        && binding.state == ApiBindingState::Active
+                }),
+        );
+    }
+    bindings.sort_by(|left, right| {
+        (
+            &left.topology_id,
+            &left.consumer_deployment_id,
+            &left.requirement_name,
+        )
+            .cmp(&(
+                &right.topology_id,
+                &right.consumer_deployment_id,
+                &right.requirement_name,
+            ))
+    });
+    Ok(bindings)
+}
+
+fn require_matching_replacement_topologies<'a>(
+    selected: &'a [InstallTopologySelection],
+    existing: &[ApiBinding],
+) -> Result<Vec<&'a InstallTopologySelection>, StoreApiError> {
+    if selected.is_empty() {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_REPLACEMENT_TOPOLOGY_REQUIRED",
+            "a topology-bound replacement requires strong ETag confirmation for every affected topology",
+        ));
+    }
+    let topology_ids = existing
+        .iter()
+        .map(|binding| binding.topology_id.as_str())
+        .filter(|topology_id| !topology_id.is_empty())
+        .collect::<BTreeSet<_>>();
+    if topology_ids.is_empty() {
+        if selected.len() != 1 {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_REPLACEMENT_TOPOLOGY_AMBIGUOUS",
+                "a consumer without an existing binding authority requires exactly one topology CAS input",
+            ));
+        }
+        return Ok(vec![&selected[0]]);
+    }
+    let selected_ids = selected
+        .iter()
+        .map(|selection| selection.topology_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if selected_ids != topology_ids {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_REPLACEMENT_TOPOLOGY_CONFLICT",
+            format!(
+                "replacement topology CAS set {:?} must exactly match affected applied topologies {:?}",
+                selected_ids, topology_ids
+            ),
+        ));
+    }
+    Ok(selected
+        .iter()
+        .filter(|selection| topology_ids.contains(selection.topology_id.as_str()))
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propose_provider_replacement_topology(
+    storage: &DurableStore,
+    selection: &InstallTopologySelection,
+    contract: &ServiceReleaseContract,
+    old_deployment_id: &str,
+    new_deployment_id: &str,
+    new_node_id: &str,
+    new_endpoint: &str,
+    operation_id: &str,
+) -> Result<StoreTopologyApplyPlan, StoreApiError> {
+    let (mut spec, expected_draft) = selected_topology_spec(storage, selection)?;
+    let new_endpoint = required_text(new_endpoint, "endpoint")?;
+    validate_endpoint_id(new_endpoint).map_err(|error| {
+        StoreApiError::new(
+            422,
+            "STORE_REPLACEMENT_PROVIDER_ENDPOINT_INVALID",
+            error.to_string(),
+        )
+    })?;
+    let identity = parse_endpoint_id(new_endpoint).map_err(|error| {
+        StoreApiError::new(
+            422,
+            "STORE_REPLACEMENT_PROVIDER_ENDPOINT_INVALID",
+            error.to_string(),
+        )
+    })?;
+    if identity.service_name != contract.release.service_name {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_REPLACEMENT_PROVIDER_ENDPOINT_MISMATCH",
+            format!(
+                "replacement endpoint service {} must match {}",
+                identity.service_name, contract.release.service_name
+            ),
+        ));
+    }
+    let previous_bindings = storage
+        .api_bindings_for_topology(&spec.topology_id)
+        .map_err(storage_error)?;
+    let affected = previous_bindings
+        .iter()
+        .filter(|binding| {
+            binding.provider_deployment_id == old_deployment_id
+                && binding.desired_state == "ACTIVE"
+                && binding.state == ApiBindingState::Active
+        })
+        .map(|binding| binding.binding_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if affected.is_empty() {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_REPLACEMENT_PROVIDER_BINDINGS_MISSING",
+            format!(
+                "deployment {old_deployment_id} has no active provider binding in topology {}",
+                spec.topology_id
+            ),
+        ));
+    }
+
+    let old_targets = previous_bindings
+        .iter()
+        .filter(|binding| affected.contains(binding.binding_id.as_str()))
+        .map(|binding| binding.link_target_endpoint.as_str())
+        .collect::<BTreeSet<_>>();
+    if old_targets.len() != 1 {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_REPLACEMENT_PROVIDER_ENDPOINT_AMBIGUOUS",
+            "active provider bindings do not share one topology endpoint",
+        ));
+    }
+    let old_target = *old_targets.first().expect("one target was checked");
+    match spec
+        .endpoints
+        .iter_mut()
+        .find(|endpoint| endpoint.endpoint == new_endpoint)
+    {
+        Some(endpoint) if endpoint.service_id != contract.release.service_name => {
+            return Err(StoreApiError::new(
+                409,
+                "STORE_REPLACEMENT_PROVIDER_ENDPOINT_CONFLICT",
+                format!(
+                    "endpoint {new_endpoint} already belongs to {}",
+                    endpoint.service_id
+                ),
+            ));
+        }
+        Some(endpoint) => {
+            endpoint.protocol = contract.release.backend.protocol.clone();
+            endpoint.health_path = contract.release.backend.health_path.clone();
+            endpoint.config = json!({
+                "deployment_id": new_deployment_id,
+                "node_id": new_node_id,
+            });
+        }
+        None => spec.endpoints.push(TopologyEndpointSpec {
+            endpoint: new_endpoint.to_string(),
+            service_id: contract.release.service_name.clone(),
+            protocol: contract.release.backend.protocol.clone(),
+            health_path: contract.release.backend.health_path.clone(),
+            display_name: contract.release.service_name.clone(),
+            note: "Store-managed replacement provider endpoint".to_string(),
+            config: json!({
+                "deployment_id": new_deployment_id,
+                "node_id": new_node_id,
+            }),
+        }),
+    }
+    let mut rewritten_links = Vec::with_capacity(spec.links.len() + 1);
+    for mut link in std::mem::take(&mut spec.links) {
+        if link.target_endpoint != old_target {
+            rewritten_links.push(link);
+            continue;
+        }
+        let replacement_template = link.clone();
+        let (mut affected_bindings, retained_bindings): (Vec<_>, Vec<_>) = link
+            .api_bindings
+            .into_iter()
+            .partition(|binding| binding.provider_deployment_id == old_deployment_id);
+        if affected_bindings.is_empty() {
+            link.api_bindings = retained_bindings;
+            rewritten_links.push(link);
+            continue;
+        }
+        for binding in &mut affected_bindings {
+            binding.provider_deployment_id = new_deployment_id.to_string();
+        }
+        if !retained_bindings.is_empty() {
+            // A Link may aggregate multiple named requirements that happen to
+            // share an endpoint. Move only the affected requirements to a new
+            // target Link and leave unrelated provider bindings untouched.
+            let mut replacement_link = replacement_template;
+            replacement_link.target_endpoint = new_endpoint.to_string();
+            replacement_link.api_bindings = affected_bindings;
+            link.api_bindings = retained_bindings;
+            rewritten_links.push(link);
+            rewritten_links.push(replacement_link);
+        } else {
+            link.target_endpoint = new_endpoint.to_string();
+            link.api_bindings = affected_bindings;
+            rewritten_links.push(link);
+        }
+    }
+    spec.links = rewritten_links;
+    if spec.root_endpoint == old_target {
+        spec.root_endpoint = new_endpoint.to_string();
+    }
+    if old_target != spec.root_endpoint
+        && !spec
+            .links
+            .iter()
+            .any(|link| link.source_endpoint == old_target || link.target_endpoint == old_target)
+    {
+        spec.endpoints
+            .retain(|endpoint| endpoint.endpoint != old_target);
+    }
+    // Compatibility is a plan-time precondition. Validate it before creating
+    // the immutable draft so a rejected upgrade cannot leave an unusable
+    // revision behind.
+    for binding in previous_bindings
+        .iter()
+        .filter(|binding| affected.contains(binding.binding_id.as_str()))
+    {
+        let (link, selection) = spec
+            .links
+            .iter()
+            .flat_map(|link| {
+                link.api_bindings
+                    .iter()
+                    .map(move |selection| (link, selection))
+            })
+            .find(|(link, selection)| {
+                link.source_endpoint == binding.link_source_endpoint
+                    && selection.requirement_name == binding.requirement_name
+                    && selection.provider_deployment_id == new_deployment_id
+            })
+            .ok_or_else(|| {
+                StoreApiError::new(
+                    500,
+                    "STORE_REPLACEMENT_BINDING_REVISION_INVALID",
+                    format!(
+                        "replacement Link for binding {} is missing",
+                        binding.binding_id
+                    ),
+                )
+            })?;
+        let version_requirement = if selection.version.trim().is_empty() {
+            binding.api_version.as_str()
+        } else {
+            selection.version.as_str()
+        };
+        if !contract.release.apis.iter().any(|api| {
+            api.api_id == binding.api_id
+                && api.protocol == link.protocol
+                && api_version_matches(version_requirement, &api.version)
+        }) {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_REPLACEMENT_PROVIDER_API_INCOMPATIBLE",
+                format!(
+                    "replacement release does not provide {} compatible with {}",
+                    binding.api_id, version_requirement
+                ),
+            ));
+        }
+    }
+    spec = spec.canonicalized().map_err(core_error)?;
+    let topology_id = spec.topology_id.clone();
+    let revision = storage
+        .create_next_topology_revision(
+            &topology_id,
+            &expected_draft,
+            spec,
+            now_marker(),
+            "store-replacement".to_string(),
+            format!("switch provider {old_deployment_id} to {new_deployment_id}"),
+        )
+        .map_err(storage_error)?;
+
+    let mut desired = previous_bindings
+        .iter()
+        .filter(|binding| {
+            binding.desired_state == "ACTIVE" && binding.state == ApiBindingState::Active
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for binding in &mut desired {
+        binding.topology_revision_id = revision.revision_id().to_string();
+        binding.last_operation_id = operation_id.to_string();
+        if !affected.contains(binding.binding_id.as_str()) {
+            continue;
+        }
+        let topology_binding = revision
+            .spec()
+            .links
+            .iter()
+            .flat_map(|link| {
+                link.api_bindings
+                    .iter()
+                    .map(move |selection| (link, selection))
+            })
+            .find(|(link, selection)| {
+                link.source_endpoint == binding.link_source_endpoint
+                    && selection.requirement_name == binding.requirement_name
+                    && selection.provider_deployment_id == new_deployment_id
+            })
+            .ok_or_else(|| {
+                StoreApiError::new(
+                    500,
+                    "STORE_REPLACEMENT_BINDING_REVISION_INVALID",
+                    format!(
+                        "replacement Link for binding {} is missing",
+                        binding.binding_id
+                    ),
+                )
+            })?;
+        let version_requirement = if topology_binding.1.version.trim().is_empty() {
+            binding.api_version.as_str()
+        } else {
+            topology_binding.1.version.as_str()
+        };
+        let provider_api = contract
+            .release
+            .apis
+            .iter()
+            .find(|api| {
+                api.api_id == binding.api_id
+                    && api.protocol == topology_binding.0.protocol
+                    && api_version_matches(version_requirement, &api.version)
+            })
+            .ok_or_else(|| {
+                StoreApiError::new(
+                    422,
+                    "STORE_REPLACEMENT_PROVIDER_API_INCOMPATIBLE",
+                    format!(
+                        "replacement release does not provide {} compatible with {}",
+                        binding.api_id, version_requirement
+                    ),
+                )
+            })?;
+        binding.api_version = provider_api.version.clone();
+        binding.provider_deployment_id = new_deployment_id.to_string();
+        binding.provider_service_id = contract.release.service_name.clone();
+        binding.provider_node_id = new_node_id.to_string();
+        binding.provider_endpoint = new_endpoint.to_string();
+        binding.provider_path = provider_api.path_prefix.clone();
+        binding.protocol = provider_api.protocol.clone();
+        binding.methods = provider_api.methods.clone();
+        binding.provider_auth_mode = provider_api.auth_mode.clone();
+        binding.permission = provider_api.permission.clone();
+        binding.link_target_endpoint = new_endpoint.to_string();
+    }
+    let staged_bindings = storage
+        .stage_precomputed_topology_api_bindings(
+            revision.spec().topology_id.as_str(),
+            revision.revision_id(),
+            operation_id,
+            desired,
+        )
+        .map_err(|error| {
+            StoreApiError::new(422, "STORE_BINDING_TOPOLOGY_INVALID", error.to_string())
+        })?;
+    Ok(StoreTopologyApplyPlan {
+        topology_id: revision.spec().topology_id.clone(),
+        revision_id: revision.revision_id().to_string(),
+        staged_bindings,
+        previous_bindings,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propose_dual_role_replacement_topology(
+    storage: &DurableStore,
+    selection: &InstallTopologySelection,
+    contract: &ServiceReleaseContract,
+    old_deployment_id: &str,
+    new_deployment_id: &str,
+    new_node_id: &str,
+    new_endpoint: &str,
+    consumer_bindings: &[ApiBinding],
+    operation_id: &str,
+) -> Result<StoreTopologyApplyPlan, StoreApiError> {
+    let (mut spec, expected_draft) = selected_topology_spec(storage, selection)?;
+    validate_endpoint_id(new_endpoint).map_err(|error| {
+        StoreApiError::new(422, "STORE_REPLACEMENT_ENDPOINT_INVALID", error.to_string())
+    })?;
+    let previous_bindings = storage
+        .api_bindings_for_topology(&spec.topology_id)
+        .map_err(storage_error)?;
+    let provider_affected = previous_bindings
+        .iter()
+        .filter(|binding| {
+            binding.provider_deployment_id == old_deployment_id
+                && binding.desired_state == "ACTIVE"
+                && binding.state == ApiBindingState::Active
+        })
+        .map(|binding| binding.binding_id.clone())
+        .collect::<BTreeSet<_>>();
+    if provider_affected.is_empty() {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_REPLACEMENT_PROVIDER_BINDINGS_MISSING",
+            format!(
+                "deployment {old_deployment_id} has no provider binding in topology {}",
+                spec.topology_id
+            ),
+        ));
+    }
+    let old_targets = previous_bindings
+        .iter()
+        .filter(|binding| provider_affected.contains(&binding.binding_id))
+        .map(|binding| binding.link_target_endpoint.clone())
+        .collect::<BTreeSet<_>>();
+    if old_targets.len() != 1 {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_REPLACEMENT_PROVIDER_ENDPOINT_AMBIGUOUS",
+            "dual-role provider bindings must share one topology endpoint",
+        ));
+    }
+    let old_target = old_targets
+        .first()
+        .expect("one provider endpoint was checked")
+        .clone();
+    let old_sources = previous_bindings
+        .iter()
+        .filter(|binding| binding.consumer_deployment_id == old_deployment_id)
+        .map(|binding| binding.link_source_endpoint.clone())
+        .collect::<BTreeSet<_>>();
+    let old_consumer_requirements = previous_bindings
+        .iter()
+        .filter(|binding| binding.consumer_deployment_id == old_deployment_id)
+        .map(|binding| binding.requirement_name.clone())
+        .collect::<BTreeSet<_>>();
+
+    let endpoint_config = json!({
+        "deployment_id": new_deployment_id,
+        "node_id": new_node_id,
+        "outbound_only": false,
+    });
+    match spec
+        .endpoints
+        .iter_mut()
+        .find(|endpoint| endpoint.endpoint == new_endpoint)
+    {
+        Some(endpoint) if endpoint.service_id != contract.release.service_name => {
+            return Err(StoreApiError::new(
+                409,
+                "STORE_REPLACEMENT_ENDPOINT_CONFLICT",
+                format!("endpoint {new_endpoint} belongs to {}", endpoint.service_id),
+            ));
+        }
+        Some(endpoint) => {
+            endpoint.protocol = contract.release.backend.protocol.clone();
+            endpoint.health_path = contract.release.backend.health_path.clone();
+            endpoint.config = endpoint_config;
+        }
+        None => spec.endpoints.push(TopologyEndpointSpec {
+            endpoint: new_endpoint.to_string(),
+            service_id: contract.release.service_name.clone(),
+            protocol: contract.release.backend.protocol.clone(),
+            health_path: contract.release.backend.health_path.clone(),
+            display_name: contract.release.service_name.clone(),
+            note: "Store-managed dual-role replacement endpoint".to_string(),
+            config: endpoint_config,
+        }),
+    }
+
+    // Remove only the old consumer's named requirements. Links may aggregate
+    // unrelated requirements and must remain intact.
+    for link in &mut spec.links {
+        if old_sources.contains(&link.source_endpoint) {
+            link.api_bindings
+                .retain(|binding| !old_consumer_requirements.contains(&binding.requirement_name));
+        }
+    }
+    for binding in consumer_bindings.iter().filter(|binding| {
+        binding.desired_state == "ACTIVE"
+            && matches!(
+                binding.state,
+                ApiBindingState::Resolved | ApiBindingState::Active
+            )
+    }) {
+        if !spec
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.endpoint == binding.provider_endpoint)
+            && binding.provider_deployment_id != old_deployment_id
+        {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_PROVIDER_ENDPOINT_MISSING",
+                format!(
+                    "provider endpoint {} for {} is absent from topology {}",
+                    binding.provider_endpoint, binding.requirement_name, spec.topology_id
+                ),
+            ));
+        }
+        let target_endpoint = if binding.provider_deployment_id == old_deployment_id {
+            old_target.as_str()
+        } else {
+            binding.provider_endpoint.as_str()
+        };
+        let link = if let Some(index) = spec.links.iter().position(|link| {
+            link.source_endpoint == new_endpoint && link.target_endpoint == target_endpoint
+        }) {
+            &mut spec.links[index]
+        } else {
+            spec.links.push(TopologyLinkSpec {
+                source_endpoint: new_endpoint.to_string(),
+                target_endpoint: target_endpoint.to_string(),
+                protocol: binding.protocol.clone(),
+                auth_mode: "workload".to_string(),
+                scope: "api-binding".to_string(),
+                enabled: true,
+                config_ref: String::new(),
+                secret_ref: String::new(),
+                policy: json!({}),
+                api_bindings: Vec::new(),
+            });
+            spec.links.last_mut().expect("dual-role link was inserted")
+        };
+        link.api_bindings.push(TopologyApiBindingSpec {
+            requirement_name: binding.requirement_name.clone(),
+            api_id: binding.api_id.clone(),
+            version: contract
+                .requirements()
+                .iter()
+                .find(|requirement| requirement.binding_name() == binding.requirement_name)
+                .map(|requirement| requirement.version_requirement().to_string())
+                .unwrap_or_else(|| binding.api_version.clone()),
+            optional: binding.optional,
+            provider_deployment_id: binding.provider_deployment_id.clone(),
+            selection: "explicit".to_string(),
+        });
+    }
+
+    // Split mixed target Links and move only bindings supplied by the old
+    // provider to the transient replacement endpoint.
+    let mut rewritten_links = Vec::with_capacity(spec.links.len() + 1);
+    for mut link in std::mem::take(&mut spec.links) {
+        if link.target_endpoint != old_target {
+            rewritten_links.push(link);
+            continue;
+        }
+        let template = link.clone();
+        let (mut affected, retained): (Vec<_>, Vec<_>) = link
+            .api_bindings
+            .into_iter()
+            .partition(|binding| binding.provider_deployment_id == old_deployment_id);
+        for binding in &mut affected {
+            binding.provider_deployment_id = new_deployment_id.to_string();
+        }
+        match (affected.is_empty(), retained.is_empty()) {
+            (true, _) => {
+                link.api_bindings = retained;
+                rewritten_links.push(link);
+            }
+            (false, true) => {
+                link.target_endpoint = new_endpoint.to_string();
+                link.api_bindings = affected;
+                rewritten_links.push(link);
+            }
+            (false, false) => {
+                link.api_bindings = retained;
+                let mut replacement = template;
+                replacement.target_endpoint = new_endpoint.to_string();
+                replacement.api_bindings = affected;
+                rewritten_links.push(link);
+                rewritten_links.push(replacement);
+            }
+        }
+    }
+    spec.links = rewritten_links;
+    if spec.root_endpoint == old_target || old_sources.contains(&spec.root_endpoint) {
+        spec.root_endpoint = new_endpoint.to_string();
+    }
+    spec.links
+        .retain(|link| !link.api_bindings.is_empty() || link.scope != "api-binding");
+    if !spec
+        .links
+        .iter()
+        .any(|link| link.source_endpoint == old_target || link.target_endpoint == old_target)
+    {
+        spec.endpoints
+            .retain(|endpoint| endpoint.endpoint != old_target);
+    }
+    for old_source in &old_sources {
+        if old_source != &spec.root_endpoint
+            && !spec.links.iter().any(|link| {
+                &link.source_endpoint == old_source || &link.target_endpoint == old_source
+            })
+        {
+            spec.endpoints
+                .retain(|endpoint| &endpoint.endpoint != old_source);
+        }
+    }
+    spec = spec.canonicalized().map_err(core_error)?;
+    let topology_id = spec.topology_id.clone();
+    let revision = storage
+        .create_next_topology_revision(
+            &topology_id,
+            &expected_draft,
+            spec,
+            now_marker(),
+            "store-replacement".to_string(),
+            format!("replace dual-role deployment {old_deployment_id} with {new_deployment_id}"),
+        )
+        .map_err(storage_error)?;
+
+    let mut desired = previous_bindings
+        .iter()
+        .filter(|binding| {
+            binding.desired_state == "ACTIVE"
+                && binding.state == ApiBindingState::Active
+                && binding.consumer_deployment_id != old_deployment_id
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    desired.extend(consumer_bindings.iter().cloned());
+    for binding in &mut desired {
+        binding.topology_id = topology_id.clone();
+        binding.topology_revision_id = revision.revision_id().to_string();
+        binding.last_operation_id = operation_id.to_string();
+        if binding.consumer_deployment_id == new_deployment_id {
+            binding.consumer_endpoint = new_endpoint.to_string();
+            binding.link_source_endpoint = new_endpoint.to_string();
+        }
+        if binding.provider_deployment_id != old_deployment_id {
+            continue;
+        }
+        let provider_api = contract
+            .release
+            .apis
+            .iter()
+            .find(|api| {
+                api.api_id == binding.api_id
+                    && api_version_matches(&binding.api_version, &api.version)
+            })
+            .ok_or_else(|| {
+                StoreApiError::new(
+                    422,
+                    "STORE_REPLACEMENT_PROVIDER_API_INCOMPATIBLE",
+                    format!("replacement release cannot provide {}", binding.api_id),
+                )
+            })?;
+        if !provider_auth_supported(contract.contract_version, &provider_api.auth_mode) {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_PROVIDER_AUTH_UNSUPPORTED",
+                format!(
+                    "replacement provider API {} uses unsupported {} auth",
+                    binding.api_id, provider_api.auth_mode
+                ),
+            ));
+        }
+        binding.api_version = provider_api.version.clone();
+        binding.provider_deployment_id = new_deployment_id.to_string();
+        binding.provider_service_id = contract.release.service_name.clone();
+        binding.provider_node_id = new_node_id.to_string();
+        binding.provider_endpoint = new_endpoint.to_string();
+        binding.provider_path = provider_api.path_prefix.clone();
+        binding.protocol = provider_api.protocol.clone();
+        binding.methods = provider_api.methods.clone();
+        binding.provider_auth_mode = provider_api.auth_mode.clone();
+        binding.permission = provider_api.permission.clone();
+        binding.link_target_endpoint = new_endpoint.to_string();
+    }
+    let staged_bindings = storage
+        .stage_precomputed_topology_api_bindings(
+            &topology_id,
+            revision.revision_id(),
+            operation_id,
+            desired,
+        )
+        .map_err(|error| {
+            StoreApiError::new(422, "STORE_BINDING_TOPOLOGY_INVALID", error.to_string())
+        })?;
+    Ok(StoreTopologyApplyPlan {
+        topology_id,
+        revision_id: revision.revision_id().to_string(),
+        staged_bindings,
+        previous_bindings,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_replacement_consumer_bootstrap(
+    storage: &DurableStore,
+    plan: &StoreTopologyApplyPlan,
+    old_consumer_deployment_id: &str,
+    new_consumer_deployment_id: &str,
+    new_consumer_endpoint: &str,
+    consumer_bindings: &[ApiBinding],
+    operation_id: &str,
+) -> Result<Vec<ApiBinding>, StoreApiError> {
+    let mut desired = plan
+        .previous_bindings
+        .iter()
+        .filter(|binding| {
+            binding.desired_state == "ACTIVE"
+                && binding.state == ApiBindingState::Active
+                && binding.consumer_deployment_id != old_consumer_deployment_id
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    desired.extend(consumer_bindings.iter().cloned());
+    for binding in &mut desired {
+        binding.topology_id = plan.topology_id.clone();
+        binding.topology_revision_id = plan.revision_id.clone();
+        binding.last_operation_id = operation_id.to_string();
+        if binding.consumer_deployment_id == new_consumer_deployment_id {
+            binding.consumer_endpoint = new_consumer_endpoint.to_string();
+            binding.link_source_endpoint = new_consumer_endpoint.to_string();
+        }
+    }
+    storage
+        .stage_precomputed_topology_api_bindings(
+            &plan.topology_id,
+            &plan.revision_id,
+            operation_id,
+            desired,
+        )
+        .map_err(|error| {
+            StoreApiError::new(422, "STORE_BINDING_BOOTSTRAP_INVALID", error.to_string())
+        })
+}
+
+struct StoreConsumerBindingMergeContext<'a> {
+    consumer_deployment_id: &'a str,
+    replaced_consumer_deployment_id: Option<&'a str>,
+    consumer_endpoint: &'a str,
+    topology_id: &'a str,
+    revision_id: &'a str,
+    operation_id: &'a str,
+}
+
+/// Builds the exact immutable Topology shape that a Store install would
+/// propose, without creating a revision or touching apply ownership.  The
+/// validate endpoint uses this to return a truthful prospective diff.
+fn preview_store_install_topology_spec(
+    mut spec: TopologySpec,
+    contract: &ServiceReleaseContract,
+    consumer_deployment_id: &str,
+    consumer_node_id: &str,
+    consumer_endpoint: &str,
+    bindings: &[ApiBinding],
+) -> Result<TopologySpec, StoreApiError> {
+    let consumer_endpoint = required_text(consumer_endpoint, "endpoint")?;
+    validate_endpoint_id(consumer_endpoint).map_err(|error| {
+        StoreApiError::new(
+            422,
+            "STORE_BINDING_CONSUMER_ENDPOINT_INVALID",
+            error.to_string(),
+        )
+    })?;
+    let endpoint_config = json!({
+        "deployment_id": consumer_deployment_id,
+        "node_id": consumer_node_id,
+        "outbound_only": true,
+    });
+    match spec
+        .endpoints
+        .iter_mut()
+        .find(|endpoint| endpoint.endpoint == consumer_endpoint)
+    {
+        Some(endpoint) if endpoint.service_id != contract.release.service_name => {
+            return Err(StoreApiError::new(
+                409,
+                "STORE_BINDING_CONSUMER_ENDPOINT_CONFLICT",
+                format!(
+                    "endpoint {consumer_endpoint} already belongs to {}",
+                    endpoint.service_id
+                ),
+            ));
+        }
+        Some(endpoint) => {
+            endpoint.config = endpoint_config;
+            endpoint.protocol = contract.release.backend.protocol.clone();
+            endpoint.health_path = contract.release.backend.health_path.clone();
+        }
+        None => spec.endpoints.push(TopologyEndpointSpec {
+            endpoint: consumer_endpoint.to_string(),
+            service_id: contract.release.service_name.clone(),
+            protocol: contract.release.backend.protocol.clone(),
+            health_path: contract.release.backend.health_path.clone(),
+            display_name: contract.release.service_name.clone(),
+            note: "Store-managed outbound workload endpoint".to_string(),
+            config: endpoint_config,
+        }),
+    }
+    for link in &mut spec.links {
+        if link.source_endpoint == consumer_endpoint {
+            link.api_bindings.clear();
+        }
+    }
+    for binding in bindings.iter().filter(|binding| {
+        matches!(
+            binding.state,
+            ApiBindingState::Resolved | ApiBindingState::Active
+        ) && binding.desired_state == "ACTIVE"
+    }) {
+        let target = spec
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint == binding.provider_endpoint)
+            .ok_or_else(|| {
+                StoreApiError::new(
+                    422,
+                    "STORE_BINDING_PROVIDER_ENDPOINT_MISSING",
+                    format!(
+                        "provider deployment {} endpoint {} is not present in topology {}",
+                        binding.provider_deployment_id, binding.provider_endpoint, spec.topology_id
+                    ),
+                )
+            })?;
+        if target.service_id != binding.provider_service_id {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_PROVIDER_ENDPOINT_MISMATCH",
+                format!(
+                    "provider endpoint {} belongs to {}, expected {}",
+                    target.endpoint, target.service_id, binding.provider_service_id
+                ),
+            ));
+        }
+        let link = if let Some(index) = spec.links.iter().position(|link| {
+            link.source_endpoint == consumer_endpoint
+                && link.target_endpoint == binding.provider_endpoint
+        }) {
+            &mut spec.links[index]
+        } else {
+            spec.links.push(TopologyLinkSpec {
+                source_endpoint: consumer_endpoint.to_string(),
+                target_endpoint: binding.provider_endpoint.clone(),
+                protocol: binding.protocol.clone(),
+                auth_mode: "workload".to_string(),
+                scope: "api-binding".to_string(),
+                enabled: true,
+                config_ref: String::new(),
+                secret_ref: String::new(),
+                policy: json!({}),
+                api_bindings: Vec::new(),
+            });
+            spec.links.last_mut().expect("link was just inserted")
+        };
+        if link.protocol != binding.protocol {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_BINDING_LINK_PROTOCOL_CONFLICT",
+                format!(
+                    "Link {} -> {} uses {}, but requirement {} needs {}",
+                    consumer_endpoint,
+                    binding.provider_endpoint,
+                    link.protocol,
+                    binding.requirement_name,
+                    binding.protocol
+                ),
+            ));
+        }
+        link.enabled = true;
+        link.auth_mode = "workload".to_string();
+        let version_requirement = contract
+            .requirements()
+            .iter()
+            .find(|requirement| requirement.binding_name() == binding.requirement_name)
+            .map(|requirement| requirement.version_requirement())
+            .filter(|version| !version.trim().is_empty())
+            .unwrap_or(binding.api_version.as_str());
+        link.api_bindings.push(TopologyApiBindingSpec {
+            requirement_name: binding.requirement_name.clone(),
+            api_id: binding.api_id.clone(),
+            version: version_requirement.to_string(),
+            optional: binding.optional,
+            provider_deployment_id: binding.provider_deployment_id.clone(),
+            selection: "explicit".to_string(),
+        });
+    }
+    spec.links
+        .retain(|link| !link.api_bindings.is_empty() || link.scope != "api-binding");
+    spec.canonicalized().map_err(core_error)
+}
+
+fn merge_store_consumer_bindings(
+    previous_bindings: &[ApiBinding],
+    consumer_bindings: &[ApiBinding],
+    context: StoreConsumerBindingMergeContext<'_>,
+) -> Vec<ApiBinding> {
+    let mut merged = previous_bindings
+        .iter()
+        .filter(|binding| {
+            binding.desired_state == "ACTIVE"
+                && binding.state == ApiBindingState::Active
+                && binding.consumer_deployment_id != context.consumer_deployment_id
+                && context
+                    .replaced_consumer_deployment_id
+                    .is_none_or(|old| binding.consumer_deployment_id != old)
+                && binding.link_source_endpoint != context.consumer_endpoint
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    merged.extend(consumer_bindings.iter().cloned());
+    for binding in &mut merged {
+        binding.topology_id = context.topology_id.to_string();
+        binding.topology_revision_id = context.revision_id.to_string();
+        binding.last_operation_id = context.operation_id.to_string();
+        if binding.consumer_deployment_id == context.consumer_deployment_id {
+            binding.link_source_endpoint = context.consumer_endpoint.to_string();
+            binding.link_target_endpoint = binding.provider_endpoint.clone();
+        }
+    }
+    merged
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propose_store_install_topology(
+    storage: &DurableStore,
+    selection: &InstallTopologySelection,
+    contract: &ServiceReleaseContract,
+    consumer_deployment_id: &str,
+    consumer_node_id: &str,
+    consumer_endpoint: &str,
+    bindings: &[ApiBinding],
+    operation_id: &str,
+    replaced_consumer_deployment_id: Option<&str>,
+) -> Result<StoreTopologyApplyPlan, StoreApiError> {
+    let (spec, expected_draft) = selected_topology_spec(storage, selection)?;
+    let spec = preview_store_install_topology_spec(
+        spec,
+        contract,
+        consumer_deployment_id,
+        consumer_node_id,
+        consumer_endpoint,
+        bindings,
+    )?;
+    let consumer_endpoint = required_text(consumer_endpoint, "endpoint")?;
+    let topology_id = spec.topology_id.clone();
+    let revision = storage
+        .create_next_topology_revision(
+            &topology_id,
+            &expected_draft,
+            spec,
+            now_marker(),
+            "store-install".to_string(),
+            format!(
+                "bind {} deployment {}",
+                contract.release.service_name, consumer_deployment_id
+            ),
+        )
+        .map_err(storage_error)?;
+    let previous_bindings = storage
+        .api_bindings_for_topology(&revision.spec().topology_id)
+        .map_err(storage_error)?;
+    // A Store edit owns only the selected consumer. Preserve every other
+    // active consumer in the topology so staging a new deployment cannot
+    // accidentally revoke unrelated routes.
+    let annotated = merge_store_consumer_bindings(
+        &previous_bindings,
+        bindings,
+        StoreConsumerBindingMergeContext {
+            consumer_deployment_id,
+            replaced_consumer_deployment_id,
+            consumer_endpoint,
+            topology_id: &revision.spec().topology_id,
+            revision_id: revision.revision_id(),
+            operation_id,
+        },
+    );
+    let staged_bindings = storage
+        .stage_precomputed_topology_api_bindings(
+            &revision.spec().topology_id,
+            revision.revision_id(),
+            operation_id,
+            annotated,
+        )
+        .map_err(|error| {
+            StoreApiError::new(422, "STORE_BINDING_TOPOLOGY_INVALID", error.to_string())
+        })?;
+    Ok(StoreTopologyApplyPlan {
+        topology_id: revision.spec().topology_id.clone(),
+        revision_id: revision.revision_id().to_string(),
+        staged_bindings,
+        previous_bindings,
+    })
+}
+
+fn provider_candidates(
+    console: &OrchestratorActionConsole,
+    storage: &DurableStore,
+) -> Result<Vec<ApiProviderCandidate>, StoreApiError> {
+    let mut contracts = BTreeMap::new();
+    for record in console.service_releases().map_err(core_error)? {
+        let Ok(contract) = ServiceReleaseContract::from_json_value(record.manifest.clone()) else {
+            continue;
+        };
+        contracts.insert((record.service_name, record.version), contract);
+    }
+    let mut candidates = Vec::new();
+    let evidence_at_ms = now_ms();
+    for stored in storage.runtime_instances(None).map_err(storage_error)? {
+        let stored = storage
+            .runtime_with_current_evidence(stored, evidence_at_ms)
+            .map_err(storage_error)?;
+        let healthy = stored.instance.observed_state == RuntimeObservedState::Running
+            && stored.instance.health.eq_ignore_ascii_case("HEALTHY");
+        let managed_observation_ready =
+            if stored.management_mode == orchestrator_storage::RuntimeManagementMode::Managed {
+                stored.instance.runtime_attested
+                    && stored.drift_reason.is_empty()
+                    && storage
+                        .managed_runtime_report_unavailable_reason(&stored, evidence_at_ms)
+                        .map_err(storage_error)?
+                        .is_none()
+            } else {
+                stored.drift_reason.is_empty()
+            };
+        if !healthy || !managed_observation_ready || stored.endpoint.trim().is_empty() {
+            continue;
+        }
+        let Some(contract) = contracts.get(&(
+            stored.instance.service_id.clone(),
+            stored.instance.release_version.clone(),
+        )) else {
+            continue;
+        };
+        for api in &contract.release.apis {
+            candidates.push(ApiProviderCandidate {
+                deployment_id: stored.instance.deployment_id.clone(),
+                service_id: stored.instance.service_id.clone(),
+                node_id: stored.node_id.clone(),
+                endpoint: stored.endpoint.clone(),
+                path: api.path_prefix.clone(),
+                api_id: api.api_id.clone(),
+                api_version: api.version.clone(),
+                protocol: api.protocol.clone(),
+                methods: api.methods.clone(),
+                auth_mode: api.auth_mode.clone(),
+                permission: api.permission.clone(),
+                healthy,
+            });
+        }
+    }
+    Ok(candidates)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unbound_binding(
+    deployment_id: &str,
+    service_id: &str,
+    node_id: &str,
+    endpoint: &str,
+    name: &str,
+    api_id: &str,
+    version: &str,
+    reason: &str,
+) -> ApiBinding {
+    unresolved_binding(
+        deployment_id,
+        service_id,
+        node_id,
+        endpoint,
+        name,
+        api_id,
+        version,
+        true,
+        ApiBindingState::Unbound,
+        reason,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unresolved_binding(
+    deployment_id: &str,
+    service_id: &str,
+    node_id: &str,
+    endpoint: &str,
+    name: &str,
+    api_id: &str,
+    version: &str,
+    optional: bool,
+    state: ApiBindingState,
+    reason: &str,
+) -> ApiBinding {
+    let now = now_marker();
+    ApiBinding {
+        binding_id: binding_id(deployment_id, name),
+        requirement_name: name.to_string(),
+        api_id: api_id.to_string(),
+        api_version: version.to_string(),
+        consumer_deployment_id: deployment_id.to_string(),
+        consumer_service_id: service_id.to_string(),
+        consumer_node_id: node_id.to_string(),
+        consumer_endpoint: endpoint.to_string(),
+        provider_deployment_id: String::new(),
+        provider_service_id: String::new(),
+        provider_node_id: String::new(),
+        provider_endpoint: String::new(),
+        provider_path: String::new(),
+        virtual_endpoint: format!("/internal/apis/{api_id}"),
+        protocol: String::new(),
+        methods: Vec::new(),
+        auth_mode: String::new(),
+        provider_auth_mode: String::new(),
+        permission: String::new(),
+        timeout_ms: None,
+        topology_id: String::new(),
+        topology_revision_id: String::new(),
+        link_source_endpoint: String::new(),
+        link_target_endpoint: String::new(),
+        credential_ref: String::new(),
+        credential_generation: 1,
+        context_generation: 1,
+        desired_state: "ACTIVE".to_string(),
+        observed_state: match state {
+            ApiBindingState::Unbound => "REVOKED".to_string(),
+            ApiBindingState::Error => "ERROR".to_string(),
+            _ => "PENDING".to_string(),
+        },
+        health: "UNKNOWN".to_string(),
+        drift: Vec::new(),
+        last_operation_id: String::new(),
+        state,
+        optional,
+        reason: reason.to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+    }
+}
+
+fn binding_id(deployment_id: &str, requirement_name: &str) -> String {
+    let digest = Sha256::digest(format!("{deployment_id}\0{requirement_name}").as_bytes());
+    format!("binding-{digest:x}")
+}
+
+fn now_marker() -> String {
+    format!("unix-ms:{}", now_ms())
 }
 
 fn ensure_release_checksum(record: &ServiceRelease) -> Result<(), StoreApiError> {
@@ -2433,7 +5933,9 @@ fn ensure_release_checksum(record: &ServiceRelease) -> Result<(), StoreApiError>
 #[allow(clippy::too_many_arguments)]
 fn release_pipeline_payload(
     release: &ServiceReleaseManifest,
+    contract: &ServiceReleaseContract,
     install: &RuntimeInstallPayload,
+    api_bindings: &[ApiBinding],
     node: &NodeRecord,
     operation_id: &str,
     migration_policy: &str,
@@ -2467,29 +5969,46 @@ fn release_pipeline_payload(
         build_runtime_materialization(release, node, requested_config, requested_secret_refs)?;
 
     let mut provisioners = Vec::new();
+    let mut redis_resources = Vec::new();
     if !release.redis.is_empty() {
         let connection_id = provider_identifier(node, "redis", "connection_id")?;
+        redis_resources.extend(release.redis.iter().map(|resource| RedisNamespaceSpec {
+            name: resource.name.clone(),
+            kind: resource.kind.clone(),
+            connection_id: connection_id.clone(),
+            namespace: format!(
+                "ojos:{}:{}",
+                provider_token(&release.service_name),
+                provider_token(&resource.name)
+            ),
+            consumer_group: format!(
+                "ojos-{}-{}",
+                provider_token(&release.service_name),
+                provider_token(&resource.name)
+            ),
+        }));
+    }
+    if contract.contract_version >= 2 && !contract.events.subscribes.is_empty() {
+        let connection_id = provider_identifier(node, "redis", "connection_id")?;
+        let groups = contract
+            .events
+            .subscribes
+            .iter()
+            .map(|event| event.consumer_group().to_string())
+            .collect::<BTreeSet<_>>();
+        redis_resources.extend(groups.into_iter().map(|consumer_group| RedisNamespaceSpec {
+            name: format!("event-group-{}", provider_token(&consumer_group)),
+            kind: "consumer-group".to_string(),
+            connection_id: connection_id.clone(),
+            namespace: MANAGED_EVENT_STREAM_V1.to_string(),
+            consumer_group,
+        }));
+    }
+    redis_resources.sort_by(|left, right| left.name.cmp(&right.name));
+    if !redis_resources.is_empty() {
         provisioners.push(TypedProvisionerStep::Redis {
             service_name: release.service_name.clone(),
-            resources: release
-                .redis
-                .iter()
-                .map(|resource| RedisNamespaceSpec {
-                    name: resource.name.clone(),
-                    kind: resource.kind.clone(),
-                    connection_id: connection_id.clone(),
-                    namespace: format!(
-                        "ojos:{}:{}",
-                        provider_token(&release.service_name),
-                        provider_token(&resource.name)
-                    ),
-                    consumer_group: format!(
-                        "ojos-{}-{}",
-                        provider_token(&release.service_name),
-                        provider_token(&resource.name)
-                    ),
-                })
-                .collect(),
+            resources: redis_resources,
         });
     }
     if !release.storage.is_empty() {
@@ -2517,28 +6036,9 @@ fn release_pipeline_payload(
                 .collect(),
         });
     }
-    if !release.apis.is_empty() || !release.required_apis.is_empty() {
-        let registry_id = provider_identifier(node, "api_registry", "registry_id")?;
-        provisioners.push(TypedProvisionerStep::ApiRegistry {
-            service_name: release.service_name.clone(),
-            registry_id,
-            apis: release
-                .apis
-                .iter()
-                .map(|api| ApiSurfaceSpec {
-                    api_id: api.api_id.clone(),
-                    protocol: api.protocol.clone(),
-                    path_prefix: api.path_prefix.clone(),
-                    methods: api.methods.clone(),
-                    visibility: api.visibility.clone(),
-                    auth_mode: api.auth_mode.clone(),
-                    permission: api.permission.clone(),
-                    version: api.version.clone(),
-                })
-                .collect(),
-            required_apis: release.required_apis.clone(),
-        });
-    }
+    // API surfaces are part of the signed Release record and ApiBinding
+    // projection in orchestrator-storage. They are never provisioned through
+    // an external registry service, including for normalized v1 manifests.
     if release.frontend.enabled {
         let asset_store_id = provider_identifier(node, "frontend", "asset_store_id")?;
         let metadata_sha256 = install
@@ -2569,9 +6069,10 @@ fn release_pipeline_payload(
         });
     }
 
-    let auth = if !release.permissions.is_empty()
-        || !release.service_identity.allowed_apis.is_empty()
-        || !release.service_identity.service_name.is_empty()
+    let auth = if contract.contract_version < 2
+        && (!release.permissions.is_empty()
+            || !release.service_identity.allowed_apis.is_empty()
+            || !release.service_identity.service_name.is_empty())
     {
         require_node_provider(node, "auth")?;
         Some(AuthPipelineStep {
@@ -2670,26 +6171,40 @@ fn release_pipeline_payload(
         });
     }
 
-    let gateway = if release.routes.is_empty() {
+    let routed_bindings = api_bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.state,
+                ApiBindingState::Resolved | ApiBindingState::Active
+            ) && binding.desired_state == "ACTIVE"
+                && binding.topology_id.is_empty()
+        })
+        .collect::<Vec<_>>();
+    let gateway = if contract.contract_version >= 2 {
+        None
+    } else if release.routes.is_empty() && routed_bindings.is_empty() {
         if !gateway_node_id.trim().is_empty() {
             return Err(StoreApiError::new(
                 422,
                 "STORE_GATEWAY_NODE_UNUSED",
-                "gateway_node_id cannot be set when the release declares no routes",
+                "gateway_node_id cannot be set when the release declares no routes or API bindings",
             ));
         }
         None
     } else {
         require_node_provider(node, "gateway")?;
         let gateway_node_id = required_text(gateway_node_id, "gateway_node_id")?;
-        if node.host_ip.trim().is_empty() {
+        if !release.routes.is_empty() && node.host_ip.trim().is_empty() {
             return Err(StoreApiError::new(
                 422,
                 "STORE_NODE_HOST_REQUIRED",
                 "target Node must advertise host_ip before Gateway routes can be published",
             ));
         }
-        if !matches!(release.backend.protocol.as_str(), "http" | "https") {
+        if !release.routes.is_empty()
+            && !matches!(release.backend.protocol.as_str(), "http" | "https")
+        {
             return Err(StoreApiError::new(
                 422,
                 "STORE_GATEWAY_PROTOCOL_UNSUPPORTED",
@@ -2700,7 +6215,7 @@ fn release_pipeline_payload(
             "{}://{}:{}",
             release.backend.protocol, node.host_ip, release.backend.port
         );
-        let mut routes = Vec::with_capacity(release.routes.len());
+        let mut routes = Vec::with_capacity(release.routes.len() + routed_bindings.len());
         for (index, route) in release.routes.iter().enumerate() {
             if !matches!(route.target_type.as_str(), "endpoint" | "endpoint-group") {
                 return Err(StoreApiError::new(
@@ -2729,6 +6244,15 @@ fn release_pipeline_payload(
                 route_id: format!("{}:{}", release.service_name, index + 1),
                 path_prefix: route.path.clone(),
                 upstream_base: upstream_base.clone(),
+                api_id: String::new(),
+                binding_id: String::new(),
+                consumer_deployment_id: String::new(),
+                credential_generation: 1,
+                timeout_ms: 30_000,
+                provider_node_id: node.node_id.clone(),
+                provider_endpoint: String::new(),
+                strip_prefix: false,
+                rewrite_prefix: String::new(),
                 methods,
                 auth_mode: if permission.is_empty() || permission == "public" {
                     "public".to_string()
@@ -2740,6 +6264,72 @@ fn release_pipeline_payload(
                 } else {
                     permission.to_string()
                 },
+            });
+        }
+        for binding in routed_bindings {
+            if !matches!(binding.protocol.as_str(), "http" | "https") {
+                return Err(StoreApiError::new(
+                    422,
+                    "STORE_BINDING_GATEWAY_PROTOCOL_UNSUPPORTED",
+                    format!(
+                        "API binding {} uses unsupported provider protocol {}",
+                        binding.requirement_name, binding.protocol
+                    ),
+                ));
+            }
+            validate_endpoint_id(&binding.provider_endpoint).map_err(|error| {
+                StoreApiError::new(
+                    422,
+                    "STORE_BINDING_PROVIDER_ENDPOINT_INVALID",
+                    format!(
+                        "API binding {} provider endpoint is invalid: {error}",
+                        binding.requirement_name
+                    ),
+                )
+            })?;
+            let identity = parse_endpoint_id(&binding.provider_endpoint).map_err(|error| {
+                StoreApiError::new(
+                    422,
+                    "STORE_BINDING_PROVIDER_ENDPOINT_INVALID",
+                    format!(
+                        "API binding {} provider endpoint is invalid: {error}",
+                        binding.requirement_name
+                    ),
+                )
+            })?;
+            let provider_host = identity.host.parse::<IpAddr>().map_err(|_| {
+                StoreApiError::new(
+                    422,
+                    "STORE_BINDING_PROVIDER_ENDPOINT_INVALID",
+                    format!(
+                        "API binding {} provider endpoint host must be an IP address",
+                        binding.requirement_name
+                    ),
+                )
+            })?;
+            let provider_host = match provider_host {
+                IpAddr::V4(address) => address.to_string(),
+                IpAddr::V6(address) => format!("[{address}]"),
+            };
+            routes.push(GatewayRouteSpec {
+                route_id: binding.binding_id.clone(),
+                path_prefix: binding.virtual_endpoint.clone(),
+                upstream_base: format!(
+                    "{}://{}:{}",
+                    binding.protocol, provider_host, identity.port
+                ),
+                api_id: binding.api_id.clone(),
+                binding_id: binding.binding_id.clone(),
+                consumer_deployment_id: binding.consumer_deployment_id.clone(),
+                credential_generation: binding.credential_generation,
+                timeout_ms: binding.timeout_ms.unwrap_or(30_000),
+                provider_node_id: binding.provider_node_id.clone(),
+                provider_endpoint: binding.provider_endpoint.clone(),
+                strip_prefix: true,
+                rewrite_prefix: binding.provider_path.clone(),
+                methods: binding.methods.clone(),
+                auth_mode: "workload".to_string(),
+                required_permission: binding.permission.clone(),
             });
         }
         Some(GatewayPipelineStep {
@@ -3356,7 +6946,10 @@ fn parse_release_channel(value: &str) -> Result<ReleaseChannel, StoreApiError> {
     }
 }
 
-fn ensure_ready_docker_node(node: &NodeRecord) -> Result<(), StoreApiError> {
+fn ensure_ready_docker_node(
+    storage: &DurableStore,
+    node: &NodeRecord,
+) -> Result<(), StoreApiError> {
     if !node.status.eq_ignore_ascii_case("READY") {
         return Err(StoreApiError::new(
             409,
@@ -3367,17 +6960,13 @@ fn ensure_ready_docker_node(node: &NodeRecord) -> Result<(), StoreApiError> {
             ),
         ));
     }
-    if !node
-        .labels
-        .get("runtime")
-        .and_then(Value::as_str)
-        .is_some_and(|runtime| runtime.eq_ignore_ascii_case("docker"))
-    {
+    let facts = node_runtime_facts(storage, &node.node_id)?;
+    if facts.docker.engine != "docker" {
         return Err(StoreApiError::new(
             422,
             "STORE_DOCKER_CAPABILITY_REQUIRED",
             format!(
-                "target Node {} does not advertise runtime=docker",
+                "target Node {} latest authenticated runtime facts do not report Docker Engine",
                 node.node_id
             ),
         ));
@@ -3385,64 +6974,129 @@ fn ensure_ready_docker_node(node: &NodeRecord) -> Result<(), StoreApiError> {
     Ok(())
 }
 
-fn target_platform(node: &NodeRecord) -> Result<TargetPlatform, StoreApiError> {
-    let nested = node.labels.get("platform");
-    let os = node.labels.get("os").and_then(Value::as_str).or_else(|| {
-        nested
-            .and_then(|value| value.get("os"))
-            .and_then(Value::as_str)
-    });
-    let arch = node.labels.get("arch").and_then(Value::as_str).or_else(|| {
-        nested
-            .and_then(|value| value.get("arch"))
-            .and_then(Value::as_str)
-    });
-    let variant = node
-        .labels
-        .get("variant")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            nested
-                .and_then(|value| value.get("variant"))
-                .and_then(Value::as_str)
-        });
-    let embedded = node
-        .labels
-        .get("embedded")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let (os, arch) = match (os, arch) {
-        (Some(os), Some(arch)) => (os.to_string(), arch.to_string()),
-        (None, None) if embedded => (
-            std::env::consts::OS.to_string(),
-            std::env::consts::ARCH.to_string(),
-        ),
-        _ => {
-            return Err(StoreApiError::new(
-                422,
-                "STORE_TARGET_PLATFORM_REQUIRED",
-                format!(
-                    "target Node {} must advertise both labels.os and labels.arch",
-                    node.node_id
-                ),
-            ));
-        }
-    };
-    if !valid_platform_token(&os)
-        || !valid_platform_token(&arch)
-        || variant.is_some_and(|value| !valid_platform_token(value))
-    {
+fn target_platform(
+    storage: &DurableStore,
+    node: &NodeRecord,
+) -> Result<TargetPlatform, StoreApiError> {
+    let facts = node_runtime_facts(storage, &node.node_id)?;
+    let os = facts.docker.os_type.trim();
+    let arch = facts.docker.architecture.trim();
+    if !valid_platform_token(os) || !valid_platform_token(arch) {
         return Err(StoreApiError::new(
             422,
             "STORE_TARGET_PLATFORM_INVALID",
-            format!("target Node {} has invalid platform labels", node.node_id),
+            format!(
+                "target Node {} authenticated runtime facts contain an invalid platform",
+                node.node_id
+            ),
         ));
     }
-    let platform = TargetPlatform::new(normalize_os(&os), normalize_arch(&arch));
-    Ok(match variant {
-        Some(variant) => platform.with_variant(variant),
-        None => platform,
+    Ok(TargetPlatform::new(normalize_os(os), normalize_arch(arch)))
+}
+
+fn node_runtime_facts(
+    storage: &DurableStore,
+    node_id: &str,
+) -> Result<NodeRuntimeFactsV1, StoreApiError> {
+    let stored = storage
+        .node_runtime_facts(node_id)
+        .map_err(storage_error)?
+        .ok_or_else(|| {
+            StoreApiError::new(
+                422,
+                "STORE_NODE_RUNTIME_FACTS_REQUIRED",
+                format!("target Node {node_id} has not submitted authenticated runtime facts"),
+            )
+        })?;
+    let now = now_ms();
+    if stored.is_stale_at(now, NODE_RUNTIME_FACTS_STALE_MS) {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_NODE_RUNTIME_FACTS_STALE",
+            format!(
+                "target Node {node_id} runtime facts are older than {} seconds",
+                NODE_RUNTIME_FACTS_STALE_MS / 1_000
+            ),
+        ));
+    }
+    serde_json::from_value(stored.facts).map_err(|error| {
+        StoreApiError::new(
+            500,
+            "STORE_NODE_RUNTIME_FACTS_INVALID",
+            format!("target Node {node_id} runtime facts cannot be decoded: {error}"),
+        )
     })
+}
+
+fn release_runtime_contract(
+    contract: &ServiceReleaseContract,
+) -> Result<RuntimeContract, StoreApiError> {
+    if contract.contract_version == 1 {
+        return Ok(RuntimeContract::standard_v1());
+    }
+    let id = match contract.runtime_contract.id.as_str() {
+        "standard-container-v1" => RuntimeProfile::StandardV1,
+        "judge-sandbox-v1" => RuntimeProfile::JudgeSandboxV1,
+        other => {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_RUNTIME_CONTRACT_UNSUPPORTED",
+                format!("release selects unknown runtime contract {other}"),
+            ));
+        }
+    };
+    let selected = RuntimeContract {
+        id,
+        profile_sha256: contract.runtime_contract.sha256.clone(),
+    };
+    selected.validate().map_err(|error| {
+        StoreApiError::new(
+            422,
+            "STORE_RUNTIME_CONTRACT_DIGEST_MISMATCH",
+            error.to_string(),
+        )
+    })?;
+    Ok(selected)
+}
+
+fn ensure_release_runtime_supported(
+    storage: &DurableStore,
+    node: &NodeRecord,
+    contract: &ServiceReleaseContract,
+    image: &str,
+) -> Result<RuntimeContract, StoreApiError> {
+    let requested = release_runtime_contract(contract)?;
+    let facts = node_runtime_facts(storage, &node.node_id)?;
+    if !facts
+        .allowed_contracts
+        .iter()
+        .any(|allowed| allowed == &requested)
+    {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_RUNTIME_CONTRACT_NOT_ALLOWED",
+            format!(
+                "target Node {} authenticated runtime facts do not allow {} with digest {}",
+                node.node_id, requested.id, requested.profile_sha256
+            ),
+        ));
+    }
+    if requested.id == RuntimeProfile::JudgeSandboxV1
+        && !facts
+            .judge_sandbox_allowed_images
+            .iter()
+            .any(|allowed| allowed == image)
+    {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_RUNTIME_ARTIFACT_NOT_ALLOWED",
+            format!(
+                "target Node {} local judge-sandbox-v1 policy does not authorize exact artifact {image}",
+                node.node_id
+            ),
+        ));
+    }
+    Ok(requested)
 }
 
 fn host_platform() -> TargetPlatform {
@@ -3450,6 +7104,202 @@ fn host_platform() -> TargetPlatform {
         normalize_os(std::env::consts::OS),
         normalize_arch(std::env::consts::ARCH),
     )
+}
+
+fn managed_service_context_spec(
+    storage: &DurableStore,
+    contract: &ServiceReleaseContract,
+    node_id: &str,
+    bindings: &[ApiBinding],
+    mount_unbound_optional_context: bool,
+) -> Result<Option<ManagedServiceContextSpec>, StoreApiError> {
+    let has_events =
+        !contract.events.publishes.is_empty() || !contract.events.subscribes.is_empty();
+    if contract.requirements().is_empty() && !has_events {
+        return Ok(None);
+    }
+    let included = bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.state,
+                ApiBindingState::Resolved | ApiBindingState::Active
+            ) && binding.desired_state == "ACTIVE"
+        })
+        .collect::<Vec<_>>();
+    let included_requirements = included
+        .iter()
+        .map(|binding| binding.requirement_name.as_str())
+        .collect::<BTreeSet<_>>();
+    let missing_required = contract
+        .requirements()
+        .iter()
+        .filter(|requirement| {
+            !requirement.optional() && !included_requirements.contains(requirement.binding_name())
+        })
+        .map(|requirement| requirement.binding_name().to_string())
+        .collect::<BTreeSet<_>>();
+    if !missing_required.is_empty() {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_REQUIRED_BINDING_CONTEXT_MISSING",
+            format!(
+                "required APIs cannot be materialized in the Service Context: {}",
+                missing_required.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        ));
+    }
+    if included.is_empty() && !mount_unbound_optional_context && !has_events {
+        return Ok(None);
+    }
+    let generations = included
+        .iter()
+        .map(|binding| binding.context_generation)
+        .collect::<BTreeSet<_>>();
+    if !included.is_empty() && (generations.len() != 1 || generations.contains(&0)) {
+        return Err(StoreApiError::new(
+            409,
+            "STORE_BINDING_GENERATION_SPLIT",
+            "all active bindings for one Deployment must share one positive context generation",
+        ));
+    }
+    let generation = generations.first().copied().unwrap_or(1);
+    let bindings = included
+        .into_iter()
+        .map(|binding| {
+            (
+                binding.requirement_name.clone(),
+                ManagedApiBinding {
+                    binding_id: binding.binding_id.clone(),
+                    api_id: binding.api_id.clone(),
+                    timeout_ms: binding.timeout_ms.unwrap_or(30_000),
+                    context_generation: binding.context_generation,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let events = managed_event_binding(storage, contract, node_id, generation)?;
+    let allow_development_admin_fallback = matches!(storage, DurableStore::Sqlite(_))
+        && std::env::var("ORCHESTRATOR_ALLOW_ADMIN_ORIGIN_FOR_WORKLOAD")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let gateway_origin = std::env::var("ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN")
+        .ok()
+        .or_else(|| {
+            allow_development_admin_fallback
+                .then(|| std::env::var("ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN").ok())
+                .flatten()
+        })
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| contract.requirements().is_empty().then(|| "http://127.0.0.1".to_string()))
+        .ok_or_else(|| {
+            StoreApiError::new(
+                503,
+                "STORE_GATEWAY_WORKLOAD_ORIGIN_REQUIRED",
+                "managed API bindings require ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN; production never falls back to the Gateway admin origin",
+            )
+        })?;
+    let gateway_ca_pem = std::env::var("ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE")
+        .ok()
+        .map(|path| {
+            let path = path.trim();
+            if path.is_empty() {
+                return Err(StoreApiError::new(
+                    503,
+                    "STORE_GATEWAY_WORKLOAD_CA_INVALID",
+                    "ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE must not be empty",
+                ));
+            }
+            fs::read_to_string(path).map_err(|error| {
+                StoreApiError::new(
+                    503,
+                    "STORE_GATEWAY_WORKLOAD_CA_UNREADABLE",
+                    format!("read Gateway workload CA file {path}: {error}"),
+                )
+            })
+        })
+        .transpose()?;
+    let context = ManagedServiceContextSpec {
+        generation,
+        node_id: node_id.to_string(),
+        gateway_origin,
+        gateway_ca_pem,
+        bindings,
+        events,
+    };
+    context.validate().map_err(|error| {
+        StoreApiError::new(
+            503,
+            "STORE_GATEWAY_WORKLOAD_CONTEXT_INVALID",
+            error.to_string(),
+        )
+    })?;
+    Ok(Some(context))
+}
+
+fn managed_event_binding(
+    storage: &DurableStore,
+    contract: &ServiceReleaseContract,
+    node_id: &str,
+    generation: u64,
+) -> Result<Option<ManagedEventBinding>, StoreApiError> {
+    if contract.events.publishes.is_empty() && contract.events.subscribes.is_empty() {
+        return Ok(None);
+    }
+    let node = storage
+        .list_nodes()
+        .map_err(storage_error)?
+        .into_iter()
+        .find(|node| node.node_id == node_id)
+        .ok_or_else(|| {
+            StoreApiError::new(
+                404,
+                "STORE_NODE_NOT_FOUND",
+                format!("target Node {node_id} does not exist"),
+            )
+        })?;
+    let connection_id = provider_identifier(&node, "redis", "connection_id")?;
+    let facts = node_runtime_facts(storage, node_id)?;
+    if !facts
+        .redis_connection_ids
+        .iter()
+        .any(|configured| configured == &connection_id)
+    {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_EVENT_PROVIDER_NOT_ATTESTED",
+            format!(
+                "target Node {node_id} has not attested Agent-local Redis connection {connection_id}"
+            ),
+        ));
+    }
+    let publish_types = contract
+        .events
+        .publishes
+        .iter()
+        .map(|event| event.event_id().to_string())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let subscriptions = contract
+        .events
+        .subscribes
+        .iter()
+        .map(|event| ManagedEventSubscription {
+            event_type: event.event_id().to_string(),
+            consumer_group: event.consumer_group().to_string(),
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    Ok(Some(ManagedEventBinding {
+        connection_id,
+        stream: MANAGED_EVENT_STREAM_V1.to_string(),
+        publish_types,
+        subscriptions,
+        generation,
+    }))
 }
 
 // These values are the complete signed release/runtime binding and keeping
@@ -3462,6 +7312,7 @@ fn container_spec(
     checksum: &str,
     node: &NodeRecord,
     image: OciImageReference,
+    runtime_contract: RuntimeContract,
     release: &ServiceReleaseManifest,
     published_endpoint: Option<PublishedEndpoint>,
 ) -> ContainerSpec {
@@ -3479,6 +7330,10 @@ fn container_spec(
     let labels = HashMap::from([
         ("ojos.release_version".to_string(), version.to_string()),
         ("ojos.release_checksum".to_string(), checksum.to_string()),
+        (
+            "ojos.catalog_signature_verified".to_string(),
+            "true".to_string(),
+        ),
         ("ojos.target_node_id".to_string(), node.node_id.clone()),
     ]);
     ContainerSpec {
@@ -3486,6 +7341,9 @@ fn container_spec(
         service_id: service_id.to_string(),
         generation: 1,
         image,
+        runtime_contract,
+        runtime_context: None,
+        managed_service_context: None,
         command,
         environment,
         labels,
@@ -3554,6 +7412,14 @@ fn managed_published_endpoint(
             ),
         ));
     }
+    // A backend worker still needs a stable Topology endpoint identity so its
+    // outbound ApiBindings can be versioned and audited.  It is not an
+    // inbound service, however, and publishing its health port would violate
+    // the fixed judge-sandbox-v1 runtime contract.  Keep the endpoint in the
+    // immutable Topology while deliberately omitting Docker port bindings.
+    if release.service_type.eq_ignore_ascii_case("backend-worker") {
+        return Ok(None);
+    }
     let host_port = identity.port.parse::<u16>().map_err(|_| {
         StoreApiError::new(
             422,
@@ -3579,9 +7445,81 @@ fn managed_published_endpoint(
     Ok(Some(published))
 }
 
+fn effective_managed_endpoint(
+    requested: &str,
+    node: &NodeRecord,
+    release: &ServiceReleaseManifest,
+) -> Result<String, StoreApiError> {
+    if !requested.trim().is_empty() {
+        return Ok(requested.trim().to_string());
+    }
+    if !release.service_type.eq_ignore_ascii_case("backend-worker") {
+        return Ok(String::new());
+    }
+    node.host_ip.parse::<IpAddr>().map_err(|_| {
+        StoreApiError::new(
+            422,
+            "STORE_TARGET_NODE_ENDPOINT_UNAVAILABLE",
+            format!(
+                "target Node {} does not advertise a valid host_ip for its logical worker endpoint",
+                node.node_id
+            ),
+        )
+    })?;
+    if release.backend.port == 0 {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_WORKER_ENDPOINT_PORT_INVALID",
+            "backend-worker release must declare a non-zero backend port for its logical Topology identity",
+        ));
+    }
+    Ok(format!(
+        "{}:{}:{}",
+        node.host_ip, release.backend.port, release.service_name
+    ))
+}
+
 fn endpoint_socket(endpoint: &str) -> Option<(IpAddr, u16)> {
     let identity = parse_endpoint_id(endpoint).ok()?;
     Some((identity.host.parse().ok()?, identity.port.parse().ok()?))
+}
+
+fn allocate_replacement_endpoint(
+    storage: &DurableStore,
+    current_endpoint: &str,
+    service_id: &str,
+    deployment_id: &str,
+) -> Result<String, StoreApiError> {
+    let identity = parse_endpoint_id(current_endpoint).map_err(|error| {
+        StoreApiError::new(422, "STORE_REPLACEMENT_ENDPOINT_INVALID", error.to_string())
+    })?;
+    let used = storage
+        .runtime_instances(None)
+        .map_err(storage_error)?
+        .into_iter()
+        .filter_map(|runtime| endpoint_socket(&runtime.endpoint))
+        .collect::<BTreeSet<_>>();
+    let seed = Sha256::digest(deployment_id.as_bytes());
+    let first = 20_000_u16 + u16::from_be_bytes([seed[0], seed[1]]) % 40_000;
+    for offset in 0..40_000_u32 {
+        let port = 20_000_u16 + ((u32::from(first - 20_000) + offset) % 40_000) as u16;
+        let socket = identity
+            .host
+            .parse::<IpAddr>()
+            .ok()
+            .map(|host| (host, port));
+        if socket.is_some_and(|socket| !used.contains(&socket)) {
+            return Ok(format!("{}:{port}:{service_id}", identity.host));
+        }
+    }
+    Err(StoreApiError::new(
+        503,
+        "STORE_REPLACEMENT_ENDPOINT_EXHAUSTED",
+        format!(
+            "no temporary replacement endpoint is available on {}",
+            identity.host
+        ),
+    ))
 }
 
 fn ensure_endpoint_available(
@@ -3860,10 +7798,10 @@ fn problem(
 }
 
 #[derive(Debug)]
-struct StoreApiError {
-    status: u16,
-    code: &'static str,
-    detail: String,
+pub(crate) struct StoreApiError {
+    pub(crate) status: u16,
+    pub(crate) code: &'static str,
+    pub(crate) detail: String,
     operation_id: Option<String>,
 }
 
@@ -3933,15 +7871,19 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
     use ed25519_dalek::{Signer, SigningKey};
     use orchestrator_control_plane::{
-        ClaimRequest, CompleteRequest, CompletionStatus, JobStatus, JobStore, OperationRepository,
+        ClaimRequest, CompleteRequest, CompletionStatus, DurableOperationStatus, JobStatus,
+        JobStore, MemoryJobStore, MemoryOperationStore, OperationRepository,
     };
     use orchestrator_legacy::{OrchestratorStore, ServiceRelease};
     use orchestrator_manager::catalog_v2::{
         CatalogModuleV2, CatalogReleaseV2, CatalogTrustStore, CatalogV2, Ed25519Signature,
         MetadataPackageV2, ReleaseDependencyV2, RuntimeCapabilityV2,
     };
-    use orchestrator_runtime::{RuntimeDesiredState, RuntimeInstance};
-    use orchestrator_storage::{SqliteOrchestratorStore, StoredRuntimeInstance};
+    use orchestrator_runtime::{DockerRuntimeFacts, RuntimeDesiredState, RuntimeInstance};
+    use orchestrator_storage::{
+        SqliteOrchestratorStore, StoredNodeRuntimeFacts, StoredRuntimeInstance,
+        TopologyApplyOutcome,
+    };
     use semver::Version;
     use semver::VersionReq;
     use std::collections::BTreeMap;
@@ -4008,6 +7950,38 @@ mod tests {
             "secrets": []
         }))
         .unwrap()
+    }
+
+    fn legacy_consumer_manifest(service_id: &str, api_id: &str) -> ServiceReleaseManifest {
+        let mut release = release_manifest(
+            service_id,
+            &format!("registry.example/ojos/{service_id}@{DIGEST}"),
+        );
+        release.required_apis = vec![api_id.to_string()];
+        release
+    }
+
+    fn workload_provider_manifest(service_id: &str, api_id: &str) -> ServiceReleaseManifest {
+        let mut release = release_manifest(
+            service_id,
+            &format!("registry.example/ojos/{service_id}@{DIGEST}"),
+        );
+        let permission = format!("{service_id}.read");
+        release.permissions = vec![permission.clone()];
+        release.apis = serde_json::from_value(json!([{
+            "api_id": api_id,
+            "protocol": "http",
+            "port_name": "http",
+            "path_prefix": "/objects",
+            "methods": ["GET"],
+            "visibility": "explicit",
+            "auth_mode": "workload",
+            "permission": permission,
+            "stability": "stable",
+            "version": "1.0.0"
+        }]))
+        .unwrap();
+        release
     }
 
     fn fixture(manifest: ServiceReleaseManifest, node_status: &str) -> Fixture {
@@ -4126,6 +8100,43 @@ mod tests {
                 status: node_status.to_string(),
                 created_at: "t0".to_string(),
                 updated_at: "t0".to_string(),
+            })
+            .unwrap();
+        let facts_now = now_ms();
+        let facts = NodeRuntimeFactsV1 {
+            schema_version: 1,
+            report_id: "fixture-report-1".to_string(),
+            observed_at_ms: facts_now,
+            agent_version: "1.0.0-test".to_string(),
+            runtime_policy_sha256: format!("sha256:{}", "9".repeat(64)),
+            allowed_contracts: vec![RuntimeContract::standard_v1()],
+            judge_sandbox_allowed_images: Vec::new(),
+            redis_connection_ids: Vec::new(),
+            docker: DockerRuntimeFacts {
+                engine: "docker".to_string(),
+                server_version: "27.0.0".to_string(),
+                operating_system: "Linux".to_string(),
+                os_type: "linux".to_string(),
+                architecture: "x86_64".to_string(),
+                cgroup_version: "2".to_string(),
+                memory_limit: true,
+                pids_limit: true,
+                rootless: false,
+                apparmor: true,
+                seccomp: true,
+                security_options: vec!["name=seccomp,profile=default".to_string()],
+            },
+            inventory_complete: true,
+            inventory_error: String::new(),
+            deployment_observations: Vec::new(),
+            credential_statuses: Vec::new(),
+        };
+        sqlite
+            .put_node_runtime_facts(&StoredNodeRuntimeFacts {
+                node_id: "node-1".to_string(),
+                observed_at_ms: facts_now,
+                received_at_ms: facts_now,
+                facts: serde_json::to_value(facts).unwrap(),
             })
             .unwrap();
         sqlite
@@ -4292,6 +8303,343 @@ mod tests {
         release
     }
 
+    fn event_contract(
+        service_id: &str,
+        publishes: Value,
+        subscribes: Value,
+    ) -> ServiceReleaseContract {
+        let mut document = serde_json::to_value(release_manifest(
+            service_id,
+            &format!("registry.example/ojos/{service_id}@{DIGEST}"),
+        ))
+        .unwrap();
+        make_v2_release_document(&mut document);
+        document["events"] = json!({
+            "publishes": publishes,
+            "subscribes": subscribes,
+        });
+        ServiceReleaseContract::from_yaml_str(&serde_yaml::to_string(&document).unwrap()).unwrap()
+    }
+
+    fn make_v2_release_document(document: &mut Value) {
+        document["schema_version"] = json!(2);
+        document["provides"] = json!({"apis": []});
+        document["requires"] = json!({"apis": []});
+        document["events"] = json!({"publishes": [], "subscribes": []});
+        document["runtime_contract"] = json!({
+            "id": "standard-container-v1",
+            "sha256": orchestrator_runtime::STANDARD_RUNTIME_PROFILE_SHA256,
+            "binding_directory": "/run/ojos/service",
+            "identity_mode": "workload",
+            "credential_delivery": "file",
+            "restart_on_change": false,
+        });
+    }
+
+    fn replace_fixture_release_metadata(
+        fixture: &Fixture,
+        service_id: &str,
+        version: &str,
+        document: &Value,
+    ) {
+        let catalog_path = fixture._directory.path().join("catalog.json");
+        let mut catalog: CatalogV2 =
+            serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+        let release = catalog
+            .modules
+            .iter_mut()
+            .find(|module| module.id == service_id)
+            .and_then(|module| {
+                module
+                    .releases
+                    .iter_mut()
+                    .find(|release| release.version == Version::parse(version).unwrap())
+            })
+            .expect("fixture Catalog release");
+        let metadata = serde_yaml::to_string(document).unwrap();
+        fs::write(
+            fixture._directory.path().join(&release.metadata.url),
+            metadata.as_bytes(),
+        )
+        .unwrap();
+        release.metadata.sha256 = format!("sha256:{:x}", Sha256::digest(metadata.as_bytes()))
+            .parse()
+            .unwrap();
+        catalog.signatures.clear();
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let signature = signing_key.sign(&catalog.signing_payload_jcs().unwrap());
+        catalog.signatures.push(Ed25519Signature {
+            key_id: "fixture-key".to_string(),
+            algorithm: "Ed25519".to_string(),
+            signature: STANDARD.encode(signature.to_bytes()),
+        });
+        fs::write(&catalog_path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
+        fixture.registry.bootstrap(&fixture.durable).unwrap();
+    }
+
+    fn configure_event_provider(fixture: &Fixture, attest_connection: bool) -> NodeRecord {
+        let mut node = fixture
+            .durable
+            .list_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|node| node.node_id == "node-1")
+            .unwrap();
+        node.labels = json!({
+            "runtime": "docker",
+            "os": "linux",
+            "arch": "amd64",
+            "providers": {
+                "redis": {
+                    "enabled": true,
+                    "connection_id": "shared-events"
+                }
+            }
+        });
+        fixture.durable.upsert_node(node.clone()).unwrap();
+
+        let stored = fixture
+            .durable
+            .node_runtime_facts("node-1")
+            .unwrap()
+            .unwrap();
+        let mut facts: NodeRuntimeFactsV1 = serde_json::from_value(stored.facts).unwrap();
+        facts.redis_connection_ids = if attest_connection {
+            vec!["shared-events".to_string()]
+        } else {
+            vec![]
+        };
+        let observed_at_ms = now_ms();
+        facts.observed_at_ms = observed_at_ms;
+        fixture
+            .durable
+            .put_node_runtime_facts(&StoredNodeRuntimeFacts {
+                node_id: "node-1".to_string(),
+                observed_at_ms,
+                received_at_ms: observed_at_ms,
+                facts: serde_json::to_value(facts).unwrap(),
+            })
+            .unwrap();
+        node
+    }
+
+    #[test]
+    fn event_contract_plan_rejects_missing_or_unattested_local_provider() {
+        let contract = event_contract(
+            "fixture-producer",
+            json!([{
+                "id": "io.example.fixture.v1",
+                "version": "1.0.0",
+                "schema_ref": "schemas/io.example.fixture.v1.json"
+            }]),
+            json!([]),
+        );
+        let fixture = fixture(
+            release_manifest(
+                "fixture-root",
+                &format!("registry.example/ojos/api@{DIGEST}"),
+            ),
+            "READY",
+        );
+
+        let missing =
+            managed_service_context_spec(&fixture.durable, &contract, "node-1", &[], false)
+                .unwrap_err();
+        assert_eq!(missing.code, "STORE_PROVIDER_REQUIRED");
+
+        configure_event_provider(&fixture, false);
+        let unattested =
+            managed_service_context_spec(&fixture.durable, &contract, "node-1", &[], false)
+                .unwrap_err();
+        assert_eq!(unattested.code, "STORE_EVENT_PROVIDER_NOT_ATTESTED");
+    }
+
+    #[test]
+    fn event_contract_derives_one_shared_stream_and_exact_consumer_group() {
+        let producer = event_contract(
+            "fixture-producer",
+            json!([{
+                "id": "io.example.fixture.v1",
+                "version": "1.0.0",
+                "schema_ref": "schemas/io.example.fixture.v1.json"
+            }]),
+            json!([]),
+        );
+        let consumer = event_contract(
+            "fixture-consumer",
+            json!([]),
+            json!([{
+                "type": "io.example.fixture.v1",
+                "version": "1.0.0",
+                "consumer_group": "fixture-consumer"
+            }]),
+        );
+        let fixture = fixture(
+            release_manifest(
+                "fixture-root",
+                &format!("registry.example/ojos/api@{DIGEST}"),
+            ),
+            "READY",
+        );
+        let node = configure_event_provider(&fixture, true);
+
+        let producer_context =
+            managed_service_context_spec(&fixture.durable, &producer, "node-1", &[], false)
+                .unwrap()
+                .expect("event-only publisher receives a managed context");
+        let consumer_context =
+            managed_service_context_spec(&fixture.durable, &consumer, "node-1", &[], false)
+                .unwrap()
+                .expect("event-only consumer receives a managed context");
+        let producer_events = producer_context.events.as_ref().unwrap();
+        let consumer_events = consumer_context.events.as_ref().unwrap();
+        assert_eq!(producer_events.stream, MANAGED_EVENT_STREAM_V1);
+        assert_eq!(consumer_events.stream, MANAGED_EVENT_STREAM_V1);
+        assert_eq!(producer_events.connection_id, "shared-events");
+        assert_eq!(consumer_events.connection_id, "shared-events");
+        assert_eq!(
+            consumer_events.subscriptions,
+            vec![ManagedEventSubscription {
+                event_type: "io.example.fixture.v1".to_string(),
+                consumer_group: "fixture-consumer".to_string(),
+            }]
+        );
+        assert!(
+            !serde_json::to_string(&consumer_context)
+                .unwrap()
+                .contains("redis://")
+        );
+
+        let install = RuntimeInstallPayload {
+            spec: ContainerSpec {
+                deployment_id: "deployment-fixture-consumer".to_string(),
+                service_id: "fixture-consumer".to_string(),
+                generation: 1,
+                image: OciImageReference::parse(&format!(
+                    "registry.example/ojos/fixture-consumer@{DIGEST}"
+                ))
+                .unwrap(),
+                runtime_contract: RuntimeContract::standard_v1(),
+                runtime_context: None,
+                managed_service_context: Some(consumer_context),
+                command: vec![],
+                environment: vec![],
+                labels: HashMap::new(),
+                published_endpoint: None,
+            },
+            start: true,
+            health_gate: HealthGatePolicy::default(),
+            offline_oci_artifact: None,
+        };
+        let pipeline = release_pipeline_payload(
+            &consumer.release,
+            &consumer,
+            &install,
+            &[],
+            &node,
+            "operation-event-contract",
+            "SKIP",
+            "",
+            &json!({}),
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .expect("event subscription requires a typed Redis provisioner");
+        let resources = pipeline
+            .provisioners
+            .iter()
+            .find_map(|step| match step {
+                TypedProvisionerStep::Redis { resources, .. } => Some(resources),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].kind, "consumer-group");
+        assert_eq!(resources[0].connection_id, "shared-events");
+        assert_eq!(resources[0].namespace, MANAGED_EVENT_STREAM_V1);
+        assert_eq!(resources[0].consumer_group, "fixture-consumer");
+    }
+
+    #[test]
+    fn legacy_api_surfaces_never_create_an_external_registry_step() {
+        let mut release = workload_provider_manifest("legacy-provider", "legacy.read");
+        release.storage = serde_json::from_value(json!([{
+            "object_type": "document",
+            "bucket": "legacy-provider",
+            "path_prefix": "/legacy-provider/documents"
+        }]))
+        .unwrap();
+        let contract =
+            ServiceReleaseContract::from_json_value(serde_json::to_value(&release).unwrap())
+                .unwrap();
+        let node = NodeRecord {
+            node_id: "node-legacy".to_string(),
+            host_ip: "127.0.0.2".to_string(),
+            parent_node_id: String::new(),
+            role: "standalone".to_string(),
+            labels: json!({
+                "providers": {
+                    "auth": true,
+                    "storage": {
+                        "enabled": true,
+                        "backend": "node_directory",
+                        "connection_id": "node-files"
+                    }
+                }
+            }),
+            status: "READY".to_string(),
+            created_at: "t0".to_string(),
+            updated_at: "t0".to_string(),
+        };
+        let install = RuntimeInstallPayload {
+            spec: ContainerSpec {
+                deployment_id: "deployment-legacy-provider".to_string(),
+                service_id: "legacy-provider".to_string(),
+                generation: 1,
+                image: OciImageReference::parse(&format!(
+                    "registry.example/ojos/legacy-provider@{DIGEST}"
+                ))
+                .unwrap(),
+                runtime_contract: RuntimeContract::standard_v1(),
+                runtime_context: None,
+                managed_service_context: None,
+                command: vec![],
+                environment: vec![],
+                labels: HashMap::new(),
+                published_endpoint: None,
+            },
+            start: true,
+            health_gate: HealthGatePolicy::default(),
+            offline_oci_artifact: None,
+        };
+        let pipeline = release_pipeline_payload(
+            &release,
+            &contract,
+            &install,
+            &[],
+            &node,
+            "operation-legacy-provider",
+            "SKIP",
+            "",
+            &json!({}),
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .expect("storage declaration creates a typed internal pipeline");
+        assert!(
+            pipeline
+                .provisioners
+                .iter()
+                .any(|step| matches!(step, TypedProvisionerStep::Storage { .. }))
+        );
+        assert!(
+            !pipeline
+                .provisioners
+                .iter()
+                .any(|step| matches!(step, TypedProvisionerStep::ApiRegistry { .. }))
+        );
+    }
+
     fn complete_only_operation_job(
         fixture: &Fixture,
         operation_id: &str,
@@ -4333,6 +8681,12 @@ mod tests {
         container_id: &str,
         image: &str,
     ) {
+        let observed_at_ms = fixture
+            .durable
+            .node_runtime_facts("node-1")
+            .unwrap()
+            .expect("fixture runtime facts")
+            .observed_at_ms;
         fixture
             .durable
             .put_runtime_instance(&StoredRuntimeInstance {
@@ -4343,15 +8697,113 @@ mod tests {
                     release_version: "1.2.3".to_string(),
                     container_id: container_id.to_string(),
                     artifact_digest: image.to_string(),
+                    runtime_contract: RuntimeContract::standard_v1(),
+                    runtime_policy_sha256: String::new(),
+                    effective_runtime_sha256: String::new(),
+                    runtime_attested: true,
                     desired_state: RuntimeDesiredState::Running,
                     observed_state: RuntimeObservedState::Running,
                     health: "HEALTHY".to_string(),
                 },
                 management_mode: orchestrator_storage::RuntimeManagementMode::Managed,
                 endpoint: String::new(),
+                external_probe_protocol: String::new(),
+                external_probe_health_path: String::new(),
+                last_observed_at_ms: observed_at_ms,
+                drift_reason: String::new(),
+                credential_expires_at_ms: 0,
+                credential_last_success_at_ms: 0,
+                credential_last_error: String::new(),
                 updated_at: "t0".to_string(),
             })
             .unwrap();
+    }
+
+    fn register_running_provider(
+        fixture: &Fixture,
+        service_id: &str,
+        deployment_id: &str,
+        endpoint: &str,
+        api_id: &str,
+    ) {
+        let release = workload_provider_manifest(service_id, api_id);
+        let mut sqlite = fixture.sqlite.clone();
+        sqlite
+            .upsert_service_release(ServiceRelease {
+                service_name: service_id.to_string(),
+                version: release.version.clone(),
+                release_url: release.source.url.clone(),
+                manifest: serde_json::to_value(&release).unwrap(),
+                checksum: CHECKSUM.to_string(),
+                created_at: "t0".to_string(),
+            })
+            .unwrap();
+        put_running_instance(
+            fixture,
+            service_id,
+            deployment_id,
+            &format!("container-{deployment_id}"),
+            &release.runtime.image,
+        );
+        let mut runtime = fixture
+            .durable
+            .runtime_instance(deployment_id)
+            .unwrap()
+            .unwrap();
+        runtime.endpoint = endpoint.to_string();
+        fixture.durable.put_runtime_instance(&runtime).unwrap();
+    }
+
+    fn apply_provider_topology(
+        fixture: &Fixture,
+        topology_id: &str,
+        service_id: &str,
+        deployment_id: &str,
+        endpoint: &str,
+    ) -> InstallTopologySelection {
+        let spec = TopologySpec::new(
+            topology_id,
+            endpoint,
+            "private",
+            vec![TopologyEndpointSpec {
+                endpoint: endpoint.to_string(),
+                service_id: service_id.to_string(),
+                protocol: "http".to_string(),
+                health_path: "/health".to_string(),
+                display_name: service_id.to_string(),
+                note: "applied provider".to_string(),
+                config: json!({"deployment_id": deployment_id, "node_id": "node-1"}),
+            }],
+            vec![],
+        )
+        .unwrap();
+        let revision = fixture
+            .durable
+            .create_initial_topology_revision(
+                spec,
+                "t1".to_string(),
+                "test".to_string(),
+                "provider".to_string(),
+            )
+            .unwrap();
+        fixture
+            .durable
+            .begin_topology_apply(topology_id, revision.revision_id(), "apply-provider", "t2")
+            .unwrap();
+        fixture
+            .durable
+            .finish_topology_apply(
+                topology_id,
+                revision.revision_id(),
+                "apply-provider",
+                TopologyApplyOutcome::Succeeded,
+                "t3",
+            )
+            .unwrap();
+        InstallTopologySelection {
+            topology_id: topology_id.to_string(),
+            revision_id: revision.revision_id().to_string(),
+        }
     }
 
     fn record_release_history(
@@ -4495,6 +8947,382 @@ mod tests {
     }
 
     #[test]
+    fn legacy_required_api_import_remains_metadata_only() {
+        let service_id = "legacy-import-consumer";
+        let manifest = legacy_consumer_manifest(service_id, "storage.object.get");
+        let mut fixture = fixture(manifest, "READY");
+        let response = route(
+            &fixture.state,
+            &mut fixture.console,
+            Some(&fixture.durable),
+            Some(&fixture.registry),
+            Some(&fixture.artifact_store),
+            &ApiRequest {
+                method: "POST".to_string(),
+                path: "/api/v1/store/releases:import".to_string(),
+                headers: BTreeMap::from([(
+                    "idempotency-key".to_string(),
+                    "legacy-import-only".to_string(),
+                )]),
+                body: json!({
+                    "service_id": service_id,
+                    "version": "2.0.0",
+                    "target_node_id": "node-1"
+                })
+                .to_string(),
+            },
+            "request-legacy-import",
+        )
+        .unwrap();
+        assert_eq!(response.status, 201, "{}", response.body);
+        let imported = fixture
+            .console
+            .service_releases()
+            .unwrap()
+            .into_iter()
+            .find(|release| release.service_name == service_id && release.version == "2.0.0")
+            .expect("legacy metadata was imported");
+        let contract = ServiceReleaseContract::from_json_value(imported.manifest).unwrap();
+        assert_eq!(contract.contract_version, 1);
+        assert_eq!(contract.requirements().len(), 1);
+        assert_eq!(
+            contract.requirements()[0].binding_name(),
+            "storage.object.get"
+        );
+        assert!(fixture.durable.operation_store().list().unwrap().is_empty());
+        assert_eq!(
+            fixture
+                .durable
+                .job_store()
+                .active_job_count("node-1")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn legacy_required_api_validate_and_install_fail_closed_without_provider_or_topology() {
+        let service_id = "legacy-gated-consumer";
+        let manifest = legacy_consumer_manifest(service_id, "storage.object.get");
+        let mut fixture = fixture(manifest, "READY");
+        let releases_before = fixture.console.service_releases().unwrap();
+        let validate = route(
+            &fixture.state,
+            &mut fixture.console,
+            Some(&fixture.durable),
+            Some(&fixture.registry),
+            Some(&fixture.artifact_store),
+            &ApiRequest {
+                method: "POST".to_string(),
+                path: "/api/v1/store/releases:validate".to_string(),
+                headers: BTreeMap::from([(
+                    "idempotency-key".to_string(),
+                    "legacy-validate-gate".to_string(),
+                )]),
+                body: json!({
+                    "service_id": service_id,
+                    "version": "2.0.0",
+                    "target_node_id": "node-1"
+                })
+                .to_string(),
+            },
+            "request-legacy-validate-gate",
+        )
+        .unwrap();
+        assert_eq!(validate.status, 200, "{}", validate.body);
+        assert_eq!(validate.body["data"]["valid"], false);
+        assert_eq!(
+            validate.body["data"]["topology_confirmation_required"],
+            true
+        );
+        assert_eq!(
+            validate.body["data"]["requirements"][0]["requirement_name"],
+            "storage.object.get"
+        );
+        assert_eq!(validate.body["data"]["requirements"][0]["missing"], true);
+        assert_eq!(validate.body["data"]["bindings"], json!([]));
+        assert_eq!(fixture.console.service_releases().unwrap(), releases_before);
+
+        let install = route(
+            &fixture.state,
+            &mut fixture.console,
+            Some(&fixture.durable),
+            Some(&fixture.registry),
+            Some(&fixture.artifact_store),
+            &ApiRequest {
+                method: "POST".to_string(),
+                path: "/api/v1/store/releases:install".to_string(),
+                headers: BTreeMap::from([(
+                    "idempotency-key".to_string(),
+                    "legacy-install-gate".to_string(),
+                )]),
+                body: json!({
+                    "service_id": service_id,
+                    "version": "2.0.0",
+                    "target_node_id": "node-1"
+                })
+                .to_string(),
+            },
+            "request-legacy-install-gate",
+        )
+        .unwrap();
+        assert_eq!(install.status, 422, "{}", install.body);
+        assert_eq!(install.body["code"], "STORE_BINDING_UNRESOLVED");
+        assert!(
+            !fixture
+                .console
+                .service_releases()
+                .unwrap()
+                .iter()
+                .any(|release| release.service_name == service_id && release.version == "2.0.0"),
+            "binding failure must happen before release metadata publication"
+        );
+        assert!(fixture.durable.operation_store().list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_required_api_resolves_only_to_one_healthy_applied_provider() {
+        let service_id = "legacy-resolved-consumer";
+        let api_id = "storage.object.get";
+        let manifest = legacy_consumer_manifest(service_id, api_id);
+        let mut fixture = fixture(manifest.clone(), "READY");
+        let contract =
+            ServiceReleaseContract::from_json_value(serde_json::to_value(manifest).unwrap())
+                .unwrap();
+        let provider_endpoint = "127.0.0.3:8080:storage-provider";
+        register_running_provider(
+            &fixture,
+            "storage-provider",
+            "deployment-storage-a",
+            provider_endpoint,
+            api_id,
+        );
+        let consumer_endpoint = "127.0.0.2:8080:legacy-resolved-consumer";
+        let validate = route(
+            &fixture.state,
+            &mut fixture.console,
+            Some(&fixture.durable),
+            Some(&fixture.registry),
+            Some(&fixture.artifact_store),
+            &ApiRequest {
+                method: "POST".to_string(),
+                path: "/api/v1/store/releases:validate".to_string(),
+                headers: BTreeMap::from([(
+                    "idempotency-key".to_string(),
+                    "legacy-unique-validate".to_string(),
+                )]),
+                body: json!({
+                    "service_id": service_id,
+                    "version": "2.0.0",
+                    "target_node_id": "node-1",
+                    "endpoint": consumer_endpoint
+                })
+                .to_string(),
+            },
+            "request-legacy-unique-validate",
+        )
+        .unwrap();
+        assert_eq!(validate.status, 200, "{}", validate.body);
+        assert_eq!(validate.body["data"]["valid"], false);
+        assert_eq!(
+            validate.body["data"]["topology_confirmation_required"],
+            true
+        );
+        assert_eq!(
+            validate.body["data"]["requirements"][0]["recommended_provider_deployment_id"],
+            "deployment-storage-a"
+        );
+        assert_eq!(validate.body["data"]["bindings"], json!([]));
+
+        let install_without_topology = route(
+            &fixture.state,
+            &mut fixture.console,
+            Some(&fixture.durable),
+            Some(&fixture.registry),
+            Some(&fixture.artifact_store),
+            &ApiRequest {
+                method: "POST".to_string(),
+                path: "/api/v1/store/releases:install".to_string(),
+                headers: BTreeMap::from([(
+                    "idempotency-key".to_string(),
+                    "legacy-unique-install".to_string(),
+                )]),
+                body: json!({
+                    "service_id": service_id,
+                    "version": "2.0.0",
+                    "target_node_id": "node-1",
+                    "endpoint": consumer_endpoint
+                })
+                .to_string(),
+            },
+            "request-legacy-unique-install",
+        )
+        .unwrap();
+        assert_eq!(install_without_topology.status, 422);
+        assert_eq!(
+            install_without_topology.body["code"],
+            "STORE_BINDING_TOPOLOGY_REQUIRED"
+        );
+        assert!(
+            !fixture
+                .console
+                .service_releases()
+                .unwrap()
+                .iter()
+                .any(|release| release.service_name == service_id && release.version == "2.0.0")
+        );
+        assert!(fixture.durable.operation_store().list().unwrap().is_empty());
+
+        let resolved = resolve_install_api_bindings(
+            &fixture.console,
+            &fixture.durable,
+            &contract,
+            "deployment-consumer",
+            "node-1",
+            consumer_endpoint,
+            &[],
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].requirement_name, api_id);
+        assert_eq!(resolved[0].state, ApiBindingState::Resolved);
+        assert_eq!(
+            ensure_managed_api_bindings_ready(&fixture.durable, &contract, &resolved, None)
+                .unwrap_err()
+                .code,
+            "STORE_BINDING_TOPOLOGY_REQUIRED"
+        );
+
+        let topology = apply_provider_topology(
+            &fixture,
+            "legacy-binding-topology",
+            "storage-provider",
+            "deployment-storage-a",
+            provider_endpoint,
+        );
+        let resolved = resolve_install_api_bindings(
+            &fixture.console,
+            &fixture.durable,
+            &contract,
+            "deployment-consumer",
+            "node-1",
+            consumer_endpoint,
+            &[],
+            Some(&topology),
+            false,
+        )
+        .unwrap();
+        ensure_managed_api_bindings_ready(&fixture.durable, &contract, &resolved, Some(&topology))
+            .unwrap();
+
+        let validate_applied = route(
+            &fixture.state,
+            &mut fixture.console,
+            Some(&fixture.durable),
+            Some(&fixture.registry),
+            Some(&fixture.artifact_store),
+            &ApiRequest {
+                method: "POST".to_string(),
+                path: "/api/v1/store/releases:validate".to_string(),
+                headers: BTreeMap::from([(
+                    "idempotency-key".to_string(),
+                    "legacy-applied-validate".to_string(),
+                )]),
+                body: json!({
+                    "service_id": service_id,
+                    "version": "2.0.0",
+                    "target_node_id": "node-1",
+                    "endpoint": consumer_endpoint,
+                    "topology_id": topology.topology_id,
+                    "topology_etag": format!("\"{}\"", topology.revision_id)
+                })
+                .to_string(),
+            },
+            "request-legacy-applied-validate",
+        )
+        .unwrap();
+        assert_eq!(validate_applied.status, 200, "{}", validate_applied.body);
+        assert_eq!(validate_applied.body["data"]["valid"], true);
+        assert_eq!(
+            validate_applied.body["data"]["topology_confirmation_required"],
+            false
+        );
+        assert_eq!(
+            validate_applied.body["data"]["bindings"][0]["state"],
+            "RESOLVED"
+        );
+        assert!(!validate_applied.body.to_string().contains("PENDING"));
+
+        let mut staged = resolved[0].clone();
+        staged.state = ApiBindingState::Pending;
+        staged.observed_state = "PENDING".to_string();
+        staged.topology_id = topology.topology_id;
+        staged.topology_revision_id = topology.revision_id;
+        let public_plan = production_binding_plan([&staged]);
+        assert_eq!(public_plan[0].state, ApiBindingState::Resolved);
+        assert_eq!(public_plan[0].observed_state, "RESOLVED");
+    }
+
+    #[test]
+    fn legacy_required_api_rejects_ambiguous_providers_until_explicitly_selected() {
+        let service_id = "legacy-ambiguous-consumer";
+        let api_id = "storage.object.get";
+        let manifest = legacy_consumer_manifest(service_id, api_id);
+        let fixture = fixture(manifest.clone(), "READY");
+        let contract =
+            ServiceReleaseContract::from_json_value(serde_json::to_value(manifest).unwrap())
+                .unwrap();
+        register_running_provider(
+            &fixture,
+            "storage-provider",
+            "deployment-storage-a",
+            "127.0.0.3:8080:storage-provider",
+            api_id,
+        );
+        register_running_provider(
+            &fixture,
+            "storage-provider",
+            "deployment-storage-b",
+            "127.0.0.4:8080:storage-provider",
+            api_id,
+        );
+        let error = resolve_install_api_bindings(
+            &fixture.console,
+            &fixture.durable,
+            &contract,
+            "deployment-consumer",
+            "node-1",
+            "127.0.0.2:8080:legacy-ambiguous-consumer",
+            &[],
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "STORE_BINDING_UNRESOLVED");
+        assert!(error.detail.contains("ambiguous"));
+
+        let selected = resolve_install_api_bindings(
+            &fixture.console,
+            &fixture.durable,
+            &contract,
+            "deployment-consumer",
+            "node-1",
+            "127.0.0.2:8080:legacy-ambiguous-consumer",
+            &[InstallBindingSelection {
+                name: api_id.to_string(),
+                provider_deployment_id: "deployment-storage-b".to_string(),
+            }],
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(selected[0].provider_deployment_id, "deployment-storage-b");
+        assert_eq!(selected[0].state, ApiBindingState::Resolved);
+    }
+
+    #[test]
     fn arbitrary_url_import_cannot_bypass_trusted_catalog_selection() {
         let manifest = release_manifest(
             "fixture-api",
@@ -4611,6 +9439,50 @@ mod tests {
             .unwrap();
         assert_eq!(job.status, JobStatus::Queued);
         assert!(fixture.durable.runtime_instances(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn v2_catalog_install_does_not_require_a_node_local_auth_provider() {
+        let service_id = "v2-control-plane-auth";
+        let mut release =
+            release_manifest(service_id, &format!("registry.example/ojos/api@{DIGEST}"));
+        release.permissions = vec!["v2-control-plane-auth.read".to_string()];
+        let mut fixture = fixture(release.clone(), "READY");
+        let mut document = serde_json::to_value(release).unwrap();
+        make_v2_release_document(&mut document);
+        replace_fixture_release_metadata(&fixture, service_id, "1.2.3", &document);
+
+        let node = fixture.durable.get_node("node-1").unwrap().unwrap();
+        assert!(node_provider_label(&node, "auth").is_none());
+        let response = route(
+            &fixture.state,
+            &mut fixture.console,
+            Some(&fixture.durable),
+            Some(&fixture.registry),
+            Some(&fixture.artifact_store),
+            &install_request(service_id, "v2-control-plane-auth-install"),
+            "request-v2-control-plane-auth-install",
+        )
+        .unwrap();
+
+        assert_eq!(response.status, 202, "{}", response.body);
+        let operation_id = response.body["data"]["operation_id"].as_str().unwrap();
+        let operation = fixture
+            .durable
+            .operation_store()
+            .get(operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.planned_jobs.len(), 1);
+        assert_eq!(operation.planned_jobs[0].kind, JobKind::Install);
+        assert_eq!(
+            operation.planned_jobs[0].payload["spec"]["labels"]["ojos.service_contract_version"],
+            "2"
+        );
+        assert!(
+            operation.planned_jobs[0].payload.get("auth").is_none(),
+            "Service Contract v2 workload identity and grants belong to the control-plane ApiBinding projection"
+        );
     }
 
     #[test]
@@ -5761,6 +10633,149 @@ mod tests {
     }
 
     #[test]
+    fn v2_release_validate_returns_exact_topology_preview_without_side_effects() {
+        let service_id = "v2-preview-api";
+        let mut fixture = fixture(
+            release_manifest(service_id, &format!("registry.example/ojos/api@{DIGEST}")),
+            "READY",
+        );
+        let mut document = serde_json::to_value(release_manifest(
+            service_id,
+            &format!("registry.example/ojos/api@{DIGEST}"),
+        ))
+        .unwrap();
+        make_v2_release_document(&mut document);
+        replace_fixture_release_metadata(&fixture, service_id, "1.2.3", &document);
+        let topology = apply_provider_topology(
+            &fixture,
+            "v2-preview-topology",
+            "existing-provider",
+            "deployment-existing-provider",
+            "127.0.0.9:8080:existing-provider",
+        );
+        let request = ApiRequest {
+            method: "POST".to_string(),
+            path: "/api/v1/store/releases:validate".to_string(),
+            headers: BTreeMap::from([(
+                "idempotency-key".to_string(),
+                "validate-v2-preview".to_string(),
+            )]),
+            body: json!({
+                "service_id": service_id,
+                "target_node_id": "node-1",
+                "version": "1.2.3",
+                "channel": "stable",
+                "endpoint": "127.0.0.2:8080:v2-preview-api",
+                "topology_id": topology.topology_id,
+                "topology_etag": format!("\"{}\"", topology.revision_id),
+                "start": true,
+                "migration_policy": "SKIP",
+                "config": {},
+                "secret_refs": {}
+            })
+            .to_string(),
+        };
+        let response = route(
+            &fixture.state,
+            &mut fixture.console,
+            Some(&fixture.durable),
+            Some(&fixture.registry),
+            Some(&fixture.artifact_store),
+            &request,
+            "request-v2-preview",
+        )
+        .unwrap();
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert_eq!(response.body["data"]["valid"], true);
+        let changes = response.body["data"]["topology_diff"]["changes"]
+            .as_array()
+            .expect("prospective Topology diff changes");
+        assert_eq!(changes.len(), 1, "{}", response.body);
+        assert_eq!(changes[0]["kind"], "endpoint_added");
+        assert_eq!(changes[0]["endpoint"]["service_id"], service_id);
+        assert_eq!(
+            response.body["data"]["side_effects"],
+            json!({
+                "release_imports": 0,
+                "operations": 0,
+                "jobs": 0,
+                "runtime_calls": 0,
+            })
+        );
+        assert!(fixture.durable.operation_store().list().unwrap().is_empty());
+        assert_eq!(
+            fixture
+                .durable
+                .job_store()
+                .active_job_count("node-1")
+                .unwrap(),
+            0
+        );
+        assert!(fixture.durable.runtime_instances(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn v2_release_validate_rejects_missing_typed_config_before_any_operation() {
+        let service_id = "v2-config-api";
+        let mut fixture = fixture(
+            release_manifest(service_id, &format!("registry.example/ojos/api@{DIGEST}")),
+            "READY",
+        );
+        let mut release =
+            release_manifest(service_id, &format!("registry.example/ojos/api@{DIGEST}"));
+        release.config_schema = json!({
+            "type": "object",
+            "properties": {"workers": {"type": "integer"}},
+            "required": ["workers"],
+            "additionalProperties": false
+        });
+        release
+            .runtime
+            .env
+            .insert("WORKERS".to_string(), "${config.workers}".to_string());
+        let mut document = serde_json::to_value(release).unwrap();
+        make_v2_release_document(&mut document);
+        replace_fixture_release_metadata(&fixture, service_id, "1.2.3", &document);
+        let response = route(
+            &fixture.state,
+            &mut fixture.console,
+            Some(&fixture.durable),
+            Some(&fixture.registry),
+            Some(&fixture.artifact_store),
+            &ApiRequest {
+                method: "POST".to_string(),
+                path: "/api/v1/store/releases:validate".to_string(),
+                headers: BTreeMap::from([(
+                    "idempotency-key".to_string(),
+                    "validate-v2-config".to_string(),
+                )]),
+                body: json!({
+                    "service_id": service_id,
+                    "target_node_id": "node-1",
+                    "version": "1.2.3",
+                    "config": {},
+                    "secret_refs": {}
+                })
+                .to_string(),
+            },
+            "request-v2-config",
+        )
+        .unwrap();
+        assert_eq!(response.status, 422, "{}", response.body);
+        assert_eq!(response.body["code"], "STORE_CONFIG_REQUIRED");
+        assert!(fixture.durable.operation_store().list().unwrap().is_empty());
+        assert_eq!(
+            fixture
+                .durable
+                .job_store()
+                .active_job_count("node-1")
+                .unwrap(),
+            0
+        );
+        assert!(fixture.durable.runtime_instances(None).unwrap().is_empty());
+    }
+
+    #[test]
     fn metadata_cannot_replace_the_catalog_oci_digest_with_a_mutable_tag() {
         let service_id = "tagged-api";
         let mut fixture = fixture(
@@ -6147,12 +11162,23 @@ mod tests {
                     release_version: "1.2.3".to_string(),
                     container_id: "0123456789abcdef".to_string(),
                     artifact_digest: format!("registry.example/ojos/api@{DIGEST}"),
+                    runtime_contract: RuntimeContract::standard_v1(),
+                    runtime_policy_sha256: String::new(),
+                    effective_runtime_sha256: String::new(),
+                    runtime_attested: false,
                     desired_state: RuntimeDesiredState::Running,
                     observed_state: RuntimeObservedState::Running,
                     health: "HEALTHY".to_string(),
                 },
                 management_mode: orchestrator_storage::RuntimeManagementMode::Managed,
                 endpoint: String::new(),
+                external_probe_protocol: String::new(),
+                external_probe_health_path: String::new(),
+                last_observed_at_ms: 0,
+                drift_reason: String::new(),
+                credential_expires_at_ms: 0,
+                credential_last_success_at_ms: 0,
+                credential_last_error: String::new(),
                 updated_at: "t0".to_string(),
             })
             .unwrap();
@@ -6184,6 +11210,793 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|release| release.service_name == service_id && release.version == "1.2.3")
+        );
+    }
+
+    #[test]
+    fn provider_candidates_require_fresh_attested_managed_runtime_evidence() {
+        let service_id = "fresh-provider";
+        let mut manifest =
+            release_manifest(service_id, &format!("registry.example/ojos/api@{DIGEST}"));
+        manifest.permissions.push("provider.read".to_string());
+        manifest.apis = serde_json::from_value(json!([{
+            "api_id": "provider.read",
+            "protocol": "http",
+            "port_name": "http",
+            "path_prefix": "/provider",
+            "methods": ["GET"],
+            "visibility": "explicit",
+            "auth_mode": "service",
+            "permission": "provider.read",
+            "stability": "stable",
+            "version": "1.0.0"
+        }]))
+        .unwrap();
+        let fixture = fixture(manifest, "READY");
+        put_running_instance(
+            &fixture,
+            service_id,
+            "deployment-fresh-provider",
+            "container-fresh-provider",
+            &format!("registry.example/ojos/api@{DIGEST}"),
+        );
+        let mut runtime = fixture
+            .durable
+            .runtime_instance("deployment-fresh-provider")
+            .unwrap()
+            .unwrap();
+        runtime.endpoint = "10.0.0.1:8080:fresh-provider".to_string();
+        runtime.instance.runtime_attested = true;
+        fixture.durable.put_runtime_instance(&runtime).unwrap();
+        assert_eq!(
+            provider_candidates(&fixture.console, &fixture.durable)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut facts = fixture
+            .sqlite
+            .node_runtime_facts("node-1")
+            .unwrap()
+            .unwrap();
+        facts.received_at_ms = now_ms().saturating_sub(NODE_RUNTIME_FACTS_STALE_MS + 1);
+        fixture.sqlite.put_node_runtime_facts(&facts).unwrap();
+        assert!(
+            provider_candidates(&fixture.console, &fixture.durable)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn provider_candidates_reject_stale_external_probe_evidence() {
+        let service_id = "external-provider";
+        let mut manifest =
+            release_manifest(service_id, &format!("registry.example/ojos/api@{DIGEST}"));
+        manifest.permissions.push("provider.read".to_string());
+        manifest.apis = serde_json::from_value(json!([{
+            "api_id": "provider.read",
+            "protocol": "http",
+            "port_name": "http",
+            "path_prefix": "/provider",
+            "methods": ["GET"],
+            "visibility": "explicit",
+            "auth_mode": "workload",
+            "permission": "provider.read",
+            "stability": "stable",
+            "version": "1.0.0"
+        }]))
+        .unwrap();
+        let fixture = fixture(manifest, "READY");
+        let observed_at_ms = now_ms();
+        let mut runtime = StoredRuntimeInstance {
+            node_id: "external".to_string(),
+            instance: RuntimeInstance {
+                deployment_id: "deployment-external-provider".to_string(),
+                service_id: service_id.to_string(),
+                release_version: "1.2.3".to_string(),
+                container_id: String::new(),
+                artifact_digest: format!("registry.example/ojos/api@{DIGEST}"),
+                runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
+                runtime_policy_sha256: String::new(),
+                effective_runtime_sha256: String::new(),
+                runtime_attested: false,
+                desired_state: RuntimeDesiredState::Running,
+                observed_state: RuntimeObservedState::Running,
+                health: "HEALTHY".to_string(),
+            },
+            management_mode: orchestrator_storage::RuntimeManagementMode::External,
+            endpoint: "http://external.example".to_string(),
+            external_probe_protocol: "http".to_string(),
+            external_probe_health_path: "/health".to_string(),
+            last_observed_at_ms: observed_at_ms,
+            drift_reason: String::new(),
+            credential_expires_at_ms: 0,
+            credential_last_success_at_ms: 0,
+            credential_last_error: String::new(),
+            updated_at: format!("unix-ms:{observed_at_ms}"),
+        };
+        fixture.durable.put_runtime_instance(&runtime).unwrap();
+        assert_eq!(
+            provider_candidates(&fixture.console, &fixture.durable)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        runtime.instance.observed_state = RuntimeObservedState::Unknown;
+        runtime.instance.health = "UNHEALTHY".to_string();
+        runtime.drift_reason = "external health probe failed".to_string();
+        fixture.durable.put_runtime_instance(&runtime).unwrap();
+        assert!(
+            provider_candidates(&fixture.console, &fixture.durable)
+                .unwrap()
+                .is_empty()
+        );
+
+        runtime.instance.observed_state = RuntimeObservedState::Running;
+        runtime.instance.health = "HEALTHY".to_string();
+        runtime.drift_reason.clear();
+        runtime.last_observed_at_ms =
+            observed_at_ms.saturating_sub(crate::durable::EXTERNAL_RUNTIME_PROBE_STALE_MS + 1);
+        fixture.durable.put_runtime_instance(&runtime).unwrap();
+        assert!(
+            provider_candidates(&fixture.console, &fixture.durable)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn judge_runtime_plan_requires_the_exact_node_local_oci_allowlist_entry() {
+        let fixture = fixture(
+            release_manifest(
+                "judge-worker",
+                &format!("registry.example/ojos/api@{DIGEST}"),
+            ),
+            "READY",
+        );
+        let mut contract_value = serde_json::to_value(release_manifest(
+            "judge-worker",
+            &format!("registry.example/ojos/api@{DIGEST}"),
+        ))
+        .unwrap();
+        contract_value["schema_version"] = json!(2);
+        contract_value["provides"] = json!({"apis": []});
+        contract_value["requires"] = json!({"apis": []});
+        contract_value["events"] = json!({"publishes": [], "subscribes": []});
+        contract_value["runtime_contract"] = json!({
+            "id": "judge-sandbox-v1",
+            "sha256": orchestrator_runtime::JUDGE_SANDBOX_V1_PROFILE_SHA256,
+            "binding_directory": "/run/ojos/service",
+            "identity_mode": "workload",
+            "credential_delivery": "file",
+            "restart_on_change": false
+        });
+        let contract = ServiceReleaseContract::from_json_value(contract_value).unwrap();
+        let image = format!("registry.example/ojos/api@{DIGEST}");
+        let mut stored_facts = fixture
+            .sqlite
+            .node_runtime_facts("node-1")
+            .unwrap()
+            .unwrap();
+        let mut facts: NodeRuntimeFactsV1 =
+            serde_json::from_value(stored_facts.facts.clone()).unwrap();
+        facts
+            .allowed_contracts
+            .push(RuntimeContract::judge_sandbox_v1());
+        facts.judge_sandbox_allowed_images = vec![format!(
+            "registry.example/ojos/other@sha256:{}",
+            "b".repeat(64)
+        )];
+        stored_facts.facts = serde_json::to_value(&facts).unwrap();
+        fixture
+            .sqlite
+            .put_node_runtime_facts(&stored_facts)
+            .unwrap();
+        let node = NodeRecord {
+            node_id: "node-1".to_string(),
+            host_ip: "127.0.0.2".to_string(),
+            parent_node_id: String::new(),
+            role: "standalone".to_string(),
+            labels: json!({}),
+            status: "READY".to_string(),
+            created_at: "t0".to_string(),
+            updated_at: "t0".to_string(),
+        };
+        let error = ensure_release_runtime_supported(&fixture.durable, &node, &contract, &image)
+            .unwrap_err();
+        assert_eq!(error.code, "STORE_RUNTIME_ARTIFACT_NOT_ALLOWED");
+
+        facts.judge_sandbox_allowed_images = vec![image.clone()];
+        stored_facts.facts = serde_json::to_value(facts).unwrap();
+        fixture
+            .sqlite
+            .put_node_runtime_facts(&stored_facts)
+            .unwrap();
+        assert_eq!(
+            ensure_release_runtime_supported(&fixture.durable, &node, &contract, &image).unwrap(),
+            RuntimeContract::judge_sandbox_v1()
+        );
+    }
+
+    fn active_merge_binding(
+        id: &str,
+        consumer: &str,
+        source: &str,
+        provider: &str,
+        target: &str,
+    ) -> ApiBinding {
+        ApiBinding {
+            binding_id: id.to_string(),
+            requirement_name: "storage_get".to_string(),
+            api_id: "storage.object.get".to_string(),
+            api_version: "1.0.0".to_string(),
+            consumer_deployment_id: consumer.to_string(),
+            consumer_service_id: "worker".to_string(),
+            consumer_node_id: "node-b".to_string(),
+            consumer_endpoint: source.to_string(),
+            provider_deployment_id: provider.to_string(),
+            provider_service_id: "storage".to_string(),
+            provider_node_id: "node-a".to_string(),
+            provider_endpoint: target.to_string(),
+            provider_path: "/objects".to_string(),
+            virtual_endpoint: "/internal/apis/storage.object.get".to_string(),
+            protocol: "http".to_string(),
+            methods: vec!["GET".to_string()],
+            auth_mode: "workload".to_string(),
+            provider_auth_mode: "workload".to_string(),
+            permission: "storage.object.read".to_string(),
+            timeout_ms: Some(30_000),
+            topology_id: "primary".to_string(),
+            topology_revision_id: "revision-1".to_string(),
+            link_source_endpoint: source.to_string(),
+            link_target_endpoint: target.to_string(),
+            credential_ref: String::new(),
+            credential_generation: 2,
+            context_generation: 2,
+            desired_state: "ACTIVE".to_string(),
+            observed_state: "ACTIVE".to_string(),
+            health: "HEALTHY".to_string(),
+            drift: Vec::new(),
+            last_operation_id: "operation-1".to_string(),
+            state: ApiBindingState::Active,
+            optional: false,
+            reason: String::new(),
+            created_at: "unix-ms:1".to_string(),
+            updated_at: "unix-ms:1".to_string(),
+        }
+    }
+
+    fn staged_context_binding(
+        id: &str,
+        requirement: &str,
+        api_id: &str,
+        provider: &str,
+        optional: bool,
+    ) -> ApiBinding {
+        let mut binding = active_merge_binding(
+            id,
+            "consumer-worker",
+            "10.0.0.2:9101:worker",
+            provider,
+            &format!("10.0.0.1:8080:{provider}"),
+        );
+        binding.requirement_name = requirement.to_string();
+        binding.api_id = api_id.to_string();
+        binding.topology_id = "primary".to_string();
+        binding.topology_revision_id = "revision-2".to_string();
+        binding.credential_generation = 3;
+        binding.context_generation = 3;
+        binding.observed_state = "PENDING".to_string();
+        binding.health = "UNKNOWN".to_string();
+        binding.last_operation_id = "operation-rebind".to_string();
+        binding.state = ApiBindingState::Pending;
+        binding.optional = optional;
+        binding
+    }
+
+    fn staged_context_plan(bindings: Vec<ApiBinding>) -> StoreTopologyApplyPlan {
+        StoreTopologyApplyPlan {
+            topology_id: "primary".to_string(),
+            revision_id: "revision-2".to_string(),
+            staged_bindings: bindings,
+            previous_bindings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn staged_apply_context_accepts_required_multi_binding_compatible_provider_rebind() {
+        let rebound = staged_context_binding(
+            "binding-storage-head",
+            "storage_head",
+            "storage.object.head",
+            "storage-compatible-b",
+            false,
+        );
+        let required_sibling = staged_context_binding(
+            "binding-storage-get",
+            "storage_get",
+            "storage.object.get",
+            "storage-a",
+            false,
+        );
+        let plan = staged_context_plan(vec![rebound, required_sibling]);
+
+        let desired = StagedApplyDesiredContextBindings::from_plans(
+            std::slice::from_ref(&plan),
+            "consumer-worker",
+        )
+        .unwrap();
+
+        assert_eq!(desired.as_slice().len(), 2);
+        assert!(desired.as_slice().iter().all(|binding| {
+            binding.state == ApiBindingState::Resolved
+                && binding.observed_state == "RESOLVED"
+                && binding.context_generation == 3
+        }));
+        assert_eq!(
+            desired
+                .as_slice()
+                .iter()
+                .find(|binding| binding.requirement_name == "storage_head")
+                .unwrap()
+                .provider_deployment_id,
+            "storage-compatible-b"
+        );
+        assert_eq!(
+            desired
+                .as_slice()
+                .iter()
+                .find(|binding| binding.requirement_name == "storage_get")
+                .unwrap()
+                .provider_deployment_id,
+            "storage-a"
+        );
+        assert!(
+            plan.staged_bindings
+                .iter()
+                .all(|binding| binding.state == ApiBindingState::Pending),
+            "the materializable view must not mutate durable staged bindings"
+        );
+    }
+
+    #[test]
+    fn staged_apply_context_optional_revoke_preserves_required_sibling() {
+        let mut optional_revoke = staged_context_binding(
+            "binding-metrics",
+            "metrics",
+            "metrics.read",
+            "metrics-a",
+            true,
+        );
+        optional_revoke.desired_state = "REVOKED".to_string();
+        let required_sibling = staged_context_binding(
+            "binding-storage-get",
+            "storage_get",
+            "storage.object.get",
+            "storage-a",
+            false,
+        );
+        let plan = staged_context_plan(vec![optional_revoke, required_sibling]);
+
+        let desired = StagedApplyDesiredContextBindings::from_plans(
+            std::slice::from_ref(&plan),
+            "consumer-worker",
+        )
+        .unwrap();
+
+        assert_eq!(desired.as_slice().len(), 1);
+        assert_eq!(desired.as_slice()[0].requirement_name, "storage_get");
+        assert_eq!(desired.as_slice()[0].provider_deployment_id, "storage-a");
+        assert_eq!(desired.as_slice()[0].context_generation, 3);
+    }
+
+    #[test]
+    fn staged_apply_context_rejects_an_illegal_pending_binding() {
+        let mut invalid = staged_context_binding(
+            "binding-storage-get",
+            "storage_get",
+            "storage.object.get",
+            "storage-a",
+            false,
+        );
+        invalid.provider_deployment_id.clear();
+        let plan = staged_context_plan(vec![invalid]);
+
+        let error = StagedApplyDesiredContextBindings::from_plans(
+            std::slice::from_ref(&plan),
+            "consumer-worker",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, 409);
+        assert_eq!(error.code, "STORE_STAGED_BINDING_CONTEXT_INVALID");
+
+        let first = staged_context_binding(
+            "binding-storage-get",
+            "storage_get",
+            "storage.object.get",
+            "storage-a",
+            false,
+        );
+        let mut second = staged_context_binding(
+            "binding-storage-head",
+            "storage_head",
+            "storage.object.head",
+            "storage-a",
+            false,
+        );
+        second.last_operation_id = "operation-other".to_string();
+        let split_operation_plan = staged_context_plan(vec![first, second]);
+        let error = StagedApplyDesiredContextBindings::from_plans(
+            std::slice::from_ref(&split_operation_plan),
+            "consumer-worker",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "STORE_STAGED_BINDING_CONTEXT_INVALID");
+        assert!(error.detail.contains("more than one Operation"));
+    }
+
+    #[test]
+    fn managed_service_context_rejects_any_missing_required_sibling() {
+        let mut document = serde_json::to_value(release_manifest(
+            "consumer-worker",
+            &format!("registry.example/ojos/consumer-worker@{DIGEST}"),
+        ))
+        .unwrap();
+        make_v2_release_document(&mut document);
+        document["requires"] = json!({
+            "apis": [
+                {
+                    "name": "storage_get",
+                    "id": "storage.object.get",
+                    "version": ">=1.0.0, <2.0.0",
+                    "optional": false,
+                    "selection": "explicit",
+                    "timeout_ms": 300000
+                },
+                {
+                    "name": "storage_head",
+                    "id": "storage.object.head",
+                    "version": ">=1.0.0, <2.0.0",
+                    "optional": false,
+                    "selection": "explicit",
+                    "timeout_ms": 300000
+                }
+            ]
+        });
+        let contract = ServiceReleaseContract::from_json_value(document).unwrap();
+        let fixture = fixture(
+            release_manifest(
+                "fixture-root",
+                &format!("registry.example/ojos/fixture-root@{DIGEST}"),
+            ),
+            "READY",
+        );
+        let mut only_storage_get = staged_context_binding(
+            "binding-storage-get",
+            "storage_get",
+            "storage.object.get",
+            "storage-a",
+            false,
+        );
+        only_storage_get.state = ApiBindingState::Active;
+        only_storage_get.observed_state = "ACTIVE".to_string();
+
+        let error = managed_service_context_spec(
+            &fixture.durable,
+            &contract,
+            "node-1",
+            &[only_storage_get],
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, 409);
+        assert_eq!(error.code, "STORE_REQUIRED_BINDING_CONTEXT_MISSING");
+        assert!(error.detail.contains("storage_head"));
+        assert!(!error.detail.contains("storage_get"));
+    }
+
+    #[test]
+    fn adding_second_consumer_preserves_first_consumer_binding_identity_and_link() {
+        let first = active_merge_binding(
+            "binding-first",
+            "consumer-first",
+            "10.0.0.2:9000:worker",
+            "storage-a",
+            "10.0.0.1:8080:storage",
+        );
+        let mut second = active_merge_binding(
+            "binding-second",
+            "consumer-second",
+            "10.0.0.3:9000:worker",
+            "storage-a",
+            "10.0.0.1:8080:storage",
+        );
+        second.state = ApiBindingState::Resolved;
+        second.observed_state = "RESOLVED".to_string();
+        let merged = merge_store_consumer_bindings(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&second),
+            StoreConsumerBindingMergeContext {
+                consumer_deployment_id: "consumer-second",
+                replaced_consumer_deployment_id: None,
+                consumer_endpoint: "10.0.0.3:9000:worker",
+                topology_id: "primary",
+                revision_id: "revision-2",
+                operation_id: "operation-2",
+            },
+        );
+        let preserved = merged
+            .iter()
+            .find(|binding| binding.consumer_deployment_id == "consumer-first")
+            .expect("first consumer is preserved");
+        assert_eq!(preserved.binding_id, "binding-first");
+        assert_eq!(preserved.link_source_endpoint, "10.0.0.2:9000:worker");
+        assert_eq!(preserved.link_target_endpoint, "10.0.0.1:8080:storage");
+        assert_eq!(preserved.provider_deployment_id, "storage-a");
+        let added = merged
+            .iter()
+            .find(|binding| binding.consumer_deployment_id == "consumer-second")
+            .expect("second consumer is added");
+        assert_eq!(added.binding_id, "binding-second");
+        assert_eq!(added.link_source_endpoint, "10.0.0.3:9000:worker");
+    }
+
+    #[test]
+    fn formal_store_topology_input_requires_a_strong_etag() {
+        let selected = normalize_store_topology_selection("primary", "\"revision-7\"", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.topology_id, "primary");
+        assert_eq!(selected.revision_id, "revision-7");
+        let error = normalize_store_topology_selection("primary", "revision-7", None)
+            .expect_err("raw revision ids are not ETags");
+        assert_eq!(error.code, "STORE_TOPOLOGY_ETAG_INVALID");
+    }
+
+    #[test]
+    fn backend_worker_uses_a_deterministic_logical_endpoint_without_publishing_a_port() {
+        let mut release = release_manifest(
+            "judge-worker",
+            &format!("registry.example/ojos/api@{DIGEST}"),
+        );
+        release.service_type = "backend-worker".to_string();
+        release.backend.port = 9101;
+        let node = NodeRecord {
+            node_id: "node-b".to_string(),
+            host_ip: "10.20.30.40".to_string(),
+            parent_node_id: String::new(),
+            role: "node".to_string(),
+            labels: json!({}),
+            status: "READY".to_string(),
+            created_at: "t0".to_string(),
+            updated_at: "t0".to_string(),
+        };
+        let endpoint = effective_managed_endpoint("", &node, &release).unwrap();
+        assert_eq!(endpoint, "10.20.30.40:9101:judge-worker");
+        assert!(
+            managed_published_endpoint(&endpoint, "judge-worker", &node, &release)
+                .unwrap()
+                .is_none(),
+            "the logical endpoint must never publish the worker health port"
+        );
+        assert_eq!(
+            effective_managed_endpoint("10.20.30.40:19101:judge-worker", &node, &release).unwrap(),
+            "10.20.30.40:19101:judge-worker"
+        );
+    }
+
+    fn topology_install_graph(operation_id: &str) -> PlanOperation {
+        let mut jobs = vec![PlannedJob {
+            step_id: "install-root".to_string(),
+            node_id: "node-1".to_string(),
+            kind: JobKind::Install,
+            depends_on: vec![],
+            condition: PlannedJobCondition::OnSuccess,
+            payload: json!({"deployment_id": "deployment-root"}),
+            max_attempts: 1,
+        }];
+        append_install_topology_jobs(
+            &mut jobs,
+            &StoreTopologyApplyPlan {
+                topology_id: "topology-1".to_string(),
+                revision_id: "revision-2".to_string(),
+                staged_bindings: vec![],
+                previous_bindings: vec![],
+            },
+            "install-root",
+            "node-1",
+            "deployment-root",
+        );
+        PlanOperation {
+            operation_id: operation_id.to_string(),
+            action: "release.install".to_string(),
+            target_type: "Release".to_string(),
+            target_id: "root@1.0.0".to_string(),
+            request: json!({"auto_enqueue": true}),
+            jobs,
+        }
+    }
+
+    fn start_topology_install_graph(operation_id: &str) -> (MemoryOperationStore, MemoryJobStore) {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+        coordinator
+            .plan(topology_install_graph(operation_id), 0)
+            .unwrap();
+        coordinator.confirm(operation_id, 1).unwrap();
+        coordinator.enqueue(operation_id, 2).unwrap();
+        (operations, jobs)
+    }
+
+    fn complete_next_topology_job(
+        jobs: &mut MemoryJobStore,
+        node_id: &str,
+        token: &str,
+        status: CompletionStatus,
+        now_ms: i64,
+    ) -> String {
+        let job = jobs
+            .claim(ClaimRequest {
+                node_id: node_id.to_string(),
+                instance_id: format!("worker-{node_id}"),
+                lease_token: token.to_string(),
+                now_ms,
+                lease_ms: 30_000,
+            })
+            .unwrap()
+            .expect("expected queued topology install job");
+        let job_id = job.job_id.clone();
+        jobs.complete(CompleteRequest {
+            job_id: job.job_id,
+            lease_token: token.to_string(),
+            status,
+            result: json!({"node_id": node_id}),
+            error_message: String::new(),
+            now_ms: now_ms + 1,
+            events: vec![],
+        })
+        .unwrap();
+        job_id
+    }
+
+    #[test]
+    fn topology_install_root_failure_aborts_without_uninstalling_an_uncommitted_root() {
+        let operation_id = "install-root-failure";
+        let (mut operations, mut jobs) = start_topology_install_graph(operation_id);
+        complete_next_topology_job(
+            &mut jobs,
+            "node-1",
+            "root-failed",
+            CompletionStatus::Failed,
+            10,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 12)
+            .unwrap();
+        assert!(
+            operation
+                .active_binding("topology-binding-finalize-success")
+                .is_none()
+        );
+        assert!(
+            operation
+                .active_binding("topology-binding-finalize-failure")
+                .is_some()
+        );
+        complete_next_topology_job(
+            &mut jobs,
+            CONTROL_PLANE_NODE_ID,
+            "abort-after-root",
+            CompletionStatus::Succeeded,
+            20,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 22)
+            .unwrap();
+        assert_eq!(operation.status, DurableOperationStatus::Failed);
+        assert!(
+            operation
+                .active_binding("remove-root-after-topology-abort")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn topology_install_finalize_failure_aborts_then_uninstalls_root() {
+        let operation_id = "install-finalize-failure";
+        let (mut operations, mut jobs) = start_topology_install_graph(operation_id);
+        complete_next_topology_job(
+            &mut jobs,
+            "node-1",
+            "root-success",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 12)
+            .unwrap();
+        complete_next_topology_job(
+            &mut jobs,
+            CONTROL_PLANE_NODE_ID,
+            "finalize-failed",
+            CompletionStatus::Failed,
+            20,
+        );
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 22)
+            .unwrap();
+        complete_next_topology_job(
+            &mut jobs,
+            CONTROL_PLANE_NODE_ID,
+            "abort-success",
+            CompletionStatus::Succeeded,
+            30,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 32)
+            .unwrap();
+        assert!(
+            operation
+                .active_binding("remove-root-after-topology-abort")
+                .is_some()
+        );
+        complete_next_topology_job(
+            &mut jobs,
+            "node-1",
+            "cleanup-success",
+            CompletionStatus::Succeeded,
+            40,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 42)
+            .unwrap();
+        assert_eq!(operation.status, DurableOperationStatus::Failed);
+        assert_eq!(
+            operation.result["remove-root-after-topology-abort"]["status"],
+            json!(JobStatus::Succeeded)
+        );
+    }
+
+    #[test]
+    fn topology_install_success_never_materializes_abort_or_cleanup() {
+        let operation_id = "install-finalize-success";
+        let (mut operations, mut jobs) = start_topology_install_graph(operation_id);
+        complete_next_topology_job(
+            &mut jobs,
+            "node-1",
+            "root-success",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 12)
+            .unwrap();
+        complete_next_topology_job(
+            &mut jobs,
+            CONTROL_PLANE_NODE_ID,
+            "finalize-success",
+            CompletionStatus::Succeeded,
+            20,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 22)
+            .unwrap();
+        assert_eq!(operation.status, DurableOperationStatus::Succeeded);
+        assert!(
+            operation
+                .active_binding("topology-binding-finalize-failure")
+                .is_none()
+        );
+        assert!(
+            operation
+                .active_binding("remove-root-after-topology-abort")
+                .is_none()
         );
     }
 }

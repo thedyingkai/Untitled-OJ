@@ -2,7 +2,8 @@ use crate::SqliteOrchestratorStore;
 use crate::operations::{EXPIRED_LEASE_COUNTER, increment_counter};
 use orchestrator_control_plane::{
     ClaimRequest, CompleteRequest, CompletionStatus, HeartbeatRequest, Job, JobError, JobEvent,
-    JobStatus, JobStore, NewJob, NewJobEvent, canonical_payload_sha256, retry_backoff_ms,
+    JobStatus, JobStore, NewJob, NewJobEvent, ResolveExpiredSuccessRequest,
+    canonical_payload_sha256, retry_backoff_ms,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -291,6 +292,19 @@ impl JobStore for SqliteJobStore {
         Ok(job)
     }
 
+    fn resolve_expired_success(
+        &mut self,
+        request: ResolveExpiredSuccessRequest,
+    ) -> Result<Job, JobError> {
+        let mut connection = self.storage.connection().map_err(job_storage_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(job_sqlite_error)?;
+        let job = resolve_expired_success_in_transaction(&transaction, &request)?;
+        transaction.commit().map_err(job_sqlite_error)?;
+        Ok(job)
+    }
+
     fn request_cancel(&mut self, job_id: &str, now_ms: i64) -> Result<Job, JobError> {
         let mut connection = self.storage.connection().map_err(job_storage_error)?;
         let transaction = connection
@@ -316,6 +330,24 @@ impl JobStore for SqliteJobStore {
         update_job(&transaction, &job)?;
         transaction.commit().map_err(job_sqlite_error)?;
         Ok(job)
+    }
+
+    fn expired_leases(&self, now_ms: i64) -> Result<Vec<Job>, JobError> {
+        let connection = self.storage.connection().map_err(job_storage_error)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT payload FROM orchestrator_jobs WHERE status IN ('LEASED', 'CANCEL_REQUESTED') AND lease_expires_at_ms <= ?1 ORDER BY status, lease_expires_at_ms, job_id",
+            )
+            .map_err(job_sqlite_error)?;
+        statement
+            .query_map([now_ms], |row| row.get::<_, String>(0))
+            .map_err(job_sqlite_error)?
+            .map(|payload| {
+                payload
+                    .map_err(job_sqlite_error)
+                    .and_then(|payload| serde_json::from_str(&payload).map_err(job_json_error))
+            })
+            .collect()
     }
 
     fn recover_expired(&mut self, now_ms: i64) -> Result<Vec<Job>, JobError> {
@@ -419,6 +451,71 @@ fn validate_new_job(job: &NewJob) -> Result<(), JobError> {
         ));
     }
     Ok(())
+}
+
+pub(crate) fn resolve_expired_success_in_transaction(
+    transaction: &Transaction<'_>,
+    request: &ResolveExpiredSuccessRequest,
+) -> Result<Job, JobError> {
+    let mut job = required_job(transaction, &request.job_id)?;
+    validate_expired_success_result(&request.result)?;
+    let fingerprint = successful_completion_fingerprint(&request.result);
+    if job.status == JobStatus::Succeeded {
+        if job.result.as_ref() == Some(&request.result)
+            && job.completion_fingerprint.as_deref() == Some(fingerprint.as_str())
+        {
+            return Ok(job);
+        }
+        return Err(JobError::InvalidTransition {
+            from: job.status,
+            to: "SUCCEEDED_FROM_EXPIRED_EVIDENCE",
+        });
+    }
+    if !matches!(job.status, JobStatus::Leased | JobStatus::CancelRequested) {
+        return Err(JobError::InvalidTransition {
+            from: job.status,
+            to: "SUCCEEDED_FROM_EXPIRED_EVIDENCE",
+        });
+    }
+    if job
+        .lease_expires_at_ms
+        .is_none_or(|deadline| deadline > request.now_ms)
+    {
+        return Err(JobError::StaleLease);
+    }
+
+    let lease_identity = lease_episode_identity(&job);
+    let was_already_observed = match lease_identity.as_deref() {
+        Some(identity) => transaction
+            .execute(
+                "DELETE FROM orchestrator_active_expired_lease_anomalies WHERE job_id = ?1 AND lease_identity = ?2",
+                params![&job.job_id, identity],
+            )
+            .map_err(job_sqlite_error)?
+            == 1,
+        None => false,
+    };
+    transaction
+        .execute(
+            "DELETE FROM orchestrator_active_expired_lease_anomalies WHERE job_id = ?1",
+            [&job.job_id],
+        )
+        .map_err(job_sqlite_error)?;
+
+    job.status = JobStatus::Succeeded;
+    job.result = Some(request.result.clone());
+    job.error_message = None;
+    job.completion_fingerprint = Some(fingerprint);
+    job.completed_at_ms = Some(request.now_ms);
+    job.updated_at_ms = request.now_ms;
+    update_job(transaction, &job)?;
+    increment_counter(
+        transaction,
+        EXPIRED_LEASE_COUNTER,
+        u64::from(!was_already_observed),
+    )
+    .map_err(|error| JobError::Persistence(error.to_string()))?;
+    Ok(job)
 }
 
 fn insert_job(transaction: &Transaction<'_>, job: &Job) -> Result<(), JobError> {
@@ -589,14 +686,19 @@ fn recover_expired_job(
         job.error_message =
             Some("worker lease expired while cancellation outcome was unknown".to_string());
         job.completed_at_ms = Some(now_ms);
-    } else if job.attempt < job.max_attempts {
+    } else if job.kind.is_retry_safe_after_lease_expiry() && job.attempt < job.max_attempts {
         job.status = JobStatus::RetryWait;
         job.available_at_ms = now_ms + retry_backoff_ms(job.attempt);
         job.error_message =
             Some("worker lease expired; awaiting ledger reconciliation".to_string());
     } else {
         job.status = JobStatus::NeedsAttention;
-        job.error_message = Some("worker lease expired and retry budget was exhausted".to_string());
+        job.error_message = Some(if job.kind.is_retry_safe_after_lease_expiry() {
+            "worker lease expired and retry budget was exhausted".to_string()
+        } else {
+            "worker lease expired with an unknown side-effect outcome; automatic retry is forbidden"
+                .to_string()
+        });
         job.completed_at_ms = Some(now_ms);
     }
     clear_lease(job);
@@ -661,6 +763,23 @@ fn completion_fingerprint(request: &CompleteRequest) -> String {
         "result": request.result,
         "error": request.error_message,
     }))
+}
+
+fn successful_completion_fingerprint(result: &serde_json::Value) -> String {
+    canonical_payload_sha256(&serde_json::json!({
+        "status": CompletionStatus::Succeeded,
+        "result": result,
+        "error": "",
+    }))
+}
+
+fn validate_expired_success_result(result: &serde_json::Value) -> Result<(), JobError> {
+    if result.is_null() {
+        return Err(JobError::InvalidJob(
+            "expired success resolution requires durable result evidence".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn status_text(status: &JobStatus) -> &'static str {

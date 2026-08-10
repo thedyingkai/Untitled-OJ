@@ -305,6 +305,51 @@ CREATE INDEX idx_orchestrator_active_operation_anomalies_operation
     ON orchestrator_active_operation_anomalies(operation_id, generation);
 "#;
 
+const API_BINDING_SCHEMA: &str = r#"
+CREATE TABLE orchestrator_api_bindings (
+    binding_id TEXT PRIMARY KEY,
+    consumer_deployment_id TEXT NOT NULL,
+    provider_deployment_id TEXT NOT NULL DEFAULT '',
+    topology_id TEXT NOT NULL DEFAULT '',
+    topology_revision_id TEXT NOT NULL DEFAULT '',
+    api_id TEXT NOT NULL,
+    binding_state TEXT NOT NULL CHECK (binding_state IN ('PENDING', 'RESOLVED', 'ACTIVE', 'UNBOUND', 'REVOKED', 'ERROR')),
+    payload TEXT NOT NULL CHECK (json_valid(payload)),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (consumer_deployment_id, api_id, binding_id)
+);
+CREATE INDEX idx_orchestrator_api_bindings_consumer
+    ON orchestrator_api_bindings(consumer_deployment_id, binding_id);
+CREATE INDEX idx_orchestrator_api_bindings_provider
+    ON orchestrator_api_bindings(provider_deployment_id, binding_id)
+    WHERE provider_deployment_id <> '';
+CREATE INDEX idx_orchestrator_api_bindings_topology
+    ON orchestrator_api_bindings(topology_id, topology_revision_id, binding_id)
+    WHERE topology_id <> '';
+"#;
+
+const NODE_RUNTIME_FACTS_SCHEMA: &str = r#"
+CREATE TABLE orchestrator_node_runtime_facts (
+    node_id TEXT PRIMARY KEY,
+    observed_at_ms INTEGER NOT NULL CHECK (observed_at_ms >= 0),
+    received_at_ms INTEGER NOT NULL CHECK (received_at_ms >= 0),
+    payload TEXT NOT NULL CHECK (json_valid(payload))
+);
+CREATE INDEX idx_orchestrator_node_runtime_facts_received
+    ON orchestrator_node_runtime_facts(received_at_ms, node_id);
+"#;
+
+const API_BINDING_REQUIREMENT_SCHEMA: &str = r#"
+ALTER TABLE orchestrator_api_bindings
+    ADD COLUMN requirement_name TEXT NOT NULL DEFAULT '';
+UPDATE orchestrator_api_bindings
+SET requirement_name = json_extract(payload, '$.requirement_name')
+WHERE requirement_name = '';
+CREATE UNIQUE INDEX idx_orchestrator_api_bindings_consumer_requirement
+    ON orchestrator_api_bindings(consumer_deployment_id, requirement_name);
+"#;
+
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -351,6 +396,21 @@ const MIGRATIONS: &[Migration] = &[
         name: "control-plane-anomaly-and-lease-evidence",
         sql: CONTROL_PLANE_EVIDENCE_SCHEMA,
     },
+    Migration {
+        version: 10,
+        name: "durable-api-bindings",
+        sql: API_BINDING_SCHEMA,
+    },
+    Migration {
+        version: 11,
+        name: "node-runtime-facts",
+        sql: NODE_RUNTIME_FACTS_SCHEMA,
+    },
+    Migration {
+        version: 12,
+        name: "api-binding-consumer-requirement-identity",
+        sql: API_BINDING_REQUIREMENT_SCHEMA,
+    },
 ];
 
 const REQUIRED_TABLES: &[&str] = &[
@@ -374,11 +434,18 @@ const REQUIRED_TABLES: &[&str] = &[
     "orchestrator_active_expired_lease_anomalies",
     "orchestrator_active_operation_anomalies",
     "orchestrator_job_status_counts",
+    "orchestrator_api_bindings",
+    "orchestrator_node_runtime_facts",
 ];
 
 const REQUIRED_INDEXES: &[&str] = &[
     "idx_orchestrator_jobs_lease_recovery",
     "idx_orchestrator_active_operation_anomalies_operation",
+    "idx_orchestrator_api_bindings_consumer",
+    "idx_orchestrator_api_bindings_provider",
+    "idx_orchestrator_api_bindings_topology",
+    "idx_orchestrator_node_runtime_facts_received",
+    "idx_orchestrator_api_bindings_consumer_requirement",
 ];
 
 const REQUIRED_TRIGGERS: &[&str] = &[

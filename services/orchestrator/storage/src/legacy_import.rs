@@ -7,7 +7,9 @@ use orchestrator_legacy::{
     Endpoint, HostService, NodeRecord, TopologyEndpointSpec, TopologyLinkSpec, TopologyRevision,
     TopologySnapshot, TopologySpec, TopologyStatus, parse_endpoint_id,
 };
-use orchestrator_runtime::{RuntimeDesiredState, RuntimeInstance, RuntimeObservedState};
+use orchestrator_runtime::{
+    RuntimeContract, RuntimeDesiredState, RuntimeInstance, RuntimeObservedState,
+};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -563,6 +565,7 @@ fn legacy_topology_revision(snapshot: &TopologySnapshot) -> Result<TopologyRevis
             config_ref: link.config_ref.clone(),
             secret_ref: link.secret_ref.clone(),
             policy: link.policy.clone(),
+            api_bindings: Vec::new(),
         })
         .collect();
     let spec = TopologySpec::new(
@@ -632,12 +635,23 @@ fn legacy_runtime_instance(
             // an External/Unknown projection and prevents it being managed as
             // a Docker instance until the operator imports a signed v1 release.
             artifact_digest: String::new(),
+            runtime_contract: RuntimeContract::standard_v1(),
+            runtime_policy_sha256: String::new(),
+            effective_runtime_sha256: String::new(),
+            runtime_attested: false,
             desired_state: RuntimeDesiredState::Running,
             observed_state: RuntimeObservedState::Unknown,
             health: "UNKNOWN".to_string(),
         },
         management_mode: RuntimeManagementMode::External,
         endpoint: endpoint.endpoint.clone(),
+        external_probe_protocol: String::new(),
+        external_probe_health_path: String::new(),
+        last_observed_at_ms: 0,
+        drift_reason: "legacy runtime has no authenticated Agent observation".to_string(),
+        credential_expires_at_ms: 0,
+        credential_last_success_at_ms: 0,
+        credential_last_error: String::new(),
         updated_at: nonempty(
             &host_service.updated_at,
             nonempty(&host_service.created_at, IMPORT_TIMESTAMP),

@@ -1,7 +1,7 @@
-schema_version: 1
+schema_version: 2
 service_name: judge-api
 version: 0.1.0
-description: Release contract for judge-api.
+description: Judge control and submission API using Service Contract v2.
 service_type: backend-api
 source:
   kind: local
@@ -12,10 +12,17 @@ runtime:
   image: ""
   binary: ""
   system_service: ""
+  env:
+    OJOS_ENVIRONMENT: production
+    DATABASE_URL: "${secret.database-url}"
+    OJOS_SERVICE_CONTEXT_FILE: /run/ojos/service/context.json
+    OJOS_EVENT_CONTEXT_FILE: /run/ojos/service/events.json
+    OJOS_WORKLOAD_PUBLIC_KEY_FILE: /opt/ojos-config/workload-public.pem
+    OJOS_ALLOW_LEGACY_WORKER_TOKEN: "false"
 frontend:
   enabled: true
-  route_prefix: "/submissions"
-  remote_entry: "/assets/judge-api/remoteEntry.js"
+  route_prefix: /submissions
+  remote_entry: /assets/judge-api/remoteEntry.js
   menu_items: []
 backend:
   protocol: http
@@ -28,11 +35,24 @@ migrations:
   - version: "000002_worker_link"
     path: services/judge-api/migrations/000002_worker_link.up.sql
     checksum: sha256:26690efb3ceb2639768d3bb395259442926d7f817157f446376112eabdf30910
+  - version: "000003_problem_meta_cache"
+    path: services/judge-api/migrations/000003_problem_meta_cache.up.sql
+    checksum: sha256:c673b69d03f9b3e1d20fb100580bbccacf43cbf2bea92b591bdc63464c45e916
+  - version: "000004_problem_projection_events"
+    path: services/judge-api/migrations/000004_problem_projection_events.up.sql
+    checksum: sha256:d8ec889d74dcb7f2663261de872b40cd7434d420f444ba00f2992943955cf432
+  - version: "000005_judge_result_outbox"
+    path: services/judge-api/migrations/000005_judge_result_outbox.up.sql
+    checksum: sha256:5cb01648a120b50145955c03a45294bc0527f85689e46a6e9abeddea745ace54
+  - version: "000006_task_retry_schedule"
+    path: services/judge-api/migrations/000006_task_retry_schedule.up.sql
+    checksum: sha256:bceaf9d22e8ae90b4e535118ee05c74efd843fc61f44a1adb00f518ac2fc807e
 permissions:
   - judge.submit
   - judge.admin
   - submission.view.own
   - submission.view.all
+  - judge.worker
   - judge.worker.status
 routes:
   - path: /api/judge/**
@@ -40,77 +60,109 @@ routes:
     target_type: endpoint-group
     target: judge-api[*]
     permission: submission.view.own
-  - path: /api/judge/worker/**
-    method: ANY
-    target_type: endpoint-group
-    target: judge-api[*]
-    permission: public
-required_apis:
-  - storage.object.get
-  - storage.object.head
-  - storage.object.put
-service_identity:
-  service_name: judge-api
-  allowed_apis:
-    - storage.object.get
-    - storage.object.head
-    - storage.object.put
-apis:
-  - api_id: judge.submission.create
-    protocol: http
-    port_name: http
-    path_prefix: /api/judge/submissions
-    methods: [POST]
-    visibility: descendants
-    auth_mode: user
-    permission: judge.submit
-    version: v1
-    stability: stable
-  - api_id: judge.submission.result
-    protocol: http
-    port_name: http
-    path_prefix: /api/judge/submissions
-    methods: [GET]
-    visibility: descendants
-    auth_mode: user
-    permission: submission.view.own
-    version: v1
-    stability: stable
-  - api_id: judge.worker.status
-    protocol: http
-    port_name: http
-    path_prefix: /api/judge/admin/workers
-    methods: [GET]
-    visibility: descendants
-    auth_mode: user
-    permission: judge.worker.status
-    version: v1
-    stability: stable
-  - api_id: judge.queue.status
-    protocol: http
-    port_name: http
-    path_prefix: /api/judge/admin/queue
-    methods: [GET]
-    visibility: descendants
-    auth_mode: user
-    permission: judge.admin
-    version: v1
-    stability: stable
+provides:
+  apis:
+    - id: judge.submission.create
+      version: 1.0.0
+      protocol: http
+      path: /api/judge/submissions
+      methods: [POST]
+      visibility: descendants
+      auth: user
+      permission: judge.submit
+      stability: stable
+    - id: judge.submission.result
+      version: 1.0.0
+      protocol: http
+      path: /api/judge/submissions
+      methods: [GET]
+      visibility: descendants
+      auth: user
+      permission: submission.view.own
+      stability: stable
+    - id: judge.worker.status
+      version: 1.0.0
+      protocol: http
+      path: /api/judge/admin/workers
+      methods: [GET]
+      visibility: descendants
+      auth: user
+      permission: judge.worker.status
+      stability: stable
+    - id: judge.queue.status
+      version: 1.0.0
+      protocol: http
+      path: /api/judge/admin/queue
+      methods: [GET]
+      visibility: descendants
+      auth: user
+      permission: judge.admin
+      stability: stable
+    - id: judge.worker.control
+      version: 1.0.0
+      protocol: http
+      path: /api/judge/worker
+      methods: [GET, POST]
+      visibility: explicit
+      auth: workload
+      permission: judge.worker
+      stability: stable
+      timeout_ms: 35000
+requires:
+  apis:
+    - name: permission_check
+      id: auth.user.permission.check
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 5000
+    - name: storage_get
+      id: storage.object.get
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 300000
+    - name: storage_put
+      id: storage.object.put
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 300000
+    - name: storage_head
+      id: storage.object.head
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 300000
+events:
+  publishes: []
+  subscribes:
+    - type: io.ojos.problem.snapshot.v1
+      version: 1.0.0
+      consumer_group: judge-api
+    - type: io.ojos.problem.deleted.v1
+      version: 1.0.0
+      consumer_group: judge-api
+runtime_contract:
+  id: standard-container-v1
+  sha256: sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f
+  binding_directory: /run/ojos/service
+  identity_mode: workload
+  credential_delivery: file
+  restart_on_change: false
 redis:
   - name: redis
     kind: stream
-    usage: judge task queue
+    usage: judge task queue and problem integration events
 storage:
   - object_type: submission-code
     bucket: submissions
 dependencies:
   - postgresql
   - redis
-  - problem-service
 config_schema: {}
 secrets:
-  - worker-token
+  - database-url
 observability:
   metrics: true
   jaeger: true
-

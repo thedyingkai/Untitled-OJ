@@ -1,7 +1,13 @@
-use crate::durable::{DurableError, DurableStore, LinkProbeBindingError};
+use crate::durable::{DurableError, DurableStore, LinkProbeBindingError, TopologyApiBindingError};
 use crate::http::{ApiRequest, ApiResponse, path_segments, query_value};
+use crate::store_v1_api::{
+    InstallTopologySelection, StoreTopologyApplyPlan, align_group_binding_generations,
+    binding_context_transition_plans, propose_generation_sibling_topology, selected_topology_spec,
+};
 use crate::topology_provider::TopologyProviderSaga;
-use orchestrator_control_plane::{JobKind, OperationCoordinator, PlanOperation, PlannedJob};
+use orchestrator_control_plane::{
+    JobKind, OperationCoordinator, PlanOperation, PlannedJob, PlannedJobCondition,
+};
 use orchestrator_legacy::{
     TopologyEndpointSpec, TopologyLinkSpec, TopologySpec, diff_topology_revisions,
 };
@@ -9,6 +15,7 @@ use orchestrator_storage::TopologyApplyOutcome;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Deserialize)]
@@ -24,6 +31,22 @@ struct DiffRequest {
 #[serde(deny_unknown_fields)]
 struct RollbackRequest {
     revision_id: String,
+    #[serde(default)]
+    topologies: Vec<ApplyTopologyCas>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyRequest {
+    #[serde(default)]
+    topologies: Vec<ApplyTopologyCas>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyTopologyCas {
+    topology_id: String,
+    topology_etag: String,
 }
 
 pub(crate) fn route(
@@ -441,6 +464,11 @@ fn route_with_store(
             require_provider(provider)?;
             let topology_id = topology_action.trim_end_matches(":apply");
             let revision_id = required_if_match(request)?;
+            let apply_request = if request.body.trim().is_empty() {
+                ApplyRequest::default()
+            } else {
+                serde_json::from_str::<ApplyRequest>(&request.body).map_err(json_error)?
+            };
             enqueue_apply(
                 store,
                 topology_id,
@@ -448,6 +476,7 @@ fn route_with_store(
                 "topology.apply",
                 request,
                 request_id,
+                apply_request,
             )
         }
         ("POST", ["api", "v1", "topologies", topology_action])
@@ -482,6 +511,9 @@ fn route_with_store(
                 "topology.rollback",
                 request,
                 request_id,
+                ApplyRequest {
+                    topologies: body.topologies,
+                },
             )
         }
         _ => Err(TopologyApiError {
@@ -577,6 +609,7 @@ fn enqueue_apply(
     action: &str,
     request: &ApiRequest,
     request_id: &str,
+    apply_request: ApplyRequest,
 ) -> Result<ApiResponse, TopologyApiError> {
     let heads = store
         .topology_heads(topology_id)
@@ -606,6 +639,200 @@ fn enqueue_apply(
         format!("{action}\0{topology_id}\0{revision_id}\0{idempotency_key}").as_bytes(),
     );
     let operation_id = format!("op-topology-{digest:x}");
+    let previous_bindings = store
+        .api_bindings_for_topology(topology_id)
+        .map_err(storage_error)?;
+    let staged_bindings = store
+        .resolve_topology_api_bindings(revision.spec(), revision_id, &operation_id)
+        .map_err(|error| TopologyApiError {
+            status: 422,
+            code: "TOPOLOGY_API_BINDING_INVALID",
+            detail: error.to_string(),
+        })?;
+    let affected_consumers = previous_bindings
+        .iter()
+        .chain(staged_bindings.iter())
+        .map(|binding| binding.consumer_deployment_id.clone())
+        .filter(|deployment_id| !deployment_id.is_empty())
+        .collect::<BTreeSet<_>>();
+    let mut sibling_topology_ids = BTreeSet::new();
+    for consumer in &affected_consumers {
+        for binding in store
+            .api_bindings_for_deployment(consumer)
+            .map_err(storage_error)?
+            .into_iter()
+            .filter(|binding| {
+                binding.desired_state == "ACTIVE"
+                    && binding.state == orchestrator_storage::ApiBindingState::Active
+                    && binding.topology_id != topology_id
+            })
+        {
+            sibling_topology_ids.insert(binding.topology_id);
+        }
+    }
+    let mut sibling_selections = BTreeMap::new();
+    for selection in apply_request.topologies {
+        let topology_id = selection.topology_id.trim();
+        let revision_id = strong_etag_value(&selection.topology_etag)?;
+        if topology_id.is_empty()
+            || sibling_selections
+                .insert(
+                    topology_id.to_string(),
+                    InstallTopologySelection {
+                        topology_id: topology_id.to_string(),
+                        revision_id,
+                    },
+                )
+                .is_some()
+        {
+            return Err(invalid(
+                "topologies must contain unique non-empty topology_id values",
+            ));
+        }
+    }
+    let supplied_siblings = sibling_selections.keys().cloned().collect::<BTreeSet<_>>();
+    if supplied_siblings != sibling_topology_ids {
+        return Err(TopologyApiError {
+            status: 409,
+            code: "TOPOLOGY_SIBLING_CAS_REQUIRED",
+            detail: format!(
+                "deployment-wide credential generation requires exact sibling topology CAS set {:?}; supplied {:?}",
+                sibling_topology_ids, supplied_siblings
+            ),
+        });
+    }
+    // Validate every sibling head before creating any generation-only
+    // immutable revision, preventing a late stale CAS from leaving drafts.
+    for selection in sibling_selections.values() {
+        selected_topology_spec(store, selection).map_err(store_topology_error)?;
+    }
+    let mut topology_applies = vec![StoreTopologyApplyPlan {
+        topology_id: topology_id.to_string(),
+        revision_id: revision_id.to_string(),
+        staged_bindings,
+        previous_bindings,
+    }];
+    for selection in sibling_selections.values() {
+        topology_applies.push(
+            propose_generation_sibling_topology(store, selection, &operation_id)
+                .map_err(store_topology_error)?,
+        );
+    }
+    topology_applies.sort_by(|left, right| left.topology_id.cmp(&right.topology_id));
+    align_group_binding_generations(store, &mut topology_applies, &affected_consumers)
+        .map_err(store_topology_error)?;
+    let context_transitions =
+        binding_context_transition_plans(store, &topology_applies, &affected_consumers)
+            .map_err(store_topology_error)?;
+    let prepare_steps = topology_applies
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("topology-binding-prepare-{index}"))
+        .collect::<Vec<_>>();
+    let finalize_step = "topology-binding-finalize-group".to_string();
+    let abort_steps = topology_applies
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("topology-binding-abort-{index}"))
+        .collect::<Vec<_>>();
+    let context_steps = context_transitions
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("binding-context-apply-{index}"))
+        .collect::<Vec<_>>();
+    let health_steps = context_transitions
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("binding-context-health-{index}"))
+        .collect::<Vec<_>>();
+    let mut jobs = Vec::new();
+    for (index, topology) in topology_applies.iter().enumerate() {
+        jobs.push(PlannedJob {
+            step_id: prepare_steps[index].clone(),
+            node_id: "control-plane".to_string(),
+            kind: JobKind::TopologyApply,
+            depends_on: vec![],
+            condition: PlannedJobCondition::OnSuccess,
+            payload: json!({
+                "topology_id": topology.topology_id,
+                "revision_id": topology.revision_id,
+                "phase": "PREPARE",
+                "bindings": topology.staged_bindings,
+                "previous_bindings": topology.previous_bindings,
+            }),
+            max_attempts: 1,
+        });
+    }
+    for (index, transition) in context_transitions.iter().enumerate() {
+        jobs.push(PlannedJob {
+            step_id: context_steps[index].clone(),
+            node_id: transition.node_id.clone(),
+            kind: JobKind::BindingContextApply,
+            depends_on: prepare_steps.clone(),
+            condition: PlannedJobCondition::OnSuccess,
+            payload: serde_json::to_value(&transition.forward).map_err(json_error_value)?,
+            max_attempts: 1,
+        });
+        jobs.push(PlannedJob {
+            step_id: health_steps[index].clone(),
+            node_id: transition.node_id.clone(),
+            kind: JobKind::Health,
+            depends_on: vec![context_steps[index].clone()],
+            condition: PlannedJobCondition::OnSuccess,
+            payload: json!({"container_id": transition.container_id}),
+            max_attempts: 3,
+        });
+    }
+    let mut finalize_dependencies = prepare_steps.clone();
+    finalize_dependencies.extend(health_steps.iter().cloned());
+    jobs.push(PlannedJob {
+        step_id: finalize_step.clone(),
+        node_id: "control-plane".to_string(),
+        kind: JobKind::TopologyApply,
+        depends_on: finalize_dependencies.clone(),
+        condition: PlannedJobCondition::OnSuccess,
+        payload: json!({
+            "phase": "FINALIZE_GROUP",
+            "group": topology_applies.iter().map(|topology| json!({
+                "topology_id": topology.topology_id,
+                "revision_id": topology.revision_id,
+            })).collect::<Vec<_>>(),
+        }),
+        max_attempts: 1,
+    });
+    let mut abort_dependencies = finalize_dependencies;
+    abort_dependencies.extend(context_steps.iter().cloned());
+    abort_dependencies.push(finalize_step);
+    for (index, topology) in topology_applies.iter().enumerate() {
+        jobs.push(PlannedJob {
+            step_id: abort_steps[index].clone(),
+            node_id: "control-plane".to_string(),
+            kind: JobKind::TopologyApply,
+            depends_on: abort_dependencies.clone(),
+            condition: PlannedJobCondition::OnFailure,
+            payload: json!({
+                "topology_id": topology.topology_id,
+                "revision_id": topology.revision_id,
+                "phase": "ABORT",
+                "bindings": topology.staged_bindings,
+                "previous_bindings": topology.previous_bindings,
+            }),
+            max_attempts: 1,
+        });
+    }
+    for (index, transition) in context_transitions.iter().enumerate() {
+        let mut depends_on = abort_steps.clone();
+        depends_on.push(context_steps[index].clone());
+        jobs.push(PlannedJob {
+            step_id: format!("binding-context-rollback-{index}"),
+            node_id: transition.node_id.clone(),
+            kind: JobKind::BindingContextApply,
+            depends_on,
+            condition: PlannedJobCondition::OnSuccess,
+            payload: serde_json::to_value(&transition.rollback).map_err(json_error_value)?,
+            max_attempts: 1,
+        });
+    }
     let plan = PlanOperation {
         operation_id: operation_id.clone(),
         action: action.to_string(),
@@ -616,18 +843,7 @@ fn enqueue_apply(
             "revision_id": revision_id,
             "auto_enqueue": true,
         }),
-        jobs: vec![PlannedJob {
-            step_id: "provider-apply".to_string(),
-            node_id: "control-plane".to_string(),
-            kind: JobKind::TopologyApply,
-            depends_on: vec![],
-            condition: Default::default(),
-            payload: json!({
-                "topology_id": topology_id,
-                "revision_id": revision_id,
-            }),
-            max_attempts: 1,
-        }],
+        jobs,
     };
     let mut operations = store.operation_store();
     let mut jobs = store.job_store();
@@ -636,19 +852,39 @@ fn enqueue_apply(
     coordinator
         .confirm(&operation_id, now_ms())
         .map_err(operation_error)?;
-    store
-        .begin_topology_apply(topology_id, revision_id, &operation_id, &now_marker())
-        .map_err(storage_error)?;
+    let mut begun: Vec<&StoreTopologyApplyPlan> = Vec::new();
+    for topology in &topology_applies {
+        if let Err(error) = store.begin_topology_apply(
+            &topology.topology_id,
+            &topology.revision_id,
+            &operation_id,
+            &now_marker(),
+        ) {
+            for prior in begun.iter().rev() {
+                let _ = store.finish_topology_apply(
+                    &prior.topology_id,
+                    &prior.revision_id,
+                    &operation_id,
+                    TopologyApplyOutcome::Failed,
+                    &now_marker(),
+                );
+            }
+            return Err(storage_error(error));
+        }
+        begun.push(topology);
+    }
     let operation = match coordinator.enqueue(&operation_id, now_ms()) {
         Ok(operation) => operation,
         Err(error) => {
-            let _ = store.finish_topology_apply(
-                topology_id,
-                revision_id,
-                &operation_id,
-                TopologyApplyOutcome::Failed,
-                &now_marker(),
-            );
+            for topology in begun.iter().rev() {
+                let _ = store.finish_topology_apply(
+                    &topology.topology_id,
+                    &topology.revision_id,
+                    &operation_id,
+                    TopologyApplyOutcome::Failed,
+                    &now_marker(),
+                );
+            }
             return Err(operation_error(error));
         }
     };
@@ -694,6 +930,24 @@ fn validate_registered_services(
             code: "TOPOLOGY_STORAGE_ERROR",
             detail,
         }),
+    }?;
+    match store.validate_topology_api_bindings(spec) {
+        Ok(()) => Ok(()),
+        Err(TopologyApiBindingError::Binding(detail)) => Err(TopologyApiError {
+            status: 422,
+            code: "TOPOLOGY_API_BINDING_INVALID",
+            detail,
+        }),
+        Err(TopologyApiBindingError::Contract(detail)) => Err(TopologyApiError {
+            status: 422,
+            code: "TOPOLOGY_SERVICE_CONTRACT_INVALID",
+            detail,
+        }),
+        Err(TopologyApiBindingError::Storage(detail)) => Err(TopologyApiError {
+            status: 500,
+            code: "TOPOLOGY_STORAGE_ERROR",
+            detail,
+        }),
     }
 }
 
@@ -722,6 +976,40 @@ fn required_if_match(request: &ApiRequest) -> Result<String, TopologyApiError> {
         return Err(invalid("If-Match revision must not be empty"));
     }
     Ok(value.to_string())
+}
+
+fn strong_etag_value(value: &str) -> Result<String, TopologyApiError> {
+    let value = value.trim();
+    let Some(value) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return Err(TopologyApiError {
+            status: 428,
+            code: "IF_MATCH_REQUIRED",
+            detail: "sibling topology_etag must be a strong quoted revision ETag".to_string(),
+        });
+    };
+    if value.trim().is_empty() {
+        return Err(invalid("sibling topology_etag revision must not be empty"));
+    }
+    Ok(value.to_string())
+}
+
+fn store_topology_error(error: crate::store_v1_api::StoreApiError) -> TopologyApiError {
+    TopologyApiError {
+        status: error.status,
+        code: error.code,
+        detail: error.detail,
+    }
+}
+
+fn json_error_value(error: serde_json::Error) -> TopologyApiError {
+    TopologyApiError {
+        status: 500,
+        code: "TOPOLOGY_PLAN_SERIALIZATION_FAILED",
+        detail: error.to_string(),
+    }
 }
 
 fn actor(request: &ApiRequest) -> String {
@@ -915,6 +1203,7 @@ mod tests {
                 config_ref: String::new(),
                 secret_ref: String::new(),
                 policy: json!({}),
+                api_bindings: Vec::new(),
             }],
         )
         .unwrap()
@@ -1061,12 +1350,23 @@ mod tests {
                 release_version: "2.0.0".to_string(),
                 container_id: "container-gateway-v2".to_string(),
                 artifact_digest: format!("sha256:{}", "b".repeat(64)),
+                runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
+                runtime_policy_sha256: String::new(),
+                effective_runtime_sha256: String::new(),
+                runtime_attested: false,
                 desired_state: RuntimeDesiredState::Running,
                 observed_state: RuntimeObservedState::Running,
                 health: "HEALTHY".to_string(),
             },
             management_mode: RuntimeManagementMode::Managed,
             endpoint: "127.0.0.1:8080:gateway".to_string(),
+            external_probe_protocol: String::new(),
+            external_probe_health_path: String::new(),
+            last_observed_at_ms: 0,
+            drift_reason: String::new(),
+            credential_expires_at_ms: 0,
+            credential_last_success_at_ms: 0,
+            credential_last_error: String::new(),
             updated_at: "unix-ms:1".to_string(),
         };
         durable.put_runtime_instance(&source).unwrap();

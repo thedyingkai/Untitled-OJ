@@ -327,7 +327,7 @@ pub fn load_operation_workbench_context_from_store<S: OrchestratorStore>(
     let releases = store
         .list_service_releases()?
         .into_iter()
-        .map(|record| serde_json::from_value(record.manifest).map_err(OrchestratorError::Json))
+        .map(|record| crate::service_io::legacy_release_manifest_from_json_value(record.manifest))
         .collect::<Result<Vec<ServiceReleaseManifest>>>()?;
     let templates = Vec::new();
     let endpoints = store.list_endpoints()?;

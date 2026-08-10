@@ -11,18 +11,24 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use orchestrator_legacy::V1Role;
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::Read;
+use std::fs::File;
+use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use ureq::Agent;
 use ureq::http::Uri;
+use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
+use x509_parser::parse_x509_certificate;
 
 const DEFAULT_ROLE_CLAIM: &str = "roles";
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_OIDC_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_JWKS_KEYS: usize = 128;
+const MAX_OIDC_CA_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_OIDC_CA_CERTIFICATES: usize = 128;
 
 #[derive(Debug, Error)]
 pub(crate) enum OidcConfigurationError {
@@ -30,6 +36,22 @@ pub(crate) enum OidcConfigurationError {
     Invalid(String),
     #[error("OIDC discovery failed: {0}")]
     Discovery(String),
+}
+
+#[derive(Clone)]
+struct OidcCaBundle {
+    source: PathBuf,
+    certificates: Vec<Certificate<'static>>,
+}
+
+impl std::fmt::Debug for OidcCaBundle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OidcCaBundle")
+            .field("source", &self.source)
+            .field("certificate_count", &self.certificates.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +65,7 @@ pub(crate) struct OidcConfig {
     cache_ttl: Duration,
     http_timeout: Duration,
     allow_insecure_loopback: bool,
+    ca_bundle: Option<OidcCaBundle>,
 }
 
 impl OidcConfig {
@@ -69,6 +92,7 @@ impl OidcConfig {
             1,
             30,
         )?;
+        let ca_bundle = oidc_ca_bundle_from_env()?;
         Self::new(
             issuer,
             audience,
@@ -77,6 +101,7 @@ impl OidcConfig {
             cache_ttl,
             http_timeout,
             false,
+            ca_bundle,
         )
     }
 
@@ -89,6 +114,7 @@ impl OidcConfig {
         cache_ttl: Duration,
         http_timeout: Duration,
         allow_insecure_loopback: bool,
+        ca_bundle: Option<OidcCaBundle>,
     ) -> Result<Self, OidcConfigurationError> {
         validate_url(&issuer, allow_insecure_loopback, "OIDC issuer")?;
         validate_claim_name(&role_claim)?;
@@ -121,6 +147,7 @@ impl OidcConfig {
             cache_ttl,
             http_timeout,
             allow_insecure_loopback,
+            ca_bundle,
         })
     }
 
@@ -138,6 +165,7 @@ impl OidcConfig {
             Duration::from_secs(3600),
             Duration::from_secs(2),
             true,
+            None,
         )
         .expect("test OIDC config")
     }
@@ -191,12 +219,23 @@ impl OidcVerifier {
     /// PostgreSQL-backed production listener starts, so bad identity
     /// configuration cannot become a partially-ready daemon.
     pub(crate) fn discover(config: OidcConfig) -> Result<Self, OidcConfigurationError> {
-        let agent: Agent = Agent::config_builder()
+        let mut agent_config = Agent::config_builder()
             .timeout_global(Some(config.http_timeout))
             .http_status_as_error(false)
-            .max_redirects(0)
-            .build()
-            .into();
+            .max_redirects(0);
+        if let Some(ca_bundle) = &config.ca_bundle {
+            // Supplying a private issuer CA is an explicit trust decision. Use
+            // exactly that bundle as the trust store while keeping rustls' normal
+            // certificate-chain, validity, hostname and SNI verification enabled.
+            let tls = TlsConfig::builder()
+                .provider(TlsProvider::Rustls)
+                .root_certs(RootCerts::new_with_certs(&ca_bundle.certificates))
+                .use_sni(true)
+                .disable_verification(false)
+                .build();
+            agent_config = agent_config.tls_config(tls);
+        }
+        let agent: Agent = agent_config.build().into();
         let discovery_url = format!(
             "{}/.well-known/openid-configuration",
             config.issuer.trim_end_matches('/')
@@ -761,6 +800,130 @@ fn constant_time_str_eq(left: &str, right: &str) -> bool {
         == 0
 }
 
+fn oidc_ca_bundle_from_env() -> Result<Option<OidcCaBundle>, OidcConfigurationError> {
+    let value = match std::env::var("ORCHESTRATOR_OIDC_CA_CERT") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(OidcConfigurationError::Invalid(
+                "ORCHESTRATOR_OIDC_CA_CERT must be valid Unicode".to_string(),
+            ));
+        }
+    };
+    if value.is_empty() || value.trim() != value {
+        return Err(OidcConfigurationError::Invalid(
+            "ORCHESTRATOR_OIDC_CA_CERT must be a non-empty absolute path with no surrounding whitespace"
+                .to_string(),
+        ));
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(OidcConfigurationError::Invalid(
+            "ORCHESTRATOR_OIDC_CA_CERT must be an absolute path".to_string(),
+        ));
+    }
+    load_oidc_ca_bundle(&path).map(Some)
+}
+
+fn load_oidc_ca_bundle(path: &Path) -> Result<OidcCaBundle, OidcConfigurationError> {
+    let file = File::open(path).map_err(|error| {
+        OidcConfigurationError::Invalid(format!(
+            "read ORCHESTRATOR_OIDC_CA_CERT {} failed: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        OidcConfigurationError::Invalid(format!(
+            "inspect ORCHESTRATOR_OIDC_CA_CERT {} failed: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(OidcConfigurationError::Invalid(format!(
+            "ORCHESTRATOR_OIDC_CA_CERT {} is not a regular file",
+            path.display()
+        )));
+    }
+    if metadata.len() > MAX_OIDC_CA_BUNDLE_BYTES as u64 {
+        return Err(OidcConfigurationError::Invalid(format!(
+            "ORCHESTRATOR_OIDC_CA_CERT {} exceeds {MAX_OIDC_CA_BUNDLE_BYTES} bytes",
+            path.display()
+        )));
+    }
+
+    let mut bytes = Vec::new();
+    file.take(MAX_OIDC_CA_BUNDLE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            OidcConfigurationError::Invalid(format!(
+                "read ORCHESTRATOR_OIDC_CA_CERT {} failed: {error}",
+                path.display()
+            ))
+        })?;
+    if bytes.len() > MAX_OIDC_CA_BUNDLE_BYTES {
+        return Err(OidcConfigurationError::Invalid(format!(
+            "ORCHESTRATOR_OIDC_CA_CERT {} exceeds {MAX_OIDC_CA_BUNDLE_BYTES} bytes",
+            path.display()
+        )));
+    }
+
+    let mut reader = BufReader::new(bytes.as_slice());
+    let mut certificates = Vec::new();
+    let mut roots = rustls::RootCertStore::empty();
+    for (index, item) in rustls_pemfile::read_all(&mut reader).enumerate() {
+        let item = item.map_err(|error| {
+            OidcConfigurationError::Invalid(format!(
+                "ORCHESTRATOR_OIDC_CA_CERT {} contains invalid PEM: {error}",
+                path.display()
+            ))
+        })?;
+        let rustls_pemfile::Item::X509Certificate(der) = item else {
+            return Err(OidcConfigurationError::Invalid(format!(
+                "ORCHESTRATOR_OIDC_CA_CERT {} contains a non-certificate PEM item",
+                path.display()
+            )));
+        };
+        if index >= MAX_OIDC_CA_CERTIFICATES {
+            return Err(OidcConfigurationError::Invalid(format!(
+                "ORCHESTRATOR_OIDC_CA_CERT {} contains more than {MAX_OIDC_CA_CERTIFICATES} certificates",
+                path.display()
+            )));
+        }
+        let (remaining, parsed) = parse_x509_certificate(der.as_ref()).map_err(|_| {
+            OidcConfigurationError::Invalid(format!(
+                "ORCHESTRATOR_OIDC_CA_CERT {} contains invalid X.509 certificate {}",
+                path.display(),
+                index + 1
+            ))
+        })?;
+        if !remaining.is_empty() || !parsed.is_ca() {
+            return Err(OidcConfigurationError::Invalid(format!(
+                "ORCHESTRATOR_OIDC_CA_CERT {} certificate {} is not a valid CA certificate",
+                path.display(),
+                index + 1
+            )));
+        }
+        roots.add(der.clone()).map_err(|error| {
+            OidcConfigurationError::Invalid(format!(
+                "ORCHESTRATOR_OIDC_CA_CERT {} certificate {} is not a usable trust anchor: {error}",
+                path.display(),
+                index + 1
+            ))
+        })?;
+        certificates.push(Certificate::from_der(der.as_ref()).to_owned());
+    }
+    if certificates.is_empty() {
+        return Err(OidcConfigurationError::Invalid(format!(
+            "ORCHESTRATOR_OIDC_CA_CERT {} contains no CA certificates",
+            path.display()
+        )));
+    }
+    Ok(OidcCaBundle {
+        source: path.to_path_buf(),
+        certificates,
+    })
+}
+
 fn required_env(name: &str) -> Result<String, OidcConfigurationError> {
     optional_env(name).ok_or_else(|| {
         OidcConfigurationError::Invalid(format!("production PostgreSQL mode requires {name}"))
@@ -802,14 +965,21 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use jsonwebtoken::{EncodingKey, Header, encode};
     use rand::rngs::OsRng;
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+        KeyPair, KeyUsagePurpose,
+    };
     use rsa::RsaPrivateKey;
     use rsa::pkcs8::{EncodePrivateKey, LineEnding};
     use rsa::traits::PublicKeyParts;
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
     use serde_json::json;
     use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::net::{Shutdown, TcpListener};
+    use std::sync::Arc;
     use std::thread::{self, JoinHandle};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
 
     #[derive(Clone)]
     struct TestKey {
@@ -918,7 +1088,7 @@ mod tests {
         }
     }
 
-    fn read_request(stream: &mut TcpStream) -> (String, String) {
+    fn read_request(stream: &mut impl Read) -> (String, String) {
         let mut bytes = Vec::new();
         let mut chunk = [0_u8; 512];
         let header_end = loop {
@@ -946,6 +1116,94 @@ mod tests {
         let body = String::from_utf8(bytes[header_end..header_end + content_length].to_vec())
             .expect("OIDC request body is UTF-8");
         (headers, body)
+    }
+
+    fn test_oidc_tls_material() -> (String, Arc<rustls::ServerConfig>) {
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+        ];
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "OJOS OIDC test CA");
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_certificate = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+        let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        let server_key = KeyPair::generate().unwrap();
+        let server_certificate = server_params.signed_by(&server_key, &issuer).unwrap();
+        let private_key =
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key.serialize_der()));
+        let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![server_certificate.der().clone()], private_key)
+        .unwrap();
+        (ca_certificate.pem(), Arc::new(server_config))
+    }
+
+    struct MockHttpsOidc {
+        origin: String,
+        ca_pem: String,
+        handle: JoinHandle<()>,
+    }
+
+    impl MockHttpsOidc {
+        fn spawn(key: TestKey) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTPS OIDC server");
+            let origin = format!(
+                "https://localhost:{}",
+                listener.local_addr().unwrap().port()
+            );
+            let responses = vec![
+                ("/.well-known/openid-configuration", discovery(&origin)),
+                ("/jwks", jwks(&[&key])),
+            ];
+            let (ca_pem, server_config) = test_oidc_tls_material();
+            let handle = thread::spawn(move || {
+                for (expected_path, body) in responses {
+                    let (tcp, _) = listener.accept().expect("accept HTTPS OIDC request");
+                    tcp.set_read_timeout(Some(Duration::from_secs(3)))
+                        .expect("set HTTPS OIDC timeout");
+                    let connection = rustls::ServerConnection::new(server_config.clone())
+                        .expect("create HTTPS OIDC connection");
+                    let mut stream = rustls::StreamOwned::new(connection, tcp);
+                    let (request, _) = read_request(&mut stream);
+                    let request_line = request.lines().next().unwrap_or_default();
+                    assert!(
+                        request_line.starts_with(&format!("GET {expected_path} HTTP/1.1")),
+                        "unexpected HTTPS OIDC request: {request_line}"
+                    );
+                    let body = serde_json::to_vec(&body).expect("encode HTTPS OIDC response");
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .expect("write HTTPS OIDC headers");
+                    stream.write_all(&body).expect("write HTTPS OIDC body");
+                    stream.flush().expect("flush HTTPS OIDC response");
+                }
+            });
+            Self {
+                origin,
+                ca_pem,
+                handle,
+            }
+        }
+
+        fn finish(self) {
+            self.handle.join().expect("join HTTPS OIDC server");
+        }
     }
 
     fn discovery(origin: &str) -> Value {
@@ -1333,6 +1591,7 @@ mod tests {
         let mut env = TestEnv::lock();
         env.remove("ORCHESTRATOR_OIDC_ISSUER");
         env.remove("ORCHESTRATOR_OIDC_AUDIENCE");
+        env.remove("ORCHESTRATOR_OIDC_CA_CERT");
         let result = OidcConfig::from_env();
         assert!(
             result
@@ -1349,5 +1608,96 @@ mod tests {
                 .to_string()
                 .contains("must use HTTPS")
         );
+    }
+
+    #[test]
+    fn explicit_oidc_ca_bundle_enables_verified_private_https_discovery() {
+        let key = TestKey::generate("private-ca-key");
+        let server = MockHttpsOidc::spawn(key);
+        let directory = tempdir().unwrap();
+        let ca_path = directory.path().join("oidc-ca.pem");
+        std::fs::write(&ca_path, &server.ca_pem).unwrap();
+
+        let mut env = TestEnv::lock();
+        env.set("ORCHESTRATOR_OIDC_ISSUER", &server.origin);
+        env.set("ORCHESTRATOR_OIDC_AUDIENCE", "orchestrator-api");
+        env.set(
+            "ORCHESTRATOR_OIDC_CA_CERT",
+            ca_path.to_str().expect("temporary path is Unicode"),
+        );
+        let config = OidcConfig::from_env().expect("load explicit OIDC CA bundle");
+        assert_eq!(
+            config
+                .ca_bundle
+                .as_ref()
+                .expect("explicit CA bundle")
+                .certificates
+                .len(),
+            1
+        );
+
+        let verifier = OidcVerifier::discover(config)
+            .expect("private HTTPS OIDC discovery succeeds with explicit CA");
+        let tls = verifier.agent.config().tls_config();
+        assert!(tls.use_sni());
+        assert!(!tls.disable_verification());
+        match tls.root_certs() {
+            RootCerts::Specific(certificates) => assert_eq!(certificates.len(), 1),
+            roots => panic!("expected explicit OIDC roots, received {roots:?}"),
+        }
+        server.finish();
+    }
+
+    #[test]
+    fn explicit_oidc_ca_bundle_configuration_fails_closed() {
+        let directory = tempdir().unwrap();
+        let missing = directory.path().join("missing-ca.pem");
+        let empty = directory.path().join("empty-ca.pem");
+        let malformed = directory.path().join("malformed-ca.pem");
+        let not_ca = directory.path().join("server.pem");
+        std::fs::write(&empty, b"").unwrap();
+        std::fs::write(
+            &malformed,
+            b"-----BEGIN CERTIFICATE-----\nnot-base64\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let server_key = KeyPair::generate().unwrap();
+        let server_certificate = CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&server_key)
+            .unwrap();
+        std::fs::write(&not_ca, server_certificate.pem()).unwrap();
+
+        let mut env = TestEnv::lock();
+        env.set(
+            "ORCHESTRATOR_OIDC_ISSUER",
+            "https://identity.example.invalid",
+        );
+        env.set("ORCHESTRATOR_OIDC_AUDIENCE", "orchestrator-api");
+
+        env.set("ORCHESTRATOR_OIDC_CA_CERT", "");
+        assert!(
+            OidcConfig::from_env()
+                .unwrap_err()
+                .to_string()
+                .contains("non-empty absolute path")
+        );
+
+        for (path, expected) in [
+            (&missing, "read ORCHESTRATOR_OIDC_CA_CERT"),
+            (&empty, "contains no CA certificates"),
+            (&malformed, "contains invalid PEM"),
+            (&not_ca, "is not a valid CA certificate"),
+        ] {
+            env.set(
+                "ORCHESTRATOR_OIDC_CA_CERT",
+                path.to_str().expect("temporary path is Unicode"),
+            );
+            let error = OidcConfig::from_env().unwrap_err().to_string();
+            assert!(
+                error.contains(expected),
+                "expected {expected:?} in {error:?}"
+            );
+        }
     }
 }

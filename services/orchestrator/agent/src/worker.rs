@@ -225,7 +225,7 @@ where
             });
         }
 
-        let outcome = {
+        let mut outcome = {
             let (cancel_sender, cancel_receiver) = watch::channel(false);
             let execution =
                 self.executor
@@ -334,6 +334,7 @@ where
                 }
             }
         };
+        attach_runtime_observation_watermark(&job.kind, &mut outcome);
         let completion = StoredCompletion {
             status: outcome.status,
             result: outcome.result,
@@ -413,6 +414,42 @@ where
             }
         }
         Ok(())
+    }
+}
+
+/// Stamps successful runtime lifecycle evidence with the Agent clock that is
+/// also used by `NodeRuntimeFactsV1::observed_at_ms`.  The control plane uses
+/// this causal watermark to distinguish a Docker inventory captured before a
+/// lifecycle result from a genuinely newer inventory that proves drift.
+///
+/// The value is persisted in the local completion ledger before publication,
+/// so a replay after an ambiguous HTTP outcome retains the exact same
+/// watermark and completion fingerprint.
+fn attach_runtime_observation_watermark(
+    kind: &orchestrator_control_plane::JobKind,
+    outcome: &mut ExecutionOutcome,
+) {
+    if outcome.status != CompletionStatus::Succeeded
+        || !matches!(
+            kind,
+            orchestrator_control_plane::JobKind::Install
+                | orchestrator_control_plane::JobKind::ReleasePipeline
+                | orchestrator_control_plane::JobKind::Upgrade
+                | orchestrator_control_plane::JobKind::Start
+                | orchestrator_control_plane::JobKind::Stop
+                | orchestrator_control_plane::JobKind::Restart
+                | orchestrator_control_plane::JobKind::Rollback
+                | orchestrator_control_plane::JobKind::Uninstall
+                | orchestrator_control_plane::JobKind::Health
+        )
+    {
+        return;
+    }
+    if let Some(result) = outcome.result.as_object_mut() {
+        result.insert(
+            "runtime_observed_at_ms".to_string(),
+            serde_json::json!(crate::now_ms()),
+        );
     }
 }
 
@@ -541,6 +578,10 @@ mod tests {
                 release_version: "1.0.0".to_string(),
                 container_id: container_id.to_string(),
                 artifact_digest: "digest".to_string(),
+                runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
+                runtime_policy_sha256: String::new(),
+                effective_runtime_sha256: String::new(),
+                runtime_attested: true,
                 desired_state: RuntimeDesiredState::Running,
                 observed_state: RuntimeObservedState::Running,
                 health: "HEALTHY".to_string(),
@@ -646,7 +687,54 @@ mod tests {
             PollOutcome::Completed { replayed: true, .. }
         ));
         assert_eq!(*runtime.starts.lock().unwrap(), 1);
-        assert_eq!(transport.completions.lock().unwrap().len(), 2);
+        let completions = transport.completions.lock().unwrap();
+        assert_eq!(completions.len(), 2);
+        let observed_at_ms = completions[0].result["runtime_observed_at_ms"]
+            .as_i64()
+            .expect("successful runtime completion carries its Agent-clock watermark");
+        assert!(observed_at_ms > 0);
+        assert_eq!(
+            completions[1].result["runtime_observed_at_ms"],
+            json!(observed_at_ms),
+            "a ledger replay must retain the original causal watermark"
+        );
+    }
+
+    #[test]
+    fn every_runtime_lifecycle_completion_gets_an_agent_clock_watermark() {
+        for kind in [
+            JobKind::Install,
+            JobKind::ReleasePipeline,
+            JobKind::Upgrade,
+            JobKind::Start,
+            JobKind::Stop,
+            JobKind::Restart,
+            JobKind::Rollback,
+            JobKind::Uninstall,
+            JobKind::Health,
+        ] {
+            let mut outcome = ExecutionOutcome {
+                status: CompletionStatus::Succeeded,
+                result: json!({}),
+                error_message: String::new(),
+                events: vec![],
+            };
+            attach_runtime_observation_watermark(&kind, &mut outcome);
+            assert!(
+                outcome.result["runtime_observed_at_ms"]
+                    .as_i64()
+                    .is_some_and(|value| value > 0),
+                "{kind:?} omitted its Agent-clock watermark"
+            );
+        }
+        let mut context = ExecutionOutcome {
+            status: CompletionStatus::Succeeded,
+            result: json!({}),
+            error_message: String::new(),
+            events: vec![],
+        };
+        attach_runtime_observation_watermark(&JobKind::BindingContextApply, &mut context);
+        assert!(context.result.get("runtime_observed_at_ms").is_none());
     }
 
     #[tokio::test]

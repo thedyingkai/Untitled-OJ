@@ -603,6 +603,7 @@ fn authorization_target(method: &str, path: &str) -> V1AuthorizationTarget {
 
         ("GET", ["api", "v1", "deployments"]) => "deployment.list",
         ("GET", ["api", "v1", "deployments", _, "health"]) => "deployment.health",
+        ("GET", ["api", "v1", "deployments", _, "bindings"]) => "deployment.get",
         ("GET", ["api", "v1", "deployments", _]) => "deployment.get",
         ("POST", ["api", "v1", "deployments", action]) if action.ends_with(":start") => {
             "deployment.start"

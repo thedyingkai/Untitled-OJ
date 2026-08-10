@@ -1,8 +1,10 @@
 use clap::{Args, Parser, Subcommand};
 use orchestrator_agent::{
     AgentLedger, AgentWorker, BuiltInReleasePipelineProvider, EnrollmentAttempt, EnrollmentClient,
-    HttpMtlsTransport, IdentityError, IdentityStore, JobExecutor, StoredNodeIdentity, WorkerConfig,
-    generate_certificate_request, validate_enrollment_bundle_fresh,
+    HttpMtlsTransport, IdentityError, IdentityStore, JobExecutor, LocalRuntimeContextProvider,
+    NodeRuntimeFactsPublisher, RuntimeContextProvider, StoredNodeIdentity, WorkerConfig,
+    WorkloadCredentialSupervisor, event_connection_urls_from_env, generate_certificate_request,
+    recover_pending_runtime_contexts, validate_enrollment_bundle_fresh,
 };
 use orchestrator_runtime::DockerEngineRuntime;
 use std::fs;
@@ -78,6 +80,18 @@ struct RunArgs {
     /// Strict JSON credential file used only for digest-pinned private registry pulls.
     #[arg(long = "registry-credentials")]
     registry_credentials: Option<PathBuf>,
+
+    /// Strict Agent-local JSON policy enabling closed runtime profiles. When
+    /// omitted, only standard-container-v1 is allowed.
+    #[arg(long = "runtime-policy")]
+    runtime_policy: Option<PathBuf>,
+
+    /// Enable the removed Node-side Auth/Gateway/API Registry providers for
+    /// the old local Compose workflow. This is rejected unless
+    /// OJOS_ENVIRONMENT=development; never use it on an enrolled production
+    /// Node.
+    #[arg(long = "legacy-release-providers", default_value_t = false)]
+    legacy_release_providers: bool,
 
     #[arg(long, default_value_t = 10_000)]
     heartbeat_ms: u64,
@@ -325,7 +339,7 @@ async fn run(arguments: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         transport.activate_certificate().await?;
         let renewal_transport = transport.clone();
         let artifact_fetcher = transport.artifact_fetcher(identity.node_id.clone())?;
-        let ledger = AgentLedger::open(&ledger_path)?;
+        let mut ledger = AgentLedger::open(&ledger_path)?;
         let runtime = DockerEngineRuntime::connect_local()?;
         let runtime = if let Some(path) = arguments.registry_credentials.as_deref() {
             runtime.with_registry_credentials_file(path)?
@@ -333,12 +347,102 @@ async fn run(arguments: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             runtime
         };
         runtime.ping().await?;
+        let runtime_facts = runtime.runtime_facts().await?;
+        let local_runtime_provider = if let Some(path) = arguments.runtime_policy.as_deref() {
+            LocalRuntimeContextProvider::from_json_file(path, runtime_facts)?
+        } else {
+            LocalRuntimeContextProvider::standard_only(
+                runtime_facts,
+                ledger_path.with_file_name("runtime-contexts"),
+            )
+        }
+        .with_event_connections(event_connection_urls_from_env()?);
+        let runtime_provider: std::sync::Arc<dyn RuntimeContextProvider> =
+            std::sync::Arc::new(local_runtime_provider);
+        recover_pending_runtime_contexts(&mut ledger, runtime_provider.as_ref(), &runtime).await?;
+        let credential_exchanger =
+            std::sync::Arc::new(transport.workload_credential_exchanger(identity.node_id.clone())?);
+        let credential_supervisor = std::sync::Arc::new(WorkloadCredentialSupervisor::new(
+            credential_exchanger,
+            std::sync::Arc::clone(&runtime_provider),
+        ));
+        credential_supervisor.recover_active(&ledger).await?;
+        let facts_publisher = transport.runtime_facts_publisher(identity.node_id.clone())?;
+        let mut initial_facts = runtime_provider.runtime_facts();
+        initial_facts.observed_at_ms = unix_ms();
+        initial_facts.report_id = format!("{}:{}", instance_id, initial_facts.observed_at_ms);
+        initial_facts.docker = runtime.runtime_facts().await?;
+        match runtime.managed_deployment_inventory(4_096).await {
+            Ok(inventory) => {
+                initial_facts.inventory_complete = inventory.inventory_complete;
+                initial_facts.inventory_error = inventory.inventory_error;
+                initial_facts.deployment_observations = inventory.deployments;
+            }
+            Err(error) => {
+                initial_facts.inventory_complete = false;
+                initial_facts.inventory_error = bounded_runtime_report_error(&error.to_string());
+            }
+        }
+        initial_facts.credential_statuses = credential_supervisor.status().await;
+        facts_publisher
+            .publish_runtime_facts(&identity.node_id, &initial_facts)
+            .await?;
+        let facts_runtime = runtime.clone();
+        let facts_provider = std::sync::Arc::clone(&runtime_provider);
+        let facts_credentials = std::sync::Arc::clone(&credential_supervisor);
+        let facts_node_id = identity.node_id.clone();
+        let facts_instance_id = instance_id.clone();
+        let facts_task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let docker = match facts_runtime.runtime_facts().await {
+                    Ok(facts) => facts,
+                    Err(error) => {
+                        eprintln!("runtime facts Docker probe failed: {error}");
+                        continue;
+                    }
+                };
+                let mut report = facts_provider.runtime_facts();
+                report.observed_at_ms = unix_ms();
+                report.report_id = format!("{}:{}", facts_instance_id, report.observed_at_ms);
+                report.docker = docker;
+                match facts_runtime.managed_deployment_inventory(4_096).await {
+                    Ok(inventory) => {
+                        report.inventory_complete = inventory.inventory_complete;
+                        report.inventory_error = inventory.inventory_error;
+                        report.deployment_observations = inventory.deployments;
+                    }
+                    Err(error) => {
+                        report.inventory_complete = false;
+                        report.inventory_error = bounded_runtime_report_error(&error.to_string());
+                    }
+                }
+                report.credential_statuses = facts_credentials.status().await;
+                if let Err(error) = facts_publisher
+                    .publish_runtime_facts(&facts_node_id, &report)
+                    .await
+                {
+                    eprintln!("runtime facts publication failed: {error}");
+                }
+            }
+        });
         let provider_state_database = ledger_path.with_file_name("provider-state.sqlite3");
-        let pipeline_provider =
-            BuiltInReleasePipelineProvider::from_env_with_state_database(provider_state_database)?;
+        let pipeline_provider = if arguments.legacy_release_providers {
+            BuiltInReleasePipelineProvider::from_legacy_development_env_with_state_database(
+                provider_state_database,
+            )?
+        } else {
+            BuiltInReleasePipelineProvider::from_remote_agent_env_with_state_database(
+                provider_state_database,
+            )?
+        };
         let executor = JobExecutor::new(runtime)
             .with_pipeline_provider(std::sync::Arc::new(pipeline_provider))
-            .with_artifact_fetcher(std::sync::Arc::new(artifact_fetcher));
+            .with_artifact_fetcher(std::sync::Arc::new(artifact_fetcher))
+            .with_runtime_context(
+                std::sync::Arc::clone(&runtime_provider),
+                std::sync::Arc::clone(&credential_supervisor),
+            );
         let config = WorkerConfig {
             node_id: identity.node_id.clone(),
             instance_id: instance_id.clone(),
@@ -355,6 +459,8 @@ async fn run(arguments: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             let wait_ms = next_renewal_attempt_ms.saturating_sub(unix_ms()).max(0) as u64;
             tokio::select! {
                 result = &mut worker_run => {
+                    facts_task.abort();
+                    credential_supervisor.shutdown_all().await;
                     result?;
                     return Err("Agent worker stopped before shutdown or certificate rotation".into());
                 }
@@ -362,6 +468,8 @@ async fn run(arguments: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
                     if changed.is_err() || *shutdown_rx.borrow() {
                         let _ = worker_shutdown_tx.send(true);
                         worker_run.await?;
+                        facts_task.abort();
+                        credential_supervisor.shutdown_all().await;
                         return Ok(());
                     }
                 }
@@ -390,6 +498,8 @@ async fn run(arguments: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
                             );
                             let _ = worker_shutdown_tx.send(true);
                             worker_run.await?;
+                            facts_task.abort();
+                            credential_supervisor.shutdown_all().await;
                             break;
                         }
                         Err(error) => {
@@ -420,6 +530,18 @@ fn unix_ms() -> i64 {
         .unwrap_or_default()
         .as_millis()
         .min(i64::MAX as u128) as i64
+}
+
+fn bounded_runtime_report_error(value: &str) -> String {
+    const MAX_BYTES: usize = 512;
+    if value.len() <= MAX_BYTES {
+        return value.to_string();
+    }
+    let mut end = MAX_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 async fn wait_for_shutdown_signal() {

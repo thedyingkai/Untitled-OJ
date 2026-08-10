@@ -1,8 +1,13 @@
+use crate::{
+    NodeRuntimeFactsPublisher, NodeRuntimeFactsV1, RuntimePolicyError,
+    WorkloadCredentialExchangeRequest, WorkloadCredentialExchanger,
+};
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use orchestrator_control_plane::{CompleteRequest, HeartbeatRequest, JobKind, NewJobEvent};
 use orchestrator_runtime::ArtifactReference;
+use orchestrator_runtime::WorkloadCredential;
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client, Identity, Response, Url};
 use serde::{Deserialize, Serialize};
@@ -31,6 +36,7 @@ pub enum TransportError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct LeasedJob {
     pub job_id: String,
     pub kind: JobKind,
@@ -61,10 +67,9 @@ impl LeasedJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimResponse {
-    #[serde(default)]
     pub jobs: Vec<LeasedJob>,
-    #[serde(default)]
     pub retry_after_ms: u64,
 }
 
@@ -75,8 +80,8 @@ pub struct AgentClaimRequest {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct HeartbeatAck {
-    #[serde(default)]
     pub cancel_requested: bool,
 }
 
@@ -145,7 +150,20 @@ pub struct HttpArtifactFetcher {
     node_id: String,
 }
 
+#[derive(Clone)]
+pub struct HttpWorkloadCredentialExchanger {
+    inner: ProtocolHttpTransport,
+    node_id: String,
+}
+
+#[derive(Clone)]
+pub struct HttpNodeRuntimeFactsPublisher {
+    inner: ProtocolHttpTransport,
+    node_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct NodeCertificateBundle {
     pub node_id: String,
     pub spiffe_id: String,
@@ -244,16 +262,19 @@ impl HttpMtlsTransport {
             .json(&CertificateRequest { csr_pem })
             .send()
             .await?;
-        accepted(response).await?.json().await.map_err(Into::into)
+        accepted_status(response, reqwest::StatusCode::OK)
+            .await?
+            .json()
+            .await
+            .map_err(Into::into)
     }
 
     /// Commits a replacement certificate only after it has been durably
     /// stored and can authenticate. The call is idempotent for the active
     /// serial and revokes older serials atomically on the control plane.
     pub async fn activate_certificate(&self) -> Result<(), TransportError> {
-        let url = self.inner.endpoint(&["certificates:activate"])?;
-        let response = self.inner.post(url).send().await?;
-        accepted(response).await?;
+        let response = self.inner.certificate_activation_request()?.send().await?;
+        accepted_status(response, reqwest::StatusCode::NO_CONTENT).await?;
         Ok(())
     }
 
@@ -282,7 +303,8 @@ impl HttpMtlsTransport {
         let url = self
             .inner
             .endpoint(&["nodes", expected_node_id, "identity"])?;
-        let response = accepted(self.inner.get(url).send().await?).await?;
+        let response =
+            accepted_status(self.inner.get(url).send().await?, reqwest::StatusCode::OK).await?;
         if response
             .content_length()
             .is_some_and(|length| length > 4_096)
@@ -307,6 +329,20 @@ impl HttpMtlsTransport {
         node_id: impl Into<String>,
     ) -> Result<HttpArtifactFetcher, TransportError> {
         HttpArtifactFetcher::new(self.inner.clone(), node_id.into())
+    }
+
+    pub fn workload_credential_exchanger(
+        &self,
+        node_id: impl Into<String>,
+    ) -> Result<HttpWorkloadCredentialExchanger, TransportError> {
+        HttpWorkloadCredentialExchanger::new(self.inner.clone(), node_id.into())
+    }
+
+    pub fn runtime_facts_publisher(
+        &self,
+        node_id: impl Into<String>,
+    ) -> Result<HttpNodeRuntimeFactsPublisher, TransportError> {
+        HttpNodeRuntimeFactsPublisher::new(self.inner.clone(), node_id.into())
     }
 }
 
@@ -364,7 +400,11 @@ impl EnrollmentClient {
             })
             .send()
             .await?;
-        accepted(response).await?.json().await.map_err(Into::into)
+        accepted_status(response, reqwest::StatusCode::CREATED)
+            .await?
+            .json()
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -450,6 +490,20 @@ impl LoopbackHttpTransport {
     ) -> Result<HttpArtifactFetcher, TransportError> {
         HttpArtifactFetcher::new(self.inner.clone(), node_id.into())
     }
+
+    pub fn workload_credential_exchanger(
+        &self,
+        node_id: impl Into<String>,
+    ) -> Result<HttpWorkloadCredentialExchanger, TransportError> {
+        HttpWorkloadCredentialExchanger::new(self.inner.clone(), node_id.into())
+    }
+
+    pub fn runtime_facts_publisher(
+        &self,
+        node_id: impl Into<String>,
+    ) -> Result<HttpNodeRuntimeFactsPublisher, TransportError> {
+        HttpNodeRuntimeFactsPublisher::new(self.inner.clone(), node_id.into())
+    }
 }
 
 impl ProtocolHttpTransport {
@@ -473,8 +527,25 @@ impl ProtocolHttpTransport {
         }
     }
 
+    fn certificate_activation_request(&self) -> Result<reqwest::RequestBuilder, TransportError> {
+        let url = self.endpoint(&["certificates:activate"])?;
+        // The server's mutation middleware intentionally requires JSON even
+        // for operations with no user-supplied fields. Sending an explicit
+        // empty object gives the request both an unambiguous JSON body and the
+        // application/json Content-Type which protects the mutation boundary.
+        Ok(self.post(url).json(&serde_json::json!({})))
+    }
+
     fn get(&self, url: Url) -> reqwest::RequestBuilder {
         let request = self.client.get(url);
+        match self.local_bootstrap_secret.as_deref() {
+            Some(secret) => request.header("x-ojos-agent-bootstrap", secret),
+            None => request,
+        }
+    }
+
+    fn put(&self, url: Url) -> reqwest::RequestBuilder {
+        let request = self.client.put(url);
         match self.local_bootstrap_secret.as_deref() {
             Some(secret) => request.header("x-ojos-agent-bootstrap", secret),
             None => request,
@@ -493,6 +564,157 @@ impl HttpArtifactFetcher {
     }
 }
 
+impl HttpWorkloadCredentialExchanger {
+    fn new(inner: ProtocolHttpTransport, node_id: String) -> Result<Self, TransportError> {
+        if node_id.trim().is_empty() || node_id.contains('/') {
+            return Err(TransportError::Configuration(
+                "workload credential exchanger requires a path-safe node_id".to_string(),
+            ));
+        }
+        Ok(Self { inner, node_id })
+    }
+}
+
+impl HttpNodeRuntimeFactsPublisher {
+    fn new(inner: ProtocolHttpTransport, node_id: String) -> Result<Self, TransportError> {
+        if node_id.trim().is_empty() || node_id.contains('/') {
+            return Err(TransportError::Configuration(
+                "runtime facts publisher requires a path-safe node_id".to_string(),
+            ));
+        }
+        Ok(Self { inner, node_id })
+    }
+}
+
+#[async_trait]
+impl NodeRuntimeFactsPublisher for HttpNodeRuntimeFactsPublisher {
+    async fn publish_runtime_facts(
+        &self,
+        node_id: &str,
+        facts: &NodeRuntimeFactsV1,
+    ) -> Result<(), RuntimePolicyError> {
+        if node_id != self.node_id
+            || facts.schema_version != 1
+            || facts.report_id.trim().is_empty()
+            || facts.observed_at_ms <= 0
+            || facts.agent_version.trim().is_empty()
+            || facts.runtime_policy_sha256.len() != 71
+        {
+            return Err(RuntimePolicyError::Publication(
+                "runtime facts do not match the authenticated Node or protocol v1 bounds"
+                    .to_string(),
+            ));
+        }
+        let url = self
+            .inner
+            .endpoint(&["nodes", &self.node_id, "runtime-facts"])
+            .map_err(|error| RuntimePolicyError::Publication(error.to_string()))?;
+        let response = self
+            .inner
+            .put(url)
+            .json(facts)
+            .send()
+            .await
+            .map_err(|error| RuntimePolicyError::Publication(error.to_string()))?;
+        accepted_status(response, reqwest::StatusCode::NO_CONTENT)
+            .await
+            .map_err(|error| RuntimePolicyError::Publication(error.to_string()))?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct WorkloadCredentialExchangeBody<'a> {
+    deployment_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease_token: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkloadCredentialExchangeResponse {
+    access_token: String,
+    token_type: String,
+    expires_at_ms: i64,
+    expires_in: u64,
+}
+
+#[async_trait]
+impl WorkloadCredentialExchanger for HttpWorkloadCredentialExchanger {
+    async fn exchange_workload_credential(
+        &self,
+        request: WorkloadCredentialExchangeRequest<'_>,
+    ) -> Result<WorkloadCredential, RuntimePolicyError> {
+        let has_job = request.job_id.is_some();
+        let has_lease = request.lease_token.is_some();
+        if request.deployment_id.trim().is_empty()
+            || request.deployment_id.len() > 256
+            || has_job != has_lease
+            || request.job_id.is_some_and(str::is_empty)
+            || request.lease_token.is_some_and(str::is_empty)
+        {
+            return Err(RuntimePolicyError::Credential(
+                "credential exchange requires deployment_id and either both or neither job_id/lease_token"
+                    .to_string(),
+            ));
+        }
+        let url = self
+            .inner
+            .endpoint(&["nodes", &self.node_id, "workload-credentials:exchange"])
+            .map_err(|error| RuntimePolicyError::Credential(error.to_string()))?;
+        let response = self
+            .inner
+            .post(url)
+            .json(&WorkloadCredentialExchangeBody {
+                deployment_id: request.deployment_id,
+                job_id: request.job_id,
+                lease_token: request.lease_token,
+            })
+            .send()
+            .await
+            .map_err(|error| RuntimePolicyError::Credential(error.to_string()))?;
+        if response.status() != reqwest::StatusCode::OK {
+            // A credential endpoint must never copy a response body into an
+            // error that can reach Agent logs. Even a misbehaving control
+            // plane therefore cannot disclose an access token here.
+            return Err(RuntimePolicyError::Credential(format!(
+                "credential exchange rejected with HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > 32 * 1024)
+        {
+            return Err(RuntimePolicyError::Credential(
+                "credential exchange response exceeds 32 KiB".to_string(),
+            ));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| RuntimePolicyError::Credential(error.to_string()))?;
+        if bytes.len() > 32 * 1024 {
+            return Err(RuntimePolicyError::Credential(
+                "credential exchange response exceeds 32 KiB".to_string(),
+            ));
+        }
+        let response: WorkloadCredentialExchangeResponse = serde_json::from_slice(&bytes)
+            .map_err(|error| RuntimePolicyError::Credential(error.to_string()))?;
+        if response.token_type != "Bearer" || response.expires_in != 15 * 60 {
+            return Err(RuntimePolicyError::Credential(
+                "credential exchange must return token_type=Bearer and expires_in=900".to_string(),
+            ));
+        }
+        Ok(WorkloadCredential {
+            access_token: response.access_token,
+            expires_at_ms: response.expires_at_ms,
+        })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactChunkResponse {
@@ -502,8 +724,6 @@ struct ArtifactChunkResponse {
     total_size: u64,
     data_base64: String,
     eof: bool,
-    #[serde(default)]
-    status: String,
 }
 
 #[async_trait]
@@ -551,7 +771,7 @@ impl ArtifactFetcher for HttpArtifactFetcher {
                     "artifact chunk response exceeds protocol bound".to_string(),
                 ));
             }
-            let response = accepted(response).await?;
+            let response = accepted_status(response, reqwest::StatusCode::OK).await?;
             let encoded = response.bytes().await?;
             if encoded.len() > 3 * 1024 * 1024 {
                 return Err(TransportError::Protocol(
@@ -560,7 +780,6 @@ impl ArtifactFetcher for HttpArtifactFetcher {
             }
             let chunk: ArtifactChunkResponse = serde_json::from_slice(&encoded)
                 .map_err(|error| TransportError::Protocol(error.to_string()))?;
-            let _status = chunk.status;
             if chunk.artifact_id != reference.artifact_id
                 || chunk.sha256 != reference.sha256
                 || chunk.offset != offset
@@ -619,6 +838,7 @@ const CAPABILITIES: &[&str] = &[
     "uninstall",
     "rollback",
     "health",
+    "binding_context_apply",
 ];
 
 const CLAIM_PREFER: &str = "wait=25";
@@ -709,7 +929,7 @@ impl AgentTransport for ProtocolHttpTransport {
             })
             .send()
             .await?;
-        let response = accepted(response).await?;
+        let response = accepted_status(response, reqwest::StatusCode::OK).await?;
         let claimed: ClaimResponse = response.json().await?;
         if claimed.jobs.len() > 1 {
             return Err(TransportError::Protocol(format!(
@@ -735,19 +955,11 @@ impl AgentTransport for ProtocolHttpTransport {
             })
             .send()
             .await?;
-        let response = accepted(response).await?;
-        if response.status() == reqwest::StatusCode::NO_CONTENT
-            || response.content_length() == Some(0)
-        {
-            return Ok(HeartbeatAck::default());
-        }
+        let response = accepted_status(response, reqwest::StatusCode::OK).await?;
+        let status = response.status();
+        let content_length = response.content_length();
         let bytes = response.bytes().await?;
-        if bytes.is_empty() {
-            Ok(HeartbeatAck::default())
-        } else {
-            serde_json::from_slice(&bytes)
-                .map_err(|error| TransportError::Protocol(error.to_string()))
-        }
+        decode_heartbeat_ack(status, content_length, &bytes)
     }
 
     async fn complete(
@@ -768,9 +980,22 @@ impl AgentTransport for ProtocolHttpTransport {
             })
             .send()
             .await?;
-        accepted(response).await?;
+        accepted_status(response, reqwest::StatusCode::NO_CONTENT).await?;
         Ok(())
     }
+}
+
+fn decode_heartbeat_ack(
+    status: reqwest::StatusCode,
+    content_length: Option<u64>,
+    bytes: &[u8],
+) -> Result<HeartbeatAck, TransportError> {
+    if status == reqwest::StatusCode::NO_CONTENT || content_length == Some(0) || bytes.is_empty() {
+        return Err(TransportError::Protocol(
+            "heartbeat response must contain the protocol v1 acknowledgement object".to_string(),
+        ));
+    }
+    serde_json::from_slice(bytes).map_err(|error| TransportError::Protocol(error.to_string()))
 }
 
 macro_rules! forward_transport {
@@ -806,11 +1031,20 @@ macro_rules! forward_transport {
 forward_transport!(HttpMtlsTransport);
 forward_transport!(LoopbackHttpTransport);
 
-async fn accepted(response: Response) -> Result<Response, TransportError> {
-    if response.status().is_success() {
+async fn accepted_status(
+    response: Response,
+    expected: reqwest::StatusCode,
+) -> Result<Response, TransportError> {
+    if response.status() == expected {
         return Ok(response);
     }
     let status = response.status().as_u16();
+    if response.status().is_success() {
+        return Err(TransportError::Protocol(format!(
+            "agent protocol expected HTTP {} but received {status}",
+            expected.as_u16()
+        )));
+    }
     let mut body = response.text().await.unwrap_or_default();
     body.truncate(4_096);
     Err(TransportError::Rejected { status, body })
@@ -849,6 +1083,32 @@ mod tests {
                 "{rejected}"
             );
         }
+    }
+
+    #[test]
+    fn certificate_activation_sends_an_explicit_empty_json_object() {
+        let transport =
+            LoopbackHttpTransport::new("http://127.0.0.1:38123/").expect("loopback transport");
+        let request = transport
+            .inner
+            .certificate_activation_request()
+            .expect("activation request")
+            .build()
+            .expect("build activation request");
+
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(request.url().path(), "/api/v1/agent/certificates:activate");
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        assert_eq!(
+            request.body().and_then(reqwest::Body::as_bytes),
+            Some(b"{}".as_slice())
+        );
     }
 
     #[test]
@@ -902,6 +1162,7 @@ mod tests {
             JobKind::Uninstall,
             JobKind::Rollback,
             JobKind::Health,
+            JobKind::BindingContextApply,
         ]
         .iter()
         .map(|kind| {
@@ -942,16 +1203,154 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(advertised, CAPABILITIES);
 
+        for schema_name in [
+            "CertificateResponse",
+            "ClaimResponse",
+            "HeartbeatAck",
+            "ArtifactChunk",
+            "WorkloadCredentialExchangeResponse",
+        ] {
+            let schema = &protocol["components"]["schemas"][schema_name];
+            assert_eq!(
+                schema["additionalProperties"].as_bool(),
+                Some(false),
+                "{schema_name} must remain closed"
+            );
+            assert!(
+                schema["properties"]["status"].is_null()
+                    && !schema["required"]
+                        .as_sequence()
+                        .expect("required fields")
+                        .iter()
+                        .any(|field| field.as_str() == Some("status")),
+                "{schema_name} must not inherit the legacy public API status field"
+            );
+        }
+
         assert!(
             protocol["paths"]["/nodes/{nodeId}/jobs/{jobId}/artifacts/{artifactId}"]["get"]
                 .is_mapping()
         );
+        assert!(protocol["paths"]["/nodes/{nodeId}/runtime-facts"]["put"].is_mapping());
+        assert!(
+            protocol["paths"]["/nodes/{nodeId}/workload-credentials:exchange"]["post"].is_mapping()
+        );
+        assert_eq!(
+            protocol["components"]["schemas"]["RuntimeContract"]["allOf"][0]["if"]
+                ["properties"]["id"]["const"]
+                .as_str(),
+            Some(orchestrator_runtime::STANDARD_RUNTIME_PROFILE_ID)
+        );
         assert!(protocol["paths"]["/enroll"]["post"].is_mapping());
         assert!(protocol["paths"]["/certificates:renew"]["post"].is_mapping());
         assert!(protocol["paths"]["/certificates:activate"]["post"].is_mapping());
+        let activation_body = &protocol["paths"]["/certificates:activate"]["post"]["requestBody"];
+        assert_eq!(activation_body["required"].as_bool(), Some(true));
+        let activation_schema = &activation_body["content"]["application/json"]["schema"];
+        assert_eq!(activation_schema["type"].as_str(), Some("object"));
+        assert_eq!(
+            activation_schema["additionalProperties"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(activation_schema["maxProperties"].as_u64(), Some(0));
         let complete_responses =
             &protocol["paths"]["/nodes/{nodeId}/jobs/{jobId}:complete"]["post"]["responses"];
         assert!(complete_responses["204"].is_mapping());
         assert!(complete_responses["200"].is_null());
+    }
+
+    #[test]
+    fn workload_credential_response_is_strict_and_debug_never_exposes_lease() {
+        let response: WorkloadCredentialExchangeResponse =
+            serde_json::from_value(serde_json::json!({
+                "access_token": "secret-token",
+                "token_type": "Bearer",
+                "expires_at_ms": 123,
+                "expires_in": 900,
+            }))
+            .unwrap();
+        assert_eq!(response.expires_in, 900);
+        assert!(
+            serde_json::from_value::<WorkloadCredentialExchangeResponse>(serde_json::json!({
+                "access_token": "secret-token",
+                "token_type": "Bearer",
+                "expires_at_ms": 123,
+                "expires_in": 900,
+                "status": "ok",
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<WorkloadCredentialExchangeResponse>(serde_json::json!({
+                "access_token": "secret-token",
+                "token_type": "Bearer",
+                "expires_at_ms": 123,
+                "expires_in": 900,
+                "unexpected": true,
+            }))
+            .is_err()
+        );
+        let request = WorkloadCredentialExchangeRequest {
+            deployment_id: "deployment-1",
+            job_id: Some("job-1"),
+            lease_token: Some("lease-secret"),
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("lease-secret"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn all_agent_object_success_responses_reject_legacy_envelope_fields() {
+        let claim: ClaimResponse =
+            serde_json::from_value(serde_json::json!({"jobs": [], "retry_after_ms": 0})).unwrap();
+        assert!(claim.jobs.is_empty());
+        assert!(
+            serde_json::from_value::<ClaimResponse>(
+                serde_json::json!({"jobs": [], "retry_after_ms": 0, "status": "ok"}),
+            )
+            .is_err()
+        );
+
+        let heartbeat: HeartbeatAck =
+            serde_json::from_value(serde_json::json!({"cancel_requested": false})).unwrap();
+        assert!(!heartbeat.cancel_requested);
+        assert!(
+            serde_json::from_value::<HeartbeatAck>(serde_json::json!({
+                "cancel_requested": false,
+                "request_id": "not-part-of-agent-protocol-v1"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn heartbeat_requires_the_exact_non_empty_200_acknowledgement() {
+        assert_eq!(
+            decode_heartbeat_ack(
+                reqwest::StatusCode::OK,
+                Some(26),
+                br#"{"cancel_requested":false}"#,
+            )
+            .unwrap(),
+            HeartbeatAck {
+                cancel_requested: false
+            }
+        );
+        for (status, length, body) in [
+            (reqwest::StatusCode::NO_CONTENT, Some(0), b"".as_slice()),
+            (reqwest::StatusCode::OK, Some(0), b"".as_slice()),
+            (reqwest::StatusCode::OK, None, b"".as_slice()),
+        ] {
+            assert!(decode_heartbeat_ack(status, length, body).is_err());
+        }
+        assert!(
+            decode_heartbeat_ack(
+                reqwest::StatusCode::OK,
+                None,
+                br#"{"cancel_requested":false,"status":"ok"}"#,
+            )
+            .is_err()
+        );
     }
 }

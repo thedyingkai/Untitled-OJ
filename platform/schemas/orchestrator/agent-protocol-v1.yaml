@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: OJOS Orchestrator Agent Protocol
   version: 1.0.0
-  description: Internal mTLS-only pull protocol. Node identity is taken from the certificate SAN.
+  description: Internal mTLS-only pull protocol. Node identity is taken from the certificate SAN. Successful object bodies are the exact closed schemas below and do not use the public API data/meta envelope, request_id, or legacy status marker; application/problem+json errors retain their numeric status and request_id fields.
 servers:
   - url: /api/v1/agent
 security:
@@ -32,6 +32,7 @@ paths:
               schema: { $ref: "#/components/schemas/CertificateResponse" }
         "409": { $ref: "#/components/responses/Problem" }
         "410": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/Problem" }
   /nodes/{nodeId}/jobs:claim:
     post:
       operationId: claimNodeJob
@@ -55,11 +56,11 @@ paths:
                 protocol_version: { const: v1 }
                 capabilities:
                   type: array
-                  minItems: 9
-                  maxItems: 9
+                  minItems: 10
+                  maxItems: 10
                   uniqueItems: true
                   items:
-                    enum: [install, release_pipeline, upgrade, start, stop, restart, uninstall, rollback, health]
+                    enum: [install, release_pipeline, upgrade, start, stop, restart, uninstall, rollback, health, binding_context_apply]
                 max_jobs: { type: integer, const: 1 }
       responses:
         "200":
@@ -68,6 +69,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ClaimResponse" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/Problem" }
   /nodes/{nodeId}/identity:
     get:
       operationId: verifyActiveNodeIdentity
@@ -102,8 +104,13 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/LeaseUpdate" }
       responses:
-        "200": { description: Lease renewed }
+        "200":
+          description: Lease renewed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HeartbeatAck" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/Problem" }
   /nodes/{nodeId}/jobs/{jobId}:complete:
     post:
       operationId: completeNodeJob
@@ -121,11 +128,18 @@ paths:
                   required: [status, result]
                   properties:
                     status: { enum: [SUCCEEDED, RETRYABLE_FAILURE, FAILED, CANCELLED, NEEDS_ATTENTION] }
-                    result: { type: object, additionalProperties: true }
+                    result:
+                      type: object
+                      additionalProperties: true
+                      description: Successful install, release_pipeline, start, stop, restart, health, upgrade, rollback, and uninstall completions require runtime_observed_at_ms from the Agent clock.
+                      properties:
+                        runtime_observed_at_ms: { type: integer, minimum: 1 }
                     error_message: { type: string }
       responses:
         "204": { description: Completion committed or idempotently replayed }
         "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/Problem" }
   /nodes/{nodeId}/jobs/{jobId}/artifacts/{artifactId}:
     get:
       operationId: downloadAssignedArtifactChunk
@@ -158,6 +172,47 @@ paths:
         "401": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+  /nodes/{nodeId}/runtime-facts:
+    put:
+      operationId: replaceNodeRuntimeFacts
+      description: Replaces the authenticated Node's latest non-operator-editable runtime facts. The Agent reports immediately at startup and every 30 seconds; reports older than 60 seconds are stale and cannot satisfy a Store plan.
+      parameters:
+        - { $ref: "#/components/parameters/NodeId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NodeRuntimeFactsV1" }
+      responses:
+        "204": { description: Latest runtime facts replaced }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/Problem" }
+  /nodes/{nodeId}/workload-credentials:exchange:
+    post:
+      operationId: exchangeWorkloadCredential
+      description: The initial exchange requires Node mTLS, the active installation lease, the deployment assignment, and a desired ACTIVE / observed RESOLVED binding. A refresh omits the lease and requires the deployment and binding to both be ACTIVE. Returns a 15-minute workload token; plaintext is never stored in a Job, RuntimeInstance, audit record, or Agent ledger.
+      parameters:
+        - { $ref: "#/components/parameters/NodeId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WorkloadCredentialExchangeRequest" }
+      responses:
+        "200":
+          description: Fresh 15-minute workload credential
+          headers:
+            Cache-Control:
+              schema: { const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkloadCredentialExchangeResponse" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/Problem" }
   /certificates:renew:
     post:
       operationId: renewNodeCertificate
@@ -179,14 +234,24 @@ paths:
               schema: { $ref: "#/components/schemas/CertificateResponse" }
         "401": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/Problem" }
   /certificates:activate:
     post:
       operationId: activateNodeCertificate
       description: Proves possession of the durably stored replacement certificate and atomically revokes all older active certificates for the Node. Idempotent for the active serial.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              maxProperties: 0
       responses:
         "204": { description: Replacement certificate is active and older serials are revoked }
         "401": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/Problem" }
 components:
   securitySchemes:
     agentMtls:
@@ -241,12 +306,18 @@ components:
             properties:
               job_id: { type: string }
               kind:
-                enum: [install, release_pipeline, upgrade, start, stop, restart, uninstall, rollback, health]
+                enum: [install, release_pipeline, upgrade, start, stop, restart, uninstall, rollback, health, binding_context_apply]
               payload: { type: object, additionalProperties: true }
               payload_sha256: { type: string }
               lease_token: { type: string }
               lease_expires_at_ms: { type: integer }
         retry_after_ms: { type: integer, minimum: 0, maximum: 25000 }
+    HeartbeatAck:
+      type: object
+      additionalProperties: false
+      required: [cancel_requested]
+      properties:
+        cancel_requested: { type: boolean }
     ArtifactChunk:
       type: object
       additionalProperties: false
@@ -287,7 +358,7 @@ components:
     ContainerSpec:
       type: object
       additionalProperties: false
-      required: [deployment_id, service_id, generation, image, command, environment, labels]
+      required: [deployment_id, service_id, generation, image, runtime_contract, command, environment, labels]
       properties:
         deployment_id: { type: string, minLength: 1 }
         service_id: { type: string, minLength: 1 }
@@ -299,9 +370,95 @@ components:
           properties:
             repository: { type: string, minLength: 1 }
             digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        runtime_contract: { $ref: '#/components/schemas/RuntimeContract' }
+        managed_service_context:
+          description: Present for every managed Service Contract v2 deployment with workload identity/bindings, independently of runtime profile. Legacy standard-container-v1 payloads may omit it.
+          $ref: '#/components/schemas/ManagedServiceContextSpec'
         command: { type: array, items: { type: string } }
         environment: { type: array, items: { type: string } }
         labels: { type: object, additionalProperties: { type: string } }
+        published_endpoint:
+          type: [object, 'null']
+          additionalProperties: false
+          required: [endpoint, application_protocol, container_port, host_port, transport_protocol]
+          properties:
+            endpoint: { type: string, minLength: 1 }
+            application_protocol: { type: string, pattern: '^[a-z][a-z0-9.+-]*$' }
+            container_port: { type: integer, minimum: 1, maximum: 65535 }
+            host_port: { type: integer, minimum: 1, maximum: 65535 }
+            transport_protocol: { const: tcp }
+      allOf:
+        - if:
+            properties:
+              runtime_contract:
+                properties: { id: { const: judge-sandbox-v1 } }
+          then:
+            required: [managed_service_context]
+            properties:
+              command: { maxItems: 0 }
+              published_endpoint: { type: 'null' }
+    RuntimeContract:
+      type: object
+      additionalProperties: false
+      required: [id, profile_sha256]
+      properties:
+        id: { enum: [standard-container-v1, judge-sandbox-v1] }
+        profile_sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+      allOf:
+        - if: { properties: { id: { const: standard-container-v1 } } }
+          then: { properties: { profile_sha256: { const: 'sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f' } } }
+        - if: { properties: { id: { const: judge-sandbox-v1 } } }
+          then: { properties: { profile_sha256: { const: 'sha256:a6b35a495f88bd8e723e395d748de40fbb4dcc08619d02cf92fa580fef2a18ec' } } }
+    ManagedServiceContextSpec:
+      type: object
+      additionalProperties: false
+      required: [generation, node_id, gateway_origin, bindings]
+      properties:
+        generation: { type: integer, minimum: 1 }
+        node_id: { type: string, minLength: 1 }
+        gateway_origin: { type: string, pattern: '^(?:https://(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)(?::[1-9][0-9]{0,4})?|http://(?:127\.0\.0\.1|localhost)(?::[1-9][0-9]{0,4})?)$' }
+        gateway_ca_pem: { type: string, minLength: 1, maxLength: 1048576 }
+        bindings:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: false
+            required: [binding_id, api_id, timeout_ms, context_generation]
+            properties:
+              binding_id: { type: string, minLength: 1 }
+              api_id: { type: string, minLength: 1, pattern: '^[^/\\s]+$' }
+              timeout_ms: { type: integer, minimum: 1 }
+              context_generation: { type: integer, minimum: 1 }
+        events:
+          $ref: '#/components/schemas/ManagedEventBinding'
+    ManagedEventBinding:
+      description: Credential-free event projection. The connection_id is resolved only from protected Agent-local configuration; no Redis URL or password is carried by a Job.
+      type: object
+      additionalProperties: false
+      required: [connection_id, stream, publish_types, subscriptions, generation]
+      properties:
+        connection_id: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$' }
+        stream: { type: string, minLength: 1, maxLength: 256 }
+        publish_types:
+          type: array
+          maxItems: 256
+          uniqueItems: true
+          items: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$' }
+        subscriptions:
+          type: array
+          maxItems: 256
+          uniqueItems: true
+          items:
+            type: object
+            additionalProperties: false
+            required: [event_type, consumer_group]
+            properties:
+              event_type: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$' }
+              consumer_group: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$' }
+        generation: { type: integer, minimum: 1 }
+      anyOf:
+        - properties: { publish_types: { minItems: 1 } }
+        - properties: { subscriptions: { minItems: 1 } }
     ReleaseReplacementPayload:
       description: Exact payload for both upgrade and rollback jobs; the Job kind preserves action/audit semantics.
       type: object
@@ -316,12 +473,17 @@ components:
     RuntimeInstance:
       type: object
       additionalProperties: false
-      required: [deployment_id, service_id, container_id, artifact_digest, desired_state, observed_state, health]
+      required: [deployment_id, service_id, release_version, container_id, artifact_digest, runtime_contract, runtime_policy_sha256, effective_runtime_sha256, runtime_attested, desired_state, observed_state, health]
       properties:
         deployment_id: { type: string, minLength: 1 }
         service_id: { type: string, minLength: 1 }
+        release_version: { type: string }
         container_id: { type: string, minLength: 1 }
         artifact_digest: { type: string, pattern: '^.+@sha256:[0-9a-f]{64}$' }
+        runtime_contract: { $ref: '#/components/schemas/RuntimeContract' }
+        runtime_policy_sha256: { type: string, pattern: '^$|^sha256:[0-9a-f]{64}$' }
+        effective_runtime_sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        runtime_attested: { type: boolean }
         desired_state: { enum: [RUNNING, STOPPED, REMOVED] }
         observed_state: { enum: [CREATED, RUNNING, STOPPED, EXITED, MISSING, UNKNOWN] }
         health: { enum: [HEALTHY, STARTING, UNHEALTHY, NONE, UNKNOWN] }
@@ -334,3 +496,110 @@ components:
         instance: { $ref: '#/components/schemas/RuntimeInstance' }
         replaced_deployment_id: { type: string, minLength: 1 }
         replaced_container_id: { type: string, minLength: 1 }
+    WorkloadCredentialExchangeRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [deployment_id, job_id, lease_token]
+          properties:
+            deployment_id: { type: string, minLength: 1, maxLength: 256 }
+            job_id: { type: string, minLength: 1 }
+            lease_token: { type: string, minLength: 1, writeOnly: true }
+        - type: object
+          additionalProperties: false
+          required: [deployment_id]
+          properties:
+            deployment_id: { type: string, minLength: 1, maxLength: 256 }
+    WorkloadCredentialExchangeResponse:
+      type: object
+      additionalProperties: false
+      required: [access_token, token_type, expires_at_ms, expires_in]
+      properties:
+        access_token: { type: string, minLength: 1, maxLength: 16384, format: password, x-sensitive: true }
+        token_type: { const: Bearer }
+        expires_at_ms: { type: integer }
+        expires_in: { type: integer, const: 900 }
+    NodeRuntimeFactsV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, report_id, observed_at_ms, agent_version, runtime_policy_sha256, allowed_contracts, judge_sandbox_allowed_images, redis_connection_ids, docker, inventory_complete, inventory_error, deployment_observations, credential_statuses]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        report_id: { type: string, minLength: 1, maxLength: 256 }
+        observed_at_ms:
+          type: integer
+          minimum: 1
+          description: Agent-clock lower bound captured before Docker inventory enumeration begins.
+        agent_version: { type: string, minLength: 1 }
+        runtime_policy_sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        allowed_contracts:
+          type: array
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RuntimeContract' }
+        judge_sandbox_allowed_images:
+          type: array
+          maxItems: 128
+          uniqueItems: true
+          items: { type: string, pattern: '^[^\s@]+@sha256:[0-9a-f]{64}$' }
+        redis_connection_ids:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$' }
+        docker:
+          type: object
+          additionalProperties: false
+          required: [engine, server_version, operating_system, os_type, architecture, cgroup_version, memory_limit, pids_limit, rootless, apparmor, seccomp, security_options]
+          properties:
+            engine: { const: docker }
+            server_version: { type: string }
+            operating_system: { type: string }
+            os_type: { type: string }
+            architecture: { type: string }
+            cgroup_version: { enum: ['', '1', '2'] }
+            memory_limit: { type: boolean }
+            pids_limit: { type: boolean }
+            rootless: { type: boolean }
+            apparmor: { type: boolean }
+            seccomp: { type: boolean }
+            security_options:
+              type: array
+              uniqueItems: true
+              items: { type: string }
+        inventory_complete: { type: boolean }
+        inventory_error: { type: string, maxLength: 512 }
+        deployment_observations:
+          type: array
+          maxItems: 4096
+          items: { $ref: '#/components/schemas/DeploymentRuntimeObservationV1' }
+        credential_statuses:
+          type: array
+          maxItems: 4096
+          items: { $ref: '#/components/schemas/CredentialRefreshStatusV1' }
+    DeploymentRuntimeObservationV1:
+      type: object
+      additionalProperties: false
+      required: [deployment_id, service_id, container_id, artifact_digest, runtime_contract, runtime_policy_sha256, effective_runtime_sha256, observed_state, health, runtime_attested, drift_reason]
+      properties:
+        deployment_id: { type: string, minLength: 1, maxLength: 256 }
+        service_id: { type: string, minLength: 1, maxLength: 256 }
+        container_id: { type: string, minLength: 1, maxLength: 256 }
+        artifact_digest: { type: string, maxLength: 512 }
+        runtime_contract: { $ref: '#/components/schemas/RuntimeContract' }
+        runtime_policy_sha256: { type: string, maxLength: 71 }
+        effective_runtime_sha256: { type: string, maxLength: 71 }
+        observed_state: { enum: [CREATED, RUNNING, STOPPED, EXITED, MISSING, UNKNOWN] }
+        health: { type: string, minLength: 1, maxLength: 32 }
+        runtime_attested: { type: boolean }
+        drift_reason: { type: string, maxLength: 512 }
+    CredentialRefreshStatusV1:
+      type: object
+      additionalProperties: false
+      required: [deployment_id, expires_at_ms, last_success_at_ms, last_error]
+      properties:
+        deployment_id: { type: string, minLength: 1, maxLength: 256 }
+        expires_at_ms: { type: integer, minimum: 0 }
+        last_success_at_ms: { type: integer, minimum: 0 }
+        last_error: { type: string, maxLength: 512 }

@@ -1,7 +1,7 @@
-schema_version: 1
+schema_version: 2
 service_name: judge-worker
 version: 0.1.0
-description: Release contract for judge-worker.
+description: Managed Judge Worker release for Service Contract v2.
 service_type: backend-worker
 source:
   kind: local
@@ -12,6 +12,16 @@ runtime:
   image: ""
   binary: ""
   system_service: ""
+  env:
+    LANGUAGES_CONFIG: config/languages.yaml
+    OJOS_RUNNER_MODE: nsjail
+    OJOS_MAX_CONCURRENCY: "1"
+    OJOS_WORK_DIR: /var/lib/ojos-worker/work
+    OJOS_ARTIFACT_CACHE_DIR: /var/lib/ojos-worker/cache
+    OJOS_SUPPORTED_LANGUAGES: cpp17,c11,python3,java17
+    OJOS_HEARTBEAT_INTERVAL: "10"
+    OJOS_TASK_LEASE_TTL: "60"
+    RUST_LOG: info
 frontend:
   enabled: false
   route_prefix: ""
@@ -20,33 +30,42 @@ frontend:
 backend:
   protocol: http
   port: 9101
-  health_path: /health
+  health_path: /healthz/ready
 migrations: []
 permissions:
   - judge.worker
 routes: []
-required_apis:
-  - storage.object.get
-  - storage.object.put
-service_identity:
-  service_name: judge-worker
-  allowed_apis:
-    - storage.object.get
-    - storage.object.put
-redis:
-  - name: redis
-    kind: consumer-group
-    usage: judge task workers
-storage:
-  - object_type: judge-artifact
-    bucket: judge-artifacts
-dependencies:
-  - judge-api
-  - redis
+provides:
+  apis: []
+requires:
+  apis:
+    - name: judge_control
+      id: judge.worker.control
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 35000
+    - name: storage_get
+      id: storage.object.get
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 300000
+events:
+  publishes: []
+  subscribes: []
+runtime_contract:
+  id: judge-sandbox-v1
+  sha256: sha256:a6b35a495f88bd8e723e395d748de40fbb4dcc08619d02cf92fa580fef2a18ec
+  binding_directory: /run/ojos/service
+  identity_mode: workload
+  credential_delivery: file
+  restart_on_change: false
+redis: []
+storage: []
+dependencies: []
 config_schema: {}
-secrets:
-  - worker-token
+secrets: []
 observability:
   metrics: true
   jaeger: true
-

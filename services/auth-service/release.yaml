@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 service_name: auth-service
 version: 0.1.0
 description: Release contract for auth-service.
@@ -53,6 +53,12 @@ migrations:
   - version: "000012_grant_service_permission_check"
     path: services/auth-service/migrations/000012_grant_service_permission_check.up.sql
     checksum: sha256:218a9fd8fabd0ea11acd8771402a585698f33c1a5c13742f7da1d378d481c08e
+  - version: "000013_topology_binding_projection"
+    path: services/auth-service/migrations/000013_topology_binding_projection.up.sql
+    checksum: sha256:620ac886d47a920ccfa9a9aaa1234d3fccc52c00640fe518d9773b8b3336bd53
+  - version: "000014_initial_admin_bootstrap"
+    path: services/auth-service/migrations/000014_initial_admin_bootstrap.up.sql
+    checksum: sha256:9b173cbd53c3d4b5b76c68f5b2a0e52b5fbb9ad61dcb19ff7f0ac1f2f2a6c15f
 permissions:
   - auth.admin
   - auth.permission.check
@@ -63,47 +69,48 @@ routes:
     target_type: endpoint-group
     target: auth-service[*]
     permission: public
-apis:
-  - api_id: auth.login
-    protocol: http
-    port_name: http
-    path_prefix: /auth/login
-    methods: [POST]
-    visibility: descendants
-    auth_mode: public
-    permission: public
-    version: v1
-    stability: stable
-  - api_id: auth.permission.check
-    protocol: http
-    port_name: http
-    path_prefix: /auth/permission-check
-    methods: [POST]
-    visibility: descendants
-    auth_mode: service
-    permission: system.admin
-    version: v1
-    stability: stable
-  - api_id: auth.user.permission.check
-    protocol: http
-    port_name: http
-    path_prefix: /auth/admin/permission-check
-    methods: [POST]
-    visibility: descendants
-    auth_mode: service
-    permission: auth.permission.check
-    version: v1
-    stability: stable
-  - api_id: auth.user.permissions
-    protocol: http
-    port_name: http
-    path_prefix: /auth/users/permissions
-    methods: [GET]
-    visibility: descendants
-    auth_mode: user
-    permission: auth.admin
-    version: v1
-    stability: stable
+provides:
+  apis:
+    - id: auth.login
+      version: 1.0.0
+      protocol: http
+      path: /auth/login
+      methods: [POST]
+      visibility: descendants
+      auth: public
+      permission: public
+      stability: stable
+    - id: auth.user.permission.check
+      version: 1.0.0
+      protocol: http
+      path: /auth/admin/permission-check
+      methods: [POST]
+      visibility: explicit
+      auth: workload
+      permission: auth.permission.check
+      stability: stable
+      timeout_ms: 5000
+    - id: auth.user.permissions
+      version: 1.0.0
+      protocol: http
+      path: /auth/admin/users
+      methods: [GET]
+      visibility: descendants
+      auth: user
+      permission: auth.admin
+      stability: stable
+requires:
+  apis: []
+events:
+  publishes: []
+  subscribes: []
+runtime_contract:
+  id: standard-container-v1
+  sha256: sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f
+  binding_directory: /run/ojos/service
+  identity_mode: workload
+  credential_delivery: file
+  restart_on_change: false
 redis:
   - name: redis
     kind: stream
@@ -118,4 +125,3 @@ secrets:
 observability:
   metrics: true
   jaeger: true
-

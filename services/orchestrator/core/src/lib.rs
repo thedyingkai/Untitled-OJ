@@ -6,16 +6,24 @@
 //! `orchestrator-legacy` or the dedicated v1 infrastructure crates.
 
 mod action;
+mod api_binding;
 mod contract_v1;
 mod model;
 mod planner;
 mod schema;
 mod service;
+mod service_contract_v2;
+mod service_openapi;
 pub mod topology_v1;
 
 pub use action::{
     ACTION_CATALOG, ActionDescriptor, ActionPlanMode, ActionRisk, CORE_ACTION_TARGETS,
     FORMAL_ACTION_PREFIXES, action_catalog, action_descriptor, validate_action_catalog,
+};
+pub use api_binding::{
+    ApiBinding, ApiBindingResolutionError, ApiBindingResolutionRequest, ApiBindingState,
+    ApiBindingValidationError, ApiProviderCandidate, api_version_matches,
+    resolve_api_binding_candidate,
 };
 pub use contract_v1::{V1_ACTIONS, V1ActionDescriptor, V1Role, v1_action};
 pub use model::{
@@ -61,13 +69,25 @@ pub use service::{
     topology_apply_operation, validate_deployment_template, validate_endpoint_id,
     validate_endpoint_service_name, validate_service_manifest, validate_service_release,
 };
+pub use service_contract_v2::{
+    ReleaseApiAuthDecl, ReleaseEventContractDecl, ReleaseEventDecl, ReleaseEventsContract,
+    ReleaseProvidedApiContractDecl, ReleaseProvidedApiDecl, ReleaseProvidesContract,
+    ReleaseRequiredApiBindingDecl, ReleaseRequiredApiDecl, ReleaseRequiredEventContractDecl,
+    ReleaseRequiredEventDecl, ReleaseRequiresContract, ReleaseRuntimeContractDecl,
+    SERVICE_CONTRACT_VERSION, STANDARD_CONTAINER_RUNTIME_ID, STANDARD_CONTAINER_RUNTIME_SHA256,
+    ServiceReleaseContract,
+};
+pub use service_openapi::{
+    ServiceOpenApiLintError, ServiceOpenApiLintReport, ServiceOpenApiOperation,
+    lint_service_openapi_value, lint_service_openapi_yaml,
+};
 pub use topology_v1::{
-    TOPOLOGY_SPEC_VERSION, TopologyAuthoritySpec, TopologyChange, TopologyDeploymentStatus,
-    TopologyDesiredDeploymentState, TopologyDiff, TopologyDrift, TopologyDriftKind,
-    TopologyEndpointSpec, TopologyEndpointStatus, TopologyHealth, TopologyLinkSpec,
-    TopologyLinkStatus, TopologyObservedDeploymentState, TopologyReconciliationState,
-    TopologyResourceKind, TopologyRevision, TopologySpec, TopologyStatus, diff_topology_revisions,
-    diff_topology_specs, rollback_topology_revision,
+    TOPOLOGY_SPEC_VERSION, TopologyApiBindingSpec, TopologyAuthoritySpec, TopologyChange,
+    TopologyDeploymentStatus, TopologyDesiredDeploymentState, TopologyDiff, TopologyDrift,
+    TopologyDriftKind, TopologyEndpointSpec, TopologyEndpointStatus, TopologyHealth,
+    TopologyLinkSpec, TopologyLinkStatus, TopologyObservedDeploymentState,
+    TopologyReconciliationState, TopologyResourceKind, TopologyRevision, TopologySpec,
+    TopologyStatus, diff_topology_revisions, diff_topology_specs, rollback_topology_revision,
 };
 
 /// Stable record names used by domain diagnostics and legacy migration tools.

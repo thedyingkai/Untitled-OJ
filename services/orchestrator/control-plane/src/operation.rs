@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 pub const OPERATION_SCHEMA_VERSION: u16 = 1;
+const PROJECT_MAX_CAS_ATTEMPTS: usize = 4;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -389,12 +390,15 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         }
         let mut pending = Vec::new();
         for planned in &operation.planned_jobs {
-            let binding = operation.active_binding(&planned.step_id).ok_or_else(|| {
-                OperationError::InvalidPlan(format!(
-                    "step {} has no durable job binding",
-                    planned.step_id
-                ))
-            })?;
+            let Some(binding) = operation.active_binding(&planned.step_id) else {
+                // Dependency-aware materialization deliberately leaves
+                // impossible descendants without a durable Job. A retry of a
+                // definitively failed ancestor can make those descendants
+                // runnable in the next generation, so preserve them as
+                // pending instead of rejecting the durable plan.
+                pending.push(planned.step_id.clone());
+                continue;
+            };
             let job = self
                 .jobs
                 .get(&binding.job_id)?
@@ -475,6 +479,30 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
     }
 
     pub fn project(
+        &mut self,
+        operation_id: &str,
+        now_ms: i64,
+    ) -> Result<DurableOperation, OperationError> {
+        for attempt in 0..PROJECT_MAX_CAS_ATTEMPTS {
+            match self.project_once(operation_id, now_ms) {
+                Err(OperationError::Store(OperationStoreError::RevisionConflict { .. }))
+                    if attempt + 1 < PROJECT_MAX_CAS_ATTEMPTS =>
+                {
+                    // Job completion and lease recovery can project the same
+                    // Operation concurrently. Reload the newest durable
+                    // revision and derive the projection again. Any child Job
+                    // materialized before the conflict is deterministic and
+                    // idempotent, so replaying this bounded section cannot
+                    // create a second Job.
+                    continue;
+                }
+                result => return result,
+            }
+        }
+        unreachable!("the final bounded projection attempt always returns")
+    }
+
+    fn project_once(
         &mut self,
         operation_id: &str,
         now_ms: i64,
@@ -734,7 +762,7 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
                 if operation.pending_step_ids.contains(&planned.step_id) {
                     let pending_status = if planned.condition == PlannedJobCondition::OnFailure {
                         "DORMANT"
-                    } else if self.planned_success_step_is_impossible(
+                    } else if self.planned_step_is_impossible(
                         operation,
                         planned,
                         &mut BTreeSet::new(),
@@ -830,51 +858,82 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         Ok((status, Value::Object(result), error_message))
     }
 
-    fn planned_success_step_is_impossible(
+    fn planned_step_is_impossible(
         &self,
         operation: &DurableOperation,
         planned: &PlannedJob,
         visiting: &mut BTreeSet<String>,
     ) -> Result<bool, OperationError> {
-        if planned.condition != PlannedJobCondition::OnSuccess {
-            return Ok(false);
-        }
         if !visiting.insert(planned.step_id.clone()) {
             return Err(OperationError::InvalidPlan(format!(
                 "dependency cycle reaches step {}",
                 planned.step_id
             )));
         }
+        let mut observed_failure = false;
         for dependency_id in &planned.depends_on {
-            if let Some(binding) = operation.active_binding(dependency_id) {
-                let status = self
-                    .jobs
-                    .get(&binding.job_id)?
-                    .ok_or_else(|| JobError::NotFound(binding.job_id.clone()))?
-                    .status;
-                if status.is_terminal() && status != JobStatus::Succeeded {
-                    visiting.remove(&planned.step_id);
-                    return Ok(true);
+            match operation.active_binding(dependency_id) {
+                Some(binding) => {
+                    let status = self
+                        .jobs
+                        .get(&binding.job_id)?
+                        .ok_or_else(|| JobError::NotFound(binding.job_id.clone()))?
+                        .status;
+                    match planned.condition {
+                        PlannedJobCondition::OnSuccess => {
+                            if status.is_terminal() && status != JobStatus::Succeeded {
+                                visiting.remove(&planned.step_id);
+                                return Ok(true);
+                            }
+                        }
+                        PlannedJobCondition::OnFailure => {
+                            if !status.is_terminal() {
+                                visiting.remove(&planned.step_id);
+                                return Ok(false);
+                            }
+                            if status == JobStatus::NeedsAttention {
+                                visiting.remove(&planned.step_id);
+                                return Ok(true);
+                            }
+                            observed_failure |=
+                                matches!(status, JobStatus::Failed | JobStatus::Cancelled);
+                        }
+                    }
                 }
-                continue;
-            }
-            let dependency = operation
-                .planned_jobs
-                .iter()
-                .find(|candidate| candidate.step_id == *dependency_id)
-                .ok_or_else(|| {
-                    OperationError::InvalidPlan(format!(
-                        "step {} depends on unknown step {dependency_id}",
-                        planned.step_id
-                    ))
-                })?;
-            if self.planned_success_step_is_impossible(operation, dependency, visiting)? {
-                visiting.remove(&planned.step_id);
-                return Ok(true);
+                None => {
+                    let dependency = operation
+                        .planned_jobs
+                        .iter()
+                        .find(|candidate| candidate.step_id == *dependency_id)
+                        .ok_or_else(|| {
+                            OperationError::InvalidPlan(format!(
+                                "step {} depends on unknown step {dependency_id}",
+                                planned.step_id
+                            ))
+                        })?;
+                    if self.planned_step_is_impossible(operation, dependency, visiting)? {
+                        if planned.condition == PlannedJobCondition::OnSuccess {
+                            visiting.remove(&planned.step_id);
+                            return Ok(true);
+                        }
+                        // An impossible OnFailure dependency is a skipped
+                        // compensation branch. It cannot satisfy a downstream
+                        // OnSuccess step, but it is terminal for deciding
+                        // whether another OnFailure branch can still run.
+                        continue;
+                    }
+                    if planned.condition == PlannedJobCondition::OnFailure {
+                        visiting.remove(&planned.step_id);
+                        return Ok(false);
+                    }
+                }
             }
         }
         visiting.remove(&planned.step_id);
-        Ok(false)
+        Ok(match planned.condition {
+            PlannedJobCondition::OnSuccess => false,
+            PlannedJobCondition::OnFailure => !observed_failure,
+        })
     }
 
     fn mark_needs_attention(
@@ -1273,6 +1332,70 @@ mod tests {
         .unwrap()
     }
 
+    #[derive(Debug)]
+    struct RevisionConflictOperationStore {
+        inner: MemoryOperationStore,
+        remaining_conflicts: usize,
+        compare_attempts: usize,
+    }
+
+    impl RevisionConflictOperationStore {
+        fn new(inner: MemoryOperationStore, remaining_conflicts: usize) -> Self {
+            Self {
+                inner,
+                remaining_conflicts,
+                compare_attempts: 0,
+            }
+        }
+    }
+
+    impl OperationRepository for RevisionConflictOperationStore {
+        fn create(
+            &mut self,
+            operation: DurableOperation,
+        ) -> Result<DurableOperation, OperationStoreError> {
+            self.inner.create(operation)
+        }
+
+        fn get(&self, operation_id: &str) -> Result<Option<DurableOperation>, OperationStoreError> {
+            self.inner.get(operation_id)
+        }
+
+        fn compare_and_swap(
+            &mut self,
+            expected_revision: u64,
+            operation: DurableOperation,
+        ) -> Result<DurableOperation, OperationStoreError> {
+            self.compare_attempts += 1;
+            if self.remaining_conflicts != 0 {
+                self.remaining_conflicts -= 1;
+                let mut concurrent = self
+                    .inner
+                    .get(&operation.operation_id)?
+                    .ok_or_else(|| OperationStoreError::NotFound(operation.operation_id.clone()))?;
+                let concurrent_expected = concurrent.revision;
+                concurrent.revision += 1;
+                concurrent.updated_at_ms = concurrent.updated_at_ms.saturating_add(1);
+                let concurrent = self
+                    .inner
+                    .compare_and_swap(concurrent_expected, concurrent)?;
+                return Err(OperationStoreError::RevisionConflict {
+                    expected: expected_revision,
+                    actual: concurrent.revision,
+                });
+            }
+            self.inner.compare_and_swap(expected_revision, operation)
+        }
+
+        fn recoverable(&self) -> Result<Vec<DurableOperation>, OperationStoreError> {
+            self.inner.recoverable()
+        }
+
+        fn list(&self) -> Result<Vec<DurableOperation>, OperationStoreError> {
+            self.inner.list()
+        }
+    }
+
     #[test]
     fn plan_confirm_enqueue_is_durable_and_idempotent() {
         let mut operations = MemoryOperationStore::default();
@@ -1308,6 +1431,67 @@ mod tests {
         assert_eq!(
             coordinator.project("op-order", 20).unwrap().status,
             DurableOperationStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn projection_reloads_and_retries_after_a_concurrent_revision_write() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        let running = run_to_running(&mut operations, &mut jobs, "op-project-conflict", 1);
+        claim_and_complete(
+            &mut jobs,
+            "node-0",
+            "terminal",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        let initial_revision = running.revision;
+        let mut operations = RevisionConflictOperationStore::new(operations, 1);
+
+        let projected = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-project-conflict", 20)
+            .unwrap();
+
+        assert_eq!(projected.status, DurableOperationStatus::Succeeded);
+        assert_eq!(projected.revision, initial_revision + 2);
+        assert_eq!(operations.compare_attempts, 2);
+        assert_eq!(
+            operations.get("op-project-conflict").unwrap().unwrap(),
+            projected
+        );
+    }
+
+    #[test]
+    fn projection_revision_retry_budget_is_bounded() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        run_to_running(&mut operations, &mut jobs, "op-project-conflict-budget", 1);
+        claim_and_complete(
+            &mut jobs,
+            "node-0",
+            "terminal",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        let mut operations =
+            RevisionConflictOperationStore::new(operations, PROJECT_MAX_CAS_ATTEMPTS);
+
+        assert!(matches!(
+            OperationCoordinator::new(&mut operations, &mut jobs)
+                .project("op-project-conflict-budget", 20),
+            Err(OperationError::Store(
+                OperationStoreError::RevisionConflict { .. }
+            ))
+        ));
+        assert_eq!(operations.compare_attempts, PROJECT_MAX_CAS_ATTEMPTS);
+        assert_eq!(
+            operations
+                .get("op-project-conflict-budget")
+                .unwrap()
+                .unwrap()
+                .status,
+            DurableOperationStatus::Running
         );
     }
 
@@ -1402,6 +1586,92 @@ mod tests {
             failed.result["compensate"]["status"],
             json!(JobStatus::Succeeded)
         );
+    }
+
+    #[test]
+    fn successful_branch_skips_nested_compensation_and_terminates() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        let graph = PlanOperation {
+            operation_id: "op-nested-compensation-success".to_string(),
+            action: "release.install".to_string(),
+            target_type: "Release".to_string(),
+            target_id: "root@1.0.0".to_string(),
+            request: json!({"auto_enqueue": true}),
+            jobs: vec![
+                PlannedJob {
+                    step_id: "root".to_string(),
+                    node_id: "node-0".to_string(),
+                    kind: JobKind::Install,
+                    depends_on: vec![],
+                    condition: PlannedJobCondition::OnSuccess,
+                    payload: json!({}),
+                    max_attempts: 1,
+                },
+                PlannedJob {
+                    step_id: "finalize".to_string(),
+                    node_id: "control-plane".to_string(),
+                    kind: JobKind::TopologyApply,
+                    depends_on: vec!["root".to_string()],
+                    condition: PlannedJobCondition::OnSuccess,
+                    payload: json!({}),
+                    max_attempts: 1,
+                },
+                PlannedJob {
+                    step_id: "abort".to_string(),
+                    node_id: "control-plane".to_string(),
+                    kind: JobKind::TopologyApply,
+                    depends_on: vec!["root".to_string(), "finalize".to_string()],
+                    condition: PlannedJobCondition::OnFailure,
+                    payload: json!({}),
+                    max_attempts: 1,
+                },
+                PlannedJob {
+                    step_id: "cleanup".to_string(),
+                    node_id: "node-0".to_string(),
+                    kind: JobKind::Uninstall,
+                    depends_on: vec!["root".to_string(), "abort".to_string()],
+                    condition: PlannedJobCondition::OnSuccess,
+                    payload: json!({}),
+                    max_attempts: 1,
+                },
+            ],
+        };
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator.plan(graph, 0).unwrap();
+            coordinator
+                .confirm("op-nested-compensation-success", 1)
+                .unwrap();
+            coordinator
+                .enqueue("op-nested-compensation-success", 2)
+                .unwrap();
+        }
+        claim_and_complete(
+            &mut jobs,
+            "node-0",
+            "root-success",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-nested-compensation-success", 12)
+            .unwrap();
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "finalize-success",
+            CompletionStatus::Succeeded,
+            20,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-nested-compensation-success", 22)
+            .unwrap();
+        assert_eq!(operation.status, DurableOperationStatus::Succeeded);
+        assert!(operation.active_binding("abort").is_none());
+        assert!(operation.active_binding("cleanup").is_none());
+        assert_eq!(operation.result["abort"]["status"], "DORMANT");
+        assert_eq!(operation.result["cleanup"]["status"], "SKIPPED");
     }
 
     #[test]
@@ -1644,7 +1914,7 @@ mod tests {
         let job_id = &operation.job_bindings[0].job_id;
         assert_eq!(
             coordinator.jobs.get(job_id).unwrap().unwrap().status,
-            JobStatus::Cancelled
+            JobStatus::NeedsAttention
         );
         assert!(matches!(
             coordinator.retry("op-uncertain", 40_001),
@@ -1685,6 +1955,81 @@ mod tests {
                 2
             );
         }
+    }
+
+    #[test]
+    fn retry_rematerializes_descendants_skipped_by_a_failed_dependency() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        let graph = PlanOperation {
+            operation_id: "op-retry-skipped".to_string(),
+            action: "topology.apply".to_string(),
+            target_type: "Topology".to_string(),
+            target_id: "primary".to_string(),
+            request: json!({"auto_enqueue": true}),
+            jobs: vec![
+                PlannedJob {
+                    step_id: "prepare".to_string(),
+                    node_id: "control-plane".to_string(),
+                    kind: JobKind::TopologyApply,
+                    depends_on: vec![],
+                    condition: PlannedJobCondition::OnSuccess,
+                    payload: json!({}),
+                    max_attempts: 1,
+                },
+                PlannedJob {
+                    step_id: "finalize".to_string(),
+                    node_id: "control-plane".to_string(),
+                    kind: JobKind::TopologyApply,
+                    depends_on: vec!["prepare".to_string()],
+                    condition: PlannedJobCondition::OnSuccess,
+                    payload: json!({}),
+                    max_attempts: 1,
+                },
+            ],
+        };
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator.plan(graph, 0).unwrap();
+            coordinator.confirm("op-retry-skipped", 1).unwrap();
+            coordinator.enqueue("op-retry-skipped", 2).unwrap();
+        }
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "prepare-failed",
+            CompletionStatus::Failed,
+            10,
+        );
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            let failed = coordinator.project("op-retry-skipped", 12).unwrap();
+            assert_eq!(failed.status, DurableOperationStatus::Failed);
+            assert!(failed.active_binding("finalize").is_none());
+            let retry = coordinator.retry("op-retry-skipped", 13).unwrap();
+            assert_eq!(retry.status, DurableOperationStatus::Running);
+            assert_eq!(
+                retry
+                    .job_bindings
+                    .iter()
+                    .filter(|binding| binding.step_id == "prepare")
+                    .count(),
+                2
+            );
+            assert!(retry.active_binding("finalize").is_none());
+        }
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "prepare-retry",
+            CompletionStatus::Succeeded,
+            20,
+        );
+        let running = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-retry-skipped", 22)
+            .unwrap();
+        assert_eq!(running.status, DurableOperationStatus::Running);
+        assert!(running.active_binding("finalize").is_some());
     }
 
     #[test]

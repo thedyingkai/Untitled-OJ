@@ -1,5 +1,7 @@
 use orchestrator_control_plane::{CompletionStatus, JobKind, NewJobEvent};
-use orchestrator_runtime::ReleaseProviderRevision;
+use orchestrator_runtime::{
+    ManagedServiceContextSpec, ManagedVolumeSpec, ReleaseProviderRevision, RuntimeContext,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
 use std::fs;
@@ -35,6 +37,8 @@ pub enum LedgerError {
     },
     #[error("provider revision saga for job {0} conflicts with its durable revision payload")]
     ProviderRevisionConflict(String),
+    #[error("runtime context for deployment {0} conflicts with its durable Agent-local record")]
+    RuntimeContextConflict(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +150,22 @@ pub struct ProviderRevisionRun {
     pub error_message: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeContextRun {
+    pub deployment_id: String,
+    pub job_id: String,
+    pub context: RuntimeContext,
+    pub state: String,
+    pub container_id: Option<String>,
+    pub error_message: Option<String>,
+    pub managed_context: Option<ManagedServiceContextSpec>,
+    pub previous_managed_context: Option<ManagedServiceContextSpec>,
+    pub binding_context_state: String,
+    pub managed_volume: Option<ManagedVolumeSpec>,
+    pub managed_volume_state: String,
+    pub managed_volume_owned: bool,
+}
+
 pub struct AgentLedger {
     connection: Connection,
 }
@@ -248,6 +268,40 @@ impl AgentLedger {
 
             CREATE INDEX IF NOT EXISTS idx_provider_revision_state
                 ON provider_revision_runs(state, updated_at_ms);
+
+            CREATE TABLE IF NOT EXISTS runtime_context_runs (
+                deployment_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                context_json TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN (
+                    'MATERIALIZING', 'PREPARED', 'CREATING', 'BOUND', 'ACTIVE',
+                    'CLEANUP_NEEDED', 'CLEANUP_RUNNING', 'CLEANED',
+                    'NEEDS_ATTENTION'
+                )),
+                container_id TEXT,
+                error_message TEXT,
+                managed_context_json TEXT,
+                previous_managed_context_json TEXT,
+                binding_context_state TEXT NOT NULL DEFAULT 'ACTIVE'
+                    CHECK (binding_context_state IN ('ACTIVE', 'REVOKED')),
+                managed_volume_spec_json TEXT,
+                managed_volume_state TEXT NOT NULL DEFAULT 'NONE'
+                    CHECK (managed_volume_state IN (
+                        'NONE', 'CREATING', 'CREATED', 'CLEANUP_NEEDED',
+                        'CLEANUP_RUNNING', 'CLEANED', 'NEEDS_ATTENTION'
+                    )),
+                managed_volume_owned INTEGER NOT NULL DEFAULT 0
+                    CHECK (managed_volume_owned IN (0, 1)),
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_context_container
+                ON runtime_context_runs(container_id)
+                WHERE container_id IS NOT NULL;
+
+            CREATE INDEX IF NOT EXISTS idx_runtime_context_state
+                ON runtime_context_runs(state, updated_at_ms);
             "#,
         )?;
         let has_events = {
@@ -263,6 +317,27 @@ impl AgentLedger {
                 "ALTER TABLE job_runs ADD COLUMN events_json TEXT NOT NULL DEFAULT '[]'",
                 [],
             )?;
+        }
+        let runtime_context_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(runtime_context_runs)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (name, declaration) in [
+            ("managed_context_json", "TEXT"),
+            ("previous_managed_context_json", "TEXT"),
+            ("binding_context_state", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+            ("managed_volume_spec_json", "TEXT"),
+            ("managed_volume_state", "TEXT NOT NULL DEFAULT 'NONE'"),
+            ("managed_volume_owned", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !runtime_context_columns.iter().any(|column| column == name) {
+                connection.execute(
+                    &format!("ALTER TABLE runtime_context_runs ADD COLUMN {name} {declaration}"),
+                    [],
+                )?;
+            }
         }
         let mut ledger = Self { connection };
         ledger.recover_interrupted(crate::now_ms())?;
@@ -293,6 +368,36 @@ impl AgentLedger {
             params![INTERRUPTED_MESSAGE, now_ms],
         )?;
         transaction.execute(
+            "UPDATE runtime_context_runs
+             SET managed_volume_state = 'CLEANUP_NEEDED', updated_at_ms = ?1
+             WHERE state IN ('MATERIALIZING', 'PREPARED', 'CLEANUP_RUNNING')
+               AND managed_volume_state IN (
+                    'CREATING', 'CREATED', 'CLEANUP_NEEDED', 'CLEANUP_RUNNING'
+               )",
+            params![now_ms],
+        )?;
+        transaction.execute(
+            "UPDATE runtime_context_runs
+             SET managed_volume_state = 'NEEDS_ATTENTION', updated_at_ms = ?1
+             WHERE state IN ('CREATING', 'BOUND')
+               AND managed_volume_state IN (
+                    'CREATING', 'CREATED', 'CLEANUP_NEEDED', 'CLEANUP_RUNNING'
+               )",
+            params![now_ms],
+        )?;
+        transaction.execute(
+            "UPDATE runtime_context_runs
+             SET state = 'CLEANUP_NEEDED', error_message = ?1, updated_at_ms = ?2
+             WHERE state IN ('MATERIALIZING', 'PREPARED', 'CLEANUP_RUNNING')",
+            params![INTERRUPTED_MESSAGE, now_ms],
+        )?;
+        transaction.execute(
+            "UPDATE runtime_context_runs
+             SET state = 'NEEDS_ATTENTION', error_message = ?1, updated_at_ms = ?2
+            WHERE state IN ('CREATING', 'BOUND')",
+            params![INTERRUPTED_MESSAGE, now_ms],
+        )?;
+        transaction.execute(
             "UPDATE job_steps
              SET state = 'FAILED', error_message = ?1, completed_at_ms = ?2
              WHERE state = 'RUNNING'
@@ -313,6 +418,614 @@ impl AgentLedger {
         )?;
         transaction.commit()?;
         Ok(recovered)
+    }
+
+    pub fn begin_runtime_context(
+        &mut self,
+        job_id: &str,
+        deployment_id: &str,
+        context: &RuntimeContext,
+        now_ms: i64,
+    ) -> Result<RuntimeContextRun, LedgerError> {
+        let context_json = serde_json::to_string(context)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = transaction
+            .query_row(
+                "SELECT job_id, context_json, state, container_id, error_message,
+                        managed_volume_spec_json, managed_volume_state,
+                        managed_volume_owned
+                 FROM runtime_context_runs WHERE deployment_id = ?1",
+                [deployment_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, bool>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match existing {
+            None => {
+                transaction.execute(
+                    "INSERT INTO runtime_context_runs (
+                        deployment_id, job_id, context_json, state,
+                        created_at_ms, updated_at_ms
+                     ) VALUES (?1, ?2, ?3, 'MATERIALIZING', ?4, ?4)",
+                    params![deployment_id, job_id, context_json, now_ms],
+                )?;
+            }
+            Some((_, stored_context, state, _, _, _, _, _))
+                if stored_context == context_json && state == "CLEANED" =>
+            {
+                transaction.execute(
+                    "UPDATE runtime_context_runs
+                     SET job_id = ?2, state = 'MATERIALIZING', container_id = NULL,
+                         error_message = NULL, managed_volume_spec_json = NULL,
+                         managed_volume_state = 'NONE', managed_volume_owned = 0,
+                         updated_at_ms = ?3
+                     WHERE deployment_id = ?1 AND state = 'CLEANED'",
+                    params![deployment_id, job_id, now_ms],
+                )?;
+            }
+            Some((
+                stored_job,
+                stored_context,
+                state,
+                container_id,
+                error_message,
+                volume_spec,
+                volume_state,
+                volume_owned,
+            )) if stored_job == job_id
+                && stored_context == context_json
+                && matches!(state.as_str(), "MATERIALIZING" | "PREPARED") =>
+            {
+                transaction.commit()?;
+                return Ok(RuntimeContextRun {
+                    deployment_id: deployment_id.to_string(),
+                    job_id: stored_job,
+                    context: context.clone(),
+                    state,
+                    container_id,
+                    error_message,
+                    managed_context: None,
+                    previous_managed_context: None,
+                    binding_context_state: "ACTIVE".to_string(),
+                    managed_volume: volume_spec
+                        .map(|value| serde_json::from_str(&value))
+                        .transpose()?,
+                    managed_volume_state: volume_state,
+                    managed_volume_owned: volume_owned,
+                });
+            }
+            Some(_) => {
+                return Err(LedgerError::RuntimeContextConflict(
+                    deployment_id.to_string(),
+                ));
+            }
+        }
+        transaction.commit()?;
+        Ok(RuntimeContextRun {
+            deployment_id: deployment_id.to_string(),
+            job_id: job_id.to_string(),
+            context: context.clone(),
+            state: "MATERIALIZING".to_string(),
+            container_id: None,
+            error_message: None,
+            managed_context: None,
+            previous_managed_context: None,
+            binding_context_state: "ACTIVE".to_string(),
+            managed_volume: None,
+            managed_volume_state: "NONE".to_string(),
+            managed_volume_owned: false,
+        })
+    }
+
+    pub fn record_binding_context_transition(
+        &mut self,
+        deployment_id: &str,
+        job_id: &str,
+        previous: Option<&ManagedServiceContextSpec>,
+        desired: Option<&ManagedServiceContextSpec>,
+        revoked: bool,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let previous_json = previous.map(serde_json::to_string).transpose()?;
+        let desired_json = desired.map(serde_json::to_string).transpose()?;
+        let state = if revoked { "REVOKED" } else { "ACTIVE" };
+        let changed = self.connection.execute(
+            "UPDATE runtime_context_runs
+             SET job_id = ?2, previous_managed_context_json = ?3,
+                 managed_context_json = ?4, binding_context_state = ?5,
+                 error_message = NULL, updated_at_ms = ?6
+             WHERE deployment_id = ?1 AND state = 'ACTIVE'",
+            params![
+                deployment_id,
+                job_id,
+                previous_json,
+                desired_json,
+                state,
+                now_ms
+            ],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidState(format!(
+                "runtime context for deployment {deployment_id} is not ACTIVE"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn mark_runtime_context_prepared(
+        &mut self,
+        deployment_id: &str,
+        job_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        self.transition_runtime_context(
+            deployment_id,
+            job_id,
+            &["MATERIALIZING"],
+            "PREPARED",
+            None,
+            None,
+            now_ms,
+        )
+    }
+
+    pub fn begin_managed_volume(
+        &mut self,
+        deployment_id: &str,
+        job_id: &str,
+        spec: &ManagedVolumeSpec,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let current = self
+            .runtime_context_for_deployment(deployment_id)?
+            .ok_or_else(|| {
+                LedgerError::InvalidState(format!(
+                    "runtime context for deployment {deployment_id} was not found"
+                ))
+            })?;
+        if current.job_id != job_id
+            || current.state != "MATERIALIZING"
+            || spec.deployment_id != deployment_id
+            || spec.name != current.context.cache_volume_name
+        {
+            return Err(LedgerError::InvalidState(format!(
+                "managed volume for deployment {deployment_id} does not match its MATERIALIZING runtime context"
+            )));
+        }
+        let spec_json = serde_json::to_string(spec)?;
+        if current.managed_volume.as_ref() == Some(spec)
+            && current.managed_volume_state == "CREATING"
+        {
+            return Ok(());
+        }
+        if !matches!(current.managed_volume_state.as_str(), "NONE" | "CLEANED")
+            || current.managed_volume_owned
+        {
+            return Err(LedgerError::InvalidState(format!(
+                "managed volume for deployment {deployment_id} is already {}",
+                current.managed_volume_state
+            )));
+        }
+        let changed = self.connection.execute(
+            "UPDATE runtime_context_runs
+             SET managed_volume_spec_json = ?3, managed_volume_state = 'CREATING',
+                 managed_volume_owned = 0, updated_at_ms = ?4
+             WHERE deployment_id = ?1 AND job_id = ?2 AND state = 'MATERIALIZING'
+               AND managed_volume_state IN ('NONE', 'CLEANED')
+               AND managed_volume_owned = 0",
+            params![deployment_id, job_id, spec_json, now_ms],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidState(format!(
+                "managed volume for deployment {deployment_id} changed concurrently"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn mark_managed_volume_created(
+        &mut self,
+        deployment_id: &str,
+        job_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE runtime_context_runs
+             SET managed_volume_state = 'CREATED', managed_volume_owned = 1,
+                 updated_at_ms = ?3
+             WHERE deployment_id = ?1 AND job_id = ?2 AND state = 'MATERIALIZING'
+               AND managed_volume_spec_json IS NOT NULL
+               AND managed_volume_state = 'CREATING'",
+            params![deployment_id, job_id, now_ms],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidState(format!(
+                "managed volume for deployment {deployment_id} is not CREATING"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Starts idempotent compensation and returns the exact persisted
+    /// ownership contract. CREATING is intentionally eligible: Docker may have
+    /// created the volume immediately before the Agent lost the response, and
+    /// the runtime adapter verifies ownership labels before deleting it.
+    pub fn begin_managed_volume_cleanup(
+        &mut self,
+        deployment_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<ManagedVolumeSpec>, LedgerError> {
+        let current = self
+            .runtime_context_for_deployment(deployment_id)?
+            .ok_or_else(|| {
+                LedgerError::InvalidState(format!(
+                    "runtime context for deployment {deployment_id} was not found"
+                ))
+            })?;
+        let Some(spec) = current.managed_volume else {
+            return Ok(None);
+        };
+        if matches!(current.managed_volume_state.as_str(), "NONE" | "CLEANED") {
+            return Ok(None);
+        }
+        if current.state != "CLEANUP_RUNNING"
+            || !matches!(
+                current.managed_volume_state.as_str(),
+                "CREATING" | "CREATED" | "CLEANUP_NEEDED" | "CLEANUP_RUNNING" | "NEEDS_ATTENTION"
+            )
+        {
+            return Err(LedgerError::InvalidState(format!(
+                "managed volume for deployment {deployment_id} cannot begin cleanup from context={} volume={}",
+                current.state, current.managed_volume_state
+            )));
+        }
+        if current.managed_volume_state != "CLEANUP_RUNNING" {
+            let changed = self.connection.execute(
+                "UPDATE runtime_context_runs
+                 SET managed_volume_state = 'CLEANUP_RUNNING', updated_at_ms = ?2
+                 WHERE deployment_id = ?1 AND state = 'CLEANUP_RUNNING'
+                   AND managed_volume_state IN (
+                       'CREATING', 'CREATED', 'CLEANUP_NEEDED', 'NEEDS_ATTENTION'
+                   )",
+                params![deployment_id, now_ms],
+            )?;
+            if changed != 1 {
+                return Err(LedgerError::InvalidState(format!(
+                    "managed volume for deployment {deployment_id} changed concurrently"
+                )));
+            }
+        }
+        Ok(Some(spec))
+    }
+
+    pub fn finish_managed_volume_cleanup(
+        &mut self,
+        deployment_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE runtime_context_runs
+             SET managed_volume_state = 'CLEANED', managed_volume_owned = 0,
+                 updated_at_ms = ?2
+             WHERE deployment_id = ?1 AND state = 'CLEANUP_RUNNING'
+               AND managed_volume_state = 'CLEANUP_RUNNING'",
+            params![deployment_id, now_ms],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidState(format!(
+                "managed volume for deployment {deployment_id} is not being cleaned"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn mark_managed_volume_cleanup_needed(
+        &mut self,
+        deployment_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE runtime_context_runs
+             SET managed_volume_state = 'CLEANUP_NEEDED', updated_at_ms = ?2
+             WHERE deployment_id = ?1
+               AND managed_volume_state IN (
+                   'CREATING', 'CREATED', 'CLEANUP_RUNNING', 'NEEDS_ATTENTION'
+               )",
+            params![deployment_id, now_ms],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidState(format!(
+                "managed volume for deployment {deployment_id} cannot be marked for cleanup"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn bind_runtime_context(
+        &mut self,
+        deployment_id: &str,
+        job_id: &str,
+        container_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        if container_id.trim().is_empty() {
+            return Err(LedgerError::InvalidState(
+                "runtime context cannot bind an empty container id".to_string(),
+            ));
+        }
+        self.transition_runtime_context(
+            deployment_id,
+            job_id,
+            &["CREATING"],
+            "BOUND",
+            Some(Some(container_id)),
+            None,
+            now_ms,
+        )
+    }
+
+    pub fn mark_runtime_context_creating(
+        &mut self,
+        deployment_id: &str,
+        job_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let current = self
+            .runtime_context_for_deployment(deployment_id)?
+            .ok_or_else(|| {
+                LedgerError::InvalidState(format!(
+                    "runtime context for deployment {deployment_id} was not found"
+                ))
+            })?;
+        if current.context.contract.id == orchestrator_runtime::RuntimeProfile::JudgeSandboxV1
+            && (current.managed_volume_state != "CREATED" || !current.managed_volume_owned)
+        {
+            return Err(LedgerError::InvalidState(format!(
+                "judge runtime context for deployment {deployment_id} cannot create a container before its managed volume is durably owned"
+            )));
+        }
+        self.transition_runtime_context(
+            deployment_id,
+            job_id,
+            &["PREPARED"],
+            "CREATING",
+            None,
+            None,
+            now_ms,
+        )
+    }
+
+    pub fn activate_runtime_context(
+        &mut self,
+        deployment_id: &str,
+        job_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        self.transition_runtime_context(
+            deployment_id,
+            job_id,
+            &["BOUND"],
+            "ACTIVE",
+            None,
+            None,
+            now_ms,
+        )
+    }
+
+    pub fn begin_runtime_context_cleanup(
+        &mut self,
+        deployment_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE runtime_context_runs
+             SET state = 'CLEANUP_RUNNING', error_message = NULL, updated_at_ms = ?2
+             WHERE deployment_id = ?1 AND state IN (
+                'MATERIALIZING', 'PREPARED', 'CREATING', 'BOUND', 'ACTIVE',
+                'CLEANUP_NEEDED', 'NEEDS_ATTENTION'
+             )",
+            params![deployment_id, now_ms],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidState(format!(
+                "runtime context for deployment {deployment_id} cannot begin cleanup"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn finish_runtime_context_cleanup(
+        &mut self,
+        deployment_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE runtime_context_runs
+             SET state = 'CLEANED', container_id = NULL, error_message = NULL,
+                 updated_at_ms = ?2
+             WHERE deployment_id = ?1 AND state = 'CLEANUP_RUNNING'
+               AND managed_volume_state IN ('NONE', 'CLEANED')
+               AND managed_volume_owned = 0",
+            params![deployment_id, now_ms],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidState(format!(
+                "runtime context for deployment {deployment_id} is not being cleaned"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn mark_runtime_context_cleanup_needed(
+        &mut self,
+        deployment_id: &str,
+        error_message: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE runtime_context_runs
+             SET state = 'CLEANUP_NEEDED', error_message = ?2, updated_at_ms = ?3
+             WHERE deployment_id = ?1 AND state IN (
+                'MATERIALIZING', 'PREPARED', 'CLEANUP_RUNNING'
+             )",
+            params![deployment_id, error_message, now_ms],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidState(format!(
+                "runtime context for deployment {deployment_id} cannot be marked for cleanup"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn mark_runtime_context_needs_attention(
+        &mut self,
+        deployment_id: &str,
+        error_message: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE runtime_context_runs
+             SET state = 'NEEDS_ATTENTION', error_message = ?2,
+                 managed_volume_state = CASE
+                     WHEN managed_volume_state IN ('CREATING', 'CREATED')
+                     THEN 'NEEDS_ATTENTION'
+                     ELSE managed_volume_state
+                 END,
+                 updated_at_ms = ?3
+             WHERE deployment_id = ?1 AND state <> 'CLEANED'",
+            params![deployment_id, error_message, now_ms],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidState(format!(
+                "runtime context for deployment {deployment_id} cannot enter NEEDS_ATTENTION"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn runtime_context_for_container(
+        &self,
+        container_id: &str,
+    ) -> Result<Option<RuntimeContextRun>, LedgerError> {
+        self.runtime_context_query("container_id = ?1", container_id)
+    }
+
+    pub fn runtime_context_for_deployment(
+        &self,
+        deployment_id: &str,
+    ) -> Result<Option<RuntimeContextRun>, LedgerError> {
+        self.runtime_context_query("deployment_id = ?1", deployment_id)
+    }
+
+    pub fn pending_runtime_context_cleanups(&self) -> Result<Vec<RuntimeContextRun>, LedgerError> {
+        let mut statement = self.connection.prepare(
+            "SELECT deployment_id, job_id, context_json, state, container_id, error_message,
+                    managed_context_json, previous_managed_context_json, binding_context_state,
+                    managed_volume_spec_json, managed_volume_state, managed_volume_owned
+             FROM runtime_context_runs WHERE state = 'CLEANUP_NEEDED'
+             ORDER BY deployment_id",
+        )?;
+        let rows = statement.query_map([], runtime_context_row)?;
+        rows.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(decode_runtime_context_run)
+            .collect()
+    }
+
+    pub fn active_runtime_contexts(&self) -> Result<Vec<RuntimeContextRun>, LedgerError> {
+        let mut statement = self.connection.prepare(
+            "SELECT deployment_id, job_id, context_json, state, container_id, error_message,
+                    managed_context_json, previous_managed_context_json, binding_context_state,
+                    managed_volume_spec_json, managed_volume_state, managed_volume_owned
+             FROM runtime_context_runs WHERE state = 'ACTIVE' AND binding_context_state = 'ACTIVE'
+             ORDER BY deployment_id",
+        )?;
+        let rows = statement.query_map([], runtime_context_row)?;
+        rows.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(decode_runtime_context_run)
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transition_runtime_context(
+        &mut self,
+        deployment_id: &str,
+        job_id: &str,
+        from_states: &[&str],
+        to_state: &str,
+        container_id: Option<Option<&str>>,
+        error_message: Option<&str>,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        let current = self
+            .runtime_context_for_deployment(deployment_id)?
+            .ok_or_else(|| {
+                LedgerError::InvalidState(format!(
+                    "runtime context for deployment {deployment_id} was not found"
+                ))
+            })?;
+        if current.job_id != job_id || !from_states.contains(&current.state.as_str()) {
+            return Err(LedgerError::InvalidState(format!(
+                "runtime context for deployment {deployment_id} is {} for job {}, expected {:?} for job {job_id}",
+                current.state, current.job_id, from_states
+            )));
+        }
+        let next_container = match container_id {
+            Some(value) => value.map(str::to_string),
+            None => current.container_id,
+        };
+        let changed = self.connection.execute(
+            "UPDATE runtime_context_runs
+             SET state = ?3, container_id = ?4, error_message = ?5, updated_at_ms = ?6
+             WHERE deployment_id = ?1 AND job_id = ?2 AND state = ?7",
+            params![
+                deployment_id,
+                job_id,
+                to_state,
+                next_container,
+                error_message,
+                now_ms,
+                current.state,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidState(format!(
+                "runtime context for deployment {deployment_id} changed concurrently"
+            )));
+        }
+        Ok(())
+    }
+
+    fn runtime_context_query(
+        &self,
+        predicate: &str,
+        value: &str,
+    ) -> Result<Option<RuntimeContextRun>, LedgerError> {
+        let sql = format!(
+            "SELECT deployment_id, job_id, context_json, state, container_id, error_message,
+                    managed_context_json, previous_managed_context_json, binding_context_state,
+                    managed_volume_spec_json, managed_volume_state, managed_volume_owned
+             FROM runtime_context_runs WHERE {predicate}"
+        );
+        self.connection
+            .query_row(&sql, [value], runtime_context_row)
+            .optional()?
+            .map(decode_runtime_context_run)
+            .transpose()
     }
 
     pub fn begin_provider_revision(
@@ -980,6 +1693,64 @@ impl AgentLedger {
     }
 }
 
+type RuntimeContextRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    String,
+    bool,
+);
+
+fn runtime_context_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeContextRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+    ))
+}
+
+fn decode_runtime_context_run(row: RuntimeContextRow) -> Result<RuntimeContextRun, LedgerError> {
+    Ok(RuntimeContextRun {
+        deployment_id: row.0,
+        job_id: row.1,
+        context: serde_json::from_str(&row.2)?,
+        state: row.3,
+        container_id: row.4,
+        error_message: row.5,
+        managed_context: row
+            .6
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?,
+        previous_managed_context: row
+            .7
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?,
+        binding_context_state: row.8,
+        managed_volume: row
+            .9
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?,
+        managed_volume_state: row.10,
+        managed_volume_owned: row.11,
+    })
+}
+
 fn stored_completion(
     state: LedgerRunState,
     result: Option<String>,
@@ -1037,6 +1808,33 @@ fn nullable_message(message: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_context() -> RuntimeContext {
+        let root = if cfg!(windows) {
+            "C:\\ojos"
+        } else {
+            "/var/lib/ojos"
+        };
+        RuntimeContext {
+            contract: orchestrator_runtime::RuntimeContract::judge_sandbox_v1(),
+            runtime_policy_sha256: format!("sha256:{}", "a".repeat(64)),
+            scratch_directory: format!("{root}/contexts/deployment-1/work"),
+            cache_volume_name: "ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            service_context_directory: format!("{root}/contexts/deployment-1/service"),
+        }
+    }
+
+    fn managed_volume() -> ManagedVolumeSpec {
+        ManagedVolumeSpec {
+            name: "ojos-judge-cache-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            deployment_id: "deployment-1".to_string(),
+            service_id: "judge-worker".to_string(),
+            artifact_digest: format!("ghcr.io/acme/judge-worker@sha256:{}", "b".repeat(64)),
+            runtime_contract: orchestrator_runtime::RuntimeContract::judge_sandbox_v1(),
+            logical_name: orchestrator_runtime::JUDGE_CACHE_VOLUME_LOGICAL_NAME.to_string(),
+            lifecycle: orchestrator_runtime::RELEASE_VOLUME_LIFECYCLE.to_string(),
+        }
+    }
 
     fn completion(status: CompletionStatus) -> StoredCompletion {
         StoredCompletion {
@@ -1317,5 +2115,182 @@ mod tests {
         assert_eq!(revision.desired, desired);
         assert_eq!(revision.applied_components, ["auth"]);
         assert!(revision.error_message.unwrap().contains("restarted"));
+    }
+
+    #[test]
+    fn restart_schedules_prepared_context_cleanup_without_persisting_a_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime-context-ledger.sqlite3");
+        {
+            let mut ledger = AgentLedger::open(&path).unwrap();
+            ledger
+                .begin("job-context", &JobKind::Install, "hash", "lease", 10)
+                .unwrap();
+            ledger
+                .begin_runtime_context("job-context", "deployment-1", &runtime_context(), 11)
+                .unwrap();
+            ledger
+                .mark_runtime_context_prepared("deployment-1", "job-context", 12)
+                .unwrap();
+            let stored: String = ledger
+                .connection
+                .query_row(
+                    "SELECT context_json FROM runtime_context_runs WHERE deployment_id = 'deployment-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!stored.contains("access_token"));
+            assert!(!stored.contains("fixture-token"));
+        }
+
+        let ledger = AgentLedger::open(&path).unwrap();
+        let pending = ledger.pending_runtime_context_cleanups().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].state, "CLEANUP_NEEDED");
+        assert!(pending[0].container_id.is_none());
+    }
+
+    #[test]
+    fn restart_reconciles_ambiguous_volume_create_without_losing_ownership_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime-volume-creating.sqlite3");
+        {
+            let mut ledger = AgentLedger::open(&path).unwrap();
+            ledger
+                .begin("job-context", &JobKind::Install, "hash", "lease", 10)
+                .unwrap();
+            ledger
+                .begin_runtime_context("job-context", "deployment-1", &runtime_context(), 11)
+                .unwrap();
+            ledger
+                .begin_managed_volume("deployment-1", "job-context", &managed_volume(), 13)
+                .unwrap();
+            // Simulate process death after Docker may have handled create but
+            // before the Agent persisted CREATED/ownership.
+        }
+
+        let mut ledger = AgentLedger::open(&path).unwrap();
+        let pending = ledger.pending_runtime_context_cleanups().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].state, "CLEANUP_NEEDED");
+        assert_eq!(pending[0].managed_volume_state, "CLEANUP_NEEDED");
+        assert!(!pending[0].managed_volume_owned);
+        assert_eq!(pending[0].managed_volume.as_ref(), Some(&managed_volume()));
+
+        ledger
+            .begin_runtime_context_cleanup("deployment-1", 20)
+            .unwrap();
+        assert_eq!(
+            ledger
+                .begin_managed_volume_cleanup("deployment-1", 21)
+                .unwrap(),
+            Some(managed_volume())
+        );
+        assert!(
+            ledger
+                .finish_runtime_context_cleanup("deployment-1", 22)
+                .is_err(),
+            "context cleanup cannot commit while the owned volume is unresolved"
+        );
+        ledger
+            .finish_managed_volume_cleanup("deployment-1", 23)
+            .unwrap();
+        ledger
+            .finish_runtime_context_cleanup("deployment-1", 24)
+            .unwrap();
+        let cleaned = ledger
+            .runtime_context_for_deployment("deployment-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleaned.state, "CLEANED");
+        assert_eq!(cleaned.managed_volume_state, "CLEANED");
+        assert!(!cleaned.managed_volume_owned);
+    }
+
+    #[test]
+    fn restart_never_blindly_cleans_a_context_after_create_may_have_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime-context-creating.sqlite3");
+        {
+            let mut ledger = AgentLedger::open(&path).unwrap();
+            ledger
+                .begin("job-context", &JobKind::Install, "hash", "lease", 10)
+                .unwrap();
+            ledger
+                .begin_runtime_context("job-context", "deployment-1", &runtime_context(), 11)
+                .unwrap();
+            ledger
+                .begin_managed_volume("deployment-1", "job-context", &managed_volume(), 12)
+                .unwrap();
+            ledger
+                .mark_managed_volume_created("deployment-1", "job-context", 12)
+                .unwrap();
+            ledger
+                .mark_runtime_context_prepared("deployment-1", "job-context", 12)
+                .unwrap();
+            ledger
+                .mark_runtime_context_creating("deployment-1", "job-context", 13)
+                .unwrap();
+        }
+
+        let ledger = AgentLedger::open(&path).unwrap();
+        assert!(
+            ledger
+                .pending_runtime_context_cleanups()
+                .unwrap()
+                .is_empty()
+        );
+        let run = ledger
+            .runtime_context_for_deployment("deployment-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "NEEDS_ATTENTION");
+        assert_eq!(run.managed_volume_state, "NEEDS_ATTENTION");
+        assert!(run.managed_volume_owned);
+    }
+
+    #[test]
+    fn active_runtime_context_survives_restart_for_credential_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime-context-active.sqlite3");
+        {
+            let mut ledger = AgentLedger::open(&path).unwrap();
+            ledger
+                .begin("job-context", &JobKind::Install, "hash", "lease", 10)
+                .unwrap();
+            ledger
+                .begin_runtime_context("job-context", "deployment-1", &runtime_context(), 11)
+                .unwrap();
+            ledger
+                .begin_managed_volume("deployment-1", "job-context", &managed_volume(), 12)
+                .unwrap();
+            ledger
+                .mark_managed_volume_created("deployment-1", "job-context", 12)
+                .unwrap();
+            ledger
+                .mark_runtime_context_prepared("deployment-1", "job-context", 12)
+                .unwrap();
+            ledger
+                .mark_runtime_context_creating("deployment-1", "job-context", 13)
+                .unwrap();
+            ledger
+                .bind_runtime_context("deployment-1", "job-context", "container-1", 14)
+                .unwrap();
+            ledger
+                .activate_runtime_context("deployment-1", "job-context", 15)
+                .unwrap();
+            ledger
+                .finish("job-context", &completion(CompletionStatus::Succeeded), 16)
+                .unwrap();
+        }
+
+        let ledger = AgentLedger::open(&path).unwrap();
+        let active = ledger.active_runtime_contexts().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].container_id.as_deref(), Some("container-1"));
+        assert_eq!(active[0].state, "ACTIVE");
+        assert_eq!(active[0].managed_volume_state, "CREATED");
+        assert!(active[0].managed_volume_owned);
     }
 }

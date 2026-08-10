@@ -1,6 +1,6 @@
 use orchestrator_control_plane::{
     ClaimRequest, CompleteRequest, CompletionStatus, HeartbeatRequest, JobKind, JobStatus,
-    JobStore, NewJob, NewJobEvent,
+    JobStore, NewJob, NewJobEvent, ResolveExpiredSuccessRequest,
 };
 use orchestrator_legacy::{
     Endpoint, EndpointDecl, Link, LogView, NodeRecord, OrchestratorStore, RuntimeMode,
@@ -479,6 +479,7 @@ fn expired_lease_requeues_then_requires_attention() {
     let storage = SqliteOrchestratorStore::open(temp.path().join("orchestrator.db")).expect("open");
     let mut jobs = SqliteJobStore::new(storage);
     let mut job = new_job("retry");
+    job.kind = JobKind::Health;
     job.max_attempts = 2;
     jobs.enqueue(job, 0).expect("enqueue");
     jobs.claim(claim_request("lease-1", 0)).expect("claim");
@@ -495,12 +496,186 @@ fn expired_lease_requeues_then_requires_attention() {
 }
 
 #[test]
+fn expired_success_evidence_resolves_atomically_and_survives_restart() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("orchestrator.db");
+    let storage = SqliteOrchestratorStore::open(&path).expect("open");
+    let mut jobs = SqliteJobStore::new(storage);
+    let mut job = new_job("resolved-expired");
+    job.max_attempts = 2;
+    jobs.enqueue(job, 0).expect("enqueue");
+    jobs.claim(claim_request("lease-1", 0)).expect("claim");
+    jobs.complete(CompleteRequest {
+        job_id: "resolved-expired".to_string(),
+        lease_token: "lease-1".to_string(),
+        status: CompletionStatus::RetryableFailure,
+        result: json!({}),
+        error_message: "known retryable failure".to_string(),
+        now_ms: 0,
+        events: Vec::new(),
+    })
+    .expect("record known retryable failure");
+    let leased = jobs
+        .claim(claim_request("lease-2", 1_000))
+        .expect("claim retry")
+        .expect("retry job");
+    let result = json!({
+        "topology_id": "primary",
+        "revision_id": "revision-1",
+        "durable_evidence": {"applied_head": "revision-1"}
+    });
+    let request = ResolveExpiredSuccessRequest {
+        job_id: leased.job_id.clone(),
+        now_ms: 31_000,
+        result: result.clone(),
+    };
+    let resolved = jobs
+        .resolve_expired_success(request.clone())
+        .expect("resolve expired success");
+    assert_eq!(resolved.status, JobStatus::Succeeded);
+    assert_eq!(resolved.result, Some(result));
+    assert_eq!(resolved.error_message, None);
+    assert_eq!(resolved.attempt, leased.attempt);
+    assert_eq!(resolved.started_at_ms, leased.started_at_ms);
+    assert_eq!(resolved.lease_owner, leased.lease_owner);
+    assert_eq!(resolved.lease_token, leased.lease_token);
+    assert_eq!(resolved.lease_expires_at_ms, leased.lease_expires_at_ms);
+    assert_eq!(
+        jobs.resolve_expired_success(request.clone())
+            .expect("replay exact evidence"),
+        resolved
+    );
+    assert!(matches!(
+        jobs.resolve_expired_success(ResolveExpiredSuccessRequest {
+            result: json!({"durable_evidence": "different"}),
+            ..request
+        }),
+        Err(orchestrator_control_plane::JobError::InvalidTransition {
+            from: JobStatus::Succeeded,
+            ..
+        })
+    ));
+
+    drop(jobs);
+    let reopened = SqliteJobStore::new(SqliteOrchestratorStore::open(path).expect("reopen"));
+    assert_eq!(
+        reopened
+            .get(&leased.job_id)
+            .expect("get resolved job after restart")
+            .expect("resolved job"),
+        resolved
+    );
+}
+
+#[test]
+fn expired_success_evidence_rejects_renewed_and_needs_attention_jobs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let storage = SqliteOrchestratorStore::open(temp.path().join("orchestrator.db")).expect("open");
+    let mut jobs = SqliteJobStore::new(storage);
+    jobs.enqueue(new_job("live-resolution"), 0)
+        .expect("enqueue live job");
+    jobs.claim(claim_request("live-lease", 0))
+        .expect("claim live job");
+    assert_eq!(
+        jobs.resolve_expired_success(ResolveExpiredSuccessRequest {
+            job_id: "live-resolution".to_string(),
+            now_ms: 29_999,
+            result: json!({"durable_evidence": "too-early"}),
+        }),
+        Err(orchestrator_control_plane::JobError::StaleLease)
+    );
+
+    let mut attention = new_job("attention-resolution");
+    attention.max_attempts = 1;
+    jobs.enqueue(attention, 0).expect("enqueue attention job");
+    jobs.claim(claim_request("attention-lease", 0))
+        .expect("claim attention job");
+    jobs.recover_expired(30_000).expect("recover attention job");
+    assert!(matches!(
+        jobs.resolve_expired_success(ResolveExpiredSuccessRequest {
+            job_id: "attention-resolution".to_string(),
+            now_ms: 30_001,
+            result: json!({"durable_evidence": "too-late"}),
+        }),
+        Err(orchestrator_control_plane::JobError::InvalidTransition {
+            from: JobStatus::NeedsAttention,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn mutating_expired_lease_is_never_requeued_by_sqlite() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let storage = SqliteOrchestratorStore::open(temp.path().join("orchestrator.db")).expect("open");
+    let mut jobs = SqliteJobStore::new(storage);
+    let mut job = new_job("mutating-expired");
+    job.kind = JobKind::TopologyApply;
+    job.max_attempts = 3;
+    jobs.enqueue(job, 0).expect("enqueue mutating job");
+    jobs.claim(claim_request("mutating-lease", 0))
+        .expect("claim mutating job");
+
+    let recovered = jobs.recover_expired(30_000).expect("recover lease");
+    assert_eq!(recovered[0].status, JobStatus::NeedsAttention);
+    assert_eq!(recovered[0].attempt, 1);
+    assert!(
+        jobs.claim(claim_request("must-not-reclaim", 60_000))
+            .expect("attempt reclaim")
+            .is_none()
+    );
+}
+
+#[test]
+fn expired_lease_query_is_read_only_and_stably_ordered_in_sqlite() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let storage = SqliteOrchestratorStore::open(temp.path().join("orchestrator.db")).expect("open");
+    let mut jobs = SqliteJobStore::new(storage);
+    for id in ["query-b", "query-a", "query-future"] {
+        jobs.enqueue(observation_job(id), 0)
+            .expect("enqueue query fixture");
+        jobs.claim(ClaimRequest {
+            node_id: "node-a".to_string(),
+            instance_id: format!("worker-{id}"),
+            lease_token: format!("lease-{id}"),
+            now_ms: 0,
+            lease_ms: if id == "query-future" { 20_000 } else { 10_000 },
+        })
+        .expect("claim query fixture")
+        .expect("query fixture");
+    }
+    jobs.request_cancel("query-b", 1)
+        .expect("mark one expired lease cancelling");
+
+    let expired = jobs.expired_leases(10_000).expect("query expired leases");
+    assert_eq!(
+        expired
+            .iter()
+            .map(|job| job.job_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["query-b", "query-a"]
+    );
+    assert_eq!(
+        jobs.get("query-a").unwrap().unwrap().status,
+        JobStatus::Leased
+    );
+    assert_eq!(
+        jobs.get("query-b").unwrap().unwrap().status,
+        JobStatus::CancelRequested
+    );
+    assert_eq!(
+        jobs.get("query-future").unwrap().unwrap().status,
+        JobStatus::Leased
+    );
+}
+
+#[test]
 fn expired_heartbeat_and_completion_recover_atomically_at_the_lease_boundary() {
     let temp = tempfile::tempdir().expect("tempdir");
     let storage = SqliteOrchestratorStore::open(temp.path().join("orchestrator.db")).expect("open");
     let mut jobs = SqliteJobStore::new(storage.clone());
 
-    jobs.enqueue(new_job("expired-heartbeat"), 0)
+    jobs.enqueue(observation_job("expired-heartbeat"), 0)
         .expect("enqueue heartbeat fixture");
     jobs.claim(claim_request("current-heartbeat", 0))
         .expect("claim heartbeat fixture");
@@ -550,7 +725,7 @@ fn expired_heartbeat_and_completion_recover_atomically_at_the_lease_boundary() {
             .is_empty()
     );
 
-    jobs.enqueue(new_job("expired-complete"), 0)
+    jobs.enqueue(observation_job("expired-complete"), 0)
         .expect("enqueue completion fixture");
     jobs.claim(claim_request("current-complete", 0))
         .expect("claim completion fixture");
@@ -574,7 +749,7 @@ fn expired_heartbeat_and_completion_recover_atomically_at_the_lease_boundary() {
         JobStatus::RetryWait
     );
 
-    jobs.enqueue(new_job("expired-race"), 0)
+    jobs.enqueue(observation_job("expired-race"), 0)
         .expect("enqueue race fixture");
     jobs.claim(claim_request("race-token", 0))
         .expect("claim race fixture");
@@ -632,6 +807,12 @@ fn new_job(id: &str) -> NewJob {
         idempotency_key: format!("key-{id}"),
         max_attempts: 3,
     }
+}
+
+fn observation_job(id: &str) -> NewJob {
+    let mut job = new_job(id);
+    job.kind = JobKind::Health;
+    job
 }
 
 fn claim_request(token: &str, now_ms: i64) -> ClaimRequest {
@@ -752,6 +933,7 @@ fn topology_spec(topology_id: &str, note: &str) -> TopologySpec {
             config_ref: String::new(),
             secret_ref: String::new(),
             policy: json!({}),
+            api_bindings: Vec::new(),
         }],
     )
     .expect("valid topology spec")

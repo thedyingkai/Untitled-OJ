@@ -1,21 +1,17 @@
-schema_version: 1
+schema_version: 2
 service_name: storage-service
 version: 0.1.0
-description: Release contract for storage-service.
+description: Object storage provider for Service Contract v2 resource references.
 service_type: storage
 source:
   kind: local
   url: local://services/storage-service
   checksum: ""
 runtime:
-  kind: local-process
+  kind: image
   image: ""
   binary: ""
   system_service: ""
-  command: go
-  args: ["run", ".", "-f", "${OJOS_STORAGE_SERVICE_CONFIG}"]
-  working_dir: services/storage-service
-  env: {}
 frontend:
   enabled: false
   route_prefix: ""
@@ -31,47 +27,60 @@ permissions:
   - storage.object.write
   - storage.object.delete
 routes: []
-apis:
-  - api_id: storage.object.put
-    protocol: http
-    port_name: http
-    path_prefix: /api/storage/objects
-    methods: [PUT, POST]
-    visibility: descendants
-    auth_mode: service
-    permission: storage.object.write
-    version: v1
-    stability: stable
-  - api_id: storage.object.get
-    protocol: http
-    port_name: http
-    path_prefix: /api/storage/objects
-    methods: [GET]
-    visibility: descendants
-    auth_mode: service
-    permission: storage.object.read
-    version: v1
-    stability: stable
-  - api_id: storage.object.head
-    protocol: http
-    port_name: http
-    path_prefix: /api/storage/objects
-    methods: [HEAD]
-    visibility: descendants
-    auth_mode: service
-    permission: storage.object.read
-    version: v1
-    stability: stable
-  - api_id: storage.object.delete
-    protocol: http
-    port_name: http
-    path_prefix: /api/storage/objects
-    methods: [DELETE]
-    visibility: descendants
-    auth_mode: service
-    permission: storage.object.delete
-    version: v1
-    stability: stable
+provides:
+  apis:
+    - id: storage.object.put
+      version: 1.0.0
+      protocol: http
+      path: /api/storage/objects
+      methods: [PUT]
+      visibility: explicit
+      auth: workload
+      permission: storage.object.write
+      stability: stable
+      timeout_ms: 300000
+    - id: storage.object.get
+      version: 1.0.0
+      protocol: http
+      path: /api/storage/objects
+      methods: [GET]
+      visibility: explicit
+      auth: workload
+      permission: storage.object.read
+      stability: stable
+      timeout_ms: 300000
+    - id: storage.object.head
+      version: 1.0.0
+      protocol: http
+      path: /api/storage/objects
+      methods: [HEAD]
+      visibility: explicit
+      auth: workload
+      permission: storage.object.read
+      stability: stable
+      timeout_ms: 300000
+    - id: storage.object.delete
+      version: 1.0.0
+      protocol: http
+      path: /api/storage/objects
+      methods: [DELETE]
+      visibility: explicit
+      auth: workload
+      permission: storage.object.delete
+      stability: stable
+      timeout_ms: 300000
+requires:
+  apis: []
+events:
+  publishes: []
+  subscribes: []
+runtime_contract:
+  id: standard-container-v1
+  sha256: sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f
+  binding_directory: /run/ojos/service
+  identity_mode: workload
+  credential_delivery: file
+  restart_on_change: false
 redis: []
 storage:
   - object_type: problem-package
@@ -101,4 +110,3 @@ secrets: []
 observability:
   metrics: true
   jaeger: true
-

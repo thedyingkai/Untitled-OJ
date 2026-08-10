@@ -581,7 +581,7 @@ pub fn validate_service_api_surface(api: &ServiceApiSurface) -> Result<()> {
     }
     if !matches!(
         api.auth_mode.as_str(),
-        "public" | "user" | "service" | "internal"
+        "public" | "user" | "service" | "internal" | "workload"
     ) {
         return Err(OrchestratorError::InvalidManifest(
             "api surface auth_mode is invalid".to_string(),
@@ -1128,4 +1128,36 @@ fn timestamp_marker(label: &str) -> String {
 
 fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ServiceApiSurface, validate_service_api_surface};
+    use serde_json::Value;
+
+    #[test]
+    fn service_api_surface_accepts_service_contract_v2_workload_auth() {
+        let surface = ServiceApiSurface {
+            service_name: "storage-service".to_string(),
+            version: "0.1.0".to_string(),
+            api_id: "storage.object.get".to_string(),
+            protocol: "http".to_string(),
+            port_name: "default".to_string(),
+            path_prefix: "/api/storage/objects".to_string(),
+            methods: vec!["GET".to_string()],
+            visibility: "explicit".to_string(),
+            auth_mode: "workload".to_string(),
+            permission: "storage.object.read".to_string(),
+            stability: "stable".to_string(),
+            api_version: "1.0.0".to_string(),
+            rate_limit: String::new(),
+            timeout: "300000ms".to_string(),
+            config: Value::Null,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        validate_service_api_surface(&surface)
+            .expect("Service Contract v2 workload surfaces must persist in the API registry");
+    }
 }

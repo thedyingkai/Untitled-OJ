@@ -1,0 +1,38 @@
+openapi: 3.1.0
+info:
+  title: OJOS Auth Service Published API
+  version: 0.1.0
+x-ojos-service:
+  id: auth-service
+  version: 0.1.0
+paths:
+  /auth/login:
+    post:
+      operationId: authLogin
+      x-ojos-api:
+        id: auth.login
+        version: 1.0.0
+        auth: public
+        permission: public
+      responses:
+        "200": {description: Authenticated}
+  /auth/admin/permission-check:
+    post:
+      operationId: checkUserPermission
+      x-ojos-api:
+        id: auth.user.permission.check
+        version: 1.0.0
+        auth: workload
+        permission: auth.permission.check
+      responses:
+        "200": {description: Permission decision}
+  /auth/admin/users/{user_id}/effective-permissions:
+    get:
+      operationId: getUserEffectivePermissions
+      x-ojos-api:
+        id: auth.user.permissions
+        version: 1.0.0
+        auth: user
+        permission: auth.admin
+      responses:
+        "200": {description: Effective permissions}

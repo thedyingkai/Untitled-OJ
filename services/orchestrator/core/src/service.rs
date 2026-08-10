@@ -738,13 +738,22 @@ pub fn validate_service_release(release: &ServiceReleaseManifest) -> Result<()> 
             "release api visibility is invalid",
         )?;
         ensure(
-            matches!(api.auth_mode.as_str(), "public" | "user" | "service"),
+            matches!(
+                api.auth_mode.as_str(),
+                "public" | "user" | "service" | "workload"
+            ),
             "release api auth_mode is invalid",
         )?;
         if api.auth_mode == "service" {
             ensure(
                 api.permission != "public",
                 "release service-auth api permission must not be public",
+            )?;
+        }
+        if api.auth_mode == "workload" {
+            ensure(
+                api.permission != "public",
+                "release workload-auth api permission must not be public",
             )?;
         }
         if api.api_id == "auth.user.permission.check" {

@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 service_name: user-service
 version: 0.1.0
 description: Release contract for user-service.
@@ -37,27 +37,44 @@ routes:
     target_type: endpoint-group
     target: user-service[*]
     permission: user.profile.read.self
-apis:
-  - api_id: user.profile.read
-    protocol: http
-    port_name: http
-    path_prefix: /api/users
-    methods: [GET]
-    visibility: descendants
-    auth_mode: user
-    permission: user.profile.read.self
-    version: v1
-    stability: stable
-  - api_id: user.profile.update
-    protocol: http
-    port_name: http
-    path_prefix: /api/users
-    methods: [PATCH]
-    visibility: descendants
-    auth_mode: user
-    permission: user.profile.update.self
-    version: v1
-    stability: stable
+provides:
+  apis:
+    - id: user.profile.read
+      version: 1.0.0
+      protocol: http
+      path: /api/users
+      methods: [GET]
+      visibility: descendants
+      auth: user
+      permission: user.profile.read.self
+      stability: stable
+    - id: user.profile.update
+      version: 1.0.0
+      protocol: http
+      path: /api/users
+      methods: [PATCH]
+      visibility: descendants
+      auth: user
+      permission: user.profile.update.self
+      stability: stable
+requires:
+  apis:
+    - name: permission_check
+      id: auth.user.permission.check
+      version: ">=1.0.0, <2.0.0"
+      optional: false
+      selection: explicit
+      timeout_ms: 5000
+events:
+  publishes: []
+  subscribes: []
+runtime_contract:
+  id: standard-container-v1
+  sha256: sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f
+  binding_directory: /run/ojos/service
+  identity_mode: workload
+  credential_delivery: file
+  restart_on_change: false
 redis: []
 storage:
   - object_type: avatar
@@ -71,4 +88,3 @@ secrets: []
 observability:
   metrics: true
   jaeger: true
-

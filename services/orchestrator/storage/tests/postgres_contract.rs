@@ -2,22 +2,25 @@ use orchestrator_control_plane::{
     ClaimRequest, CompleteRequest, CompletionStatus, DurableOperation, DurableOperationMode,
     DurableOperationStatus, HeartbeatRequest, JobKind, JobStatus, JobStore, MemoryJobStore, NewJob,
     NewJobEvent, OPERATION_SCHEMA_VERSION, OperationCoordinator, OperationRepository,
-    OperationStoreError, PlanOperation, PlannedJob,
+    OperationStoreError, PlanOperation, PlannedJob, ResolveExpiredSuccessRequest,
 };
 use orchestrator_legacy::{
-    NodeRecord, OrchestratorStore, TopologyEndpointSpec, TopologyLinkSpec, TopologySpec,
+    ApiBinding, ApiBindingState, NodeRecord, OrchestratorStore, TopologyEndpointSpec,
+    TopologyLinkSpec, TopologySpec,
 };
 use orchestrator_runtime::{RuntimeDesiredState, RuntimeInstance, RuntimeObservedState};
 use orchestrator_storage::{
     AuditOutcome, CERTIFICATE_LIFETIME_MS, EnrollmentRedemption, IdempotencyBegin, NewAuditRecord,
     NewNodeCertificate, NodeEnrollmentCode, PostgresError, PostgresJobStore,
     PostgresOperationStore, PostgresOptions, PostgresOrchestratorStore, PostgresTlsTrust,
-    StoredIdempotentResponse, StoredRuntimeInstance, TopologyApplyOutcome,
+    StoredIdempotentResponse, StoredNodeRuntimeFacts, StoredRuntimeInstance,
+    TopologyApplyGroupMember, TopologyApplyOutcome,
 };
 use serde_json::json;
 use std::{
     collections::BTreeMap,
     path::PathBuf,
+    sync::{Arc, Barrier},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -186,6 +189,8 @@ fn postgres_repository_contract_when_configured() {
     assert_eq!(jobs.events(&job_id, 0).expect("events").len(), 1);
 
     verify_expired_request_contract(&store, suffix, &node_id);
+    verify_expired_success_resolution_contract(&store, suffix, &node_id);
+    verify_expired_lease_query_and_mutation_safety_contract(&store, suffix, &node_id);
 
     verify_node_enrollment_concurrency_contract(&store, suffix);
     verify_history_retention_contract(&store, suffix, &audit_request_id, &node_id);
@@ -365,6 +370,191 @@ fn verify_expired_request_contract(store: &PostgresOrchestratorStore, suffix: u6
             .expired_job_lease_transitions_total,
         baseline + 3
     );
+}
+
+fn verify_expired_success_resolution_contract(
+    store: &PostgresOrchestratorStore,
+    suffix: u64,
+    node_id: &str,
+) {
+    let mut jobs = PostgresJobStore::new(store.clone());
+    let job_id = format!("pg-resolve-expired-{suffix}");
+    jobs.enqueue(
+        NewJob {
+            job_id: job_id.clone(),
+            operation_id: format!("pg-resolve-expired-operation-{suffix}"),
+            node_id: node_id.to_string(),
+            kind: JobKind::TopologyApply,
+            payload: json!({"revision_id": format!("revision-{suffix}")}),
+            idempotency_key: format!("pg-resolve-expired-key-{suffix}"),
+            max_attempts: 2,
+        },
+        0,
+    )
+    .expect("enqueue expired success fixture");
+    jobs.claim(ClaimRequest {
+        node_id: node_id.to_string(),
+        instance_id: "pg-resolve-worker-1".to_string(),
+        lease_token: "pg-resolve-lease-1".to_string(),
+        now_ms: 0,
+        lease_ms: 30_000,
+    })
+    .expect("claim first expired success attempt")
+    .expect("first expired success attempt");
+    jobs.complete(CompleteRequest {
+        job_id: job_id.clone(),
+        lease_token: "pg-resolve-lease-1".to_string(),
+        status: CompletionStatus::RetryableFailure,
+        result: json!({}),
+        error_message: "known retryable failure".to_string(),
+        now_ms: 0,
+        events: Vec::new(),
+    })
+    .expect("record known retryable failure");
+    let leased = jobs
+        .claim(ClaimRequest {
+            node_id: node_id.to_string(),
+            instance_id: "pg-resolve-worker-2".to_string(),
+            lease_token: "pg-resolve-lease-2".to_string(),
+            now_ms: 1_000,
+            lease_ms: 30_000,
+        })
+        .expect("claim second expired success attempt")
+        .expect("second expired success attempt");
+    let result = json!({
+        "topology_id": "primary",
+        "revision_id": format!("revision-{suffix}"),
+        "durable_evidence": {"applied_head": format!("revision-{suffix}")}
+    });
+    let request = ResolveExpiredSuccessRequest {
+        job_id: job_id.clone(),
+        now_ms: 31_000,
+        result: result.clone(),
+    };
+    let resolved = jobs
+        .resolve_expired_success(request.clone())
+        .expect("resolve PostgreSQL expired success");
+    assert_eq!(resolved.status, JobStatus::Succeeded);
+    assert_eq!(resolved.result, Some(result));
+    assert_eq!(resolved.error_message, None);
+    assert_eq!(resolved.attempt, leased.attempt);
+    assert_eq!(resolved.started_at_ms, leased.started_at_ms);
+    assert_eq!(resolved.lease_owner, leased.lease_owner);
+    assert_eq!(resolved.lease_token, leased.lease_token);
+    assert_eq!(resolved.lease_expires_at_ms, leased.lease_expires_at_ms);
+    assert_eq!(
+        jobs.resolve_expired_success(request.clone())
+            .expect("replay PostgreSQL expired success evidence"),
+        resolved
+    );
+    assert!(matches!(
+        jobs.resolve_expired_success(ResolveExpiredSuccessRequest {
+            result: json!({"durable_evidence": "different"}),
+            ..request
+        }),
+        Err(orchestrator_control_plane::JobError::InvalidTransition {
+            from: JobStatus::Succeeded,
+            ..
+        })
+    ));
+    assert_eq!(
+        jobs.get(&job_id)
+            .expect("read PostgreSQL resolved success")
+            .expect("resolved PostgreSQL Job"),
+        resolved
+    );
+}
+
+fn verify_expired_lease_query_and_mutation_safety_contract(
+    store: &PostgresOrchestratorStore,
+    suffix: u64,
+    node_id: &str,
+) {
+    let mut jobs = PostgresJobStore::new(store.clone());
+    for (id, lease_ms) in [
+        (format!("pg-query-b-{suffix}"), 10_000),
+        (format!("pg-query-a-{suffix}"), 10_000),
+        (format!("pg-query-future-{suffix}"), 20_000),
+    ] {
+        jobs.enqueue(
+            NewJob {
+                job_id: id.clone(),
+                operation_id: format!("operation-{id}"),
+                node_id: node_id.to_string(),
+                kind: JobKind::Health,
+                payload: json!({}),
+                idempotency_key: format!("key-{id}"),
+                max_attempts: 2,
+            },
+            0,
+        )
+        .expect("enqueue PostgreSQL expired query fixture");
+        jobs.claim(ClaimRequest {
+            node_id: node_id.to_string(),
+            instance_id: format!("worker-{id}"),
+            lease_token: format!("lease-{id}"),
+            now_ms: 0,
+            lease_ms,
+        })
+        .expect("claim PostgreSQL expired query fixture")
+        .expect("PostgreSQL expired query fixture");
+    }
+    let cancelling_id = format!("pg-query-b-{suffix}");
+    jobs.request_cancel(&cancelling_id, 1)
+        .expect("mark PostgreSQL expired query fixture cancelling");
+    let expired = jobs
+        .expired_leases(10_000)
+        .expect("query PostgreSQL expired leases");
+    assert_eq!(
+        expired
+            .iter()
+            .map(|job| job.job_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            format!("pg-query-b-{suffix}"),
+            format!("pg-query-a-{suffix}")
+        ]
+    );
+    assert_eq!(
+        jobs.get(&cancelling_id)
+            .expect("read cancelling query fixture")
+            .expect("cancelling query fixture")
+            .status,
+        JobStatus::CancelRequested
+    );
+
+    let mutating_id = format!("pg-mutating-expired-{suffix}");
+    jobs.enqueue(
+        NewJob {
+            job_id: mutating_id.clone(),
+            operation_id: format!("operation-{mutating_id}"),
+            node_id: node_id.to_string(),
+            kind: JobKind::TopologyApply,
+            payload: json!({}),
+            idempotency_key: format!("key-{mutating_id}"),
+            max_attempts: 3,
+        },
+        0,
+    )
+    .expect("enqueue PostgreSQL mutating expiry fixture");
+    jobs.claim(ClaimRequest {
+        node_id: node_id.to_string(),
+        instance_id: "pg-mutating-worker".to_string(),
+        lease_token: "pg-mutating-lease".to_string(),
+        now_ms: 0,
+        lease_ms: 30_000,
+    })
+    .expect("claim PostgreSQL mutating expiry fixture")
+    .expect("PostgreSQL mutating expiry fixture");
+    let recovered = jobs
+        .recover_expired(30_000)
+        .expect("recover PostgreSQL expired leases");
+    let mutating = recovered
+        .iter()
+        .find(|job| job.job_id == mutating_id)
+        .expect("mutating Job is recovered");
+    assert_eq!(mutating.status, JobStatus::NeedsAttention);
+    assert_eq!(mutating.attempt, 1);
 }
 
 fn verify_node_enrollment_concurrency_contract(store: &PostgresOrchestratorStore, suffix: u64) {
@@ -1301,6 +1491,125 @@ fn verify_topology_contract(store: &PostgresOrchestratorStore, suffix: u64) {
     );
     assert_eq!(rollback.spec(), first.spec());
     assert_eq!(store.topology_revisions(&topology_id).unwrap().len(), 3);
+
+    let group_topology_id = format!("pg-topology-group-{suffix}");
+    let group_revision = store
+        .create_initial_topology_revision(
+            topology_spec(&group_topology_id, "group terminal bindings"),
+            "t9",
+            "admin",
+            "group initial",
+        )
+        .expect("initial grouped revision");
+    let operation_id = format!("pg-group-operation-{suffix}");
+    store
+        .begin_topology_apply(
+            &group_topology_id,
+            group_revision.revision_id(),
+            &operation_id,
+            "t10",
+        )
+        .expect("begin grouped apply");
+    let retained = finalized_api_binding(
+        &format!("pg-binding-active-{suffix}"),
+        "permission_check",
+        &format!("pg-consumer-{suffix}"),
+        &group_topology_id,
+        group_revision.revision_id(),
+        &operation_id,
+    );
+    let mut revoked = finalized_api_binding(
+        &format!("pg-binding-revoked-{suffix}"),
+        "echo",
+        &format!("pg-consumer-{suffix}"),
+        &group_topology_id,
+        group_revision.revision_id(),
+        &operation_id,
+    );
+    revoked.desired_state = "REVOKED".to_string();
+    revoked.observed_state = "REVOKED".to_string();
+    revoked.health = "UNKNOWN".to_string();
+    revoked.state = ApiBindingState::Revoked;
+    revoked.optional = true;
+    let members = vec![TopologyApplyGroupMember {
+        topology_id: group_topology_id.clone(),
+        revision_id: group_revision.revision_id().to_string(),
+        active_bindings: vec![retained, revoked],
+    }];
+
+    let mut unstaged = members.clone();
+    unstaged[0].active_bindings[0].last_operation_id = "older-operation".to_string();
+    assert!(matches!(
+        store.finish_topology_apply_group(&unstaged, &operation_id, "t11"),
+        Err(PostgresError::Invariant(_))
+    ));
+    let mut duplicate = members.clone();
+    duplicate[0].active_bindings[1].binding_id = duplicate[0].active_bindings[0].binding_id.clone();
+    assert!(matches!(
+        store.finish_topology_apply_group(&duplicate, &operation_id, "t11"),
+        Err(PostgresError::Invariant(_))
+    ));
+    store
+        .finish_topology_apply_group(&members, &operation_id, "t12")
+        .expect("finish grouped apply with retained and revoked terminal bindings");
+    assert_eq!(
+        store
+            .api_bindings_for_topology(&group_topology_id)
+            .expect("read grouped PostgreSQL bindings"),
+        members[0].active_bindings
+    );
+
+    // Agent completion replaces the consumer view while Topology finalization
+    // replaces the topology view. They deliberately overlap on the same rows;
+    // all writers must serialize instead of interleaving DELETE/INSERT pairs.
+    let race_topology_id = format!("pg-binding-race-topology-{suffix}");
+    let race_deployment_id = format!("pg-binding-race-deployment-{suffix}");
+    let race_binding = finalized_api_binding(
+        &format!("pg-binding-race-{suffix}"),
+        "judge_control",
+        &race_deployment_id,
+        &race_topology_id,
+        &format!("pg-binding-race-revision-{suffix}"),
+        &format!("pg-binding-race-operation-{suffix}"),
+    );
+    store
+        .replace_topology_api_bindings(&race_topology_id, std::slice::from_ref(&race_binding))
+        .expect("seed overlapping binding projection");
+    let writer_count = 24;
+    let barrier = Arc::new(Barrier::new(writer_count));
+    let handles = (0..writer_count)
+        .map(|index| {
+            let store = store.clone();
+            let barrier = Arc::clone(&barrier);
+            let binding = race_binding.clone();
+            let deployment_id = race_deployment_id.clone();
+            let topology_id = race_topology_id.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                if index % 2 == 0 {
+                    store.replace_deployment_api_bindings(
+                        &deployment_id,
+                        std::slice::from_ref(&binding),
+                    )
+                } else {
+                    store
+                        .replace_topology_api_bindings(&topology_id, std::slice::from_ref(&binding))
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle
+            .join()
+            .expect("binding projection writer thread")
+            .expect("serialized overlapping binding replacement");
+    }
+    assert_eq!(
+        store
+            .api_bindings_for_topology(&race_topology_id)
+            .expect("read serialized binding projection"),
+        vec![race_binding]
+    );
 }
 
 fn verify_idempotency_contract(store: &PostgresOrchestratorStore, suffix: u64) {
@@ -1384,12 +1693,23 @@ fn verify_runtime_restart(
             release_version: "1.0.0".to_string(),
             container_id: format!("container-{suffix}"),
             artifact_digest: format!("sha256:{}", "c".repeat(64)),
+            runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
+            runtime_policy_sha256: String::new(),
+            effective_runtime_sha256: String::new(),
+            runtime_attested: false,
             desired_state: RuntimeDesiredState::Running,
             observed_state: RuntimeObservedState::Running,
             health: "healthy".to_string(),
         },
         management_mode: orchestrator_storage::RuntimeManagementMode::Managed,
         endpoint: String::new(),
+        external_probe_protocol: String::new(),
+        external_probe_health_path: String::new(),
+        last_observed_at_ms: 0,
+        drift_reason: String::new(),
+        credential_expires_at_ms: 0,
+        credential_last_success_at_ms: 0,
+        credential_last_error: String::new(),
         updated_at: "2026-08-03T00:00:00Z".to_string(),
     };
     store
@@ -1401,7 +1721,86 @@ fn verify_runtime_restart(
         reopened
             .runtime_instance(&deployment_id)
             .expect("read runtime after restart"),
-        Some(value)
+        Some(value.clone())
+    );
+    let mut external = value.clone();
+    external.node_id = "external".to_string();
+    external.instance.deployment_id = format!("pg-external-deployment-{suffix}");
+    external.instance.container_id.clear();
+    external.instance.runtime_attested = false;
+    external.management_mode = orchestrator_storage::RuntimeManagementMode::External;
+    external.endpoint = "https://external.example".to_string();
+    external.external_probe_protocol = "https".to_string();
+    external.external_probe_health_path = "/healthz/ready".to_string();
+    external.last_observed_at_ms = 123_456;
+    reopened
+        .put_runtime_instance(&external)
+        .expect("persist External probe contract");
+    assert_eq!(
+        reopened
+            .runtime_instance(&external.instance.deployment_id)
+            .expect("read External probe contract"),
+        Some(external)
+    );
+    let report = StoredNodeRuntimeFacts {
+        node_id: value.node_id.clone(),
+        observed_at_ms: 100,
+        received_at_ms: 101,
+        facts: json!({"schema_version": 1, "report_id": format!("pg-report-{suffix}")}),
+    };
+    let mut projected = value.clone();
+    projected.last_observed_at_ms = 100;
+    projected.instance.runtime_attested = true;
+    reopened
+        .apply_node_runtime_report(
+            &report,
+            Some(std::slice::from_ref(&deployment_id)),
+            &[(value.clone(), projected.clone())],
+        )
+        .expect("atomically apply PostgreSQL runtime report");
+    reopened
+        .apply_node_runtime_report(
+            &report,
+            Some(std::slice::from_ref(&deployment_id)),
+            &[(value.clone(), projected.clone())],
+        )
+        .expect("replay identical PostgreSQL runtime report");
+
+    let mut lifecycle = projected.clone();
+    lifecycle.instance.desired_state = RuntimeDesiredState::Stopped;
+    lifecycle.instance.observed_state = RuntimeObservedState::Stopped;
+    lifecycle.instance.health = "NONE".to_string();
+    lifecycle.updated_at = "2026-08-03T00:00:01Z".to_string();
+    reopened
+        .put_runtime_instance(&lifecycle)
+        .expect("persist concurrent PostgreSQL lifecycle state");
+    let newer_report = StoredNodeRuntimeFacts {
+        node_id: value.node_id.clone(),
+        observed_at_ms: 200,
+        received_at_ms: 201,
+        facts: json!({"schema_version": 1, "report_id": format!("pg-report-newer-{suffix}")}),
+    };
+    let mut stale_projection = projected.clone();
+    stale_projection.last_observed_at_ms = 200;
+    assert!(matches!(
+        reopened.apply_node_runtime_report(
+            &newer_report,
+            Some(std::slice::from_ref(&deployment_id)),
+            &[(projected.clone(), stale_projection)],
+        ),
+        Err(PostgresError::Conflict(_))
+    ));
+    assert_eq!(
+        reopened
+            .node_runtime_facts(&value.node_id)
+            .expect("read PostgreSQL runtime facts after CAS conflict"),
+        Some(report)
+    );
+    assert_eq!(
+        reopened
+            .runtime_instance(&deployment_id)
+            .expect("read PostgreSQL lifecycle state after CAS conflict"),
+        Some(lifecycle)
     );
     assert!(
         reopened
@@ -1445,9 +1844,59 @@ fn topology_spec(topology_id: &str, note: &str) -> TopologySpec {
             config_ref: String::new(),
             secret_ref: String::new(),
             policy: json!({}),
+            api_bindings: Vec::new(),
         }],
     )
     .expect("valid topology spec")
+}
+
+fn finalized_api_binding(
+    binding_id: &str,
+    requirement_name: &str,
+    consumer_deployment_id: &str,
+    topology_id: &str,
+    revision_id: &str,
+    operation_id: &str,
+) -> ApiBinding {
+    ApiBinding {
+        binding_id: binding_id.to_string(),
+        requirement_name: requirement_name.to_string(),
+        api_id: format!("fixture.{requirement_name}"),
+        api_version: "1.0.0".to_string(),
+        consumer_deployment_id: consumer_deployment_id.to_string(),
+        consumer_service_id: "fixture-consumer".to_string(),
+        consumer_node_id: "node-consumer".to_string(),
+        consumer_endpoint: "10.0.0.2:9000:consumer".to_string(),
+        provider_deployment_id: format!("provider-{binding_id}"),
+        provider_service_id: "fixture-provider".to_string(),
+        provider_node_id: "node-provider".to_string(),
+        provider_endpoint: "10.0.0.1:8080:provider".to_string(),
+        provider_path: format!("/{requirement_name}"),
+        virtual_endpoint: format!("/internal/apis/fixture.{requirement_name}"),
+        protocol: "http".to_string(),
+        methods: vec!["GET".to_string()],
+        auth_mode: "workload".to_string(),
+        provider_auth_mode: "workload".to_string(),
+        permission: format!("fixture.{requirement_name}"),
+        timeout_ms: Some(5_000),
+        topology_id: topology_id.to_string(),
+        topology_revision_id: revision_id.to_string(),
+        link_source_endpoint: "10.0.0.2:9000:consumer".to_string(),
+        link_target_endpoint: "10.0.0.1:8080:provider".to_string(),
+        credential_ref: String::new(),
+        credential_generation: 2,
+        context_generation: 2,
+        desired_state: "ACTIVE".to_string(),
+        observed_state: "ACTIVE".to_string(),
+        health: "HEALTHY".to_string(),
+        drift: Vec::new(),
+        last_operation_id: operation_id.to_string(),
+        state: ApiBindingState::Active,
+        optional: false,
+        reason: String::new(),
+        created_at: "unix-ms:1".to_string(),
+        updated_at: "unix-ms:2".to_string(),
+    }
 }
 
 fn unique_suffix() -> u64 {

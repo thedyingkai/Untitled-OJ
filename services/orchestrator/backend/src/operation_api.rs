@@ -456,6 +456,7 @@ fn derive_rollback_plan(
             | JobKind::Rollback
             | JobKind::Uninstall
             | JobKind::Health
+            | JobKind::BindingContextApply
             | JobKind::Inventory
             | JobKind::TopologyApply
             | JobKind::ExternalHealth

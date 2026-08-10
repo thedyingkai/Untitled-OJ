@@ -1,0 +1,59 @@
+schema_version: 2
+service_name: storage-head-provenance-miss-provider
+version: 1.0.0
+description: Healthy test provider that returns an unproven 404 for storage HEAD failure recovery.
+service_type: storage
+source:
+  kind: local
+  url: local://deploy/cross-machine/fixture/storage-head-provenance-miss-provider
+  checksum: ""
+runtime:
+  kind: image
+  image: ""
+  binary: ""
+  system_service: ""
+  args: ["storage-head-provenance-miss", "--port", "8080"]
+frontend:
+  enabled: false
+  route_prefix: ""
+  remote_entry: ""
+  menu_items: []
+backend:
+  protocol: http
+  port: 8080
+  health_path: /health
+migrations: []
+permissions: [storage.object.read]
+routes: []
+provides:
+  apis:
+    - id: storage.object.head
+      version: 1.0.0
+      protocol: http
+      path: /api/storage/objects
+      methods: [HEAD]
+      visibility: explicit
+      auth: workload
+      permission: storage.object.read
+      stability: stable
+      timeout_ms: 300000
+requires:
+  apis: []
+events:
+  publishes: []
+  subscribes: []
+runtime_contract:
+  id: standard-container-v1
+  sha256: sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f
+  binding_directory: /run/ojos/service
+  identity_mode: workload
+  credential_delivery: file
+  restart_on_change: false
+redis: []
+storage: []
+dependencies: []
+config_schema: {}
+secrets: []
+observability:
+  metrics: false
+  jaeger: false
