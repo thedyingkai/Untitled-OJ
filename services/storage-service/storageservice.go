@@ -12,6 +12,7 @@ import (
 	"time"
 
 	sharedmw "ojos-shared/middleware"
+	"ojos-shared/servicehealth"
 	"ojos-storage-service/internal/config"
 	"ojos-storage-service/internal/handler"
 	"ojos-storage-service/internal/svc"
@@ -23,11 +24,19 @@ import (
 var configFile = flag.String("f", "etc/storageservice.yaml", "the config file")
 
 func main() {
+	if handled, err := servicehealth.RunIfRequested(os.Args, "http://127.0.0.1:8085/health"); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	flag.Parse()
 
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
 	applyEnvOverrides(&c)
+	c.PrepareObjectStreaming()
 	sharedmw.InstallHTTPErrorHandler()
 
 	server := rest.MustNewServer(c.RestConf)

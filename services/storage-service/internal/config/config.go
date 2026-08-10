@@ -5,6 +5,8 @@ package config
 
 import "github.com/zeromicro/go-zero/rest"
 
+const minimumObjectStreamNetworkTimeoutMS int64 = 600000
+
 type Config struct {
 	rest.RestConf
 
@@ -28,4 +30,15 @@ type MinIOConfig struct {
 	AccessKey string
 	SecretKey string
 	UseSSL    bool
+}
+
+// PrepareObjectStreaming prevents the framework timeout middleware from
+// buffering complete object bodies. Gateway/client contexts retain the
+// operation-specific deadline and this value remains the socket-level bound.
+func (c *Config) PrepareObjectStreaming() {
+	if c.Timeout < minimumObjectStreamNetworkTimeoutMS {
+		c.Timeout = minimumObjectStreamNetworkTimeoutMS
+	}
+	c.Middlewares.Timeout = false
+	c.Middlewares.Recover = false
 }

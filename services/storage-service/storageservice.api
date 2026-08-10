@@ -31,6 +31,13 @@ type ObjectReq {
 	Key    string `path:"key"`
 }
 
+type ListObjectsReq {
+	Bucket string `path:"bucket"`
+	Prefix string `form:"prefix,optional"`
+	Cursor string `form:"cursor,optional"`
+	Limit  int    `form:"limit,optional"`
+}
+
 type ObjectMetadata {
 	Bucket      string `json:"bucket"`
 	Key         string `json:"key"`
@@ -42,6 +49,11 @@ type ObjectMetadata {
 
 type DeleteObjectResp {
 	Deleted bool `json:"deleted"`
+}
+
+type ListObjectsResp {
+	Objects    []ObjectMetadata `json:"objects"`
+	NextCursor string           `json:"next_cursor,optional"`
 }
 
 service storageservice {
@@ -61,6 +73,9 @@ service storageservice {
 
 	@handler putObject
 	put /objects/:bucket/:key (ObjectReq) returns (ObjectMetadata)
+
+	@handler listObjects
+	get /objects/:bucket (ListObjectsReq) returns (ListObjectsResp)
 
 	@handler getObject
 	get /objects/:bucket/:key (ObjectReq)

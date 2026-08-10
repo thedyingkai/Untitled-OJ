@@ -1,9 +1,11 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -17,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"ojos-shared/storagecontract"
 	"ojos-storage-service/internal/types"
 )
 
@@ -29,13 +32,35 @@ type ObjectStore struct {
 
 var safeBucket = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,62}$`)
 
+const maxObjectBytes int64 = 512 * 1024 * 1024
+
+var (
+	ErrObjectNotFound     = errors.New("object not found")
+	ErrPreconditionFailed = errors.New("object precondition failed")
+)
+
+type PutOptions struct {
+	ContentType    string
+	SizeBytes      int64
+	SizeKnown      bool
+	ExpectedSHA256 string
+	IfAbsent       bool
+}
+
+type ObjectPage struct {
+	Objects    []types.ObjectMetadata
+	NextCursor string
+}
+
 type ObjectStorage interface {
 	Backend() string
 	BucketNames() []string
 	EnsureBucket(bucket string) (bool, error)
-	Put(bucket, key, contentType string, body io.Reader) (types.ObjectMetadata, error)
+	Put(ctx context.Context, bucket, key string, options PutOptions, body io.Reader) (types.ObjectMetadata, error)
+	List(ctx context.Context, bucket, prefix, cursor string, limit int) (ObjectPage, error)
 	Serve(w http.ResponseWriter, r *http.Request, bucket, key string) error
 	Delete(bucket, key string) error
+	DeleteIfMatches(ctx context.Context, bucket, key, expectedSHA256 string, expectedSize int64) error
 	Metadata(bucket, key string) (types.ObjectMetadata, error)
 }
 
@@ -120,24 +145,41 @@ func (s *ObjectStore) EnsureBucket(bucket string) (bool, error) {
 	return !existed, nil
 }
 
-func (s *ObjectStore) Put(bucket, key, contentType string, body io.Reader) (types.ObjectMetadata, error) {
+func (s *ObjectStore) Put(ctx context.Context, bucket, key string, options PutOptions, body io.Reader) (types.ObjectMetadata, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return types.ObjectMetadata{}, err
+	}
 	objectPath, err := s.objectPath(bucket, key)
+	if err != nil {
+		return types.ObjectMetadata{}, err
+	}
+	if options.IfAbsent {
+		if _, err := os.Stat(objectPath); err == nil {
+			return types.ObjectMetadata{}, ErrPreconditionFailed
+		} else if !os.IsNotExist(err) {
+			return types.ObjectMetadata{}, err
+		}
+	}
+	if options.SizeKnown && (options.SizeBytes < 0 || options.SizeBytes > maxObjectBytes) {
+		return types.ObjectMetadata{}, fmt.Errorf("invalid object size %d", options.SizeBytes)
+	}
+	expectedSHA, err := normalizeExpectedSHA256(options.ExpectedSHA256)
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(objectPath), 0o755); err != nil {
 		return types.ObjectMetadata{}, err
 	}
-	tmp := objectPath + ".tmp"
-	file, err := os.Create(tmp)
+	file, err := os.CreateTemp(filepath.Dir(objectPath), ".ojos-object-*.tmp")
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
+	tmp := file.Name()
 	hasher := sha256.New()
-	size, copyErr := io.Copy(file, io.TeeReader(io.LimitReader(body, 512*1024*1024), hasher))
+	size, copyErr := io.Copy(io.MultiWriter(file, hasher), io.LimitReader(body, maxObjectBytes+1))
 	closeErr := file.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmp)
@@ -147,6 +189,20 @@ func (s *ObjectStore) Put(bucket, key, contentType string, body io.Reader) (type
 		_ = os.Remove(tmp)
 		return types.ObjectMetadata{}, closeErr
 	}
+	if size > maxObjectBytes {
+		_ = os.Remove(tmp)
+		return types.ObjectMetadata{}, fmt.Errorf("object exceeds %d bytes", maxObjectBytes)
+	}
+	if options.SizeKnown && size != options.SizeBytes {
+		_ = os.Remove(tmp)
+		return types.ObjectMetadata{}, fmt.Errorf("object size mismatch: expected %d, got %d", options.SizeBytes, size)
+	}
+	actualSHA := hex.EncodeToString(hasher.Sum(nil))
+	if expectedSHA != "" && actualSHA != expectedSHA {
+		_ = os.Remove(tmp)
+		return types.ObjectMetadata{}, fmt.Errorf("object sha256 mismatch: expected %s, got %s", expectedSHA, actualSHA)
+	}
+	contentType := options.ContentType
 	if contentType == "" {
 		contentType = mime.TypeByExtension(filepath.Ext(key))
 	}
@@ -157,7 +213,7 @@ func (s *ObjectStore) Put(bucket, key, contentType string, body io.Reader) (type
 		Bucket:      bucket,
 		Key:         key,
 		SizeBytes:   size,
-		SHA256:      hex.EncodeToString(hasher.Sum(nil)),
+		SHA256:      actualSHA,
 		ContentType: contentType,
 		UpdatedAt:   s.now().UTC().Format(time.RFC3339),
 	}
@@ -171,17 +227,89 @@ func (s *ObjectStore) Put(bucket, key, contentType string, body io.Reader) (type
 	return meta, nil
 }
 
+func (s *ObjectStore) List(ctx context.Context, bucket, prefix, cursor string, limit int) (ObjectPage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return ObjectPage{}, err
+	}
+	if err := s.ensureBucket(bucket); err != nil {
+		return ObjectPage{}, err
+	}
+	limit = normalizeListLimit(limit)
+	prefix = strings.TrimSpace(prefix)
+	cursor = strings.TrimSpace(cursor)
+	root := s.bucketDir(bucket)
+	items := make([]types.ObjectMetadata, 0)
+	err := filepath.WalkDir(root, func(objectPath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported stored object: %s", objectPath)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, objectPath)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(relative)
+		if !strings.HasPrefix(key, prefix) || (cursor != "" && key <= cursor) {
+			return nil
+		}
+		meta, err := s.metadataForObject(bucket, key, objectPath, info)
+		if err != nil {
+			return err
+		}
+		items = append(items, meta)
+		return nil
+	})
+	if err != nil {
+		return ObjectPage{}, err
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Key < items[j].Key })
+	page := ObjectPage{Objects: items}
+	if len(items) > limit {
+		page.Objects = items[:limit]
+		page.NextCursor = page.Objects[len(page.Objects)-1].Key
+	}
+	return page, nil
+}
+
 func (s *ObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket, key string) error {
 	objectPath, err := s.objectPath(bucket, key)
 	if err != nil {
 		return err
 	}
-	meta, _ := s.Metadata(bucket, key)
+	meta, metaErr := s.Metadata(bucket, key)
+	if metaErr != nil {
+		if os.IsNotExist(metaErr) {
+			if r.Method == http.MethodHead {
+				w.Header().Set(storagecontract.ResultHeader, storagecontract.ResultObjectNotFound)
+			}
+			return ErrObjectNotFound
+		}
+		return metaErr
+	}
 	if meta.ContentType != "" {
 		w.Header().Set("Content-Type", meta.ContentType)
 	}
 	if meta.SHA256 != "" {
 		w.Header().Set("X-OJOS-Object-Sha256", meta.SHA256)
+	}
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", meta.SizeBytes))
+	if r.Method == http.MethodHead {
+		w.Header().Set(storagecontract.ResultHeader, storagecontract.ResultPresent)
 	}
 	http.ServeFile(w, r, objectPath)
 	return nil
@@ -208,20 +336,92 @@ func (s *ObjectStore) Delete(bucket, key string) error {
 	return nil
 }
 
+// DeleteIfMatches makes GC deletion conditional on the immutable identity the
+// caller observed. The same store mutex is used by Put, so a local provider
+// cannot replace an object between verification and removal.
+func (s *ObjectStore) DeleteIfMatches(_ context.Context, bucket, key, expectedSHA256 string, expectedSize int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	expectedSHA256, err := normalizeExpectedSHA256(expectedSHA256)
+	if err != nil || expectedSHA256 == "" || expectedSize < 0 {
+		return ErrPreconditionFailed
+	}
+	objectPath, err := s.objectPath(bucket, key)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(objectPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	meta, err := s.metadataForObject(bucket, key, objectPath, info)
+	if err != nil {
+		return err
+	}
+	if meta.SHA256 != expectedSHA256 || meta.SizeBytes != expectedSize {
+		return ErrPreconditionFailed
+	}
+	if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	metaPath, err := s.metaPath(bucket, key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(metaPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (s *ObjectStore) Metadata(bucket, key string) (types.ObjectMetadata, error) {
+	objectPath, err := s.objectPath(bucket, key)
+	if err != nil {
+		return types.ObjectMetadata{}, err
+	}
+	info, err := os.Stat(objectPath)
+	if err != nil {
+		return types.ObjectMetadata{}, err
+	}
+	return s.metadataForObject(bucket, key, objectPath, info)
+}
+
+func (s *ObjectStore) metadataForObject(bucket, key, objectPath string, info os.FileInfo) (types.ObjectMetadata, error) {
 	metaPath, err := s.metaPath(bucket, key)
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
 	data, err := os.ReadFile(metaPath)
+	if err == nil {
+		var meta types.ObjectMetadata
+		if err := json.Unmarshal(data, &meta); err != nil {
+			return types.ObjectMetadata{}, err
+		}
+		return meta, nil
+	}
+	if !os.IsNotExist(err) {
+		return types.ObjectMetadata{}, err
+	}
+	digest, size, err := digestObjectFile(objectPath)
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
-	var meta types.ObjectMetadata
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return types.ObjectMetadata{}, err
+	contentType := mime.TypeByExtension(filepath.Ext(key))
+	if contentType == "" {
+		contentType = "application/octet-stream"
 	}
-	return meta, nil
+	return types.ObjectMetadata{
+		Bucket:      bucket,
+		Key:         key,
+		SizeBytes:   size,
+		SHA256:      digest,
+		ContentType: contentType,
+		UpdatedAt:   info.ModTime().UTC().Format(time.RFC3339),
+	}, nil
 }
 
 func (s *ObjectStore) ensureBuckets() error {
@@ -311,4 +511,40 @@ func validateBucket(bucket string) error {
 		return fmt.Errorf("invalid bucket")
 	}
 	return nil
+}
+
+func normalizeExpectedSHA256(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "", nil
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("invalid expected sha256")
+	}
+	return value, nil
+}
+
+func normalizeListLimit(limit int) int {
+	if limit <= 0 {
+		return 100
+	}
+	if limit > 500 {
+		return 500
+	}
+	return limit
+}
+
+func digestObjectFile(path string) (string, int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+	hasher := sha256.New()
+	size, err := io.Copy(hasher, file)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }

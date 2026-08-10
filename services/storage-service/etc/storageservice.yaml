@@ -1,6 +1,13 @@
 Name: storage-service
 Host: 0.0.0.0
 Port: 8085
+Timeout: 600000
+
+# Object bodies must be streamed. The go-zero timeout middleware buffers the
+# whole response, so network and caller deadlines provide the outer bound.
+Middlewares:
+  Timeout: false
+  Recover: false
 
 Storage:
   Backend: local

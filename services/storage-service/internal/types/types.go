@@ -26,6 +26,18 @@ type HealthResp struct {
 	Backend string `json:"backend"`
 }
 
+type ListObjectsReq struct {
+	Bucket string `path:"bucket"`
+	Prefix string `form:"prefix,optional"`
+	Cursor string `form:"cursor,optional"`
+	Limit  int    `form:"limit,optional"`
+}
+
+type ListObjectsResp struct {
+	Objects    []ObjectMetadata `json:"objects"`
+	NextCursor string           `json:"next_cursor,omitempty"`
+}
+
 type ObjectMetadata struct {
 	Bucket      string `json:"bucket"`
 	Key         string `json:"key"`

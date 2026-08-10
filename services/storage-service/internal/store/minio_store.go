@@ -1,27 +1,27 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"ojos-shared/storagecontract"
 	"ojos-storage-service/internal/types"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
-
-const maxObjectBytes = 512 * 1024 * 1024
 
 type MinIOObjectStore struct {
 	client  *minio.Client
@@ -87,7 +87,7 @@ func (s *MinIOObjectStore) EnsureBucket(bucket string) (bool, error) {
 	return created, nil
 }
 
-func (s *MinIOObjectStore) Put(bucket, key, contentType string, body io.Reader) (types.ObjectMetadata, error) {
+func (s *MinIOObjectStore) Put(ctx context.Context, bucket, key string, options PutOptions, body io.Reader) (types.ObjectMetadata, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -95,47 +95,112 @@ func (s *MinIOObjectStore) Put(bucket, key, contentType string, body io.Reader) 
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
-	if _, err := s.ensureBucketLocked(context.Background(), bucket); err != nil {
+	if _, err := s.ensureBucketLocked(ctx, bucket); err != nil {
 		return types.ObjectMetadata{}, err
 	}
-	data, err := readLimitedObject(body)
+	if options.SizeKnown && (options.SizeBytes < 0 || options.SizeBytes > maxObjectBytes) {
+		return types.ObjectMetadata{}, fmt.Errorf("invalid object size %d", options.SizeBytes)
+	}
+	expectedSHA, err := normalizeExpectedSHA256(options.ExpectedSHA256)
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
+	tmp, size, sha, err := spoolObject(body, options.SizeKnown, options.SizeBytes, expectedSHA)
+	if err != nil {
+		return types.ObjectMetadata{}, err
+	}
+	defer os.Remove(tmp)
+	file, err := os.Open(tmp)
+	if err != nil {
+		return types.ObjectMetadata{}, err
+	}
+	defer file.Close()
+
+	contentType := options.ContentType
 	if contentType == "" {
 		contentType = mime.TypeByExtension(filepath.Ext(key))
 	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	hash := sha256.Sum256(data)
-	sha := hex.EncodeToString(hash[:])
 	meta := types.ObjectMetadata{
 		Bucket:      bucket,
 		Key:         key,
-		SizeBytes:   int64(len(data)),
+		SizeBytes:   size,
 		SHA256:      sha,
 		ContentType: contentType,
 		UpdatedAt:   s.now().UTC().Format(time.RFC3339),
 	}
+	putOptions := minio.PutObjectOptions{
+		ContentType: contentType,
+		UserMetadata: map[string]string{
+			"ojos-sha256":     sha,
+			"ojos-updated-at": meta.UpdatedAt,
+		},
+	}
+	if options.IfAbsent {
+		putOptions.SetMatchETagExcept("*")
+	}
 	_, err = s.client.PutObject(
-		context.Background(),
+		ctx,
 		bucket,
 		key,
-		bytes.NewReader(data),
+		file,
 		meta.SizeBytes,
-		minio.PutObjectOptions{
-			ContentType: contentType,
-			UserMetadata: map[string]string{
-				"ojos-sha256":     sha,
-				"ojos-updated-at": meta.UpdatedAt,
-			},
-		},
+		putOptions,
 	)
 	if err != nil {
+		if isPreconditionFailure(err) {
+			return types.ObjectMetadata{}, ErrPreconditionFailed
+		}
 		return types.ObjectMetadata{}, err
 	}
 	return meta, nil
+}
+
+func (s *MinIOObjectStore) List(ctx context.Context, bucket, prefix, cursor string, limit int) (ObjectPage, error) {
+	if err := s.ensureConfiguredBucket(bucket); err != nil {
+		return ObjectPage{}, err
+	}
+	limit = normalizeListLimit(limit)
+	listCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	objects := s.client.ListObjects(listCtx, bucket, minio.ListObjectsOptions{
+		Prefix:       strings.TrimSpace(prefix),
+		Recursive:    true,
+		WithMetadata: true,
+		StartAfter:   strings.TrimSpace(cursor),
+		MaxKeys:      limit + 1,
+	})
+	items := make([]types.ObjectMetadata, 0, limit+1)
+	for object := range objects {
+		if object.Err != nil {
+			if errors.Is(object.Err, context.Canceled) && len(items) > limit {
+				continue
+			}
+			return ObjectPage{}, object.Err
+		}
+		if len(items) <= limit {
+			meta := metadataFromObjectInfo(bucket, object)
+			if meta.SHA256 == "" || meta.UpdatedAt == "" || meta.SizeBytes < 0 {
+				fullMeta, err := s.metadata(listCtx, bucket, object.Key)
+				if err != nil {
+					return ObjectPage{}, err
+				}
+				meta = fullMeta
+			}
+			items = append(items, meta)
+			if len(items) > limit {
+				cancel()
+			}
+		}
+	}
+	page := ObjectPage{Objects: items}
+	if len(items) > limit {
+		page.Objects = items[:limit]
+		page.NextCursor = page.Objects[len(page.Objects)-1].Key
+	}
+	return page, nil
 }
 
 func (s *MinIOObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket, key string) error {
@@ -146,17 +211,22 @@ func (s *MinIOObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket,
 	if err := s.ensureConfiguredBucket(bucket); err != nil {
 		return err
 	}
-	meta, _ := s.metadata(r.Context(), bucket, key)
+	meta, err := s.metadata(r.Context(), bucket, key)
+	if err != nil {
+		if r.Method == http.MethodHead && errors.Is(err, ErrObjectNotFound) {
+			w.Header().Set(storagecontract.ResultHeader, storagecontract.ResultObjectNotFound)
+		}
+		return err
+	}
 	if meta.ContentType != "" {
 		w.Header().Set("Content-Type", meta.ContentType)
 	}
 	if meta.SHA256 != "" {
 		w.Header().Set("X-OJOS-Object-Sha256", meta.SHA256)
 	}
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", meta.SizeBytes))
 	if r.Method == http.MethodHead {
-		if meta.SizeBytes > 0 {
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", meta.SizeBytes))
-		}
+		w.Header().Set(storagecontract.ResultHeader, storagecontract.ResultPresent)
 		return nil
 	}
 	object, err := s.client.GetObject(r.Context(), bucket, key, minio.GetObjectOptions{})
@@ -164,8 +234,14 @@ func (s *MinIOObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket,
 		return err
 	}
 	defer object.Close()
-	_, err = io.Copy(w, object)
-	return err
+	written, err := io.CopyN(w, object, meta.SizeBytes)
+	if err != nil {
+		return fmt.Errorf("stream MinIO object %s/%s after %d of %d bytes: %w", bucket, key, written, meta.SizeBytes, err)
+	}
+	if written != meta.SizeBytes {
+		return fmt.Errorf("stream MinIO object %s/%s: wrote %d of %d bytes", bucket, key, written, meta.SizeBytes)
+	}
+	return nil
 }
 
 func (s *MinIOObjectStore) Delete(bucket, key string) error {
@@ -179,38 +255,66 @@ func (s *MinIOObjectStore) Delete(bucket, key string) error {
 	return s.client.RemoveObject(context.Background(), bucket, key, minio.RemoveObjectOptions{})
 }
 
+func (s *MinIOObjectStore) DeleteIfMatches(ctx context.Context, bucket, key, expectedSHA256 string, expectedSize int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	expectedSHA256, err := normalizeExpectedSHA256(expectedSHA256)
+	if err != nil || expectedSHA256 == "" || expectedSize < 0 {
+		return ErrPreconditionFailed
+	}
+	meta, err := s.metadataLocked(ctx, bucket, key)
+	if err != nil {
+		if errors.Is(err, ErrObjectNotFound) {
+			return nil
+		}
+		return err
+	}
+	if meta.SHA256 != expectedSHA256 || meta.SizeBytes != expectedSize {
+		return ErrPreconditionFailed
+	}
+	// All writes through this provider share mu. The key is content-addressed,
+	// and MinIO access is not exposed to consumers, so the stat/remove pair is
+	// the provider's atomic conditional-delete boundary.
+	return s.client.RemoveObject(ctx, bucket, key, minio.RemoveObjectOptions{})
+}
+
 func (s *MinIOObjectStore) Metadata(bucket, key string) (types.ObjectMetadata, error) {
 	return s.metadata(context.Background(), bucket, key)
 }
 
 func (s *MinIOObjectStore) metadata(ctx context.Context, bucket, key string) (types.ObjectMetadata, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.metadataLocked(ctx, bucket, key)
+}
+
+func (s *MinIOObjectStore) metadataLocked(ctx context.Context, bucket, key string) (types.ObjectMetadata, error) {
 	key, err := cleanObjectKey(key)
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
-	if err := s.ensureConfiguredBucket(bucket); err != nil {
+	if err := s.ensureConfiguredBucketLocked(bucket); err != nil {
 		return types.ObjectMetadata{}, err
 	}
 	info, err := s.client.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
 	if err != nil {
+		if isMinIOObjectNotFound(err) {
+			bucketExists, bucketErr := s.client.BucketExists(ctx, bucket)
+			if bucketErr != nil {
+				return types.ObjectMetadata{}, bucketErr
+			}
+			if bucketExists {
+				return types.ObjectMetadata{}, ErrObjectNotFound
+			}
+		}
 		return types.ObjectMetadata{}, err
 	}
-	contentType := info.ContentType
-	if contentType == "" {
-		contentType = info.Metadata.Get("Content-Type")
+	meta := metadataFromObjectInfo(bucket, info)
+	if meta.Key == "" {
+		meta.Key = key
 	}
-	updatedAt := userMetadataValue(info, "ojos-updated-at")
-	if updatedAt == "" && !info.LastModified.IsZero() {
-		updatedAt = info.LastModified.UTC().Format(time.RFC3339)
-	}
-	return types.ObjectMetadata{
-		Bucket:      bucket,
-		Key:         key,
-		SizeBytes:   info.Size,
-		SHA256:      userMetadataValue(info, "ojos-sha256"),
-		ContentType: contentType,
-		UpdatedAt:   updatedAt,
-	}, nil
+	return meta, nil
 }
 
 func (s *MinIOObjectStore) ensureBuckets(ctx context.Context) error {
@@ -244,26 +348,19 @@ func (s *MinIOObjectStore) ensureBucketLocked(ctx context.Context, bucket string
 }
 
 func (s *MinIOObjectStore) ensureConfiguredBucket(bucket string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ensureConfiguredBucketLocked(bucket)
+}
+
+func (s *MinIOObjectStore) ensureConfiguredBucketLocked(bucket string) error {
 	if err := validateBucket(bucket); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.buckets[bucket]; !ok {
 		return fmt.Errorf("bucket %s is not configured", bucket)
 	}
 	return nil
-}
-
-func readLimitedObject(body io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(body, maxObjectBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxObjectBytes {
-		return nil, fmt.Errorf("object exceeds %d bytes", maxObjectBytes)
-	}
-	return data, nil
 }
 
 func bucketSet(buckets []string) map[string]struct{} {
@@ -274,6 +371,77 @@ func bucketSet(buckets []string) map[string]struct{} {
 		}
 	}
 	return set
+}
+
+func spoolObject(body io.Reader, sizeKnown bool, expectedSize int64, expectedSHA string) (string, int64, string, error) {
+	file, err := os.CreateTemp("", "ojos-storage-upload-*.tmp")
+	if err != nil {
+		return "", 0, "", err
+	}
+	path := file.Name()
+	fail := func(err error) (string, int64, string, error) {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", 0, "", err
+	}
+	hasher := sha256.New()
+	size, err := io.Copy(io.MultiWriter(file, hasher), io.LimitReader(body, maxObjectBytes+1))
+	if err != nil {
+		return fail(err)
+	}
+	if err := file.Close(); err != nil {
+		return fail(err)
+	}
+	if size > maxObjectBytes {
+		_ = os.Remove(path)
+		return "", 0, "", fmt.Errorf("object exceeds %d bytes", maxObjectBytes)
+	}
+	if sizeKnown && size != expectedSize {
+		_ = os.Remove(path)
+		return "", 0, "", fmt.Errorf("object size mismatch: expected %d, got %d", expectedSize, size)
+	}
+	actualSHA := hex.EncodeToString(hasher.Sum(nil))
+	if expectedSHA != "" && actualSHA != expectedSHA {
+		_ = os.Remove(path)
+		return "", 0, "", fmt.Errorf("object sha256 mismatch: expected %s, got %s", expectedSHA, actualSHA)
+	}
+	return path, size, actualSHA, nil
+}
+
+func isPreconditionFailure(err error) bool {
+	response := minio.ToErrorResponse(err)
+	return response.StatusCode == http.StatusPreconditionFailed || strings.EqualFold(response.Code, "PreconditionFailed")
+}
+
+func isMinIOObjectNotFound(err error) bool {
+	response := minio.ToErrorResponse(err)
+	switch strings.ToLower(strings.TrimSpace(response.Code)) {
+	case "nosuchkey", "nosuchobject":
+		return true
+	case "notfound":
+		return response.StatusCode == http.StatusNotFound
+	default:
+		return false
+	}
+}
+
+func metadataFromObjectInfo(bucket string, info minio.ObjectInfo) types.ObjectMetadata {
+	contentType := info.ContentType
+	if contentType == "" {
+		contentType = info.Metadata.Get("Content-Type")
+	}
+	updatedAt := userMetadataValue(info, "ojos-updated-at")
+	if updatedAt == "" && !info.LastModified.IsZero() {
+		updatedAt = info.LastModified.UTC().Format(time.RFC3339)
+	}
+	return types.ObjectMetadata{
+		Bucket:      bucket,
+		Key:         info.Key,
+		SizeBytes:   info.Size,
+		SHA256:      userMetadataValue(info, "ojos-sha256"),
+		ContentType: contentType,
+		UpdatedAt:   updatedAt,
+	}
 }
 
 func userMetadataValue(info minio.ObjectInfo, key string) string {

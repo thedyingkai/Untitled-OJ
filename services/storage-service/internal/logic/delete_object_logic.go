@@ -32,3 +32,10 @@ func (l *DeleteObjectLogic) DeleteObject(req *types.ObjectReq) (resp *types.Dele
 	}
 	return &types.DeleteObjectResp{Deleted: true}, nil
 }
+
+func (l *DeleteObjectLogic) DeleteObjectIfMatches(req *types.ObjectReq, expectedSHA256 string, expectedSize int64) (resp *types.DeleteObjectResp, err error) {
+	if err := l.svcCtx.ObjectStore.DeleteIfMatches(l.ctx, req.Bucket, req.Key, expectedSHA256, expectedSize); err != nil {
+		return nil, err
+	}
+	return &types.DeleteObjectResp{Deleted: true}, nil
+}

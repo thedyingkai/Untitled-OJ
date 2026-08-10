@@ -2,14 +2,18 @@ package handler
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	sharedmw "ojos-shared/middleware"
+	"ojos-shared/storagecontract"
 	"ojos-storage-service/internal/config"
 	"ojos-storage-service/internal/svc"
 	"ojos-storage-service/internal/types"
@@ -25,7 +29,63 @@ func TestStorageHTTPObjectLifecycle(t *testing.T) {
 	assertStorageObjectLifecycle(t, endpoint, "submissions", "42-source-main.cpp", "int main(){}")
 	assertStorageObjectLifecycle(t, endpoint, "problems", "problem-42.zip", "zip-bytes")
 	assertStorageObjectLifecycle(t, endpoint, "judge-artifacts", "42-log.txt", "judge log")
+	assertStorageObjectLifecycle(t, endpoint, "problems", "empty.in", "")
 	assertStorageObjectLifecycleWithContentType(t, endpoint, "submissions", "42-result.json", `{"status":"ACCEPTED"}`, "application/json; charset=utf-8")
+	assertStorageConditionalCreateAndList(t, endpoint)
+}
+
+func assertStorageConditionalCreateAndList(t *testing.T, endpoint string) {
+	t.Helper()
+	objectURL := endpoint + "/api/storage/objects/problems/package-sha256-test.zip"
+	put := func(body string) *http.Response {
+		req, err := http.NewRequest(http.MethodPut, objectURL, bytes.NewBufferString(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("If-None-Match", "*")
+		req.Header.Set("X-OJOS-Content-Sha256", fmt.Sprintf("%x", sha256.Sum256([]byte(body))))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	first := put("immutable")
+	defer first.Body.Close()
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first conditional put returned %d", first.StatusCode)
+	}
+	second := put("replacement")
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("second conditional put returned %d", second.StatusCode)
+	}
+	get, err := http.Get(objectURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer get.Body.Close()
+	body, _ := io.ReadAll(get.Body)
+	if string(body) != "immutable" {
+		t.Fatalf("conditional put replaced existing bytes: %q", body)
+	}
+
+	list, err := http.Get(endpoint + "/api/storage/objects/problems?prefix=package-sha256-&limit=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer list.Body.Close()
+	if list.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(list.Body)
+		t.Fatalf("list returned %d: %s", list.StatusCode, data)
+	}
+	var page types.ListObjectsResp
+	if err := json.NewDecoder(list.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Objects) != 1 || page.Objects[0].Key != "package-sha256-test.zip" {
+		t.Fatalf("unexpected object page: %#v", page)
+	}
 }
 
 func assertStorageHealthLocal(t *testing.T, endpoint string) {
@@ -111,6 +171,9 @@ func assertStorageObjectLifecycleWithContentType(t *testing.T, endpoint string, 
 	if got := getResp.Header.Get("X-OJOS-Object-Sha256"); got != putMeta.SHA256 {
 		t.Fatalf("object sha header mismatch: got %q want %q", got, putMeta.SHA256)
 	}
+	if got := getResp.Header.Get("Content-Length"); got != fmt.Sprintf("%d", putMeta.SizeBytes) {
+		t.Fatalf("get content length mismatch: got %q want %d", got, putMeta.SizeBytes)
+	}
 
 	headResp, err := http.Head(objectURL)
 	if err != nil {
@@ -123,18 +186,49 @@ func assertStorageObjectLifecycleWithContentType(t *testing.T, endpoint string, 
 	if got := headResp.Header.Get("X-OJOS-Object-Sha256"); got != putMeta.SHA256 {
 		t.Fatalf("head sha header mismatch: got %q want %q", got, putMeta.SHA256)
 	}
+	if got := headResp.Header.Get("Content-Length"); got != fmt.Sprintf("%d", putMeta.SizeBytes) {
+		t.Fatalf("head content length mismatch: got %q want %d", got, putMeta.SizeBytes)
+	}
+	if got := headResp.Header.Get(storagecontract.ResultHeader); got != storagecontract.ResultPresent {
+		t.Fatalf("head result mismatch: got %q want %q", got, storagecontract.ResultPresent)
+	}
 
 	deleteReq, err := http.NewRequest(http.MethodDelete, objectURL, nil)
 	if err != nil {
 		t.Fatalf("build delete request: %v", err)
 	}
+	deleteReq.Header.Set("X-OJOS-Expected-Sha256", strings.Repeat("0", 64))
+	deleteReq.Header.Set("X-OJOS-Expected-Size", fmt.Sprintf("%d", putMeta.SizeBytes))
 	deleteResp, err := http.DefaultClient.Do(deleteReq)
 	if err != nil {
 		t.Fatalf("delete object: %v", err)
 	}
+	_ = deleteResp.Body.Close()
+	if deleteResp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("mismatched conditional delete status %d", deleteResp.StatusCode)
+	}
+	deleteReq, err = http.NewRequest(http.MethodDelete, objectURL, nil)
+	if err != nil {
+		t.Fatalf("build matching delete request: %v", err)
+	}
+	deleteReq.Header.Set("X-OJOS-Expected-Sha256", putMeta.SHA256)
+	deleteReq.Header.Set("X-OJOS-Expected-Size", fmt.Sprintf("%d", putMeta.SizeBytes))
+	deleteResp, err = http.DefaultClient.Do(deleteReq)
+	if err != nil {
+		t.Fatalf("conditionally delete object: %v", err)
+	}
 	defer deleteResp.Body.Close()
 	if deleteResp.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected delete status %d", deleteResp.StatusCode)
+		t.Fatalf("unexpected matching delete status %d", deleteResp.StatusCode)
+	}
+	if got := deleteResp.Header.Get(storagecontract.ResultHeader); got != storagecontract.ResultDeleted {
+		t.Fatalf("delete result mismatch: got %q want %q", got, storagecontract.ResultDeleted)
+	}
+	var deleteResult struct {
+		Deleted bool `json:"deleted"`
+	}
+	if err := json.NewDecoder(deleteResp.Body).Decode(&deleteResult); err != nil || !deleteResult.Deleted {
+		t.Fatalf("invalid delete acknowledgement: result=%#v err=%v", deleteResult, err)
 	}
 
 	missingResp, err := http.Get(objectURL)
@@ -142,13 +236,26 @@ func assertStorageObjectLifecycleWithContentType(t *testing.T, endpoint string, 
 		t.Fatalf("get deleted object: %v", err)
 	}
 	defer missingResp.Body.Close()
-	if missingResp.StatusCode == http.StatusOK {
-		t.Fatalf("deleted object should not be readable")
+	if missingResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("deleted object GET should return 404, got %d", missingResp.StatusCode)
+	}
+
+	missingHeadResp, err := http.Head(objectURL)
+	if err != nil {
+		t.Fatalf("head deleted object: %v", err)
+	}
+	defer missingHeadResp.Body.Close()
+	if missingHeadResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("deleted object HEAD should return 404, got %d", missingHeadResp.StatusCode)
+	}
+	if got := missingHeadResp.Header.Get(storagecontract.ResultHeader); got != storagecontract.ResultObjectNotFound {
+		t.Fatalf("deleted object HEAD result = %q, want %q", got, storagecontract.ResultObjectNotFound)
 	}
 }
 
 func startStorageHTTPServer(t *testing.T, buckets []string) (string, func()) {
 	t.Helper()
+	sharedmw.InstallHTTPErrorHandler()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

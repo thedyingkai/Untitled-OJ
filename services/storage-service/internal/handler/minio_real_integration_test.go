@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	sharedmw "ojos-shared/middleware"
 	"ojos-storage-service/internal/config"
 	"ojos-storage-service/internal/svc"
 	"ojos-storage-service/internal/types"
@@ -42,10 +43,12 @@ func TestRealMinIOHTTPObjectLifecycle(t *testing.T) {
 	assertStorageObjectLifecycle(t, storageEndpoint, "submissions", "real-minio-submission.txt", "source via real minio")
 	assertStorageObjectLifecycle(t, storageEndpoint, "problems", "real-minio-problem.txt", "problem via real minio")
 	assertStorageObjectLifecycle(t, storageEndpoint, "judge-artifacts", "real-minio-artifact.txt", "artifact via real minio")
+	assertStorageObjectLifecycle(t, storageEndpoint, "problems", "real-minio-empty.in", "")
 }
 
 func startStorageHTTPServerWithConfig(t *testing.T, cfg config.Config) (string, func()) {
 	t.Helper()
+	sharedmw.InstallHTTPErrorHandler()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

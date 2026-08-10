@@ -46,6 +46,11 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 			},
 			{
 				Method:  http.MethodGet,
+				Path:    "/objects/:bucket",
+				Handler: listObjectsHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
 				Path:    "/objects/:bucket/:key",
 				Handler: getObjectHandler(serverCtx),
 			},
