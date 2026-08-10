@@ -51,7 +51,7 @@ class CapacityAnsibleAssetTests(unittest.TestCase):
         self.assertIn("- config", compose_validation)
         self.assertIn("- --quiet", compose_validation)
 
-    def test_node_plan_platform_labels_match_store_and_catalog_contract(self):
+    def test_node_plan_platform_uses_authenticated_runtime_facts(self):
         template = (CAPACITY / "templates" / "nodes.json.j2").read_text(
             encoding="utf-8"
         )
@@ -66,17 +66,18 @@ class CapacityAnsibleAssetTests(unittest.TestCase):
         store_api = (
             ROOT / "services" / "orchestrator" / "backend" / "src" / "store_v1_api.rs"
         ).read_text(encoding="utf-8")
-        self.assertRegex(
-            store_api,
-            re.compile(
-                r'\.get\("runtime"\).*?eq_ignore_ascii_case\("docker"\).*?'
-                r'"STORE_DOCKER_CAPABILITY_REQUIRED"',
-                re.DOTALL,
-            ),
+        self.assertIn(
+            "let facts = node_runtime_facts(storage, &node.node_id)?;", store_api
         )
-        self.assertIn('node.labels.get("os")', store_api)
-        self.assertIn('node.labels.get("arch")', store_api)
-        self.assertIn('"STORE_TARGET_PLATFORM_REQUIRED"', store_api)
+        self.assertIn('facts.docker.engine != "docker"', store_api)
+        self.assertIn("facts.docker.os_type.trim()", store_api)
+        self.assertIn("facts.docker.architecture.trim()", store_api)
+        self.assertIn('"STORE_NODE_RUNTIME_FACTS_REQUIRED"', store_api)
+        self.assertIn('"STORE_NODE_RUNTIME_FACTS_STALE"', store_api)
+        self.assertIn('"STORE_TARGET_PLATFORM_INVALID"', store_api)
+        self.assertNotIn('node.labels.get("runtime")', store_api)
+        self.assertNotIn('node.labels.get("os")', store_api)
+        self.assertNotIn('node.labels.get("arch")', store_api)
 
         catalog_generator = (
             ROOT
