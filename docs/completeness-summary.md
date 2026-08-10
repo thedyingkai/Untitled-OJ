@@ -4,9 +4,9 @@
 
 ## 当前结论
 
-当前工作树已经实现 Service Contract v2 的主要闭环，并在本地 pre-commit 环境通过一次 `full-components` 双 Engine 门禁。这个结果证明当前工作树在单台 Linux 测试环境中的两个隔离 Docker Engine 上能够完成 A 机业务栈、B 机 Agent/Store Judge Worker、Problem 事件投影、Gateway Binding、资源校验下载、nsjail 判题、结果回传、失败补偿、恢复和通用 provider/consumer fixture。
+`main` 上的功能提交 `daeed00a6fd7d8370f44f6e70550e91354c531c6` 已实现 Service Contract v2 的主要闭环，并由 GitHub Actions run [`31367013842`](https://github.com/thedyingkai/Untitled-OJ/actions/runs/31367013842) 通过严格 `full-components` 双 Engine 门禁。这个结果证明该提交在单台 Linux runner 的两个隔离 Docker Engine 上能够完成 A 机业务栈、B 机 Agent/Store Judge Worker、Problem 事件投影、Gateway Binding、资源校验下载、nsjail 判题、结果回传、失败补偿、恢复和通用 provider/consumer fixture。
 
-它不是最终发布结论：工作树尚未冻结为同一 clean commit，门禁也不是两台物理主机。当前没有 100 Node/24 小时容量证据、签名 GA 制品或最终安全验收，因此不得据此声称已经验证这些事项，也不得创建正式 GA 结论。
+这是绑定 clean `main` 功能提交的功能证据，但不是最终发布结论：门禁不是两台物理主机，当前也没有 100 Node/24 小时容量证据、签名 GA 制品或最终安全验收。因此不得据此声称已经验证这些事项，也不得创建正式 tag 或 GA Release。记录本结果的后续纯文档提交不冒充已经重跑过 `full-components` 的功能提交。
 
 ## 当前实现面
 
@@ -34,7 +34,28 @@
 
 完整契约见 [Service Contract v2](orchestrator/service-contract-v2.md)，B 节点操作见 [Judge Worker 生产部署](../deploy/worker/README.md)。
 
-## 本地 pre-commit 双 Engine 证据
+## main 功能提交双 Engine 证据
+
+| 字段 | 值 |
+| --- | --- |
+| 功能提交 | `daeed00a6fd7d8370f44f6e70550e91354c531c6` |
+| 前置 main 门禁 | [Orchestrator CI `31365814865`](https://github.com/thedyingkai/Untitled-OJ/actions/runs/31365814865) / [Docker E2E `31365814883`](https://github.com/thedyingkai/Untitled-OJ/actions/runs/31365814883)，均为 `success` |
+| full-components workflow | [run `31367013842`](https://github.com/thedyingkai/Untitled-OJ/actions/runs/31367013842)，attempt `1`，`run_live=true`，`full_components=true` |
+| Artifact | `cross-machine-live-evidence`，artifact ID `9055398574` |
+| mode/status | `full-components` / `PASSED` |
+| run_id | `21caf605e5` |
+| 执行时间 | 2026-08-10 07:43:32Z 至 08:16:22Z，共 1,970 秒 |
+| 证据文件 SHA-256 | `6e49e2cf06739234b0a5a6c524a67b8aa66a6e0a98410d8d17e0b3d14830d017` |
+| build identity | `1.0.0` / `daeed00a6fd7d8370f44f6e70550e91354c531c6` / `production` / `x86_64-unknown-linux-gnu` |
+| Engine A | ID `9294fd31-da4c-4ac5-aafd-10f54745014e`；outer container `bd33d099045d2ba41fda174cc6a5bf1207b9c1fe4b1ebba3a6081ed043e04266`；data volume `ojos-cross-v2-21caf605e5-engine-a-data` |
+| Engine B | ID `cd758c32-7261-4c95-82cc-b0ea86ff99c2`；outer container `125e51abb60bc71a668544802d61b2bcc69754c80808ed81753742483aa44e05`；data volume `ojos-cross-v2-21caf605e5-engine-b-data` |
+| DIND 身份 | 请求 pin 与实际 RepoDigest 均为 `sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c` |
+| 独立复核 | workflow 内复读和下载后的 `verify-evidence --require-full` 均通过；`cleanup_completed=true`，`cleanup_errors=[]` |
+| 环境 | GitHub-hosted Ubuntu runner 中的两个 privileged、独立、digest-pinned Docker-in-Docker Engine；不是两台物理主机 |
+
+Workflow checkout SHA、报告内 build SHA 和上表功能提交完全一致。验证器逐侧关联 host TCP endpoint、容器内 Unix socket 的完整 Engine identity、outer container、run-scoped data volume、实际 image config/RepoDigest 和最终证据；两个 Engine 的 marker volume 相互不可见，清理后两个 data volume 均不存在。命令、验证器和证据范围见 [跨机门禁说明](../deploy/cross-machine/README.md)。
+
+## 历史：本地 pre-commit 双 Engine 证据
 
 | 字段 | 值 |
 | --- | --- |
@@ -46,17 +67,16 @@
 | 报告内 build identity | `52d67919231f663411698af625284def4f9ccccd` / `production` / `x86_64-unknown-linux-gnu` |
 | 环境 | 单台 Linux 测试环境中的两个 privileged Docker-in-Docker Engine；不是两台物理主机 |
 
-这是 **pre-commit 工作树证据**。报告内 commit 是运行时注入的基线身份，不能覆盖未提交文件，也不能证明最终候选 commit 与该工作树字节一致。最终功能候选必须先冻结 clean commit，再从该 commit 重跑相同 `--full-components` 门禁并保存新的 run_id、SHA-256 和 CI/checkout 身份。命令、验证器和证据范围见 [跨机门禁说明](../deploy/cross-machine/README.md)。
+这是 **pre-commit 工作树证据**。报告内 commit 是运行时注入的基线身份，不能覆盖当时的未提交文件，也不能证明后续 commit 与该工作树字节一致；它只作为历史来源保留，不能替代上面的 commit-bound Actions 证据。
 
 ## 尚未取得、不得声称
 
-- 最终 clean candidate commit 对应的双 Engine `full-components` 证据；
 - 两台物理 A/B 主机或真实跨地域网络的部署证据；
 - 100 Nodes、2,000 Deployments、10,000 Endpoint+Link、50 并发 Operations和连续 24 小时稳定性证据；
 - Windows/Linux 受信任签名 GA 制品、正式 tag 或 GitHub Release；
 - 最终依赖、权限、鉴权和供应链安全验收。
 
-这些未取得的证据不抹去上面的本地功能结果，但必须在对外作相应声明前单独完成。额外门禁定义见 [生产就绪证据](production-readiness.md)。
+这些未取得的证据不抹去上面的 commit-bound 功能结果，但必须在对外作相应声明前单独完成。额外门禁定义见 [生产就绪证据](production-readiness.md)。
 
 ## 固定产品边界
 
