@@ -8,7 +8,7 @@ HTTP 接收成功显示成业务执行成功。
 
 | 入口 | 运行方式 | 身份 | 持久化 |
 | --- | --- | --- | --- |
-| Desktop | Tauri WebView 内嵌同源 Web UI、backend 与 loopback Agent；不打开外部浏览器 | 一次性 bootstrap secret 换取 HttpOnly 本地 admin 会话 | OS 应用数据目录中的 SQLite、Agent ledger 与 artifact 目录 |
+| Desktop | Tauri WebView 内嵌同源 Web UI 与 backend；不打开外部浏览器，不执行 managed workload | 一次性 bootstrap secret 换取 HttpOnly 本地 admin 会话 | OS 应用数据目录中的 SQLite 与 artifact 目录；执行账本属于独立 Agent |
 | 远程 Web | daemon 托管的同源 Vue UI | OIDC Authorization Code + PKCE，HttpOnly 会话 | PostgreSQL 控制面 |
 | TUI | `/api/v1` 客户端，不在进程内执行 mutation | OIDC Device Authorization Grant；access token 只保存在内存 | PostgreSQL 控制面 |
 | daemon API | REST + SSE | 固定 viewer/operator/admin RBAC | Desktop SQLite 或生产 PostgreSQL |

@@ -61,6 +61,14 @@ services:
       ORCHESTRATOR_TLS_KEY: /run/secrets/orchestrator-tls.key
       ORCHESTRATOR_NODE_CA_CERT: /run/secrets/orchestrator-node-ca.crt
       ORCHESTRATOR_NODE_CA_KEY: /run/secrets/orchestrator-node-ca.key
+      ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN_SHA256: ${ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN_SHA256:?protected Gateway Contribution ACK verifier is required}
+      ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN_SHA256: ${ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN_SHA256:?protected Auth Contribution ACK verifier is required}
+      ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN: ${ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN:?external HTTPS Gateway management provider is required}
+      ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: ${ORCHESTRATOR_GATEWAY_ADMIN_TOKEN:?Gateway management provider token is required}
+      ORCHESTRATOR_AUTH_ADMIN_ORIGIN: ${ORCHESTRATOR_AUTH_ADMIN_ORIGIN:?external HTTPS Auth management provider is required}
+      ORCHESTRATOR_AUTH_ADMIN_TOKEN: ${ORCHESTRATOR_AUTH_ADMIN_TOKEN:?Auth management provider token is required}
+      ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN: ${ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN:?external HTTPS Auth workload issuer is required}
+      ORCHESTRATOR_AUTH_WORKLOAD_TOKEN: ${ORCHESTRATOR_AUTH_WORKLOAD_TOKEN:?Auth workload issuer token is required}
       ORCHESTRATOR_HEALTHCHECK_URL: {{ capacity_control_plane_api_url }}/api/v1/healthz/ready
       ORCHESTRATOR_HEALTHCHECK_CA_CERT: /run/secrets/orchestrator-health-ca.crt
     ports:

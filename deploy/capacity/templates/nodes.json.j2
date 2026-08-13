@@ -13,7 +13,13 @@
         "capacity.profile": "production",
         "runtime": "docker",
         "os": "linux",
-        "arch": "x86_64"
+        "arch": "x86_64",
+        "providers": {
+          "postgresql": {
+            "enabled": true,
+            "provider_id": "postgresql-capacity"
+          }
+        }
       }
     }
 {% endfor %}

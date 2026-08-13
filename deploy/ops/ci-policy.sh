@@ -57,7 +57,60 @@ if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJO
 fi
 
 strong_env="$(mktemp)"
-trap 'rm -f "$strong_env"' EXIT
+bootstrap_fixture_dir="$(mktemp -d)"
+admin_bootstrap_file="$bootstrap_fixture_dir/admin-bootstrap"
+observability_token_file="$(mktemp)"
+prometheus_observability_token_file="$(mktemp)"
+trap 'rm -f "$strong_env" "$admin_bootstrap_file" "$observability_token_file" "$prometheus_observability_token_file"; rmdir "$bootstrap_fixture_dir" 2>/dev/null || true' EXIT
+printf '%s\n' 'AdminBootstrapProd_0123456789abcdef0123456789' >"$admin_bootstrap_file"
+printf '%s\n' 'ObservabilityProd_0123456789abcdef0123456789' >"$observability_token_file"
+printf '%s\n' 'ObservabilityProd_0123456789abcdef0123456789' >"$prometheus_observability_token_file"
+chmod 600 "$admin_bootstrap_file" "$observability_token_file" "$prometheus_observability_token_file"
+admin_bootstrap_policy_supported=1
+platform="$(uname -s)"
+case "$platform" in
+  MSYS_*|MINGW*|CYGWIN*)
+    # Windows-backed Git worktrees cannot represent the production numeric
+    # owner contract. Keep the checker itself strict and disable only the
+    # optional bootstrap fixture in this local policy runner.
+    admin_bootstrap_policy_supported=0
+    ;;
+esac
+
+set_fixture_owner() {
+  local owner="$1"
+  shift
+  if (( EUID == 0 )); then
+    chown "$owner" "$@"
+  else
+    need_cmd sudo
+    sudo -n chown "$owner" "$@"
+  fi
+}
+
+run_production_secret_check() {
+  local env_file="$1"
+  if (( admin_bootstrap_policy_supported )) && (( EUID != 0 )); then
+    sudo -n env \
+      OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 \
+      OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 \
+      OJOS_ENV_FILE="$env_file" \
+      "$bash_bin" "$script_dir/secret-check.sh"
+  else
+    OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 \
+      OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 \
+      OJOS_ENV_FILE="$env_file" \
+      "$bash_bin" "$script_dir/secret-check.sh"
+  fi
+}
+
+if (( admin_bootstrap_policy_supported )); then
+  set_fixture_owner 65532:65532 "$admin_bootstrap_file"
+  [[ "$(stat -c '%u:%g %a' "$admin_bootstrap_file")" == "65532:65532 600" ]] || {
+    echo "ops-ci: failed to construct exact 65532:65532/0600 bootstrap fixture" >&2
+    exit 1
+  }
+fi
 cat >"$strong_env" <<'EOF'
 OJOS_ENVIRONMENT=production
 OJOS_PUBLIC_BASE_URL=https://ojos.invalid
@@ -81,6 +134,7 @@ USER_POSTGRES_DB=ojos_user
 USER_POSTGRES_USER=ojos_user_app
 USER_POSTGRES_PASSWORD=UserDbProd_0123456789abcdef
 USER_DATABASE_URL=postgres://ojos_user_app:UserDbProd_0123456789abcdef@user-db:5432/ojos_user?sslmode=disable
+OJOS_BACKUP_TEXTFILE_DIR=/var/lib/ojos/node-exporter-textfile
 
 ORCHESTRATOR_POSTGRES_DB=ojos_orchestrator
 ORCHESTRATOR_POSTGRES_USER=ojos_orchestrator_app
@@ -95,6 +149,12 @@ ORCHESTRATOR_TLS_KEY=/run/secrets/orchestrator-tls.key
 ORCHESTRATOR_NODE_CA_CERT=/run/secrets/orchestrator-node-ca.crt
 ORCHESTRATOR_NODE_CA_KEY=/run/secrets/orchestrator-node-ca.key
 ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT=/run/secrets/gateway-workload-ca.crt
+ORCHESTRATOR_GATEWAY_OBSERVABILITY_ORIGIN=https://gateway.invalid
+ORCHESTRATOR_ALLOW_COMPOSE_BOOTSTRAP_HTTP=1
+ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN=http://gateway:8080
+ORCHESTRATOR_GATEWAY_ADMIN_TOKEN=GatewayAdminProd_0123456789abcdef0123
+ORCHESTRATOR_AUTH_ADMIN_ORIGIN=http://auth-service:8081
+ORCHESTRATOR_AUTH_ADMIN_TOKEN=AuthAdminProd_0123456789abcdef012345
 OJOS_WORKLOAD_PRIVATE_KEY_FILE=/run/secrets/ojos-workload-private-key.pem
 OJOS_WORKLOAD_PUBLIC_KEY_FILE=/run/secrets/ojos-workload-public-key.pem
 OJOS_WORKLOAD_KEY_ID=workload-1
@@ -129,6 +189,10 @@ REDIS_URL=redis://:RedisProd_0123456789abcdef012345@redis:6379/0
 JWT_SECRET=JwtProd_0123456789abcdef0123456789abcdef
 AUTH_INTERNAL_TOKEN=AuthIntProd_0123456789abcdef0123456789
 ORCHESTRATOR_INTERNAL_TOKEN=OrchIntProd_0123456789abcdef0123456789
+ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN=GatewayAckProd_0123456789abcdef012345
+ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN=AuthAckProd_0123456789abcdef012345678
+ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN_SHA256=sha256:b40b1333ab8013d15668d94ffab2beb0311c9cd73303bebb18bfebce3fbc148a
+ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN_SHA256=sha256:ee5124487f958d8007d69ca541069fbf3dfe5c3da7f41bc8112cd32d35274a55
 ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM=1
 OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT=http://gateway:8080
 OJOS_AUTH_PERMISSION_CHECK_API_ID=auth.user.permission.check
@@ -150,43 +214,138 @@ OJOS_REDIS_RDB_PATH=/var/lib/redis/dump.rdb
 OJOS_ALERT_WEBHOOK_URL=https://alerts.invalid/ojos
 GRAFANA_ADMIN_PASSWORD=GrafanaAdminProd_0123456789abcdef01
 EOF
+if (( admin_bootstrap_policy_supported )); then
+  printf 'AUTH_ADMIN_BOOTSTRAP_SECRET_FILE=%s\n' "$admin_bootstrap_file" >>"$strong_env"
+else
+  printf 'AUTH_ADMIN_BOOTSTRAP_SECRET_FILE=\n' >>"$strong_env"
+fi
+printf 'ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE=%s\n' "$observability_token_file" >>"$strong_env"
+printf 'PROMETHEUS_ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE=%s\n' "$prometheus_observability_token_file" >>"$strong_env"
 
-OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$strong_env" "$bash_bin" "$script_dir/secret-check.sh"
+run_production_secret_check "$strong_env"
 
 reused_service_token_env="$(mktemp)"
+reused_ack_token_env="$(mktemp)"
+wrong_ack_verifier_env="$(mktemp)"
 wrong_migration_database_env="$(mktemp)"
 missing_postgres_ca_env="$(mktemp)"
 plaintext_health_env="$(mktemp)"
-trap 'rm -f "$strong_env" "$reused_service_token_env" "$wrong_migration_database_env" "$missing_postgres_ca_env" "$plaintext_health_env"' EXIT
+invalid_bootstrap_file="$bootstrap_fixture_dir/invalid-bootstrap"
+public_bootstrap_file="$bootstrap_fixture_dir/public-bootstrap"
+wrong_owner_bootstrap_file="$bootstrap_fixture_dir/wrong-owner-bootstrap"
+wrong_mode_bootstrap_file="$bootstrap_fixture_dir/wrong-mode-bootstrap"
+reused_bootstrap_file="$bootstrap_fixture_dir/reused-bootstrap"
+empty_bootstrap_file="$bootstrap_fixture_dir/empty-bootstrap"
+oversized_bootstrap_file="$bootstrap_fixture_dir/oversized-bootstrap"
+bootstrap_symlink="$bootstrap_fixture_dir/bootstrap-symlink"
+printf '%s\n' 'not+url+safe+but-long-enough-token-value' >"$invalid_bootstrap_file"
+printf '%s\n' 'AdminBootstrapPublic_0123456789abcdef012345' >"$public_bootstrap_file"
+printf '%s\n' 'AdminBootstrapWrongOwner_0123456789abcdef' >"$wrong_owner_bootstrap_file"
+printf '%s\n' 'AdminBootstrapWrongMode_0123456789abcdef0' >"$wrong_mode_bootstrap_file"
+printf '%s\n' 'JwtProd_0123456789abcdef0123456789abcdef' >"$reused_bootstrap_file"
+: >"$empty_bootstrap_file"
+printf '%0513d' 0 | tr '0' A >"$oversized_bootstrap_file"
+ln -s "$admin_bootstrap_file" "$bootstrap_symlink"
+chmod 600 "$invalid_bootstrap_file" "$wrong_owner_bootstrap_file" "$wrong_mode_bootstrap_file" "$reused_bootstrap_file" "$empty_bootstrap_file" "$oversized_bootstrap_file"
+chmod 644 "$public_bootstrap_file"
+chmod 400 "$wrong_mode_bootstrap_file"
+if (( admin_bootstrap_policy_supported )); then
+  set_fixture_owner 65532:65532 \
+    "$invalid_bootstrap_file" \
+    "$public_bootstrap_file" \
+    "$wrong_mode_bootstrap_file" \
+    "$reused_bootstrap_file" \
+    "$empty_bootstrap_file" \
+    "$oversized_bootstrap_file"
+  set_fixture_owner 0:0 "$wrong_owner_bootstrap_file"
+fi
+trap 'rm -f "$strong_env" "$admin_bootstrap_file" "$observability_token_file" "$prometheus_observability_token_file" "$reused_service_token_env" "$reused_ack_token_env" "$wrong_ack_verifier_env" "$wrong_migration_database_env" "$missing_postgres_ca_env" "$plaintext_health_env" "$invalid_bootstrap_file" "$public_bootstrap_file" "$wrong_owner_bootstrap_file" "$wrong_mode_bootstrap_file" "$reused_bootstrap_file" "$empty_bootstrap_file" "$oversized_bootstrap_file" "$bootstrap_symlink"; rmdir "$bootstrap_fixture_dir" 2>/dev/null || true' EXIT
 sed 's/^OJOS_PROBLEM_SERVICE_TOKEN=.*/OJOS_PROBLEM_SERVICE_TOKEN=UserSvcProd_0123456789abcdef0123456789/' \
   "$strong_env" >"$reused_service_token_env"
-if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$reused_service_token_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-reused-service-token.log 2>&1; then
+if run_production_secret_check "$reused_service_token_env" >/tmp/ojos-reused-service-token.log 2>&1; then
   echo "ops-ci: secret policy unexpectedly accepted a reused service token" >&2
+  exit 1
+fi
+sed 's/^ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN=.*/ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN=GatewayAckProd_0123456789abcdef012345/' \
+  "$strong_env" >"$reused_ack_token_env"
+if run_production_secret_check "$reused_ack_token_env" >/tmp/ojos-reused-ack-token.log 2>&1; then
+  echo "ops-ci: secret policy unexpectedly accepted one ACK token for Gateway and Auth" >&2
+  exit 1
+fi
+sed 's/^ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN_SHA256=.*/ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN_SHA256=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+  "$strong_env" >"$wrong_ack_verifier_env"
+if run_production_secret_check "$wrong_ack_verifier_env" >/tmp/ojos-wrong-ack-verifier.log 2>&1; then
+  echo "ops-ci: secret policy unexpectedly accepted an ACK verifier that does not match its raw token" >&2
   exit 1
 fi
 sed '/^ORCHESTRATOR_MIGRATION_DATABASE_URL=/ s#/ojos_orchestrator?#/wrong_database?#' \
   "$strong_env" >"$wrong_migration_database_env"
-if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$wrong_migration_database_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-wrong-migration-database.log 2>&1; then
+if run_production_secret_check "$wrong_migration_database_env" >/tmp/ojos-wrong-migration-database.log 2>&1; then
   echo "ops-ci: migration URL unexpectedly accepted a non-Orchestrator database" >&2
   exit 1
 fi
 grep -v '^ORCHESTRATOR_POSTGRES_CA_CERT=' "$strong_env" >"$missing_postgres_ca_env"
-if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$missing_postgres_ca_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-missing-postgres-ca.log 2>&1; then
+if run_production_secret_check "$missing_postgres_ca_env" >/tmp/ojos-missing-postgres-ca.log 2>&1; then
   echo "ops-ci: production policy unexpectedly accepted a missing PostgreSQL CA" >&2
   exit 1
 fi
 sed 's#^ORCHESTRATOR_HEALTHCHECK_URL=https://#ORCHESTRATOR_HEALTHCHECK_URL=http://#' \
   "$strong_env" >"$plaintext_health_env"
-if OJOS_SECRET_CHECK_REQUIRE_ALERTS=1 OJOS_SECRET_CHECK_REQUIRE_MONITORING=1 OJOS_ENV_FILE="$plaintext_health_env" "$bash_bin" "$script_dir/secret-check.sh" >/tmp/ojos-plaintext-health.log 2>&1; then
+if run_production_secret_check "$plaintext_health_env" >/tmp/ojos-plaintext-health.log 2>&1; then
   echo "ops-ci: production policy unexpectedly accepted a plaintext healthcheck" >&2
   exit 1
+fi
+bootstrap_cases=()
+if (( admin_bootstrap_policy_supported )); then
+  bootstrap_cases=(invalid public owner mode reused empty oversized symlink)
+fi
+for bootstrap_case in "${bootstrap_cases[@]}"; do
+  case "$bootstrap_case" in
+    invalid) bootstrap_path="$invalid_bootstrap_file" ;;
+    public) bootstrap_path="$public_bootstrap_file" ;;
+    owner) bootstrap_path="$wrong_owner_bootstrap_file" ;;
+    mode) bootstrap_path="$wrong_mode_bootstrap_file" ;;
+    reused) bootstrap_path="$reused_bootstrap_file" ;;
+    empty) bootstrap_path="$empty_bootstrap_file" ;;
+    oversized) bootstrap_path="$oversized_bootstrap_file" ;;
+    symlink) bootstrap_path="$bootstrap_symlink" ;;
+  esac
+  bootstrap_env="$(mktemp)"
+  sed "s#^AUTH_ADMIN_BOOTSTRAP_SECRET_FILE=.*#AUTH_ADMIN_BOOTSTRAP_SECRET_FILE=$bootstrap_path#" \
+    "$strong_env" >"$bootstrap_env"
+  if run_production_secret_check "$bootstrap_env" >/tmp/ojos-bootstrap-secret.log 2>&1; then
+    rm -f "$bootstrap_env"
+    echo "ops-ci: production policy unexpectedly accepted $bootstrap_case admin bootstrap secret file" >&2
+    exit 1
+  fi
+  rm -f "$bootstrap_env"
+done
+inline_bootstrap_env="$(mktemp)"
+printf '%s\n' 'AUTH_ADMIN_BOOTSTRAP_SECRET=InlineBootstrapProd_0123456789abcdef' >>"$strong_env"
+if run_production_secret_check "$strong_env" >/tmp/ojos-bootstrap-secret.log 2>&1; then
+  echo "ops-ci: production policy unexpectedly accepted inline admin bootstrap secret" >&2
+  exit 1
+fi
+sed '$d' "$strong_env" >"$inline_bootstrap_env"
+mv "$inline_bootstrap_env" "$strong_env"
+
+# Compose still needs a concrete host source while its mount contract is being
+# rendered. On MSYS/noacl the strict checker above deliberately exercised the
+# disabled-bootstrap state; restore the fixture path only for the read-only
+# Compose structure assertions below (Docker does not consume the file here).
+if (( ! admin_bootstrap_policy_supported )); then
+  bootstrap_render_env="$(mktemp)"
+  sed "s#^AUTH_ADMIN_BOOTSTRAP_SECRET_FILE=.*#AUTH_ADMIN_BOOTSTRAP_SECRET_FILE=$admin_bootstrap_file#" \
+    "$strong_env" >"$bootstrap_render_env"
+  mv "$bootstrap_render_env" "$strong_env"
 fi
 
 rendered="$(mktemp)"
 rendered_json="$(mktemp)"
 legacy_rendered="$(mktemp)"
+legacy_rendered_json="$(mktemp)"
 dev_rendered="$(mktemp)"
-trap 'rm -f "$strong_env" "$reused_service_token_env" "$wrong_migration_database_env" "$missing_postgres_ca_env" "$plaintext_health_env" "$rendered" "$rendered_json" "$legacy_rendered" "$dev_rendered"' EXIT
+trap 'rm -f "$strong_env" "$admin_bootstrap_file" "$observability_token_file" "$prometheus_observability_token_file" "$reused_service_token_env" "$reused_ack_token_env" "$wrong_ack_verifier_env" "$wrong_migration_database_env" "$missing_postgres_ca_env" "$plaintext_health_env" "$invalid_bootstrap_file" "$public_bootstrap_file" "$wrong_owner_bootstrap_file" "$wrong_mode_bootstrap_file" "$reused_bootstrap_file" "$empty_bootstrap_file" "$oversized_bootstrap_file" "$bootstrap_symlink" "$rendered" "$rendered_json" "$legacy_rendered" "$legacy_rendered_json" "$dev_rendered"; rmdir "$bootstrap_fixture_dir" 2>/dev/null || true' EXIT
 docker compose --env-file "$strong_env" -f "$repo_root/deploy/compose/docker-compose.yml" config >"$rendered"
 docker compose --env-file "$strong_env" -f "$repo_root/deploy/compose/docker-compose.yml" config --format json >"$rendered_json"
 if grep -Eq '^[[:space:]]+judge-worker:' "$rendered" || grep -q 'OJOS_RUNNER_MODE:' "$rendered"; then
@@ -196,6 +355,9 @@ fi
 docker compose --profile legacy-development --env-file "$repo_root/.env.example" \
   -f "$repo_root/deploy/compose/docker-compose.yml" \
   -f "$repo_root/deploy/compose/docker-compose.dev.yml" config >"$legacy_rendered"
+docker compose --profile legacy-development --env-file "$repo_root/.env.example" \
+  -f "$repo_root/deploy/compose/docker-compose.yml" \
+  -f "$repo_root/deploy/compose/docker-compose.dev.yml" config --format json >"$legacy_rendered_json"
 grep -Eq '^[[:space:]]+judge-worker:' "$legacy_rendered" || {
   echo "ops-ci: the compatibility Judge Worker must require the explicit legacy-development profile" >&2
   exit 1
@@ -211,26 +373,128 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     services = json.load(stream)["services"]
 
+visiting: list[str] = []
+visited: set[str] = set()
+
+
+def assert_acyclic(service_name: str) -> None:
+    if service_name in visited:
+        return
+    if service_name in visiting:
+        cycle_start = visiting.index(service_name)
+        cycle = visiting[cycle_start:] + [service_name]
+        raise AssertionError(
+            "production Compose dependency cycle: " + " -> ".join(cycle)
+        )
+    visiting.append(service_name)
+    for dependency in services[service_name].get("depends_on", {}):
+        assert dependency in services, (
+            f"{service_name} depends on omitted production service {dependency}"
+        )
+        assert_acyclic(dependency)
+    visiting.pop()
+    visited.add(service_name)
+
+
+for service_name in services:
+    assert_acyclic(service_name)
+
 assert "judge-worker" not in services, "legacy Judge Worker rendered in production"
 orchestrator = services["orchestrator"]["environment"]
-auth = services["auth-service"]["environment"]
-gateway = services["gateway"]["environment"]
-judge = services["judge-api"]["environment"]
+legacy_workloads = {
+    "user-service", "storage-service",
+    "judge-api", "problem-service",
+}
+legacy_databases = {"problem-db", "judge-db", "user-db"}
+assert legacy_workloads.isdisjoint(services), "legacy business workloads rendered in production"
+assert legacy_databases.isdisjoint(services), "legacy per-service databases rendered in production"
+for name in ("auth-db", "auth-service-migrations", "auth-service", "gateway"):
+    assert name in services, f"platform bootstrap omitted {name}"
+assert services["auth-service"]["environment"]["OJOS_PLATFORM_BOOTSTRAP"] == "1"
+assert services["auth-service"]["user"] == "65532:65532"
+assert services["gateway"]["environment"]["OJOS_PLATFORM_BOOTSTRAP"] == "1"
+gateway_environment = services["gateway"]["environment"]
+auth_environment = services["auth-service"]["environment"]
+assert not any(name in gateway_environment for name in ("OJOS_MANAGED_WORKLOAD", "OJOS_SERVICE_CONTEXT_FILE"))
+assert set(services["gateway"]["depends_on"]) == {"auth-service", "orchestrator"}
+assert set(services["orchestrator"]["depends_on"]) == {"orchestrator-migrations"}
+assert set(services["auth-service"]["networks"]) == {"platform-control"}
+assert set(services["gateway"]["networks"]) == {"platform-control"}
+assert services["gateway"]["read_only"] is True
+assert services["auth-service"]["read_only"] is True
+
+admin_bootstrap_target = "/run/secrets/ojos-auth-admin-bootstrap"
+admin_bootstrap_mounts = [
+    mount for mount in services["auth-service"].get("volumes", [])
+    if mount.get("target") == admin_bootstrap_target
+]
+assert services["auth-service"]["environment"]["AUTH_ADMIN_BOOTSTRAP_SECRET_FILE"] == admin_bootstrap_target
+assert len(admin_bootstrap_mounts) == 1, "platform Auth must receive exactly one admin bootstrap mount"
+assert admin_bootstrap_mounts[0].get("type") == "bind", "admin bootstrap secret must be a host bind mount"
+assert admin_bootstrap_mounts[0].get("read_only") is True, "admin bootstrap secret mount must be read-only"
+assert admin_bootstrap_mounts[0].get("bind", {}).get("create_host_path") is False, (
+    "admin bootstrap bind must fail closed instead of creating a missing host path"
+)
+for name, service in services.items():
+    if name != "auth-service":
+        assert not any(
+            mount.get("target") == admin_bootstrap_target
+            for mount in service.get("volumes", [])
+        ), f"{name} must not receive the Auth admin bootstrap secret"
+
+workload_private_key_target = "/run/secrets/ojos-workload-private-key.pem"
+for name, service in services.items():
+    mounts = [
+        mount
+        for mount in service.get("volumes", [])
+        if mount.get("target") == workload_private_key_target
+    ]
+    if name == "auth-service":
+        assert len(mounts) == 1, "platform Auth must receive exactly one workload signing key mount"
+        assert mounts[0].get("type") == "bind", "Auth workload signing key must be a bind mount"
+        assert mounts[0].get("read_only") is True, "Auth workload signing key mount must be read-only"
+    else:
+        assert not mounts, f"{name} must not receive the Auth workload signing key"
 
 assert orchestrator["OJOS_ENVIRONMENT"] == "production"
 assert orchestrator["ORCHESTRATOR_AUTH_WORKLOAD_TOKEN"]
+assert orchestrator["ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN"] == "http://gateway:8080"
+assert orchestrator["ORCHESTRATOR_AUTH_ADMIN_ORIGIN"] == "http://auth-service:8081"
+assert orchestrator["ORCHESTRATOR_GATEWAY_ADMIN_TOKEN"] == gateway_environment["ORCHESTRATOR_GATEWAY_ADMIN_TOKEN"]
+assert orchestrator["ORCHESTRATOR_AUTH_ADMIN_TOKEN"] == auth_environment["ORCHESTRATOR_AUTH_ADMIN_TOKEN"]
+assert len({
+    orchestrator["ORCHESTRATOR_INTERNAL_TOKEN"],
+    orchestrator["ORCHESTRATOR_GATEWAY_ADMIN_TOKEN"],
+    orchestrator["ORCHESTRATOR_AUTH_ADMIN_TOKEN"],
+    orchestrator["ORCHESTRATOR_AUTH_WORKLOAD_TOKEN"],
+}) == 4, "platform control-plane credentials must be role-separated"
 assert orchestrator["ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN"].startswith("https://")
-assert auth["OJOS_ENVIRONMENT"] == "production"
-assert auth["OJOS_WORKLOAD_CONTROL_PLANE_TOKEN"] == orchestrator["ORCHESTRATOR_AUTH_WORKLOAD_TOKEN"]
-assert auth["OJOS_WORKLOAD_PRIVATE_KEY_FILE"] == "/run/secrets/ojos-workload-private-key.pem"
-assert "OJOS_WORKLOAD_PUBLIC_KEY_FILE" not in auth
-assert gateway["OJOS_ENVIRONMENT"] == "production"
-assert gateway["OJOS_WORKLOAD_PUBLIC_KEY_FILE"] == "/run/secrets/ojos-workload-public-key.pem"
-assert "OJOS_WORKLOAD_PRIVATE_KEY_FILE" not in gateway
-assert judge["OJOS_ENVIRONMENT"] == "production"
-assert judge["OJOS_ALLOW_LEGACY_WORKER_TOKEN"] == "false"
-assert judge["OJOS_WORKER_TOKEN"] == ""
-assert judge["OJOS_WORKLOAD_PUBLIC_KEY_FILE"] == "/run/secrets/ojos-workload-public-key.pem"
+assert orchestrator["ORCHESTRATOR_GATEWAY_OBSERVABILITY_ORIGIN"].startswith("https://")
+assert orchestrator["ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE"] == "/run/secrets/orchestrator-observability-token"
+PY
+if grep -Eq 'target:[[:space:]]+http://(problem-service|judge-api|user-service|storage-service)' \
+  "$repo_root/services/gateway/etc/gateway.yaml"; then
+  echo "ops-ci: Gateway bootstrap YAML must not contain static business routes" >&2
+  exit 1
+fi
+if grep -Eq 'name:[[:space:]]+(problem-service|judge-api|user-service|storage-service)' \
+  "$repo_root/services/gateway/etc/gateway.yaml"; then
+  echo "ops-ci: Gateway bootstrap YAML must not trust static business services" >&2
+  exit 1
+fi
+python3 - "$legacy_rendered_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    services = json.load(stream)["services"]
+
+for name in ("gateway", "auth-service", "user-service", "storage-service", "judge-api", "problem-service"):
+    assert name in services, f"legacy profile omitted {name}"
+for name in ("gateway", "auth-service", "judge-api"):
+    assert services[name]["environment"]["OJOS_ENVIRONMENT"] == "development"
+assert services["judge-api"]["environment"]["OJOS_ALLOW_LEGACY_WORKER_TOKEN"] == "true"
+assert services["judge-worker"]["environment"]["OJOS_ENVIRONMENT"] == "development"
 PY
 if grep -Eq 'ORCHESTRATOR_NODE_(DISPATCH|ENDPOINT|TOKEN|EXECUTE_SERVICE_DRIVER|HOST_IP):' "$rendered"; then
   echo "ops-ci: v1 Compose must not publish the removed Node push/bearer transport" >&2
@@ -266,6 +530,8 @@ for variable in \
   ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN \
   ORCHESTRATOR_AUTH_WORKLOAD_TOKEN \
   ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN \
+  ORCHESTRATOR_GATEWAY_OBSERVABILITY_ORIGIN \
+  ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE \
   ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE \
   ORCHESTRATOR_CATALOG_TRUST_KEYS \
   ORCHESTRATOR_CATALOG_SOURCES \
@@ -298,6 +564,7 @@ for assignment in \
   'ORCHESTRATOR_NODE_CA_CERT: /run/secrets/orchestrator-node-ca.crt' \
   'ORCHESTRATOR_NODE_CA_KEY: /run/secrets/orchestrator-node-ca.key' \
   'ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE: /run/secrets/gateway-workload-ca.crt' \
+  'ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE: /run/secrets/orchestrator-observability-token' \
   'ORCHESTRATOR_HEALTHCHECK_URL: https://orchestrator:8090/api/v1/healthz/ready' \
   'ORCHESTRATOR_LEGACY_API_MODE: gone'
 do
@@ -330,7 +597,7 @@ for target in \
   /run/secrets/orchestrator-node-ca.crt \
   /run/secrets/orchestrator-node-ca.key \
   /run/secrets/gateway-workload-ca.crt \
-  /run/secrets/ojos-workload-private-key.pem \
+  /run/secrets/orchestrator-observability-token \
   /run/secrets/ojos-workload-public-key.pem
 do
   awk -v target="$target" '
@@ -344,6 +611,16 @@ do
     exit 1
   }
 done
+awk '
+  index($0, "target: /run/secrets/ojos-workload-private-key.pem") {
+    seen = 1
+    if ((getline <= 0) || $0 !~ /read_only: true/) bad = 1
+  }
+  END { exit !(seen && !bad) }
+' "$legacy_rendered" || {
+  echo "ops-ci: the explicit legacy Auth profile must mount its workload signing key read-only" >&2
+  exit 1
+}
 [[ "$(grep -Fc 'target: /run/secrets/orchestrator-postgres-ca.crt' "$rendered")" -ge 2 ]] || {
   echo "ops-ci: PostgreSQL CA must be mounted into both migration and daemon containers" >&2
   exit 1
@@ -373,6 +650,14 @@ grep -Fq 'ORCHESTRATOR_HEALTHCHECK_URL: http://127.0.0.1:8090/api/v1/healthz/liv
   echo "ops-ci: development Compose must use the bounded loopback live check" >&2
   exit 1
 }
+grep -Fq 'AUTH_ADMIN_BOOTSTRAP_SECRET_FILE: ""' "$dev_rendered" || {
+  echo "ops-ci: development Compose must disable the production admin bootstrap route" >&2
+  exit 1
+}
+if grep -Fq '/run/secrets/ojos-auth-admin-bootstrap' "$dev_rendered"; then
+  echo "ops-ci: development Compose must not inherit the production admin bootstrap mount" >&2
+  exit 1
+fi
 if grep -Eq 'ORCHESTRATOR_CATALOG_(TRUST_KEYS|SOURCES): ""' "$dev_rendered"; then
   echo "ops-ci: development Compose must unset Catalog variables, not export empty JSON" >&2
   exit 1
@@ -385,12 +670,16 @@ for variable in ORCHESTRATOR_CATALOG_TRUST_KEYS ORCHESTRATOR_CATALOG_SOURCES; do
 done
 for variable in \
   ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN \
-  ORCHESTRATOR_GATEWAY_ADMIN_TOKEN \
-  ORCHESTRATOR_AUTH_ADMIN_ORIGIN \
-  ORCHESTRATOR_AUTH_ADMIN_TOKEN
+  ORCHESTRATOR_AUTH_ADMIN_ORIGIN
 do
   grep -Eq "^[[:space:]]+$variable: null$" "$dev_rendered" || {
     echo "ops-ci: development Compose must leave optional provider variable $variable unset" >&2
+    exit 1
+  }
+done
+for variable in ORCHESTRATOR_GATEWAY_ADMIN_TOKEN ORCHESTRATOR_AUTH_ADMIN_TOKEN; do
+  grep -Eq "^[[:space:]]+$variable: \"\"$" "$dev_rendered" || {
+    echo "ops-ci: development Compose must clear bootstrap credential $variable" >&2
     exit 1
   }
 done

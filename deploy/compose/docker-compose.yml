@@ -14,13 +14,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks: [ platform-control ]
 
   auth-db:
     image: postgres:17
     environment:
-      POSTGRES_USER: ${AUTH_POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${AUTH_POSTGRES_PASSWORD:-ojos-auth-local}
-      POSTGRES_DB: ${AUTH_POSTGRES_DB:-ojos_auth}
+      POSTGRES_USER: ${AUTH_POSTGRES_USER:?set the platform Auth PostgreSQL role}
+      POSTGRES_PASSWORD: ${AUTH_POSTGRES_PASSWORD:?set the platform Auth PostgreSQL password}
+      POSTGRES_DB: ${AUTH_POSTGRES_DB:?set the platform Auth PostgreSQL database}
     volumes:
       - auth-db-data:/var/lib/postgresql/data
     healthcheck:
@@ -28,8 +29,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks: [ platform-control ]
 
   problem-db:
+    profiles: [ "legacy-development" ]
     image: postgres:17
     environment:
       POSTGRES_USER: ${PROBLEM_POSTGRES_USER:-postgres}
@@ -44,6 +47,7 @@ services:
       retries: 10
 
   judge-db:
+    profiles: [ "legacy-development" ]
     image: postgres:17
     environment:
       POSTGRES_USER: ${JUDGE_POSTGRES_USER:-postgres}
@@ -58,6 +62,7 @@ services:
       retries: 10
 
   user-db:
+    profiles: [ "legacy-development" ]
     image: postgres:17
     environment:
       POSTGRES_USER: ${USER_POSTGRES_USER:-postgres}
@@ -76,6 +81,7 @@ services:
     command: [ "redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-DEV_ONLY_redis_password_not_for_production}" ]
     ports:
       - "127.0.0.1:6379:6379"
+    networks: [ platform-control ]
 
   orchestrator-migrations:
     image: migrate/migrate:v4.18.3
@@ -91,6 +97,7 @@ services:
     # migrate/migrate uses lib/pq. Its URL therefore carries the fixed
     # container CA path, while the daemon receives the CA in its own option.
     command: [ "-path", "/migrations", "-database", "${ORCHESTRATOR_MIGRATION_DATABASE_URL:?set ORCHESTRATOR_MIGRATION_DATABASE_URL with sslmode=verify-full and sslrootcert=/run/secrets/orchestrator-postgres-ca.crt}", "up" ]
+    networks: [ platform-control ]
 
   orchestrator:
     build:
@@ -130,16 +137,28 @@ services:
       ORCHESTRATOR_OIDC_ADMIN_ROLE: ${ORCHESTRATOR_OIDC_ADMIN_ROLE:-admin}
       ORCHESTRATOR_OIDC_JWKS_CACHE_SECONDS: ${ORCHESTRATOR_OIDC_JWKS_CACHE_SECONDS:-300}
       ORCHESTRATOR_OIDC_HTTP_TIMEOUT_SECONDS: ${ORCHESTRATOR_OIDC_HTTP_TIMEOUT_SECONDS:-5}
-      ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN: ${ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN:-}
-      ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: ${ORCHESTRATOR_GATEWAY_ADMIN_TOKEN:-}
-      ORCHESTRATOR_AUTH_ADMIN_ORIGIN: ${ORCHESTRATOR_AUTH_ADMIN_ORIGIN:-}
-      ORCHESTRATOR_AUTH_ADMIN_TOKEN: ${ORCHESTRATOR_AUTH_ADMIN_TOKEN:-}
+      # The only permitted plaintext provider path is this isolated Compose
+      # bootstrap network. External/capacity deployments use HTTPS origins.
+      ORCHESTRATOR_ALLOW_COMPOSE_BOOTSTRAP_HTTP: "1"
+      ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN: http://gateway:8080
+      ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: ${ORCHESTRATOR_GATEWAY_ADMIN_TOKEN:?set the dedicated Gateway topology management token}
+      ORCHESTRATOR_AUTH_ADMIN_ORIGIN: http://auth-service:8081
+      ORCHESTRATOR_AUTH_ADMIN_TOKEN: ${ORCHESTRATOR_AUTH_ADMIN_TOKEN:?set the dedicated Auth topology management token}
+      ORCHESTRATOR_FRONTEND_ARTIFACT_CA_CERT: ${ORCHESTRATOR_FRONTEND_ARTIFACT_CA_CERT:-}
+      ORCHESTRATOR_FRONTEND_ARTIFACT_TIMEOUT_MS: ${ORCHESTRATOR_FRONTEND_ARTIFACT_TIMEOUT_MS:-5000}
+      ORCHESTRATOR_AUTH_PERMISSION_TIMEOUT_MS: ${ORCHESTRATOR_AUTH_PERMISSION_TIMEOUT_MS:-3000}
       # Dedicated workload-identity path. This credential can only mint
       # deployment JWTs; it is not the Auth admin or Orchestrator API token.
-      ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN: ${ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN:-http://auth-service:8081}
+      ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN: http://auth-service:8081
       ORCHESTRATOR_AUTH_WORKLOAD_TOKEN: ${ORCHESTRATOR_AUTH_WORKLOAD_TOKEN:?set a dedicated Auth workload issuer token}
       ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN: ${ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN:?set the B-node reachable HTTPS Gateway origin}
       ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE: /run/secrets/gateway-workload-ca.crt
+      # Public verifier material projected by the Store into every signed v3
+      # workload API provider. The Auth signing key is never mounted here.
+      ORCHESTRATOR_WORKLOAD_PUBLIC_KEY_FILE: /run/secrets/ojos-workload-public-key.pem
+      ORCHESTRATOR_WORKLOAD_KEY_ID: ${OJOS_WORKLOAD_KEY_ID:?set OJOS_WORKLOAD_KEY_ID}
+      ORCHESTRATOR_WORKLOAD_ISSUER: ${OJOS_WORKLOAD_ISSUER:?set OJOS_WORKLOAD_ISSUER}
+      ORCHESTRATOR_WORKLOAD_AUDIENCE: ${OJOS_WORKLOAD_AUDIENCE:?set OJOS_WORKLOAD_AUDIENCE}
       ORCHESTRATOR_MAX_WORKERS: ${ORCHESTRATOR_MAX_WORKERS:-160}
       ORCHESTRATOR_LOG_RETENTION_DAYS: ${ORCHESTRATOR_LOG_RETENTION_DAYS:-30}
       ORCHESTRATOR_ARTIFACT_RETENTION_DAYS: ${ORCHESTRATOR_ARTIFACT_RETENTION_DAYS:-30}
@@ -153,6 +172,12 @@ services:
       # Compatibility-only internal callers still need an explicit distinct
       # credential. Public v1 Web/TUI traffic is authenticated through OIDC.
       ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:?set ORCHESTRATOR_INTERNAL_TOKEN}
+      # Target-bound observer verifiers. The control plane never receives the
+      # raw credentials held by Gateway and Auth.
+      ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN_SHA256: ${ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN_SHA256:?set the Gateway Contribution ACK token verifier}
+      ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN_SHA256: ${ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN_SHA256:?set the Auth Contribution ACK token verifier}
+      ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE: /run/secrets/orchestrator-observability-token
+      ORCHESTRATOR_GATEWAY_OBSERVABILITY_ORIGIN: ${ORCHESTRATOR_GATEWAY_OBSERVABILITY_ORIGIN:?set the external HTTPS Gateway observability origin}
       ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM: ${ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM:-1}
     ports:
       - "127.0.0.1:8090:8090"
@@ -188,6 +213,14 @@ services:
         source: ${ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT:?set ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT to the Gateway CA bundle}
         target: /run/secrets/gateway-workload-ca.crt
         read_only: true
+      - type: bind
+        source: ${OJOS_WORKLOAD_PUBLIC_KEY_FILE:?set OJOS_WORKLOAD_PUBLIC_KEY_FILE to the Ed25519 public PEM}
+        target: /run/secrets/ojos-workload-public-key.pem
+        read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE:?set ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE to the dedicated token file}
+        target: /run/secrets/orchestrator-observability-token
+        read_only: true
     # v1 live/ready routes are auth-exempt. Production overrides the URL with HTTPS.
     healthcheck:
       test:
@@ -203,6 +236,7 @@ services:
       retries: 10
       start_period: 20s
     restart: unless-stopped
+    networks: [ platform-control, platform-egress ]
 
   auth-service-migrations:
     image: migrate/migrate:v4.18.3
@@ -211,9 +245,11 @@ services:
         condition: service_healthy
     volumes:
       - ../../services/auth-service/migrations:/migrations:ro
-    command: [ "-path", "/migrations", "-database", "${AUTH_DATABASE_URL:-postgres://postgres:ojos-auth-local@auth-db:5432/ojos_auth?sslmode=disable}", "up" ]
+    command: [ "-path", "/migrations", "-database", "${AUTH_DATABASE_URL:?set the platform Auth PostgreSQL URL}", "up" ]
+    networks: [ platform-control ]
 
   problem-service-migrations:
+    profiles: [ "legacy-development" ]
     image: migrate/migrate:v4.18.3
     depends_on:
       problem-db:
@@ -223,6 +259,7 @@ services:
     command: [ "-path", "/migrations", "-database", "${PROBLEM_DATABASE_URL:-postgres://postgres:ojos-problem-local@problem-db:5432/ojos_problem?sslmode=disable}", "up" ]
 
   judge-api-migrations:
+    profiles: [ "legacy-development" ]
     image: migrate/migrate:v4.18.3
     depends_on:
       judge-db:
@@ -232,6 +269,7 @@ services:
     command: [ "-path", "/migrations", "-database", "${JUDGE_DATABASE_URL:-postgres://postgres:ojos-judge-local@judge-db:5432/ojos_judge?sslmode=disable}", "up" ]
 
   user-service-migrations:
+    profiles: [ "legacy-development" ]
     image: migrate/migrate:v4.18.3
     depends_on:
       user-db:
@@ -249,6 +287,7 @@ services:
       - "127.0.0.1:4317:4317"
       - "127.0.0.1:4318:4318"
       - "127.0.0.1:14268:14268"
+    networks: [ platform-control ]
 
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
@@ -286,6 +325,8 @@ services:
     restart: "no"
 
   gateway:
+    # Reserved platform bootstrap consumer. Business routes are compiled only
+    # from active Contribution revisions; bootstrap code retains one Auth route.
     build:
       context: ../..
       dockerfile: services/gateway/Dockerfile
@@ -299,23 +340,26 @@ services:
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
       auth-service:
-        condition: service_started
+        condition: service_healthy
       orchestrator:
         condition: service_healthy
     environment:
       OJOS_ENVIRONMENT: production
-      REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
+      OJOS_PLATFORM_BOOTSTRAP: "1"
+      REDIS_URL: ${REDIS_URL:?set the platform Redis URL}
+      JWT_SECRET: ${JWT_SECRET:?set the platform JWT secret}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
-      AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
-      AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
-      ORCHESTRATOR_ENDPOINT: ${ORCHESTRATOR_ENDPOINT:-http://orchestrator:8090}
-      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:-ojos-local-internal}
+      AUTH_SERVICE_ENDPOINT: http://auth-service:8081
+      ORCHESTRATOR_PLATFORM_ORIGIN: https://orchestrator:8090
+      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:?set the Orchestrator projection token}
+      ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: ${ORCHESTRATOR_GATEWAY_ADMIN_TOKEN:?set the dedicated Gateway topology management token}
+      ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN: ${ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN:?set a dedicated Gateway Contribution ACK token}
       ORCHESTRATOR_NODE_ID: ${ORCHESTRATOR_NODE_ID:-child-node}
+      SSL_CERT_FILE: /run/secrets/orchestrator-ca.crt
       OJOS_WORKLOAD_PUBLIC_KEY_FILE: /run/secrets/ojos-workload-public-key.pem
-      OJOS_WORKLOAD_KEY_ID: ${OJOS_WORKLOAD_KEY_ID:-workload-1}
-      OJOS_WORKLOAD_ISSUER: ${OJOS_WORKLOAD_ISSUER:-ojos-auth/workload}
-      OJOS_WORKLOAD_AUDIENCE: ${OJOS_WORKLOAD_AUDIENCE:-ojos-gateway}
+      OJOS_WORKLOAD_KEY_ID: ${OJOS_WORKLOAD_KEY_ID:?set OJOS_WORKLOAD_KEY_ID}
+      OJOS_WORKLOAD_ISSUER: ${OJOS_WORKLOAD_ISSUER:?set OJOS_WORKLOAD_ISSUER}
+      OJOS_WORKLOAD_AUDIENCE: ${OJOS_WORKLOAD_AUDIENCE:?set OJOS_WORKLOAD_AUDIENCE}
     ports:
       - "8080:8080"
     volumes:
@@ -323,8 +367,18 @@ services:
         source: ${OJOS_WORKLOAD_PUBLIC_KEY_FILE:?set OJOS_WORKLOAD_PUBLIC_KEY_FILE to the Ed25519 public PEM}
         target: /run/secrets/ojos-workload-public-key.pem
         read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_HEALTHCHECK_CA_CERT:?set ORCHESTRATOR_HEALTHCHECK_CA_CERT to the Orchestrator CA bundle}
+        target: /run/secrets/orchestrator-ca.crt
+        read_only: true
+    read_only: true
+    tmpfs: [ /tmp ]
+    cap_drop: [ ALL ]
+    security_opt: [ no-new-privileges:true ]
+    networks: [ platform-control ]
 
   auth-service:
+    user: "65532:65532"
     build:
       context: ../..
       dockerfile: services/auth-service/Dockerfile
@@ -349,23 +403,48 @@ services:
       - "127.0.0.1:8081:8081"
     environment:
       OJOS_ENVIRONMENT: production
-      DATABASE_URL: ${AUTH_DATABASE_URL:-postgres://postgres:ojos-auth-local@auth-db:5432/ojos_auth?sslmode=disable}
-      JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
-      AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      OJOS_PLATFORM_BOOTSTRAP: "1"
+      AUTH_DATABASE_URL: ${AUTH_DATABASE_URL:?set the platform Auth PostgreSQL URL}
+      JWT_SECRET: ${JWT_SECRET:?set the platform JWT secret}
+      AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:?set the Auth management token}
+      # One-time initial-admin enrollment is enabled only while this dedicated
+      # host file is mounted. Remove both this env entry and its bind mount,
+      # then recreate Auth immediately after the administrator is created.
+      AUTH_ADMIN_BOOTSTRAP_SECRET_FILE: /run/secrets/ojos-auth-admin-bootstrap
+      ORCHESTRATOR_AUTH_ADMIN_TOKEN: ${ORCHESTRATOR_AUTH_ADMIN_TOKEN:?set the dedicated Auth topology management token}
+      ORCHESTRATOR_PLATFORM_ORIGIN: https://orchestrator:8090
+      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:?set ORCHESTRATOR_INTERNAL_TOKEN}
+      ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN: ${ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN:?set a dedicated Auth Contribution ACK token}
       OJOS_WORKLOAD_PRIVATE_KEY_FILE: /run/secrets/ojos-workload-private-key.pem
-      OJOS_WORKLOAD_CONTROL_PLANE_TOKEN: ${ORCHESTRATOR_AUTH_WORKLOAD_TOKEN:?set a dedicated Auth workload issuer token}
-      OJOS_WORKLOAD_KEY_ID: ${OJOS_WORKLOAD_KEY_ID:-workload-1}
-      OJOS_WORKLOAD_ISSUER: ${OJOS_WORKLOAD_ISSUER:-ojos-auth/workload}
-      OJOS_WORKLOAD_AUDIENCE: ${OJOS_WORKLOAD_AUDIENCE:-ojos-gateway}
-      OJOS_WORKLOAD_TTL_SECONDS: "900"
+      ORCHESTRATOR_AUTH_WORKLOAD_TOKEN: ${ORCHESTRATOR_AUTH_WORKLOAD_TOKEN:?set a dedicated Auth workload issuer token}
+      OJOS_WORKLOAD_KEY_ID: ${OJOS_WORKLOAD_KEY_ID:?set OJOS_WORKLOAD_KEY_ID}
+      OJOS_WORKLOAD_ISSUER: ${OJOS_WORKLOAD_ISSUER:?set OJOS_WORKLOAD_ISSUER}
+      OJOS_WORKLOAD_AUDIENCE: ${OJOS_WORKLOAD_AUDIENCE:?set OJOS_WORKLOAD_AUDIENCE}
+      SSL_CERT_FILE: /run/secrets/orchestrator-ca.crt
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
     volumes:
+      - type: bind
+        source: ${AUTH_ADMIN_BOOTSTRAP_SECRET_FILE:?set AUTH_ADMIN_BOOTSTRAP_SECRET_FILE to the private one-time host token file}
+        target: /run/secrets/ojos-auth-admin-bootstrap
+        read_only: true
+        bind:
+          create_host_path: false
       - type: bind
         source: ${OJOS_WORKLOAD_PRIVATE_KEY_FILE:?set OJOS_WORKLOAD_PRIVATE_KEY_FILE to the Ed25519 private PEM}
         target: /run/secrets/ojos-workload-private-key.pem
         read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_HEALTHCHECK_CA_CERT:?set ORCHESTRATOR_HEALTHCHECK_CA_CERT to the Orchestrator CA bundle}
+        target: /run/secrets/orchestrator-ca.crt
+        read_only: true
+    read_only: true
+    tmpfs: [ /tmp ]
+    cap_drop: [ ALL ]
+    security_opt: [ no-new-privileges:true ]
+    networks: [ platform-control ]
 
   user-service:
+    profiles: [ "legacy-development" ]
     build:
       context: ../..
       dockerfile: services/user-service/Dockerfile
@@ -387,6 +466,7 @@ services:
     expose:
       - "8084"
     environment:
+      OJOS_ENVIRONMENT: development
       DATABASE_URL: ${USER_DATABASE_URL:-postgres://postgres:ojos-user-local@user-db:5432/ojos_user?sslmode=disable}
       AUTH_SERVICE_ENDPOINT: ${AUTH_SERVICE_ENDPOINT:-http://auth-service:8081}
       AUTH_SERVICE_ADMIN_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
@@ -396,6 +476,7 @@ services:
       OJOS_CALLER_NODE_ID: ${OJOS_CALLER_NODE_ID:-child-node}
 
   storage-service:
+    profiles: [ "legacy-development" ]
     build:
       context: ../..
       dockerfile: services/storage-service/Dockerfile
@@ -417,6 +498,7 @@ services:
       minio-init:
         condition: service_completed_successfully
     environment:
+      OJOS_ENVIRONMENT: development
       STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
       OJOS_STORAGE_ROOT: /data/ojos/storage
       OJOS_STORAGE_BUCKETS: problems,submissions,judge-artifacts,avatars
@@ -429,6 +511,7 @@ services:
       - storage-service-data:/data/ojos/storage
 
   judge-api:
+    profiles: [ "legacy-development" ]
     build:
       context: ../..
       dockerfile: services/judge-api/Dockerfile
@@ -450,7 +533,7 @@ services:
     ports:
       - "127.0.0.1:8082:8082"
     environment:
-      OJOS_ENVIRONMENT: production
+      OJOS_ENVIRONMENT: development
       DATABASE_URL: ${JUDGE_DATABASE_URL:-postgres://postgres:ojos-judge-local@judge-db:5432/ojos_judge?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
@@ -541,6 +624,7 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
 
   problem-service:
+    profiles: [ "legacy-development" ]
     build:
       context: ../..
       dockerfile: services/problem-service/Dockerfile
@@ -564,6 +648,7 @@ services:
     expose:
       - "8083"
     environment:
+      OJOS_ENVIRONMENT: development
       DATABASE_URL: ${PROBLEM_DATABASE_URL:-postgres://postgres:ojos-problem-local@problem-db:5432/ojos_problem?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
       JAEGER_ENDPOINT: ${JAEGER_ENDPOINT:-jaeger:4317}
@@ -595,3 +680,9 @@ volumes:
   minio-data:
   storage-service-data:
   worker-data:
+
+networks:
+  default:
+  platform-control:
+    internal: true
+  platform-egress:

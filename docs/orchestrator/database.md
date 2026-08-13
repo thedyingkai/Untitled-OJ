@@ -10,7 +10,7 @@ Orchestrator 只写自己的控制面数据库，不直接写 auth、problem、j
 | SQLite | Desktop 默认持久化 | 位于 OS 应用数据目录，启用 WAL、foreign keys、5 秒 busy timeout；数据库旁文件锁阻止两个 Desktop 同时写同一数据目录。打开、迁移或加锁失败即停止启动。 |
 | PostgreSQL | 远程生产控制面 | `ORCHESTRATOR_DATABASE_URL` 必填，使用 r2d2 连接池和证书校验 TLS；迁移/checksum/readiness 或单主动 advisory lock 失败时，在绑定服务端口前退出。 |
 
-Desktop 同一数据目录还保存 Agent execution ledger 和 OCI artifact；ledger 是 Node 幂等执行的独立真值，不能由控制面数据库恢复覆盖。
+Desktop 同一数据目录还保存 OCI artifact，但不保存 Agent execution ledger。ledger 位于独立 Node Agent 的私有持久根，是 Node 幂等执行的独立真值，不能由控制面数据库恢复覆盖。
 
 ## PostgreSQL 连接与单主动所有权
 

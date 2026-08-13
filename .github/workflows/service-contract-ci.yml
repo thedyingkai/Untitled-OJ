@@ -1,0 +1,341 @@
+name: Service Contract CI
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/service_ci_matrix.py"
+      - ".github/scripts/test_service_ci_matrix.py"
+      - ".github/scripts/service_publish_gate.py"
+      - ".github/scripts/test_service_publish_gate.py"
+      - ".github/toolchains.env"
+      - ".github/workflows/service-contract-ci.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "platform/schemas/**"
+      - "platform/shared/**"
+      - "services/**"
+      - "tools/ojos-service/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/scripts/service_ci_matrix.py"
+      - ".github/scripts/test_service_ci_matrix.py"
+      - ".github/scripts/service_publish_gate.py"
+      - ".github/scripts/test_service_publish_gate.py"
+      - ".github/toolchains.env"
+      - ".github/workflows/service-contract-ci.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "platform/schemas/**"
+      - "platform/shared/**"
+      - "services/**"
+      - "tools/ojos-service/**"
+  workflow_dispatch:
+    inputs:
+      all_services:
+        description: Validate every discovered service
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  discover:
+    name: Discover Service Contract services
+    runs-on: ubuntu-latest
+    outputs:
+      service_count: ${{ steps.matrix.outputs.service_count }}
+      affected_count: ${{ steps.matrix.outputs.affected_count }}
+      affected_matrix: ${{ steps.matrix.outputs.affected_matrix }}
+      go_matrix: ${{ steps.matrix.outputs.go_matrix }}
+      rust_matrix: ${{ steps.matrix.outputs.rust_matrix }}
+      node_matrix: ${{ steps.matrix.outputs.node_matrix }}
+      image_matrix: ${{ steps.matrix.outputs.images_matrix }}
+      publish_matrix: ${{ steps.matrix.outputs.publish_matrix }}
+      go_version: ${{ steps.toolchains.outputs.go_version }}
+      rust_version: ${{ steps.toolchains.outputs.rust_version }}
+      node_version: ${{ steps.toolchains.outputs.node_version }}
+      typescript_version: ${{ steps.toolchains.outputs.typescript_version }}
+      govulncheck_version: ${{ steps.toolchains.outputs.govulncheck_version }}
+      cargo_audit_version: ${{ steps.toolchains.outputs.cargo_audit_version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Load pinned toolchains
+        id: toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/service_ci_matrix.py --repo . --all >/dev/null
+          source .github/toolchains.env
+          {
+            echo "go_version=$GO_VERSION"
+            echo "rust_version=$RUST_VERSION"
+            echo "node_version=$NODE_VERSION"
+            echo "typescript_version=$TYPESCRIPT_VERSION"
+            echo "govulncheck_version=$GOVULNCHECK_VERSION"
+            echo "cargo_audit_version=$CARGO_AUDIT_VERSION"
+          } >>"$GITHUB_OUTPUT"
+      - name: Test deterministic discovery policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/test_service_ci_matrix.py
+          python3 .github/scripts/test_service_publish_gate.py
+      - name: Generate affected-service matrices
+        id: matrix
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          FORCE_ALL: ${{ inputs.all_services }}
+        run: |
+          set -euo pipefail
+          args=(--repo . --github-output "$GITHUB_OUTPUT" --pretty)
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$FORCE_ALL" != "false" ]]; then
+            args+=(--all)
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            args+=(--base "$PR_BASE_SHA" --head HEAD)
+          elif [[ "$EVENT_NAME" == "push" && -n "$BEFORE_SHA" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            args+=(--base "$BEFORE_SHA" --head HEAD)
+          else
+            args+=(--all)
+          fi
+          python3 .github/scripts/service_ci_matrix.py "${args[@]}" | tee "$RUNNER_TEMP/service-ci-matrix.json"
+      - name: Require at least one discovered service
+        shell: bash
+        env:
+          SERVICE_COUNT: ${{ steps.matrix.outputs.service_count }}
+        run: |
+          set -euo pipefail
+          if [[ "$SERVICE_COUNT" -lt 1 ]]; then
+            echo "no services/**/ojos.service.yaml manifests were discovered" >&2
+            exit 1
+          fi
+
+  contract-gate:
+    name: Contract/codegen gate (${{ matrix.service }})
+    needs: discover
+    if: needs.discover.outputs.affected_count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.affected_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.discover.outputs.rust_version }}
+      - name: Verify generated output has zero drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --quiet -p ojos-service -- service check "${{ matrix.manifest }}" --generated
+      - name: Verify compiler build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/${{ matrix.service }}-generated"
+          cargo run --locked --quiet -p ojos-service -- service build "${{ matrix.manifest }}" --output "$scratch"
+          test -s "$scratch/build-input.json"
+          cmp "$scratch/build-input.json" "${{ matrix.generated }}/build-input.json"
+
+  go:
+    name: Go lint/test/security (${{ matrix.service }})
+    needs: discover
+    if: needs.discover.outputs.go_matrix != '{"include":[]}'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.go_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ needs.discover.outputs.go_version }}
+      - name: Format, vet, test and build every discovered Go module
+        shell: bash
+        run: |
+          set -euo pipefail
+          for module in $(printf '%s' '${{ toJSON(matrix.goModules) }}' | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))'); do
+            echo "::group::$module"
+            case "$module" in
+              "${{ matrix.generated }}"/*) ;;
+              *) test -z "$(find "$module" -path '${{ matrix.generated }}' -prune -o -name '*.go' -type f -print0 | xargs -0 -r gofmt -l)" ;;
+            esac
+            (cd "$module" && go vet ./... && go test ./... && go build ./...)
+            echo "::endgroup::"
+          done
+      - name: Scan reachable Go vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install "golang.org/x/vuln/cmd/govulncheck@${{ needs.discover.outputs.govulncheck_version }}"
+          for module in $(printf '%s' '${{ toJSON(matrix.goModules) }}' | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))'); do
+            (cd "$module" && govulncheck ./...)
+          done
+
+  rust:
+    name: Rust lint/test/security (${{ matrix.service }})
+    needs: discover
+    if: needs.discover.outputs.rust_matrix != '{"include":[]}'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.rust_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.discover.outputs.rust_version }}
+          components: rustfmt,clippy
+      - name: Lint, test and build generated Rust crates
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in $(printf '%s' '${{ toJSON(matrix.rustManifests) }}' | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))'); do
+            cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings
+            cargo test --manifest-path "$manifest"
+            cargo build --manifest-path "$manifest"
+          done
+      - name: Audit generated Rust dependency graphs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked --version "${{ needs.discover.outputs.cargo_audit_version }}"
+          for manifest in $(printf '%s' '${{ toJSON(matrix.rustManifests) }}' | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))'); do
+            cargo generate-lockfile --manifest-path "$manifest"
+            cargo audit --file "$(dirname "$manifest")/Cargo.lock"
+          done
+
+  node:
+    name: Node lint/test/security (${{ matrix.service }})
+    needs: discover
+    if: needs.discover.outputs.node_matrix != '{"include":[]}'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.node_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ needs.discover.outputs.node_version }}
+      - name: Typecheck generated TypeScript packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global "typescript@${{ needs.discover.outputs.typescript_version }}"
+          for package in $(printf '%s' '${{ toJSON(matrix.nodePackages) }}' | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))'); do
+            directory="$(dirname "$package")"
+            if [[ -f "$directory/package-lock.json" ]]; then
+              (cd "$directory" && npm ci)
+            else
+              (cd "$directory" && npm install --ignore-scripts)
+            fi
+            (cd "$directory" && tsc --project tsconfig.json)
+            (cd "$directory" && npm run lint --if-present && npm test --if-present && npm run build --if-present)
+            (cd "$directory" && npm audit --audit-level=high)
+          done
+
+  image:
+    name: OCI build (${{ matrix.service }})
+    needs: discover
+    if: needs.discover.outputs.image_matrix != '{"include":[]}'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.image_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - name: Build every service image without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dockerfile in $(printf '%s' '${{ toJSON(matrix.dockerfiles) }}' | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))'); do
+            docker buildx build --check --file "$dockerfile" .
+            docker buildx build --file "$dockerfile" --tag "ojos-ci/${{ matrix.service }}:verify" --load .
+          done
+
+  publish-gate:
+    name: Publish graph validation (${{ matrix.service }})
+    needs: discover
+    if: needs.discover.outputs.publish_matrix != '{"include":[]}'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.publish_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.discover.outputs.rust_version }}
+      - name: Seal, sign and self-verify an ephemeral Catalog fixture
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            baseline_revision="$PR_BASE_SHA"
+          elif [[ "$EVENT_NAME" == "push" && -n "$BEFORE_SHA" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            baseline_revision="$BEFORE_SHA"
+          else
+            baseline_revision="$(git rev-parse HEAD^)"
+          fi
+          [[ "$baseline_revision" =~ ^[0-9a-fA-F]{40}$ ]]
+          python3 .github/scripts/service_publish_gate.py \
+            --repo . \
+            --service "${{ matrix.directory }}" \
+            --baseline-revision "$baseline_revision"
+
+  required:
+    name: Service Contract CI required
+    if: always()
+    needs:
+      - discover
+      - contract-gate
+      - go
+      - rust
+      - node
+      - image
+      - publish-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require every applicable service gate
+        shell: bash
+        env:
+          AFFECTED_COUNT: ${{ needs.discover.outputs.affected_count }}
+          DISCOVER_RESULT: ${{ needs.discover.result }}
+          CONTRACT_RESULT: ${{ needs.contract-gate.result }}
+          GO_RESULT: ${{ needs.go.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          NODE_RESULT: ${{ needs.node.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+          PUBLISH_RESULT: ${{ needs.publish-gate.result }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/service_ci_matrix.py \
+            --verify-required \
+            --affected-count "${AFFECTED_COUNT:-0}" \
+            --discover-result "$DISCOVER_RESULT" \
+            --gate-result "contract=$CONTRACT_RESULT" \
+            --gate-result "go=$GO_RESULT" \
+            --gate-result "rust=$RUST_RESULT" \
+            --gate-result "node=$NODE_RESULT" \
+            --gate-result "image=$IMAGE_RESULT" \
+            --gate-result "publish=$PUBLISH_RESULT"

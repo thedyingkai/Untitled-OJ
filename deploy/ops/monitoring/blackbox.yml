@@ -9,3 +9,27 @@ modules:
         - HTTP/2.0
       follow_redirects: true
       preferred_ip_protocol: ip4
+  http_2xx_orchestrator_tls:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      valid_http_versions:
+        - HTTP/1.1
+        - HTTP/2.0
+      follow_redirects: true
+      preferred_ip_protocol: ip4
+      tls_config:
+        ca_file: /etc/blackbox-exporter/tls/orchestrator-ca.crt
+  http_2xx_gateway_tls:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      valid_http_versions:
+        - HTTP/1.1
+        - HTTP/2.0
+      follow_redirects: false
+      preferred_ip_protocol: ip4
+      tls_config:
+        ca_file: /etc/blackbox-exporter/tls/gateway-ca.crt

@@ -211,6 +211,9 @@
         path: "{{ item }}"
       loop:
         - "{{ capacity_postgres_secret_bundle_dir }}"
+        - "{{ capacity_agent_postgres_provider_file }}"
+        - "{{ capacity_agent_postgres_admin_url_file }}"
+        - "{{ capacity_agent_postgres_ca_file }}"
         - "{{ capacity_control_plane_env_file }}"
         - "{{ capacity_control_plane_secret_bundle_dir }}"
         - "{{ capacity_catalog_signing_key_file }}"
@@ -251,7 +254,7 @@
         fail_msg: The private candidate registry token must be a 1-16384 byte regular file.
       no_log: true
 
-    - name: Read the protected runtime and migration PostgreSQL URLs
+    - name: Read the protected runtime, provider and migration inputs
       ansible.builtin.set_fact:
         capacity_runtime_database_url: >-
           {{
@@ -271,6 +274,102 @@
               file=capacity_control_plane_env_file
             )
           }}
+        capacity_gateway_contribution_ack_verifier: >-
+          {{
+            lookup(
+              'ansible.builtin.ini',
+              'ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN_SHA256',
+              type='properties',
+              file=capacity_control_plane_env_file
+            )
+          }}
+        capacity_auth_contribution_ack_verifier: >-
+          {{
+            lookup(
+              'ansible.builtin.ini',
+              'ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN_SHA256',
+              type='properties',
+              file=capacity_control_plane_env_file
+            )
+          }}
+        capacity_gateway_admin_origin: >-
+          {{
+            lookup(
+              'ansible.builtin.ini',
+              'ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN',
+              type='properties',
+              file=capacity_control_plane_env_file
+            )
+          }}
+        capacity_gateway_admin_token: >-
+          {{
+            lookup(
+              'ansible.builtin.ini',
+              'ORCHESTRATOR_GATEWAY_ADMIN_TOKEN',
+              type='properties',
+              file=capacity_control_plane_env_file
+            )
+          }}
+        capacity_auth_admin_origin: >-
+          {{
+            lookup(
+              'ansible.builtin.ini',
+              'ORCHESTRATOR_AUTH_ADMIN_ORIGIN',
+              type='properties',
+              file=capacity_control_plane_env_file
+            )
+          }}
+        capacity_auth_admin_token: >-
+          {{
+            lookup(
+              'ansible.builtin.ini',
+              'ORCHESTRATOR_AUTH_ADMIN_TOKEN',
+              type='properties',
+              file=capacity_control_plane_env_file
+            )
+          }}
+        capacity_auth_workload_origin: >-
+          {{
+            lookup(
+              'ansible.builtin.ini',
+              'ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN',
+              type='properties',
+              file=capacity_control_plane_env_file
+            )
+          }}
+        capacity_auth_workload_token: >-
+          {{
+            lookup(
+              'ansible.builtin.ini',
+              'ORCHESTRATOR_AUTH_WORKLOAD_TOKEN',
+              type='properties',
+              file=capacity_control_plane_env_file
+            )
+          }}
+      no_log: true
+
+    - name: Require complete external HTTPS platform bootstrap providers
+      ansible.builtin.assert:
+        that:
+          - capacity_gateway_admin_origin is match('^https://[^/?#@]+$')
+          - capacity_auth_admin_origin is match('^https://[^/?#@]+$')
+          - capacity_auth_workload_origin is match('^https://[^/?#@]+$')
+          - capacity_gateway_admin_token is match('^[!-~]{32,4096}$')
+          - capacity_auth_admin_token is match('^[!-~]{32,4096}$')
+          - capacity_auth_workload_token is match('^[!-~]{32,4096}$')
+          - capacity_gateway_admin_token != capacity_auth_admin_token
+          - capacity_gateway_admin_token != capacity_auth_workload_token
+          - capacity_auth_admin_token != capacity_auth_workload_token
+        fail_msg: Capacity requires reachable external HTTPS Gateway/Auth management providers and a workload issuer with three distinct strong credentials.
+      no_log: true
+
+    - name: Require distinct canonical Contribution consumer verifiers
+      ansible.builtin.assert:
+        that:
+          - capacity_gateway_contribution_ack_verifier is match('^sha256:[0-9a-f]{64}$')
+          - capacity_auth_contribution_ack_verifier is match('^sha256:[0-9a-f]{64}$')
+          - capacity_gateway_contribution_ack_verifier != capacity_auth_contribution_ack_verifier
+        fail_msg: Gateway and Auth require distinct canonical Contribution ACK token verifiers.
       no_log: true
 
     - name: Require one verify-full PostgreSQL identity for migration and runtime
@@ -281,6 +380,33 @@
           - capacity_runtime_database_url is regex('[?&]sslmode=verify-full(?:&|$)')
           - "'sslrootcert=/run/secrets/orchestrator-postgres-ca.crt' in capacity_runtime_database_url"
         fail_msg: Runtime and migration must use one verify-full PostgreSQL URL and mounted CA.
+      no_log: true
+
+    - name: Read the strict Agent PostgreSQL ResourceClaim descriptor
+      ansible.builtin.set_fact:
+        capacity_agent_postgres_provider: >-
+          {{ lookup('file', capacity_agent_postgres_provider_file) | from_json }}
+        capacity_agent_postgres_admin_url: >-
+          {{ lookup('file', capacity_agent_postgres_admin_url_file, rstrip=True) }}
+      no_log: true
+
+    - name: Require one fail-closed verify-full Agent ResourceClaim provider
+      ansible.builtin.assert:
+        that:
+          - capacity_agent_postgres_provider.keys() | sort | list == ['admin_url_file', 'ca_file', 'host', 'port', 'provider_id', 'schema_version', 'tls_mode']
+          - capacity_agent_postgres_provider.schema_version == 1
+          - capacity_agent_postgres_provider.provider_id == 'postgresql-capacity'
+          - capacity_agent_postgres_provider.host is match('^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$')
+          - capacity_agent_postgres_provider.port is integer
+          - capacity_agent_postgres_provider.port | int == 5432
+          - capacity_agent_postgres_provider.tls_mode == 'verify-full'
+          - capacity_agent_postgres_provider.admin_url_file == '/run/agent-resource-provider/admin.url'
+          - capacity_agent_postgres_provider.ca_file == '/run/agent-resource-provider/postgres-ca.crt'
+          - capacity_agent_postgres_admin_url is match('^postgres(ql)?://[^\s]+$')
+          - capacity_agent_postgres_admin_url is regex('^postgres(?:ql)?://[^/?#@:]+:[^/?#@]+@')
+          - capacity_agent_postgres_admin_url is regex('[?&]sslmode=require(?:&|$)')
+          - ('@' ~ capacity_agent_postgres_provider.host ~ ':5432/') in capacity_agent_postgres_admin_url
+        fail_msg: Capacity requires the exact strict verify-full Agent PostgreSQL ResourceClaim provider and one protected administrator URL.
       no_log: true
 
     - name: Read the verified immutable image provenance record
@@ -740,6 +866,68 @@
       retries: 60
       delay: 5
 
+    - name: Probe the external Gateway topology projection provider
+      ansible.builtin.uri:
+        url: "{{ capacity_gateway_admin_origin }}/api/v1/topologies/__capacity_provider_probe__"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ capacity_gateway_admin_token }}"
+        return_content: true
+        status_code: 200
+      register: capacity_gateway_provider_probe
+      until:
+        - capacity_gateway_provider_probe.status == 200
+        - capacity_gateway_provider_probe.json.api_version == 'v1'
+        - capacity_gateway_provider_probe.json.provider == 'gateway'
+        - capacity_gateway_provider_probe.json.topology_id == '__capacity_provider_probe__'
+        - capacity_gateway_provider_probe.json.absent | bool
+      retries: 12
+      delay: 5
+      no_log: true
+
+    - name: Probe the external Auth topology projection provider
+      ansible.builtin.uri:
+        url: "{{ capacity_auth_admin_origin }}/api/v1/topologies/__capacity_provider_probe__"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ capacity_auth_admin_token }}"
+        return_content: true
+        status_code: 200
+      register: capacity_auth_provider_probe
+      until:
+        - capacity_auth_provider_probe.status == 200
+        - capacity_auth_provider_probe.json.api_version == 'v1'
+        - capacity_auth_provider_probe.json.provider == 'auth'
+        - capacity_auth_provider_probe.json.topology_id == '__capacity_provider_probe__'
+        - capacity_auth_provider_probe.json.absent | bool
+      retries: 12
+      delay: 5
+      no_log: true
+
+    - name: Probe the external Auth workload credential issuer
+      ansible.builtin.uri:
+        url: "{{ capacity_auth_workload_origin }}/auth/internal/workload-tokens:issue"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ capacity_auth_workload_token }}"
+        body_format: json
+        body:
+          deployment_id: capacity-platform-provider-probe
+          service_id: capacity-platform-provider-probe
+          node_id: capacity-platform-provider-probe
+          credential_generation: 1
+        return_content: true
+        status_code: 200
+      register: capacity_auth_workload_probe
+      until:
+        - capacity_auth_workload_probe.status == 200
+        - capacity_auth_workload_probe.json.token_type == 'Bearer'
+        - capacity_auth_workload_probe.json.access_token | length > 64
+        - capacity_auth_workload_probe.json.expires_in | int > 0
+      retries: 12
+      delay: 5
+      no_log: true
+
     - name: Issue 100 one-time enrollment codes through public v1
       ansible.builtin.command:
         argv:
@@ -767,6 +955,47 @@
   become: true
   gather_facts: false
   tasks:
+    - name: Detect an existing worker Compose deployment before identity migration
+      ansible.builtin.stat:
+        path: /opt/ojos/capacity/worker/compose.yml
+        follow: false
+      register: existing_worker_compose
+
+    - name: Stop existing Agents before workload identity migration
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - /opt/ojos/capacity/worker
+          - -f
+          - /opt/ojos/capacity/worker/compose.yml
+          - stop
+          - "agent-{{ '%02d' | format(item) }}"
+      loop: "{{ range(0, 10) | list }}"
+      register: stopped_agents_for_identity_migration
+      changed_when: stopped_agents_for_identity_migration.rc == 0
+      when: existing_worker_compose.stat.exists
+
+    - name: Detect legacy combined Agent roots
+      ansible.builtin.stat:
+        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(item) }}"
+        follow: false
+      loop: "{{ range(0, 10) | list }}"
+      register: legacy_combined_agent_roots
+
+    - name: Fail closed instead of copying secrets out of the legacy combined layout
+      ansible.builtin.assert:
+        that:
+          - not item.stat.exists
+        fail_msg: >-
+          Legacy combined Agent root {{ item.stat.path }} exists. Agents are stopped;
+          migrate identity/SQLite/provider state into agent-internal and only
+          runtime-contexts/resource outputs into workload-exports under an
+          audited offline procedure, then remove the legacy root. This playbook
+          never guesses which credential files are safe to export.
+      loop: "{{ legacy_combined_agent_roots.results }}"
+
     - name: Create worker state and shared CA directories
       ansible.builtin.file:
         path: "{{ item.path }}"
@@ -778,15 +1007,28 @@
         - { path: /opt/ojos/capacity/worker, owner: root, group: root, mode: "0750" }
         - { path: /opt/ojos/capacity/evidence, owner: root, group: root, mode: "0750" }
         - { path: /etc/ojos/capacity, owner: root, group: root, mode: "0750" }
-        - { path: /var/lib/ojos/capacity/agents, owner: "10004", group: "10004", mode: "0750" }
+        - { path: /var/lib/ojos/capacity/agent-internal, owner: "65532", group: "65532", mode: "0750" }
+        - { path: /var/lib/ojos/capacity/workload-exports, owner: "65532", group: "65532", mode: "0750" }
+        - { path: /etc/ojos/capacity/agent-resource-provider, owner: root, group: "65532", mode: "0750" }
 
-    - name: Create independent Agent state directories
+    - name: Create independent Agent-internal state directories
       ansible.builtin.file:
-        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(item) }}"
+        path: "/var/lib/ojos/capacity/agent-internal/{{ '%02d' | format(item) }}"
         state: directory
-        owner: "10004"
-        group: "10004"
-        mode: "0750"
+        owner: "65532"
+        group: "65532"
+        mode: "0700"
+        follow: false
+      loop: "{{ range(0, 10) | list }}"
+
+    - name: Create independent workload export directories
+      ansible.builtin.file:
+        path: "/var/lib/ojos/capacity/workload-exports/{{ '%02d' | format(item) }}"
+        state: directory
+        owner: "65532"
+        group: "65532"
+        mode: "0700"
+        follow: false
       loop: "{{ range(0, 10) | list }}"
 
     - name: Install the immutable expected runtime manifest on every worker
@@ -799,19 +1041,46 @@
 
     - name: Create independent Agent bootstrap secret directories
       ansible.builtin.file:
-        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(item) }}/bootstrap"
+        path: "/var/lib/ojos/capacity/agent-internal/{{ '%02d' | format(item) }}/bootstrap"
         state: directory
-        owner: "10004"
-        group: "10004"
+        owner: "65532"
+        group: "65532"
         mode: "0700"
       loop: "{{ range(0, 10) | list }}"
+
+    - name: Install strict Agent PostgreSQL ResourceClaim provider descriptor
+      ansible.builtin.copy:
+        src: "{{ capacity_agent_postgres_provider_file }}"
+        dest: /etc/ojos/capacity/agent-resource-provider/provider.json
+        owner: "65532"
+        group: "65532"
+        mode: "0600"
+      no_log: true
+
+    - name: Install Agent-only PostgreSQL administrator URL
+      ansible.builtin.copy:
+        src: "{{ capacity_agent_postgres_admin_url_file }}"
+        dest: /etc/ojos/capacity/agent-resource-provider/admin.url
+        owner: "65532"
+        group: "65532"
+        mode: "0600"
+      no_log: true
+
+    - name: Install Agent-only PostgreSQL ResourceClaim CA
+      ansible.builtin.copy:
+        src: "{{ capacity_agent_postgres_ca_file }}"
+        dest: /etc/ojos/capacity/agent-resource-provider/postgres-ca.crt
+        owner: "65532"
+        group: "65532"
+        mode: "0600"
+      no_log: true
 
     - name: Install the control-plane CA only
       ansible.builtin.copy:
         src: "{{ capacity_control_plane_ca_file }}"
         dest: /etc/ojos/capacity/control-plane-ca.pem
         owner: root
-        group: "10004"
+        group: "65532"
         mode: "0640"
 
     - name: Materialize strict read-only Agent registry credentials
@@ -832,7 +1101,7 @@
           }}
         dest: /etc/ojos/capacity/registry-credentials.json
         owner: root
-        group: "10004"
+        group: "65532"
         mode: "0640"
       no_log: true
 
@@ -893,7 +1162,7 @@
 
     - name: Detect previously enrolled durable identities
       ansible.builtin.stat:
-        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(item) }}/identity/current.json"
+        path: "/var/lib/ojos/capacity/agent-internal/{{ '%02d' | format(item) }}/identity/current.json"
       loop: "{{ range(0, 10) | list }}"
       register: identity_files
 

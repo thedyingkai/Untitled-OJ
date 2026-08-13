@@ -59,11 +59,48 @@ curl --fail-with-body \
   --data '{"node_id":"worker-01","host_ip":"10.20.0.31","role":"worker","ttl_seconds":600}'
 ```
 
-在目标 Node 上准备控制面 HTTPS CA、持久 identity 目录和注册码文件，然后只兑换一次：
+在目标 Node 上先创建固定数值身份。signed `standard-container-v1` 工作负载和 Agent 物化的私密文件都使用 `65532:65532`；若该 UID/GID 已被其他账户占用，必须先解决冲突，不能复用另一账户，也不能改用 `CAP_CHOWN`：
 
 ```bash
-install -d -m 0700 /var/lib/ojos-agent/identity
-ojos-orchestrator-agent enroll \
+if getent group ojos-agent >/dev/null; then
+  test "$(getent group ojos-agent | cut -d: -f3)" = 65532
+else
+  ! getent group 65532 >/dev/null
+  groupadd --system --gid 65532 ojos-agent
+fi
+if getent passwd ojos-agent >/dev/null; then
+  test "$(id -u ojos-agent)" = 65532
+  test "$(id -g ojos-agent)" = 65532
+else
+  ! getent passwd 65532 >/dev/null
+  useradd --system --uid 65532 --gid 65532 \
+    --home-dir /var/lib/ojos-agent --no-create-home \
+    --shell /usr/sbin/nologin ojos-agent
+fi
+test "$(id -u ojos-agent)" = 65532
+test "$(id -g ojos-agent)" = 65532
+
+docker_socket_gid="$(stat -c '%g' /var/run/docker.sock)"
+docker_socket_group="$(getent group "$docker_socket_gid" | cut -d: -f1)"
+if test -z "$docker_socket_group"; then
+  docker_socket_group="ojos-docker-$docker_socket_gid"
+  groupadd --system --gid "$docker_socket_gid" "$docker_socket_group"
+fi
+usermod --append --groups "$docker_socket_group" ojos-agent
+
+install -d -o 65532 -g 65532 -m 0700 \
+  /var/lib/ojos-agent \
+  /var/lib/ojos-agent/identity \
+  /var/lib/ojos-workload-export
+```
+
+不要把 Capacity 环境使用的补充 GID `10004` 照搬到普通主机；standalone Node 必须读取本机 Docker socket 的真实 GID。控制面 HTTPS CA 可由 root 管理，但 Agent 必须可读。注册码文件应由可信部署步骤直接以 `65532:65532`、`0600` 创建，而不是先写成 root 私有文件再在运行中改权。
+
+随后以 Agent 服务身份只兑换一次：
+
+```bash
+sudo --user=ojos-agent --group=ojos-agent \
+  ojos-orchestrator-agent enroll \
   --control-plane https://orchestrator.example.com \
   --ca /etc/ojos/control-plane-ca.pem \
   --expected-node-id worker-01 \
@@ -77,15 +114,19 @@ ojos-orchestrator-agent enroll \
 
 identity 目录保存版本化证书、私钥、控制面 CA、注册恢复状态与当前 generation 指针；它必须位于本地持久磁盘并只允许 Agent 服务账号访问。completed marker 只保存 CSR、绑定摘要和证书 serial，不保存私钥。只有命令成功或输出 `RECOVERED` 后才删除临时注册码文件；不要备份或把它复用到其他 Node。
 
-前台验证：
+前台验证也必须使用同一服务身份；不要用 root 运行一次来“预热”目录：
 
 ```bash
-ojos-orchestrator-agent run \
+sudo --user=ojos-agent --group=ojos-agent \
+  ojos-orchestrator-agent run \
   --control-plane https://orchestrator.example.com \
-  --identity-dir /var/lib/ojos-agent/identity
+  --identity-dir /var/lib/ojos-agent/identity \
+  --workload-export-dir /var/lib/ojos-workload-export
 ```
 
 默认执行账本为 `/var/lib/ojos-agent/identity/execution-ledger.sqlite3`，可用 `--ledger` 指向同一节点上的其他持久路径。账本记录 claim/attempt/副作用结果，用于至少一次投递下的幂等恢复；不得放在临时目录，也不得用控制面数据库备份覆盖。默认 heartbeat 为 10 秒、lease 为 30 秒、传输重试为 1 秒。
+
+`--workload-export-dir` 是工作负载唯一可见的 Agent 输出边界，其中只保存 Service Context、公钥材料和 ResourceClaim 输出；它必须与 identity、ledger、Registry 凭据、runtime policy、provider 管理凭据和 ResourceClaim 内部状态互不重叠，也不能互为父子目录。Agent 会拒绝相同路径、祖先/后代关系与符号链接逃逸。Docker daemon 与 Agent 不在同一 mount namespace 时，只把该 export 根以相同绝对路径只读映射给 daemon；绝不能映射 `/var/lib/ojos-agent` 或 provider secret 根。
 
 私有 OCI Registry 使用 `--registry-credentials /etc/ojos/agent/registry-credentials.json` 显式启用。文件采用严格 schema v1：`{"schema_version":1,"registries":[{"server_address":"ghcr.io","username":"...","password":"..."}]}`；最多 32 个 Registry、文件最大 64 KiB，拒绝未知字段、重复 host、URL、浮动 tag 和跨 Registry 复用。Agent 只把匹配目标 digest 引用 host 的凭据交给 Docker Engine API，不写入 Job、Operation 或日志。该文件必须由服务管理器以只读方式物化；轮换后重启 Agent，让新 worker 重新加载凭据。
 
@@ -104,8 +145,14 @@ Requires=docker.service
 Type=simple
 User=ojos-agent
 Group=ojos-agent
+# ojos-agent must be provisioned as numeric UID/GID 65532. Grant Docker socket
+# access through only its host-specific supplemental group; never CAP_CHOWN.
+# Replace this with the group that owns this host's Docker socket. It is not
+# necessarily named docker and must not be copied from the Capacity template.
+SupplementaryGroups=docker
+UMask=0077
 Environment=OJOS_ENVIRONMENT=production
-ExecStart=/usr/local/bin/ojos-orchestrator-agent run --control-plane https://orchestrator.example.com --identity-dir /var/lib/ojos-agent/identity --registry-credentials /etc/ojos/agent/registry-credentials.json --runtime-policy /etc/ojos/agent/runtime-policy.json
+ExecStart=/usr/local/bin/ojos-orchestrator-agent run --control-plane https://orchestrator.example.com --identity-dir /var/lib/ojos-agent/identity --workload-export-dir /var/lib/ojos-workload-export --registry-credentials /etc/ojos/agent/registry-credentials.json --runtime-policy /etc/ojos/agent/runtime-policy.json
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=35s
@@ -114,6 +161,15 @@ KillSignal=SIGTERM
 [Install]
 WantedBy=multi-user.target
 ```
+
+Linux 上必须把 `ojos-agent` 固定为 UID/GID `65532:65532`，并由服务管理器确认
+ServiceContext 与 ResourceClaim 输出根目录也归该身份所有。它与 signed standard-v3
+工作负载使用同一文件身份，因此可在保持目录 `0700`、文件 `0600` 的前提下原子轮换；
+不得用 `CAP_CHOWN` 或放宽权限替代。若 Agent 连接容器化 Docker daemon，daemon
+命名空间必须只把该 Agent 的 workload export 根以相同绝对路径只读挂载；identity、
+ledger、provider 管理凭据、Registry 凭据和 ResourceClaim 内部状态不得进入 daemon
+命名空间，也不得挂载其他 Agent 的 export 根。否则 Docker 无法解析合法 bind source，
+或会扩大节点间 secret 可见范围。
 
 服务账号必须能够访问 Docker Unix socket；Windows 服务账号必须能够访问 Docker named pipe，并把 identity/ledger 放在例如 `C:\ProgramData\OJOS\agent` 的持久且受 ACL 保护的目录。服务管理器应发送 SIGTERM/控制台停止事件并至少留出 30 秒排空时间，不能周期性删除 identity 或 ledger。
 
@@ -172,12 +228,18 @@ export ORCHESTRATOR_ARTIFACT_DIR=/var/lib/ojos/orchestrator/artifacts
 export ORCHESTRATOR_BACKUP_DIR=/srv/backup/ojos-orchestrator
 export ORCHESTRATOR_HEALTH_URL=https://orchestrator.example.com
 export ORCHESTRATOR_CONFIRM_QUIESCED_BACKUP=backup-orchestrator-v1
+export ORCHESTRATOR_BACKUP_FENCE_TOKEN="$CHANGE_AND_FENCE_ID"
+export ORCHESTRATOR_BACKUP_FENCE_CHECK_COMMAND='/usr/local/sbin/orchestrator-fence-check'
 bash deploy/ops/orchestrator-backup.sh
 ```
 
-脚本在配置 health URL 时会拒绝备份仍存活的 daemon，并把数据库、artifact 文件数/字节数和
-`control-plane-quiesced` 一致性声明写入 manifest。每日至少备份一次，恢复演练至少每月一次。
+脚本在配置 health URL 时会拒绝备份仍存活的 daemon，还要求独立 fence check；manifest 记录 fence token
+的 SHA-256（不记录原值）、数据库、artifact 文件数/字节数和 `control-plane-quiesced` 一致性声明。
+每日至少备份一次，恢复演练至少每月一次。
 Node 本地执行账本不属于控制面备份；Node 重连后按幂等账本与服务端状态对账。
+
+恢复会在切换前另存当前数据库 dump，并保留旧 artifact；恢复或必需表验证失败时同时回灌数据库与 artifact。
+自动回灌失败必须继续关闭流量并人工处置，不得仅凭 artifact 已回退就重新启动控制面。
 
 恢复必须先停止 daemon，并显式确认：
 

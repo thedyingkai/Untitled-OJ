@@ -55,15 +55,15 @@ def assert_in_order(test: unittest.TestCase, body: str, *needles: str) -> None:
 
 
 class ReleaseWorkflowPolicyTests(unittest.TestCase):
-    def test_security_scans_are_explicitly_deferred_from_functional_ci(self) -> None:
+    def test_security_scans_are_required_and_kept_as_explicit_steps(self) -> None:
         opt_in = "if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}"
         for name in (
             "Scan Go modules for reachable vulnerabilities",
             "Audit Rust dependencies",
             "Audit gateway frontend dependencies",
         ):
-            self.assertIn(opt_in, workflow_step(name, CI_WORKFLOW), name)
-        self.assertIn(
+            self.assertNotIn(opt_in, workflow_step(name, CI_WORKFLOW), name)
+        self.assertNotIn(
             opt_in,
             workflow_step("Audit gateway frontend dependencies", DOCKER_E2E_WORKFLOW),
         )
@@ -383,6 +383,9 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
         self.assertIn('reference="$IMAGE@$DIGEST"', build)
         self.assertIn("org.opencontainers.image.revision", build)
         self.assertIn('[[ "$revision" == "$GITHUB_SHA" ]]', build)
+        self.assertIn('if [[ "$COMPONENT" == "agent" ]]', build)
+        self.assertIn("docker image inspect --format '{{.Config.User}}'", build)
+        self.assertIn('[[ "$runtime_user" == "65532:65532" ]]', build)
         for field in (
             "component:$component",
             "digest:$digest",

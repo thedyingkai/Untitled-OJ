@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -48,6 +49,12 @@ def write_env(path: pathlib.Path) -> None:
                 "ORCHESTRATOR_OIDC_ADMIN_ROLE=admin",
                 "ORCHESTRATOR_OIDC_JWKS_CACHE_SECONDS=300",
                 "ORCHESTRATOR_OIDC_HTTP_TIMEOUT_SECONDS=5",
+                "ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN=https://gateway-control.example.com",
+                "ORCHESTRATOR_GATEWAY_ADMIN_TOKEN=gateway-admin-0123456789abcdef0123456789",
+                "ORCHESTRATOR_AUTH_ADMIN_ORIGIN=https://auth-control.example.com",
+                "ORCHESTRATOR_AUTH_ADMIN_TOKEN=auth-admin-0123456789abcdef012345678901",
+                "ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN=https://auth-workload.example.com",
+                "ORCHESTRATOR_AUTH_WORKLOAD_TOKEN=auth-workload-0123456789abcdef012345678",
             )
         )
         + "\n",
@@ -191,10 +198,26 @@ def write_runtime_set(root: pathlib.Path, expected: dict[str, Any]) -> None:
                     "repo_digest": AGENT_IMAGE,
                     "oci_revision": CANDIDATE,
                     "state": "RUNNING",
+                    "primary_user": "65532:65532",
+                    "socket_supplemental_groups": ["10004"],
+                    "effective_identity": {
+                        "uid": 65_532,
+                        "gid": 65_532,
+                        "supplemental_groups": [10_004],
+                        "docker_socket_gid": 10_004,
+                        "docker_socket_mode": "0660",
+                    },
                     "mount_identity": {
                         "socket_volume": socket_volume,
-                        "ledger_source": f"/var/lib/ojos/capacity/agents/{engine:02d}",
+                        "ledger_source": f"/var/lib/ojos/capacity/agent-internal/{engine:02d}",
+                        "export_source": f"/var/lib/ojos/capacity/workload-exports/{engine:02d}",
                         "ca_source": "/etc/ojos/capacity/control-plane-ca.pem",
+                    },
+                    "workload_export": {
+                        "path": f"/var/lib/ojos/capacity/workload-exports/{engine:02d}",
+                        "owner_uid": 65_532,
+                        "mode": "0700",
+                        "allowed_children": [],
                     },
                     "transport_ca_certificates_sha256": ["7" * 64],
                     "identity": {
@@ -210,12 +233,15 @@ def write_runtime_set(root: pathlib.Path, expected: dict[str, Any]) -> None:
                         "private_key_mode": "0600",
                     },
                     "ledger": {
-                        "path": f"/var/lib/ojos/capacity/agents/{engine:02d}/execution-ledger.sqlite3",
+                        "path": f"/var/lib/ojos/capacity/agent-internal/{engine:02d}/execution-ledger.sqlite3",
                         "format": "sqlite3",
                         "device": worker + 1,
                         "inode": engine + 1,
                         "size_bytes": 4096,
+                        "owner_uid": 65_532,
                     },
+                    "state_root_owner_uid": 65_532,
+                    "state_root_mode": "0750",
                 }
             )
             engines.append(
@@ -230,6 +256,12 @@ def write_runtime_set(root: pathlib.Path, expected: dict[str, Any]) -> None:
                     "repo_digest": ENGINE_IMAGE,
                     "socket_volume": socket_volume,
                     "data_volume": f"ojos-capacity-{worker:02d}_engine-{engine:02d}-data",
+                    "workload_export_mount": {
+                        "type": "bind",
+                        "source": f"/var/lib/ojos/capacity/workload-exports/{engine:02d}",
+                        "destination": "/var/lib/ojos-workload-export",
+                        "read_only": True,
+                    },
                     "published_ports": [
                         {
                             "container_port": first_port + service,
@@ -299,7 +331,72 @@ class RuntimeEvidenceTests(unittest.TestCase):
                 "/run/secrets/orchestrator-postgres-ca.crt",
             )
             self.assertEqual(expected["control_plane_origin"], ORIGIN)
+            providers = expected["control_plane"]["configuration"]["environment"][
+                "platform_providers"
+            ]
+            self.assertEqual(
+                providers["gateway_admin_origin"],
+                "https://gateway-control.example.com",
+            )
+            self.assertEqual(
+                providers["credentials_present"],
+                {
+                    "gateway_admin": True,
+                    "auth_admin": True,
+                    "auth_workload": True,
+                },
+            )
+            self.assertNotIn("gateway-admin-0123456789", rendered)
             self.assertEqual(len(RUNTIME.canonical_sha256(expected)), 64)
+
+    def test_manifest_rejects_missing_or_insecure_platform_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            env = root / "control-plane.env"
+            write_env(env)
+            text = env.read_text(encoding="utf-8").replace(
+                "ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN=https://gateway-control.example.com\n",
+                "",
+            )
+            env.write_text(text, encoding="utf-8")
+            with self.assertRaisesRegex(
+                RUNTIME.RuntimeEvidenceError, "ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN"
+            ):
+                RUNTIME.generate_manifest(
+                    candidate_sha=CANDIDATE,
+                    control_plane_image=CP_IMAGE,
+                    postgres_image=PG_IMAGE,
+                    agent_image=AGENT_IMAGE,
+                    engine_image=ENGINE_IMAGE,
+                    control_plane_origin=ORIGIN,
+                    control_plane_listen_address="0.0.0.0",
+                    database_listen_address="192.0.2.10",
+                    postgres_database="ojos_orchestrator",
+                    postgres_user="capacity",
+                    control_plane_env_file=env,
+                )
+
+            write_env(env)
+            text = env.read_text(encoding="utf-8").replace(
+                "https://auth-workload.example.com", "http://auth-workload.example.com"
+            )
+            env.write_text(text, encoding="utf-8")
+            with self.assertRaisesRegex(
+                RUNTIME.RuntimeEvidenceError, "must be an HTTPS origin"
+            ):
+                RUNTIME.generate_manifest(
+                    candidate_sha=CANDIDATE,
+                    control_plane_image=CP_IMAGE,
+                    postgres_image=PG_IMAGE,
+                    agent_image=AGENT_IMAGE,
+                    engine_image=ENGINE_IMAGE,
+                    control_plane_origin=ORIGIN,
+                    control_plane_listen_address="0.0.0.0",
+                    database_listen_address="192.0.2.10",
+                    postgres_database="ojos_orchestrator",
+                    postgres_user="capacity",
+                    control_plane_env_file=env,
+                )
 
     def test_manifest_rejects_non_verify_full_database(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -381,7 +478,22 @@ class RuntimeEvidenceTests(unittest.TestCase):
                 mock.patch.object(
                     RUNTIME,
                     "require_owned_regular_file",
-                    side_effect=lambda path, **_kwargs: path.stat(),
+                    side_effect=lambda path, **_kwargs: type(
+                        "OwnedAgentFileStat",
+                        (),
+                        {
+                            **{
+                                name: getattr(os.stat(path), name)
+                                for name in (
+                                    "st_mode",
+                                    "st_size",
+                                    "st_dev",
+                                    "st_ino",
+                                )
+                            },
+                            "st_uid": 65_532,
+                        },
+                    )(),
                 ),
                 mock.patch.object(
                     RUNTIME,
@@ -406,12 +518,77 @@ class RuntimeEvidenceTests(unittest.TestCase):
                     },
                 ),
             ):
-                observed = RUNTIME.collect_agent_state(root, node)
+                original_path_stat = pathlib.Path.stat
+
+                def owned_path_stat(path: pathlib.Path, **kwargs: Any) -> Any:
+                    information = original_path_stat(path, **kwargs)
+                    if path != root:
+                        return information
+                    return type(
+                        "OwnedStateRootStat",
+                        (),
+                        {
+                            **{
+                                name: getattr(information, name)
+                                for name in (
+                                    "st_size",
+                                    "st_dev",
+                                    "st_ino",
+                                )
+                            },
+                            "st_mode": (information.st_mode & ~0o777) | 0o750,
+                            "st_uid": 65_532,
+                        },
+                    )()
+
+                with mock.patch.object(pathlib.Path, "stat", new=owned_path_stat):
+                    observed = RUNTIME.collect_agent_state(root, node)
             self.assertEqual(
                 observed["identity"]["spiffe_id"], f"spiffe://ojos.local/node/{node}"
             )
             self.assertEqual(observed["identity"]["private_key_mode"], "0600")
             self.assertEqual(observed["ledger"]["format"], "sqlite3")
+            self.assertEqual(observed["state_root_owner_uid"], 65_532)
+            self.assertEqual(observed["ledger"]["owner_uid"], 65_532)
+
+    def test_workload_export_allows_only_context_and_resource_output_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name in ("runtime-contexts", "resource-outputs"):
+                (root / name).mkdir()
+            original_path_stat = pathlib.Path.stat
+
+            def owned_directory_stat(path: pathlib.Path, **kwargs: Any) -> Any:
+                information = original_path_stat(path, **kwargs)
+                return type(
+                    "OwnedExportDirectoryStat",
+                    (),
+                    {
+                        "st_mode": (information.st_mode & ~0o777) | 0o700,
+                        "st_uid": 65_532,
+                    },
+                )()
+
+            with mock.patch.object(pathlib.Path, "stat", new=owned_directory_stat):
+                observed = RUNTIME.collect_workload_export(root)
+                self.assertEqual(
+                    observed["allowed_children"],
+                    ["resource-outputs", "runtime-contexts"],
+                )
+                (root / "identity").mkdir()
+                with self.assertRaisesRegex(
+                    RUNTIME.RuntimeEvidenceError, "Agent-internal"
+                ):
+                    RUNTIME.collect_workload_export(root)
+
+    def test_agent_file_ownership_requires_workload_uid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "agent-state"
+            path.write_bytes(b"state")
+            with self.assertRaisesRegex(
+                RUNTIME.RuntimeEvidenceError, "ownership/mode"
+            ):
+                RUNTIME.require_owned_regular_file(path, expected_uid=65_532)
 
     def test_aggregate_proves_runtime_config_postgres_and_100_daemons(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -523,10 +700,22 @@ class RuntimeEvidenceTests(unittest.TestCase):
                 "control_plane_origin", "https://other.example"
             ),
             lambda worker: worker["agents"][0]["mount_identity"].__setitem__(
-                "ledger_source", "/var/lib/ojos/capacity/agents/99"
+                "ledger_source", "/var/lib/ojos/capacity/agent-internal/99"
             ),
             lambda worker: worker["engines"][0]["published_ports"][0].__setitem__(
                 "host_port", 65535
+            ),
+            lambda worker: worker["agents"][0].__setitem__(
+                "primary_user", "10004:10004"
+            ),
+            lambda worker: worker["agents"][0].__setitem__(
+                "socket_supplemental_groups", []
+            ),
+            lambda worker: worker["engines"][0]["workload_export_mount"].__setitem__(
+                "read_only", False
+            ),
+            lambda worker: worker["engines"][0]["workload_export_mount"].__setitem__(
+                "source", "/var/lib/ojos/capacity/workload-exports/01"
             ),
         )
         for mutate in mutations:
@@ -553,6 +742,31 @@ class RuntimeEvidenceTests(unittest.TestCase):
                 RUNTIME.RuntimeEvidenceError, "Agent/Engine contract"
             ):
                 RUNTIME.validate_manifest(expected)
+
+    def test_manifest_schema_rejects_workload_identity_or_state_mount_drift(self) -> None:
+        mutations = (
+            lambda expected: expected["agent"].__setitem__(
+                "primary_user", "10004:10004"
+            ),
+            lambda expected: expected["agent"].__setitem__(
+                "socket_supplemental_groups", []
+            ),
+            lambda expected: expected["engine"].__setitem__(
+                "workload_export_read_only", False
+            ),
+            lambda expected: expected["engine"].__setitem__(
+                "workload_export_destination", "/wrong-export"
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                with tempfile.TemporaryDirectory() as directory:
+                    expected = manifest(pathlib.Path(directory))
+                    mutate(expected)
+                    with self.assertRaisesRegex(
+                        RUNTIME.RuntimeEvidenceError, "Agent/Engine contract"
+                    ):
+                        RUNTIME.validate_manifest(expected)
 
     def test_image_revision_and_repo_digest_are_observed(self) -> None:
         valid = {

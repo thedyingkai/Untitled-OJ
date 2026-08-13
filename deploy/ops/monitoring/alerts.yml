@@ -10,6 +10,24 @@ groups:
           summary: "OJOS service health check failed"
           description: "{{ $labels.service }} at {{ $labels.instance }} has failed blackbox health checks for more than 2 minutes."
 
+      - alert: OJOSActiveRuntimeUnhealthy
+        expr: ojos_orchestrator_observability_target_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Active Contribution runtime is not monitorable"
+          description: "{{ $labels.service }} deployment {{ $labels.deployment_id }} is ACTIVE but lacks current healthy, attested runtime evidence."
+
+      - alert: OJOSObservabilityDiscoveryFailed
+        expr: ojos_orchestrator_observability_discovery_collection_error == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Active Contribution monitoring discovery failed"
+          description: "Orchestrator could not evaluate the durable ACTIVE runtime target set and returned a fail-closed sentinel."
+
       - alert: OJOSPostgresDown
         expr: pg_up == 0
         for: 2m
@@ -29,7 +47,7 @@ groups:
           description: "Redis exporter cannot reach the configured Redis instance."
 
       - alert: OJOSJudgeWorkerOffline
-        expr: absent(ojos_judge_workers_online) or ojos_judge_workers_online < 1
+        expr: absent(ojos_judge_workers_online) or ojos_judge_workers_online < 1 or ojos_judge_queue_metrics_collection_error == 1
         for: 3m
         labels:
           severity: critical
@@ -46,8 +64,25 @@ groups:
           summary: "Judge queue backlog is growing"
           description: "Pending judge tasks have stayed above 100 for more than 5 minutes."
 
+      - alert: OJOSJudgeMetricsUnavailable
+        expr: absent(ojos_judge_queue_metrics_collection_error) or ojos_judge_queue_metrics_collection_error == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Judge authoritative metrics are unavailable"
+          description: "judge-api could not query its Agent-provisioned PostgreSQL claim or its ACTIVE runtime is not being scraped."
+
       - alert: OJOSHighHTTP5xxRate
-        expr: sum by (service) (rate(http_requests_total{status=~"5.."}[5m])) > 0.05
+        expr: |
+          sum by (service) (
+            rate(ojos_http_requests_total{status=~"5.."}[5m])
+            or
+            label_replace(
+              rate(ojos_orchestrator_http_requests_total{status=~"5.."}[5m]),
+              "service", "orchestrator", "service", ".*"
+            )
+          ) > 0.05
         for: 5m
         labels:
           severity: warning

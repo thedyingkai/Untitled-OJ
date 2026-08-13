@@ -93,7 +93,9 @@ jobs:
             libssl-dev \
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
-            postgresql-client
+            postgresql-client \
+            redis-tools \
+            socat
           psql "$ORCHESTRATOR_DATABASE_URL" -f services/orchestrator/migrations/000001_orchestrator_schema.up.sql
       - name: Build embedded Orchestrator Web UI
         working-directory: manager/web
@@ -123,6 +125,13 @@ jobs:
       - name: Orchestrator Store Job Agent Docker lifecycle
         shell: bash
         run: bash deploy/ops/orchestrator-docker-agent-e2e.sh
+
+      # No job/step condition is permitted here. The script sets the live-test
+      # sentinel itself and fails if Docker, TLS PostgreSQL, Redis, the real
+      # Gateway/contest binaries, signed artifacts, or driver evidence is absent.
+      - name: Contest service real Docker vertical
+        shell: bash
+        run: bash deploy/ops/contest-service-real-vertical-e2e.sh
 
       - name: Build nsjail for strict judge-worker live tests
         shell: bash
@@ -226,7 +235,6 @@ jobs:
           npm run build
 
       - name: Audit gateway frontend dependencies
-        if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}
         working-directory: services/gateway/frontend
         run: npm audit --registry=https://registry.npmjs.org --audit-level=high
 
@@ -298,10 +306,10 @@ jobs:
         run: |
           set -euo pipefail
           services=(orchestrator auth-service storage-service gateway problem-service judge-api judge-worker user-service)
-          docker compose --env-file .env.example -f deploy/compose/docker-compose.yml build "${services[@]}"
+          docker compose --profile legacy-development --env-file .env.example -f deploy/compose/docker-compose.yml build "${services[@]}"
           mkdir -p artifacts/image-build
-          docker compose --env-file .env.example -f deploy/compose/docker-compose.yml images >artifacts/image-build/docker-compose-images.txt
-          if docker compose --env-file .env.example -f deploy/compose/docker-compose.yml images --format json >artifacts/image-build/docker-compose-images.jsonl 2>/dev/null; then
+          docker compose --profile legacy-development --env-file .env.example -f deploy/compose/docker-compose.yml images >artifacts/image-build/docker-compose-images.txt
+          if docker compose --profile legacy-development --env-file .env.example -f deploy/compose/docker-compose.yml images --format json >artifacts/image-build/docker-compose-images.jsonl 2>/dev/null; then
             jq -s '.' artifacts/image-build/docker-compose-images.jsonl >artifacts/image-build/docker-compose-images.json
           else
             jq -n --arg note "docker compose images --format json is unavailable on this runner; see docker-compose-images.txt" '{note: $note}' >artifacts/image-build/docker-compose-images.json

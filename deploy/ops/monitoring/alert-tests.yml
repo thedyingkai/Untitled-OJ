@@ -1,0 +1,162 @@
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="ojos-health",service="gateway",instance="https://gateway.example/readyz",source="explicit-platform"}'
+        values: '0x5'
+      - series: 'pg_up{database="orchestrator"}'
+        values: '0x5'
+      - series: 'redis_up{instance="redis-exporter:9121"}'
+        values: '0x5'
+      - series: 'ojos_judge_workers_online{instance="judge"}'
+        values: '0x6'
+      - series: 'ojos_judge_queue_pending_tasks{instance="judge"}'
+        values: '101x8'
+      - series: 'ojos_judge_queue_metrics_collection_error{instance="judge"}'
+        values: '0x8'
+      - series: 'ojos_http_requests_total{service="gateway",method="GET",status="503"}'
+        values: '0+60x12'
+      - series: 'container_start_time_seconds{name="gateway"}'
+        values: '1 1 1 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OJOSServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ojos-health
+              service: gateway
+              instance: https://gateway.example/readyz
+              source: explicit-platform
+            exp_annotations:
+              summary: OJOS service health check failed
+              description: gateway at https://gateway.example/readyz has failed blackbox health checks for more than 2 minutes.
+      - eval_time: 3m
+        alertname: OJOSPostgresDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              database: orchestrator
+            exp_annotations:
+              summary: OJOS PostgreSQL exporter cannot reach database
+              description: Database orchestrator is unreachable from postgres_exporter.
+      - eval_time: 3m
+        alertname: OJOSRedisDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: redis-exporter:9121
+            exp_annotations:
+              summary: OJOS Redis is unreachable
+              description: Redis exporter cannot reach the configured Redis instance.
+      - eval_time: 4m
+        alertname: OJOSJudgeWorkerOffline
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: judge
+            exp_annotations:
+              summary: No judge workers are online
+              description: judge-api reports no online workers, or the worker availability metric is missing.
+      - eval_time: 6m
+        alertname: OJOSJudgeQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: judge
+            exp_annotations:
+              summary: Judge queue backlog is growing
+              description: Pending judge tasks have stayed above 100 for more than 5 minutes.
+      - eval_time: 6m
+        alertname: OJOSHighHTTP5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: gateway
+            exp_annotations:
+              summary: High HTTP 5xx rate
+              description: gateway is returning sustained 5xx responses.
+      - eval_time: 5m
+        alertname: OJOSContainerRestarting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              name: gateway
+            exp_annotations:
+              summary: Container restarted
+              description: Container gateway restarted within the last 15 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'ojos_orchestrator_http_requests_total{method="GET",route="/api/v1/operations",status="503"}'
+        values: '0+60x12 780x8'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OJOSHighHTTP5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: orchestrator
+            exp_annotations:
+              summary: High HTTP 5xx rate
+              description: orchestrator is returning sustained 5xx responses.
+      - eval_time: 20m
+        alertname: OJOSHighHTTP5xxRate
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'ojos_backup_last_success_timestamp_seconds{environment="production"}'
+        values: '0x1580'
+    alert_rule_test:
+      - eval_time: 1571m
+        alertname: OJOSBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: production
+            exp_annotations:
+              summary: OJOS backups are stale
+              description: No successful backup metric has been observed in the last 26 hours.
+
+  - interval: 1m
+    input_series:
+      - series: 'ojos_orchestrator_observability_target_ready{service="judge-api",deployment_id="dep-1",contribution_revision="rev-2",contribution_generation="2"}'
+        values: '0x4'
+      - series: 'ojos_orchestrator_observability_discovery_collection_error'
+        values: '1x4'
+      - series: 'ojos_judge_queue_metrics_collection_error{service="judge-api"}'
+        values: '1x4'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OJOSActiveRuntimeUnhealthy
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: judge-api
+              deployment_id: dep-1
+              contribution_revision: rev-2
+              contribution_generation: "2"
+            exp_annotations:
+              summary: Active Contribution runtime is not monitorable
+              description: judge-api deployment dep-1 is ACTIVE but lacks current healthy, attested runtime evidence.
+      - eval_time: 2m
+        alertname: OJOSObservabilityDiscoveryFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Active Contribution monitoring discovery failed
+              description: Orchestrator could not evaluate the durable ACTIVE runtime target set and returned a fail-closed sentinel.
+      - eval_time: 3m
+        alertname: OJOSJudgeMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: judge-api
+            exp_annotations:
+              summary: Judge authoritative metrics are unavailable
+              description: judge-api could not query its Agent-provisioned PostgreSQL claim or its ACTIVE runtime is not being scraped.

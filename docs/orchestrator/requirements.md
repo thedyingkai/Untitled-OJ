@@ -4,7 +4,7 @@ OJOS Orchestrator 是服务控制面。它管理服务发布、节点放置、�
 
 ## 正式交付形态
 
-- **Desktop**：Tauri 原生 WebView 内嵌同源 Web UI、随机 loopback backend 和 loopback Agent；默认使用操作系统应用数据目录中的 SQLite，不打开外部浏览器。
+- **Desktop**：Tauri 原生 WebView 内嵌同源 Web UI 和随机 loopback backend；默认使用操作系统应用数据目录中的 SQLite，不打开外部浏览器，也不启动 managed workload Agent。容器执行必须选择已注册的独立 Agent。
 - **远程控制面**：单主动 daemon + PostgreSQL，目标规模最多 100 Nodes；生产模式强制 PostgreSQL TLS、HTTPS、OIDC、Node CA、可信 Catalog 和 durable artifact 目录。
 - **Node**：独立 Agent 通过带 SPIFFE Node ID 的 mTLS pull 协议领取持久 Job，并通过 Docker Engine API 执行分配给本节点的固定任务。
 - **TUI**：远程 `/api/v1` 客户端，使用 OIDC Device Authorization Grant；不在进程内执行控制面 mutation。

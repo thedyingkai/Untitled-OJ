@@ -25,27 +25,76 @@ services:
       ORCHESTRATOR_CATALOG_TRUST_KEYS: null
       ORCHESTRATOR_CATALOG_SOURCES: null
       ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN: null
-      ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: null
+      ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: ""
       ORCHESTRATOR_AUTH_ADMIN_ORIGIN: null
-      ORCHESTRATOR_AUTH_ADMIN_TOKEN: null
+      ORCHESTRATOR_AUTH_ADMIN_TOKEN: ""
       ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN: ""
       ORCHESTRATOR_AUTH_WORKLOAD_TOKEN: ""
       ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN: ""
       ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE: ""
+      ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE: ""
+      ORCHESTRATOR_GATEWAY_OBSERVABILITY_ORIGIN: ""
       ORCHESTRATOR_DATABASE_URL: ""
       ORCHESTRATOR_HEALTHCHECK_URL: http://127.0.0.1:8090/api/v1/healthz/live
       ORCHESTRATOR_LEGACY_API_MODE: gone
+    networks:
+      - default
+      - platform-control
 
   gateway:
     environment:
       OJOS_ENVIRONMENT: development
+      OJOS_PLATFORM_BOOTSTRAP: null
+      REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
+      AUTH_SERVICE_ENDPOINT: http://auth-service:8081
+      ORCHESTRATOR_ENDPOINT: http://orchestrator:8090
+      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:-ojos-local-internal}
+      ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: ""
+      CONTRIBUTION_ACK_TOKEN: ${ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN:-DEV_ONLY_gateway_contribution_ack_token}
       OJOS_WORKLOAD_PUBLIC_KEY_FILE: ""
+    networks:
+      - default
+      - platform-control
 
   auth-service:
     environment:
       OJOS_ENVIRONMENT: development
+      OJOS_PLATFORM_BOOTSTRAP: null
+      DATABASE_URL: ${AUTH_DATABASE_URL:-postgres://postgres:ojos-auth-local@auth-db:5432/ojos_auth?sslmode=disable}
+      JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
+      AUTH_INTERNAL_TOKEN: ${AUTH_INTERNAL_TOKEN:-ojos-local-internal}
+      # Never inherit the production one-time bootstrap route into local
+      # integration. Developers may opt in explicitly outside this overlay.
+      AUTH_ADMIN_BOOTSTRAP_SECRET_FILE: ""
+      ORCHESTRATOR_AUTH_ADMIN_TOKEN: ""
+      ORCHESTRATOR_ENDPOINT: http://orchestrator:8090
+      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:-ojos-local-internal}
+      CONTRIBUTION_ACK_TOKEN: ${ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN:-DEV_ONLY_auth_contribution_ack_token}
       OJOS_WORKLOAD_PRIVATE_KEY_FILE: ""
       OJOS_WORKLOAD_CONTROL_PLANE_TOKEN: ""
+    volumes: !override
+      - type: bind
+        source: ${OJOS_WORKLOAD_PRIVATE_KEY_FILE:?set OJOS_WORKLOAD_PRIVATE_KEY_FILE}
+        target: /run/secrets/ojos-workload-private-key.pem
+        read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_HEALTHCHECK_CA_CERT:?set ORCHESTRATOR_HEALTHCHECK_CA_CERT}
+        target: /run/secrets/orchestrator-ca.crt
+        read_only: true
+    networks:
+      - default
+      - platform-control
+
+  redis:
+    networks:
+      - default
+      - platform-control
+
+  jaeger:
+    networks:
+      - default
+      - platform-control
 
   judge-api:
     environment:

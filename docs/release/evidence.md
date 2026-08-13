@@ -12,7 +12,7 @@ services/orchestrator/runtime/       Docker Engine 与类型化运行时契约
 services/orchestrator/manager/       Catalog / Release / Store 用例
 services/orchestrator/agent/         mTLS pull Agent、本地 execution ledger
 services/orchestrator/backend/       /api/v1、身份、SSE、live/ready/metrics
-manager/desktop/                     Tauri WebView、embedded backend/Agent、SQLite
+manager/desktop/                     Tauri WebView、embedded backend、SQLite、managed execution unavailable 边界
 manager/web/                         Web 控制面
 manager/tui/                         /api/v1 Device Flow 客户端
 platform/schemas/orchestrator/       OpenAPI、published action、Agent protocol

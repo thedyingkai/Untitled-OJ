@@ -10,6 +10,18 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - type: bind
+        source: ${ORCHESTRATOR_HEALTHCHECK_CA_CERT:?set ORCHESTRATOR_HEALTHCHECK_CA_CERT to the Orchestrator server CA}
+        target: /etc/prometheus/tls/orchestrator-ca.crt
+        read_only: true
+      - type: bind
+        source: ${PROMETHEUS_ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE:?set PROMETHEUS_ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE to Prometheus' private token copy}
+        target: /etc/prometheus/secrets/orchestrator-observability-token
+        read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT:?set ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT to the Gateway CA bundle}
+        target: /etc/prometheus/tls/gateway-ca.crt
+        read_only: true
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:9090:9090"
@@ -46,6 +58,14 @@ services:
       - --config.file=/etc/blackbox_exporter/config.yml
     volumes:
       - ./blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+      - type: bind
+        source: ${ORCHESTRATOR_HEALTHCHECK_CA_CERT:?set ORCHESTRATOR_HEALTHCHECK_CA_CERT to the Orchestrator server CA}
+        target: /etc/blackbox-exporter/tls/orchestrator-ca.crt
+        read_only: true
+      - type: bind
+        source: ${ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT:?set ORCHESTRATOR_GATEWAY_WORKLOAD_CA_CERT to the Gateway CA bundle}
+        target: /etc/blackbox-exporter/tls/gateway-ca.crt
+        read_only: true
     networks:
       - observability
       - app
@@ -55,9 +75,11 @@ services:
     restart: unless-stopped
     command:
       - --path.rootfs=/host
+      - --collector.textfile.directory=/var/lib/node-exporter/textfile
     pid: host
     volumes:
       - /:/host:ro,rslave
+      - ${OJOS_BACKUP_TEXTFILE_DIR:?set OJOS_BACKUP_TEXTFILE_DIR to the host backup metric directory}:/var/lib/node-exporter/textfile:ro
     networks:
       - observability
 
@@ -88,42 +110,6 @@ services:
     restart: unless-stopped
     environment:
       DATA_SOURCE_NAME: ${ORCHESTRATOR_DATABASE_URL}
-    networks:
-      - observability
-      - app
-
-  postgres-exporter-auth:
-    image: prometheuscommunity/postgres-exporter:v0.15.0
-    restart: unless-stopped
-    environment:
-      DATA_SOURCE_NAME: ${AUTH_DATABASE_URL}
-    networks:
-      - observability
-      - app
-
-  postgres-exporter-problem:
-    image: prometheuscommunity/postgres-exporter:v0.15.0
-    restart: unless-stopped
-    environment:
-      DATA_SOURCE_NAME: ${PROBLEM_DATABASE_URL}
-    networks:
-      - observability
-      - app
-
-  postgres-exporter-judge:
-    image: prometheuscommunity/postgres-exporter:v0.15.0
-    restart: unless-stopped
-    environment:
-      DATA_SOURCE_NAME: ${JUDGE_DATABASE_URL}
-    networks:
-      - observability
-      - app
-
-  postgres-exporter-user:
-    image: prometheuscommunity/postgres-exporter:v0.15.0
-    restart: unless-stopped
-    environment:
-      DATA_SOURCE_NAME: ${USER_DATABASE_URL}
     networks:
       - observability
       - app

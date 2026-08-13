@@ -37,7 +37,34 @@ class CapacityAnsibleAssetTests(unittest.TestCase):
             "/etc/ojos/capacity/registry-credentials.json:/run/secrets/registry-credentials.json:ro",
             template,
         )
-        self.assertIn("user: \"10004:10004\"", template)
+        self.assertIn("user: \"65532:65532\"", template)
+        self.assertIn('group_add:\n      - "10004"', template)
+        internal_root = (
+            "/var/lib/ojos/capacity/agent-internal/{{ '%02d' | format(engine) }}:"
+            "/var/lib/ojos-agent"
+        )
+        export_root = (
+            "/var/lib/ojos/capacity/workload-exports/{{ '%02d' | format(engine) }}:"
+            "/var/lib/ojos-workload-export"
+        )
+        self.assertEqual(template.count(internal_root), 1)
+        self.assertEqual(template.count(export_root), 2)
+        self.assertIn(f"{export_root}:ro", template)
+        self.assertNotIn(f"{internal_root}:ro", template)
+        self.assertIn("--postgres-resource-provider", template)
+        self.assertIn("--resource-secret-dir", template)
+        engine_block = template[
+            template.index("  engine-") : template.index("  agent-")
+        ]
+        for forbidden in (
+            "/var/lib/ojos-agent",
+            "agent-internal",
+            "registry-credentials",
+            "agent-resource-provider",
+            "control-plane-ca",
+        ):
+            self.assertNotIn(forbidden, engine_block)
+        self.assertNotIn("cap_add:", template)
         self.assertNotIn("/var/run/docker.sock:/var/run/docker.sock", template)
         self.assertIn("20000 + engine * 20 + service_index", template)
         self.assertIn('0.0.0.0:', template)
@@ -51,16 +78,53 @@ class CapacityAnsibleAssetTests(unittest.TestCase):
         self.assertIn("- config", compose_validation)
         self.assertIn("- --quiet", compose_validation)
 
+    def test_capacity_configures_strict_agent_postgres_resource_provider(self):
+        variables = (CAPACITY / "group_vars" / "all.example.yml").read_text(
+            encoding="utf-8"
+        )
+        playbook = (CAPACITY / "site.yml").read_text(encoding="utf-8")
+        compose = (CAPACITY / "templates" / "worker-compose.yml.j2").read_text(
+            encoding="utf-8"
+        )
+        for variable in (
+            "capacity_agent_postgres_provider_file",
+            "capacity_agent_postgres_admin_url_file",
+            "capacity_agent_postgres_ca_file",
+        ):
+            self.assertIn(variable, variables)
+            self.assertIn(variable, playbook)
+        gate = playbook[
+            playbook.index("- name: Require one fail-closed verify-full Agent ResourceClaim provider") :
+            playbook.index("- name: Read the verified immutable image provenance record")
+        ]
+        for exact in (
+            "schema_version == 1",
+            "provider_id == 'postgresql-capacity'",
+            "tls_mode == 'verify-full'",
+            "admin_url_file == '/run/agent-resource-provider/admin.url'",
+            "ca_file == '/run/agent-resource-provider/postgres-ca.crt'",
+            "sslmode=require",
+        ):
+            self.assertIn(exact, gate)
+        self.assertIn("--postgres-resource-provider", compose)
+        self.assertIn("/run/agent-resource-provider/provider.json", compose)
+        self.assertIn("--resource-secret-dir", compose)
+        self.assertIn("/var/lib/ojos-agent/resource-provider-secrets", compose)
+
     def test_node_plan_platform_uses_authenticated_runtime_facts(self):
         template = (CAPACITY / "templates" / "nodes.json.j2").read_text(
             encoding="utf-8"
         )
-        labels_match = re.search(r'"labels":\s*(\{.*?\})', template, re.DOTALL)
+        labels_match = re.search(r'"labels":\s*(\{.*?\n      \})', template, re.DOTALL)
         self.assertIsNotNone(labels_match)
         labels = json.loads(labels_match.group(1))
         self.assertEqual(
             {key: labels[key] for key in ("runtime", "os", "arch")},
             {"runtime": "docker", "os": "linux", "arch": "x86_64"},
+        )
+        self.assertEqual(
+            labels["providers"]["postgresql"],
+            {"enabled": True, "provider_id": "postgresql-capacity"},
         )
 
         store_api = (
@@ -107,18 +171,29 @@ class CapacityAnsibleAssetTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn('user: "10004:10004"', compose)
+        self.assertIn('user: "65532:65532"', compose)
+        self.assertIn('group_add:\n      - "10004"', compose)
         self.assertNotIn("enrollment-code", compose)
         self.assertIn(
-            "agents/{{ '%02d' | format(engine) }}:/var/lib/ojos-agent", compose
+            "agent-internal/{{ '%02d' | format(engine) }}:/var/lib/ojos-agent", compose
         )
         self.assertNotIn("/var/lib/ojos/capacity/agents:/var/lib/ojos-agent", compose)
         self.assertNotIn("/etc/ojos/capacity/enrollment", worker_play)
         self.assertIn(
-            'agents/{{ \'%02d\' | format(item) }}/bootstrap"', worker_play
+            'agent-internal/{{ \'%02d\' | format(item) }}/bootstrap"', worker_play
         )
-        self.assertIn('owner: "10004"', worker_play)
-        self.assertIn('group: "10004"', worker_play)
+        self.assertIn('owner: "65532"', worker_play)
+        self.assertIn('group: "65532"', worker_play)
+        self.assertIn("Create independent Agent-internal state directories", worker_play)
+        self.assertNotIn("recurse: true", worker_play)
+        self.assertIn("Stop existing Agents before workload identity migration", worker_play)
+        self.assertIn("existing_worker_compose.stat.exists", worker_play)
+        self.assertIn("Fail closed instead of copying secrets out of the legacy combined layout", worker_play)
+        self.assertIn("Create independent workload export directories", worker_play)
+        self.assertLess(
+            worker_play.index("- name: Stop existing Agents before workload identity migration"),
+            worker_play.index("- name: Create independent Agent-internal state directories"),
+        )
         self.assertIn('mode: "0700"', worker_play)
         self.assertIn(
             "ansible.builtin.include_tasks: tasks/enroll-capacity-agent.yml",
@@ -161,8 +236,8 @@ class CapacityAnsibleAssetTests(unittest.TestCase):
         )
         staged = enrollment[stage:redeem]
         redemption = enrollment[redeem:cleanup]
-        self.assertIn('owner: "10004"', staged)
-        self.assertIn('group: "10004"', staged)
+        self.assertIn('owner: "65532"', staged)
+        self.assertIn('group: "65532"', staged)
         self.assertIn('mode: "0600"', staged)
         self.assertIn(
             "bootstrap/enrollment-code:/run/secrets/enrollment-code:ro",
@@ -191,7 +266,7 @@ class CapacityAnsibleAssetTests(unittest.TestCase):
             enrollment[require_state:stage],
         )
         for coupled_reference in (
-            "agents/{{ '%02d' | format(capacity_engine_ordinal) }}",
+            "agent-internal/{{ '%02d' | format(capacity_engine_ordinal) }}",
             '"agent-{{ \'%02d\' | format(capacity_engine_ordinal) }}"',
         ):
             self.assertIn(coupled_reference, redemption)

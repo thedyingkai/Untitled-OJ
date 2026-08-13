@@ -84,7 +84,6 @@ jobs:
             echo "::endgroup::"
           done
       - name: Scan Go modules for reachable vulnerabilities
-        if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -142,6 +141,24 @@ jobs:
           cargo fmt --check
           cargo check --workspace --exclude ojos-orchestrator-desktop
           cargo test --workspace --exclude ojos-orchestrator-desktop
+      - name: Discover, compile and verify Service Contract v3 services
+        shell: bash
+        run: |
+          set -euo pipefail
+          discovery="$(cargo run --quiet -p ojos-service -- service discover .)"
+          printf '%s\n' "$discovery"
+          service_count="$(printf '%s' "$discovery" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["services"]))')"
+          if [[ "$service_count" -gt 0 ]]; then
+            cargo run --quiet -p ojos-service -- service discover . --check-generated
+          fi
+      - name: Compile generated Go, Rust and TypeScript SDKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global typescript@5.9.2
+          cargo test -p ojos-service --lib \
+            codegen::tests::generated_go_rust_and_typescript_targets_compile \
+            -- --ignored --exact
       - name: Test Orchestrator PostgreSQL live integration
         shell: bash
         env:
@@ -190,7 +207,39 @@ jobs:
         env:
           OJOS_TEST_POSTGRES_URL: postgresql://postgres:ojos-tls-live-ci@127.0.0.1:55433/ojos_orchestrator_tls?sslmode=require
           OJOS_TEST_POSTGRES_CA: ${{ runner.temp }}/orchestrator-pg-tls/ca.crt
-        run: cargo test -p orchestrator-storage --test postgres_contract -- --test-threads=1
+          OJOS_REQUIRE_POSTGRES_CONTRACT: "1"
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/postgres-contract-output.txt"
+          : >"$output"
+          for test_name in \
+            postgres_repository_contract_when_configured \
+            postgres_legacy_upgrade_imports_draft_and_external_unknown_when_configured; do
+            cargo test -p orchestrator-storage --test postgres_contract \
+              "$test_name" -- --exact --test-threads=1 2>&1 | tee -a "$output"
+          done
+          cargo test -p orchestrator-storage --test contribution_contract \
+            postgres_contribution_repository_contract_when_configured \
+            -- --exact --test-threads=1 2>&1 | tee -a "$output"
+          executed="$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$output")"
+          if [[ "$executed" -ne 3 ]]; then
+            echo "required PostgreSQL contract did not execute all three live tests" >&2
+            exit 1
+          fi
+      - name: Verify required PostgreSQL contract cannot skip without DSN
+        shell: bash
+        env:
+          OJOS_REQUIRE_POSTGRES_CONTRACT: "1"
+        run: |
+          set -euo pipefail
+          if env -u OJOS_TEST_POSTGRES_URL \
+            cargo test -p orchestrator-storage --test postgres_contract \
+              postgres_repository_contract_when_configured -- --exact >"$RUNNER_TEMP/postgres-contract-missing-dsn.txt" 2>&1; then
+            echo "required PostgreSQL contract silently skipped without its DSN" >&2
+            exit 1
+          fi
+          grep -Fq 'OJOS_TEST_POSTGRES_URL must be set when OJOS_REQUIRE_POSTGRES_CONTRACT=1' \
+            "$RUNNER_TEMP/postgres-contract-missing-dsn.txt"
       - name: Stop PostgreSQL contract service
         if: always()
         shell: bash
@@ -204,7 +253,6 @@ jobs:
           cargo check
           cargo test
       - name: Audit Rust dependencies
-        if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -273,7 +321,6 @@ jobs:
           npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
           npm run build
       - name: Audit gateway frontend dependencies
-        if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}
         working-directory: services/gateway/frontend
         run: npm audit --registry=https://registry.npmjs.org --audit-level=high
       - name: Gateway frontend browser E2E
@@ -380,6 +427,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Validate Prometheus configuration and alert rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/deploy/ops/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$PWD/deploy/ops/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            -v "/etc/ssl/certs/ca-certificates.crt:/etc/prometheus/tls/orchestrator-ca.crt:ro" \
+            --entrypoint /bin/promtool \
+            prom/prometheus:v2.55.1 \
+            check config /etc/prometheus/prometheus.yml
+          docker run --rm \
+            -v "$PWD/deploy/ops/monitoring:/etc/ojos-monitoring:ro" \
+            --entrypoint /bin/promtool \
+            prom/prometheus:v2.55.1 \
+            check rules /etc/ojos-monitoring/alerts.yml
+          docker run --rm \
+            -w /etc/ojos-monitoring \
+            -v "$PWD/deploy/ops/monitoring:/etc/ojos-monitoring:ro" \
+            --entrypoint /bin/promtool \
+            prom/prometheus:v2.55.1 \
+            test rules alert-tests.yml
       - name: Judge worker compose defaults
         shell: bash
         env:

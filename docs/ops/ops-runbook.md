@@ -155,24 +155,62 @@ content-addressed URI。只有 claim lease 到期后
 `OJOS_PROBLEM_ARTIFACT_GC_CLAIM_LEASE` 时必须保持这一严格不等式，不能仅依靠 SHA/size 条件删除，
 因为相同内容重新上传后的身份仍然相同。
 
+## 首管理员一次性引导
+
+1. 在宿主机生成 32–512 字符的 URL-safe 随机 token，保存为非符号链接普通文件，依次执行 `chown 65532:65532 <file>` 与 `chmod 600 <file>`，使 owner 精确为 Auth 容器身份 `65532:65532`、mode 精确为 `0600`。该值不得复用 JWT、internal、admin、observability、workload、Contribution ACK 或服务 token。
+2. 将宿主绝对路径写入 `AUTH_ADMIN_BOOTSTRAP_SECRET_FILE`。production Compose 会把它只读挂到 Auth 固定路径 `/run/secrets/ojos-auth-admin-bootstrap`；不要使用 inline `AUTH_ADMIN_BOOTSTRAP_SECRET`。
+3. 运行 `OJOS_ENV_FILE=/etc/ojos/production.env deploy/ops/preflight.sh`，启动后通过公网 HTTPS Gateway 向 `/api/auth/bootstrap/admin` 提交一次请求，并以普通登录确认管理员权限。
+4. 成功后立即从实际生产 Compose 部署中同时移除 `AUTH_ADMIN_BOOTSTRAP_SECRET_FILE` env 和该 bind mount，删除宿主 token 文件，然后执行 `docker compose --env-file /etc/ojos/production.env -f deploy/compose/docker-compose.yml up -d --force-recreate auth-service`（实际部署若使用生成后的 Compose，修改该部署源）。
+5. 再次请求 `/api/auth/bootstrap/admin`，必须得到 `404`。数据库中的 durable consumed marker 仍提供第二道防线，但 `409` 不能代替撤掉路由。
+
 ## 备份 / 恢复
 
-备份：
+整栈备份是一个有界停写窗口，不是在线逐组件复制。先在 Gateway/调度层停止新写入，暂停服务、Worker
+和迁移执行器，再由独立命令证明外部写屏障仍有效。fence token 只用于绑定本次变更单或租约；manifest
+仅保存其 SHA-256。脚本在私有临时目录中生成并验证五个 PostgreSQL dump、Redis RDB、本地/对象存储
+清单和精确 checksum 集，最后才原子发布备份目录。
 
 ```bash
-OJOS_ENV_FILE=/etc/ojos/production.env deploy/ops/backup.sh
+OJOS_ENV_FILE=/etc/ojos/production.env \
+OJOS_BACKUP_SOURCE_ID=production-primary \
+OJOS_PROBLEM_RETAINED_VOLUME_OWNER_INSTANCE_ID='<applied stable service instance id>' \
+OJOS_PROBLEM_RETAINED_VOLUME_NAME='<Agent-derived ojos-retain-* name>' \
+OJOS_CONFIRM_QUIESCED_BACKUP=backup-production-fenced-v1 \
+OJOS_BACKUP_FENCE_TOKEN="$CHANGE_AND_FENCE_ID" \
+OJOS_BACKUP_FENCE_CHECK_COMMAND='/usr/local/sbin/ojos-fence-check' \
+deploy/ops/backup.sh
 ```
 
-恢复：
+先做无副作用校验：
 
 ```bash
 OJOS_ENV_FILE=/etc/ojos/production.env \
 OJOS_RESTORE_DIR=/var/backups/ojos/<stamp> \
-OJOS_CONFIRM_RESTORE=restore-production \
+OJOS_RESTORE_SOURCE_ID=production-primary \
+OJOS_RESTORE_VERIFY_ONLY=1 \
 deploy/ops/restore.sh
 ```
 
-恢复后务必运行预检和冒烟检查。
+正式恢复前，在替换节点上以备份 identity 中相同的 stable owner instance 创建/核验一个空的 Agent-owned
+Problem RETAIN volume；设置 `OJOS_RESTORE_PROBLEM_RETAINED_VOLUME_OWNER_INSTANCE_ID`、
+`OJOS_RESTORE_PROBLEM_RETAINED_VOLUME_NAME`、`OJOS_RESTORE_RETAINED_VOLUME_TARGET_ID` 和
+`OJOS_RESTORE_PROBLEM_RETAINED_VOLUME_OWNER`。脚本拒绝 foreign labels、错误派生名、symlink mountpoint、非空树或
+运行中挂载；只从已校验 SHA-256 的私有 staging archive 解包，逐文件 inventory 对账后才写入目标，并在结束时
+重新 inspect/no-writer/fence。该路径覆盖旧节点或旧 volume 完全丢失的场景，不依赖节点保留。
+
+正式恢复只允许写入一个仍被 fence 且所有组件为空/不存在的新环境；同源原地覆盖会被拒绝。默认在组件
+验证后保持隔离，不切流。如需自动切流，必须成对提供 `OJOS_RESTORE_CUTOVER_COMMAND`、
+`OJOS_RESTORE_ROLLBACK_COMMAND`，并提供 `OJOS_RESTORE_POST_CUTOVER_CHECK_COMMAND`；切换后检查失败会
+立即回切旧环境。还必须提供 `OJOS_RESTORE_POST_ROLLBACK_CHECK_COMMAND` 独立确认旧环境已重新承载流量；
+回切无法确认时脚本禁止清理目标。Redis/local storage 恢复需显式指定服务 UID/GID 所有权。重新放量前仍需
+运行预检、逐服务冒烟和业务对象读回，旧环境和备份在验收期结束前不得清理。
+
+季度恢复演练必须使用全新五数据库、Redis 和对象存储命名空间，记录 manifest digest、组件探针、RPO/RTO
+以及切流/回切结果。`OJOS_RESTORE_FAILPOINT` 只可在隔离演练中验证 `after-databases`、`after-redis`、
+`after-storage`、`after-retained-volume`、`after-components` 边界。`deploy/ops/tests/full-stack-backup-restore-drill.sh` 提供本地存储
+profile 的 clean-target 基准演练；它还把 Problem live tree、未决 mutation journal、数据库 outbox 与 immutable
+artifact reference 一起恢复并对账。每次运行必须重新创建脚本要求的专用 target 数据库。MinIO profile 仍须在
+独立命名空间执行同样的 manifest inventory 与对象读回验收。
 
 ## Trace
 

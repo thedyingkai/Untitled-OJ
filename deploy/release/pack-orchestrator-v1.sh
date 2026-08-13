@@ -61,9 +61,11 @@ cp docs/orchestrator/operations-v1.md "$bundle/docs/"
 cat >"$bundle/README.txt" <<EOF
 OJOS Orchestrator $version ($channel, $platform)
 
-Desktop is the default local entry point and embeds the Web UI, backend, SQLite
-and loopback Agent. The standalone daemon is production-only unless --ephemeral
-is explicitly passed. Remote production configuration and recovery procedures:
+Desktop is the default local entry point and embeds the Web UI, backend and
+SQLite. Managed container execution is intentionally unavailable in Desktop;
+use an enrolled standalone Agent with a verified workload-file ownership
+boundary. The standalone daemon is production-only unless --ephemeral is
+explicitly passed. Remote production configuration and recovery procedures:
 docs/operations-v1.md
 
 The compat channel contains the 0.2 legacy adapter and emits Deprecation,
