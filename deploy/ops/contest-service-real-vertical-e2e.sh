@@ -328,8 +328,9 @@ sudo env -i \
     --reuid "$workload_uid" --regid "$workload_gid" \
     --groups "$workload_groups" \
     --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
-    --no-new-privs --umask 0022 \
-    "$test_binary" --nocapture --test-threads=1
+    --no-new-privs \
+    /bin/bash -c 'umask 0022; exec "$@"' contest-vertical \
+      "$test_binary" --nocapture --test-threads=1
 
 if [[ ! -s "$evidence" ]]; then
   echo "real vertical driver did not create evidence: $evidence" >&2

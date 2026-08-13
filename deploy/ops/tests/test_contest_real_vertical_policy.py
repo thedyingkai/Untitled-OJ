@@ -38,7 +38,7 @@ class ContestRealVerticalPolicyTests(unittest.TestCase):
             "sudo env -i", 0, HARNESS.index(home_marker)
         )
         execution_end = HARNESS.index(
-            '    "$test_binary" --nocapture --test-threads=1', execution_start
+            '      "$test_binary" --nocapture --test-threads=1', execution_start
         )
         execution = HARNESS[execution_start:execution_end]
         for marker in (
@@ -50,6 +50,12 @@ class ContestRealVerticalPolicyTests(unittest.TestCase):
             self.assertIn(marker, execution)
         self.assertIn("workload_uid=65532", HARNESS)
         self.assertIn("workload_gid=65532", HARNESS)
+        self.assertNotIn("--umask", execution)
+        self.assertIn(
+            "/bin/bash -c 'umask 0022; exec \"$@\"' contest-vertical",
+            execution,
+        )
+        self.assertNotIn('eval ', execution)
 
     def test_privileged_cleanup_remains_confined_to_validated_mktemp_root(self) -> None:
         cleanup_start = HARNESS.index("cleanup() {")
