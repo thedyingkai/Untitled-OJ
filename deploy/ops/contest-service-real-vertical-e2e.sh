@@ -127,6 +127,16 @@ trap cleanup EXIT
 # writable tree is never made group/world accessible.
 chmod 0755 "$run_root"
 mkdir -p "$scratch_root/home" "$scratch_root/tmp" "$output_root"
+# The evidence path is inside this freshly-created, validated mktemp root.
+# Remove it while the runner still owns the tree: an arbitrary numeric uid
+# cannot be assumed to traverse RUNNER_TEMP's runner-owned ancestors. After
+# this point output_root is handed to 65532 without widening any permissions.
+if [[ "$(dirname -- "$evidence")" != "$output_root" \
+    || "$(basename -- "$evidence")" != "live-evidence.json" ]]; then
+  echo "refusing unsafe contest vertical evidence preclean: $evidence" >&2
+  exit 1
+fi
+rm -f -- "$evidence"
 sudo chown -R "$workload_uid:$workload_gid" "$scratch_root" "$output_root"
 sudo chmod 0700 "$scratch_root" "$scratch_root/home" "$scratch_root/tmp"
 sudo chmod 0755 "$output_root"
@@ -257,18 +267,6 @@ socat "OPENSSL-LISTEN:${gateway_tls_port},bind=0.0.0.0,reuseaddr,fork,cert=${run
   "TCP4:127.0.0.1:${gateway_port}" &
 gateway_tls_pid=$!
 
-# The runner image has no passwd entry for the numeric workload identity, so
-# sudo must not resolve it as a user name. Enter root only to let setpriv apply
-# the exact numeric uid/gid, then drop groups, capabilities, and new privileges
-# before touching the workload-owned output path.
-sudo env -i \
-  "PATH=$PATH" \
-  "$(command -v setpriv)" \
-    --reuid "$workload_uid" --regid "$workload_gid" \
-    --clear-groups \
-    --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
-    --no-new-privs \
-    rm -f -- "$evidence"
 cd "$repo_root"
 cargo_build_json="$run_root/contest-test-build.jsonl"
 cargo test -p ojos-orchestrator-daemon --test contest_service_real_vertical_e2e \

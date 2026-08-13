@@ -10,21 +10,27 @@ HARNESS = HARNESS_PATH.read_text(encoding="utf-8")
 
 
 class ContestRealVerticalPolicyTests(unittest.TestCase):
-    def test_workload_output_preclean_uses_numeric_setpriv_not_sudo_lookup(self) -> None:
+    def test_workload_output_preclean_is_runner_owned_and_path_constrained(self) -> None:
         self.assertNotIn('sudo -u "#$workload_uid"', HARNESS)
-        preclean_end = HARNESS.index('    rm -f -- "$evidence"')
-        preclean_start = HARNESS.rindex("sudo env -i", 0, preclean_end)
-        preclean = HARNESS[preclean_start : preclean_end + 28]
+        mkdir = HARNESS.index(
+            'mkdir -p "$scratch_root/home" "$scratch_root/tmp" "$output_root"'
+        )
+        preclean = HARNESS.index('rm -f -- "$evidence"', mkdir)
+        chown = HARNESS.index(
+            'sudo chown -R "$workload_uid:$workload_gid"', preclean
+        )
+        self.assertLess(mkdir, preclean)
+        self.assertLess(preclean, chown)
+        preclean_block = HARNESS[mkdir:chown]
         for marker in (
-            '"$(command -v setpriv)"',
-            '--reuid "$workload_uid" --regid "$workload_gid"',
-            "--clear-groups",
-            "--bounding-set=-all --inh-caps=-all --ambient-caps=-all",
-            "--no-new-privs",
+            '"$(dirname -- "$evidence")" != "$output_root"',
+            '"$(basename -- "$evidence")" != "live-evidence.json"',
+            "refusing unsafe contest vertical evidence preclean",
             'rm -f -- "$evidence"',
         ):
-            self.assertIn(marker, preclean)
-        self.assertNotIn("--groups", preclean)
+            self.assertIn(marker, preclean_block)
+        self.assertNotIn("sudo rm", preclean_block)
+        self.assertNotIn("setpriv", preclean_block)
 
     def test_real_test_keeps_exact_workload_identity_and_socket_group(self) -> None:
         home_marker = '  "HOME=$scratch_root/home"'
