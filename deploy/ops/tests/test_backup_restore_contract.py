@@ -174,6 +174,26 @@ class FullStackBackupRestoreContractTests(unittest.TestCase):
         self.assertIn("include-hidden-files: true", upload)
         self.assertNotIn("continue-on-error", workflow)
 
+    def test_full_stack_source_storage_is_created_parent_first_with_private_modes(
+        self,
+    ) -> None:
+        drill = DRILL.read_text(encoding="utf-8")
+        root = 'mkdir -m 0700 "$source_storage"'
+        parents = (
+            'mkdir -m 0700 "$source_storage/problems" '
+            '"$source_storage/submissions"'
+        )
+        leaves = (
+            'mkdir -m 0700 "$source_storage/problems/drill" '
+            '"$source_storage/submissions/drill"'
+        )
+        self.assertIn(root, drill)
+        self.assertIn(parents, drill)
+        self.assertIn(leaves, drill)
+        self.assertLess(drill.index(root), drill.index(parents))
+        self.assertLess(drill.index(parents), drill.index(leaves))
+        self.assertNotIn('mkdir -p "$source_storage', drill)
+
     def test_release_recovery_evidence_uses_the_same_ownership_contract(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         drill = workflow.split(
