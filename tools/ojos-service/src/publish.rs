@@ -35,6 +35,12 @@ use std::{
 
 const JUDGE_SANDBOX_V1_SHA256: &str =
     "sha256:a6b35a495f88bd8e723e395d748de40fbb4dcc08619d02cf92fa580fef2a18ec";
+// Migration images own their executable through OCI Entrypoint. Docker appends
+// ContainerSpec.command as Cmd, so publishing the executable here would run it
+// twice (for example `/ojos-migrate /ojos-migrate`). The v1 migration image
+// contract uses this canonical Cmd until the compiled Service Contract carries
+// each migration.oci.yaml command directly.
+const STANDARD_MIGRATION_IMAGE_COMMAND: [&str; 2] = ["apply", "/migrations"];
 
 #[derive(Debug, Clone)]
 pub struct CatalogPublishOptions {
@@ -318,7 +324,7 @@ fn release_projection(
                 "destructive": false,
                 "oci": {
                     "image": image,
-                    "command": ["/ojos-migrate"],
+                    "command": STANDARD_MIGRATION_IMAGE_COMMAND,
                     "env": {"OJOS_RESOURCE_CLAIM": migration.resource},
                     "timeout_ms": 300_000
                 }
@@ -1047,6 +1053,11 @@ mod tests {
         );
         assert_eq!(metadata["routes"], json!([]));
         assert_eq!(metadata["frontend"]["enabled"], false);
+        assert_eq!(
+            metadata["migrations"][0]["oci"]["command"],
+            json!(["apply", "/migrations"]),
+            "Catalog metadata must publish Docker Cmd arguments, not repeat the image Entrypoint"
+        );
         assert_eq!(
             metadata["platform"]["resourceClaims"][0]["lifecycle"],
             "retain"

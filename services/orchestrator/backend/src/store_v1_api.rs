@@ -9722,6 +9722,89 @@ mod tests {
         release
     }
 
+    #[test]
+    fn release_pipeline_preserves_published_migration_cmd_without_repeating_entrypoint() {
+        let service_id = "migration-command-projection";
+        let mut release = release_manifest(
+            service_id,
+            &format!("registry.example/ojos/{service_id}@{DIGEST}"),
+        );
+        release.migrations = serde_json::from_value(json!([{
+            "version": "schema-v1",
+            "path": format!("services/{service_id}/migrations/0001.sql"),
+            "checksum": format!("sha256:{}", "3".repeat(64)),
+            "destructive": false,
+            "oci": {
+                "image": format!("registry.example/ojos/migration@{DEPENDENCY_DIGEST}"),
+                "command": ["apply", "/migrations"],
+                "env": {},
+                "timeout_ms": 30000
+            }
+        }]))
+        .unwrap();
+        let contract =
+            ServiceReleaseContract::from_json_value(serde_json::to_value(&release).unwrap())
+                .unwrap();
+        let node = NodeRecord {
+            node_id: "node-migration-command".to_string(),
+            host_ip: "127.0.0.2".to_string(),
+            parent_node_id: String::new(),
+            role: "standalone".to_string(),
+            labels: json!({
+                "providers": {
+                    "migration": true
+                }
+            }),
+            status: "READY".to_string(),
+            created_at: "t0".to_string(),
+            updated_at: "t0".to_string(),
+        };
+        let install = RuntimeInstallPayload {
+            spec: ContainerSpec {
+                deployment_id: "deployment-migration-command".to_string(),
+                service_id: service_id.to_string(),
+                generation: 1,
+                image: OciImageReference::parse(&format!(
+                    "registry.example/ojos/{service_id}@{DIGEST}"
+                ))
+                .unwrap(),
+                runtime_contract: RuntimeContract::standard_v1(),
+                runtime_context: None,
+                managed_service_context: None,
+                resource_secret_file_mounts: Vec::new(),
+                retained_volume: None,
+                command: vec![],
+                environment: vec![],
+                labels: HashMap::new(),
+                published_endpoint: None,
+            },
+            start: true,
+            health_gate: HealthGatePolicy::default(),
+            offline_oci_artifact: None,
+        };
+
+        let pipeline = release_pipeline_payload(
+            &release,
+            &contract,
+            &install,
+            &[],
+            &node,
+            "operation-migration-command",
+            "APPLY",
+            "",
+            &json!({}),
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .expect("migration declaration creates a ReleasePipeline");
+
+        assert_eq!(
+            pipeline.migrations[0].command,
+            vec!["apply".to_string(), "/migrations".to_string()]
+        );
+        assert_ne!(pipeline.migrations[0].command, vec!["/ojos-migrate"]);
+    }
+
     fn event_contract(
         service_id: &str,
         publishes: Value,
