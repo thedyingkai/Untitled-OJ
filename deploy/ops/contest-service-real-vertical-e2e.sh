@@ -11,11 +11,23 @@ run_id="$(printf '%s' "$run_id" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-
 registry_name="ojos-contest-vertical-registry-${run_id}"
 postgres_name="ojos-contest-vertical-postgres-${run_id}"
 repository=""
-run_parent="$(realpath -e -- "${RUNNER_TEMP:-${TMPDIR:-/tmp}}")"
+run_parent="/tmp"
+run_parent_canonical="$(realpath -e -- "$run_parent" 2>/dev/null || true)"
+run_parent_contract="$(stat -c '%u:%g:%a' -- "$run_parent" 2>/dev/null || true)"
+if [[ "$run_parent_canonical" != "$run_parent" || ! -d "$run_parent" \
+    || -L "$run_parent" || "$run_parent_contract" != "0:0:1777" ]]; then
+  echo "contest real vertical requires canonical root-owned sticky /tmp (0:0:1777)" >&2
+  exit 1
+fi
+invoking_uid="$(id -u)"
+invoking_gid="$(id -g)"
 run_root="$(mktemp -d -p "$run_parent" ojos-contest-real-vertical.XXXXXXXX)"
 run_root="$(realpath -e -- "$run_root")"
 run_root_validated=0
-if [[ ! "$run_root" =~ ^/ || "$run_root" == / || "$(dirname -- "$run_root")" != "$run_parent" || ! "$(basename -- "$run_root")" =~ ^ojos-contest-real-vertical\.[A-Za-z0-9]{8}$ ]]; then
+if [[ ! "$run_root" =~ ^/ || "$run_root" == / || ! -d "$run_root" \
+    || -L "$run_root" || "$(dirname -- "$run_root")" != "$run_parent" \
+    || ! "$(basename -- "$run_root")" =~ ^ojos-contest-real-vertical\.[A-Za-z0-9]{8}$ \
+    || "$(stat -c '%u:%g:%a' -- "$run_root")" != "$invoking_uid:$invoking_gid:700" ]]; then
   echo "mktemp returned an unsafe contest vertical run root: $run_root" >&2
   exit 1
 fi
@@ -35,6 +47,9 @@ hosts_marker="# ojos-contest-vertical-${run_id}"
 # full constrained cleanup below replaces it before any chown occurs.
 cleanup_runner_root() {
   if [[ "$run_root_validated" == 1 && -n "$run_root" && "$run_root" != / \
+      && "$run_parent" == /tmp \
+      && "$(realpath -e -- "$run_parent" 2>/dev/null || true)" == "$run_parent" \
+      && "$(stat -c '%u:%g:%a' -- "$run_parent" 2>/dev/null || true)" == "0:0:1777" \
       && "$(dirname -- "$run_root")" == "$run_parent" \
       && "$(basename -- "$run_root")" =~ ^ojos-contest-real-vertical\.[A-Za-z0-9]{8}$ ]]; then
     rm -rf -- "$run_root"
@@ -113,6 +128,9 @@ PY
     if [[ -z "$cleanup_root" ]]; then
       : # The directory was already removed.
     elif [[ "$cleanup_root" == "$run_root" \
+        && "$run_parent" == /tmp \
+        && "$(realpath -e -- "$run_parent" 2>/dev/null || true)" == "$run_parent" \
+        && "$(stat -c '%u:%g:%a' -- "$run_parent" 2>/dev/null || true)" == "0:0:1777" \
         && "$(dirname -- "$cleanup_root")" == "$run_parent" \
         && "$(basename -- "$cleanup_root")" =~ ^ojos-contest-real-vertical\.[A-Za-z0-9]{8}$ ]]; then
       sudo rm -rf -- "$cleanup_root"
@@ -124,8 +142,14 @@ PY
 trap cleanup EXIT
 
 # From this point on the privileged cleanup trap is installed. The Agent's
-# writable tree is never made group/world accessible.
+# writable tree is never made group/world accessible. Only the validated
+# run-root boundary becomes traversable so numeric uid 65532 can reach its
+# explicitly permissioned inputs and private scratch tree through sticky /tmp.
 chmod 0755 "$run_root"
+if [[ "$(stat -c '%u:%g:%a' -- "$run_root")" != "$invoking_uid:$invoking_gid:755" ]]; then
+  echo "contest vertical run root handoff violates the traversal contract" >&2
+  exit 1
+fi
 mkdir -p "$scratch_root/home" "$scratch_root/tmp" "$output_root"
 # The evidence path is inside this freshly-created, validated mktemp root.
 # Remove it while the runner still owns the tree: an arbitrary numeric uid

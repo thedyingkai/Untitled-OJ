@@ -10,6 +10,33 @@ HARNESS = HARNESS_PATH.read_text(encoding="utf-8")
 
 
 class ContestRealVerticalPolicyTests(unittest.TestCase):
+    def test_run_root_uses_trusted_tmp_and_stays_private_until_handoff(self) -> None:
+        initialization_end = HARNESS.index('scratch_root="$run_root/workload"')
+        initialization = HARNESS[:initialization_end]
+        for marker in (
+            'run_parent="/tmp"',
+            'run_parent_canonical="$(realpath -e -- "$run_parent"',
+            '"$run_parent_canonical" != "$run_parent"',
+            '! -d "$run_parent"',
+            '-L "$run_parent"',
+            '"$run_parent_contract" != "0:0:1777"',
+            'mktemp -d -p "$run_parent" ojos-contest-real-vertical.XXXXXXXX',
+            '"$(stat -c \'%u:%g:%a\' -- "$run_root")" != "$invoking_uid:$invoking_gid:700"',
+        ):
+            self.assertIn(marker, initialization)
+        self.assertNotIn("RUNNER_TEMP", initialization)
+        self.assertNotIn("${TMPDIR", initialization)
+
+        private_check = HARNESS.index(
+            '"$(stat -c \'%u:%g:%a\' -- "$run_root")" != "$invoking_uid:$invoking_gid:700"'
+        )
+        handoff = HARNESS.index('chmod 0755 "$run_root"')
+        handoff_check = HARNESS.index(
+            '"$(stat -c \'%u:%g:%a\' -- "$run_root")" != "$invoking_uid:$invoking_gid:755"'
+        )
+        self.assertLess(private_check, handoff)
+        self.assertLess(handoff, handoff_check)
+
     def test_workload_output_preclean_is_runner_owned_and_path_constrained(self) -> None:
         self.assertNotIn('sudo -u "#$workload_uid"', HARNESS)
         mkdir = HARNESS.index(
@@ -84,6 +111,9 @@ class ContestRealVerticalPolicyTests(unittest.TestCase):
         for marker in (
             'cleanup_root="$(realpath -e -- "$run_root" 2>/dev/null || true)"',
             '"$cleanup_root" == "$run_root"',
+            '"$run_parent" == /tmp',
+            '"$(realpath -e -- "$run_parent" 2>/dev/null || true)" == "$run_parent"',
+            '"$(stat -c \'%u:%g:%a\' -- "$run_parent" 2>/dev/null || true)" == "0:0:1777"',
             '"$(dirname -- "$cleanup_root")" == "$run_parent"',
             '^ojos-contest-real-vertical\\.[A-Za-z0-9]{8}$',
             'sudo rm -rf -- "$cleanup_root"',
