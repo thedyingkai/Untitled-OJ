@@ -22,7 +22,7 @@ use std::{
     io::{Read, Write},
     net::IpAddr,
     path::{Component, Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 use thiserror::Error;
 
@@ -79,6 +79,8 @@ pub enum ResourceClaimError {
     SecretStore(String),
     #[error("provider executor failed: {0}")]
     Provider(String),
+    #[error("resource claim execution ended without a proven outcome")]
+    ExecutionOutcomeUnknown,
     #[error("provider returned evidence that does not match the command: {0}")]
     InvalidEvidence(String),
     #[error("secret write evidence is invalid: {0}")]
@@ -1060,6 +1062,92 @@ pub trait ResourceClaimPipelineExecutor: Send + Sync {
     }
 
     fn output_path(&self, reference: &str) -> std::result::Result<PathBuf, ResourceClaimError>;
+}
+
+/// Async boundary for the Agent's synchronous ResourceClaim backend.
+///
+/// The concrete PostgreSQL client owns a synchronous Tokio runtime internally,
+/// and the claim manager also performs blocking SQLite and filesystem I/O. All
+/// calls therefore have to leave the Agent worker runtime before entering the
+/// backend. Keeping that rule in one handle prevents an individual job path
+/// from accidentally calling the synchronous provider on an async worker.
+#[derive(Clone)]
+pub(crate) struct ResourceClaimPipelineHandle {
+    backend: Arc<dyn ResourceClaimPipelineExecutor>,
+}
+
+impl ResourceClaimPipelineHandle {
+    pub(crate) fn new(backend: Arc<dyn ResourceClaimPipelineExecutor>) -> Self {
+        Self { backend }
+    }
+
+    async fn execute<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<dyn ResourceClaimPipelineExecutor>) -> Result<T> + Send + 'static,
+    {
+        let backend = Arc::clone(&self.backend);
+        tokio::task::spawn_blocking(move || operation(backend))
+            .await
+            .map_err(|_| ResourceClaimError::ExecutionOutcomeUnknown)?
+    }
+
+    pub(crate) async fn ensure(
+        &self,
+        step: &orchestrator_runtime::ResourceClaimStepV1,
+    ) -> Result<ResourceClaimV1> {
+        let step = step.clone();
+        self.execute(move |backend| backend.ensure(&step)).await
+    }
+
+    pub(crate) async fn release_deployment(
+        &self,
+        deployment_id: &str,
+    ) -> Result<Vec<ResourceClaimReleaseResultV1>> {
+        let deployment_id = deployment_id.to_string();
+        self.execute(move |backend| backend.release_deployment(&deployment_id))
+            .await
+    }
+
+    pub(crate) async fn reuse_for_replacement(
+        &self,
+        old_deployment_id: &str,
+        steps: &[orchestrator_runtime::ResourceClaimStepV1],
+    ) -> Result<Vec<ResourceClaimV1>> {
+        let old_deployment_id = old_deployment_id.to_string();
+        let steps = steps.to_vec();
+        self.execute(move |backend| backend.reuse_for_replacement(&old_deployment_id, &steps))
+            .await
+    }
+
+    pub(crate) async fn bind_replacement(
+        &self,
+        old_deployment_id: &str,
+        new_deployment_id: &str,
+        claim_ids: &[String],
+    ) -> Result<()> {
+        let old_deployment_id = old_deployment_id.to_string();
+        let new_deployment_id = new_deployment_id.to_string();
+        let claim_ids = claim_ids.to_vec();
+        self.execute(move |backend| {
+            backend.bind_replacement(&old_deployment_id, &new_deployment_id, &claim_ids)
+        })
+        .await
+    }
+
+    pub(crate) async fn purge(
+        &self,
+        payload: &orchestrator_runtime::ResourcePurgePayloadV1,
+    ) -> Result<ResourceClaimV1> {
+        let payload = payload.clone();
+        self.execute(move |backend| backend.purge(&payload)).await
+    }
+
+    pub(crate) async fn output_path(&self, reference: &str) -> Result<PathBuf> {
+        let reference = reference.to_string();
+        self.execute(move |backend| backend.output_path(&reference))
+            .await
+    }
 }
 
 /// Durable pipeline bridge for the pure claim state machine.  Claim records

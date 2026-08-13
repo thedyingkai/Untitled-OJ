@@ -1,5 +1,6 @@
 use crate::resource_claim::{
-    ResourceClaimFailureCodeV1, ResourceClaimPipelineExecutor, ResourceClaimStatusV1,
+    ResourceClaimFailureCodeV1, ResourceClaimPipelineExecutor, ResourceClaimPipelineHandle,
+    ResourceClaimStatusV1,
 };
 use crate::{
     AgentLedger, ArtifactFetcher, HttpReleasePipelineProvider, LeasedJob, LedgerError,
@@ -73,7 +74,7 @@ pub struct JobExecutor<R> {
     artifact_fetcher: Option<Arc<dyn ArtifactFetcher>>,
     runtime_context_provider: Option<Arc<dyn RuntimeContextProvider>>,
     workload_credentials: Option<Arc<WorkloadCredentialSupervisor>>,
-    resource_claims: Option<Arc<dyn ResourceClaimPipelineExecutor>>,
+    resource_claims: Option<ResourceClaimPipelineHandle>,
 }
 
 #[derive(Clone)]
@@ -91,14 +92,14 @@ struct MaterializedRuntimeContext {
 /// the same RETAIN compensation boundary.  A successful pipeline disarms by
 /// keeping the binding for the installed runtime; compensation only removes the
 /// deployment binding and never purges the retained provider resource.
-struct ReleasePipelineClaimGuard<'a> {
-    manager: Option<&'a dyn ResourceClaimPipelineExecutor>,
+struct ReleasePipelineClaimGuard {
+    manager: Option<ResourceClaimPipelineHandle>,
     deployment_id: String,
     armed: bool,
 }
 
-impl<'a> ReleasePipelineClaimGuard<'a> {
-    fn new(manager: Option<&'a dyn ResourceClaimPipelineExecutor>, deployment_id: String) -> Self {
+impl ReleasePipelineClaimGuard {
+    fn new(manager: Option<ResourceClaimPipelineHandle>, deployment_id: String) -> Self {
         Self {
             manager,
             deployment_id,
@@ -113,15 +114,16 @@ impl<'a> ReleasePipelineClaimGuard<'a> {
         self.armed = true;
     }
 
-    fn release(&mut self) -> Result<(), &'static str> {
+    async fn release(&mut self) -> Result<(), &'static str> {
         if !self.armed {
             return Ok(());
         }
-        let Some(manager) = self.manager else {
+        let Some(manager) = self.manager.as_ref() else {
             return Err("the Agent-local ResourceClaim manager is unavailable");
         };
         let releases = manager
             .release_deployment(&self.deployment_id)
+            .await
             .map_err(|_| "the ResourceClaim deployment release failed")?;
         let unsafe_state = releases.iter().any(|release| {
             if release.provider_released {
@@ -137,19 +139,19 @@ impl<'a> ReleasePipelineClaimGuard<'a> {
         Ok(())
     }
 
-    fn finish(
+    async fn finish(
         &mut self,
         execution: Result<ExecutionOutcome, LedgerError>,
     ) -> Result<ExecutionOutcome, LedgerError> {
         match execution {
             Ok(outcome) if outcome.status == CompletionStatus::Succeeded => Ok(outcome),
             Ok(mut outcome) => {
-                if let Err(reason) = self.release() {
+                if let Err(reason) = self.release().await {
                     mark_resource_claim_compensation_unknown(&mut outcome, reason);
                 }
                 Ok(outcome)
             }
-            Err(error) => match self.release() {
+            Err(error) => match self.release().await {
                 Ok(()) => Err(error),
                 Err(reason) => {
                     let mut outcome = needs_attention_outcome(format!(
@@ -226,7 +228,7 @@ where
         mut self,
         resource_claims: Arc<dyn ResourceClaimPipelineExecutor>,
     ) -> Self {
-        self.resource_claims = Some(resource_claims);
+        self.resource_claims = Some(ResourceClaimPipelineHandle::new(resource_claims));
         self
     }
 
@@ -257,12 +259,12 @@ where
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let manager = self.resource_claims.as_deref();
-                let mut claim_guard = ReleasePipelineClaimGuard::new(manager, deployment_id);
+                let mut claim_guard =
+                    ReleasePipelineClaimGuard::new(self.resource_claims.clone(), deployment_id);
                 let execution = self
                     .release_pipeline(job, ledger, cancellation, &mut claim_guard)
                     .await;
-                claim_guard.finish(execution)
+                claim_guard.finish(execution).await
             }
             JobKind::Upgrade => {
                 self.replace_release(job, ledger, cancellation, "upgrade")
@@ -308,8 +310,13 @@ where
                 "resource purge requires an Agent-local resource provider",
             ));
         };
-        let claim = match manager.purge(&payload) {
+        let claim = match manager.purge(&payload).await {
             Ok(claim) => claim,
+            Err(crate::resource_claim::ResourceClaimError::ExecutionOutcomeUnknown) => {
+                return Ok(needs_attention_outcome(
+                    "resource purge ended without a proven provider outcome",
+                ));
+            }
             Err(error) => {
                 return Ok(ExecutionOutcome::failed(format!(
                     "resource purge rejected before completion: {error}"
@@ -1300,7 +1307,7 @@ where
         job: &LeasedJob,
         ledger: &mut AgentLedger,
         cancellation: watch::Receiver<bool>,
-        claim_guard: &mut ReleasePipelineClaimGuard<'_>,
+        claim_guard: &mut ReleasePipelineClaimGuard,
     ) -> Result<ExecutionOutcome, LedgerError> {
         const AUTH_APPLY_STEP: u32 = 1_000_000;
         const AUTH_COMPENSATE_STEP: u32 = 1_000_001;
@@ -1334,7 +1341,7 @@ where
                     "resource_claim_ensure",
                     crate::now_ms(),
                 )?;
-                let result = manager.ensure(step);
+                let result = manager.ensure(step).await;
                 let claim = match result {
                     Ok(claim) if claim.status == ResourceClaimStatusV1::Ready => claim,
                     Ok(claim) => {
@@ -1362,12 +1369,16 @@ where
                         step.claim_id
                     ))
                 })?;
-                let output_path = manager.output_path(&output.reference).map_err(|error| {
-                    LedgerError::InvalidState(format!(
-                        "resolve resource output for {}: {error}",
-                        step.claim_id
-                    ))
-                })?;
+                let output_path =
+                    manager
+                        .output_path(&output.reference)
+                        .await
+                        .map_err(|error| {
+                            LedgerError::InvalidState(format!(
+                                "resolve resource output for {}: {error}",
+                                step.claim_id
+                            ))
+                        })?;
                 resource_outputs.insert(
                     step.resource_name.clone(),
                     (
@@ -3044,7 +3055,7 @@ where
         if !payload.deployment_id.trim().is_empty()
             && let Some(manager) = self.resource_claims.as_ref()
         {
-            match manager.release_deployment(&payload.deployment_id) {
+            match manager.release_deployment(&payload.deployment_id).await {
                 Ok(claims) => {
                     if claims.iter().any(|release| {
                         (release.provider_released
@@ -3105,6 +3116,7 @@ where
             };
             let claims = match manager
                 .reuse_for_replacement(&payload.old_deployment_id, &payload.resource_claims)
+                .await
             {
                 Ok(claims) => claims,
                 Err(error) => {
@@ -3120,12 +3132,15 @@ where
                         step.claim_id
                     ))
                 })?;
-                let path = manager.output_path(&output.reference).map_err(|error| {
-                    LedgerError::InvalidState(format!(
-                        "resolve replacement output for {}: {error}",
-                        step.claim_id
-                    ))
-                })?;
+                let path = manager
+                    .output_path(&output.reference)
+                    .await
+                    .map_err(|error| {
+                        LedgerError::InvalidState(format!(
+                            "resolve replacement output for {}: {error}",
+                            step.claim_id
+                        ))
+                    })?;
                 replacement_resource_outputs.insert(
                     step.resource_name.clone(),
                     (
@@ -3775,11 +3790,13 @@ where
                     .map(|step| step.claim_id.clone())
                     .collect::<Vec<_>>();
                 if let Some(manager) = self.resource_claims.as_ref()
-                    && let Err(error) = manager.bind_replacement(
-                        &payload.old_deployment_id,
-                        &payload.new_spec.deployment_id,
-                        &claim_ids,
-                    )
+                    && let Err(error) = manager
+                        .bind_replacement(
+                            &payload.old_deployment_id,
+                            &payload.new_spec.deployment_id,
+                            &claim_ids,
+                        )
+                        .await
                 {
                     return Ok(needs_attention_outcome(format!(
                         "healthy replacement exists but ResourceClaim binding commit failed: {error}"
@@ -3908,6 +3925,7 @@ where
                         &payload.new_spec.deployment_id,
                         &claim_ids,
                     )
+                    .await
                     .map_err(|error| {
                         LedgerError::InvalidState(format!(
                             "replacement ResourceClaim binding commit failed after runtime cutover: {error}"
@@ -3918,6 +3936,7 @@ where
                 // exists; it must not run ordinary RETAIN compensation here.
                 manager
                     .release_deployment(&payload.old_deployment_id)
+                    .await
                     .map_err(|error| {
                         LedgerError::InvalidState(format!(
                             "remove old ResourceClaim binding after cutover: {error}"
@@ -5148,6 +5167,9 @@ mod tests {
         calls: Mutex<Vec<String>>,
         output_root: Option<tempfile::TempDir>,
         fail_release: bool,
+        nested_runtime_on_ensure: bool,
+        nested_runtime_on_release: bool,
+        panic_on_purge: bool,
     }
 
     impl FakeResourceClaims {
@@ -5156,6 +5178,9 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 output_root: Some(tempfile::tempdir().unwrap()),
                 fail_release: false,
+                nested_runtime_on_ensure: false,
+                nested_runtime_on_release: false,
+                panic_on_purge: false,
             }
         }
 
@@ -5164,8 +5189,40 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 output_root: Some(tempfile::tempdir().unwrap()),
                 fail_release: true,
+                nested_runtime_on_ensure: false,
+                nested_runtime_on_release: false,
+                panic_on_purge: false,
             }
         }
+
+        fn probing_nested_runtime(on_ensure: bool, on_release: bool) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                output_root: Some(tempfile::tempdir().unwrap()),
+                fail_release: false,
+                nested_runtime_on_ensure: on_ensure,
+                nested_runtime_on_release: on_release,
+                panic_on_purge: false,
+            }
+        }
+
+        fn panicking_purge() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                output_root: Some(tempfile::tempdir().unwrap()),
+                fail_release: false,
+                nested_runtime_on_ensure: false,
+                nested_runtime_on_release: false,
+                panic_on_purge: true,
+            }
+        }
+    }
+
+    fn run_synchronous_runtime_probe() {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {});
     }
 
     impl ResourceClaimPipelineExecutor for FakeResourceClaims {
@@ -5173,6 +5230,9 @@ mod tests {
             &self,
             step: &orchestrator_runtime::ResourceClaimStepV1,
         ) -> crate::resource_claim::Result<crate::resource_claim::ResourceClaimV1> {
+            if self.nested_runtime_on_ensure {
+                run_synchronous_runtime_probe();
+            }
             self.calls
                 .lock()
                 .unwrap()
@@ -5204,6 +5264,9 @@ mod tests {
             deployment_id: &str,
         ) -> crate::resource_claim::Result<Vec<crate::resource_claim::ResourceClaimReleaseResultV1>>
         {
+            if self.nested_runtime_on_release {
+                run_synchronous_runtime_probe();
+            }
             self.calls
                 .lock()
                 .unwrap()
@@ -5240,6 +5303,18 @@ mod tests {
                 .unwrap()
                 .push(format!("bind:{old_deployment_id}->{new_deployment_id}"));
             Ok(())
+        }
+
+        fn purge(
+            &self,
+            _payload: &orchestrator_runtime::ResourcePurgePayloadV1,
+        ) -> crate::resource_claim::Result<crate::resource_claim::ResourceClaimV1> {
+            if self.panic_on_purge {
+                panic!("fixture panic contained postgresql://sensitive-provider-secret");
+            }
+            Err(crate::resource_claim::ResourceClaimError::Provider(
+                "fixture purge is not configured".to_string(),
+            ))
         }
 
         fn output_path(
@@ -7178,6 +7253,114 @@ mod tests {
         assert!(!output.contains("postgresql://"));
         assert!(!output.contains(expected_path_text));
         assert!(expected.contains("OJOS_RESOURCE_DATABASE_OUTPUT_FILE="));
+    }
+
+    #[tokio::test]
+    async fn synchronous_resource_claim_ensure_runs_outside_agent_tokio_runtime() {
+        let runtime = Arc::new(EnvironmentTraceRuntime {
+            trace: Arc::new(Mutex::new(EnvironmentTrace::new())),
+        });
+        let provider = Arc::new(TraceProvider {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(0),
+        });
+        let resources = Arc::new(FakeResourceClaims::probing_nested_runtime(true, false));
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = resource_pipeline_job("job-claim-blocking-ensure", false);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.migrations.clear();
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Succeeded);
+        assert_eq!(
+            resources.calls.lock().unwrap().as_slice(),
+            ["ensure:database"]
+        );
+    }
+
+    #[tokio::test]
+    async fn synchronous_resource_claim_compensation_runs_outside_agent_tokio_runtime() {
+        let runtime = Arc::new(MockRuntime::default());
+        let provider = Arc::new(TraceProvider {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(1),
+        });
+        let resources = Arc::new(FakeResourceClaims::probing_nested_runtime(false, true));
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = resource_pipeline_job("job-claim-blocking-compensation", false);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.materialization = Some(orchestrator_runtime::RuntimeMaterializationStep {
+            config: Default::default(),
+            secret_refs: Default::default(),
+            environment_templates: Default::default(),
+        });
+        payload.migrations.clear();
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Failed);
+        assert_claim_released_without_secret(&resources, &outcome);
+    }
+
+    #[tokio::test]
+    async fn panicked_resource_purge_is_unknown_and_never_leaks_panic_payload() {
+        let resources = Arc::new(FakeResourceClaims::panicking_purge());
+        let executor = JobExecutor::from_shared(Arc::new(MockRuntime::default()))
+            .with_resource_claims(resources);
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let payload = ResourcePurgePayloadV1 {
+            schema_version: orchestrator_runtime::RESOURCE_PURGE_JOB_SCHEMA_VERSION.to_string(),
+            node_id: "node-1".to_string(),
+            claim_id: "claim-service-1-database".to_string(),
+            claim_digest: digest.clone(),
+            generation: 1,
+            confirmation: format!("PURGE claim-service-1-database {digest} GENERATION 1"),
+            reason: "operator approved permanent resource deletion".to_string(),
+            audit_intent: orchestrator_runtime::ResourcePurgeAuditIntentV1 {
+                intent_id: "operation-resource-purge-001".to_string(),
+                actor_id: "admin@example.test".to_string(),
+                claim_digest: digest,
+                generation: 1,
+            },
+        };
+        let job = LeasedJob::new_for_test(
+            "job-resource-purge-panic",
+            JobKind::ResourcePurge,
+            serde_json::to_value(payload).unwrap(),
+            "lease-resource-purge-panic",
+        );
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::NeedsAttention);
+        assert!(
+            outcome
+                .error_message
+                .contains("without a proven provider outcome")
+        );
+        let encoded = format!("{} {}", outcome.error_message, outcome.result);
+        assert!(!encoded.contains("postgresql://"));
+        assert!(!encoded.contains("sensitive-provider-secret"));
+        assert!(!encoded.contains("fixture panic"));
     }
 
     #[tokio::test]
