@@ -17,6 +17,7 @@ import (
 	sharedmw "ojos-shared/middleware"
 	"ojos-shared/servicehealth"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zeromicro/go-zero/core/conf"
 	"github.com/zeromicro/go-zero/rest"
 )
@@ -24,7 +25,7 @@ import (
 var configFile = flag.String("f", "etc/judgeapi.yaml", "the config file")
 
 func main() {
-	if handled, err := servicehealth.RunIfRequested(os.Args, "http://127.0.0.1:8082/health"); handled {
+	if handled, err := servicehealth.RunIfRequested(os.Args, "http://127.0.0.1:8082/readyz"); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -38,6 +39,7 @@ func main() {
 	sharedmw.InstallHTTPErrorHandler()
 
 	svcCtx := svc.NewServiceContext(c)
+	prometheus.MustRegister(svc.NewJudgeQueueCollector(svcCtx))
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -48,9 +50,10 @@ func main() {
 	defer server.Stop()
 
 	server.Use(sharedmw.RecoveryMiddleware(svcCtx.Logger))
-	server.Use(sharedmw.LoggingMiddleware(svcCtx.Logger, svcCtx.Tracer))
+	server.Use(sharedmw.ServiceLoggingMiddleware("judge-api", svcCtx.Logger, svcCtx.Tracer))
 
 	handler.RegisterHandlers(server, svcCtx)
+	sharedmw.RegisterMetricsRoute(server)
 
 	fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
 	server.Start()

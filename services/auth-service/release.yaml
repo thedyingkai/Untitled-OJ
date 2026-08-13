@@ -59,8 +59,10 @@ migrations:
   - version: "000014_initial_admin_bootstrap"
     path: services/auth-service/migrations/000014_initial_admin_bootstrap.up.sql
     checksum: sha256:9b173cbd53c3d4b5b76c68f5b2a0e52b5fbb9ad61dcb19ff7f0ac1f2f2a6c15f
+  - version: "000015_contribution_permission_projection"
+    path: services/auth-service/migrations/000015_contribution_permission_projection.up.sql
+    checksum: sha256:e369ec0789e6c02b53a8878a635b06c0d5ba0d7e4ed8f0b619ed2239ce0b6ec3
 permissions:
-  - auth.admin
   - auth.permission.check
   - system.admin
 routes:
@@ -97,7 +99,7 @@ provides:
       methods: [GET]
       visibility: descendants
       auth: user
-      permission: auth.admin
+      permission: system.admin
       stability: stable
 requires:
   apis: []

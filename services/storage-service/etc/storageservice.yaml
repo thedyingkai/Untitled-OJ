@@ -19,8 +19,8 @@ Storage:
     - avatars
   MinIO:
     Endpoint: minio:9000
-    AccessKey: ojos
-    SecretKey: ojos-local-dev
+    AccessKey: ""
+    SecretKey: ""
     UseSSL: false
 
 Jaeger:

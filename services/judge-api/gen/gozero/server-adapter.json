@@ -1,0 +1,326 @@
+{
+  "schemaVersion": "ojos.dev/gozero-server-adapter/v1",
+  "serviceId": "judge-api",
+  "operations": [
+    {
+      "operationId": "getJudgeQueue",
+      "handler": "GetJudgeQueue",
+      "method": "GET",
+      "path": "/judge/admin/queue",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "judge.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getJudgeQueueStatus",
+      "handler": "GetJudgeQueueStatus",
+      "method": "GET",
+      "path": "/judge/admin/queue/status",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "judge.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "requeueSubmission",
+      "handler": "RequeueSubmission",
+      "method": "POST",
+      "path": "/judge/admin/submissions/{id}/requeue",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "judge.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "createSubmission",
+      "handler": "CreateSubmission",
+      "method": "POST",
+      "path": "/judge/submissions",
+      "audience": "user",
+      "auth": "required",
+      "permission": "judge.submit",
+      "requestSchemaDigests": [
+        "sha256:1afcd65c8fed622f64bb296dabe173e66f89e014980e7f4a32c9cb4cfa66c409"
+      ],
+      "responseSchemaDigests": [
+        "sha256:257b203a7559ccd128a999a67074172dc7b27872f6b38a9f7c2181735f77de11"
+      ]
+    },
+    {
+      "operationId": "judgeHealth",
+      "handler": "JudgeHealth",
+      "method": "GET",
+      "path": "/healthz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": []
+    },
+    {
+      "operationId": "listJudgeLanguages",
+      "handler": "ListJudgeLanguages",
+      "method": "GET",
+      "path": "/judge/languages",
+      "audience": "user",
+      "auth": "required",
+      "permission": "judge.submission.view.own",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "rejudgeProblem",
+      "handler": "RejudgeProblem",
+      "method": "POST",
+      "path": "/judge/problems/{id}/rejudge",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "judge.submission.manage",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "listSubmissions",
+      "handler": "ListSubmissions",
+      "method": "GET",
+      "path": "/judge/submissions",
+      "audience": "user",
+      "auth": "required",
+      "permission": "judge.submission.view.own",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getSubmission",
+      "handler": "GetSubmission",
+      "method": "GET",
+      "path": "/judge/submissions/{id}",
+      "audience": "user",
+      "auth": "required",
+      "permission": "judge.submission.view.own",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "cancelSubmission",
+      "handler": "CancelSubmission",
+      "method": "POST",
+      "path": "/judge/submissions/{id}/cancel",
+      "audience": "user",
+      "auth": "required",
+      "permission": "judge.submission.manage",
+      "requestSchemaDigests": [
+        "sha256:8dfec3cffbffaf82c02648045d5656ca6774874309af74dc2987ff5de66ecd2c"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getSubmissionCases",
+      "handler": "GetSubmissionCases",
+      "method": "GET",
+      "path": "/judge/submissions/{id}/cases",
+      "audience": "user",
+      "auth": "required",
+      "permission": "judge.submission.view.own",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getSubmissionDebugLogs",
+      "handler": "GetSubmissionDebugLogs",
+      "method": "GET",
+      "path": "/judge/submissions/{id}/debug-logs",
+      "audience": "user",
+      "auth": "required",
+      "permission": "judge.submission.view.all",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "judgeReady",
+      "handler": "JudgeReady",
+      "method": "GET",
+      "path": "/readyz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": []
+    },
+    {
+      "operationId": "getWorkerProblemPackage",
+      "handler": "GetWorkerProblemPackage",
+      "method": "GET",
+      "path": "/api/judge/worker/artifacts/problems/{id}/package",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "judge.worker",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": []
+    },
+    {
+      "operationId": "getWorkerSubmissionSource",
+      "handler": "GetWorkerSubmissionSource",
+      "method": "GET",
+      "path": "/api/judge/worker/artifacts/submissions/{id}/source",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "judge.worker",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": []
+    },
+    {
+      "operationId": "heartbeatJudgeWorker",
+      "handler": "HeartbeatJudgeWorker",
+      "method": "POST",
+      "path": "/api/judge/worker/heartbeat",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "judge.worker",
+      "requestSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "registerJudgeWorker",
+      "handler": "RegisterJudgeWorker",
+      "method": "POST",
+      "path": "/api/judge/worker/register",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "judge.worker",
+      "requestSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "claimJudgeTasks",
+      "handler": "ClaimJudgeTasks",
+      "method": "POST",
+      "path": "/api/judge/worker/tasks/claim",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "judge.worker",
+      "requestSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "failJudgeTask",
+      "handler": "FailJudgeTask",
+      "method": "POST",
+      "path": "/api/judge/worker/tasks/{task_id}/fail",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "judge.worker",
+      "requestSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "heartbeatJudgeTask",
+      "handler": "HeartbeatJudgeTask",
+      "method": "POST",
+      "path": "/api/judge/worker/tasks/{task_id}/heartbeat",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "judge.worker",
+      "requestSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "completeJudgeTask",
+      "handler": "CompleteJudgeTask",
+      "method": "POST",
+      "path": "/api/judge/worker/tasks/{task_id}/result",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "judge.worker",
+      "requestSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "listJudgeTasks",
+      "handler": "ListJudgeTasks",
+      "method": "GET",
+      "path": "/judge/admin/tasks",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "judge.worker.status",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "listJudgeWorkers",
+      "handler": "ListJudgeWorkers",
+      "method": "GET",
+      "path": "/judge/admin/workers",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "judge.worker.status",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "drainJudgeWorker",
+      "handler": "DrainJudgeWorker",
+      "method": "POST",
+      "path": "/judge/admin/workers/{id}/drain",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "judge.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    }
+  ]
+}

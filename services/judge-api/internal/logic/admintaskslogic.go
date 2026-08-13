@@ -25,7 +25,7 @@ func NewAdminTasksLogic(ctx context.Context, svcCtx *svc.ServiceContext) *AdminT
 }
 
 func (l *AdminTasksLogic) AdminTasks() (resp *types.AdminTasksResp, err error) {
-	if err := requireJudgeAdmin(l.ctx, l.svcCtx); err != nil {
+	if err := requireJudgePermission(l.ctx, l.svcCtx, "judge.worker.status"); err != nil {
 		return nil, err
 	}
 

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"ojos-problem-events/problemv1"
 	"ojos-problem-service/internal/packagefs"
 	problemstorage "ojos-problem-service/internal/storage"
-	"ojos-shared/eventing"
 )
 
 func TestReplaceRollbackRestoresByteExactLiveTree(t *testing.T) {
@@ -170,14 +170,14 @@ func TestValidateStagedPackageRejectsUndeclaredCaseGroup(t *testing.T) {
 	}
 }
 
-func testArtifact(t *testing.T, dir string) eventing.ArtifactRef {
+func testArtifact(t *testing.T, dir string) problemv1.ArtifactRef {
 	t.Helper()
-	zipPath, digest, size, err := problemstorage.BuildDeterministicPackageArtifact(dir)
+	zipPath, digest, size, err := problemstorage.BuildDeterministicPackageArtifact(filepath.Dir(dir), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = os.Remove(zipPath)
-	return eventing.ArtifactRef{URI: "file://test", SHA256: digest, SizeBytes: size, ContentType: "application/zip"}
+	return problemv1.ArtifactRef{URI: "file://test", SHA256: digest, SizeBytes: size, ContentType: "application/zip"}
 }
 
 func writeTestTree(t *testing.T, root string, files map[string]string) {

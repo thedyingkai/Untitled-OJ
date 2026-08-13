@@ -315,6 +315,243 @@ func TestServiceProxyChecksDynamicRoutePermission(t *testing.T) {
 	}
 }
 
+func TestContributionRoutesMatchMethodAndRewriteTemplateParameters(t *testing.T) {
+	var gotMethod string
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_, _ = io.WriteString(w, r.Method+" "+r.URL.Path)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	route := func(method, operation, providerPath string) servicestatus.ServiceRoute {
+		return servicestatus.ServiceRoute{
+			RouteID: "contribution:contest:" + operation, ApiID: "contest.api", OperationID: operation,
+			DeploymentID: "dep-1", RevisionID: "rev-1", Generation: 3, Audience: "user",
+			PathTemplate: "/api/contests/{contestId}", ProviderPath: providerPath,
+			Prefix: "/api/contests/{contestId}", ServiceID: "contest-service", UpstreamBase: upstream.URL,
+			AuthMode: "public", Methods: []string{method}, Enabled: true, ProxyEnabled: true, Status: "active",
+			CreatedFrom: "contribution_snapshot_v1",
+		}
+	}
+	rp.SetContributionRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{
+		route(http.MethodGet, "getContest", "/v1/contests/{contestId}"),
+		route(http.MethodPut, "updateContest", "/v1/contests/{contestId}"),
+	}, CanProxy: true})
+
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		rr := httptest.NewRecorder()
+		rp.ServeHTTP(rr, httptest.NewRequest(method, "/api/contests/contest-42?expand=owner", nil))
+		if rr.Code != http.StatusOK || gotMethod != method || gotPath != "/v1/contests/contest-42" {
+			t.Fatalf("%s route mismatch: status=%d upstream=%s %s body=%s", method, rr.Code, gotMethod, gotPath, rr.Body.String())
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/api/contests/contest-42", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unpublished method must not match contribution template, got %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/contests/a/b", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("template parameter must consume exactly one path segment, got %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/contests/%2Fadmin", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("encoded slash must not be smuggled through provider rewrite, got %d", rr.Code)
+	}
+}
+
+func TestContributionRoutesIsolateAudience(t *testing.T) {
+	userUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "user")
+	}))
+	defer userUpstream.Close()
+	adminUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(contributionAudienceHeader) != "" {
+			t.Fatal("caller-controlled audience header leaked upstream")
+		}
+		_, _ = io.WriteString(w, "admin")
+	}))
+	defer adminUpstream.Close()
+
+	route := func(audience, revision, upstream string) servicestatus.ServiceRoute {
+		return servicestatus.ServiceRoute{
+			RouteID: "contribution:contest:" + audience, ApiID: "contest.api", OperationID: "listContest",
+			DeploymentID: "dep-1", RevisionID: revision, Generation: 1, Audience: audience,
+			PathTemplate: "/api/shared", ProviderPath: "/shared", Prefix: "/api/shared",
+			ServiceID: "contest-service", UpstreamBase: upstream, AuthMode: "public", Methods: []string{"GET"},
+			Enabled: true, ProxyEnabled: true, Status: "active", CreatedFrom: "contribution_snapshot_v1",
+		}
+	}
+	rp := newTestServiceProxy(t, nil)
+	rp.SetContributionRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{
+		route("user", "rev-user", userUpstream.URL), route("admin", "rev-admin", adminUpstream.URL),
+	}, CanProxy: true})
+
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/shared", nil))
+	if rr.Code != http.StatusOK || rr.Body.String() != "user" {
+		t.Fatalf("default user audience selected wrong route: status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/shared", nil)
+	req.Header.Set(contributionAudienceHeader, "admin")
+	rr = httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || rr.Body.String() != "admin" {
+		t.Fatalf("admin audience selected wrong route: status=%d body=%q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestContributionRouteExecutesOperationPermission(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	rp := newTestServiceProxy(t, nil)
+	rp.SetPermissionChecker(func(_ context.Context, _ string, caller PermissionCheckCaller, permission string) (bool, error) {
+		return caller.UserID == 42 && caller.APIID == "contest.api" && permission == "contest.read", nil
+	})
+	rp.SetContributionRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{{
+		RouteID: "contribution:contest:getContest", ApiID: "contest.api", OperationID: "getContest",
+		DeploymentID: "dep-1", RevisionID: "rev-1", Generation: 1, Audience: "user",
+		PathTemplate: "/api/contests/{contestId}", ProviderPath: "/contests/{contestId}",
+		Prefix: "/api/contests/{contestId}", ServiceID: "contest-service", UpstreamBase: upstream.URL,
+		AuthMode: "user", RequiredPermission: "contest.read", Methods: []string{"GET"},
+		Enabled: true, ProxyEnabled: true, Status: "active", CreatedFrom: "contribution_snapshot_v1",
+	}}, CanProxy: true})
+
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/contests/42", nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("operation permission must require a user, got %d", rr.Code)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/contests/42", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken(t, []string{"user"}))
+	rr = httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("operation permission should allow verified user, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestContributionRouteDerivesPermissionScopeFromMatchedPathOnly(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	defer upstream.Close()
+	rp := newTestServiceProxy(t, nil)
+	rp.SetPermissionChecker(func(_ context.Context, _ string, caller PermissionCheckCaller, permission string) (bool, error) {
+		return caller.UserID == 42 && caller.ScopeType == "contest" && caller.ScopeID == 73 && permission == "contest.read", nil
+	})
+	rp.SetContributionRouteTable(servicestatus.RouteTable{Routes: []servicestatus.ServiceRoute{{
+		RouteID: "contribution:contest:getContest", ApiID: "contest.api", OperationID: "getContest", DeploymentID: "dep-1", RevisionID: "rev-1", Generation: 1, Audience: "user",
+		PathTemplate: "/api/contests/{contestId}", ProviderPath: "/contests/{contestId}", Prefix: "/api/contests/{contestId}", ServiceID: "contest-service", UpstreamBase: upstream.URL,
+		AuthMode: "user", RequiredPermission: "contest.read", PermissionScope: &servicestatus.PermissionScope{Kind: "path_parameter", Type: "contest", PathParameter: "contestId"},
+		Methods: []string{"GET"}, Enabled: true, ProxyEnabled: true, Status: "active", CreatedFrom: "contribution_snapshot_v1",
+	}}, CanProxy: true})
+	req := httptest.NewRequest(http.MethodGet, "/api/contests/73?contestId=999", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken(t, []string{"user"}))
+	req.Header.Set("X-OJOS-Scope-Id", "999")
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("path-derived scope should be authorized, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/contests/073", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken(t, []string{"user"}))
+	rr = httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("non-canonical resource id must fail closed, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestInvalidContributionRevisionPreservesActiveRouteTable(t *testing.T) {
+	oldUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "old")
+	}))
+	defer oldUpstream.Close()
+	rp := newTestServiceProxy(t, nil)
+	valid := servicestatus.ServiceRoute{
+		RouteID: "contribution:contest:old", ApiID: "contest.api", OperationID: "getContest",
+		DeploymentID: "dep-1", RevisionID: "rev-old", Generation: 1, Audience: "user",
+		PathTemplate: "/api/contests/{contestId}", ProviderPath: "/contests/{contestId}",
+		Prefix: "/api/contests/{contestId}", ServiceID: "contest-service", UpstreamBase: oldUpstream.URL,
+		AuthMode: "public", Methods: []string{"GET"}, Enabled: true, ProxyEnabled: true,
+		Status: "active", CreatedFrom: "contribution_snapshot_v1",
+	}
+	if err := rp.TrySetContributionRouteTable(servicestatus.RouteTable{Version: "old", Routes: []servicestatus.ServiceRoute{valid}, CanProxy: true}); err != nil {
+		t.Fatal(err)
+	}
+	invalid := valid
+	invalid.RouteID, invalid.RevisionID, invalid.UpstreamBase = "contribution:contest:new", "rev-new", "file:///tmp/not-an-upstream"
+	if err := rp.TrySetContributionRouteTable(servicestatus.RouteTable{Version: "new", Routes: []servicestatus.ServiceRoute{invalid}, CanProxy: true}); err == nil {
+		t.Fatal("invalid candidate contribution revision was published")
+	}
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/contests/42", nil))
+	if rr.Code != http.StatusOK || rr.Body.String() != "old" {
+		t.Fatalf("invalid candidate evicted active revision: status=%d body=%q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestContributionRevisionSwitchKeepsOldInFlightSnapshot(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	oldUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		_, _ = io.WriteString(w, "old")
+	}))
+	defer oldUpstream.Close()
+	newUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "new")
+	}))
+	defer newUpstream.Close()
+
+	route := func(revision, upstream string) servicestatus.ServiceRoute {
+		return servicestatus.ServiceRoute{
+			RouteID: "contribution:contest:" + revision, ApiID: "contest.api", OperationID: "getContest",
+			DeploymentID: "dep-1", RevisionID: revision, Generation: 1, Audience: "user",
+			PathTemplate: "/api/contests/{contestId}", ProviderPath: "/contests/{contestId}",
+			Prefix: "/api/contests/{contestId}", ServiceID: "contest-service", UpstreamBase: upstream,
+			AuthMode: "public", Methods: []string{"GET"}, Enabled: true, ProxyEnabled: true,
+			Status: "active", CreatedFrom: "contribution_snapshot_v1",
+		}
+	}
+	rp := newTestServiceProxy(t, nil)
+	if err := rp.TrySetContributionRouteTable(servicestatus.RouteTable{Version: "old", Routes: []servicestatus.ServiceRoute{route("old", oldUpstream.URL)}, CanProxy: true}); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		status int
+		body   string
+	}
+	oldResult := make(chan result, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/contests/1", nil))
+		oldResult <- result{status: rr.Code, body: rr.Body.String()}
+	}()
+	<-entered
+	if err := rp.TrySetContributionRouteTable(servicestatus.RouteTable{Version: "new", Routes: []servicestatus.ServiceRoute{route("new", newUpstream.URL)}, CanProxy: true}); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/contests/2", nil))
+	if rr.Code != http.StatusOK || rr.Body.String() != "new" {
+		t.Fatalf("new request did not use new revision: status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	close(release)
+	old := <-oldResult
+	if old.status != http.StatusOK || old.body != "old" {
+		t.Fatalf("in-flight request lost old snapshot: %#v", old)
+	}
+}
+
 func TestServiceProxyUnavailableServiceRouteReturnsStableError(t *testing.T) {
 	staticUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("static"))

@@ -1,0 +1,248 @@
+{
+  "schemaVersion": "ojos.dev/gozero-server-adapter/v1",
+  "serviceId": "problem-service",
+  "operations": [
+    {
+      "operationId": "listArtifactGCIntents",
+      "handler": "ListArtifactGCIntents",
+      "method": "GET",
+      "path": "/admin/artifact-gc/intents",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.manage.data",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:d99b2c266a0334e2b554e15c2deb292d5df4fd9499fd5591a066a4c29d9b671d"
+      ]
+    },
+    {
+      "operationId": "reconcileArtifactGCIntent",
+      "handler": "ReconcileArtifactGCIntent",
+      "method": "POST",
+      "path": "/admin/artifact-gc/intents/reconcile",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.manage.data",
+      "requestSchemaDigests": [
+        "sha256:24a92c6465c24541247a5598868db3b6f838904cfc1b3eb0b0270484de41a90c"
+      ],
+      "responseSchemaDigests": [
+        "sha256:efbea1c5dee07fa2ca4d194a19a99eb494c648e41829d1bcec88b0ec92edc0ca"
+      ]
+    },
+    {
+      "operationId": "retryArtifactGCIntent",
+      "handler": "RetryArtifactGCIntent",
+      "method": "POST",
+      "path": "/admin/artifact-gc/intents/retry",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.manage.data",
+      "requestSchemaDigests": [
+        "sha256:31a7842c05f4c5f4801b941f6915bdb1486b974e326da027ce80550c608dfdeb"
+      ],
+      "responseSchemaDigests": [
+        "sha256:efbea1c5dee07fa2ca4d194a19a99eb494c648e41829d1bcec88b0ec92edc0ca"
+      ]
+    },
+    {
+      "operationId": "adminListProblems",
+      "handler": "AdminListProblems",
+      "method": "GET",
+      "path": "/admin/problems",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.edit",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "createProblem",
+      "handler": "CreateProblem",
+      "method": "POST",
+      "path": "/problems",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.create",
+      "requestSchemaDigests": [
+        "sha256:79c97616b095c5fd5a0af0f3838e838e9088e4b9c016814ecb2fe0c5b765a855"
+      ],
+      "responseSchemaDigests": [
+        "sha256:927a38b81d41a65bdcf1f9fd505834dd9b2aa3dad002b8ab66a13c289f3ef9de"
+      ]
+    },
+    {
+      "operationId": "deleteProblem",
+      "handler": "DeleteProblem",
+      "method": "DELETE",
+      "path": "/problems/{id}",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.delete",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:dfcd1e653de172182efa2ed16260de864cd2075d4b2d710371e3b492f724a300"
+      ]
+    },
+    {
+      "operationId": "updateProblem",
+      "handler": "UpdateProblem",
+      "method": "PUT",
+      "path": "/problems/{id}",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.edit",
+      "requestSchemaDigests": [
+        "sha256:83ccc4aaeb5770d0372a7cfa91f4328bd981aaf606dcbf714dddc95f92d3f7cd"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "problemHealth",
+      "handler": "ProblemHealth",
+      "method": "GET",
+      "path": "/healthz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:371b921c7ecbfc970b01da1c6dcfd2a5562344cbfa4d8756f52fab0928fe6434"
+      ]
+    },
+    {
+      "operationId": "listProblems",
+      "handler": "ListProblems",
+      "method": "GET",
+      "path": "/problems",
+      "audience": "user",
+      "auth": "required",
+      "permission": "problem.view",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:ed542ab9600a0b7282e557caa571f21375e7aec04f496826dee6df109a015fc9"
+      ]
+    },
+    {
+      "operationId": "getProblem",
+      "handler": "GetProblem",
+      "method": "GET",
+      "path": "/problems/{id}",
+      "audience": "user",
+      "auth": "required",
+      "permission": "problem.view",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:c460627a1806b462b2f3b39f3894aa508f9db3ae96a0f7d7a3a4946c250f76f0"
+      ]
+    },
+    {
+      "operationId": "problemReady",
+      "handler": "ProblemReady",
+      "method": "GET",
+      "path": "/readyz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": []
+    },
+    {
+      "operationId": "getProblemPackage",
+      "handler": "GetProblemPackage",
+      "method": "GET",
+      "path": "/problems/{id}/package",
+      "audience": "user",
+      "auth": "required",
+      "permission": "problem.testdata.read",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "listPackageCases",
+      "handler": "ListPackageCases",
+      "method": "GET",
+      "path": "/problems/{id}/package/cases",
+      "audience": "user",
+      "auth": "required",
+      "permission": "problem.testdata.read",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:38df22c1b874992fd92e5b03a12d752031a2e68566c4b0513b4de350e8786b43"
+      ]
+    },
+    {
+      "operationId": "listTestCases",
+      "handler": "ListTestCases",
+      "method": "GET",
+      "path": "/problems/{id}/test-cases",
+      "audience": "user",
+      "auth": "required",
+      "permission": "problem.testdata.read",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:38df22c1b874992fd92e5b03a12d752031a2e68566c4b0513b4de350e8786b43"
+      ]
+    },
+    {
+      "operationId": "validateProblemPackage",
+      "handler": "ValidateProblemPackage",
+      "method": "POST",
+      "path": "/problems/{id}/package/validate",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.testdata.read",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": []
+    },
+    {
+      "operationId": "addTestCase",
+      "handler": "AddTestCase",
+      "method": "POST",
+      "path": "/problems/{id}/test-cases",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.testdata.write",
+      "requestSchemaDigests": [
+        "sha256:c4a3b8520a47b06e2e2ac9c07ff79778f57647d417331ecfdc73865731212800"
+      ],
+      "responseSchemaDigests": [
+        "sha256:c3570966e16dc7296f59b8f00014fa393858ceef47a88905215a27a5c934dfb2"
+      ]
+    },
+    {
+      "operationId": "deleteTestCase",
+      "handler": "DeleteTestCase",
+      "method": "DELETE",
+      "path": "/problems/{id}/test-cases/{case_no}",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.testdata.write",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:dfcd1e653de172182efa2ed16260de864cd2075d4b2d710371e3b492f724a300"
+      ]
+    },
+    {
+      "operationId": "updateTestCase",
+      "handler": "UpdateTestCase",
+      "method": "PUT",
+      "path": "/problems/{id}/test-cases/{case_no}",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "problem.testdata.write",
+      "requestSchemaDigests": [
+        "sha256:c4a3b8520a47b06e2e2ac9c07ff79778f57647d417331ecfdc73865731212800"
+      ],
+      "responseSchemaDigests": [
+        "sha256:c3570966e16dc7296f59b8f00014fa393858ceef47a88905215a27a5c934dfb2"
+      ]
+    }
+  ]
+}

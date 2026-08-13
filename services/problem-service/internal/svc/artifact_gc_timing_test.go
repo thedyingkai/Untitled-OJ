@@ -32,7 +32,7 @@ func TestConfiguredArtifactGCDeleteTimingRejectsLegacyEnvironment(t *testing.T) 
 func boundStoreWithDeleteTimeout(timeoutMS uint64) *artifactgc.BoundObjectStore {
 	return &artifactgc.BoundObjectStore{Context: servicecontext.ServiceContext{
 		Bindings: map[string]servicecontext.APIBinding{
-			"storage_delete": {
+			"storage.object.delete": {
 				BindingID: "delete",
 				APIID:     "storage.object.delete",
 				BasePath:  "/internal/apis/storage.object.delete",

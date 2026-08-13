@@ -1,0 +1,14 @@
+schemaVersion: ojos.dev/migration-oci/v1
+artifactSlot: user-migration-v1
+resource: profiles
+engine: postgresql
+entrypoint: ["/ojos-migrate"]
+command: ["apply", "/migrations"]
+transactions: required
+files:
+  - 000001_user_profile_schema.up.sql
+rollbackFiles:
+  - 000001_user_profile_schema.down.sql
+labels:
+  dev.ojos.migration.id: user-schema-v1
+  dev.ojos.resource.kind: postgresql.database/v1

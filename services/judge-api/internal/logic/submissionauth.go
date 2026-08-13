@@ -19,20 +19,29 @@ func requireSubmissionViewPermission(
 	if !ok || user == nil || user.UserID <= 0 {
 		return errors.New("unauthorized")
 	}
-
-	if submission.UserID == user.UserID {
-		return nil
-	}
-
 	checker := svcCtx.ActivePermissionChecker()
 	if checker == nil {
 		return errors.New("permission checker is not configured")
+	}
+	// Mirror the operation-level OpenAPI/Gateway permission even for direct
+	// provider calls, then apply the row-level escalation for another user's
+	// submission.
+	if err := checker.RequireUserPermission(
+		ctx,
+		user.UserID,
+		"judge.submission.view.own",
+		sharedperm.SystemScope(),
+	); err != nil {
+		return err
+	}
+	if submission.UserID == user.UserID {
+		return nil
 	}
 
 	ok, err := checker.HasUserPermission(
 		ctx,
 		user.UserID,
-		"submission.view.all",
+		"judge.submission.view.all",
 		sharedperm.SystemScope(),
 	)
 	if err != nil {
@@ -42,12 +51,7 @@ func requireSubmissionViewPermission(
 		return nil
 	}
 
-	return checker.RequireUserPermission(
-		ctx,
-		user.UserID,
-		"problem.manage.data",
-		sharedperm.Scope{Type: "problem", ID: submission.ProblemID},
-	)
+	return sharedperm.ErrForbidden
 }
 
 func requireSubmissionDebugPermission(
@@ -68,7 +72,7 @@ func requireSubmissionDebugPermission(
 	ok, err := checker.HasUserPermission(
 		ctx,
 		user.UserID,
-		"submission.view.all",
+		"judge.submission.view.all",
 		sharedperm.SystemScope(),
 	)
 	if err != nil {
@@ -78,10 +82,5 @@ func requireSubmissionDebugPermission(
 		return nil
 	}
 
-	return checker.RequireUserPermission(
-		ctx,
-		user.UserID,
-		"problem.manage.data",
-		sharedperm.Scope{Type: "problem", ID: submission.ProblemID},
-	)
+	return sharedperm.ErrForbidden
 }

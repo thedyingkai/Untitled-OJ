@@ -1,0 +1,142 @@
+openapi: 3.1.0
+info:
+  title: OJOS Problem Read API
+  version: 1.0.0
+x-ojos-api-id: problem.problem.read
+x-ojos-service:
+  id: problem-service
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    ProblemId:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+  schemas:
+    LanguageLimit:
+      type: object
+      additionalProperties: false
+      required: [language, time_limit_ms, memory_limit_mb]
+      properties:
+        language: {type: string}
+        time_limit_ms: {type: integer, minimum: 1}
+        memory_limit_mb: {type: integer, minimum: 1}
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [id, problem_no, slug, title, statement, statement_format, solution, solution_format, problem_type, visibility, manifest_sha256, source_format, status, difficulty, tags, time_limit_ms, memory_limit_mb, language_limits, created_by, created_at, updated_at]
+      properties:
+        id: {type: integer, format: int64, minimum: 1}
+        problem_no: {type: string}
+        slug: {type: string}
+        title: {type: string}
+        statement: {type: string}
+        statement_format: {type: string}
+        solution: {type: string}
+        solution_format: {type: string}
+        problem_type: {type: string}
+        visibility: {type: string, enum: [private, public]}
+        manifest_sha256: {type: string}
+        source_format: {type: string}
+        status: {type: string, enum: [draft, ready, published, archived]}
+        difficulty: {type: string}
+        tags: {type: string}
+        time_limit_ms: {type: integer, minimum: 1}
+        memory_limit_mb: {type: integer, minimum: 1}
+        language_limits: {type: array, items: {$ref: '#/components/schemas/LanguageLimit'}}
+        created_by: {type: integer, format: int64, minimum: 0}
+        created_at: {type: string}
+        updated_at: {type: string}
+        samples:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [case_no, input, output]
+            properties:
+              case_no: {type: integer, minimum: 1}
+              input: {type: string}
+              output: {type: string}
+    ProblemResponse:
+      type: object
+      additionalProperties: false
+      required: [problem]
+      properties: {problem: {$ref: '#/components/schemas/Problem'}}
+    ProblemList:
+      type: object
+      additionalProperties: false
+      required: [problems, total]
+      properties:
+        problems: {type: array, items: {$ref: '#/components/schemas/Problem'}}
+        total: {type: integer, format: int64, minimum: 0}
+    Error:
+      type: object
+      additionalProperties: true
+      properties:
+        code: {}
+        msg: {type: string}
+        message: {type: string}
+paths:
+  /problems:
+    get:
+      operationId: listProblems
+      x-ojos-audience: user
+      x-ojos-permission: problem.view
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      parameters:
+        - {name: page, in: query, required: false, schema: {type: integer, minimum: 1}}
+        - {name: page_size, in: query, required: false, schema: {type: integer, minimum: 1}}
+        - {name: keyword, in: query, required: false, schema: {type: string}}
+        - {name: visibility, in: query, required: false, schema: {type: string}}
+        - {name: difficulty, in: query, required: false, schema: {type: string}}
+        - {name: tags, in: query, required: false, schema: {type: string}}
+      responses:
+        '200':
+          description: Problem list
+          content: {application/json: {schema: {$ref: '#/components/schemas/ProblemList'}}}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.view}
+        '500': {description: Server error}
+  /problems/{id}:
+    parameters: [{$ref: '#/components/parameters/ProblemId'}]
+    get:
+      operationId: getProblem
+      x-ojos-audience: user
+      x-ojos-permission: problem.view
+      x-ojos-secondary-permissions: [problem.view.private]
+      x-ojos-scope: {type: problem, pathParameter: id}
+      security: [{ojosBearer: []}]
+      responses:
+        '200':
+          description: Problem detail; private rows additionally require problem.view.private or ownership.
+          content: {application/json: {schema: {$ref: '#/components/schemas/ProblemResponse'}}}
+        '401': {description: User authentication required}
+        '403': {description: Missing the row-specific read permission}
+        '404': {description: Problem not found}
+  /healthz:
+    get:
+      operationId: problemHealth
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties: {status: {const: ok}}
+  /readyz:
+    get:
+      operationId: problemReady
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200': {description: Database, event transport, credential, and all required API bindings are ready}
+        '503': {description: A required dependency is unavailable}

@@ -24,7 +24,7 @@ import (
 var configFile = flag.String("f", "etc/problemapi.yaml", "the config file")
 
 func main() {
-	if handled, err := servicehealth.RunIfRequested(os.Args, "http://127.0.0.1:8083/health"); handled {
+	if handled, err := servicehealth.RunIfRequested(os.Args, "http://127.0.0.1:8083/readyz"); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -48,9 +48,10 @@ func main() {
 	defer server.Stop()
 
 	server.Use(sharedmw.RecoveryMiddleware(svcCtx.Logger))
-	server.Use(sharedmw.LoggingMiddleware(svcCtx.Logger, svcCtx.Tracer))
+	server.Use(sharedmw.ServiceLoggingMiddleware("problem-service", svcCtx.Logger, svcCtx.Tracer))
 
 	handler.RegisterHandlers(server, svcCtx)
+	sharedmw.RegisterMetricsRoute(server)
 
 	fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
 	server.Start()

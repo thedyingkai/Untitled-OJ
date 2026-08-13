@@ -79,9 +79,11 @@ type InternalAuthConfig struct {
 }
 
 type OrchestratorConfig struct {
-	Endpoint      string
-	InternalToken string
-	NodeID        string `json:",optional"`
+	Endpoint             string
+	InternalToken        string
+	ManagementToken      string `json:",optional"`
+	ContributionAckToken string `json:",optional"`
+	NodeID               string `json:",optional"`
 }
 
 type AuthServiceConfig struct {

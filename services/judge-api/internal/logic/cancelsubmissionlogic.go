@@ -41,7 +41,7 @@ func (l *CancelSubmissionLogic) CancelSubmission(req *types.CancelSubmissionReq)
 		return nil, errors.New("invalid submission id")
 	}
 
-	submission, err := l.svcCtx.Repo.GetSubmission(l.ctx, req.Id)
+	_, err = l.svcCtx.Repo.GetSubmission(l.ctx, req.Id)
 	if err != nil {
 		if errors.Is(err, repository.ErrSubmissionNotFound) {
 			return nil, errors.New("submission not found")
@@ -56,8 +56,8 @@ func (l *CancelSubmissionLogic) CancelSubmission(req *types.CancelSubmissionReq)
 	if err := permissions.RequireUserPermission(
 		l.ctx,
 		user.UserID,
-		"problem.manage.data",
-		sharedperm.Scope{Type: "problem", ID: submission.ProblemID},
+		"judge.submission.manage",
+		sharedperm.SystemScope(),
 	); err != nil {
 		return nil, err
 	}

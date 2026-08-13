@@ -19,6 +19,16 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Path:    "/health",
 				Handler: healthHandler(serverCtx),
 			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/healthz",
+				Handler: healthHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/readyz",
+				Handler: readyHandler(serverCtx),
+			},
 		},
 	)
 
@@ -28,36 +38,67 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 			[]rest.Route{
 				{
 					Method:  http.MethodGet,
-					Path:    "/:user_id/preferences",
-					Handler: getPreferencesHandler(serverCtx),
+					Path:    "/api/users/me",
+					Handler: requireOperationPermission(serverCtx, "user.profile.read.self", getMyProfileHandler(serverCtx)),
 				},
 				{
 					Method:  http.MethodPatch,
-					Path:    "/:user_id/preferences",
-					Handler: updatePreferencesHandler(serverCtx),
+					Path:    "/api/users/me",
+					Handler: requireOperationPermission(serverCtx, "user.profile.update.self", updateMeHandler(serverCtx)),
 				},
 				{
 					Method:  http.MethodGet,
-					Path:    "/:user_id/profile",
-					Handler: getProfileHandler(serverCtx),
+					Path:    "/api/users/me/preferences",
+					Handler: requireOperationPermission(serverCtx, "user.profile.read.self", getMyPreferencesHandler(serverCtx)),
 				},
 				{
 					Method:  http.MethodPatch,
-					Path:    "/:user_id/profile",
-					Handler: updateProfileHandler(serverCtx),
+					Path:    "/api/users/me/preferences",
+					Handler: requireOperationPermission(serverCtx, "user.profile.update.self", updateMyPreferencesHandler(serverCtx)),
 				},
 				{
 					Method:  http.MethodGet,
-					Path:    "/:user_id/stats",
-					Handler: getStatsHandler(serverCtx),
+					Path:    "/admin/users/:user_id/profile",
+					Handler: requireOperationPermission(serverCtx, "user.profile.read.any", adminGetProfileHandler(serverCtx)),
+				},
+				{
+					Method:  http.MethodPatch,
+					Path:    "/admin/users/:user_id/profile",
+					Handler: requireOperationPermission(serverCtx, "user.profile.update.any", adminUpdateProfileHandler(serverCtx)),
 				},
 				{
 					Method:  http.MethodGet,
-					Path:    "/me",
-					Handler: getMeHandler(serverCtx),
+					Path:    "/admin/users/:user_id/stats",
+					Handler: requireOperationPermission(serverCtx, "user.stats.read", adminGetStatsHandler(serverCtx)),
+				},
+				{
+					Method:  http.MethodGet,
+					Path:    "/admin/users/:user_id/preferences",
+					Handler: requireOperationPermission(serverCtx, "user.profile.read.any", adminGetPreferencesHandler(serverCtx)),
+				},
+				{
+					Method:  http.MethodPatch,
+					Path:    "/admin/users/:user_id/preferences",
+					Handler: requireOperationPermission(serverCtx, "user.profile.update.any", adminUpdatePreferencesHandler(serverCtx)),
 				},
 			}...,
 		),
-		rest.WithPrefix("/api/users"),
+	)
+
+	if serverCtx.Managed {
+		return
+	}
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.UserContextMiddleware},
+			[]rest.Route{
+				{Method: http.MethodGet, Path: "/api/users/:user_id/preferences", Handler: getPreferencesHandler(serverCtx)},
+				{Method: http.MethodPatch, Path: "/api/users/:user_id/preferences", Handler: updatePreferencesHandler(serverCtx)},
+				{Method: http.MethodGet, Path: "/api/users/:user_id/profile", Handler: getProfileHandler(serverCtx)},
+				{Method: http.MethodPatch, Path: "/api/users/:user_id/profile", Handler: updateProfileHandler(serverCtx)},
+				{Method: http.MethodGet, Path: "/api/users/:user_id/stats", Handler: getStatsHandler(serverCtx)},
+			}...,
+		),
 	)
 }

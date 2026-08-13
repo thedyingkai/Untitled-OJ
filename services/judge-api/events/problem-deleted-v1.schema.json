@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ojos.local/events/problem-deleted-v1.schema.json",
+  "title": "OJOS Problem Deleted Event v1",
+  "type": "object",
+  "required": ["problem_id", "aggregate_version"],
+  "properties": {
+    "problem_id": {"type": "integer", "minimum": 1},
+    "aggregate_version": {"type": "integer", "minimum": 1}
+  },
+  "additionalProperties": false
+}

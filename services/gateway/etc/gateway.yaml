@@ -32,21 +32,6 @@ Proxy:
       StripPrefix: /api
       HealthCheckID: auth-service-health
 
-    - ServiceID: problem-service
-      Target: http://problem-service:8083
-      StripPrefix: /api
-      HealthCheckID: problem-service-health
-
-    - ServiceID: user-service
-      Target: http://user-service:8084
-      StripPrefix: /api
-      HealthCheckID: user-service-health
-
-    - ServiceID: judge-api
-      Target: http://judge-api:8082
-      StripPrefix: /api
-      HealthCheckID: judge-api-health
-
   Routes:
     - Prefix: /api/auth
       Target: http://auth-service:8081
@@ -54,39 +39,10 @@ Proxy:
       AuthMode: optional
       TimeoutMS: 30000
 
-    - Prefix: /api/judge/worker
-      Target: http://judge-api:8082
-      StripPrefix: /api
-      AuthMode: none
-      TimeoutMS: 35000
-
-    - Prefix: /api/judge
-      Target: http://judge-api:8082
-      StripPrefix: /api
-      AuthMode: required
-      TimeoutMS: 30000
-
-    - Prefix: /api/problem
-      Target: http://problem-service:8083
-      StripPrefix: /api
-      AuthMode: required
-      TimeoutMS: 30000
-
-    - Prefix: /api/users
-      Target: http://user-service:8084
-      StripPrefix: /api
-      AuthMode: required
-      TimeoutMS: 30000
-
 ServiceStatus:
   ComposeServices:
     - auth-service
-    - user-service
-    - storage-service
     - gateway
-    - problem-service
-    - judge-api
-    - judge-worker
 
 InternalAuth:
   Enabled: true
@@ -99,6 +55,7 @@ InternalAuth:
 Orchestrator:
   Endpoint: ""
   InternalToken: ""
+  ContributionAckToken: ""
   NodeID: ""
 
 AuthService:

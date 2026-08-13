@@ -22,6 +22,16 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Path:    "/health",
 				Handler: healthHandler(serverCtx),
 			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/healthz",
+				Handler: healthHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/readyz",
+				Handler: readyHandler(serverCtx),
+			},
 		},
 	)
 
@@ -146,7 +156,9 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 		Path:    "/worker/tasks/claim",
 		Handler: workerClaimTasksHandler(serverCtx),
 	}}
-	registerWorkerRoutes(server, serverCtx, "/judge", workerRoutes, workerClaimRoutes)
+	if !serverCtx.Managed {
+		registerWorkerRoutes(server, serverCtx, "/judge", workerRoutes, workerClaimRoutes)
+	}
 	// Service Contract v2 paths are provider-native and therefore retain the
 	// public /api prefix. The legacy /judge prefix remains for the development
 	// Compose gateway, which historically strips /api before proxying.

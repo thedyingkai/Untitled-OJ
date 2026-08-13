@@ -46,8 +46,19 @@ func TestAuthTopologyStatusReportsEffectiveProjectionDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	serviceContext := &svc.ServiceContext{
-		Config:             config.Config{InternalAuth: config.InternalAuthConfig{Token: "management-token"}},
+		Config: config.Config{
+			InternalAuth: config.InternalAuthConfig{Token: "generic-internal-token"},
+			Orchestrator: config.OrchestratorConfig{ManagementToken: "management-token"},
+		},
 		TopologyProjection: store,
+	}
+	unauthorizedRequest := httptest.NewRequest(http.MethodGet, "/api/v1/topologies/primary", nil)
+	unauthorizedRequest.Header.Set("Authorization", "Bearer generic-internal-token")
+	unauthorizedRequest = pathvar.WithVars(unauthorizedRequest, map[string]string{"id": "primary"})
+	unauthorizedRecorder := httptest.NewRecorder()
+	topologyProjectionHandler(serviceContext).ServeHTTP(unauthorizedRecorder, unauthorizedRequest)
+	if unauthorizedRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("generic Auth token reached topology provider: %d", unauthorizedRecorder.Code)
 	}
 
 	httpRequest := httptest.NewRequest(http.MethodGet, "/api/v1/topologies/primary", nil)

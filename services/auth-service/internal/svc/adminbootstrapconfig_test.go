@@ -36,7 +36,9 @@ func TestAdminBootstrapEnvironmentOverridesAreExplicit(t *testing.T) {
 	t.Setenv("AUTH_ADMIN_BOOTSTRAP_SECRET", inline)
 	t.Setenv("AUTH_ADMIN_BOOTSTRAP_SECRET_FILE", "")
 	var cfg config.Config
-	applyEnvOverrides(&cfg)
+	if err := applyEnvOverrides(&cfg); err != nil {
+		t.Fatal(err)
+	}
 	secret, enabled, err := resolveAdminBootstrapSecret(cfg.AdminBootstrap)
 	if err != nil {
 		t.Fatal(err)
@@ -47,10 +49,18 @@ func TestAdminBootstrapEnvironmentOverridesAreExplicit(t *testing.T) {
 }
 
 func TestResolveAdminBootstrapSecretFailsClosedOnAmbiguousOrWeakConfig(t *testing.T) {
+	directory := t.TempDir()
+	oversized := filepath.Join(t.TempDir(), "oversized")
+	if err := os.WriteFile(oversized, []byte(strings.Repeat("a", maxAdminBootstrapSecretBytes+3)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for name, cfg := range map[string]config.AdminBootstrapConfig{
-		"both sources": {Secret: strings.Repeat("a", 32), SecretFile: "unused"},
-		"weak inline":  {Secret: "too-short"},
-		"missing file": {SecretFile: filepath.Join(t.TempDir(), "missing")},
+		"both sources":   {Secret: strings.Repeat("a", 32), SecretFile: "unused"},
+		"weak inline":    {Secret: "too-short"},
+		"invalid token":  {Secret: strings.Repeat("a", 31) + "+"},
+		"missing file":   {SecretFile: filepath.Join(t.TempDir(), "missing")},
+		"directory":      {SecretFile: directory},
+		"oversized file": {SecretFile: oversized},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, _, err := resolveAdminBootstrapSecret(cfg); err == nil {

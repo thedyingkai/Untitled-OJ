@@ -1,0 +1,81 @@
+{
+  "schemaVersion": "ojos.dev/build-input/v1",
+  "serviceId": "user-service",
+  "serviceVersion": "0.1.0",
+  "contractDigest": "sha256:ebf87a2199d3cf3e0a7d9c7621ac2f161537b8485acedcfd3abb5e1b8b23a986",
+  "generatedFiles": 19,
+  "artifactRequirements": [
+    {
+      "role": "config-schema",
+      "slot": "config.schema",
+      "expectedDigest": "sha256:bfbaab92dbfb3cc29fc4af30106cdcfe23dae68d0d2c7342e5b67e23374d6bee",
+      "expectedSize": null
+    },
+    {
+      "role": "contract",
+      "slot": "contract",
+      "expectedDigest": "sha256:ebf87a2199d3cf3e0a7d9c7621ac2f161537b8485acedcfd3abb5e1b8b23a986",
+      "expectedSize": 17827
+    },
+    {
+      "role": "events-manifest",
+      "slot": "events",
+      "expectedDigest": "sha256:08bd3b65e1a5790fffed0ef69e19034c286f51f5e3dd2e2e0188e6059fe30981",
+      "expectedSize": 32
+    },
+    {
+      "role": "frontend-manifest:user-service.admin",
+      "slot": "frontend.user-service.admin.manifest",
+      "expectedDigest": "sha256:af8724ca24a112b1351e4c5ae74d41f763bc91d46a2986f9b80295d4364e3239",
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-manifest:user-service.user",
+      "slot": "frontend.user-service.user.manifest",
+      "expectedDigest": "sha256:f8b9da26816c3918f9f8258a82610f8369aa3f79c374563b65827c04587d838d",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:user-service.api",
+      "slot": "openapi.user-service.api",
+      "expectedDigest": "sha256:0d703e0e0758df88247b3bdd0c4e45a68ed82b8d2b02cc211bfbdecb5741f5ef",
+      "expectedSize": null
+    },
+    {
+      "role": "provenance",
+      "slot": "provenance",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "sbom",
+      "slot": "sbom",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-bundle:user-service.admin",
+      "slot": "user-admin-frontend",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-bundle:user-service.user",
+      "slot": "user-frontend",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "migration:user-schema-v1",
+      "slot": "user-migration-v1",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "runtime",
+      "slot": "user-runtime",
+      "expectedDigest": null,
+      "expectedSize": null
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import (
 	"ojos-gateway/internal/authclient"
 	"ojos-gateway/internal/svc"
 	sharedjwt "ojos-shared/security/jwt"
+	sharedperm "ojos-shared/security/permission"
 )
 
 func requireAdmin(ctx context.Context, svcCtx *svc.ServiceContext, authHeader string) error {
@@ -40,6 +41,9 @@ func requireAdminClaims(ctx context.Context, svcCtx *svc.ServiceContext, authHea
 }
 
 var hasSystemAdminPermission = func(ctx context.Context, svcCtx *svc.ServiceContext, authHeader string, userID int64) (bool, error) {
+	if svcCtx != nil && svcCtx.PermissionChecker != nil {
+		return svcCtx.PermissionChecker.HasUserPermission(ctx, userID, "system.admin", sharedperm.SystemScope())
+	}
 	if svcCtx == nil || svcCtx.AuthClient == nil {
 		return false, errors.New("auth-service permission client is not configured")
 	}

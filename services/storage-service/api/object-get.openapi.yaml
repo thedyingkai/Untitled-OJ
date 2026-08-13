@@ -1,0 +1,55 @@
+openapi: 3.1.0
+info:
+  title: OJOS Storage Object Get API
+  version: 1.0.0
+x-ojos-api-id: storage.object.get
+x-ojos-service:
+  id: storage-service
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    Bucket: {name: bucket, in: path, required: true, schema: {type: string, pattern: '^[a-z0-9][a-z0-9.-]{1,62}$'}}
+    Key: {name: key, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 1024, pattern: '^[^/]+$'}}
+security: [{ojosBearer: []}]
+paths:
+  /{bucket}/{key}:
+    parameters:
+      - {$ref: '#/components/parameters/Bucket'}
+      - {$ref: '#/components/parameters/Key'}
+    get:
+      operationId: getStorageObject
+      x-ojos-audience: internal
+      x-ojos-permission: storage.object.read
+      x-ojos-scope: system
+      responses:
+        '200':
+          description: Stored object stream with authoritative content identity headers
+          headers:
+            X-OJOS-Object-Sha256:
+              required: true
+              schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+            Content-Length:
+              required: true
+              schema: {type: integer, format: int64, minimum: 0}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary, maxLength: 536870912}
+        '401': {description: A valid bound workload identity is required}
+        '404': {description: Object not found}
+  /healthz:
+    get:
+      operationId: storageHealth
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200': {description: Process is alive}
+  /readyz:
+    get:
+      operationId: storageReady
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200': {description: Configured object backend and all buckets are reachable}
+        '503': {description: Object backend is unavailable}

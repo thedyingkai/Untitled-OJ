@@ -20,6 +20,17 @@ type ProfilePatchReq struct {
 	Preferences  map[string]string `json:"preferences,optional"`
 }
 
+type MyProfilePatchReq struct {
+	DisplayName  string            `json:"display_name,optional"`
+	Bio          string            `json:"bio,optional"`
+	AvatarObject string            `json:"avatar_object,optional"`
+	Preferences  map[string]string `json:"preferences,optional"`
+}
+
+type MyPreferencesPatchReq struct {
+	Preferences map[string]string `json:"preferences"`
+}
+
 type ProfileReq struct {
 	UserId string `path:"user_id"`
 }

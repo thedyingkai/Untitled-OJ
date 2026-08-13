@@ -1,0 +1,32 @@
+schemaVersion: ojos.dev/migration-oci/v1
+artifactSlot: problem-migration-v1
+resource: problems
+engine: postgresql
+entrypoint: ["/ojos-migrate"]
+command: ["apply", "/migrations"]
+transactions: required
+nonTransactionalFiles:
+  - file: 000006_problem_files_storage_path_index.up.sql
+    sha256: 1ce67c6828f6d034326186cb21250fbf2442abc98b5ec170067c529bc037b686
+    reason: PostgreSQL CREATE INDEX CONCURRENTLY
+files:
+  - 000001_problem_schema.up.sql
+  - 000002_problem_content_limits.up.sql
+  - 000003_problem_projection_events.up.sql
+  - 000004_problem_artifact_upload_intents.up.sql
+  - 000005_problem_content_upload_intents.up.sql
+  - 000006_problem_files_storage_path_index.up.sql
+  - 000007_problem_artifact_gc_needs_attention.up.sql
+  - 000008_problem_artifact_gc_operator_api.up.sql
+rollbackFiles:
+  - 000001_problem_schema.down.sql
+  - 000002_problem_content_limits.down.sql
+  - 000003_problem_projection_events.down.sql
+  - 000004_problem_artifact_upload_intents.down.sql
+  - 000005_problem_content_upload_intents.down.sql
+  - 000006_problem_files_storage_path_index.down.sql
+  - 000007_problem_artifact_gc_needs_attention.down.sql
+  - 000008_problem_artifact_gc_operator_api.down.sql
+labels:
+  dev.ojos.migration.id: problem-schema-v1
+  dev.ojos.resource.kind: postgresql.database/v1

@@ -1,0 +1,47 @@
+apiVersion: ojos.dev/v1
+kind: Service
+metadata:
+  id: auth-service
+  version: 0.1.0
+  displayName: Auth Service
+  permissionNamespace: auth
+  permissionReferences:
+    - system.admin
+runtime:
+  profile: standard-container-v1
+  artifact: auth-runtime
+  httpPort: 8081
+  health:
+    path: /readyz
+provides:
+  apis:
+    - document: api/openapi.yaml
+    - document: api/permission-check.openapi.yaml
+    - document: api/control.openapi.yaml
+resources:
+  - name: auth
+    type: postgresql.database/v1
+    lifecycle: retain
+migrations:
+  - id: auth-schema-v1
+    artifact: auth-migration-v1
+    resource: auth
+permissions:
+  - key: auth.permission.check
+    title: Evaluate delegated permissions
+  - key: auth.control
+    title: Operate the Auth control plane
+exposures:
+  - id: public-auth
+    api: auth-service.api
+    audience: public
+    mount: /
+  - id: user-auth
+    api: auth-service.api
+    audience: user
+    mount: /
+  - id: admin-auth
+    api: auth-service.api
+    audience: admin
+    mount: /
+configSchema: config.schema.json

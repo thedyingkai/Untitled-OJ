@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"ojos-problem-events/problemv1"
 	"ojos-problem-service/internal/artifactgc"
 	"ojos-problem-service/internal/config"
 	"ojos-problem-service/internal/middleware"
@@ -23,8 +26,10 @@ import (
 
 	"ojos-shared/database"
 	sharedlogger "ojos-shared/logger"
+	"ojos-shared/resourceoutput"
 	"ojos-shared/security/internalauth"
 	sharedperm "ojos-shared/security/permission"
+	"ojos-shared/servicecontext"
 	"ojos-shared/tracing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -50,7 +55,9 @@ type ServiceContext struct {
 
 	Repo       *repository.Repository
 	Permission sharedperm.UserChecker
+	Context    *servicecontext.ContextProvider
 	ArtifactGC *ArtifactGCController
+	Managed    bool
 
 	InternalAuthMiddleware rest.Middleware
 	UserContextMiddleware  rest.Middleware
@@ -59,9 +66,20 @@ type ServiceContext struct {
 	backgroundWG     sync.WaitGroup
 }
 
+const (
+	permissionBindingName     = sharedperm.DefaultPermissionCheckApiID
+	storagePutBinding         = "storage.object.put"
+	storageHeadBinding        = "storage.object.head"
+	storageDeleteBinding      = "storage.object.delete"
+	defaultProblemsOutputFile = "/run/ojos/resources/problems/dsn"
+	managedProblemsRoot       = "/data/ojos/problems"
+)
+
 func NewServiceContext(c config.Config) *ServiceContext {
 	ctx := context.Background()
-	applyEnvOverrides(&c)
+	if err := applyEnvOverrides(&c); err != nil {
+		log.Fatalf("configure problem-service: %v", err)
+	}
 
 	zlog, err := sharedlogger.New(c.Name)
 	if err != nil {
@@ -80,7 +98,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 
 	eventContext, err := eventing.LoadEventContextForService(
 		"problem-service",
-		[]string{eventing.ProblemDeletedV1, eventing.ProblemSnapshotV1},
+		[]string{problemv1.DeletedType, problemv1.SnapshotType},
 		nil,
 	)
 	if err != nil {
@@ -111,14 +129,39 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		}
 	}
 	var eventRedis redis.UniversalClient = redisClient
-	permissionChecker, err := sharedperm.NewManagedOrLegacyUserChecker(
-		"problem-service",
-		sharedperm.DefaultPermissionCheckBinding,
-		permissionCheckerConfig(c),
-		db,
-	)
+	var contextProvider *servicecontext.ContextProvider
+	var permissionChecker sharedperm.UserChecker
+	contextValue, err := servicecontext.LoadOptional()
 	if err != nil {
-		log.Fatalf("configure permission_check ApiBinding failed: %v", err)
+		log.Fatalf("load managed Service Context failed: %v", err)
+	}
+	if contextValue != nil {
+		if err := contextValue.RequireService("problem-service"); err != nil {
+			log.Fatalf("validate managed Service Context failed: %v", err)
+		}
+		contextPath := strings.TrimSpace(os.Getenv("OJOS_SERVICE_CONTEXT_FILE"))
+		if contextPath == "" {
+			contextPath = servicecontext.DefaultFile
+		}
+		contextProvider, err = servicecontext.NewContextProvider(contextPath, servicecontext.ProviderOptions{})
+		if err == nil {
+			permissionChecker, err = sharedperm.NewContextProviderUserChecker(contextProvider, permissionBindingName)
+		}
+		if err == nil {
+			err = contextProvider.Start(context.Background())
+		}
+		if err != nil {
+			_ = contextProvider.Close()
+			log.Fatalf("configure permission ApiBinding failed: %v", err)
+		}
+	} else {
+		if managedEnvironment() {
+			log.Fatal("managed problem-service requires an Agent Service Context")
+		}
+		permissionChecker = sharedperm.NewUserCheckerWithConfig(permissionCheckerConfig(c), db)
+		if permissionChecker == nil {
+			log.Fatal("configure permission checker failed")
+		}
 	}
 
 	internalAuthCfg := internalauth.Config{
@@ -143,7 +186,8 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	}
 
 	svcCtx := &ServiceContext{
-		Config: c,
+		Config:  c,
+		Managed: managedEnvironment(),
 
 		Logger:     zlog,
 		DB:         db,
@@ -154,6 +198,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 
 		Repo:       repository.New(db),
 		Permission: permissionChecker,
+		Context:    contextProvider,
 
 		InternalAuthMiddleware: middleware.NewInternalAuthMiddleware(
 			c.InternalAuth.Enabled,
@@ -171,25 +216,25 @@ func NewServiceContext(c config.Config) *ServiceContext {
 func (s *ServiceContext) startProjectionBackground() {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.backgroundCancel = cancel
-	stream := ""
+	var transport eventing.TransportConfig
 	if s.Events != nil {
-		stream = s.Events.Stream
+		transport = s.Events.PublisherTransport()
 	} else {
 		// Compatibility is intentionally limited to unmanaged development.
-		stream = strings.TrimSpace(os.Getenv("OJOS_PROBLEM_EVENT_STREAM"))
+		stream := strings.TrimSpace(os.Getenv("OJOS_PROBLEM_EVENT_STREAM"))
 		if stream == "" {
-			stream = "ojos:integration:problem:v1"
+			stream = eventing.DefaultEventStream
 		}
+		transport = eventing.DevelopmentPublisherTransport(stream)
 	}
-	relay := &eventing.Relay{
-		DB:            s.DB,
-		Redis:         s.EventRedis,
-		Stream:        stream,
-		RelayID:       s.Config.Name,
-		BatchSize:     100,
-		LeaseDuration: 30 * time.Second,
-		PollInterval:  250 * time.Millisecond,
+	relay, err := eventing.NewRelay(s.DB, s.EventRedis, transport)
+	if err != nil {
+		s.Logger.Fatal("configure event relay failed", zap.Error(err))
 	}
+	relay.RelayID = s.Config.Name
+	relay.BatchSize = 100
+	relay.LeaseDuration = 30 * time.Second
+	relay.PollInterval = 250 * time.Millisecond
 	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEM_EVENT_REPLAY_ON_START")); value == "1" || strings.EqualFold(value, "true") {
 		if replayed, err := relay.ReplayPublished(ctx); err != nil {
 			s.Logger.Warn("problem integration-event replay preparation failed", zap.Error(err))
@@ -249,6 +294,12 @@ func (s *ServiceContext) startArtifactGC(ctx context.Context) {
 		s.Logger.Error("problem artifact GC disabled: configure bound Storage", zap.Error(err))
 		return
 	}
+	s.backgroundWG.Add(1)
+	go func() {
+		defer s.backgroundWG.Done()
+		<-ctx.Done()
+		_ = store.Close()
+	}()
 	timing, err := configuredArtifactGCDeleteTiming(store)
 	if err != nil {
 		if production {
@@ -297,7 +348,7 @@ func envBool(key string) bool {
 }
 
 func envBoolDefault(key string, fallback bool) bool {
-	value := strings.TrimSpace(os.Getenv(key))
+	value := firstEnv(contractConfigEnv(key), key)
 	if value == "" {
 		return fallback
 	}
@@ -305,7 +356,7 @@ func envBoolDefault(key string, fallback bool) bool {
 }
 
 func envDuration(key string, fallback time.Duration) (time.Duration, error) {
-	value := strings.TrimSpace(os.Getenv(key))
+	value := firstEnv(contractConfigEnv(key), key)
 	if value == "" {
 		return fallback, nil
 	}
@@ -348,24 +399,51 @@ func permissionCheckerConfig(c config.Config) sharedperm.RemoteCheckerConfig {
 	}
 }
 
-func applyEnvOverrides(c *config.Config) {
-	if value := firstEnv("PROBLEM_DATABASE_URL", "DATABASE_URL", "POSTGRES_DSN"); value != "" {
+func applyEnvOverrides(c *config.Config) error {
+	managed := managedEnvironment()
+	if managed {
+		path := firstEnv("OJOS_RESOURCE_PROBLEMS_OUTPUT_FILE", "OJOS_RESOURCE_OUTPUT_FILE")
+		if path == "" {
+			path = defaultProblemsOutputFile
+		}
+		dsn, err := resourceoutput.ReadPostgreSQLDSN(path)
+		if err != nil {
+			return fmt.Errorf("load problems resource output: %w", err)
+		}
+		c.Database.Url = dsn
+		// The signed runtime volume contract owns this target. Managed workloads
+		// must never let inherited configuration redirect mutation journals or
+		// authoring trees onto the container root filesystem.
+		c.Storage.ProblemsRoot = managedProblemsRoot
+	} else if value := firstEnv("PROBLEM_DATABASE_URL", "DATABASE_URL", "POSTGRES_DSN"); value != "" {
 		c.Database.Url = value
-	}
-	if value := strings.TrimSpace(os.Getenv("REDIS_URL")); value != "" {
-		c.Redis.Url = value
 	}
 	if value := strings.TrimSpace(os.Getenv("JAEGER_ENDPOINT")); value != "" {
 		c.Jaeger.Endpoint = value
+	}
+	if !managed {
+		if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEMS_ROOT")); value != "" {
+			c.Storage.ProblemsRoot = value
+		}
+	}
+	if value := firstEnv("OJOS_CONFIG_STORAGE_BUCKET", "OJOS_PROBLEM_STORAGE_BUCKET"); value != "" {
+		c.Storage.Bucket = value
+	}
+	if managed {
+		// Agent materialization is the only production trust path. In
+		// particular, legacy direct service URLs and bearer tokens must not be
+		// copied into the effective managed configuration even when inherited
+		// from an old Compose environment.
+		return nil
+	}
+	if value := strings.TrimSpace(os.Getenv("REDIS_URL")); value != "" {
+		c.Redis.Url = value
 	}
 	if value := strings.TrimSpace(os.Getenv("AUTH_SERVICE_ENDPOINT")); value != "" {
 		c.AuthService.Endpoint = value
 	}
 	if value := firstEnv("AUTH_SERVICE_ADMIN_TOKEN", "AUTH_INTERNAL_TOKEN"); value != "" {
 		c.AuthService.AdminToken = value
-	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEMS_ROOT")); value != "" {
-		c.Storage.ProblemsRoot = value
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_SERVICE_URL")); value != "" {
 		c.Storage.ServiceEndpoint = value
@@ -378,9 +456,6 @@ func applyEnvOverrides(c *config.Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_HEAD_API_ID")); value != "" {
 		c.Storage.HeadApiID = value
-	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_PROBLEM_STORAGE_BUCKET")); value != "" {
-		c.Storage.Bucket = value
 	}
 	if value := firstEnv("OJOS_PROBLEM_SERVICE_TOKEN", "OJOS_SERVICE_TOKEN"); value != "" {
 		c.Storage.ServiceToken = value
@@ -411,6 +486,131 @@ func applyEnvOverrides(c *config.Config) {
 	if value := firstEnv("OJOS_PROBLEM_SERVICE_TOKEN", "OJOS_SERVICE_TOKEN"); value != "" {
 		c.AuthService.ServiceToken = value
 	}
+	return nil
+}
+
+func contractConfigEnv(legacy string) string {
+	switch legacy {
+	case "OJOS_PROBLEM_ARTIFACT_GC_ENABLED":
+		return "OJOS_CONFIG_ARTIFACTGC_ENABLED"
+	case "OJOS_PROBLEM_ARTIFACT_GC_DELETE":
+		return "OJOS_CONFIG_ARTIFACTGC_DELETE"
+	case "OJOS_PROBLEM_ARTIFACT_GC_RETENTION":
+		return "OJOS_CONFIG_ARTIFACTGC_RETENTION"
+	case "OJOS_PROBLEM_ARTIFACT_GC_INTERVAL":
+		return "OJOS_CONFIG_ARTIFACTGC_INTERVAL"
+	case "OJOS_PROBLEM_ARTIFACT_GC_CLAIM_LEASE":
+		return "OJOS_CONFIG_ARTIFACTGC_CLAIMLEASE"
+	default:
+		return ""
+	}
+}
+
+func managedEnvironment() bool {
+	value := strings.TrimSpace(os.Getenv("OJOS_MANAGED_WORKLOAD"))
+	return value == "1" || strings.EqualFold(value, "true") ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("OJOS_ENVIRONMENT")), "production")
+}
+
+func (s *ServiceContext) Ready(ctx context.Context) error {
+	if s == nil || s.DB == nil || s.DB.Ping(ctx) != nil {
+		return errors.New("claimed PostgreSQL database is unavailable")
+	}
+	if err := probeProblemsRoot(s.Config.Storage.ProblemsRoot); err != nil {
+		return fmt.Errorf("problem package volume is unavailable: %w", err)
+	}
+	if s.EventRedis == nil || s.EventRedis.Ping(ctx).Err() != nil {
+		return errors.New("event transport is unavailable")
+	}
+	if s.Context == nil {
+		if managedEnvironment() {
+			return errors.New("managed Service Context is unavailable")
+		}
+		return nil
+	}
+	_ = s.Context.ReloadNow()
+	snapshot, err := s.Context.Current(ctx)
+	if err != nil || snapshot.RequireService("problem-service") != nil {
+		return errors.New("managed Service Context is invalid")
+	}
+	required := map[string]string{
+		permissionBindingName: sharedperm.DefaultPermissionCheckApiID,
+		storagePutBinding:     storagePutBinding,
+		storageHeadBinding:    storageHeadBinding,
+		storageDeleteBinding:  storageDeleteBinding,
+	}
+	for name, apiID := range required {
+		binding, bindingErr := snapshot.Binding(name)
+		if bindingErr != nil || binding.APIID != apiID {
+			return fmt.Errorf("required API binding %s is unavailable", name)
+		}
+	}
+	if _, err := snapshot.Client(); err != nil {
+		return errors.New("required API client is unavailable")
+	}
+	if _, err := s.Context.Credential(ctx); err != nil {
+		return errors.New("workload credential is unavailable")
+	}
+	return nil
+}
+
+// probeProblemsRoot exercises the exact primitives required by the durable
+// mutation journal: a private file can be written and fsynced, atomically
+// renamed within the volume, and the containing directory can be synced. It
+// leaves no readiness artifact behind.
+func probeProblemsRoot(root string) error {
+	root = strings.TrimSpace(root)
+	if root == "" || !filepath.IsAbs(root) {
+		return errors.New("problems root must be an absolute path")
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("problems root is not a real directory")
+	}
+	temporary, err := os.CreateTemp(root, ".ojos-readiness-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	renamedPath := temporaryPath + ".renamed"
+	defer func() {
+		_ = temporary.Close()
+		_ = os.Remove(temporaryPath)
+		_ = os.Remove(renamedPath)
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := temporary.WriteString("ready\n"); err != nil {
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, renamedPath); err != nil {
+		return err
+	}
+	if runtime.GOOS != "windows" {
+		directory, err := os.Open(root)
+		if err != nil {
+			return err
+		}
+		syncErr := directory.Sync()
+		closeErr := directory.Close()
+		if err := errors.Join(syncErr, closeErr); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(renamedPath); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *ServiceContext) ActivePermissionChecker() sharedperm.UserChecker {
@@ -448,6 +648,9 @@ func (s *ServiceContext) Close(ctx context.Context) {
 
 	if s.EventRedis != nil && s.EventRedis != s.Redis {
 		_ = s.EventRedis.Close()
+	}
+	if s.Context != nil {
+		_ = s.Context.Close()
 	}
 
 	if s.Redis != nil {

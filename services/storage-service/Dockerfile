@@ -25,18 +25,14 @@ COPY platform/shared/go /platform/shared/go
 WORKDIR /app/storage-service
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/storage-service .
 
-FROM debian:bookworm-slim AS runtime
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 WORKDIR /app
 
-COPY --from=build /out/storage-service ./storage-service
-COPY --from=build /app/storage-service/etc ./etc
+COPY --from=build --chown=65532:65532 /out/storage-service ./storage-service
+COPY --from=build --chown=65532:65532 /app/storage-service/etc ./etc
 
-RUN mkdir -p /data/ojos/storage
+USER 65532:65532
 
 HEALTHCHECK --interval=2s --timeout=5s --start-period=5s --retries=30 CMD ["./storage-service", "healthcheck"]
 

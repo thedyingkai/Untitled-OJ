@@ -134,21 +134,7 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		return nil, err
 	}
 
-	files, err := submissionfs.CreateSubmissionFiles(submissionfs.CreateSubmissionFilesArgs{
-		Root:         l.svcCtx.Config.Storage.SubmissionsRoot,
-		SubmissionID: submissionID,
-		Language:     language,
-		SourceFile:   sourceFile,
-		Code:         req.Code,
-	})
-	if err != nil {
-		_ = submissions.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
-		return nil, err
-	}
-
-	codePath := files.CodePath
-	codeSha256 := files.CodeSha256
-	resultPath := files.ResultPath
+	var codePath, codeSha256, resultPath string
 	if storageEnabled(l.svcCtx.Config.Storage) {
 		stored, err := storeSubmissionSource(
 			l.ctx,
@@ -164,6 +150,24 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		codePath = stored.CodePath
 		codeSha256 = stored.CodeSha256
 		resultPath = stored.ResultPath
+	} else {
+		// Local files are an unmanaged development compatibility path. Managed
+		// deployments write directly through the storage ApiBindings, which keeps
+		// the runtime compatible with a read-only root filesystem.
+		files, err := submissionfs.CreateSubmissionFiles(submissionfs.CreateSubmissionFilesArgs{
+			Root:         l.svcCtx.Config.Storage.SubmissionsRoot,
+			SubmissionID: submissionID,
+			Language:     language,
+			SourceFile:   sourceFile,
+			Code:         req.Code,
+		})
+		if err != nil {
+			_ = submissions.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
+			return nil, err
+		}
+		codePath = files.CodePath
+		codeSha256 = files.CodeSha256
+		resultPath = files.ResultPath
 	}
 
 	if err := submissions.UpdateSubmissionSource(
@@ -182,10 +186,10 @@ func (l *CreateSubmissionLogic) CreateSubmission(req *types.CreateSubmissionReq)
 		return nil, err
 	}
 
-	if err := l.publishSubmissionCreated(submissionID); err != nil {
-		_ = submissions.MarkSubmissionSystemError(l.ctx, submissionID, err.Error())
-		return nil, err
-	}
+	// The PostgreSQL task above is the durable work record. Redis only wakes a
+	// worker sooner; a failed signal must not corrupt the submission state or
+	// turn a successful create into an API failure.
+	notifyJudgeTaskAvailable(l.ctx, l.svcCtx, "submission.created", "judge-api-service", submissionID)
 
 	return &types.CreateSubmissionResp{
 		SubmissionId: submissionID,
@@ -209,8 +213,4 @@ func ensureSubmissionProblemProjection(svcCtx *svc.ServiceContext, problem *repo
 		reason = "the projected artifact is incomplete or invalid; run reconcile before accepting submissions"
 	}
 	return problemProjectionNotReadyError{problemID: problem.ID, reason: reason}
-}
-
-func (l *CreateSubmissionLogic) publishSubmissionCreated(submissionID int64) error {
-	return publishJudgeTaskEvent(l.ctx, l.svcCtx, "submission.created", "judge-api-service", submissionID)
 }

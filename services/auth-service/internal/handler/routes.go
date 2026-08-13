@@ -42,6 +42,16 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 			},
 			{
 				Method:  http.MethodGet,
+				Path:    "/healthz",
+				Handler: runtimeHealthHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/readyz",
+				Handler: runtimeReadyHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
 				Path:    "/auth/.well-known/workload-jwks.json",
 				Handler: workloadJWKSHandler(serverCtx),
 			},
@@ -101,11 +111,6 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 					Method:  http.MethodDelete,
 					Path:    "/admin/permission-assignments",
 					Handler: revokePermissionHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/admin/permission-check",
-					Handler: permissionCheckHandler(serverCtx),
 				},
 				{
 					Method:  http.MethodGet,
@@ -263,6 +268,17 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 					Handler: profileHandler(serverCtx),
 				},
 			}...,
+		),
+		rest.WithPrefix("/auth"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.DelegatedPermissionMiddleware},
+			[]rest.Route{{
+				Method: http.MethodPost, Path: "/admin/permission-check",
+				Handler: permissionCheckHandler(serverCtx),
+			}}...,
 		),
 		rest.WithPrefix("/auth"),
 	)

@@ -1,0 +1,238 @@
+openapi: 3.1.0
+info:
+  title: OJOS User Service API
+  version: 0.1.0
+x-ojos-api-id: user-service.api
+x-ojos-service:
+  id: user-service
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, service]
+      properties:
+        status: {const: ok}
+        service: {const: user-service}
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message: {type: string}
+    UserStats:
+      type: object
+      additionalProperties: false
+      required: [solved_problems, submissions, accepted]
+      properties:
+        solved_problems: {type: integer, minimum: 0}
+        submissions: {type: integer, minimum: 0}
+        accepted: {type: integer, minimum: 0}
+    Preferences:
+      type: object
+      additionalProperties: {type: string}
+    Profile:
+      type: object
+      additionalProperties: false
+      required: [user_id, display_name, bio, avatar_object, preferences, stats, created_at, updated_at]
+      properties:
+        user_id: {type: string, pattern: '^[A-Za-z0-9_.-]{1,128}$'}
+        display_name: {type: string}
+        bio: {type: string}
+        avatar_object: {type: string}
+        preferences: {$ref: '#/components/schemas/Preferences'}
+        stats: {$ref: '#/components/schemas/UserStats'}
+        created_at: {type: string}
+        updated_at: {type: string}
+    ProfilePatch:
+      type: object
+      additionalProperties: false
+      properties:
+        display_name: {type: string}
+        bio: {type: string}
+        avatar_object: {type: string}
+        preferences: {$ref: '#/components/schemas/Preferences'}
+    PreferencesPatch:
+      type: object
+      additionalProperties: false
+      required: [preferences]
+      properties:
+        preferences: {$ref: '#/components/schemas/Preferences'}
+  parameters:
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[A-Za-z0-9_.-]{1,128}$'}
+paths:
+  /healthz:
+    get:
+      operationId: userHealth
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+  /readyz:
+    get:
+      operationId: userReady
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200':
+          description: Database and permission Binding are ready
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+        '503':
+          description: A required dependency is unavailable
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /api/users/me:
+    get:
+      operationId: getMyUserProfile
+      x-ojos-audience: user
+      x-ojos-permission: user.profile.read.self
+      security: [{ojosBearer: []}]
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+    patch:
+      operationId: updateMyUserProfile
+      x-ojos-audience: user
+      x-ojos-permission: user.profile.update.self
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProfilePatch'}
+      responses:
+        '200':
+          description: Updated current user profile
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+  /api/users/me/preferences:
+    get:
+      operationId: getMyUserPreferences
+      x-ojos-audience: user
+      x-ojos-permission: user.profile.read.self
+      security: [{ojosBearer: []}]
+      responses:
+        '200':
+          description: Current user preferences
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [preferences]
+                properties:
+                  preferences: {$ref: '#/components/schemas/Preferences'}
+    patch:
+      operationId: updateMyUserPreferences
+      x-ojos-audience: user
+      x-ojos-permission: user.profile.update.self
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PreferencesPatch'}
+      responses:
+        '200':
+          description: Updated current user profile
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+  /admin/users/{user_id}/profile:
+    parameters: [{$ref: '#/components/parameters/UserId'}]
+    get:
+      operationId: adminGetUserProfile
+      x-ojos-audience: admin
+      x-ojos-permission: user.profile.read.any
+      security: [{ojosBearer: []}]
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+    patch:
+      operationId: adminUpdateUserProfile
+      x-ojos-audience: admin
+      x-ojos-permission: user.profile.update.any
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProfilePatch'}
+      responses:
+        '200':
+          description: Updated user profile
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+  /admin/users/{user_id}/stats:
+    parameters: [{$ref: '#/components/parameters/UserId'}]
+    get:
+      operationId: adminGetUserStats
+      x-ojos-audience: admin
+      x-ojos-permission: user.stats.read
+      security: [{ojosBearer: []}]
+      responses:
+        '200':
+          description: User statistics
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserStats'}
+  /admin/users/{user_id}/preferences:
+    parameters: [{$ref: '#/components/parameters/UserId'}]
+    get:
+      operationId: adminGetUserPreferences
+      x-ojos-audience: admin
+      x-ojos-permission: user.profile.read.any
+      security: [{ojosBearer: []}]
+      responses:
+        '200':
+          description: User preferences
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [preferences]
+                properties:
+                  preferences: {$ref: '#/components/schemas/Preferences'}
+    patch:
+      operationId: adminUpdateUserPreferences
+      x-ojos-audience: admin
+      x-ojos-permission: user.profile.update.any
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PreferencesPatch'}
+      responses:
+        '200':
+          description: Updated user profile
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}

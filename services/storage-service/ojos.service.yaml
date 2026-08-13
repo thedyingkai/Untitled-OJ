@@ -1,0 +1,27 @@
+apiVersion: ojos.dev/v1
+kind: Service
+metadata:
+  id: storage-service
+  version: 0.1.0
+  displayName: Storage Service
+  permissionNamespace: storage
+runtime:
+  profile: standard-container-v1
+  artifact: storage-runtime
+  httpPort: 8085
+  health:
+    path: /readyz
+provides:
+  apis:
+    - document: api/object-put.openapi.yaml
+    - document: api/object-get.openapi.yaml
+    - document: api/object-head.openapi.yaml
+    - document: api/object-delete.openapi.yaml
+permissions:
+  - key: storage.object.write
+    title: Store immutable objects
+  - key: storage.object.read
+    title: Read stored objects
+  - key: storage.object.delete
+    title: Delete stored objects conditionally
+configSchema: config.schema.json

@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -10,7 +11,9 @@ import (
 	"ojos-judge-api/internal/svc"
 	"ojos-judge-api/internal/types"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
+	"github.com/zeromicro/go-zero/core/logx"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 )
@@ -19,6 +22,20 @@ const judgeSubmissionStreamMaxLen int64 = 10000
 const judgeSubmissionStream = "ojos:judge:task"
 const judgeResultStream = "ojos:judge:result"
 const judgeConsumerGroup = "judge-worker"
+
+var judgeTaskWakeupFailures = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "ojos",
+		Subsystem: "judge",
+		Name:      "task_wakeup_failures_total",
+		Help:      "Failed best-effort Redis wakeups for durable PostgreSQL judge tasks.",
+	},
+	[]string{"event_type", "producer"},
+)
+
+func init() {
+	prometheus.MustRegister(judgeTaskWakeupFailures)
+}
 
 func judgeTaskStreamName() string {
 	if value := strings.TrimSpace(os.Getenv("OJOS_JUDGE_TASK_STREAM")); value != "" {
@@ -51,6 +68,30 @@ func publishJudgeSignal(
 	return publishJudgeTaskEvent(ctx, svcCtx, eventType, producer, submissionID)
 }
 
+// notifyJudgeTaskAvailable treats Redis as a wakeup accelerator only. The
+// judge task stored in PostgreSQL is the durable source of work, so callers
+// must not roll back or fail an otherwise successful task transition when the
+// signal cannot be published. The bounded event type and producer fields keep
+// the failure log suitable for aggregation without introducing submission IDs
+// as labels or structured dimensions.
+func notifyJudgeTaskAvailable(
+	ctx context.Context,
+	svcCtx *svc.ServiceContext,
+	eventType string,
+	producer string,
+	submissionID int64,
+) {
+	if err := publishJudgeSignal(ctx, svcCtx, eventType, producer, submissionID); err != nil {
+		judgeTaskWakeupFailures.WithLabelValues(eventType, producer).Inc()
+		logx.WithContext(ctx).Errorf(
+			"judge task wakeup failed; PostgreSQL task remains authoritative: event_type=%s producer=%s error=%v",
+			eventType,
+			producer,
+			err,
+		)
+	}
+}
+
 func publishJudgeTaskEvent(
 	ctx context.Context,
 	svcCtx *svc.ServiceContext,
@@ -58,6 +99,9 @@ func publishJudgeTaskEvent(
 	producer string,
 	submissionID int64,
 ) error {
+	if svcCtx == nil || svcCtx.Redis == nil {
+		return errors.New("judge task wakeup redis is not configured")
+	}
 	if err := ensureJudgeTaskConsumerGroup(ctx, svcCtx); err != nil {
 		return err
 	}

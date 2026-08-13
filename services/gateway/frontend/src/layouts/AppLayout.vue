@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref, watch } from 'vue'
+import { computed, h, ref } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
   NBreadcrumb,
@@ -15,29 +15,25 @@ import {
   type MenuOption,
 } from 'naive-ui'
 
-import { getOrchestratorSnapshot } from '../api/services'
+import { userFrontendContributions } from '../ojos-frontend/shell-host'
 import { useAuthStore } from '../stores/auth'
-import type { ServiceMenuItem } from '../types/service'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const collapsed = ref(false)
-const serviceMenus = ref<ServiceMenuItem[]>([])
 
 const canUseAdmin = computed(
   () => auth.hasAnyRole(['super_admin', 'admin']) || auth.hasAnyPermission(['system.admin']),
 )
 
 const menuOptions = computed<MenuOption[]>(() => {
-  const primaryMenus = serviceMenuOptions(
-    serviceMenus.value.filter((item) => !item.route_path.startsWith('/admin')),
+  const primaryMenus = userFrontendContributions.value.menus.map((item) =>
+    menuLink(item.path, item.title),
   )
   const options: MenuOption[] = [
     menuLink('/dashboard', '总览'),
-    ...(primaryMenus.length > 0
-      ? primaryMenus
-      : [menuLink('/problems', '题库'), menuLink('/submissions', '提交')]),
+    ...primaryMenus,
     menuLink('/me', '账号'),
   ]
 
@@ -47,7 +43,6 @@ const menuOptions = computed<MenuOption[]>(() => {
       label: '管理',
       children: [
         menuLink('/admin/health', '健康'),
-        ...serviceMenuOptions(serviceMenus.value.filter((item) => item.route_path.startsWith('/admin'))),
         menuLink('/admin/services/status', 'Service 状态'),
         menuLink('/admin/topology', 'Topology 只读'),
         menuLink('/admin/services/contributions', 'Service UI'),
@@ -65,8 +60,6 @@ const selectedKey = computed(() => {
   if (route.path.startsWith('/admin/topology')) return '/admin/topology'
   if (route.path.startsWith('/admin/services/contributions')) return '/admin/services/contributions'
   if (route.path.startsWith('/admin/services/status')) return '/admin/services/status'
-  if (route.path.startsWith('/problems')) return '/problems'
-  if (route.path.startsWith('/submissions')) return '/submissions'
   return route.path
 })
 
@@ -82,55 +75,11 @@ function menuLink(path: string, label: string): MenuOption {
   }
 }
 
-function serviceMenuOptions(items: ServiceMenuItem[]): MenuOption[] {
-  const seen = new Set<string>()
-  return items
-    .filter((item) => item.enabled)
-    .filter((item) => canUseMenu(item))
-    .sort((a, b) => a.sort_order - b.sort_order || a.menu_key.localeCompare(b.menu_key))
-    .flatMap((item) => {
-      if (seen.has(item.route_path)) return []
-      seen.add(item.route_path)
-      const routePath = routeExists(item.route_path)
-        ? item.route_path
-        : `/admin/services/contributions/${encodeURIComponent(item.service_id)}`
-      return [menuLink(routePath, item.title)]
-    })
-}
-
-function routeExists(path: string): boolean {
-  return router.getRoutes().some((item) => item.path === path || item.path.replace(/\/:.*$/, '') === path)
-}
-
-function canUseMenu(item: ServiceMenuItem): boolean {
-  if (!item.required_permission) return true
-  return auth.hasAnyPermission([item.required_permission, 'system.admin'])
-}
-
-async function loadServiceMenus(): Promise<void> {
-  if (!canUseAdmin.value && !auth.isAuthenticated) {
-    serviceMenus.value = []
-    return
-  }
-  try {
-    const snapshot = await getOrchestratorSnapshot()
-    serviceMenus.value = snapshot.menus
-  } catch {
-    serviceMenus.value = []
-  }
-}
-
 function logout(): void {
   auth.logout()
   void router.push({ name: 'login' })
 }
 
-watch(
-  () => [auth.isAuthenticated, auth.permissions.join(','), auth.roles.join(',')],
-  () => void loadServiceMenus(),
-)
-
-onMounted(() => void loadServiceMenus())
 </script>
 
 <template>

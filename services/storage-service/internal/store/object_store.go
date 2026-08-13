@@ -54,6 +54,7 @@ type ObjectPage struct {
 
 type ObjectStorage interface {
 	Backend() string
+	Ready(context.Context) error
 	BucketNames() []string
 	EnsureBucket(bucket string) (bool, error)
 	Put(ctx context.Context, bucket, key string, options PutOptions, body io.Reader) (types.ObjectMetadata, error)
@@ -113,6 +114,22 @@ func NewObjectStore(root string, buckets []string) (*ObjectStore, error) {
 
 func (s *ObjectStore) Backend() string {
 	return "local"
+}
+
+func (s *ObjectStore) Ready(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for bucket := range s.buckets {
+		path := s.bucketDir(bucket)
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("local storage bucket %s is unavailable", bucket)
+		}
+	}
+	return nil
 }
 
 func (s *ObjectStore) BucketNames() []string {

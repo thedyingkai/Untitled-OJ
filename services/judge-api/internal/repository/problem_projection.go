@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"ojos-problem-events/problemv1"
 	"ojos-shared/eventing"
 
 	"github.com/jackc/pgx/v5"
@@ -15,8 +16,8 @@ func ApplyProblemProjection(ctx context.Context, tx pgx.Tx, envelope eventing.En
 		return err
 	}
 	switch envelope.Type {
-	case eventing.ProblemSnapshotV1:
-		snapshot, err := eventing.DecodeProblemSnapshotData(envelope)
+	case problemv1.SnapshotType:
+		snapshot, err := problemv1.SnapshotCodec.Decode(envelope)
 		if err != nil {
 			return err
 		}
@@ -68,8 +69,8 @@ WHERE problems.aggregate_version < EXCLUDED.aggregate_version
 `, snapshot.ProblemID, snapshot.Status, snapshot.Visibility, snapshot.CreatedBy, snapshot.AggregateVersion, snapshot.PackageRevision, snapshot.PackageArtifact.URI, strings.ToLower(snapshot.PackageArtifact.SHA256), snapshot.PackageArtifact.SizeBytes, snapshot.ManifestSHA256, envelope.ID, snapshot.SourceUpdatedAtUTC, snapshot.ProblemNo, snapshot.Title, snapshot.ProblemType, snapshot.TimeLimitMS, snapshot.MemoryLimitMB)
 		return err
 
-	case eventing.ProblemDeletedV1:
-		deleted, err := eventing.DecodeProblemDeletedData(envelope)
+	case problemv1.DeletedType:
+		deleted, err := problemv1.DeletedCodec.Decode(envelope)
 		if err != nil {
 			return err
 		}

@@ -1,0 +1,59 @@
+openapi: 3.1.0
+info:
+  title: OJOS Delegated Permission Check API
+  version: 1.0.0
+x-ojos-api-id: auth.user.permission.check
+x-ojos-service:
+  id: auth-service
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    PermissionCheckRequest:
+      type: object
+      additionalProperties: false
+      required: [permission]
+      properties:
+        user_id: {type: integer, format: int64, minimum: 1}
+        permission: {type: string, minLength: 1}
+        scope_type: {type: string}
+        scope_id: {type: integer, format: int64, minimum: 0}
+        caller_type: {type: string}
+        caller_service: {type: string}
+        caller_node_id: {type: string}
+        api_id: {type: string}
+    PermissionCheckResponse:
+      type: object
+      additionalProperties: false
+      required: [code, msg, data]
+      properties:
+        code: {type: integer}
+        msg: {type: string}
+        data:
+          type: object
+          additionalProperties: false
+          required: [allowed]
+          properties:
+            allowed: {type: boolean}
+paths:
+  /auth/admin/permission-check:
+    post:
+      operationId: checkDelegatedUserPermission
+      x-ojos-audience: internal
+      x-ojos-permission: auth.permission.check
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/PermissionCheckRequest'}}
+      responses:
+        '200':
+          description: Permission decision
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PermissionCheckResponse'}}
+        '401': {description: Workload identity is invalid}
+        '403': {description: Workload is not authorized for this API}

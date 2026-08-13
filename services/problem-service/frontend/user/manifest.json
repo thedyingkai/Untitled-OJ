@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "ojos.frontend/v1",
+  "moduleId": "problem-service.user",
+  "target": "user-shell",
+  "artifact": "problem-user-frontend",
+  "hostApiRange": "^1.0",
+  "routes": [
+    {
+      "id": "problem-service.user.list",
+      "path": "/problems",
+      "title": "Problems",
+      "menu": true,
+      "order": 30,
+      "permission": "problem.view"
+    }
+  ]
+}

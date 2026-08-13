@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -9,7 +10,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -64,6 +64,22 @@ func (s *MinIOObjectStore) Backend() string {
 	return "minio"
 }
 
+func (s *MinIOObjectStore) Ready(ctx context.Context) error {
+	if s == nil || s.client == nil {
+		return errors.New("minio client is unavailable")
+	}
+	for _, bucket := range s.BucketNames() {
+		exists, err := s.client.BucketExists(ctx, bucket)
+		if err != nil {
+			return fmt.Errorf("minio bucket %s readiness: %w", bucket, err)
+		}
+		if !exists {
+			return fmt.Errorf("minio bucket %s is unavailable", bucket)
+		}
+	}
+	return nil
+}
+
 func (s *MinIOObjectStore) BucketNames() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -105,16 +121,41 @@ func (s *MinIOObjectStore) Put(ctx context.Context, bucket, key string, options 
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
-	tmp, size, sha, err := spoolObject(body, options.SizeKnown, options.SizeBytes, expectedSHA)
+	if options.IfAbsent {
+		if _, err := s.metadataLocked(ctx, bucket, key); err == nil {
+			return types.ObjectMetadata{}, ErrPreconditionFailed
+		} else if !errors.Is(err, ErrObjectNotFound) {
+			return types.ObjectMetadata{}, err
+		}
+	}
+	temporaryKey, err := temporaryObjectKey()
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
-	defer os.Remove(tmp)
-	file, err := os.Open(tmp)
+	defer func() {
+		_ = s.client.RemoveObject(context.Background(), bucket, temporaryKey, minio.RemoveObjectOptions{})
+	}()
+	hasher := sha256.New()
+	limited := io.LimitReader(body, maxObjectBytes+1)
+	counted := &countingReader{reader: io.TeeReader(limited, hasher)}
+	_, err = s.client.PutObject(ctx, bucket, temporaryKey, counted, -1, minio.PutObjectOptions{
+		ContentType: "application/octet-stream",
+		PartSize:    8 * 1024 * 1024,
+	})
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
-	defer file.Close()
+	size := counted.count
+	if size > maxObjectBytes {
+		return types.ObjectMetadata{}, fmt.Errorf("object exceeds %d bytes", maxObjectBytes)
+	}
+	if options.SizeKnown && size != options.SizeBytes {
+		return types.ObjectMetadata{}, fmt.Errorf("object size mismatch: expected %d, got %d", options.SizeBytes, size)
+	}
+	sha := hex.EncodeToString(hasher.Sum(nil))
+	if expectedSHA != "" && sha != expectedSHA {
+		return types.ObjectMetadata{}, fmt.Errorf("object sha256 mismatch: expected %s, got %s", expectedSHA, sha)
+	}
 
 	contentType := options.ContentType
 	if contentType == "" {
@@ -131,26 +172,28 @@ func (s *MinIOObjectStore) Put(ctx context.Context, bucket, key string, options 
 		ContentType: contentType,
 		UpdatedAt:   s.now().UTC().Format(time.RFC3339),
 	}
+	temporary, err := s.client.GetObject(ctx, bucket, temporaryKey, minio.GetObjectOptions{})
+	if err != nil {
+		return types.ObjectMetadata{}, err
+	}
+	defer temporary.Close()
 	putOptions := minio.PutObjectOptions{
-		ContentType: contentType,
+		ContentType:      contentType,
+		DisableMultipart: true,
 		UserMetadata: map[string]string{
 			"ojos-sha256":     sha,
 			"ojos-updated-at": meta.UpdatedAt,
 		},
 	}
 	if options.IfAbsent {
+		// A single conditional PUT is the cross-process atomic boundary. The
+		// source is a provider-side temporary object, so this remains compatible
+		// with a read-only container root without buffering the payload in memory.
 		putOptions.SetMatchETagExcept("*")
 	}
-	_, err = s.client.PutObject(
-		ctx,
-		bucket,
-		key,
-		file,
-		meta.SizeBytes,
-		putOptions,
-	)
+	_, err = s.client.PutObject(ctx, bucket, key, temporary, size, putOptions)
 	if err != nil {
-		if isPreconditionFailure(err) {
+		if isMinIOPreconditionFailure(err) {
 			return types.ObjectMetadata{}, ErrPreconditionFailed
 		}
 		return types.ObjectMetadata{}, err
@@ -373,44 +416,23 @@ func bucketSet(buckets []string) map[string]struct{} {
 	return set
 }
 
-func spoolObject(body io.Reader, sizeKnown bool, expectedSize int64, expectedSHA string) (string, int64, string, error) {
-	file, err := os.CreateTemp("", "ojos-storage-upload-*.tmp")
-	if err != nil {
-		return "", 0, "", err
-	}
-	path := file.Name()
-	fail := func(err error) (string, int64, string, error) {
-		_ = file.Close()
-		_ = os.Remove(path)
-		return "", 0, "", err
-	}
-	hasher := sha256.New()
-	size, err := io.Copy(io.MultiWriter(file, hasher), io.LimitReader(body, maxObjectBytes+1))
-	if err != nil {
-		return fail(err)
-	}
-	if err := file.Close(); err != nil {
-		return fail(err)
-	}
-	if size > maxObjectBytes {
-		_ = os.Remove(path)
-		return "", 0, "", fmt.Errorf("object exceeds %d bytes", maxObjectBytes)
-	}
-	if sizeKnown && size != expectedSize {
-		_ = os.Remove(path)
-		return "", 0, "", fmt.Errorf("object size mismatch: expected %d, got %d", expectedSize, size)
-	}
-	actualSHA := hex.EncodeToString(hasher.Sum(nil))
-	if expectedSHA != "" && actualSHA != expectedSHA {
-		_ = os.Remove(path)
-		return "", 0, "", fmt.Errorf("object sha256 mismatch: expected %s, got %s", expectedSHA, actualSHA)
-	}
-	return path, size, actualSHA, nil
+type countingReader struct {
+	reader io.Reader
+	count  int64
 }
 
-func isPreconditionFailure(err error) bool {
-	response := minio.ToErrorResponse(err)
-	return response.StatusCode == http.StatusPreconditionFailed || strings.EqualFold(response.Code, "PreconditionFailed")
+func (reader *countingReader) Read(buffer []byte) (int, error) {
+	n, err := reader.reader.Read(buffer)
+	reader.count += int64(n)
+	return n, err
+}
+
+func temporaryObjectKey() (string, error) {
+	random := make([]byte, 18)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("generate temporary object identity: %w", err)
+	}
+	return ".ojos-upload/" + hex.EncodeToString(random), nil
 }
 
 func isMinIOObjectNotFound(err error) bool {
@@ -423,6 +445,12 @@ func isMinIOObjectNotFound(err error) bool {
 	default:
 		return false
 	}
+}
+
+func isMinIOPreconditionFailure(err error) bool {
+	response := minio.ToErrorResponse(err)
+	return response.StatusCode == http.StatusPreconditionFailed ||
+		strings.EqualFold(strings.TrimSpace(response.Code), minio.PreconditionFailed)
 }
 
 func metadataFromObjectInfo(bucket string, info minio.ObjectInfo) types.ObjectMetadata {

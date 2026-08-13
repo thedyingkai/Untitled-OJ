@@ -30,6 +30,10 @@ func deleteObjectHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 		expectedSizeText := strings.TrimSpace(r.Header.Get("X-OJOS-Expected-Size"))
 		var resp *types.DeleteObjectResp
 		var err error
+		if svcCtx.WorkloadAuthEnabled && (expectedSHA == "" || expectedSizeText == "") {
+			http.Error(w, "workload delete requires X-OJOS-Expected-Sha256 and X-OJOS-Expected-Size", http.StatusBadRequest)
+			return
+		}
 		if expectedSHA == "" && expectedSizeText == "" {
 			resp, err = l.DeleteObject(&req)
 		} else {

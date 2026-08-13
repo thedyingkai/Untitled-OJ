@@ -1,0 +1,53 @@
+openapi: 3.1.0
+info:
+  title: OJOS Storage Object Delete API
+  version: 1.0.0
+x-ojos-api-id: storage.object.delete
+x-ojos-service:
+  id: storage-service
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    Bucket: {name: bucket, in: path, required: true, schema: {type: string, pattern: '^[a-z0-9][a-z0-9.-]{1,62}$'}}
+    Key: {name: key, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 1024, pattern: '^[^/]+$'}}
+  schemas:
+    DeleteResult:
+      type: object
+      additionalProperties: false
+      required: [deleted]
+      properties: {deleted: {type: boolean, const: true}}
+security: [{ojosBearer: []}]
+paths:
+  /{bucket}/{key}:
+    parameters:
+      - {$ref: '#/components/parameters/Bucket'}
+      - {$ref: '#/components/parameters/Key'}
+    delete:
+      operationId: deleteStorageObject
+      x-ojos-audience: internal
+      x-ojos-permission: storage.object.delete
+      x-ojos-scope: system
+      parameters:
+        - name: X-OJOS-Expected-Sha256
+          in: header
+          required: true
+          schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+        - name: X-OJOS-Expected-Size
+          in: header
+          required: true
+          schema: {type: integer, format: int64, minimum: 0}
+      responses:
+        '200':
+          description: Storage provider authoritatively confirmed object deletion
+          headers:
+            X-OJOS-Storage-Result:
+              required: true
+              schema: {type: string, const: deleted}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeleteResult'}
+        '400': {description: Conditional identity headers are incomplete or invalid}
+        '401': {description: A valid bound workload identity is required}
+        '412': {description: Object identity did not match the conditional delete}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ojos-problem-events/problemv1"
 	"ojos-problem-service/internal/packagefs"
 	"ojos-shared/eventing"
 
@@ -980,7 +981,7 @@ func sameProblemFileArtifactIdentity(leftURI, leftSHA string, leftSize int64, ri
 // the collector's final reference check remains the authority on deletion.
 // Invalid, local and package-archive paths are intentionally ignored.
 func (r *Repository) registerProblemFileCleanupCandidate(ctx context.Context, storagePath, sha256 string, sizeBytes int64) error {
-	artifact := eventing.ArtifactRef{URI: storagePath, SHA256: sha256, SizeBytes: sizeBytes}
+	artifact := problemv1.ArtifactRef{URI: storagePath, SHA256: sha256, SizeBytes: sizeBytes}
 	uri, digest, err := normalizedArtifactIntent(artifact)
 	if err != nil {
 		return nil
@@ -1015,7 +1016,7 @@ var ErrArtifactIntentMissing = errors.New("problem artifact upload intent is mis
 var ErrArtifactIntentUnreferenced = errors.New("problem artifact upload intent has no matching committed reference")
 var ErrArtifactUploadIncomplete = errors.New("problem artifact upload has not completed identity verification")
 
-func normalizedArtifactIntent(artifact eventing.ArtifactRef) (string, string, error) {
+func normalizedArtifactIntent(artifact problemv1.ArtifactRef) (string, string, error) {
 	uri := strings.TrimSpace(artifact.URI)
 	digest := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(artifact.SHA256)), "sha256:")
 	storagePath := strings.TrimPrefix(uri, "storage://")
@@ -1085,7 +1086,7 @@ func isProblemContentObjectKey(key, digest string) bool {
 // It is safe to replay for the same immutable URI. An active GC claim owns the
 // object exclusively; a publisher must retry after that bounded lease instead
 // of racing a delete.
-func (r *Repository) RegisterArtifactUploadIntent(ctx context.Context, artifact eventing.ArtifactRef) error {
+func (r *Repository) RegisterArtifactUploadIntent(ctx context.Context, artifact problemv1.ArtifactRef) error {
 	uri, digest, err := normalizedArtifactIntent(artifact)
 	if err != nil {
 		return err
@@ -1143,7 +1144,7 @@ SELECT status FROM problem_artifact_upload_intents WHERE artifact_uri=$1
 // the publisher has verified the exact SHA-256 and size. It is an identity and
 // state CAS, so an operator/collector transition can never bless a different
 // object or an upload that is still in flight.
-func (r *Repository) MarkArtifactUploadCompleted(ctx context.Context, artifact eventing.ArtifactRef) error {
+func (r *Repository) MarkArtifactUploadCompleted(ctx context.Context, artifact problemv1.ArtifactRef) error {
 	uri, digest, err := normalizedArtifactIntent(artifact)
 	if err != nil {
 		return err
@@ -1183,18 +1184,18 @@ WHERE artifact_uri = $1
 // problem_files or immutable revision reference and integration_outbox
 // snapshot. Production mutations fail closed when the pre-upload PENDING row
 // is absent, mismatched, or already owned by GC.
-func (r *Repository) ResolveArtifactUploadIntent(ctx context.Context, artifact eventing.ArtifactRef) error {
+func (r *Repository) ResolveArtifactUploadIntent(ctx context.Context, artifact problemv1.ArtifactRef) error {
 	return r.resolveArtifactUploadIntent(ctx, artifact, false)
 }
 
 // ResolveLegacyArtifactUploadIntent is the only expand-first exemption for
 // imported/backfilled references that predate the upload-intent ledger. Online
 // create/update mutations must use ResolveArtifactUploadIntent instead.
-func (r *Repository) ResolveLegacyArtifactUploadIntent(ctx context.Context, artifact eventing.ArtifactRef) error {
+func (r *Repository) ResolveLegacyArtifactUploadIntent(ctx context.Context, artifact problemv1.ArtifactRef) error {
 	return r.resolveArtifactUploadIntent(ctx, artifact, true)
 }
 
-func (r *Repository) resolveArtifactUploadIntent(ctx context.Context, artifact eventing.ArtifactRef, allowMissingLegacy bool) error {
+func (r *Repository) resolveArtifactUploadIntent(ctx context.Context, artifact problemv1.ArtifactRef, allowMissingLegacy bool) error {
 	uri := strings.TrimSpace(artifact.URI)
 	if !strings.HasPrefix(uri, "storage://") {
 		return nil
@@ -1297,12 +1298,12 @@ WHERE artifact_uri = $1
 // problem_files references. A missing or mismatched reference fails the
 // transaction closed and leaves the object reclaimable.
 func (r *Repository) ResolveProblemFileUploadIntents(ctx context.Context, files []packagefs.IndexedFile) error {
-	resolved := make(map[string]eventing.ArtifactRef, len(files))
+	resolved := make(map[string]problemv1.ArtifactRef, len(files))
 	for _, file := range files {
 		if !strings.HasPrefix(strings.TrimSpace(file.StoragePath), "storage://") {
 			continue
 		}
-		artifact := eventing.ArtifactRef{
+		artifact := problemv1.ArtifactRef{
 			URI:         file.StoragePath,
 			SHA256:      file.Sha256,
 			SizeBytes:   file.SizeBytes,
@@ -1372,7 +1373,7 @@ SELECT EXISTS (
       AND event_type = $3
       AND LOWER(payload->'data'->'package_artifact'->>'sha256') = LOWER($4)
 )
-`, problemID, aggregateVersion, eventing.ProblemSnapshotV1, strings.TrimSpace(artifactSHA256)).Scan(&matches)
+`, problemID, aggregateVersion, problemv1.SnapshotType, strings.TrimSpace(artifactSHA256)).Scan(&matches)
 	return matches, err
 }
 
@@ -1387,7 +1388,7 @@ SELECT EXISTS (
       AND aggregate_version = $2
       AND event_type = $3
 )
-`, problemID, aggregateVersion, eventing.ProblemDeletedV1).Scan(&exists)
+`, problemID, aggregateVersion, problemv1.DeletedType).Scan(&exists)
 	return exists, err
 }
 
@@ -1431,10 +1432,10 @@ LIMIT $2
 // PublishProblemSnapshot advances the source version and writes a full
 // versioned snapshot to the outbox. The caller must invoke it on the repository
 // passed to InTransaction after applying the matching domain mutation.
-func (r *Repository) PublishProblemSnapshot(ctx context.Context, problemID int64, artifact eventing.ArtifactRef) (eventing.ProblemSnapshotData, error) {
+func (r *Repository) PublishProblemSnapshot(ctx context.Context, problemID int64, artifact problemv1.ArtifactRef) (problemv1.Snapshot, error) {
 	state, err := r.ProblemProjectionState(ctx, problemID)
 	if err != nil {
-		return eventing.ProblemSnapshotData{}, err
+		return problemv1.Snapshot{}, err
 	}
 	return r.PublishProblemSnapshotCAS(ctx, problemID, state.AggregateVersion, artifact)
 }
@@ -1442,12 +1443,12 @@ func (r *Repository) PublishProblemSnapshot(ctx context.Context, problemID int64
 // PublishProblemSnapshotCAS prevents a snapshot built from an older authoring
 // tree from committing after a newer mutation. Callers that mutate package
 // state must pass the version observed while holding the problem advisory lock.
-func (r *Repository) PublishProblemSnapshotCAS(ctx context.Context, problemID int64, expectedAggregateVersion int64, artifact eventing.ArtifactRef) (eventing.ProblemSnapshotData, error) {
+func (r *Repository) PublishProblemSnapshotCAS(ctx context.Context, problemID int64, expectedAggregateVersion int64, artifact problemv1.ArtifactRef) (problemv1.Snapshot, error) {
 	if problemID <= 0 || strings.TrimSpace(artifact.URI) == "" || strings.TrimSpace(artifact.SHA256) == "" || artifact.SizeBytes <= 0 {
-		return eventing.ProblemSnapshotData{}, errors.New("problem package artifact is incomplete")
+		return problemv1.Snapshot{}, errors.New("problem package artifact is incomplete")
 	}
 	if expectedAggregateVersion < 0 {
-		return eventing.ProblemSnapshotData{}, errors.New("expected aggregate version must not be negative")
+		return problemv1.Snapshot{}, errors.New("expected aggregate version must not be negative")
 	}
 	var aggregateVersion int64
 	var packageRevision int64
@@ -1469,9 +1470,9 @@ RETURNING aggregate_version, package_revision, manifest_sha256, updated_at
 	`, problemID, strings.ToLower(strings.TrimSpace(artifact.SHA256)), artifact.URI, artifact.SizeBytes, expectedAggregateVersion).Scan(&aggregateVersion, &packageRevision, &manifestSHA, &updatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return eventing.ProblemSnapshotData{}, ErrProblemMutationConflict
+			return problemv1.Snapshot{}, ErrProblemMutationConflict
 		}
-		return eventing.ProblemSnapshotData{}, err
+		return problemv1.Snapshot{}, err
 	}
 	if _, err := r.db.Exec(ctx, `
 INSERT INTO problem_package_revisions(
@@ -1487,14 +1488,14 @@ INSERT INTO problem_package_revisions(
 VALUES($1, $2, $3, $4, $5, $6, $7, NOW())
 ON CONFLICT(problem_id, package_revision) DO NOTHING
 `, problemID, packageRevision, aggregateVersion, artifact.URI, strings.ToLower(artifact.SHA256), artifact.SizeBytes, manifestSHA); err != nil {
-		return eventing.ProblemSnapshotData{}, err
+		return problemv1.Snapshot{}, err
 	}
 
 	problem, err := r.GetProblem(ctx, problemID)
 	if err != nil {
-		return eventing.ProblemSnapshotData{}, err
+		return problemv1.Snapshot{}, err
 	}
-	snapshot := eventing.ProblemSnapshotData{
+	snapshot := problemv1.Snapshot{
 		ProblemID:          problem.ID,
 		AggregateVersion:   aggregateVersion,
 		PackageRevision:    packageRevision,
@@ -1510,23 +1511,15 @@ ON CONFLICT(problem_id, package_revision) DO NOTHING
 		PackageArtifact:    artifact,
 		SourceUpdatedAtUTC: updatedAt.UTC(),
 	}
-	envelope, err := eventing.NewEnvelope(
-		ctx,
-		"ojos://problem-service",
-		eventing.ProblemSnapshotV1,
-		"problem/"+strconv.FormatInt(problemID, 10),
-		eventing.ProblemSnapshotSchemaV1,
-		aggregateVersion,
-		snapshot,
-	)
+	event, err := problemv1.SnapshotCodec.NewEvent(ctx, "ojos://problem-service", "problem/"+strconv.FormatInt(problemID, 10), aggregateVersion, snapshot)
 	if err != nil {
-		return eventing.ProblemSnapshotData{}, err
+		return problemv1.Snapshot{}, err
 	}
-	if err := eventing.Enqueue(ctx, r.db, envelope); err != nil {
-		return eventing.ProblemSnapshotData{}, err
+	if err := eventing.Enqueue(ctx, r.db, event); err != nil {
+		return problemv1.Snapshot{}, err
 	}
 	if err := r.ResolveArtifactUploadIntent(ctx, artifact); err != nil {
-		return eventing.ProblemSnapshotData{}, err
+		return problemv1.Snapshot{}, err
 	}
 	return snapshot, nil
 }
@@ -1554,20 +1547,12 @@ RETURNING aggregate_version
 		}
 		return err
 	}
-	deleted := eventing.ProblemDeletedData{ProblemID: problemID, AggregateVersion: aggregateVersion}
-	envelope, err := eventing.NewEnvelope(
-		ctx,
-		"ojos://problem-service",
-		eventing.ProblemDeletedV1,
-		"problem/"+strconv.FormatInt(problemID, 10),
-		eventing.ProblemDeletedSchemaV1,
-		aggregateVersion,
-		deleted,
-	)
+	deleted := problemv1.Deleted{ProblemID: problemID, AggregateVersion: aggregateVersion}
+	event, err := problemv1.DeletedCodec.NewEvent(ctx, "ojos://problem-service", "problem/"+strconv.FormatInt(problemID, 10), aggregateVersion, deleted)
 	if err != nil {
 		return err
 	}
-	return eventing.Enqueue(ctx, r.db, envelope)
+	return eventing.Enqueue(ctx, r.db, event)
 }
 
 func (r *Repository) IsProblemOwner(ctx context.Context, userID int64, problemID int64) (bool, error) {

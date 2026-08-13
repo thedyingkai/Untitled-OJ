@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "ojos.frontend/v1",
+  "moduleId": "problem-service.admin",
+  "target": "admin-shell",
+  "artifact": "problem-admin-frontend",
+  "hostApiRange": "^1.0",
+  "routes": [
+    {
+      "id": "problem-service.admin.list",
+      "path": "/admin/problems",
+      "title": "Problem management",
+      "menu": true,
+      "order": 30,
+      "permission": "problem.edit"
+    }
+  ]
+}

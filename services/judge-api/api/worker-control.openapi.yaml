@@ -1,0 +1,71 @@
+openapi: 3.1.0
+info: {title: OJOS Judge Worker Control API, version: 1.0.0}
+x-ojos-api-id: judge.worker.control
+x-ojos-service: {id: judge-api, version: 0.1.0}
+components:
+  securitySchemes: {ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}}
+  parameters:
+    TaskId: {name: task_id, in: path, required: true, schema: {type: string, minLength: 1}}
+    Id: {name: id, in: path, required: true, schema: {type: integer, format: int64, minimum: 1}}
+  schemas: {Object: {type: object, additionalProperties: true}}
+security: [{ojosBearer: []}]
+paths:
+  /api/judge/worker/register:
+    post:
+      operationId: registerJudgeWorker
+      x-ojos-audience: internal
+      x-ojos-permission: judge.worker
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}
+      responses: {'200': {description: Worker registered, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /api/judge/worker/heartbeat:
+    post:
+      operationId: heartbeatJudgeWorker
+      x-ojos-audience: internal
+      x-ojos-permission: judge.worker
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}
+      responses: {'200': {description: Worker heartbeat accepted, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /api/judge/worker/tasks/claim:
+    post:
+      operationId: claimJudgeTasks
+      x-ojos-audience: internal
+      x-ojos-permission: judge.worker
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}
+      responses: {'200': {description: Durable PostgreSQL tasks claimed, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /api/judge/worker/tasks/{task_id}/heartbeat:
+    parameters: [{$ref: '#/components/parameters/TaskId'}]
+    post:
+      operationId: heartbeatJudgeTask
+      x-ojos-audience: internal
+      x-ojos-permission: judge.worker
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}
+      responses: {'200': {description: Task lease renewed, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /api/judge/worker/tasks/{task_id}/result:
+    parameters: [{$ref: '#/components/parameters/TaskId'}]
+    post:
+      operationId: completeJudgeTask
+      x-ojos-audience: internal
+      x-ojos-permission: judge.worker
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}
+      responses: {'200': {description: Judge result accepted, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /api/judge/worker/tasks/{task_id}/fail:
+    parameters: [{$ref: '#/components/parameters/TaskId'}]
+    post:
+      operationId: failJudgeTask
+      x-ojos-audience: internal
+      x-ojos-permission: judge.worker
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}
+      responses: {'200': {description: Judge failure accepted, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /api/judge/worker/artifacts/submissions/{id}/source:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get:
+      operationId: getWorkerSubmissionSource
+      x-ojos-audience: internal
+      x-ojos-permission: judge.worker
+      responses: {'200': {description: Submission source stream}}
+  /api/judge/worker/artifacts/problems/{id}/package:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get:
+      operationId: getWorkerProblemPackage
+      x-ojos-audience: internal
+      x-ojos-permission: judge.worker
+      responses: {'200': {description: Problem package stream}}

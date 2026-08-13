@@ -1,0 +1,121 @@
+{
+  "schemaVersion": "ojos.dev/gozero-server-adapter/v1",
+  "serviceId": "contest-service",
+  "operations": [
+    {
+      "operationId": "adminListContests",
+      "handler": "AdminListContests",
+      "method": "GET",
+      "path": "/admin/contests",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "contest-service.contest.manage",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:dab591f7a3fba7f31fb760442c17e213f5fe427228eb18e42ce930490bd6cc91"
+      ]
+    },
+    {
+      "operationId": "listContests",
+      "handler": "ListContests",
+      "method": "GET",
+      "path": "/contests",
+      "audience": "user",
+      "auth": "required",
+      "permission": "contest-service.contest.read",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:dab591f7a3fba7f31fb760442c17e213f5fe427228eb18e42ce930490bd6cc91",
+        "sha256:d2c0d03b1db2ba4a62bc179015423a9ac6a3fdcb9ddb903b830e8768da8fdb44"
+      ]
+    },
+    {
+      "operationId": "createContest",
+      "handler": "CreateContest",
+      "method": "POST",
+      "path": "/contests",
+      "audience": "user",
+      "auth": "required",
+      "permission": "contest-service.contest.manage",
+      "requestSchemaDigests": [
+        "sha256:4f628e1e34d8fd63f618197372550d3198a08da16a26c01cc91d5cd7c049847a"
+      ],
+      "responseSchemaDigests": [
+        "sha256:80af38900b6e32c9cedc165aa3f1b3fa1e8c05b54eeb7ba2b5da92dc890cdb0a",
+        "sha256:d2c0d03b1db2ba4a62bc179015423a9ac6a3fdcb9ddb903b830e8768da8fdb44",
+        "sha256:d2c0d03b1db2ba4a62bc179015423a9ac6a3fdcb9ddb903b830e8768da8fdb44"
+      ]
+    },
+    {
+      "operationId": "deleteContest",
+      "handler": "DeleteContest",
+      "method": "DELETE",
+      "path": "/contests/{contestId}",
+      "audience": "user",
+      "auth": "required",
+      "permission": "contest-service.contest.manage",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:d2c0d03b1db2ba4a62bc179015423a9ac6a3fdcb9ddb903b830e8768da8fdb44"
+      ]
+    },
+    {
+      "operationId": "getContest",
+      "handler": "GetContest",
+      "method": "GET",
+      "path": "/contests/{contestId}",
+      "audience": "user",
+      "auth": "required",
+      "permission": "contest-service.contest.read",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:80af38900b6e32c9cedc165aa3f1b3fa1e8c05b54eeb7ba2b5da92dc890cdb0a",
+        "sha256:d2c0d03b1db2ba4a62bc179015423a9ac6a3fdcb9ddb903b830e8768da8fdb44"
+      ]
+    },
+    {
+      "operationId": "updateContest",
+      "handler": "UpdateContest",
+      "method": "PUT",
+      "path": "/contests/{contestId}",
+      "audience": "user",
+      "auth": "required",
+      "permission": "contest-service.contest.manage",
+      "requestSchemaDigests": [
+        "sha256:2cdb56bc5381f801c7fe83bf0e7f403abb0ac68d09b6f308c65be2a9fc9d64b8"
+      ],
+      "responseSchemaDigests": [
+        "sha256:80af38900b6e32c9cedc165aa3f1b3fa1e8c05b54eeb7ba2b5da92dc890cdb0a",
+        "sha256:d2c0d03b1db2ba4a62bc179015423a9ac6a3fdcb9ddb903b830e8768da8fdb44",
+        "sha256:d2c0d03b1db2ba4a62bc179015423a9ac6a3fdcb9ddb903b830e8768da8fdb44"
+      ]
+    },
+    {
+      "operationId": "contestHealth",
+      "handler": "ContestHealth",
+      "method": "GET",
+      "path": "/healthz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:371b921c7ecbfc970b01da1c6dcfd2a5562344cbfa4d8756f52fab0928fe6434"
+      ]
+    },
+    {
+      "operationId": "contestReady",
+      "handler": "ContestReady",
+      "method": "GET",
+      "path": "/readyz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:371b921c7ecbfc970b01da1c6dcfd2a5562344cbfa4d8756f52fab0928fe6434",
+        "sha256:d2c0d03b1db2ba4a62bc179015423a9ac6a3fdcb9ddb903b830e8768da8fdb44"
+      ]
+    }
+  ]
+}

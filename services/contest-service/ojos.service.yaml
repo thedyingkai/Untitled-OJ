@@ -1,0 +1,59 @@
+apiVersion: ojos.dev/v1
+kind: Service
+metadata:
+  id: contest-service
+  version: 0.1.0
+  displayName: Contest Service
+runtime:
+  profile: standard-container-v1
+  artifact: contest-runtime
+  httpPort: 8080
+  health:
+    path: /readyz
+provides:
+  apis:
+    - document: api/openapi.yaml
+requires:
+  apis:
+    - id: auth.user.permission.check
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+    - id: problem.problem.read
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+resources:
+  - name: contests
+    type: postgresql.database/v1
+    lifecycle: retain
+migrations:
+  - id: contest-schema-v1
+    artifact: contest-migration-v1
+    resource: contests
+events:
+  publishes:
+    - type: contest-service.contest-created
+      version: 1
+      schema: events/contest-created-v1.schema.json
+      delivery: durable
+permissions:
+  - key: contest-service.contest.read
+    title: View contests
+  - key: contest-service.contest.manage
+    title: Manage contests
+exposures:
+  - id: user-contests
+    api: contest-service.api
+    audience: user
+    mount: /api
+  - id: admin-contests
+    api: contest-service.api
+    audience: admin
+    mount: /api
+frontends:
+  - target: user-shell
+    manifest: frontend/user/manifest.json
+  - target: admin-shell
+    manifest: frontend/admin/manifest.json
+configSchema: config.schema.json

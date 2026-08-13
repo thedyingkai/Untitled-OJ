@@ -14,6 +14,7 @@ type Config struct {
 	InternalAuth     InternalAuthConfig
 	AdminBootstrap   AdminBootstrapConfig   `json:",optional"`
 	WorkloadIdentity WorkloadIdentityConfig `json:",optional"`
+	Orchestrator     OrchestratorConfig     `json:",optional"`
 }
 
 type DatabaseConfig struct {
@@ -43,9 +44,17 @@ type AdminBootstrapConfig struct {
 
 type WorkloadIdentityConfig struct {
 	PrivateKeyFile    string `json:",optional"`
+	PrivateKeyPEM     string `json:",optional"`
 	ControlPlaneToken string `json:",optional"`
 	KeyID             string `json:",optional"`
 	Issuer            string `json:",optional"`
 	Audience          string `json:",optional"`
 	TTLSeconds        int64  `json:",optional"`
+}
+
+type OrchestratorConfig struct {
+	Endpoint             string `json:",optional"`
+	InternalToken        string `json:",optional"`
+	ManagementToken      string `json:",optional"`
+	ContributionAckToken string `json:",optional"`
 }

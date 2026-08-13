@@ -1,0 +1,30 @@
+openapi: 3.1.0
+info: {title: OJOS Judge Queue Status API, version: 1.0.0}
+x-ojos-api-id: judge.queue.status
+x-ojos-service: {id: judge-api, version: 0.1.0}
+components:
+  securitySchemes: {ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}}
+  schemas: {Object: {type: object, additionalProperties: true}}
+paths:
+  /judge/admin/queue:
+    get:
+      operationId: getJudgeQueue
+      x-ojos-audience: admin
+      x-ojos-permission: judge.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Authoritative queue and Redis wakeup status, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /judge/admin/queue/status:
+    get:
+      operationId: getJudgeQueueStatus
+      x-ojos-audience: admin
+      x-ojos-permission: judge.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Queue compatibility status, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /judge/admin/submissions/{id}/requeue:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer, format: int64, minimum: 1}}]
+    post:
+      operationId: requeueSubmission
+      x-ojos-audience: admin
+      x-ojos-permission: judge.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Durable task requeued, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}

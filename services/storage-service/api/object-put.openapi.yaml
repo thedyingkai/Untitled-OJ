@@ -1,0 +1,68 @@
+openapi: 3.1.0
+info:
+  title: OJOS Storage Object Put API
+  version: 1.0.0
+x-ojos-api-id: storage.object.put
+x-ojos-service:
+  id: storage-service
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    Bucket:
+      name: bucket
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[a-z0-9][a-z0-9.-]{1,62}$'}
+    Key:
+      name: key
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 1024, pattern: '^[^/]+$'}
+  schemas:
+    ObjectMetadata:
+      type: object
+      additionalProperties: false
+      required: [bucket, key, size_bytes, sha256, content_type, updated_at]
+      properties:
+        bucket: {type: string}
+        key: {type: string}
+        size_bytes: {type: integer, format: int64, minimum: 0}
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        content_type: {type: string}
+        updated_at: {type: string, format: date-time}
+security: [{ojosBearer: []}]
+paths:
+  /{bucket}/{key}:
+    parameters:
+      - {$ref: '#/components/parameters/Bucket'}
+      - {$ref: '#/components/parameters/Key'}
+    put:
+      operationId: putStorageObject
+      x-ojos-audience: internal
+      x-ojos-permission: storage.object.write
+      x-ojos-scope: system
+      parameters:
+        - name: X-OJOS-Content-Sha256
+          in: header
+          required: false
+          schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: {type: string, const: '*'}
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary, maxLength: 536870912}
+      responses:
+        '200':
+          description: Object stored and content identity verified
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ObjectMetadata'}
+        '400': {description: Invalid bucket, key, size, digest, or precondition header}
+        '401': {description: A valid bound workload identity is required}
+        '412': {description: If-None-Match precondition failed}

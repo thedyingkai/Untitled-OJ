@@ -74,3 +74,37 @@ func (l *ListProblemsLogic) ListProblems(req *types.ListProblemsReq) (resp *type
 		Total:    total,
 	}, nil
 }
+
+// ListProblemsAuthorized is the admin-shell entrypoint. Its handler has
+// already required problem.edit at system scope, so this method only loads the
+// list and must not silently require the unrelated problem.view permission.
+func (l *ListProblemsLogic) ListProblemsAuthorized(req *types.ListProblemsReq) (resp *types.ListProblemsResp, err error) {
+	if req == nil {
+		return nil, errors.New("request is required")
+	}
+	user, ok := authctx.FromContext(l.ctx)
+	if !ok || user == nil || user.UserID <= 0 {
+		return nil, errors.New("unauthorized")
+	}
+	problems, total, err := l.svcCtx.Repo.ListProblems(
+		l.ctx,
+		repository.ListProblemsFilter{
+			UserID:         user.UserID,
+			CanViewPrivate: true,
+			Page:           req.Page,
+			PageSize:       req.PageSize,
+			Keyword:        req.Keyword,
+			Visibility:     req.Visibility,
+			Difficulty:     req.Difficulty,
+			Tags:           parseTags(req.Tags),
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]types.ProblemItem, 0, len(problems))
+	for _, problem := range problems {
+		items = append(items, convertProblem(problem))
+	}
+	return &types.ListProblemsResp{Problems: items, Total: total}, nil
+}

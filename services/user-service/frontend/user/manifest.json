@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "ojos.frontend/v1",
+  "moduleId": "user-service.user",
+  "target": "user-shell",
+  "artifact": "user-frontend",
+  "hostApiRange": "^1.0",
+  "routes": [
+    {
+      "id": "user-service.user.profile",
+      "path": "/me/profile",
+      "title": "Profile",
+      "menu": true,
+      "order": 80,
+      "permission": "user.profile.read.self"
+    }
+  ]
+}

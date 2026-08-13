@@ -77,7 +77,6 @@ ui:
   menus: []
   permissions: []
 permissions:
-  - auth.admin
   - system.admin
 health:
   checks:

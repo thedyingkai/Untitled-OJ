@@ -9,6 +9,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.44.0
 	go.uber.org/zap v1.28.0
 	gopkg.in/yaml.v3 v3.0.1
+	ojos-problem-events v0.0.0
 	ojos-shared v0.0.0
 )
 
@@ -67,3 +68,5 @@ require (
 )
 
 replace ojos-shared => ../../platform/shared/go
+
+replace ojos-problem-events => ./gen/go/events

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "ojos.frontend/v1",
+  "moduleId": "contest-service.admin",
+  "target": "admin-shell",
+  "artifact": "contest-admin-frontend",
+  "hostApiRange": "^1.0",
+  "routes": [
+    {
+      "id": "contest-service.admin.list",
+      "path": "/admin/contests",
+      "title": "Contest management",
+      "menu": true,
+      "order": 40,
+      "permission": "contest-service.contest.manage"
+    }
+  ]
+}

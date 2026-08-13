@@ -1,0 +1,87 @@
+{
+  "schemaVersion": "ojos.dev/build-input/v1",
+  "serviceId": "contest-service",
+  "serviceVersion": "0.1.0",
+  "contractDigest": "sha256:7fabac49be415585e5bcc75990a5829a8850009d90af037d508fefe00846058c",
+  "generatedFiles": 19,
+  "artifactRequirements": [
+    {
+      "role": "config-schema",
+      "slot": "config.schema",
+      "expectedDigest": "sha256:317e332a08325c85da551a8aa6daba99ff8cdac1070be2925fe6a79a6a107c4f",
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-bundle:contest-service.admin",
+      "slot": "contest-admin-frontend",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "migration:contest-schema-v1",
+      "slot": "contest-migration-v1",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "runtime",
+      "slot": "contest-runtime",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-bundle:contest-service.user",
+      "slot": "contest-user-frontend",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "contract",
+      "slot": "contract",
+      "expectedDigest": "sha256:7fabac49be415585e5bcc75990a5829a8850009d90af037d508fefe00846058c",
+      "expectedSize": 16022
+    },
+    {
+      "role": "event-schema:contest-service.contest-created:v1",
+      "slot": "event.contest-service.contest-created.v1.schema",
+      "expectedDigest": "sha256:e4b5dfee89b1e4140126bd259236d0edbec39dc409247798093850b2c7d8fd6d",
+      "expectedSize": null
+    },
+    {
+      "role": "events-manifest",
+      "slot": "events",
+      "expectedDigest": "sha256:9c77061a7e89c38dcface6b8af528cad1dad6810ffa124a3820eb132f15d050a",
+      "expectedSize": 809
+    },
+    {
+      "role": "frontend-manifest:contest-service.admin",
+      "slot": "frontend.contest-service.admin.manifest",
+      "expectedDigest": "sha256:5ab1a9c8745a8418a5a3d297190ac074b4c39c792e2a9f832d8c3c02fa881cd4",
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-manifest:contest-service.user",
+      "slot": "frontend.contest-service.user.manifest",
+      "expectedDigest": "sha256:0b3a22f8d5de4c1602dc8b0cdef206b874aa1f1134b1a2869cd5c8a12bdf2428",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:contest-service.api",
+      "slot": "openapi.contest-service.api",
+      "expectedDigest": "sha256:110edc48eda587177db5f0da9437e7745deeb7c2c26ebe9eeb43377f83459dd2",
+      "expectedSize": null
+    },
+    {
+      "role": "provenance",
+      "slot": "provenance",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "sbom",
+      "slot": "sbom",
+      "expectedDigest": null,
+      "expectedSize": null
+    }
+  ]
+}

@@ -60,6 +60,10 @@ func RegisterRoutes(
 	}
 
 	dynamicPaths := []string{
+		"/__ojos/extensions/:digest/:artifact",
+		"/__ojos/extensions/:digest/:artifact/:p1",
+		"/__ojos/extensions/:digest/:artifact/:p1/:p2",
+		"/__ojos/extensions/:digest/:artifact/:p1/:p2/:p3",
 		"/internal/apis/:api",
 		"/internal/apis/:api/:p1",
 		"/internal/apis/:api/:p1/:p2",

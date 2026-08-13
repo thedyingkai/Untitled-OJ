@@ -1,0 +1,217 @@
+openapi: 3.1.0
+info:
+  title: OJOS Contest API
+  version: 0.1.0
+x-ojos-api-id: contest-service.api
+x-ojos-service:
+  id: contest-service
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Contest:
+      type: object
+      additionalProperties: false
+      required: [id, slug, title, description, startsAt, endsAt, version, createdAt, updatedAt]
+      properties:
+        id: {type: integer, format: int64, minimum: 1}
+        slug: {type: string, pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'}
+        title: {type: string, minLength: 1, maxLength: 200}
+        description: {type: string, maxLength: 10000}
+        startsAt: {type: string, format: date-time}
+        endsAt: {type: string, format: date-time}
+        version: {type: integer, format: int64, minimum: 1}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    ContestList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Contest'}
+    ContestCreate:
+      type: object
+      additionalProperties: false
+      required: [slug, title, startsAt, endsAt]
+      properties:
+        slug: {type: string, pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'}
+        title: {type: string, minLength: 1, maxLength: 200}
+        description: {type: string, maxLength: 10000, default: ''}
+        startsAt: {type: string, format: date-time}
+        endsAt: {type: string, format: date-time}
+    ContestUpdate:
+      type: object
+      additionalProperties: false
+      required: [title, description, startsAt, endsAt, version]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 200}
+        description: {type: string, maxLength: 10000}
+        startsAt: {type: string, format: date-time}
+        endsAt: {type: string, format: date-time}
+        version: {type: integer, format: int64, minimum: 1}
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message: {type: string}
+paths:
+  /healthz:
+    get:
+      operationId: contestHealth
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: {const: ok}
+  /readyz:
+    get:
+      operationId: contestReady
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200':
+          description: Database and required API bindings are ready
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: {const: ok}
+        '503':
+          description: Database or a required API binding is unavailable
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /contests:
+    get:
+      operationId: listContests
+      x-ojos-audience: user
+      x-ojos-permission: contest-service.contest.read
+      security: [{ojosBearer: []}]
+      responses:
+        '200':
+          description: Contest list
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ContestList'}
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+    post:
+      operationId: createContest
+      x-ojos-audience: user
+      x-ojos-permission: contest-service.contest.manage
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ContestCreate'}
+      responses:
+        '201':
+          description: Contest created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Contest'}
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: Slug conflict
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /contests/{contestId}:
+    parameters:
+      - name: contestId
+        in: path
+        required: true
+        schema: {type: integer, format: int64, minimum: 1}
+    get:
+      operationId: getContest
+      x-ojos-audience: user
+      x-ojos-permission: contest-service.contest.read
+      security: [{ojosBearer: []}]
+      responses:
+        '200':
+          description: Contest
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Contest'}
+        '404':
+          description: Contest not found
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+    put:
+      operationId: updateContest
+      x-ojos-audience: user
+      x-ojos-permission: contest-service.contest.manage
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ContestUpdate'}
+      responses:
+        '200':
+          description: Contest updated
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Contest'}
+        '404':
+          description: Contest not found
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: Stale version
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+    delete:
+      operationId: deleteContest
+      x-ojos-audience: user
+      x-ojos-permission: contest-service.contest.manage
+      security: [{ojosBearer: []}]
+      responses:
+        '204': {description: Contest deleted}
+        '404':
+          description: Contest not found
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /admin/contests:
+    get:
+      operationId: adminListContests
+      x-ojos-audience: admin
+      x-ojos-permission: contest-service.contest.manage
+      security: [{ojosBearer: []}]
+      responses:
+        '200':
+          description: Administrative contest list
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ContestList'}

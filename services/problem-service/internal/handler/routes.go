@@ -19,90 +19,57 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Path:    "/health",
 				Handler: healthHandler(serverCtx),
 			},
+			{Method: http.MethodGet, Path: "/healthz", Handler: healthHandler(serverCtx)},
+			{Method: http.MethodGet, Path: "/readyz", Handler: readyHandler(serverCtx)},
 		},
 	)
 
 	server.AddRoutes(
 		rest.WithMiddlewares(
 			[]rest.Middleware{serverCtx.UserContextMiddleware},
-			[]rest.Route{
-				{
-					Method:  http.MethodGet,
-					Path:    "/admin/artifact-gc/intents",
-					Handler: listArtifactGCIntentsHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/admin/artifact-gc/intents:reconcile",
-					Handler: reconcileArtifactGCIntentHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/admin/artifact-gc/intents:retry",
-					Handler: retryArtifactGCIntentHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/problems",
-					Handler: createProblemHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodGet,
-					Path:    "/problems",
-					Handler: listProblemsHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodGet,
-					Path:    "/problems/:id",
-					Handler: getProblemHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPut,
-					Path:    "/problems/:id",
-					Handler: updateProblemHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodDelete,
-					Path:    "/problems/:id",
-					Handler: deleteProblemHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodGet,
-					Path:    "/problems/:id/package",
-					Handler: getProblemPackageHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodGet,
-					Path:    "/problems/:id/package/cases",
-					Handler: listPackageCasesHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/problems/:id/package/validate",
-					Handler: validateProblemPackageHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPost,
-					Path:    "/problems/:id/test-cases",
-					Handler: addTestCaseHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodGet,
-					Path:    "/problems/:id/test-cases",
-					Handler: listTestCasesHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodPut,
-					Path:    "/problems/:id/test-cases/:case_no",
-					Handler: updateTestCaseHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodDelete,
-					Path:    "/problems/:id/test-cases/:case_no",
-					Handler: deleteTestCaseHandler(serverCtx),
-				},
-			}...,
+			problemOperationRoutes(serverCtx)...,
 		),
-		rest.WithPrefix("/problem"),
+	)
+
+	// Keep the static-Gateway /api -> /problem projection for one migration
+	// release. Contribution v3 rewrites directly to the OpenAPI provider path,
+	// so the unprefixed routes above are the authoritative runtime surface.
+	if !serverCtx.Managed {
+		server.AddRoutes(
+			rest.WithMiddlewares(
+				[]rest.Middleware{serverCtx.UserContextMiddleware},
+				legacyProblemRoutes(serverCtx)...,
+			),
+			rest.WithPrefix("/problem"),
+		)
+	}
+}
+
+func problemOperationRoutes(serverCtx *svc.ServiceContext) []rest.Route {
+	return []rest.Route{
+		{Method: http.MethodGet, Path: "/admin/artifact-gc/intents", Handler: listArtifactGCIntentsHandler(serverCtx)},
+		{Method: http.MethodGet, Path: "/admin/problems", Handler: adminListProblemsHandler(serverCtx)},
+		{Method: http.MethodPost, Path: "/admin/artifact-gc/intents/reconcile", Handler: reconcileArtifactGCIntentHandler(serverCtx)},
+		{Method: http.MethodPost, Path: "/admin/artifact-gc/intents/retry", Handler: retryArtifactGCIntentHandler(serverCtx)},
+		{Method: http.MethodPost, Path: "/problems", Handler: createProblemHandler(serverCtx)},
+		{Method: http.MethodGet, Path: "/problems", Handler: listProblemsHandler(serverCtx)},
+		{Method: http.MethodGet, Path: "/problems/:id", Handler: getProblemHandler(serverCtx)},
+		{Method: http.MethodPut, Path: "/problems/:id", Handler: updateProblemHandler(serverCtx)},
+		{Method: http.MethodDelete, Path: "/problems/:id", Handler: deleteProblemHandler(serverCtx)},
+		{Method: http.MethodGet, Path: "/problems/:id/package", Handler: getProblemPackageHandler(serverCtx)},
+		{Method: http.MethodGet, Path: "/problems/:id/package/cases", Handler: listPackageCasesHandler(serverCtx)},
+		{Method: http.MethodPost, Path: "/problems/:id/package/validate", Handler: validateProblemPackageHandler(serverCtx)},
+		{Method: http.MethodPost, Path: "/problems/:id/test-cases", Handler: addTestCaseHandler(serverCtx)},
+		{Method: http.MethodGet, Path: "/problems/:id/test-cases", Handler: listTestCasesHandler(serverCtx)},
+		{Method: http.MethodPut, Path: "/problems/:id/test-cases/:case_no", Handler: updateTestCaseHandler(serverCtx)},
+		{Method: http.MethodDelete, Path: "/problems/:id/test-cases/:case_no", Handler: deleteTestCaseHandler(serverCtx)},
+	}
+}
+
+func legacyProblemRoutes(serverCtx *svc.ServiceContext) []rest.Route {
+	routes := problemOperationRoutes(serverCtx)
+	return append(routes,
+		rest.Route{Method: http.MethodPost, Path: "/admin/artifact-gc/intents:reconcile", Handler: reconcileArtifactGCIntentHandler(serverCtx)},
+		rest.Route{Method: http.MethodPost, Path: "/admin/artifact-gc/intents:retry", Handler: retryArtifactGCIntentHandler(serverCtx)},
 	)
 }

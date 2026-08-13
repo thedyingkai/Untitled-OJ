@@ -19,6 +19,7 @@ import (
 	"ojos-judge-api/internal/repository"
 	"ojos-judge-api/internal/svc"
 	"ojos-judge-api/internal/types"
+	"ojos-shared/servicecontext"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -195,9 +196,9 @@ func TestManagedStorageClientUsesNamedBindingsWithoutCallerHeaders(t *testing.T)
 		"deployment":     map[string]any{"id": "judge-a", "service": "judge-api", "node": "node-a"},
 		"gateway":        map[string]any{"origin": server.URL},
 		"bindings": map[string]any{
-			"storage_put":  map[string]any{"binding_id": "put", "api_id": "storage.object.put", "base_path": "/internal/apis/storage.object.put", "timeout_ms": 300000},
-			"storage_get":  map[string]any{"binding_id": "get", "api_id": "storage.object.get", "base_path": "/internal/apis/storage.object.get", "timeout_ms": 300000},
-			"storage_head": map[string]any{"binding_id": "head", "api_id": "storage.object.head", "base_path": "/internal/apis/storage.object.head", "timeout_ms": 300000},
+			"storage.object.put":  map[string]any{"binding_id": "put", "api_id": "storage.object.put", "base_path": "/internal/apis/storage.object.put", "timeout_ms": 300000},
+			"storage.object.get":  map[string]any{"binding_id": "get", "api_id": "storage.object.get", "base_path": "/internal/apis/storage.object.get", "timeout_ms": 300000},
+			"storage.object.head": map[string]any{"binding_id": "head", "api_id": "storage.object.head", "base_path": "/internal/apis/storage.object.head", "timeout_ms": 300000},
 		},
 		"credential_file": tokenPath,
 		"generation":      4,
@@ -208,8 +209,14 @@ func TestManagedStorageClientUsesNamedBindingsWithoutCallerHeaders(t *testing.T)
 	if err := os.WriteFile(contextPath, contextJSON, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("OJOS_SERVICE_CONTEXT_FILE", contextPath)
-	client := newStorageClient(config.StorageConfig{})
+	provider, err := servicecontext.NewContextProvider(contextPath, servicecontext.ProviderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	storageConfig := config.StorageConfig{}
+	storageConfig.SetContextProvider(provider)
+	client := newStorageClient(storageConfig)
 	if _, err := client.putObject(context.Background(), "submissions", "42-source-main.cpp", "text/plain", strings.NewReader("stored code")); err != nil {
 		t.Fatal(err)
 	}

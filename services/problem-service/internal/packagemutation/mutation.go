@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"ojos-problem-events/problemv1"
 	"ojos-problem-service/internal/config"
 	"ojos-problem-service/internal/packagefs"
 	"ojos-problem-service/internal/repository"
 	problemstorage "ojos-problem-service/internal/storage"
-	"ojos-shared/eventing"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -440,7 +440,7 @@ func (w *workspace) cloneLiveTree() error {
 	return copyTree(w.liveDir, w.stagingDir)
 }
 
-func (w *workspace) publishBeforeCommit(artifact eventing.ArtifactRef, targetVersion int64) error {
+func (w *workspace) publishBeforeCommit(artifact problemv1.ArtifactRef, targetVersion int64) error {
 	journal := mutationJournal{
 		SchemaVersion:            journalSchemaVersion,
 		Operation:                w.operation,
@@ -827,7 +827,7 @@ func rebaseLocalFiles(files []packagefs.IndexedFile, stagingDir string, liveDir 
 }
 
 func packageDigest(dir string) (string, error) {
-	zipPath, digest, _, err := problemstorage.BuildDeterministicPackageArtifact(dir)
+	zipPath, digest, _, err := problemstorage.BuildDeterministicPackageArtifact(filepath.Dir(dir), dir)
 	if zipPath != "" {
 		_ = os.Remove(zipPath)
 	}

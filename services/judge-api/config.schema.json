@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ojos:judge-api:config:v1",
+  "title": "Judge API configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "submission": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxCodeBytes": {"type": "integer", "minimum": 1024, "maximum": 10485760, "default": 262144}
+      }
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "leaseTTLSeconds": {"type": "integer", "minimum": 10, "maximum": 3600, "default": 60}
+      }
+    }
+  }
+}

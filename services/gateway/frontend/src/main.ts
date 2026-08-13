@@ -5,6 +5,7 @@ import './style.css'
 import App from './App.vue'
 import { setUnauthorizedHandler } from './api/client'
 import { router } from './router'
+import { startUserFrontendHost } from './ojos-frontend/shell-host'
 import { useAuthStore } from './stores/auth'
 
 const app = createApp(App)
@@ -27,3 +28,10 @@ setUnauthorizedHandler(() => {
 })
 
 app.mount('#app')
+
+const frontendHost = startUserFrontendHost(router, pinia)
+window.addEventListener('beforeunload', () => void frontendHost.dispose(), { once: true })
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => void frontendHost.dispose())
+}

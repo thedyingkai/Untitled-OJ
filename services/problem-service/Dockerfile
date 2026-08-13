@@ -25,21 +25,22 @@ COPY platform/shared/go /platform/shared/go
 
 WORKDIR /app/problem-service
 
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/problem-service .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/problem-service .
 
-FROM debian:bookworm-slim AS runtime
+FROM alpine:3.22 AS runtime
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN addgroup -S -g 65532 ojos && adduser -S -D -H -u 65532 -G ojos ojos
 
 WORKDIR /app
 
-COPY --from=build /out/problem-service ./problem-service
-COPY --from=build /app/problem-service/etc ./etc
+COPY --from=build --chown=65532:65532 --chmod=0555 /out/problem-service ./problem-service
+COPY --from=build --chown=65532:65532 --chmod=0444 /app/problem-service/etc ./etc
 
-RUN mkdir -p /data/ojos/problems
+RUN mkdir -p /data/ojos/problems && chown -R 65532:65532 /data/ojos
 
-HEALTHCHECK --interval=2s --timeout=5s --start-period=5s --retries=30 CMD ["./problem-service", "healthcheck"]
+USER 65532:65532
+EXPOSE 8083
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 CMD ["/app/problem-service", "healthcheck"]
 
-CMD ["./problem-service", "-f", "etc/problemapi.yaml"]
+ENTRYPOINT ["/app/problem-service"]
+CMD ["-f", "etc/problemapi.yaml"]

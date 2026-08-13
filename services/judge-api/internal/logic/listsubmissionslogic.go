@@ -64,32 +64,27 @@ func (l *ListSubmissionsLogic) ListSubmissions(req *types.ListSubmissionsReq) (r
 	if permissions == nil {
 		return nil, errors.New("permission checker is not configured")
 	}
+	if err := permissions.RequireUserPermission(
+		l.ctx,
+		user.UserID,
+		"judge.submission.view.own",
+		sharedperm.SystemScope(),
+	); err != nil {
+		return nil, err
+	}
 
 	canViewAll, err := permissions.HasUserPermission(
 		l.ctx,
 		user.UserID,
-		"submission.view.all",
+		"judge.submission.view.all",
 		sharedperm.SystemScope(),
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	canViewProblem := false
-	if req.ProblemId > 0 && !canViewAll {
-		canViewProblem, err = permissions.HasUserPermission(
-			l.ctx,
-			user.UserID,
-			"problem.manage.data",
-			sharedperm.Scope{Type: "problem", ID: req.ProblemId},
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	restrictToUserID := int64(0)
-	if !canViewAll && !canViewProblem {
+	if !canViewAll {
 		restrictToUserID = user.UserID
 		if req.UserId > 0 && req.UserId != user.UserID {
 			return nil, sharedperm.ErrForbidden

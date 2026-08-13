@@ -57,19 +57,24 @@ type PermissionCaller struct {
 }
 
 func (c *Client) HasSystemPermission(ctx context.Context, authHeader string, caller PermissionCaller, permission string) (bool, error) {
+	return c.HasPermission(ctx, authHeader, caller, permission, "system", 0)
+}
+
+func (c *Client) HasPermission(ctx context.Context, authHeader string, caller PermissionCaller, permission string, scopeType string, scopeID int64) (bool, error) {
 	if !c.Configured() {
 		return false, errors.New("auth-service permission client is not configured")
 	}
 	permission = strings.TrimSpace(permission)
-	if strings.TrimSpace(caller.Type) == "" || permission == "" {
+	scopeType = strings.TrimSpace(scopeType)
+	if strings.TrimSpace(caller.Type) == "" || permission == "" || scopeType == "" || (scopeType == "system" && scopeID != 0) || (scopeType != "system" && scopeID <= 0) {
 		return false, nil
 	}
 
 	body, err := json.Marshal(permissionCheckRequest{
 		UserID:        caller.UserID,
 		Permission:    permission,
-		ScopeType:     "system",
-		ScopeID:       0,
+		ScopeType:     scopeType,
+		ScopeID:       scopeID,
 		CallerType:    caller.Type,
 		CallerService: caller.Service,
 		CallerNodeID:  caller.NodeID,

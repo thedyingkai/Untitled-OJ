@@ -1,0 +1,346 @@
+openapi: 3.1.0
+info:
+  title: OJOS Gateway Platform API
+  version: 1.0.0
+  description: >-
+    Platform-reserved Gateway health, topology projection and administrative
+    surfaces. These operations are intentionally internal and are never
+    compiled into Contribution routes; business routes come only from the
+    active Contribution snapshot.
+x-ojos-api-id: gateway.platform.api
+x-ojos-service:
+  id: gateway
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 256}
+    IncludeDisabled:
+      name: include_disabled
+      in: query
+      required: false
+      schema: {type: boolean, default: false}
+    DebugUpstream:
+      name: debug_upstream
+      in: query
+      required: false
+      schema: {type: boolean, default: false}
+  schemas:
+    Status:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string}
+    PlatformDocument:
+      type: object
+      additionalProperties: true
+    TopologyProjectionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - api_version
+        - provider
+        - action
+        - topology_id
+        - attempted_revision_id
+        - operation_id
+      properties:
+        api_version: {const: v1}
+        provider: {const: gateway}
+        action: {type: string, enum: [apply, restore_previous, delete]}
+        topology_id: {type: string, minLength: 1}
+        attempted_revision_id: {type: string, minLength: 1}
+        desired_revision_id: {type: [string, 'null']}
+        desired_content_sha256:
+          type: [string, 'null']
+          pattern: '^[a-f0-9]{64}$'
+        operation_id: {type: string, minLength: 1}
+        spec: {}
+        routes:
+          type: array
+          items: {$ref: '#/components/schemas/PlatformDocument'}
+        grants:
+          type: array
+          items: {$ref: '#/components/schemas/PlatformDocument'}
+    RoutesReloadRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        operation_id: {type: string}
+        service_name: {type: string}
+        node_id: {type: string}
+        version: {type: string}
+        generated_at: {type: string}
+        pushed_route_table: {type: boolean}
+        routes:
+          type: array
+          items: {$ref: '#/components/schemas/PlatformDocument'}
+        warnings:
+          type: array
+          items: {type: string}
+        can_proxy: {type: boolean}
+paths:
+  /health:
+    get:
+      operationId: getGatewayCompatibilityHealth
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200':
+          description: Backward-compatible process health
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Status'}
+  /healthz:
+    get:
+      operationId: getGatewayLiveness
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Status'}
+  /readyz:
+    get:
+      operationId: getGatewayReadiness
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200':
+          description: Redis, control-plane projection and managed bindings are ready
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Status'}
+        '503':
+          description: A required dependency is unavailable
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Status'}
+  /metrics:
+    get:
+      operationId: getGatewayMetrics
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema: {type: string}
+  /api/v1/contributions/snapshot:
+    get:
+      operationId: getGatewayUserContributionSnapshot
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200':
+          description: Sanitized active user-shell Contribution snapshot
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlatformDocument'}
+        '503': {description: Contribution projection is unavailable}
+  /api/v1/topologies/{id}:
+    parameters: [{$ref: '#/components/parameters/ResourceId'}]
+    get:
+      operationId: getGatewayTopologyProjection
+      x-ojos-audience: internal
+      security: [{ojosBearer: []}]
+      responses:
+        '200':
+          description: Current observed Gateway topology projection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlatformDocument'}
+        '401': {description: Orchestrator management bearer rejected}
+    put:
+      operationId: applyGatewayTopologyProjection
+      x-ojos-audience: internal
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TopologyProjectionRequest'}
+      responses:
+        '200':
+          description: Projection applied or idempotently observed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlatformDocument'}
+        '401': {description: Orchestrator management bearer rejected}
+        '422': {description: Projection request is invalid}
+    delete:
+      operationId: deleteGatewayTopologyProjection
+      x-ojos-audience: internal
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TopologyProjectionRequest'}
+      responses:
+        '200':
+          description: Projection deleted or idempotently absent
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlatformDocument'}
+        '401': {description: Orchestrator management bearer rejected}
+        '422': {description: Projection request is invalid}
+  /api/admin/endpoint-groups:
+    get:
+      operationId: listGatewayEndpointGroups
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Effective endpoint groups, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+  /api/admin/health:
+    get:
+      operationId: getGatewayAdminHealth
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Gateway and routed-service health, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+  /api/admin/orchestrator/routes:
+    get:
+      operationId: listGatewayOrchestratorRoutes
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      parameters:
+        - $ref: '#/components/parameters/IncludeDisabled'
+        - $ref: '#/components/parameters/DebugUpstream'
+      responses:
+        '200': {description: Effective route table, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+  /api/admin/orchestrator/routes/reload:
+    post:
+      operationId: reloadGatewayOrchestratorRoutes
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RoutesReloadRequest'}
+      responses:
+        '200': {description: Route table reloaded, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+  /api/admin/orchestrator/snapshot:
+    get:
+      operationId: getGatewayOrchestratorSnapshot
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      parameters: [{$ref: '#/components/parameters/IncludeDisabled'}]
+      responses:
+        '200': {description: Orchestrator projection snapshot, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+  /api/admin/services:
+    get:
+      operationId: listGatewayServices
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Service definitions, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+  /api/admin/services/{id}:
+    parameters: [{$ref: '#/components/parameters/ResourceId'}]
+    get:
+      operationId: getGatewayService
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Service definition detail, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+        '404': {description: Service not found}
+  /api/admin/topology:
+    get:
+      operationId: getGatewayServiceTopology
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Service topology graph, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+  /api/admin/services/status:
+    get:
+      operationId: listGatewayServiceStatuses
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Service runtime statuses, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+  /api/admin/services/status/operations:
+    get:
+      operationId: listGatewayServiceOperations
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Service operation statuses, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+  /api/admin/services/status/operations/{id}:
+    parameters: [{$ref: '#/components/parameters/ResourceId'}]
+    get:
+      operationId: getGatewayServiceOperation
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Service operation detail, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+        '404': {description: Operation not found}
+  /api/admin/services/status/{id}:
+    parameters: [{$ref: '#/components/parameters/ResourceId'}]
+    get:
+      operationId: getGatewayServiceStatus
+      x-ojos-audience: internal
+      x-ojos-permission: system.admin
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Service runtime status detail, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformDocument'}}}}
+        '401': {description: Authentication required}
+        '403': {description: system.admin required}
+        '404': {description: Service not found}

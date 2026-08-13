@@ -1,6 +1,12 @@
 package orchestratorsnapshot
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+)
 
 const (
 	StatusEnabled = "ENABLED"
@@ -127,6 +133,163 @@ type GatewayRoute struct {
 	RewritePrefix        string `json:"rewrite_prefix,omitempty"`
 	HealthCheckID        string `json:"health_check_id,omitempty"`
 	Enabled              bool   `json:"enabled"`
+}
+
+// ContributionSnapshot is the deployment-scoped, atomically published route
+// projection consumed by Gateway. Only routes from active heads are present;
+// Enabled additionally reflects the runtime evidence gate.
+type ContributionSnapshot struct {
+	SchemaVersion         string                             `json:"schema_version"`
+	Digest                string                             `json:"digest"`
+	ScopeID               string                             `json:"scope_id"`
+	Acknowledgements      []ContributionAcknowledgement      `json:"acknowledgements"`
+	Revisions             []ContributionRevision             `json:"revisions"`
+	GatewayRoutes         []ContributionGatewayRoute         `json:"gateway_routes"`
+	PermissionDefinitions []ContributionPermissionDefinition `json:"permission_definitions"`
+	UserFrontendModules   []ContributionFrontendModule       `json:"user_frontend_modules"`
+	AdminFrontendModules  []ContributionFrontendModule       `json:"admin_frontend_modules"`
+}
+
+// ContributionAcknowledgement is an exact observation obligation emitted by
+// Orchestrator as part of the signed snapshot digest. Consumers must return the
+// array unchanged after the complete snapshot has been applied locally.
+type ContributionAcknowledgement struct {
+	ActivationID        string  `json:"activation_id"`
+	ServiceID           string  `json:"service_id"`
+	CandidateRevisionID string  `json:"candidate_revision_id"`
+	CandidateGeneration uint64  `json:"candidate_generation"`
+	ExpectedState       string  `json:"expected_state"`
+	ObservedRevisionID  *string `json:"observed_revision_id"`
+	ObservedGeneration  *uint64 `json:"observed_generation"`
+}
+
+type ContributionPermissionDefinition struct {
+	ServiceID   string `json:"service_id"`
+	RevisionID  string `json:"revision_id"`
+	Generation  uint64 `json:"generation"`
+	Key         string `json:"key"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+type ContributionFrontendModule struct {
+	ServiceID         string `json:"service_id"`
+	DeploymentID      string `json:"deployment_id"`
+	RevisionID        string `json:"revision_id"`
+	Generation        uint64 `json:"generation"`
+	Target            string `json:"target"`
+	ModuleID          string `json:"module_id"`
+	SurfaceID         string `json:"surface_id"`
+	Route             string `json:"route"`
+	MenuLabel         string `json:"menu_label"`
+	Menu              bool   `json:"menu"`
+	Order             int    `json:"order"`
+	Permission        string `json:"permission,omitempty"`
+	Artifact          string `json:"artifact"`
+	HostAPIRange      string `json:"host_api_range"`
+	ManifestDigest    string `json:"manifest_digest"`
+	ManifestReference string `json:"manifest_reference"`
+	BundleDigest      string `json:"bundle_digest"`
+	BundleReference   string `json:"bundle_reference"`
+	Enabled           bool   `json:"enabled"`
+}
+
+type ContributionRevision struct {
+	ServiceID    string `json:"service_id"`
+	DeploymentID string `json:"deployment_id"`
+	RevisionID   string `json:"revision_id"`
+	Generation   uint64 `json:"generation"`
+	RuntimeReady bool   `json:"runtime_ready"`
+}
+
+type ContributionGatewayRoute struct {
+	ServiceID       string           `json:"service_id"`
+	DeploymentID    string           `json:"deployment_id"`
+	RevisionID      string           `json:"revision_id"`
+	Generation      uint64           `json:"generation"`
+	Audience        string           `json:"audience"`
+	Method          string           `json:"method"`
+	Path            string           `json:"path"`
+	ApiID           string           `json:"api_id"`
+	OperationID     string           `json:"operation_id"`
+	ProviderPath    string           `json:"provider_path"`
+	Auth            string           `json:"auth"`
+	Permission      string           `json:"permission,omitempty"`
+	PermissionScope *PermissionScope `json:"permission_scope,omitempty"`
+	UpstreamBase    string           `json:"upstream_base,omitempty"`
+	Enabled         bool             `json:"enabled"`
+}
+
+// PermissionScope is emitted by the signed contribution snapshot. System
+// scopes use Kind=system; resource scopes derive ScopeID only from the named
+// path parameter on the matched external route.
+type PermissionScope struct {
+	Kind          string
+	Type          string
+	PathParameter string
+}
+
+func (s *PermissionScope) UnmarshalJSON(data []byte) error {
+	var scalar string
+	if err := json.Unmarshal(data, &scalar); err == nil {
+		if scalar != "system" {
+			return fmt.Errorf("unsupported permission scope %q", scalar)
+		}
+		*s = PermissionScope{Kind: "system", Type: "system"}
+		return nil
+	}
+	var object struct {
+		Type          string `json:"type"`
+		PathParameter string `json:"pathParameter"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&object); err != nil {
+		return fmt.Errorf("decode permission scope: %w", err)
+	}
+	if !validPermissionScopeType(strings.TrimSpace(object.Type)) || strings.TrimSpace(object.Type) == "system" || strings.TrimSpace(object.PathParameter) == "" {
+		return errors.New("resource permission scope requires type and pathParameter")
+	}
+	*s = PermissionScope{
+		Kind:          "path_parameter",
+		Type:          strings.TrimSpace(object.Type),
+		PathParameter: strings.TrimSpace(object.PathParameter),
+	}
+	return nil
+}
+
+func (s PermissionScope) MarshalJSON() ([]byte, error) {
+	if s.Kind == "system" && s.Type == "system" && s.PathParameter == "" {
+		return json.Marshal("system")
+	}
+	if s.Kind != "path_parameter" || !validPermissionScopeType(s.Type) || s.Type == "system" || strings.TrimSpace(s.PathParameter) == "" {
+		return nil, errors.New("invalid permission scope")
+	}
+	return json.Marshal(struct {
+		Type          string `json:"type"`
+		PathParameter string `json:"pathParameter"`
+	}{Type: s.Type, PathParameter: s.PathParameter})
+}
+
+func validPermissionScopeType(value string) bool {
+	if value == "" || len(value) > 128 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	separator := false
+	for _, character := range value[1:] {
+		switch {
+		case character >= 'a' && character <= 'z', character >= '0' && character <= '9':
+			separator = false
+		case character == '.', character == '_', character == '-':
+			if separator {
+				return false
+			}
+			separator = true
+		default:
+			return false
+		}
+	}
+	return !separator
 }
 
 type Migration struct {

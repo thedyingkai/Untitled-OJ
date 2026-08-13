@@ -3,6 +3,7 @@ package servicestatus
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -96,43 +97,268 @@ type RouteTable struct {
 }
 
 type ServiceRoute struct {
-	RouteID              string   `json:"route_id"`
-	ApiID                string   `json:"api_id,omitempty"`
-	BindingID            string   `json:"binding_id,omitempty"`
-	ConsumerDeploymentID string   `json:"consumer_deployment_id,omitempty"`
-	ConsumerServiceID    string   `json:"consumer_service_id,omitempty"`
-	ConsumerNodeID       string   `json:"consumer_node_id,omitempty"`
-	CredentialGeneration uint64   `json:"credential_generation,omitempty"`
-	TimeoutMS            uint64   `json:"timeout_ms,omitempty"`
-	NodeID               string   `json:"node_id,omitempty"`
-	ProviderNodeID       string   `json:"provider_node_id,omitempty"`
-	ProviderHostIP       string   `json:"provider_host_ip,omitempty"`
-	ProviderService      string   `json:"provider_service_name,omitempty"`
-	ProviderEndpoint     string   `json:"provider_endpoint,omitempty"`
-	VisibilitySource     string   `json:"visibility_source,omitempty"`
-	Distance             int      `json:"distance,omitempty"`
-	OwnerServiceID       string   `json:"owner_service_id"`
-	Prefix               string   `json:"prefix"`
-	ServiceID            string   `json:"service_id"`
-	TargetService        string   `json:"target_service"`
-	UpstreamBase         string   `json:"upstream_base,omitempty"`
-	AuthMode             string   `json:"auth_mode"`
-	ProviderAuthMode     string   `json:"provider_auth_mode,omitempty"`
-	RequiredPermission   string   `json:"required_permission,omitempty"`
-	Methods              []string `json:"methods"`
-	Enabled              bool     `json:"enabled"`
-	ProxyEnabled         bool     `json:"proxy_enabled"`
-	Priority             int      `json:"priority"`
-	StripPrefix          string   `json:"strip_prefix,omitempty"`
-	RewritePrefix        string   `json:"rewrite_prefix,omitempty"`
-	HealthCheckID        string   `json:"health_check_id,omitempty"`
-	CreatedFrom          string   `json:"created_from"`
-	Status               string   `json:"status"`
-	ServiceStatus        string   `json:"service_status,omitempty"`
-	ServiceHealth        string   `json:"service_health,omitempty"`
-	Conflicts            []string `json:"conflicts"`
-	Warnings             []string `json:"warnings"`
-	BlockedBy            []string `json:"blocked_by"`
+	RouteID              string           `json:"route_id"`
+	ApiID                string           `json:"api_id,omitempty"`
+	OperationID          string           `json:"operation_id,omitempty"`
+	DeploymentID         string           `json:"deployment_id,omitempty"`
+	RevisionID           string           `json:"revision_id,omitempty"`
+	Generation           uint64           `json:"generation,omitempty"`
+	Audience             string           `json:"audience,omitempty"`
+	PathTemplate         string           `json:"path_template,omitempty"`
+	ProviderPath         string           `json:"provider_path,omitempty"`
+	BindingID            string           `json:"binding_id,omitempty"`
+	ConsumerDeploymentID string           `json:"consumer_deployment_id,omitempty"`
+	ConsumerServiceID    string           `json:"consumer_service_id,omitempty"`
+	ConsumerNodeID       string           `json:"consumer_node_id,omitempty"`
+	CredentialGeneration uint64           `json:"credential_generation,omitempty"`
+	TimeoutMS            uint64           `json:"timeout_ms,omitempty"`
+	NodeID               string           `json:"node_id,omitempty"`
+	ProviderNodeID       string           `json:"provider_node_id,omitempty"`
+	ProviderHostIP       string           `json:"provider_host_ip,omitempty"`
+	ProviderService      string           `json:"provider_service_name,omitempty"`
+	ProviderEndpoint     string           `json:"provider_endpoint,omitempty"`
+	VisibilitySource     string           `json:"visibility_source,omitempty"`
+	Distance             int              `json:"distance,omitempty"`
+	OwnerServiceID       string           `json:"owner_service_id"`
+	Prefix               string           `json:"prefix"`
+	ServiceID            string           `json:"service_id"`
+	TargetService        string           `json:"target_service"`
+	UpstreamBase         string           `json:"upstream_base,omitempty"`
+	AuthMode             string           `json:"auth_mode"`
+	ProviderAuthMode     string           `json:"provider_auth_mode,omitempty"`
+	RequiredPermission   string           `json:"required_permission,omitempty"`
+	PermissionScope      *PermissionScope `json:"permission_scope,omitempty"`
+	Methods              []string         `json:"methods"`
+	Enabled              bool             `json:"enabled"`
+	ProxyEnabled         bool             `json:"proxy_enabled"`
+	Priority             int              `json:"priority"`
+	StripPrefix          string           `json:"strip_prefix,omitempty"`
+	RewritePrefix        string           `json:"rewrite_prefix,omitempty"`
+	HealthCheckID        string           `json:"health_check_id,omitempty"`
+	CreatedFrom          string           `json:"created_from"`
+	Status               string           `json:"status"`
+	ServiceStatus        string           `json:"service_status,omitempty"`
+	ServiceHealth        string           `json:"service_health,omitempty"`
+	Conflicts            []string         `json:"conflicts"`
+	Warnings             []string         `json:"warnings"`
+	BlockedBy            []string         `json:"blocked_by"`
+}
+
+type PermissionScope struct {
+	Kind          string `json:"kind"`
+	Type          string `json:"type"`
+	PathParameter string `json:"path_parameter,omitempty"`
+}
+
+func ContributionRouteTable(snapshot orchestratorsnapshot.ContributionSnapshot) (RouteTable, error) {
+	table := RouteTable{
+		Version:  strings.TrimSpace(snapshot.Digest),
+		CanProxy: false,
+	}
+	seen := make(map[string]int)
+	reserved := normalizeReservedPrefixes(nil)
+	for _, route := range snapshot.GatewayRoutes {
+		method := strings.ToUpper(strings.TrimSpace(route.Method))
+		path := cleanPrefix(route.Path)
+		audience := strings.ToLower(strings.TrimSpace(route.Audience))
+		item := ServiceRoute{
+			RouteID:            contributionRouteID(route),
+			ApiID:              strings.TrimSpace(route.ApiID),
+			OperationID:        strings.TrimSpace(route.OperationID),
+			DeploymentID:       strings.TrimSpace(route.DeploymentID),
+			RevisionID:         strings.TrimSpace(route.RevisionID),
+			Generation:         route.Generation,
+			Audience:           audience,
+			PathTemplate:       path,
+			ProviderPath:       cleanPrefix(route.ProviderPath),
+			OwnerServiceID:     strings.TrimSpace(route.ServiceID),
+			Prefix:             path,
+			ServiceID:          strings.TrimSpace(route.ServiceID),
+			TargetService:      strings.TrimSpace(route.ServiceID),
+			UpstreamBase:       strings.TrimRight(strings.TrimSpace(route.UpstreamBase), "/"),
+			AuthMode:           normalizeContributionAuth(route.Auth, audience),
+			RequiredPermission: normalizeRequiredPermission(route.Permission),
+			PermissionScope:    contributionPermissionScope(route),
+			Methods:            []string{method},
+			Enabled:            route.Enabled,
+			Priority:           templateSpecificity(path),
+			CreatedFrom:        "contribution_snapshot_v1",
+			Status:             "active",
+		}
+		if !item.Enabled {
+			item.Status = "disabled"
+			item.BlockedBy = append(item.BlockedBy, "runtime not ready")
+		}
+		if item.ServiceID == "" || item.DeploymentID == "" || item.RevisionID == "" || item.ApiID == "" || item.OperationID == "" {
+			item.BlockedBy = append(item.BlockedBy, "incomplete operation identity")
+		}
+		if strings.EqualFold(item.ServiceID, "gateway") {
+			item.BlockedBy = append(item.BlockedBy, "Gateway platform service cannot contribute proxy routes")
+		}
+		shape, validTemplate := contributionTemplateShape(path)
+		providerParameters, validProviderTemplate := contributionTemplateParameters(item.ProviderPath)
+		pathParameters, _ := contributionTemplateParameters(path)
+		if method == "" || path == "" || item.ProviderPath == "" || !validContributionAudience(audience) || !validTemplate || !validProviderTemplate || !sameStringSet(pathParameters, providerParameters) {
+			item.BlockedBy = append(item.BlockedBy, "invalid operation route")
+		}
+		if item.RequiredPermission == "" && item.PermissionScope != nil {
+			item.BlockedBy = append(item.BlockedBy, "permission scope without permission")
+		}
+		if item.RequiredPermission != "" && !validPermissionScope(item.PermissionScope, pathParameters, providerParameters) {
+			item.BlockedBy = append(item.BlockedBy, "invalid permission scope")
+		}
+		if item.UpstreamBase == "" {
+			item.BlockedBy = append(item.BlockedBy, "runtime upstream unavailable")
+		}
+		if reservedPrefixMatches(path, reserved) {
+			item.BlockedBy = append(item.BlockedBy, "reserved prefix")
+		}
+		methods := []string{method}
+		if method == "GET" {
+			methods = append(methods, "HEAD")
+		}
+		for _, matchingMethod := range methods {
+			key := audience + "\x00" + matchingMethod + "\x00" + shape
+			if previous, exists := seen[key]; exists {
+				return RouteTable{}, fmt.Errorf("contribution routes %s and %s collide for %s %s %s", table.Routes[previous].RouteID, item.RouteID, audience, matchingMethod, path)
+			}
+			seen[key] = len(table.Routes)
+		}
+		if len(item.BlockedBy) > 0 {
+			item.Status = "blocked"
+		}
+		table.Routes = append(table.Routes, item)
+	}
+	for i := range table.Routes {
+		table.Routes[i].ProxyEnabled = table.Routes[i].Enabled && table.Routes[i].Status == "active" && len(table.Routes[i].BlockedBy) == 0
+		if table.Routes[i].ProxyEnabled {
+			table.CanProxy = true
+		}
+		if len(table.Routes[i].BlockedBy) > 0 {
+			table.Warnings = append(table.Warnings, table.Routes[i].RouteID+": "+strings.Join(table.Routes[i].BlockedBy, "; "))
+		}
+	}
+	sortRouteTable(&table)
+	return table, nil
+}
+
+func contributionPermissionScope(route orchestratorsnapshot.ContributionGatewayRoute) *PermissionScope {
+	if strings.TrimSpace(route.Permission) == "" {
+		if route.PermissionScope == nil {
+			return nil
+		}
+		return &PermissionScope{}
+	}
+	if route.PermissionScope == nil || route.PermissionScope.Kind == "system" {
+		return &PermissionScope{Kind: "system", Type: "system"}
+	}
+	return &PermissionScope{
+		Kind:          strings.TrimSpace(route.PermissionScope.Kind),
+		Type:          strings.TrimSpace(route.PermissionScope.Type),
+		PathParameter: strings.TrimSpace(route.PermissionScope.PathParameter),
+	}
+}
+
+func validPermissionScope(scope *PermissionScope, externalParameters, providerParameters map[string]bool) bool {
+	if scope == nil {
+		return false
+	}
+	if scope.Kind == "system" {
+		return scope.Type == "system" && scope.PathParameter == ""
+	}
+	if scope.Kind != "path_parameter" || scope.Type == "" || scope.Type == "system" || scope.PathParameter == "" {
+		return false
+	}
+	return externalParameters[scope.PathParameter] && providerParameters[scope.PathParameter]
+}
+
+func contributionRouteID(route orchestratorsnapshot.ContributionGatewayRoute) string {
+	return strings.Join([]string{
+		"contribution", strings.TrimSpace(route.ServiceID), strings.TrimSpace(route.DeploymentID),
+		strings.TrimSpace(route.RevisionID), strings.TrimSpace(route.OperationID),
+	}, ":")
+}
+
+func normalizeContributionAuth(auth string, audience string) string {
+	switch strings.ToLower(strings.TrimSpace(auth)) {
+	case "anonymous":
+		return "public"
+	case "optional":
+		return "optional"
+	case "required":
+		if strings.EqualFold(audience, "admin") {
+			return "admin"
+		}
+		return "user"
+	default:
+		return strings.ToLower(strings.TrimSpace(auth))
+	}
+}
+
+func validContributionAudience(audience string) bool {
+	switch audience {
+	case "public", "user", "admin", "internal":
+		return true
+	default:
+		return false
+	}
+}
+
+func templateSpecificity(path string) int {
+	literal := 0
+	for _, segment := range strings.Split(strings.Trim(path, "/"), "/") {
+		if !strings.HasPrefix(segment, "{") || !strings.HasSuffix(segment, "}") {
+			literal++
+		}
+	}
+	return literal*1000 + len(path)
+}
+
+func contributionTemplateShape(path string) (string, bool) {
+	segments := strings.Split(strings.Trim(cleanPrefix(path), "/"), "/")
+	if len(segments) == 1 && segments[0] == "" {
+		return "/", true
+	}
+	for index, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return "", false
+		}
+		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") && len(segment) > 2 {
+			segments[index] = "{}"
+		} else if strings.ContainsAny(segment, "{}") {
+			return "", false
+		}
+	}
+	return "/" + strings.Join(segments, "/"), true
+}
+
+func contributionTemplateParameters(path string) (map[string]bool, bool) {
+	parameters := make(map[string]bool)
+	segments := strings.Split(strings.Trim(cleanPrefix(path), "/"), "/")
+	for _, segment := range segments {
+		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") && len(segment) > 2 {
+			name := strings.TrimSpace(segment[1 : len(segment)-1])
+			if name == "" || parameters[name] {
+				return nil, false
+			}
+			parameters[name] = true
+		} else if strings.ContainsAny(segment, "{}") {
+			return nil, false
+		}
+	}
+	return parameters, true
+}
+
+func sameStringSet(left map[string]bool, right map[string]bool) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for item := range left {
+		if !right[item] {
+			return false
+		}
+	}
+	return true
 }
 
 type RouteTableOptions struct {
@@ -1205,12 +1431,21 @@ func normalizeReservedPrefixes(items []string) []string {
 
 func DefaultReservedPrefixes() []string {
 	return []string{
+		"/health",
+		"/healthz",
+		"/readyz",
+		"/metrics",
+		"/__ojos/extensions",
+		"/internal/apis",
 		"/api/auth",
+		"/api/admin",
 		"/api/admin/services",
 		"/api/admin/health",
 		"/api/health",
 		"/api/internal",
 		"/api/judge/worker",
+		"/api/v1/contributions",
+		"/api/v1/topologies",
 	}
 }
 

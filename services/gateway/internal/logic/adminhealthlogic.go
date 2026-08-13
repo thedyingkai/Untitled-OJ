@@ -43,7 +43,9 @@ func (l *AdminHealthLogic) adminHealth(authHeader string) (*types.AdminHealthRes
 	components := []types.HealthComponent{
 		component("gateway", time.Now(), nil),
 		l.checkRedis(),
-		l.checkArtifactStorage(),
+	}
+	if !managedGatewayHealth(l.svcCtx) {
+		components = append(components, l.checkArtifactStorage())
 	}
 
 	for _, route := range l.svcCtx.Config.Proxy.Routes {
@@ -56,10 +58,14 @@ func (l *AdminHealthLogic) adminHealth(authHeader string) (*types.AdminHealthRes
 	}
 	components = append(components, l.runtimeHealthChecks()...)
 
-	workerOnline, queuePending, judgeAdminComponents := l.judgeAdminStatus(authHeader)
-	components = append(components, judgeAdminComponents...)
-	components = append(components, l.checkWorkers(workerOnline))
-	components = append(components, l.checkQueue(queuePending))
+	workerOnline, queuePending := int64(0), int64(0)
+	if !managedGatewayHealth(l.svcCtx) {
+		observedWorkers, observedQueue, judgeAdminComponents := l.judgeAdminStatus(authHeader)
+		workerOnline, queuePending = observedWorkers, observedQueue
+		components = append(components, judgeAdminComponents...)
+		components = append(components, l.checkWorkers(workerOnline))
+		components = append(components, l.checkQueue(queuePending))
+	}
 
 	overall := "ok"
 	for _, c := range components {
@@ -76,6 +82,10 @@ func (l *AdminHealthLogic) adminHealth(authHeader string) (*types.AdminHealthRes
 		QueuePending:      queuePending,
 		InternalAuth:      statusFromBool(l.svcCtx.Config.InternalAuth.Enabled),
 	}, nil
+}
+
+func managedGatewayHealth(svcCtx *svc.ServiceContext) bool {
+	return svcCtx != nil && svcCtx.Context != nil
 }
 
 func (l *AdminHealthLogic) checkRedis() types.HealthComponent {

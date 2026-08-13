@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "ojos.dev/build-input/v1",
+  "serviceId": "auth-service",
+  "serviceVersion": "0.1.0",
+  "contractDigest": "sha256:10e76b71630427ffca9b89683d0c396983d38ae00caf6f415d689e29997c0d64",
+  "generatedFiles": 19,
+  "artifactRequirements": [
+    {
+      "role": "migration:auth-schema-v1",
+      "slot": "auth-migration-v1",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "runtime",
+      "slot": "auth-runtime",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "config-schema",
+      "slot": "config.schema",
+      "expectedDigest": "sha256:fd12f358abe0edc91123b5dd7a82de524ebd3e8cec0b5e20790b2878a65b4a0a",
+      "expectedSize": null
+    },
+    {
+      "role": "contract",
+      "slot": "contract",
+      "expectedDigest": "sha256:10e76b71630427ffca9b89683d0c396983d38ae00caf6f415d689e29997c0d64",
+      "expectedSize": 54136
+    },
+    {
+      "role": "events-manifest",
+      "slot": "events",
+      "expectedDigest": "sha256:08bd3b65e1a5790fffed0ef69e19034c286f51f5e3dd2e2e0188e6059fe30981",
+      "expectedSize": 32
+    },
+    {
+      "role": "openapi:auth-service.api",
+      "slot": "openapi.auth-service.api",
+      "expectedDigest": "sha256:8528505233498a35a19b478c335e665678318d920a7b27dea1df63399f1842e1",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:auth.control.v1",
+      "slot": "openapi.auth.control.v1",
+      "expectedDigest": "sha256:a1d652aa047e17977ef3cb889880d9a73bbd1294f8da229181aa36ad814c886a",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:auth.user.permission.check",
+      "slot": "openapi.auth.user.permission.check",
+      "expectedDigest": "sha256:bab8d1f35abf226446327c5f7c0020f88312b8fd1a616e75b21af20924f91300",
+      "expectedSize": null
+    },
+    {
+      "role": "provenance",
+      "slot": "provenance",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "sbom",
+      "slot": "sbom",
+      "expectedDigest": null,
+      "expectedSize": null
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "ojos.dev/build-input/v1",
+  "serviceId": "storage-service",
+  "serviceVersion": "0.1.0",
+  "contractDigest": "sha256:25af6fba97d7961ec83c8e4ad3dfa266b04056146d73135ab1884335e4435b63",
+  "generatedFiles": 19,
+  "artifactRequirements": [
+    {
+      "role": "config-schema",
+      "slot": "config.schema",
+      "expectedDigest": "sha256:4f26f66c34655deabc7698cfc049343184e20d8f97fd1adeed4eea12e23169ef",
+      "expectedSize": null
+    },
+    {
+      "role": "contract",
+      "slot": "contract",
+      "expectedDigest": "sha256:25af6fba97d7961ec83c8e4ad3dfa266b04056146d73135ab1884335e4435b63",
+      "expectedSize": 7362
+    },
+    {
+      "role": "events-manifest",
+      "slot": "events",
+      "expectedDigest": "sha256:08bd3b65e1a5790fffed0ef69e19034c286f51f5e3dd2e2e0188e6059fe30981",
+      "expectedSize": 32
+    },
+    {
+      "role": "openapi:storage.object.delete",
+      "slot": "openapi.storage.object.delete",
+      "expectedDigest": "sha256:049871d925795569065f168224007bdba22b9748fdf487ab350fa30af9c94057",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:storage.object.get",
+      "slot": "openapi.storage.object.get",
+      "expectedDigest": "sha256:aa39ce1ce7d08044907860f93329650c42996c18335214673c0a8ee8045e2c71",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:storage.object.head",
+      "slot": "openapi.storage.object.head",
+      "expectedDigest": "sha256:336ab0e774046d086b7f5f0a031c0cebf74b196bc954f9d49d01e54a58da70e2",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:storage.object.put",
+      "slot": "openapi.storage.object.put",
+      "expectedDigest": "sha256:2bf4536aef91c2738ea3ed15d88dec8c7a01f297c8d31fecbd3d75a343103280",
+      "expectedSize": null
+    },
+    {
+      "role": "provenance",
+      "slot": "provenance",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "sbom",
+      "slot": "sbom",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "runtime",
+      "slot": "storage-runtime",
+      "expectedDigest": null,
+      "expectedSize": null
+    }
+  ]
+}

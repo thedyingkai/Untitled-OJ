@@ -73,3 +73,25 @@ func TestHasSystemPermissionBindsServiceCredentialToCallerHeader(t *testing.T) {
 		t.Fatal("expected permission to be allowed")
 	}
 }
+
+func TestHasPermissionSendsResourceScope(t *testing.T) {
+	var payload permissionCheckRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{"allowed":true}}`))
+	}))
+	defer server.Close()
+
+	allowed, err := New(server.URL).HasPermission(context.Background(), "Bearer token", PermissionCaller{
+		Type: "user", UserID: 42, APIID: "contest.api",
+	}, "contest.read", "contest", 73)
+	if err != nil || !allowed {
+		t.Fatalf("resource permission check failed: allowed=%v err=%v", allowed, err)
+	}
+	if payload.ScopeType != "contest" || payload.ScopeID != 73 {
+		t.Fatalf("unexpected resource permission scope: %#v", payload)
+	}
+}

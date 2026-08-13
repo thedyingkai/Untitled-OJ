@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "ojos.frontend/v1",
+  "moduleId": "user-service.admin",
+  "target": "admin-shell",
+  "artifact": "user-admin-frontend",
+  "hostApiRange": "^1.0",
+  "routes": [
+    {
+      "id": "user-service.admin.profile",
+      "path": "/admin/user-profiles",
+      "title": "User profiles",
+      "menu": true,
+      "order": 80,
+      "permission": "user.profile.read.any"
+    }
+  ]
+}
