@@ -445,6 +445,28 @@ fn live_contest_slug_is_stable_and_within_the_signed_contract() {
     assert!(first.starts_with("real-vertical-") && !first.ends_with('-'));
 }
 
+#[test]
+fn postgres_database_url_preserves_the_verified_network_connection() {
+    let target = postgres_database_url(
+        "postgresql://admin:secret@127.0.0.1:55432/postgres?sslmode=require",
+        "ojosdb_deadbeef",
+    )
+    .expect("target database URL");
+
+    assert_eq!(
+        target,
+        "postgresql://admin:secret@127.0.0.1:55432/ojosdb_deadbeef?sslmode=require"
+    );
+    assert!(postgres_database_url("postgresql:///postgres", "ojosdb_deadbeef").is_err());
+    assert!(
+        postgres_database_url(
+            "postgresql://admin:secret@127.0.0.1:55432/postgres",
+            "../postgres"
+        )
+        .is_err()
+    );
+}
+
 async fn run_gate() -> Result<()> {
     let config = LiveConfig::from_env()?;
     ensure!(
@@ -720,6 +742,8 @@ fn assert_postgres_migration_and_outbox(
     evidence: &LiveEvidenceV1,
     contest: &CreatedContestEvidence,
 ) -> Result<PublishedEventEvidence> {
+    let target_database_url =
+        postgres_database_url(&config.postgres_admin_url, &evidence.postgres_database)?;
     let query = format!(
         "SELECT event_id, event_type, payload->>'dataschema', \
          payload->'data'->>'contestId', payload->'data'->>'slug', \
@@ -733,16 +757,8 @@ fn assert_postgres_migration_and_outbox(
         let output = Command::new("psql")
             .env("PGCONNECT_TIMEOUT", "5")
             .env("PGSSLROOTCERT", &config.postgres_ca_file)
-            .arg(&config.postgres_admin_url)
-            .args([
-                "-XAt",
-                "-F",
-                "\t",
-                "-d",
-                &evidence.postgres_database,
-                "-c",
-                &query,
-            ])
+            .arg(&target_database_url)
+            .args(["-XAt", "-F", "\t", "-c", &query])
             .output()
             .context("execute live PostgreSQL migration/outbox assertion")?;
         ensure!(
@@ -780,6 +796,28 @@ fn assert_postgres_migration_and_outbox(
         contest.id,
         last_detail
     )
+}
+
+fn postgres_database_url(admin_url: &str, database: &str) -> Result<String> {
+    ensure!(
+        !database.is_empty()
+            && database.len() <= 63
+            && database
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
+        "live PostgreSQL database name is invalid"
+    );
+    let mut target = url::Url::parse(admin_url).context("parse live PostgreSQL admin URL")?;
+    ensure!(
+        target.scheme() == "postgres" || target.scheme() == "postgresql",
+        "live PostgreSQL admin URL must use postgres:// or postgresql://"
+    );
+    ensure!(
+        target.host_str().is_some() && target.port().is_some(),
+        "live PostgreSQL admin URL must contain an explicit host and port"
+    );
+    target.set_path(&format!("/{database}"));
+    Ok(target.into())
 }
 
 fn assert_redis_event(
