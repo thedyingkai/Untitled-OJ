@@ -56,6 +56,27 @@ func TestRuntimeImageSeedsRetainedVolumeTargetForNonRootUser(t *testing.T) {
 	}
 }
 
+func TestLegacyComposeUsesCopyUpVolumeForNonRootProblemPackages(t *testing.T) {
+	bytes, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "deploy", "compose", "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(bytes)
+	for _, required := range []string{
+		"source: problem-packages",
+		"target: /data/ojos/problems",
+		"nocopy: false",
+		"\n  problem-packages:\n",
+	} {
+		if !strings.Contains(compose, required) {
+			t.Fatalf("legacy Compose no longer preserves image-seeded non-root volume ownership: missing %q", required)
+		}
+	}
+	if strings.Contains(compose, "../../storage/problems:/data/ojos/problems") {
+		t.Fatal("legacy Compose reintroduced a root-created host bind for the non-root Problem runtime")
+	}
+}
+
 func TestRuntimeImageCopiesLocalModuleMetadataBeforeDownloadingDependencies(t *testing.T) {
 	bytes, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
 	if err != nil {

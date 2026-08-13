@@ -668,7 +668,14 @@ services:
       OJOS_PROBLEM_EVENT_STREAM: ${OJOS_PROBLEM_EVENT_STREAM:-ojos:integration:problem:v1}
       OJOS_PROBLEM_EVENT_REPLAY_ON_START: ${OJOS_PROBLEM_EVENT_REPLAY_ON_START:-false}
     volumes:
-      - ../../storage/problems:/data/ojos/problems
+      - type: volume
+        source: problem-packages
+        target: /data/ojos/problems
+        volume:
+          # Preserve the image-seeded 65532:65532 ownership when Docker
+          # initializes a fresh volume; disabling copy-up recreates the
+          # root-owned mount that the non-root service cannot write.
+          nocopy: false
 
 volumes:
   orchestrator-db-data:
@@ -680,6 +687,7 @@ volumes:
   minio-data:
   storage-service-data:
   worker-data:
+  problem-packages:
 
 networks:
   default:
