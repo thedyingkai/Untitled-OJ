@@ -7,11 +7,23 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 HARNESS_PATH = ROOT / "deploy" / "ops" / "contest-service-real-vertical-e2e.sh"
 HARNESS = HARNESS_PATH.read_text(encoding="utf-8")
+RUST_DRIVER_PATH = (
+    ROOT
+    / "services"
+    / "orchestrator"
+    / "backend"
+    / "tests"
+    / "contest_service_real_vertical_e2e.rs"
+)
+RUST_DRIVER = RUST_DRIVER_PATH.read_text(encoding="utf-8")
+RUST_FIXTURES = (
+    RUST_DRIVER_PATH.parent / "support" / "contest_real_vertical_fixtures.rs"
+).read_text(encoding="utf-8")
 
 
 class ContestRealVerticalPolicyTests(unittest.TestCase):
     def test_run_root_uses_trusted_tmp_and_stays_private_until_handoff(self) -> None:
-        initialization_end = HARNESS.index('scratch_root="$run_root/workload"')
+        initialization_end = HARNESS.index('staged_repo_root="$run_root/staged-repo"')
         initialization = HARNESS[:initialization_end]
         for marker in (
             'run_parent="/tmp"',
@@ -40,11 +52,11 @@ class ContestRealVerticalPolicyTests(unittest.TestCase):
     def test_workload_output_preclean_is_runner_owned_and_path_constrained(self) -> None:
         self.assertNotIn('sudo -u "#$workload_uid"', HARNESS)
         mkdir = HARNESS.index(
-            'mkdir -p "$scratch_root/home" "$scratch_root/tmp" "$output_root"'
+            'mkdir -p "$output_root"'
         )
         preclean = HARNESS.index('rm -f -- "$evidence"', mkdir)
         chown = HARNESS.index(
-            'sudo chown -R "$workload_uid:$workload_gid"', preclean
+            'sudo chown "$workload_uid:$workload_gid" "$output_root"', preclean
         )
         self.assertLess(mkdir, preclean)
         self.assertLess(preclean, chown)
@@ -103,6 +115,82 @@ class ContestRealVerticalPolicyTests(unittest.TestCase):
             self.assertIn(marker, HARNESS)
         self.assertNotIn("chmod -R", HARNESS)
         self.assertNotIn("chmod o+x", HARNESS)
+
+    def test_contract_inputs_are_explicitly_staged_without_checkout_traversal(self) -> None:
+        expected_inputs = (
+            "services/contest-service/ojos.service.yaml",
+            "services/contest-service/api/openapi.yaml",
+            "services/contest-service/config.schema.json",
+            "services/contest-service/events/contest-created-v1.schema.json",
+            "services/contest-service/frontend/user/manifest.json",
+            "services/contest-service/frontend/admin/manifest.json",
+            "platform/schemas/orchestrator/actions.yaml",
+            "platform/schemas/orchestrator/forms.yaml",
+            "platform/schemas/orchestrator/plans.yaml",
+            "platform/schemas/orchestrator/results.yaml",
+            "platform/schemas/orchestrator/errors.yaml",
+        )
+        allowlist_start = HARNESS.index("staged_inputs=(")
+        allowlist_end = HARNESS.index("\n)", allowlist_start)
+        allowlist = HARNESS[allowlist_start:allowlist_end]
+        for relative_input in expected_inputs:
+            self.assertEqual(allowlist.count(f'  "{relative_input}"'), 1)
+        self.assertEqual(allowlist.count('  "'), len(expected_inputs))
+
+        staging_end = HARNESS.index("free_port() {")
+        staging = HARNESS[allowlist_start:staging_end]
+        for marker in (
+            'staged_repo_root="$(realpath -e -- "$staged_repo_root")"',
+            '"$staged_repo_root" != "$run_root/staged-repo"',
+            '"$resolved_source" != "$source_input"',
+            'install -D -m 0444 -- "$resolved_source" "$staged_input"',
+            'chmod 0555 -- "$staged_directory"',
+            '"$(find "$staged_repo_root" -type f -print | wc -l)" -ne "${#staged_inputs[@]}"',
+            '"$(stat -c \'%u:%g:%a\' -- "$staged_input")" != "$invoking_uid:$invoking_gid:444"',
+            'cmp -s -- "$source_input" "$staged_input"',
+            '"$(stat -c \'%u:%g:%a\' -- "$staged_repo_root")" != "$invoking_uid:$invoking_gid:555"',
+        ):
+            self.assertIn(marker, staging)
+        self.assertNotIn("chmod -R", staging)
+        for marker in (
+            'scratch_root="$staged_repo_root/.runtime"',
+            'sudo install -d -o "$workload_uid" -g "$workload_gid" -m 0700',
+            '"$scratch_root" != "$staged_repo_root/.runtime"',
+            '"$(sudo stat -c \'%u:%g:%a\' -- "$scratch_root")" != "$workload_uid:$workload_gid:700"',
+        ):
+            self.assertIn(marker, HARNESS)
+
+        execution_start = HARNESS.index("sudo env -i")
+        execution = HARNESS[execution_start:]
+        self.assertIn(
+            '"OJOS_CONTEST_E2E_STAGED_REPO_ROOT=$staged_repo_root"', execution
+        )
+        self.assertIn(
+            '"OJOS_CONTEST_E2E_CONTRACT_SOURCE=$staged_contract_source"', execution
+        )
+
+    def test_rust_driver_uses_only_canonical_staged_repo_inputs(self) -> None:
+        for forbidden in ('env!("CARGO_MANIFEST_DIR")', "workspace_root()"):
+            self.assertNotIn(forbidden, RUST_DRIVER)
+            self.assertNotIn(forbidden, RUST_FIXTURES)
+        for marker in (
+            'canonical_env_directory("OJOS_CONTEST_E2E_STAGED_REPO_ROOT")',
+            'canonical_env_file("OJOS_CONTEST_E2E_CONTRACT_SOURCE")',
+            'contract_source.strip_prefix(&staged_repo_root)?',
+            '== Path::new("services/contest-service/ojos.service.yaml")',
+            'scratch_root.strip_prefix(&staged_repo_root)? == Path::new(".runtime")',
+            'metadata.is_dir() && !metadata.file_type().is_symlink()',
+            'metadata.is_file() && !metadata.file_type().is_symlink()',
+            'ensure!(canonical == supplied, "{name} must already be canonical")',
+            '&config.staged_repo_root,',
+            '&config.contract_source,',
+        ):
+            self.assertIn(marker, RUST_DRIVER)
+        self.assertIn(
+            'compile(source).context("compile staged checked-in contest service contract")',
+            RUST_FIXTURES,
+        )
+        self.assertIn(".strip_prefix(repo_root)?", RUST_FIXTURES)
 
     def test_privileged_cleanup_remains_confined_to_validated_mktemp_root(self) -> None:
         cleanup_start = HARNESS.index("cleanup() {")

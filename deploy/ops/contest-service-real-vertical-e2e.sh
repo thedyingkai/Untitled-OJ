@@ -32,10 +32,12 @@ if [[ ! "$run_root" =~ ^/ || "$run_root" == / || ! -d "$run_root" \
   exit 1
 fi
 run_root_validated=1
-scratch_root="$run_root/workload"
+staged_repo_root="$run_root/staged-repo"
+scratch_root="$staged_repo_root/.runtime"
 output_root="$run_root/output"
 evidence="$output_root/live-evidence.json"
 gateway_bin="$run_root/ojos-gateway"
+staged_contract_source="$staged_repo_root/services/contest-service/ojos.service.yaml"
 artifact_pid=""
 gateway_tls_pid=""
 contest_container_id=""
@@ -150,7 +152,7 @@ if [[ "$(stat -c '%u:%g:%a' -- "$run_root")" != "$invoking_uid:$invoking_gid:755
   echo "contest vertical run root handoff violates the traversal contract" >&2
   exit 1
 fi
-mkdir -p "$scratch_root/home" "$scratch_root/tmp" "$output_root"
+mkdir -p "$output_root"
 # The evidence path is inside this freshly-created, validated mktemp root.
 # Remove it while the runner still owns the tree: an arbitrary numeric uid
 # cannot be assumed to traverse RUNNER_TEMP's runner-owned ancestors. After
@@ -161,9 +163,87 @@ if [[ "$(dirname -- "$evidence")" != "$output_root" \
   exit 1
 fi
 rm -f -- "$evidence"
-sudo chown -R "$workload_uid:$workload_gid" "$scratch_root" "$output_root"
-sudo chmod 0700 "$scratch_root" "$scratch_root/home" "$scratch_root/tmp"
+sudo chown "$workload_uid:$workload_gid" "$output_root"
 sudo chmod 0755 "$output_root"
+
+# The numeric workload identity cannot and must not traverse the runner's
+# checkout. Stage only the checked-in inputs required to compile the contest
+# Service Contract and initialize the embedded server, preserving their
+# relative paths. Everything in this allowlist is non-secret and becomes
+# immutable before the privilege drop; no other workspace content is exposed.
+staged_inputs=(
+  "services/contest-service/ojos.service.yaml"
+  "services/contest-service/api/openapi.yaml"
+  "services/contest-service/config.schema.json"
+  "services/contest-service/events/contest-created-v1.schema.json"
+  "services/contest-service/frontend/user/manifest.json"
+  "services/contest-service/frontend/admin/manifest.json"
+  "platform/schemas/orchestrator/actions.yaml"
+  "platform/schemas/orchestrator/forms.yaml"
+  "platform/schemas/orchestrator/plans.yaml"
+  "platform/schemas/orchestrator/results.yaml"
+  "platform/schemas/orchestrator/errors.yaml"
+)
+mkdir -p "$staged_repo_root"
+staged_repo_root="$(realpath -e -- "$staged_repo_root")"
+if [[ "$staged_repo_root" != "$run_root/staged-repo" || ! -d "$staged_repo_root" \
+    || -L "$staged_repo_root" ]]; then
+  echo "contest contract staged root violates the fixed path contract" >&2
+  exit 1
+fi
+for relative_input in "${staged_inputs[@]}"; do
+  source_input="$repo_root/$relative_input"
+  resolved_source="$(realpath -e -- "$source_input" 2>/dev/null || true)"
+  if [[ "$resolved_source" != "$source_input" || ! -f "$resolved_source" \
+      || -L "$source_input" ]]; then
+    echo "contest contract input violates the checked-in file contract: $relative_input" >&2
+    exit 1
+  fi
+  staged_input="$staged_repo_root/$relative_input"
+  install -D -m 0444 -- "$resolved_source" "$staged_input"
+done
+while IFS= read -r staged_directory; do
+  chmod 0555 -- "$staged_directory"
+done < <(find "$staged_repo_root" -type d -print)
+if [[ "$(find "$staged_repo_root" -type f -print | wc -l)" -ne "${#staged_inputs[@]}" \
+    || -n "$(find "$staged_repo_root" -type l -print -quit)" ]]; then
+  echo "contest contract staging contains files outside the explicit allowlist" >&2
+  exit 1
+fi
+for relative_input in "${staged_inputs[@]}"; do
+  source_input="$repo_root/$relative_input"
+  staged_input="$staged_repo_root/$relative_input"
+  resolved_staged="$(realpath -e -- "$staged_input" 2>/dev/null || true)"
+  if [[ "$resolved_staged" != "$staged_input" || ! -f "$resolved_staged" \
+      || -L "$staged_input" \
+      || "$(stat -c '%u:%g:%a' -- "$staged_input")" != "$invoking_uid:$invoking_gid:444" \
+      || "$resolved_staged" != "$staged_repo_root/"* ]]; then
+    echo "staged contest contract input violates the read-only contract: $relative_input" >&2
+    exit 1
+  fi
+  if ! cmp -s -- "$source_input" "$staged_input"; then
+    echo "staged contest contract input differs from the checkout: $relative_input" >&2
+    exit 1
+  fi
+done
+if [[ "$(stat -c '%u:%g:%a' -- "$staged_repo_root")" != "$invoking_uid:$invoking_gid:555" \
+    || "$(realpath -e -- "$staged_contract_source")" != "$staged_contract_source" ]]; then
+  echo "contest contract staged root or entrypoint violates the final contract" >&2
+  exit 1
+fi
+# Catalog fixtures must remain beneath the embedded server's repository root,
+# so reserve one dedicated writable subtree. Only uid 65532 can enter it; the
+# staged checkout inputs above remain runner-owned and read-only.
+sudo install -d -o "$workload_uid" -g "$workload_gid" -m 0700 -- \
+  "$scratch_root" "$scratch_root/home" "$scratch_root/tmp"
+scratch_root="$(sudo realpath -e -- "$scratch_root")"
+if [[ "$scratch_root" != "$staged_repo_root/.runtime" \
+    || "$(sudo stat -c '%u:%g:%a' -- "$scratch_root")" != "$workload_uid:$workload_gid:700" \
+    || "$(sudo stat -c '%u:%g:%a' -- "$scratch_root/home")" != "$workload_uid:$workload_gid:700" \
+    || "$(sudo stat -c '%u:%g:%a' -- "$scratch_root/tmp")" != "$workload_uid:$workload_gid:700" ]]; then
+  echo "contest workload subtree violates the private ownership contract" >&2
+  exit 1
+fi
 
 free_port() {
   python3 - <<'PY'
@@ -383,6 +463,8 @@ sudo env -i \
   "OJOS_CONTEST_E2E_GATEWAY_CONTAINER_ORIGIN=https://${bridge_gateway}:${gateway_tls_port}" \
   "OJOS_CONTEST_E2E_ARTIFACT_ORIGIN=https://artifacts.test:${artifact_port}" \
   "OJOS_CONTEST_E2E_ARTIFACT_ROOT=$run_root/artifacts" \
+  "OJOS_CONTEST_E2E_STAGED_REPO_ROOT=$staged_repo_root" \
+  "OJOS_CONTEST_E2E_CONTRACT_SOURCE=$staged_contract_source" \
   "OJOS_CONTEST_E2E_POSTGRES_PROVIDER_HOST=$bridge_gateway" \
   "OJOS_CONTEST_E2E_POSTGRES_PROVIDER_PORT=$postgres_port" \
   "OJOS_CONTEST_E2E_POSTGRES_ADMIN_URL=postgresql://postgres:${postgres_password}@${bridge_gateway}:${postgres_port}/postgres?sslmode=require" \

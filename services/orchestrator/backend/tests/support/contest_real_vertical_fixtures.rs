@@ -72,11 +72,11 @@ pub(crate) struct SeededTopology {
 
 pub(crate) fn write_live_catalog(
     repo_root: &std::path::Path,
+    source: &std::path::Path,
     directory: &std::path::Path,
     config: &LiveConfig,
 ) -> Result<CatalogFixture> {
-    let source = repo_root.join("services/contest-service/ojos.service.yaml");
-    let contract = compile(&source).context("compile checked-in contest service contract")?;
+    let contract = compile(source).context("compile staged checked-in contest service contract")?;
     ensure!(
         contract.service_id == CONTEST_SERVICE,
         "unexpected reference service"
@@ -92,7 +92,7 @@ pub(crate) fn write_live_catalog(
     let report = publish_catalog_v2(
         &contract,
         &lock,
-        &source,
+        source,
         &CatalogPublishOptions {
             output_directory: directory.join("published-contest-real"),
             signing_key_file: key_file,

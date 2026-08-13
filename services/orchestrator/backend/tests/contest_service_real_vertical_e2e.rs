@@ -128,10 +128,24 @@ struct LiveConfig {
     postgres_provider_port: u16,
     postgres_ca_file: PathBuf,
     scratch_root: PathBuf,
+    staged_repo_root: PathBuf,
+    contract_source: PathBuf,
 }
 
 impl LiveConfig {
     fn from_env() -> Result<Self> {
+        let staged_repo_root = canonical_env_directory("OJOS_CONTEST_E2E_STAGED_REPO_ROOT")?;
+        let contract_source = canonical_env_file("OJOS_CONTEST_E2E_CONTRACT_SOURCE")?;
+        let scratch_root = canonical_env_directory("OJOS_CONTEST_E2E_SCRATCH_ROOT")?;
+        ensure!(
+            contract_source.strip_prefix(&staged_repo_root)?
+                == Path::new("services/contest-service/ojos.service.yaml"),
+            "contest contract source must be the fixed entrypoint under the staged root"
+        );
+        ensure!(
+            scratch_root.strip_prefix(&staged_repo_root)? == Path::new(".runtime"),
+            "contest scratch root must be the fixed private subtree under the staged root"
+        );
         Ok(Self {
             runtime_image: OciImageReference::parse(&required_env(
                 "OJOS_CONTEST_E2E_RUNTIME_IMAGE",
@@ -160,7 +174,9 @@ impl LiveConfig {
                 .parse()
                 .context("parse PostgreSQL provider port")?,
             postgres_ca_file: required_env("OJOS_CONTEST_E2E_POSTGRES_CA_FILE")?.into(),
-            scratch_root: required_env("OJOS_CONTEST_E2E_SCRATCH_ROOT")?.into(),
+            scratch_root,
+            staged_repo_root,
+            contract_source,
         })
     }
 }
@@ -191,7 +207,6 @@ struct LiveDriverGuards {
 /// only output is written after the real Agent completion and Gateway ACK have
 /// both been observed, so a stale/pre-baked evidence file cannot satisfy CI.
 async fn drive_real_install(config: &LiveConfig) -> Result<LiveDriver> {
-    let repo_root = workspace_root()?;
     ensure!(
         config.scratch_root.is_absolute() && config.scratch_root.is_dir(),
         "live harness scratch root must be an existing absolute directory"
@@ -222,7 +237,12 @@ async fn drive_real_install(config: &LiveConfig) -> Result<LiveDriver> {
         problem.origin(),
         auth.origin(),
     )?;
-    let catalog = write_live_catalog(&repo_root, data.path(), config)?;
+    let catalog = write_live_catalog(
+        &config.staged_repo_root,
+        &config.contract_source,
+        data.path(),
+        config,
+    )?;
 
     let mut environment = EnvironmentGuard::default();
     environment.set("ORCHESTRATOR_CATALOG_TRUST_KEYS", &catalog.trust_json);
@@ -269,7 +289,7 @@ async fn drive_real_install(config: &LiveConfig) -> Result<LiveDriver> {
     let desktop_bootstrap = format!("contest-real-web-{}", std::process::id());
     let agent_bootstrap = format!("contest-real-agent-{}", std::process::id());
     let server = start_server(
-        &repo_root,
+        &config.staged_repo_root,
         &web_root,
         &artifact_store,
         &database_path,
@@ -1028,12 +1048,34 @@ fn start_server(
     })
 }
 
-fn workspace_root() -> Result<PathBuf> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| anyhow!("could not locate workspace root"))
+fn canonical_env_directory(name: &str) -> Result<PathBuf> {
+    let supplied = PathBuf::from(required_env(name)?);
+    ensure!(supplied.is_absolute(), "{name} must be absolute");
+    let metadata = fs::symlink_metadata(&supplied)
+        .with_context(|| format!("inspect {name} {}", supplied.display()))?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "{name} must be a non-symlink directory"
+    );
+    let canonical = fs::canonicalize(&supplied)
+        .with_context(|| format!("canonicalize {name} {}", supplied.display()))?;
+    ensure!(canonical == supplied, "{name} must already be canonical");
+    Ok(canonical)
+}
+
+fn canonical_env_file(name: &str) -> Result<PathBuf> {
+    let supplied = PathBuf::from(required_env(name)?);
+    ensure!(supplied.is_absolute(), "{name} must be absolute");
+    let metadata = fs::symlink_metadata(&supplied)
+        .with_context(|| format!("inspect {name} {}", supplied.display()))?;
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "{name} must be a non-symlink file"
+    );
+    let canonical = fs::canonicalize(&supplied)
+        .with_context(|| format!("canonicalize {name} {}", supplied.display()))?;
+    ensure!(canonical == supplied, "{name} must already be canonical");
+    Ok(canonical)
 }
 
 fn required_pointer_str(value: &Value, pointer: &str) -> Result<String> {
