@@ -42,6 +42,7 @@
       {"action":"deployment.stop","target_type":"Deployment","capability_status":"AVAILABLE","required_permission":"orchestrator.operate"},
       {"action":"deployment.restart","target_type":"Deployment","capability_status":"AVAILABLE","required_permission":"orchestrator.operate"},
       {"action":"deployment.uninstall","target_type":"Deployment","capability_status":"AVAILABLE","required_permission":"orchestrator.admin"},
+      {"action":"resource.purge","target_type":"ResourceClaim","capability_status":"AVAILABLE","required_permission":"orchestrator.admin"},
       {"action":"diagnostic.create","target_type":"Diagnostic","capability_status":"AVAILABLE","required_permission":"orchestrator.operate"},
       {"action":"diagnostic.list","target_type":"Diagnostic","capability_status":"AVAILABLE","required_permission":"orchestrator.read"},
       {"action":"diagnostic.get","target_type":"Diagnostic","capability_status":"AVAILABLE","required_permission":"orchestrator.read"},

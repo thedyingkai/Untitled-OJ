@@ -25,6 +25,9 @@ jobs:
   docker-e2e:
     name: Docker E2E production gate
     runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT_NAME: ojos-docker-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      OJOS_E2E_MINIO_CONTAINER: ojos-e2e-minio-${{ github.run_id }}-${{ github.run_attempt }}
     services:
       postgres:
         image: postgres:17
@@ -42,7 +45,9 @@ jobs:
       redis:
         image: redis:8.8.0
         ports:
-          - 6379:6379
+          # Keep the live Go-test Redis separate from the Compose drill Redis,
+          # which intentionally publishes its own loopback port 6379.
+          - 56379:6379
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s
@@ -93,7 +98,9 @@ jobs:
             libssl-dev \
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
-            postgresql-client
+            postgresql-client \
+            redis-tools \
+            socat
           psql "$ORCHESTRATOR_DATABASE_URL" -f services/orchestrator/migrations/000001_orchestrator_schema.up.sql
       - name: Build embedded Orchestrator Web UI
         working-directory: manager/web
@@ -123,6 +130,15 @@ jobs:
       - name: Orchestrator Store Job Agent Docker lifecycle
         shell: bash
         run: bash deploy/ops/orchestrator-docker-agent-e2e.sh
+
+      # No job/step condition is permitted here. The script sets the live-test
+      # sentinel itself and fails if Docker, TLS PostgreSQL, Redis, the real
+      # Gateway/contest binaries, signed artifacts, or driver evidence is absent.
+      - name: Contest service real Docker vertical
+        shell: bash
+        env:
+          OJOS_CONTEST_E2E_REDIS_HOST_PORT: "56379"
+        run: bash deploy/ops/contest-service-real-vertical-e2e.sh
 
       - name: Build nsjail for strict judge-worker live tests
         shell: bash
@@ -179,26 +195,26 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d \
-            --name ojos-e2e-minio \
-            -p 9000:9000 \
-            -p 9001:9001 \
+            --name "$OJOS_E2E_MINIO_CONTAINER" \
+            -p 19000:9000 \
+            -p 19001:9001 \
             -e "MINIO_ROOT_USER=$MINIO_ROOT_USER" \
             -e "MINIO_ROOT_PASSWORD=$MINIO_ROOT_PASSWORD" \
             minio/minio:RELEASE.2025-09-07T16-13-09Z server /data --console-address ":9001"
           for attempt in {1..60}; do
-            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null; then
+            if curl -fsS http://127.0.0.1:19000/minio/health/live >/dev/null; then
               exit 0
             fi
             sleep 2
           done
-          docker logs ojos-e2e-minio >&2 || true
+          docker logs "$OJOS_E2E_MINIO_CONTAINER" >&2 || true
           exit 1
 
       - name: Go checks
         shell: bash
         env:
-          OJOS_REAL_REDIS_URL: redis://127.0.0.1:6379/0
-          OJOS_REAL_MINIO_ENDPOINT: 127.0.0.1:9000
+          OJOS_REAL_REDIS_URL: redis://127.0.0.1:56379/0
+          OJOS_REAL_MINIO_ENDPOINT: 127.0.0.1:19000
           OJOS_REAL_MINIO_ACCESS_KEY: ojosminioaccess
           OJOS_REAL_MINIO_SECRET_KEY: OjosMinioLive_0123456789abcdef
           OJOS_REAL_MINIO_USE_SSL: "false"
@@ -226,7 +242,6 @@ jobs:
           npm run build
 
       - name: Audit gateway frontend dependencies
-        if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}
         working-directory: services/gateway/frontend
         run: npm audit --registry=https://registry.npmjs.org --audit-level=high
 
@@ -298,10 +313,10 @@ jobs:
         run: |
           set -euo pipefail
           services=(orchestrator auth-service storage-service gateway problem-service judge-api judge-worker user-service)
-          docker compose --env-file .env.example -f deploy/compose/docker-compose.yml build "${services[@]}"
+          docker compose --profile legacy-development --env-file .env.example -f deploy/compose/docker-compose.yml build "${services[@]}"
           mkdir -p artifacts/image-build
-          docker compose --env-file .env.example -f deploy/compose/docker-compose.yml images >artifacts/image-build/docker-compose-images.txt
-          if docker compose --env-file .env.example -f deploy/compose/docker-compose.yml images --format json >artifacts/image-build/docker-compose-images.jsonl 2>/dev/null; then
+          docker compose --profile legacy-development --env-file .env.example -f deploy/compose/docker-compose.yml images >artifacts/image-build/docker-compose-images.txt
+          if docker compose --profile legacy-development --env-file .env.example -f deploy/compose/docker-compose.yml images --format json >artifacts/image-build/docker-compose-images.jsonl 2>/dev/null; then
             jq -s '.' artifacts/image-build/docker-compose-images.jsonl >artifacts/image-build/docker-compose-images.json
           else
             jq -n --arg note "docker compose images --format json is unavailable on this runner; see docker-compose-images.txt" '{note: $note}' >artifacts/image-build/docker-compose-images.json
@@ -330,6 +345,7 @@ jobs:
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true') }}
         shell: bash
         env:
+          REDIS_HOST_PORT: "16379"
           OJOS_TRACE_DRILL_BOOTSTRAP_COMPOSE: "1"
           OJOS_TRACE_DRILL_BUILD_COMPOSE: "0"
           OJOS_TRACE_DRILL_CLEANUP_COMPOSE: "0"
@@ -339,6 +355,7 @@ jobs:
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true') }}
         shell: bash
         env:
+          REDIS_HOST_PORT: "16379"
           OJOS_LOAD_DRILL_BOOTSTRAP_COMPOSE: "0"
           OJOS_LOAD_DRILL_RUN_SMOKE: "1"
           OJOS_LOAD_CONCURRENCY: "20"
@@ -356,4 +373,10 @@ jobs:
       - name: Cleanup compose runtime drill
         if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true')) }}
         shell: bash
-        run: docker compose --env-file .env.example -f deploy/compose/docker-compose.yml down --remove-orphans
+        env:
+          REDIS_HOST_PORT: "16379"
+        run: |
+          compose_status=0
+          docker compose --env-file .env.example -f deploy/compose/docker-compose.yml down --remove-orphans || compose_status=$?
+          docker rm -f "$OJOS_E2E_MINIO_CONTAINER" >/dev/null 2>&1 || true
+          exit "$compose_status"

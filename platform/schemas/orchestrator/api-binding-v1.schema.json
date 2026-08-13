@@ -43,7 +43,10 @@
     "health": { "enum": ["UNKNOWN", "HEALTHY", "UNHEALTHY", "DEGRADED"] },
     "drift": { "type": "array", "items": { "type": "string" } },
     "last_operation_id": { "type": "string" },
-    "state": { "enum": ["PENDING", "RESOLVED", "ACTIVE", "UNBOUND", "REVOKED", "ERROR"] },
+    "state": {
+      "description": "Compatibility projection. Writers MUST derive this value from desired_state, observed_state and optional; it is not an independent lifecycle input.",
+      "enum": ["PENDING", "RESOLVED", "ACTIVE", "UNBOUND", "REVOKED", "ERROR"]
+    },
     "optional": { "type": "boolean" },
     "reason": { "type": "string" },
     "created_at": { "$ref": "#/$defs/nonEmpty" },

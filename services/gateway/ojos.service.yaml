@@ -1,0 +1,25 @@
+apiVersion: ojos.dev/v1
+kind: Service
+metadata:
+  id: gateway
+  version: 0.1.0
+  displayName: OJOS Gateway
+  permissionNamespace: gateway
+  permissionReferences:
+    - system.admin
+runtime:
+  profile: standard-container-v1
+  artifact: gateway-runtime
+  httpPort: 8080
+  health:
+    path: /readyz
+provides:
+  apis:
+    - document: api/openapi.yaml
+requires:
+  apis:
+    - id: auth.user.permission.check
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+configSchema: config.schema.json

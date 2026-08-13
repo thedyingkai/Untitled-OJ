@@ -50,6 +50,14 @@ ApiBinding，Agent 用 Node mTLS 兑换每 Deployment 独立的 15 分钟 JWT；
 OJOS_ENV_FILE=/etc/ojos/production.env deploy/ops/preflight.sh
 ```
 
+## 首管理员一次性引导
+
+- [ ] 在宿主机生成独立的 32–512 字符 URL-safe 随机 token 文件，并设置为非符号链接普通文件、精确 owner `65532:65532` 和精确 mode `0600`（先 `chown 65532:65532 <file>`，再 `chmod 600 <file>`）。
+- [ ] `AUTH_ADMIN_BOOTSTRAP_SECRET_FILE` 填宿主机绝对路径；Compose 仅将其只读挂载到 Auth 的固定路径 `/run/secrets/ojos-auth-admin-bootstrap`。
+- [ ] 通过 Gateway HTTPS 调用一次 `POST /api/auth/bootstrap/admin`，确认返回 `201`，再用普通 `/api/auth/login` 验证新管理员。
+- [ ] 成功后从生产 Compose 部署中同时删除 `AUTH_ADMIN_BOOTSTRAP_SECRET_FILE` env 和对应 bind mount，删除宿主 token 文件，并执行 `docker compose up -d --force-recreate auth-service`。
+- [ ] 重启后确认 `POST /api/auth/bootstrap/admin` 返回 `404`；不要把已消费 token 或空文件继续挂载。
+
 ## 启动步骤
 
 1. 安装 Docker / Docker Compose 并确认 daemon 正在运行。
@@ -135,22 +143,36 @@ deploy/ops/rollback-drill.sh
 
 ## 备份 / 恢复
 
-备份：
+- [ ] 已停止 Gateway 新写、服务、Worker 和迁移执行器，独立 fence check 仍通过。
+- [ ] 已设置稳定 source ID；每次 fence token 只临时注入，不写入 env 或日志。
+- [ ] 最终备份目录为一次性原子发布；manifest 和全部 payload 均由 checksum 覆盖。
+- [ ] 已先以 verify-only 校验 schema、环境/source ID、精确文件集、checksum 与 archive 安全。
+- [ ] restore target ID 与源不同，五数据库、Redis、本地存储、MinIO buckets 均为空/不存在。
+- [ ] 自动切流同时配置 cutover、rollback、post-cutover check、post-rollback check；否则恢复后保持隔离。
+- [ ] Redis/local storage 已设置服务 UID/GID 所有权，并由服务身份验证可读。
+- [ ] clean-environment drill 已验证逐组件读回、故障边界与回切，并记录 RPO/RTO。
 
 ```bash
-OJOS_ENV_FILE=/etc/ojos/production.env deploy/ops/backup.sh
+OJOS_ENV_FILE=/etc/ojos/production.env \
+OJOS_BACKUP_SOURCE_ID=production-primary \
+OJOS_CONFIRM_QUIESCED_BACKUP=backup-production-fenced-v1 \
+OJOS_BACKUP_FENCE_TOKEN="$CHANGE_AND_FENCE_ID" \
+OJOS_BACKUP_FENCE_CHECK_COMMAND='/usr/local/sbin/ojos-fence-check' \
+deploy/ops/backup.sh
 ```
 
-恢复需要显式确认：
+恢复前无副作用校验：
 
 ```bash
 OJOS_ENV_FILE=/etc/ojos/production.env \
 OJOS_RESTORE_DIR=/var/backups/ojos/20260702T120000Z \
-OJOS_CONFIRM_RESTORE=restore-production \
+OJOS_RESTORE_SOURCE_ID=production-primary \
+OJOS_RESTORE_VERIFY_ONLY=1 \
 deploy/ops/restore.sh
 ```
 
-恢复后，在重新开放流量前运行预检和冒烟检查。
+校验通过后才恢复到独立 clean target。重新开放流量前运行预检、逐服务冒烟和业务对象读回，确认回切仍可用，
+并保留旧环境及备份直到验收期结束。
 
 ## 日志
 
@@ -160,6 +182,14 @@ deploy/ops/restore.sh
 - Prometheus / Alertmanager / Jaeger 日志：监控 compose 日志。
 
 ## 监控与告警
+
+分别为 Orchestrator 与 Prometheus 准备由各自非 root 用户持有的 `0600` token
+文件副本，两份内容必须相同，并填写
+`ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE` 与
+`PROMETHEUS_ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE`。该 token 不得复用 internal、
+admin、workload 或 Contribution ACK 凭据。Gateway 必须通过
+`ORCHESTRATOR_GATEWAY_OBSERVABILITY_ORIGIN` 指向显式外部 HTTPS origin，不能填写
+`gateway:8080` 等 legacy Compose DNS。
 
 启动监控：
 

@@ -6,10 +6,13 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"ojos-auth-service/internal/config"
 )
+
+var adminBootstrapSecretPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 const (
 	minAdminBootstrapSecretBytes = 32
@@ -56,6 +59,9 @@ func resolveAdminBootstrapSecret(c config.AdminBootstrapConfig) ([]byte, bool, e
 			minAdminBootstrapSecretBytes,
 			maxAdminBootstrapSecretBytes,
 		)
+	}
+	if !adminBootstrapSecretPattern.Match(secret) {
+		return nil, false, fmt.Errorf("admin bootstrap secret must use only URL-safe token characters")
 	}
 	return append([]byte(nil), secret...), true, nil
 }

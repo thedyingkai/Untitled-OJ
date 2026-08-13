@@ -1,0 +1,98 @@
+apiVersion: ojos.dev/v1
+kind: Service
+metadata:
+  id: judge-api
+  version: 0.1.0
+  displayName: Judge API
+  permissionNamespace: judge
+runtime:
+  profile: standard-container-v1
+  artifact: judge-runtime
+  httpPort: 8082
+  health:
+    path: /readyz
+provides:
+  apis:
+    - document: api/submission-create.openapi.yaml
+    - document: api/submission-result.openapi.yaml
+    - document: api/worker-status.openapi.yaml
+    - document: api/queue-status.openapi.yaml
+    - document: api/worker-control.openapi.yaml
+requires:
+  apis:
+    - id: auth.user.permission.check
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+    - id: storage.object.get
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+    - id: storage.object.put
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+    - id: storage.object.head
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+resources:
+  - name: submissions
+    type: postgresql.database/v1
+    lifecycle: retain
+migrations:
+  - id: judge-schema-v1
+    artifact: judge-migration-v1
+    resource: submissions
+events:
+  subscribes:
+    - type: io.ojos.problem.snapshot.v1
+      version: 1
+      schema: events/problem-snapshot-v1.schema.json
+      delivery: durable
+    - type: io.ojos.problem.deleted.v1
+      version: 1
+      schema: events/problem-deleted-v1.schema.json
+      delivery: durable
+permissions:
+  - key: judge.submit
+    title: Submit code for judging
+  - key: judge.submission.view.own
+    title: View own submissions
+  - key: judge.submission.view.all
+    title: View all submissions
+  - key: judge.submission.manage
+    title: Cancel and rejudge submissions
+  - key: judge.admin
+    title: Administer judge queue and workers
+  - key: judge.worker.status
+    title: View judge worker status
+  - key: judge.worker
+    title: Operate an authenticated judge worker
+exposures:
+  - id: user-submission-create
+    api: judge.submission.create
+    audience: user
+    mount: /api
+  - id: user-submission-result
+    api: judge.submission.result
+    audience: user
+    mount: /api
+  - id: admin-submission-manage
+    api: judge.submission.result
+    audience: admin
+    mount: /api
+  - id: admin-worker-status
+    api: judge.worker.status
+    audience: admin
+    mount: /api
+  - id: admin-queue-status
+    api: judge.queue.status
+    audience: admin
+    mount: /api
+frontends:
+  - target: user-shell
+    manifest: frontend/user/manifest.json
+  - target: admin-shell
+    manifest: frontend/admin/manifest.json
+configSchema: config.schema.json

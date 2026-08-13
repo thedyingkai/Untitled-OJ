@@ -1,0 +1,158 @@
+{
+  "schemaVersion": "ojos.dev/gozero-server-adapter/v1",
+  "serviceId": "user-service",
+  "operations": [
+    {
+      "operationId": "adminGetUserPreferences",
+      "handler": "AdminGetUserPreferences",
+      "method": "GET",
+      "path": "/admin/users/{user_id}/preferences",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "user.profile.read.any",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:ae13774750022eb8366d36c3efc26a4b3328f07a34dcad29178d98183eea59a1"
+      ]
+    },
+    {
+      "operationId": "adminUpdateUserPreferences",
+      "handler": "AdminUpdateUserPreferences",
+      "method": "PATCH",
+      "path": "/admin/users/{user_id}/preferences",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "user.profile.update.any",
+      "requestSchemaDigests": [
+        "sha256:ae13774750022eb8366d36c3efc26a4b3328f07a34dcad29178d98183eea59a1"
+      ],
+      "responseSchemaDigests": [
+        "sha256:778dba9dc91e54893f760bb9185317f87188b5f6aad3a052cabbe6428b64b6a6"
+      ]
+    },
+    {
+      "operationId": "adminGetUserProfile",
+      "handler": "AdminGetUserProfile",
+      "method": "GET",
+      "path": "/admin/users/{user_id}/profile",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "user.profile.read.any",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:778dba9dc91e54893f760bb9185317f87188b5f6aad3a052cabbe6428b64b6a6"
+      ]
+    },
+    {
+      "operationId": "adminUpdateUserProfile",
+      "handler": "AdminUpdateUserProfile",
+      "method": "PATCH",
+      "path": "/admin/users/{user_id}/profile",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "user.profile.update.any",
+      "requestSchemaDigests": [
+        "sha256:80bf4cf7ebd4d286707a52f117d3d10acb70276eca0c62e5426ee154630e9c70"
+      ],
+      "responseSchemaDigests": [
+        "sha256:778dba9dc91e54893f760bb9185317f87188b5f6aad3a052cabbe6428b64b6a6"
+      ]
+    },
+    {
+      "operationId": "adminGetUserStats",
+      "handler": "AdminGetUserStats",
+      "method": "GET",
+      "path": "/admin/users/{user_id}/stats",
+      "audience": "admin",
+      "auth": "required",
+      "permission": "user.stats.read",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:f132a555749d3b042ea1ee7f662527ab934d66f76ef4482e53485c62134949c2"
+      ]
+    },
+    {
+      "operationId": "getMyUserProfile",
+      "handler": "GetMyUserProfile",
+      "method": "GET",
+      "path": "/api/users/me",
+      "audience": "user",
+      "auth": "required",
+      "permission": "user.profile.read.self",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:778dba9dc91e54893f760bb9185317f87188b5f6aad3a052cabbe6428b64b6a6"
+      ]
+    },
+    {
+      "operationId": "updateMyUserProfile",
+      "handler": "UpdateMyUserProfile",
+      "method": "PATCH",
+      "path": "/api/users/me",
+      "audience": "user",
+      "auth": "required",
+      "permission": "user.profile.update.self",
+      "requestSchemaDigests": [
+        "sha256:80bf4cf7ebd4d286707a52f117d3d10acb70276eca0c62e5426ee154630e9c70"
+      ],
+      "responseSchemaDigests": [
+        "sha256:778dba9dc91e54893f760bb9185317f87188b5f6aad3a052cabbe6428b64b6a6"
+      ]
+    },
+    {
+      "operationId": "getMyUserPreferences",
+      "handler": "GetMyUserPreferences",
+      "method": "GET",
+      "path": "/api/users/me/preferences",
+      "audience": "user",
+      "auth": "required",
+      "permission": "user.profile.read.self",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:ae13774750022eb8366d36c3efc26a4b3328f07a34dcad29178d98183eea59a1"
+      ]
+    },
+    {
+      "operationId": "updateMyUserPreferences",
+      "handler": "UpdateMyUserPreferences",
+      "method": "PATCH",
+      "path": "/api/users/me/preferences",
+      "audience": "user",
+      "auth": "required",
+      "permission": "user.profile.update.self",
+      "requestSchemaDigests": [
+        "sha256:ae13774750022eb8366d36c3efc26a4b3328f07a34dcad29178d98183eea59a1"
+      ],
+      "responseSchemaDigests": [
+        "sha256:778dba9dc91e54893f760bb9185317f87188b5f6aad3a052cabbe6428b64b6a6"
+      ]
+    },
+    {
+      "operationId": "userHealth",
+      "handler": "UserHealth",
+      "method": "GET",
+      "path": "/healthz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:2bf3da5ec47882c72d9ea4de4c0c22dec8fde424a539b008ab8b938c3c4ef652"
+      ]
+    },
+    {
+      "operationId": "userReady",
+      "handler": "UserReady",
+      "method": "GET",
+      "path": "/readyz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:2bf3da5ec47882c72d9ea4de4c0c22dec8fde424a539b008ab8b938c3c4ef652",
+        "sha256:d2c0d03b1db2ba4a62bc179015423a9ac6a3fdcb9ddb903b830e8768da8fdb44"
+      ]
+    }
+  ]
+}

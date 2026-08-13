@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "ojos.frontend/v1",
+  "moduleId": "contest-service.user",
+  "target": "user-shell",
+  "artifact": "contest-user-frontend",
+  "hostApiRange": "^1.0",
+  "routes": [
+    {
+      "id": "contest-service.user.list",
+      "path": "/contests",
+      "title": "Contests",
+      "menu": true,
+      "order": 40,
+      "permission": "contest-service.contest.read"
+    }
+  ]
+}

@@ -386,12 +386,12 @@ service problemapi {
 	@handler listArtifactGCIntents
 	get /admin/artifact-gc/intents (ListArtifactGCIntentsReq) returns (ListArtifactGCIntentsResp)
 
-	// goctl cannot tokenize an RFC action suffix. The generated slash route is
-	// replaced by the exact published /intents:reconcile route in routes.go.
+	// The slash action path is the signed Service Contract v3 provider route.
+	// routes.go keeps the historical colon spelling for one migration release.
 	@handler reconcileArtifactGCIntent
 	post /admin/artifact-gc/intents/reconcile (ReconcileArtifactGCIntentReq) returns (ArtifactGCActionResp)
 
-	// The published route is /intents:retry; see the note above.
+	// The historical /intents:retry spelling remains only as a legacy alias.
 	@handler retryArtifactGCIntent
 	post /admin/artifact-gc/intents/retry (RetryArtifactGCIntentReq) returns (ArtifactGCActionResp)
 }

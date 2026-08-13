@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ojos:problem-service:config:v1",
+  "title": "Problem Service configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "artifactGC": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean", "default": true},
+        "delete": {"type": "boolean", "default": true},
+        "retention": {"type": "string", "pattern": "^[1-9][0-9]*(?:s|m|h)$", "default": "168h"},
+        "interval": {"type": "string", "pattern": "^[1-9][0-9]*(?:s|m|h)$", "default": "24h"},
+        "claimLease": {"type": "string", "pattern": "^[1-9][0-9]*(?:s|m|h)$", "default": "10m"}
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bucket": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,62}$", "default": "problems"}
+      }
+    }
+  }
+}

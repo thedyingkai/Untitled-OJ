@@ -4,7 +4,7 @@ use orchestrator_runtime::{
     JUDGE_SANDBOX_V1_PROFILE_SHA256, MANAGED_EVENT_CONNECTION_FILE,
     MANAGED_SERVICE_CREDENTIAL_FILE, MANAGED_SERVICE_GATEWAY_CA_FILE, ManagedApiBinding,
     ManagedEventBinding, ManagedEventSubscription, ManagedServiceContextSpec, OciImageReference,
-    RuntimeContext, RuntimeContract, RuntimeProfile, WorkloadCredential,
+    RuntimeContext, RuntimeContract, RuntimeProfile, WorkloadCredential, WorkloadFileOwnership,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -359,7 +359,12 @@ pub async fn recover_pending_runtime_contexts(
             .begin_managed_volume_cleanup(&run.deployment_id, crate::now_ms())
             .map_err(|error| RuntimePolicyError::Compensation(error.to_string()))?;
         if let Some(volume) = volume {
-            if let Err(error) = runtime.remove_managed_volume(&volume).await {
+            let cleanup = if volume.lifecycle == orchestrator_runtime::RETAIN_VOLUME_LIFECYCLE {
+                Ok(())
+            } else {
+                runtime.remove_managed_volume(&volume).await
+            };
+            if let Err(error) = cleanup {
                 ledger
                     .mark_managed_volume_cleanup_needed(&run.deployment_id, crate::now_ms())
                     .map_err(|ledger_error| {
@@ -541,6 +546,8 @@ pub struct LocalRuntimeContextProvider {
     policy_sha256: String,
     docker_facts: DockerRuntimeFacts,
     event_connections: BTreeMap<String, String>,
+    workload_file_ownership: WorkloadFileOwnership,
+    workload_export_root: Option<PathBuf>,
 }
 
 impl LocalRuntimeContextProvider {
@@ -557,6 +564,8 @@ impl LocalRuntimeContextProvider {
             policy_sha256,
             docker_facts,
             event_connections: BTreeMap::new(),
+            workload_file_ownership: WorkloadFileOwnership::current_process(),
+            workload_export_root: None,
         }
     }
 
@@ -599,7 +608,47 @@ impl LocalRuntimeContextProvider {
             policy_sha256,
             docker_facts,
             event_connections: BTreeMap::new(),
+            workload_file_ownership: WorkloadFileOwnership::current_process(),
+            workload_export_root: None,
         })
+    }
+
+    /// Select the identity that must own every service-context directory and
+    /// file. Production callers must use `standard_v3`; the default current
+    /// process policy exists so in-process unit tests need no elevated user.
+    pub fn with_workload_file_ownership(
+        mut self,
+        ownership: WorkloadFileOwnership,
+    ) -> Result<Self, RuntimePolicyError> {
+        validate_agent_workload_file_ownership(ownership)?;
+        self.workload_file_ownership = ownership;
+        Ok(self)
+    }
+
+    /// Bind managed runtime contexts to one dedicated workload-export root.
+    ///
+    /// Docker resolves bind sources in the daemon's mount namespace.  A
+    /// production DinD daemon may therefore receive this export root read-only,
+    /// but must never receive any Agent identity, ledger or provider state root.
+    /// Requiring the fixed `runtime-contexts` child also prevents a policy file
+    /// from redirecting a workload bind into Agent-internal state.
+    pub fn with_workload_export_boundary(
+        mut self,
+        export_root: PathBuf,
+        internal_state_roots: Vec<PathBuf>,
+    ) -> Result<Self, RuntimePolicyError> {
+        validate_isolated_workload_roots(&export_root, &internal_state_roots)?;
+        let expected_context_root = export_root.join("runtime-contexts");
+        if self.context_root()? != expected_context_root {
+            return Err(RuntimePolicyError::InvalidPolicy(format!(
+                "service_context_root must equal the dedicated workload export path {}",
+                expected_context_root.display()
+            )));
+        }
+        create_private_directory(&export_root, self.workload_file_ownership)?;
+        validate_isolated_workload_roots(&export_root, &internal_state_roots)?;
+        self.workload_export_root = Some(export_root);
+        Ok(self)
     }
 
     pub fn with_event_connections(mut self, connections: BTreeMap<String, String>) -> Self {
@@ -645,6 +694,7 @@ impl LocalRuntimeContextProvider {
         &self,
         context: &RuntimeContext,
     ) -> Result<OwnedRuntimePaths, RuntimePolicyError> {
+        self.validate_workload_export_boundary()?;
         context
             .validate()
             .map_err(|error| RuntimePolicyError::Compensation(error.to_string()))?;
@@ -712,6 +762,13 @@ impl LocalRuntimeContextProvider {
         Ok(OwnedRuntimePaths {
             context_directory: expected_directory,
         })
+    }
+
+    fn validate_workload_export_boundary(&self) -> Result<(), RuntimePolicyError> {
+        if let Some(export_root) = self.workload_export_root.as_deref() {
+            validate_private_directory(export_root, self.workload_file_ownership)?;
+        }
+        Ok(())
     }
 }
 
@@ -840,12 +897,21 @@ impl RuntimeContextProvider for LocalRuntimeContextProvider {
             self.judge_policy()?;
             validate_judge_runtime_facts(&self.docker_facts)?;
         }
-        create_private_directory(self.context_root()?)?;
-        create_private_directory(&paths.context_directory)?;
+        create_private_directory(self.context_root()?, self.workload_file_ownership)?;
+        create_private_directory(&paths.context_directory, self.workload_file_ownership)?;
         if context.contract.id == RuntimeProfile::JudgeSandboxV1 {
-            create_private_directory(Path::new(&context.scratch_directory))?;
+            create_private_directory(
+                Path::new(&context.scratch_directory),
+                self.workload_file_ownership,
+            )?;
         }
-        materialize_service_context(spec, context, credential, &self.event_connections)?;
+        materialize_service_context(
+            spec,
+            context,
+            credential,
+            &self.event_connections,
+            self.workload_file_ownership,
+        )?;
         Ok(())
     }
 
@@ -864,8 +930,11 @@ impl RuntimeContextProvider for LocalRuntimeContextProvider {
                     .to_string(),
             ));
         }
-        create_private_directory(self.context_root()?)?;
-        create_private_directory(Path::new(&context.service_context_directory))?;
+        create_private_directory(self.context_root()?, self.workload_file_ownership)?;
+        create_private_directory(
+            Path::new(&context.service_context_directory),
+            self.workload_file_ownership,
+        )?;
         materialize_service_context_fields(
             &spec.deployment_id,
             &spec.service_id,
@@ -873,6 +942,7 @@ impl RuntimeContextProvider for LocalRuntimeContextProvider {
             context,
             None,
             &self.event_connections,
+            self.workload_file_ownership,
         )
     }
 
@@ -892,6 +962,7 @@ impl RuntimeContextProvider for LocalRuntimeContextProvider {
             context,
             Some(credential),
             &self.event_connections,
+            self.workload_file_ownership,
         )
     }
 
@@ -907,6 +978,7 @@ impl RuntimeContextProvider for LocalRuntimeContextProvider {
         atomic_private_write(
             &Path::new(&context.service_context_directory).join("token"),
             credential.access_token.as_bytes(),
+            self.workload_file_ownership,
         )
     }
 
@@ -921,6 +993,7 @@ impl RuntimeContextProvider for LocalRuntimeContextProvider {
         atomic_private_write(
             &Path::new(&context.service_context_directory).join("token"),
             b"",
+            self.workload_file_ownership,
         )
     }
 
@@ -1146,6 +1219,7 @@ fn materialize_service_context(
     context: &RuntimeContext,
     credential: &WorkloadCredential,
     event_connections: &BTreeMap<String, String>,
+    ownership: WorkloadFileOwnership,
 ) -> Result<(), RuntimePolicyError> {
     let managed = spec.managed_service_context.as_ref().ok_or_else(|| {
         RuntimePolicyError::Materialization(
@@ -1159,6 +1233,7 @@ fn materialize_service_context(
         context,
         Some(credential),
         event_connections,
+        ownership,
     )
 }
 
@@ -1169,6 +1244,7 @@ fn materialize_service_context_fields(
     context: &RuntimeContext,
     credential: Option<&WorkloadCredential>,
     event_connections: &BTreeMap<String, String>,
+    ownership: WorkloadFileOwnership,
 ) -> Result<(), RuntimePolicyError> {
     managed
         .validate()
@@ -1183,12 +1259,13 @@ fn materialize_service_context_fields(
         ));
     }
     let directory = Path::new(&context.service_context_directory);
-    create_private_directory(directory)?;
+    create_private_directory(directory, ownership)?;
 
     let credential_path = directory.join("token");
     let gateway_ca_path = directory.join("ca.pem");
     let event_context_path = directory.join("events.json");
     let event_connection_path = directory.join("event-redis.url");
+    let workload_public_key_path = directory.join("workload-public-key.pem");
     let ca_file = if managed.gateway_ca_pem.is_some() {
         Some(MANAGED_SERVICE_GATEWAY_CA_FILE)
     } else {
@@ -1278,16 +1355,25 @@ fn materialize_service_context_fields(
     let previous_token = read_optional_file(&credential_path)?;
     let previous_event_context = read_optional_file(&event_context_path)?;
     let previous_event_connection = read_optional_file(&event_connection_path)?;
+    let previous_workload_public_key = read_optional_file(&workload_public_key_path)?;
     let apply = (|| {
         match managed.gateway_ca_pem.as_deref() {
-            Some(pem) => atomic_private_write(&gateway_ca_path, pem.as_bytes())?,
+            Some(pem) => atomic_private_write(&gateway_ca_path, pem.as_bytes(), ownership)?,
             None => remove_file_if_present(&gateway_ca_path)?,
         }
-        atomic_private_write(&context_path, &bytes)?;
+        atomic_private_write(&context_path, &bytes, ownership)?;
+        match managed.workload_verifier.as_ref() {
+            Some(verifier) => atomic_private_write(
+                &workload_public_key_path,
+                verifier.public_key_pem.as_bytes(),
+                ownership,
+            )?,
+            None => remove_file_if_present(&workload_public_key_path)?,
+        }
         match event_materialization.as_ref() {
             Some((connection, document)) => {
-                atomic_private_write(&event_connection_path, connection)?;
-                atomic_private_write(&event_context_path, document)?;
+                atomic_private_write(&event_connection_path, connection, ownership)?;
+                atomic_private_write(&event_context_path, document, ownership)?;
             }
             None => {
                 remove_file_if_present(&event_context_path)?;
@@ -1299,6 +1385,7 @@ fn materialize_service_context_fields(
             credential
                 .map(|credential| credential.access_token.as_bytes())
                 .unwrap_or_default(),
+            ownership,
         )?;
         Ok::<(), RuntimePolicyError>(())
     })();
@@ -1310,9 +1397,13 @@ fn materialize_service_context_fields(
             (&credential_path, previous_token.as_deref()),
             (&event_context_path, previous_event_context.as_deref()),
             (&event_connection_path, previous_event_connection.as_deref()),
+            (
+                &workload_public_key_path,
+                previous_workload_public_key.as_deref(),
+            ),
         ] {
             let restored = match previous {
-                Some(bytes) => atomic_private_write(path, bytes),
+                Some(bytes) => atomic_private_write(path, bytes, ownership),
                 None => remove_file_if_present(path),
             };
             if let Err(restore) = restored {
@@ -1352,14 +1443,18 @@ fn remove_file_if_present(path: &Path) -> Result<(), RuntimePolicyError> {
     }
 }
 
-fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<(), RuntimePolicyError> {
+fn atomic_private_write(
+    path: &Path,
+    bytes: &[u8],
+    ownership: WorkloadFileOwnership,
+) -> Result<(), RuntimePolicyError> {
     let parent = path.parent().ok_or_else(|| {
         RuntimePolicyError::Materialization(format!(
             "managed file {} has no parent directory",
             path.display()
         ))
     })?;
-    create_private_directory(parent)?;
+    create_private_directory(parent, ownership)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
         RuntimePolicyError::Materialization(format!(
             "create temporary managed file beside {}: {error}",
@@ -1402,6 +1497,7 @@ fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<(), RuntimePolicyEr
                 path.display()
             ))
         })?;
+        verify_unix_file_ownership(temporary.as_file(), path, ownership, 0o600)?;
     }
     temporary.persist(path).map_err(|error| {
         RuntimePolicyError::Materialization(format!(
@@ -1411,14 +1507,23 @@ fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<(), RuntimePolicyEr
         ))
     })?;
     #[cfg(unix)]
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
+    {
+        let published = fs::File::open(path).map_err(|error| {
             RuntimePolicyError::Materialization(format!(
-                "sync managed directory {}: {error}",
-                parent.display()
+                "inspect published managed file {}: {error}",
+                path.display()
             ))
         })?;
+        verify_unix_file_ownership(&published, path, ownership, 0o600)?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                RuntimePolicyError::Materialization(format!(
+                    "sync managed directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+    }
     Ok(())
 }
 
@@ -1447,7 +1552,146 @@ fn validate_absolute_path(name: &str, path: &Path) -> Result<(), RuntimePolicyEr
     Ok(())
 }
 
-fn create_private_directory(path: &Path) -> Result<(), RuntimePolicyError> {
+/// Validate that a daemon-visible export root cannot alias or contain any
+/// Agent-internal state.  Existing ancestors are canonicalized so symlinked
+/// roots cannot bypass the lexical check; neither configured root itself may
+/// be a symlink.
+pub fn validate_isolated_workload_roots(
+    export_root: &Path,
+    internal_state_roots: &[PathBuf],
+) -> Result<(), RuntimePolicyError> {
+    validate_absolute_path("workload_export_root", export_root)?;
+    if internal_state_roots.is_empty() {
+        return Err(RuntimePolicyError::InvalidPolicy(
+            "workload export isolation requires at least one Agent-internal state root".to_string(),
+        ));
+    }
+    let export = canonicalize_configured_root("workload_export_root", export_root)?;
+    for internal_root in internal_state_roots {
+        validate_absolute_path("internal_state_root", internal_root)?;
+        let internal = canonicalize_configured_root("internal_state_root", internal_root)?;
+        if roots_overlap(&export, &internal) {
+            return Err(RuntimePolicyError::InvalidPolicy(format!(
+                "workload export root {} overlaps Agent-internal state root {}",
+                export_root.display(),
+                internal_root.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn roots_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+fn canonicalize_configured_root(name: &str, path: &Path) -> Result<PathBuf, RuntimePolicyError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(
+            RuntimePolicyError::InvalidPolicy(format!("{name} must not be a symlink")),
+        ),
+        Ok(metadata) if !metadata.is_dir() => Err(RuntimePolicyError::InvalidPolicy(format!(
+            "{name} must be a directory"
+        ))),
+        Ok(_) => fs::canonicalize(path).map_err(|error| {
+            RuntimePolicyError::InvalidPolicy(format!(
+                "cannot canonicalize {name} {}: {error}",
+                path.display()
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            canonicalize_missing_root(name, path)
+        }
+        Err(error) => Err(RuntimePolicyError::InvalidPolicy(format!(
+            "cannot inspect {name} {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn canonicalize_missing_root(name: &str, path: &Path) -> Result<PathBuf, RuntimePolicyError> {
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    loop {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(RuntimePolicyError::InvalidPolicy(format!(
+                        "existing ancestor of {name} must be a real directory"
+                    )));
+                }
+                let mut canonical = fs::canonicalize(ancestor).map_err(|error| {
+                    RuntimePolicyError::InvalidPolicy(format!(
+                        "cannot canonicalize existing ancestor of {name}: {error}"
+                    ))
+                })?;
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = ancestor.file_name().ok_or_else(|| {
+                    RuntimePolicyError::InvalidPolicy(format!(
+                        "{name} has no existing directory ancestor"
+                    ))
+                })?;
+                missing.push(component.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    RuntimePolicyError::InvalidPolicy(format!(
+                        "{name} has no existing directory ancestor"
+                    ))
+                })?;
+            }
+            Err(error) => {
+                return Err(RuntimePolicyError::InvalidPolicy(format!(
+                    "cannot inspect existing ancestor of {name}: {error}"
+                )));
+            }
+        }
+    }
+}
+
+fn validate_private_directory(
+    path: &Path,
+    _ownership: WorkloadFileOwnership,
+) -> Result<(), RuntimePolicyError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        RuntimePolicyError::Materialization(format!(
+            "inspect private workload export directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RuntimePolicyError::Materialization(format!(
+            "workload export root {} is not a real directory",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        let directory = fs::File::open(path).map_err(|error| {
+            RuntimePolicyError::Materialization(format!(
+                "open private workload export directory {}: {error}",
+                path.display()
+            ))
+        })?;
+        verify_unix_file_ownership(&directory, path, _ownership, 0o700)?;
+    }
+    Ok(())
+}
+
+fn create_private_directory(
+    path: &Path,
+    ownership: WorkloadFileOwnership,
+) -> Result<(), RuntimePolicyError> {
+    validate_agent_workload_file_ownership(ownership)?;
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(RuntimePolicyError::Materialization(format!(
+            "private workload directory {} must not be a symlink",
+            path.display()
+        )));
+    }
     fs::create_dir_all(path).map_err(|error| {
         RuntimePolicyError::Materialization(format!("create {}: {error}", path.display()))
     })?;
@@ -1460,6 +1704,88 @@ fn create_private_directory(path: &Path) -> Result<(), RuntimePolicyError> {
                 path.display()
             ))
         })?;
+        let directory = fs::File::open(path).map_err(|error| {
+            RuntimePolicyError::Materialization(format!(
+                "inspect private directory {}: {error}",
+                path.display()
+            ))
+        })?;
+        verify_unix_file_ownership(&directory, path, ownership, 0o700)?;
+    }
+    validate_private_directory(path, ownership)?;
+    Ok(())
+}
+
+/// Prove the Agent can create files with the selected workload identity
+/// without CHOWN. Production calls this before certificate, ledger, or Docker
+/// work so a unit/user mismatch cannot perform partial runtime mutations.
+pub fn validate_agent_workload_file_ownership(
+    ownership: WorkloadFileOwnership,
+) -> Result<(), RuntimePolicyError> {
+    #[cfg(unix)]
+    {
+        if let Some((uid, gid)) = ownership.unix_ids() {
+            // SAFETY: geteuid/getegid take no pointers and have no preconditions.
+            let (effective_uid, effective_gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+            if effective_uid != uid || effective_gid != gid {
+                return Err(RuntimePolicyError::Materialization(format!(
+                    "workload files require Agent effective identity {uid}:{gid}, observed {effective_uid}:{effective_gid}; refusing CAP_CHOWN fallback"
+                )));
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        if ownership.unix_ids().is_some() {
+            return Err(RuntimePolicyError::Materialization(
+                "explicit Unix workload ownership is unsupported on this platform".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn verify_unix_file_ownership(
+    file: &fs::File,
+    path: &Path,
+    ownership: WorkloadFileOwnership,
+    expected_mode: u32,
+) -> Result<(), RuntimePolicyError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = file.metadata().map_err(|error| {
+        RuntimePolicyError::Materialization(format!(
+            "inspect workload-owned path {}: {error}",
+            path.display()
+        ))
+    })?;
+    // CurrentProcess resolves to the actual creator, while an explicit Unix
+    // policy was already checked against euid/egid before any mutation.
+    let expected = match ownership.unix_ids() {
+        Some(ids) => ids,
+        None => {
+            // SAFETY: geteuid/getegid take no pointers and have no preconditions.
+            unsafe { (libc::geteuid(), libc::getegid()) }
+        }
+    };
+    if (metadata.uid(), metadata.gid()) != expected {
+        return Err(RuntimePolicyError::Materialization(format!(
+            "workload-owned path {} has owner {}:{}, expected {}:{}",
+            path.display(),
+            metadata.uid(),
+            metadata.gid(),
+            expected.0,
+            expected.1
+        )));
+    }
+    let actual_mode = metadata.permissions().mode() & 0o777;
+    if actual_mode != expected_mode {
+        return Err(RuntimePolicyError::Materialization(format!(
+            "workload-owned path {} has mode {actual_mode:04o}, expected {expected_mode:04o}",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -1489,7 +1815,7 @@ mod tests {
     use super::*;
     use orchestrator_runtime::{
         ContainerSpec, ManagedApiBinding, ManagedServiceContextSpec, ManagedVolumeSpec,
-        OciImageReference, RuntimeError, RuntimeInstance,
+        ManagedWorkloadVerifierSpec, OciImageReference, RuntimeError, RuntimeInstance,
     };
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
@@ -1640,6 +1966,8 @@ mod tests {
                 .unwrap(),
             runtime_contract: RuntimeContract::judge_sandbox_v1(),
             runtime_context: None,
+            resource_secret_file_mounts: Vec::new(),
+            retained_volume: None,
             managed_service_context: Some(ManagedServiceContextSpec {
                 generation: 3,
                 node_id: "node-1".to_string(),
@@ -1655,6 +1983,7 @@ mod tests {
                     },
                 )]),
                 events: None,
+                workload_verifier: None,
             }),
             command: Vec::new(),
             environment: Vec::new(),
@@ -1696,12 +2025,33 @@ mod tests {
         spec
     }
 
+    fn fixture_workload_verifier(fill: u8) -> ManagedWorkloadVerifierSpec {
+        use base64::Engine as _;
+        let mut der = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        der.extend([fill; 32]);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+        ManagedWorkloadVerifierSpec {
+            public_key_pem: format!(
+                "-----BEGIN PUBLIC KEY-----\n{encoded}\n-----END PUBLIC KEY-----\n"
+            ),
+            key_id: format!("workload-{fill}"),
+            issuer: "ojos-auth/workload".to_string(),
+            audience: "ojos-gateway".to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn restart_recovery_removes_ambiguous_owned_volume_once_before_context_tree() {
         let root = TempDir::new().unwrap();
         let provider =
             LocalRuntimeContextProvider::from_json_file(&write_policy(&root), supported_facts())
-                .unwrap();
+                .unwrap()
+                .with_event_connections(BTreeMap::from([(
+                    "shared-events".to_string(),
+                    "redis://127.0.0.1:6379/4".to_string(),
+                )]));
         let mut spec = judge_spec();
         let context = provider.plan_context(&spec).unwrap().unwrap();
         spec.runtime_context = Some(context.clone());
@@ -1754,7 +2104,11 @@ mod tests {
         let root = TempDir::new().unwrap();
         let provider =
             LocalRuntimeContextProvider::from_json_file(&write_policy(&root), supported_facts())
-                .unwrap();
+                .unwrap()
+                .with_event_connections(BTreeMap::from([(
+                    "shared-events".to_string(),
+                    "redis://127.0.0.1:6379/4".to_string(),
+                )]));
         let spec = judge_spec();
         let context = provider.plan_context(&spec).unwrap().unwrap();
         let credential = WorkloadCredential {
@@ -1791,24 +2145,21 @@ mod tests {
         );
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // SAFETY: geteuid/getegid take no pointers and have no preconditions.
+            let expected_owner = unsafe { (libc::geteuid(), libc::getegid()) };
+            let directory_metadata =
+                fs::metadata(Path::new(&context.service_context_directory)).unwrap();
+            assert_eq!(directory_metadata.permissions().mode() & 0o777, 0o700);
             assert_eq!(
-                fs::metadata(Path::new(&context.service_context_directory))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
+                (directory_metadata.uid(), directory_metadata.gid()),
+                expected_owner
             );
             for file in ["context.json", "token", "ca.pem"] {
-                assert_eq!(
-                    fs::metadata(Path::new(&context.service_context_directory).join(file))
-                        .unwrap()
-                        .permissions()
-                        .mode()
-                        & 0o777,
-                    0o600
-                );
+                let metadata =
+                    fs::metadata(Path::new(&context.service_context_directory).join(file)).unwrap();
+                assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+                assert_eq!((metadata.uid(), metadata.gid()), expected_owner);
             }
         }
         provider
@@ -1826,6 +2177,17 @@ mod tests {
                 .unwrap(),
             "second-token"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let token =
+                fs::metadata(Path::new(&context.service_context_directory).join("token")).unwrap();
+            // SAFETY: geteuid/getegid take no pointers and have no preconditions.
+            assert_eq!((token.uid(), token.gid()), unsafe {
+                (libc::geteuid(), libc::getegid())
+            });
+            assert_eq!(token.permissions().mode() & 0o777, 0o600);
+        }
         assert_eq!(
             provider.runtime_facts().allowed_contracts,
             vec![
@@ -1835,6 +2197,29 @@ mod tests {
         );
         provider.compensate(&context).await.unwrap();
         assert!(!Path::new(&context.scratch_directory).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_workload_owner_must_match_agent_effective_identity() {
+        // SAFETY: geteuid/getegid take no pointers and have no preconditions.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        validate_agent_workload_file_ownership(WorkloadFileOwnership::Unix { uid, gid }).unwrap();
+        let wrong_uid = if uid == u32::MAX { uid - 1 } else { uid + 1 };
+        let error = validate_agent_workload_file_ownership(WorkloadFileOwnership::Unix {
+            uid: wrong_uid,
+            gid,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("refusing CAP_CHOWN fallback"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_unix_workload_owner_fails_closed_on_windows() {
+        let error = validate_agent_workload_file_ownership(WorkloadFileOwnership::standard_v3())
+            .unwrap_err();
+        assert!(error.to_string().contains("unsupported on this platform"));
     }
 
     #[tokio::test]
@@ -1946,6 +2331,78 @@ mod tests {
                 .unwrap();
         assert_eq!(rebound["generation"], 2);
         assert!(rebound["bindings"]["storage_get"].is_object());
+    }
+
+    #[tokio::test]
+    async fn workload_verifier_file_is_atomic_removed_and_not_embedded_in_context() {
+        let root = TempDir::new().unwrap();
+        let provider =
+            LocalRuntimeContextProvider::from_json_file(&write_policy(&root), supported_facts())
+                .unwrap()
+                .with_event_connections(BTreeMap::from([(
+                    "shared-events".to_string(),
+                    "redis://127.0.0.1:6379/4".to_string(),
+                )]));
+        let mut spec = event_only_managed_spec();
+        let first = fixture_workload_verifier(1);
+        spec.managed_service_context
+            .as_mut()
+            .unwrap()
+            .workload_verifier = Some(first.clone());
+        let context = provider.plan_context(&spec).unwrap().unwrap();
+        provider
+            .materialize_unbound_context(&spec, &context)
+            .await
+            .unwrap();
+        let directory = Path::new(&context.service_context_directory);
+        assert_eq!(
+            fs::read_to_string(directory.join("workload-public-key.pem")).unwrap(),
+            first.public_key_pem
+        );
+        let context_json = fs::read_to_string(directory.join("context.json")).unwrap();
+        assert!(!context_json.contains("BEGIN PUBLIC KEY"));
+        assert!(!context_json.contains("workload-public-key"));
+
+        let second = fixture_workload_verifier(2);
+        let mut next = spec.managed_service_context.clone().unwrap();
+        next.generation += 1;
+        next.events.as_mut().unwrap().generation = next.generation;
+        next.workload_verifier = Some(second.clone());
+        provider
+            .reconfigure_context(
+                &spec.deployment_id,
+                &spec.service_id,
+                &next,
+                &context,
+                &WorkloadCredential {
+                    access_token: "rotation-token".to_string(),
+                    expires_at_ms: i64::MAX,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.join("workload-public-key.pem")).unwrap(),
+            second.public_key_pem
+        );
+
+        next.generation += 1;
+        next.events.as_mut().unwrap().generation = next.generation;
+        next.workload_verifier = None;
+        provider
+            .reconfigure_context(
+                &spec.deployment_id,
+                &spec.service_id,
+                &next,
+                &context,
+                &WorkloadCredential {
+                    access_token: "removal-token".to_string(),
+                    expires_at_ms: i64::MAX,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!directory.join("workload-public-key.pem").exists());
     }
 
     #[tokio::test]
@@ -2170,6 +2627,25 @@ mod tests {
             LocalRuntimeContextProvider::from_json_file(&path, supported_facts()),
             Err(RuntimePolicyError::InvalidPolicy(_))
         ));
+    }
+
+    #[test]
+    fn workload_export_boundary_rejects_overlap_and_symlink_aliases() {
+        let root = TempDir::new().unwrap();
+        let export = root.path().join("export");
+        let internal = root.path().join("internal");
+        fs::create_dir(&export).unwrap();
+        fs::create_dir(&internal).unwrap();
+        assert!(validate_isolated_workload_roots(&export, std::slice::from_ref(&internal)).is_ok());
+        assert!(validate_isolated_workload_roots(&export, &[export.join("identity")]).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let alias = root.path().join("export-alias");
+            symlink(&export, &alias).unwrap();
+            assert!(validate_isolated_workload_roots(&alias, &[internal]).is_err());
+        }
     }
 
     #[test]

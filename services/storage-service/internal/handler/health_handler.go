@@ -22,3 +22,16 @@ func healthHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 		}
 	}
 }
+
+func readyHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := svcCtx.Ready(r.Context()); err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"unavailable","service":"storage-service"}` + "\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"status":"ok","service":"storage-service"}` + "\n"))
+	}
+}

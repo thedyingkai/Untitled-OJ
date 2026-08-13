@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ojos.dev/schemas/orchestrator/frontend-manifest-v1.schema.json",
+  "title": "OJOS signed same-origin frontend module manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "moduleId", "target", "artifact", "hostApiRange", "routes"],
+  "properties": {
+    "schemaVersion": {"const": "ojos.frontend/v1"},
+    "moduleId": {"type": "string"},
+    "target": {"enum": ["user-shell", "admin-shell"]},
+    "artifact": {"type": "string", "minLength": 1},
+    "hostApiRange": {"type": "string", "minLength": 1},
+    "routes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "path", "title"],
+        "properties": {
+          "id": {"type": "string"},
+          "path": {"type": "string", "pattern": "^/"},
+          "title": {"type": "string", "minLength": 1},
+          "menu": {"type": "boolean", "default": false},
+          "order": {"type": "integer", "default": 0},
+          "permission": {"type": "string"}
+        }
+      }
+    }
+  }
+}

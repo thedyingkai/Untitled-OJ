@@ -47,7 +47,7 @@ func ResolveDeleteIsolationTiming(claimLease, deleteTimeout time.Duration) (Dele
 	}
 	if deleteTimeout < MinimumDeleteTimeout || deleteTimeout > MaximumDeleteTimeout {
 		return result, fmt.Errorf(
-			"artifact GC storage_delete timeout %s is outside %s..%s",
+			"artifact GC storage.object.delete timeout %s is outside %s..%s",
 			deleteTimeout,
 			MinimumDeleteTimeout,
 			MaximumDeleteTimeout,
@@ -56,7 +56,7 @@ func ResolveDeleteIsolationTiming(claimLease, deleteTimeout time.Duration) (Dele
 	minimumIsolation := deleteTimeout + DeleteRequestIsolationGrace
 	if claimLease <= minimumIsolation {
 		return result, fmt.Errorf(
-			"artifact GC claim lease %s must exceed storage_delete timeout %s plus isolation grace %s",
+			"artifact GC claim lease %s must exceed storage.object.delete timeout %s plus isolation grace %s",
 			claimLease,
 			deleteTimeout,
 			DeleteRequestIsolationGrace,

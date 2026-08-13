@@ -55,6 +55,25 @@ func NewStrictWorkloadAuthMiddleware(secret string, internalToken string, author
 	return middleware
 }
 
+func (m *AuthMiddleware) HandleDelegated(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			writeAuthError(w, 40102, "invalid authorization header")
+			return
+		}
+		tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		claims, ok := m.authorizeServiceRoute(r, tokenString)
+		if !ok {
+			writeAuthError(w, 40104, "invalid or expired token")
+			return
+		}
+		ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
+		ctx = context.WithValue(ctx, TokenContextKey, tokenString)
+		next(w, r.WithContext(ctx))
+	}
+}
+
 func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -75,19 +94,7 @@ func (m *AuthMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		if m.strictDelegatedRoute && isDelegatedPermissionCheck(r) {
-			claims, ok := m.authorizeServiceRoute(r, tokenString)
-			if !ok {
-				writeAuthError(w, 40104, "invalid or expired token")
-				return
-			}
-			ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
-			ctx = context.WithValue(ctx, TokenContextKey, tokenString)
-			next(w, r.WithContext(ctx))
-			return
-		}
-
-		if m.internalToken != "" && tokenString == m.internalToken {
+		if !m.strictDelegatedRoute && m.internalToken != "" && tokenString == m.internalToken && !isDelegatedPermissionCheck(r) {
 			claims := &token.Claims{
 				UserID:   0,
 				Username: "internal-service",

@@ -33,7 +33,25 @@ capacity_registry_password_file: "/protected/orchestrator-capacity/ghcr-read-tok
 capacity_postgres_database: ojos_orchestrator
 capacity_postgres_user: ojos_orchestrator_app
 capacity_postgres_secret_bundle_dir: "/protected/orchestrator-capacity/postgres"
+# Controller-only Agent PostgreSQL ResourceClaim inputs. The JSON descriptor
+# must be strict schema v1 and points, inside the Agent container, to the two
+# files below. The administrator URL contains one password-authenticated URL
+# with sslmode=require; verify-full hostname/CA enforcement is selected by the
+# descriptor and the dedicated CA file. Never place this bundle below a
+# workload-export directory.
+capacity_agent_postgres_provider_file: "/protected/orchestrator-capacity/agent-postgres-provider.json"
+capacity_agent_postgres_admin_url_file: "/protected/orchestrator-capacity/agent-postgres-admin.url"
+capacity_agent_postgres_ca_file: "/protected/orchestrator-capacity/agent-postgres-ca.crt"
 capacity_control_plane_env_file: "/protected/orchestrator-capacity/control-plane.env"
+# The protected control-plane env must also define these external platform
+# bootstrap pairs. Origins are credential-free HTTPS origins; all three raw
+# tokens are distinct, header-safe values with at least 32 bytes:
+# ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN=https://gateway-control.example.com
+# ORCHESTRATOR_GATEWAY_ADMIN_TOKEN=REPLACE_DISTINCT_GATEWAY_MANAGEMENT_SECRET
+# ORCHESTRATOR_AUTH_ADMIN_ORIGIN=https://auth-control.example.com
+# ORCHESTRATOR_AUTH_ADMIN_TOKEN=REPLACE_DISTINCT_AUTH_MANAGEMENT_SECRET
+# ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN=https://auth-workload.example.com
+# ORCHESTRATOR_AUTH_WORKLOAD_TOKEN=REPLACE_DISTINCT_WORKLOAD_ISSUER_SECRET
 capacity_control_plane_secret_bundle_dir: "/protected/orchestrator-capacity/control-plane"
 capacity_catalog_signing_key_file: "/protected/orchestrator-capacity/catalog-ed25519.seed.b64"
 capacity_control_plane_ca_file: "/protected/orchestrator-capacity/control-plane-ca.pem"

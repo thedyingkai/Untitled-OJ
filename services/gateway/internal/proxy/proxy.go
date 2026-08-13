@@ -16,6 +16,7 @@ import (
 
 	"ojos-gateway/internal/config"
 	"ojos-gateway/internal/orchestrator/servicestatus"
+	orchestratorsnapshot "ojos-gateway/internal/orchestrator/snapshot"
 	"ojos-shared/security/internalauth"
 	"ojos-shared/security/workload"
 
@@ -38,15 +39,24 @@ const (
 	authModeService  = "service"
 	authModeWorkload = "workload"
 
-	internalAPIPrefix = "/internal/apis"
+	internalAPIPrefix          = "/internal/apis"
+	contributionAudienceHeader = "X-OJOS-Audience"
 )
 
 type claimsContextKey struct{}
 type workloadClaimsContextKey struct{}
+type matchedPathParametersContextKey struct{}
 
 type routeProxy struct {
 	prefix               string
 	apiID                string
+	operationID          string
+	deploymentID         string
+	revisionID           string
+	generation           uint64
+	audience             string
+	pathTemplate         string
+	providerPath         string
 	bindingID            string
 	consumerDeploymentID string
 	consumerServiceID    string
@@ -61,6 +71,7 @@ type routeProxy struct {
 	authMode             string
 	providerAuthMode     string
 	requiredPermission   string
+	permissionScope      *servicestatus.PermissionScope
 	stripPrefix          string
 	rewritePrefix        string
 	proxy                *httputil.ReverseProxy
@@ -92,30 +103,43 @@ type ServiceRouteReader interface {
 }
 
 type ServiceProxy struct {
-	jwtSecret         string
-	internalSigner    *internalauth.Signer
-	adminChecker      AdminChecker
-	permissionChecker PermissionChecker
-	log               *zap.Logger
-	staticRoutes      []routeProxy
-	trusted           map[string]trustedService
-	nodeID            string
-	workloadVerifier  *workload.Verifier
-	tableMu           sync.Mutex
-	baseTable         servicestatus.RouteTable
-	topologyTable     servicestatus.RouteTable
-	table             atomic.Pointer[compiledRouteTable]
-	closed            atomic.Bool
+	jwtSecret          string
+	internalSigner     *internalauth.Signer
+	adminChecker       AdminChecker
+	permissionChecker  PermissionChecker
+	log                *zap.Logger
+	staticRoutes       []routeProxy
+	trusted            map[string]trustedService
+	nodeID             string
+	workloadVerifier   *workload.Verifier
+	tableMu            sync.Mutex
+	baseTable          servicestatus.RouteTable
+	topologyTable      servicestatus.RouteTable
+	contributionTable  servicestatus.RouteTable
+	table              atomic.Pointer[compiledRouteTable]
+	closed             atomic.Bool
+	extensionArtifacts *extensionArtifactRegistry
+}
+
+type RouteTableValidationError struct {
+	RouteID string
+	Reason  string
+}
+
+func (e *RouteTableValidationError) Error() string {
+	return "invalid contribution route " + e.RouteID + ": " + e.Reason
 }
 
 type AdminChecker func(context.Context, string, int64) (bool, error)
 
 type PermissionCheckCaller struct {
-	Type    string
-	UserID  int64
-	Service string
-	NodeID  string
-	APIID   string
+	Type      string
+	UserID    int64
+	Service   string
+	NodeID    string
+	APIID     string
+	ScopeType string
+	ScopeID   int64
 }
 
 type PermissionChecker func(context.Context, string, PermissionCheckCaller, string) (bool, error)
@@ -202,14 +226,16 @@ func NewServiceProxy(
 	})
 
 	serviceProxy := &ServiceProxy{
-		jwtSecret:      jwtSecret,
-		internalSigner: internalSigner,
-		log:            log,
-		staticRoutes:   compiled,
-		trusted:        trusted,
+		jwtSecret:          jwtSecret,
+		internalSigner:     internalSigner,
+		log:                log,
+		staticRoutes:       compiled,
+		trusted:            trusted,
+		extensionArtifacts: newExtensionArtifactRegistry(),
 	}
 	serviceProxy.baseTable = servicestatus.RouteTable{Version: "0"}
 	serviceProxy.topologyTable = servicestatus.RouteTable{Version: "0"}
+	serviceProxy.contributionTable = servicestatus.RouteTable{Version: "0"}
 	serviceProxy.table.Store(serviceProxy.compileRouteTable(servicestatus.RouteTable{Version: "0"}))
 	return serviceProxy, nil
 }
@@ -266,6 +292,121 @@ func (p *ServiceProxy) SetTopologyRouteTable(table servicestatus.RouteTable) {
 	previous.retire()
 }
 
+// SetContributionRouteTable atomically replaces deployment-scoped external
+// operation routes while preserving legacy registry routes and ApiBindings.
+func (p *ServiceProxy) SetContributionRouteTable(table servicestatus.RouteTable) {
+	_ = p.TrySetContributionRouteTable(table)
+}
+
+// TrySetContributionRouteTable compiles a candidate before publication. A bad
+// revision therefore cannot evict the currently active, healthy snapshot.
+func (p *ServiceProxy) TrySetContributionRouteTable(table servicestatus.RouteTable) error {
+	if err := validateContributionRouteTable(table); err != nil {
+		return err
+	}
+	p.tableMu.Lock()
+	if p.closed.Load() {
+		p.tableMu.Unlock()
+		return nil
+	}
+	p.contributionTable = cloneRouteTable(table)
+	previous := p.rebuildRouteTableLocked()
+	p.tableMu.Unlock()
+	previous.retire()
+	return nil
+}
+
+// ApplyContributionSnapshot validates routes and frontend artifacts as one
+// candidate before atomically publishing the route revision and allowlist.
+func (p *ServiceProxy) ApplyContributionSnapshot(table servicestatus.RouteTable, snapshot orchestratorsnapshot.ContributionSnapshot) error {
+	if p == nil || p.extensionArtifacts == nil {
+		return fmt.Errorf("contribution snapshot consumer is unavailable")
+	}
+	if err := validateContributionRouteTable(table); err != nil {
+		return err
+	}
+	artifacts, err := compileExtensionArtifacts(snapshot)
+	if err != nil {
+		return err
+	}
+	p.tableMu.Lock()
+	if p.closed.Load() {
+		p.tableMu.Unlock()
+		return nil
+	}
+	p.extensionArtifacts.replaceCompiled(artifacts)
+	p.contributionTable = cloneRouteTable(table)
+	previous := p.rebuildRouteTableLocked()
+	p.tableMu.Unlock()
+	previous.retire()
+	return nil
+}
+
+func (p *ServiceProxy) SetContributionArtifacts(snapshot orchestratorsnapshot.ContributionSnapshot) error {
+	if p == nil || p.extensionArtifacts == nil {
+		return fmt.Errorf("extension artifact registry is unavailable")
+	}
+	return p.extensionArtifacts.replace(snapshot)
+}
+
+func validateContributionRouteTable(table servicestatus.RouteTable) error {
+	for _, route := range table.Routes {
+		if route.CreatedFrom != "contribution_snapshot_v1" {
+			continue
+		}
+		if !route.ProxyEnabled {
+			continue
+		}
+		if _, ok := routeUpstreamBaseTarget(route); !ok {
+			return &RouteTableValidationError{RouteID: route.RouteID, Reason: "invalid upstream_base"}
+		}
+		params, ok := templateParameterNames(route.PathTemplate)
+		if !ok {
+			return &RouteTableValidationError{RouteID: route.RouteID, Reason: "invalid external path template"}
+		}
+		providerParams, ok := templateParameterNames(route.ProviderPath)
+		if !ok || !equalStringSet(params, providerParams) {
+			return &RouteTableValidationError{RouteID: route.RouteID, Reason: "provider path parameters differ from external path"}
+		}
+		if normalizeRequiredPermission(route.RequiredPermission) == "" && route.PermissionScope != nil {
+			return &RouteTableValidationError{RouteID: route.RouteID, Reason: "permission scope has no permission"}
+		}
+		if normalizeRequiredPermission(route.RequiredPermission) != "" {
+			scope := route.PermissionScope
+			if scope != nil && scope.Kind != "system" && (scope.Kind != "path_parameter" || scope.Type == "" || !params[scope.PathParameter] || !providerParams[scope.PathParameter]) {
+				return &RouteTableValidationError{RouteID: route.RouteID, Reason: "invalid permission scope"}
+			}
+		}
+	}
+	return nil
+}
+
+func templateParameterNames(path string) (map[string]bool, bool) {
+	segments, ok := splitTemplatePath(path)
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]bool)
+	for _, segment := range segments {
+		if name, parameter := templateParameter(segment); parameter {
+			out[name] = true
+		}
+	}
+	return out, true
+}
+
+func equalStringSet(left, right map[string]bool) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for value := range left {
+		if !right[value] {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *ServiceProxy) rebuildRouteTableLocked() *compiledRouteTable {
 	merged := cloneRouteTable(p.baseTable)
 	projectionIDs := make(map[string]bool, len(p.topologyTable.Routes))
@@ -284,6 +425,7 @@ func (p *ServiceProxy) rebuildRouteTableLocked() *compiledRouteTable {
 		filtered = append(filtered, route)
 	}
 	merged.Routes = append(filtered, cloneServiceRoutes(p.topologyTable.Routes)...)
+	merged.Routes = append(merged.Routes, cloneServiceRoutes(p.contributionTable.Routes)...)
 	sort.SliceStable(merged.Routes, func(i, j int) bool {
 		if merged.Routes[i].Priority == merged.Routes[j].Priority {
 			return merged.Routes[i].RouteID < merged.Routes[j].RouteID
@@ -295,7 +437,11 @@ func (p *ServiceProxy) rebuildRouteTableLocked() *compiledRouteTable {
 		merged.GeneratedAt = p.topologyTable.GeneratedAt
 	}
 	merged.CanProxy = p.baseTable.CanProxy || p.topologyTable.CanProxy
-	merged.Warnings = append(append([]string(nil), p.baseTable.Warnings...), p.topologyTable.Warnings...)
+	merged.CanProxy = merged.CanProxy || p.contributionTable.CanProxy
+	merged.Warnings = append(append(append([]string(nil), p.baseTable.Warnings...), p.topologyTable.Warnings...), p.contributionTable.Warnings...)
+	if p.contributionTable.Version != "" && p.contributionTable.Version != "0" {
+		merged.Version = p.contributionTable.Version
+	}
 	return p.table.Swap(p.compileRouteTable(merged))
 }
 
@@ -322,8 +468,16 @@ func (p *ServiceProxy) compileServiceRoute(route servicestatus.ServiceRoute) (ro
 		return routeProxy{}, false
 	}
 	totalTimeout := routeTotalTimeout(route.TimeoutMS, 30*time.Second)
-	return routeProxy{
+	compiled := routeProxy{
 		prefix:               route.Prefix,
+		apiID:                strings.TrimSpace(route.ApiID),
+		operationID:          strings.TrimSpace(route.OperationID),
+		deploymentID:         strings.TrimSpace(route.DeploymentID),
+		revisionID:           strings.TrimSpace(route.RevisionID),
+		generation:           route.Generation,
+		audience:             strings.ToLower(strings.TrimSpace(route.Audience)),
+		pathTemplate:         cleanPrefix(route.PathTemplate),
+		providerPath:         cleanPrefix(route.ProviderPath),
 		bindingID:            route.BindingID,
 		consumerDeploymentID: route.ConsumerDeploymentID,
 		consumerServiceID:    route.ConsumerServiceID,
@@ -334,20 +488,29 @@ func (p *ServiceProxy) compileServiceRoute(route servicestatus.ServiceRoute) (ro
 		authMode:             route.AuthMode,
 		providerAuthMode:     route.ProviderAuthMode,
 		requiredPermission:   normalizeRequiredPermission(route.RequiredPermission),
+		permissionScope:      clonePermissionScope(route.PermissionScope),
 		stripPrefix:          stripPrefix,
 		rewritePrefix:        rewritePrefix,
-		proxy: newReverseProxy(
-			target,
-			route.Prefix,
-			stripPrefix,
-			rewritePrefix,
-			false,
-			totalTimeout,
-			p.internalSigner,
-			p.log,
-		),
-		target: target,
-	}, true
+		target:               target,
+	}
+	forwardAuthorization := false
+	if compiled.pathTemplate != "" {
+		// Contribution routes already authenticate and authorize at Gateway;
+		// preserve the sanitized caller identity but never leak the bearer.
+		compiled.stripPrefix = ""
+		compiled.rewritePrefix = ""
+	}
+	compiled.proxy = newReverseProxy(
+		target,
+		route.Prefix,
+		compiled.stripPrefix,
+		compiled.rewritePrefix,
+		forwardAuthorization,
+		totalTimeout,
+		p.internalSigner,
+		p.log,
+	)
+	return compiled, true
 }
 
 func (p *ServiceProxy) compileInternalRoute(route servicestatus.ServiceRoute) (routeProxy, bool) {
@@ -381,6 +544,7 @@ func (p *ServiceProxy) compileInternalRoute(route servicestatus.ServiceRoute) (r
 		authMode:             route.AuthMode,
 		providerAuthMode:     route.ProviderAuthMode,
 		requiredPermission:   normalizeRequiredPermission(route.RequiredPermission),
+		permissionScope:      clonePermissionScope(route.PermissionScope),
 		stripPrefix:          stripPrefix,
 		rewritePrefix:        rewritePrefix,
 		proxy: newReverseProxy(
@@ -481,9 +645,18 @@ func cloneServiceRoutes(routes []servicestatus.ServiceRoute) []servicestatus.Ser
 		route.Conflicts = append([]string(nil), route.Conflicts...)
 		route.Warnings = append([]string(nil), route.Warnings...)
 		route.BlockedBy = append([]string(nil), route.BlockedBy...)
+		route.PermissionScope = clonePermissionScope(route.PermissionScope)
 		cloned[i] = route
 	}
 	return cloned
+}
+
+func clonePermissionScope(scope *servicestatus.PermissionScope) *servicestatus.PermissionScope {
+	if scope == nil {
+		return nil
+	}
+	cloned := *scope
+	return &cloned
 }
 
 // Close retires all dynamic revisions and drains the static connection pools.
@@ -523,6 +696,9 @@ func (p *ServiceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, 50303, "gateway proxy is shutting down")
 		return
 	}
+	if p.extensionArtifacts != nil && p.extensionArtifacts.serve(w, r) {
+		return
+	}
 	for _, route := range p.staticRoutes {
 		if isCoreStaticProxyPrefix(route.prefix) && matchPrefix(r.URL.Path, route.prefix) {
 			p.serveRoute(w, r, route)
@@ -541,7 +717,21 @@ func (p *ServiceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if route, ok := p.matchServiceRoute(snapshot, r.URL.Path); ok {
+	if route, ok := p.matchServiceRouteRequest(snapshot, r); ok {
+		if route.pathTemplate != "" {
+			params, matched := matchPathTemplate(route.pathTemplate, r.URL.Path)
+			if !matched {
+				http.NotFound(w, r)
+				return
+			}
+			providerPath, rewriteOK := expandProviderPath(route.providerPath, params)
+			if !rewriteOK {
+				writeJSONError(w, http.StatusInternalServerError, 50005, "invalid contribution provider path")
+				return
+			}
+			ctx := context.WithValue(r.Context(), matchedPathParametersContextKey{}, params)
+			r = cloneRequestWithPath(r.WithContext(ctx), providerPath)
+		}
 		p.serveRoute(w, r, route)
 		return
 	}
@@ -577,13 +767,166 @@ func (p *ServiceProxy) matchBlockedServiceRoute(snapshot *compiledRouteTable, pa
 }
 
 func (p *ServiceProxy) matchServiceRoute(snapshot *compiledRouteTable, path string) (routeProxy, bool) {
+	return p.matchServiceRouteMethod(snapshot, "", path)
+}
+
+func (p *ServiceProxy) matchServiceRouteRequest(snapshot *compiledRouteTable, request *http.Request) (routeProxy, bool) {
+	if request == nil {
+		return routeProxy{}, false
+	}
+	return p.matchServiceRouteAudience(snapshot, request.Method, request.URL.Path, requestAudience(request))
+}
+
+func (p *ServiceProxy) matchServiceRouteMethod(snapshot *compiledRouteTable, method string, path string) (routeProxy, bool) {
+	return p.matchServiceRouteAudience(snapshot, method, path, "")
+}
+
+func (p *ServiceProxy) matchServiceRouteAudience(snapshot *compiledRouteTable, method string, path string, audience string) (routeProxy, bool) {
 	for _, compiled := range snapshot.routes {
-		if !compiled.serviceReady || !matchPrefix(path, compiled.source.Prefix) {
+		if !compiled.serviceReady || !methodAllowed(method, compiled.source.Methods) {
+			continue
+		}
+		if compiled.source.PathTemplate != "" && !audienceMatches(compiled.source.Audience, audience) {
+			continue
+		}
+		if compiled.source.PathTemplate != "" {
+			if _, ok := matchPathTemplate(compiled.source.PathTemplate, path); !ok {
+				continue
+			}
+		} else if !matchPrefix(path, compiled.source.Prefix) {
 			continue
 		}
 		return compiled.service, true
 	}
 	return routeProxy{}, false
+}
+
+func requestAudience(request *http.Request) string {
+	if request == nil {
+		return ""
+	}
+	audience := strings.ToLower(strings.TrimSpace(request.Header.Get(contributionAudienceHeader)))
+	if audience != "" {
+		return audience
+	}
+	if matchPrefix(request.URL.Path, "/api/admin") {
+		return "admin"
+	}
+	return "user"
+}
+
+func audienceMatches(routeAudience string, requestAudience string) bool {
+	routeAudience = strings.ToLower(strings.TrimSpace(routeAudience))
+	requestAudience = strings.ToLower(strings.TrimSpace(requestAudience))
+	if routeAudience == "public" {
+		return requestAudience == "public" || requestAudience == "user"
+	}
+	return routeAudience == requestAudience
+}
+
+func cloneRequestWithPath(request *http.Request, path string) *http.Request {
+	cloned := request.Clone(request.Context())
+	urlCopy := *request.URL
+	urlCopy.Path = path
+	urlCopy.RawPath = ""
+	cloned.URL = &urlCopy
+	return cloned
+}
+
+func matchPathTemplate(template string, requestPath string) (map[string]string, bool) {
+	templateSegments, ok := splitTemplatePath(template)
+	if !ok {
+		return nil, false
+	}
+	pathSegments, ok := splitEscapedRequestPath(requestPath)
+	if !ok || len(pathSegments) != len(templateSegments) {
+		return nil, false
+	}
+	params := make(map[string]string)
+	for index, segment := range templateSegments {
+		if name, parameter := templateParameter(segment); parameter {
+			if pathSegments[index] == "" || pathSegments[index] == "." || pathSegments[index] == ".." {
+				return nil, false
+			}
+			params[name] = pathSegments[index]
+			continue
+		}
+		literal, err := url.PathUnescape(pathSegments[index])
+		if err != nil || literal != segment {
+			return nil, false
+		}
+	}
+	return params, true
+}
+
+func expandProviderPath(template string, params map[string]string) (string, bool) {
+	segments, ok := splitTemplatePath(template)
+	if !ok {
+		return "", false
+	}
+	for index, segment := range segments {
+		name, parameter := templateParameter(segment)
+		if !parameter {
+			segments[index] = url.PathEscape(segment)
+			continue
+		}
+		value, exists := params[name]
+		if !exists || value == "" || value == "." || value == ".." || strings.ContainsAny(value, "/\\") {
+			return "", false
+		}
+		decoded, err := url.PathUnescape(value)
+		if err != nil || decoded == "" || decoded == "." || decoded == ".." || strings.ContainsAny(decoded, "/\\") {
+			return "", false
+		}
+		segments[index] = url.PathEscape(decoded)
+	}
+	return "/" + strings.Join(segments, "/"), true
+}
+
+func splitTemplatePath(path string) ([]string, bool) {
+	path = cleanPrefix(path)
+	if path == "" || path == "/" {
+		return []string{}, path == "/"
+	}
+	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	seen := make(map[string]bool)
+	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return nil, false
+		}
+		if name, parameter := templateParameter(segment); parameter {
+			if name == "" || seen[name] {
+				return nil, false
+			}
+			seen[name] = true
+		} else if strings.ContainsAny(segment, "{}") {
+			return nil, false
+		}
+	}
+	return segments, true
+}
+
+func splitEscapedRequestPath(path string) ([]string, bool) {
+	if path == "/" {
+		return []string{}, true
+	}
+	if path == "" || !strings.HasPrefix(path, "/") || strings.HasSuffix(path, "/") {
+		return nil, false
+	}
+	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	for _, segment := range segments {
+		if segment == "" {
+			return nil, false
+		}
+	}
+	return segments, true
+}
+
+func templateParameter(segment string) (string, bool) {
+	if len(segment) >= 3 && strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
+		return strings.TrimSpace(segment[1 : len(segment)-1]), true
+	}
+	return "", false
 }
 
 func (p *ServiceProxy) serveInternalAPI(w http.ResponseWriter, r *http.Request, snapshot *compiledRouteTable) {
@@ -750,7 +1093,7 @@ func (p *ServiceProxy) serveRoute(w http.ResponseWriter, r *http.Request, route 
 		return
 	}
 
-	if !p.authorizeRequiredPermission(w, r, caller, route.requiredPermission) {
+	if !p.authorizeRequiredPermission(w, r, caller, route.requiredPermission, route.permissionScope) {
 		return
 	}
 
@@ -792,6 +1135,7 @@ func (p *ServiceProxy) authorizeRequiredPermission(
 	r *http.Request,
 	caller PermissionCheckCaller,
 	requiredPermission string,
+	permissionScope *servicestatus.PermissionScope,
 ) bool {
 	requiredPermission = normalizeRequiredPermission(requiredPermission)
 	if requiredPermission == "" {
@@ -810,6 +1154,13 @@ func (p *ServiceProxy) authorizeRequiredPermission(
 		writeJSONError(w, http.StatusInternalServerError, 50002, "permission check unavailable")
 		return false
 	}
+	scopeType, scopeID, validScope := resolvePermissionScope(r, permissionScope)
+	if !validScope {
+		writeJSONError(w, http.StatusBadRequest, 40005, "invalid permission scope id")
+		return false
+	}
+	caller.ScopeType = scopeType
+	caller.ScopeID = scopeID
 	ok, err := p.permissionChecker(
 		r.Context(),
 		strings.TrimSpace(r.Header.Get("Authorization")),
@@ -825,6 +1176,29 @@ func (p *ServiceProxy) authorizeRequiredPermission(
 		return false
 	}
 	return true
+}
+
+func resolvePermissionScope(r *http.Request, scope *servicestatus.PermissionScope) (string, int64, bool) {
+	if scope == nil || scope.Kind == "system" {
+		return "system", 0, true
+	}
+	if scope.Kind != "path_parameter" || strings.TrimSpace(scope.Type) == "" || strings.TrimSpace(scope.PathParameter) == "" {
+		return "", 0, false
+	}
+	params, _ := r.Context().Value(matchedPathParametersContextKey{}).(map[string]string)
+	raw, exists := params[scope.PathParameter]
+	if !exists {
+		return "", 0, false
+	}
+	decoded, err := url.PathUnescape(raw)
+	if err != nil || decoded == "" || strings.TrimSpace(decoded) != decoded || strings.HasPrefix(decoded, "+") {
+		return "", 0, false
+	}
+	id, err := strconv.ParseInt(decoded, 10, 64)
+	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != decoded {
+		return "", 0, false
+	}
+	return scope.Type, id, true
 }
 
 func (p *ServiceProxy) authenticateRequest(
@@ -1043,6 +1417,9 @@ func methodAllowed(method string, allowed []string) bool {
 		return true
 	}
 	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" {
+		return true
+	}
 	for _, item := range allowed {
 		item = strings.ToUpper(strings.TrimSpace(item))
 		if item == method || item == "ANY" || item == "*" {
@@ -1171,6 +1548,7 @@ func newReverseProxy(
 			}
 			internalauth.ClearTrustedAuthHeaders(pr.Out.Header)
 			internalauth.ClearInternalAuthHeaders(pr.Out.Header)
+			pr.Out.Header.Del(contributionAudienceHeader)
 
 			if claims, ok := claimsFromContext(pr.In.Context()); ok && claims != nil {
 				pr.Out.Header.Set("X-Auth-Verified", "true")

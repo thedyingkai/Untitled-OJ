@@ -19,7 +19,7 @@
 | Store | Catalog v2 信任、依赖/平台/版本选择、OCI digest、release-version 签名能力、精确 endpoint/port 绑定、导入与 Managed/External 安装、升级/回滚/卸载、健康投影和补偿；缺少 provider 时 plan 失败。 | `services/orchestrator/manager/`、Store API/contract tests |
 | Topology | 不可变 revision、强 ETag、确定性历史 diff、按精确 Runtime release 绑定的真实 Endpoint/Link probe、validate/apply/rollback saga、Status、drift、审计和按用户布局。 | storage topology contract、backend API/probe tests、Web Playwright |
 | 身份与 API | `/api/v1`、Problem Details、request id、Idempotency-Key、cursor、SSE；远程 Web OIDC Code + PKCE、TUI Device Flow、viewer/operator/admin RBAC、append-only audit。 | OpenAPI/action contract、backend auth tests、Web/TUI fixtures |
-| Desktop/UI | Tauri WebView 内嵌同源 Web UI、随机 loopback backend 与 Agent、HttpOnly bootstrap session；Web/TUI published action 对齐，持续运行测试可配置到 30 分钟。 | `manager/desktop/`、`manager/web/`、`manager/tui/` |
+| Desktop/UI | Tauri WebView 内嵌同源 Web UI 与随机 loopback backend、HttpOnly bootstrap session；本机 managed execution 明确 `Unavailable`，须使用独立 Agent；Web/TUI published action 对齐，持续运行测试可配置到 30 分钟。 | `manager/desktop/`、`manager/web/`、`manager/tui/` |
 | 运维 | fail-closed preflight、live/ready、Prometheus、可选 OTLP、日志保留、PostgreSQL + artifact 备份恢复、容量/恢复/soak runner。 | `docs/orchestrator/operations-v1.md`、`deploy/ops/` |
 
 这些条目说明实现与可重复测试入口已经存在；它们不替代候选环境的实际运行 artifact。

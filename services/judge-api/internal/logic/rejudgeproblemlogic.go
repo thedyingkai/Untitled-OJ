@@ -39,7 +39,12 @@ func (l *RejudgeProblemLogic) RejudgeProblem(req *types.RejudgeProblemReq) (resp
 		return nil, errors.New("invalid problem id")
 	}
 
-	if _, err := l.svcCtx.Repo.GetProblemMeta(l.ctx, req.Id); err != nil {
+	repo := l.svcCtx.ActiveRejudgeRepo()
+	if repo == nil {
+		return nil, errors.New("rejudge repository is not configured")
+	}
+
+	if _, err := repo.GetProblemMeta(l.ctx, req.Id); err != nil {
 		return nil, err
 	}
 
@@ -50,25 +55,23 @@ func (l *RejudgeProblemLogic) RejudgeProblem(req *types.RejudgeProblemReq) (resp
 	if err := permissions.RequireUserPermission(
 		l.ctx,
 		user.UserID,
-		"problem.manage.data",
-		sharedperm.Scope{Type: "problem", ID: req.Id},
+		"judge.submission.manage",
+		sharedperm.SystemScope(),
 	); err != nil {
 		return nil, err
 	}
 
-	ids, err := l.svcCtx.Repo.ResetSubmissionsForProblem(l.ctx, req.Id)
+	ids, err := repo.ResetSubmissionsForProblem(l.ctx, req.Id)
 	if err != nil {
 		return nil, err
 	}
 
 	enqueued := 0
 	for _, submissionID := range ids {
-		if err := l.svcCtx.Repo.EnsureTaskForSubmission(l.ctx, submissionID); err != nil {
+		if err := repo.EnsureTaskForSubmission(l.ctx, submissionID); err != nil {
 			return nil, err
 		}
-		if err := l.publishSubmissionCreated(submissionID); err != nil {
-			return nil, err
-		}
+		notifyJudgeTaskAvailable(l.ctx, l.svcCtx, "submission.created", "judge-api-service", submissionID)
 		enqueued++
 	}
 
@@ -76,8 +79,4 @@ func (l *RejudgeProblemLogic) RejudgeProblem(req *types.RejudgeProblemReq) (resp
 		ProblemId: req.Id,
 		Enqueued:  enqueued,
 	}, nil
-}
-
-func (l *RejudgeProblemLogic) publishSubmissionCreated(submissionID int64) error {
-	return publishJudgeSignal(l.ctx, l.svcCtx, "submission.created", "judge-api-service", submissionID)
 }

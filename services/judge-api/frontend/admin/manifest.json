@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "ojos.frontend/v1",
+  "moduleId": "judge-api.admin",
+  "target": "admin-shell",
+  "artifact": "judge-admin-frontend",
+  "hostApiRange": "^1.0",
+  "routes": [
+    {
+      "id": "judge-api.admin.queue",
+      "path": "/admin/judge",
+      "title": "Judge operations",
+      "menu": true,
+      "order": 50,
+      "permission": "judge.admin"
+    }
+  ]
+}

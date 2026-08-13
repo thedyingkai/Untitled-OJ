@@ -6,6 +6,7 @@ import http.client
 import importlib.util
 import inspect
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -177,6 +178,77 @@ class EngineConfigurationTests(unittest.TestCase):
         source = inspect.getsource(gate.LiveGate._start_engines)
         self.assertIn('dind_image,\n                "dockerd",', source)
         self.assertIn('"--tls=false"', source)
+        self.assertIn('f"--group={AGENT_DOCKER_SOCKET_GID}"', source)
+
+    def test_nested_engine_socket_evidence_checks_command_and_live_stat(self) -> None:
+        root = mock.Mock()
+        root.command.side_effect = [
+            gate.Completed(
+                ["docker", "inspect"],
+                0,
+                json.dumps(
+                    [
+                        {
+                            "Config": {
+                                "Cmd": [
+                                    "dockerd",
+                                    "--host=unix:///var/run/docker.sock",
+                                    f"--group={gate.AGENT_DOCKER_SOCKET_GID}",
+                                ]
+                            }
+                        }
+                    ]
+                ),
+                "",
+            ),
+            gate.Completed(
+                ["docker", "exec"],
+                0,
+                f"{gate.AGENT_DOCKER_SOCKET_GID} 660 socket\n",
+                "",
+            ),
+        ]
+
+        observed = gate.nested_engine_socket_evidence(root, "engine-a")
+
+        self.assertEqual(observed["gid"], gate.AGENT_DOCKER_SOCKET_GID)
+        self.assertEqual(observed["mode"], "0660")
+        self.assertEqual(observed["file_type"], "socket")
+        self.assertEqual(
+            root.command.call_args_list[1],
+            mock.call(
+                "exec",
+                "engine-a",
+                "stat",
+                "-c",
+                "%g %a %F",
+                "/var/run/docker.sock",
+                timeout=30,
+            ),
+        )
+
+    def test_nested_engine_socket_evidence_rejects_wrong_live_gid(self) -> None:
+        root = mock.Mock()
+        root.command.side_effect = [
+            gate.Completed(
+                ["docker", "inspect"],
+                0,
+                json.dumps(
+                    [
+                        {
+                            "Config": {
+                                "Cmd": [f"--group={gate.AGENT_DOCKER_SOCKET_GID}"]
+                            }
+                        }
+                    ]
+                ),
+                "",
+            ),
+            gate.Completed(["docker", "exec"], 0, "0 660 socket\n", ""),
+        ]
+
+        with self.assertRaisesRegex(gate.GateError, "socket identity is unsafe"):
+            gate.nested_engine_socket_evidence(root, "engine-a")
 
     def test_wait_engine_requires_two_complete_stable_identity_probes(self) -> None:
         engine = mock.Mock()
@@ -839,6 +911,10 @@ class FullComponentCommandArgumentTests(unittest.TestCase):
         scenario.internal_token = "internal-token"
         scenario.auth_internal_token = "auth-token"
         scenario.workload_issuer_token = "workload-token"
+        scenario.gateway_management_token = "gateway-management-token"
+        scenario.auth_management_token = "auth-management-token"
+        scenario.gateway_contribution_ack_token = "gateway-ack-token"
+        scenario.auth_contribution_ack_token = "auth-ack-token"
         scenario.commit = "1" * 40
         scenario.ca_cert = Path("unused-test-ca.pem")
         scenario.h = mock.Mock()
@@ -1383,7 +1459,9 @@ class BindingHeadProbeTests(unittest.TestCase):
 
         deployment_id = "deployment-problem"
         component = fixture_service.hashlib.sha256(deployment_id.encode()).hexdigest()[:32]
-        context_source = f"/var/lib/ojos-agent-a/runtime-contexts/{component}/service"
+        context_source = (
+            f"/var/lib/ojos-workload-export-a/runtime-contexts/{component}/service"
+        )
         result = scenario._binding_head_probe(
             context_source,
             "/problems/package.zip",
@@ -1412,7 +1490,9 @@ class BindingHeadProbeTests(unittest.TestCase):
         scenario.a = mock.Mock()
         deployment_id = "deployment-problem"
         component = fixture_service.hashlib.sha256(deployment_id.encode()).hexdigest()[:32]
-        expected_source = f"/var/lib/ojos-agent-a/runtime-contexts/{component}/service"
+        expected_source = (
+            f"/var/lib/ojos-workload-export-a/runtime-contexts/{component}/service"
+        )
         scenario.a.command.side_effect = (
             types.SimpleNamespace(stdout="c" * 64 + "\n"),
             types.SimpleNamespace(
@@ -1990,8 +2070,8 @@ class ContractTests(unittest.TestCase):
     def test_provider_status_reads_management_bearer_from_stdin_not_argv(self) -> None:
         scenario = object.__new__(full_components.FullComponentsScenario)
         scenario.topology_id = "cross-machine-a-b"
-        scenario.internal_token = "gateway-management-secret"
-        scenario.auth_internal_token = "auth-management-secret"
+        scenario.gateway_management_token = "gateway-management-secret"
+        scenario.auth_management_token = "auth-management-secret"
         scenario.a = mock.Mock()
         scenario.a.command.return_value = types.SimpleNamespace(
             stdout=json.dumps(
@@ -2013,8 +2093,8 @@ class ContractTests(unittest.TestCase):
 
         self.assertEqual(status["provider"], "gateway")
         call = scenario.a.command.call_args
-        self.assertNotIn(scenario.internal_token, call.args)
-        self.assertIn(scenario.internal_token, call.kwargs["input_data"])
+        self.assertNotIn(scenario.gateway_management_token, call.args)
+        self.assertIn(scenario.gateway_management_token, call.kwargs["input_data"])
         self.assertEqual(call.args[:6], ("exec", "-i", "orchestrator-a", "curl", "--config", "-"))
 
     def test_judge_sandbox_security_options_accept_only_docker_privileged_normalization(
@@ -2767,6 +2847,122 @@ class ContractTests(unittest.TestCase):
         self.assertIn('"workload_request_transcript"', source)
         self.assertNotIn('CAPTURE_PATHS_JSON=["/judge/worker/tasks/claim"]', source)
 
+    def test_auth_and_gateway_enable_the_production_platform_bootstrap(self) -> None:
+        scenario = full_components.FullComponentsScenario.__new__(
+            full_components.FullComponentsScenario
+        )
+        scenario.tmp = Path("/tmp/cross-machine-fixture")
+        scenario.auth_bootstrap_secret = "bootstrap-" + "b" * 32
+        scenario.postgres_password = "postgres-secret"
+        scenario.jwt_secret = "jwt-" + "j" * 32
+        scenario.auth_internal_token = "auth-internal-" + "i" * 32
+        scenario.internal_token = "orchestrator-internal-" + "o" * 32
+        scenario.workload_issuer_token = "auth-workload-" + "w" * 32
+        scenario.auth_management_token = "auth-management-" + "a" * 32
+        scenario.gateway_management_token = "gateway-management-" + "g" * 32
+        scenario.auth_contribution_ack_token = "auth-ack-" + "c" * 32
+        scenario.gateway_contribution_ack_token = "gateway-ack-" + "d" * 32
+        scenario.a = mock.Mock()
+        scenario._run_a_service = mock.Mock()
+        scenario._wait_a_http = mock.Mock()
+        scenario.secure_fixture_image = "fixture:latest"
+        scenario.images = {"echo": "echo:latest"}
+        scenario.a_network = "a-network"
+        scenario.A_IPS = {
+            **full_components.FullComponentsScenario.A_IPS,
+        }
+        scenario.h = types.SimpleNamespace(a_ip="172.20.0.2")
+        scenario._materialize_auth_bootstrap_secret_file = mock.Mock(
+            return_value={"host_file_mode": "0600"}
+        )
+        scenario._inspect_auth_bootstrap_secret_delivery = mock.Mock(
+            return_value={"delivery_mode": "host-private-file-read-only-bind"}
+        )
+
+        scenario._start_bootstrap_services()
+
+        calls = {
+            call.args[0]: list(call.args[3])
+            for call in scenario._run_a_service.call_args_list
+        }
+        def environment(argv: list[str]) -> dict[str, str]:
+            return {
+                argv[index + 1].split("=", 1)[0]: argv[index + 1].split("=", 1)[1]
+                for index, item in enumerate(argv[:-1])
+                if item == "--env"
+            }
+
+        auth = environment(calls["auth-a"])
+        gateway = environment(calls["gateway-a"])
+        self.assertEqual(
+            set(auth),
+            {
+                "OJOS_ENVIRONMENT", "OJOS_PLATFORM_BOOTSTRAP", "AUTH_DATABASE_URL",
+                "JWT_SECRET", "AUTH_INTERNAL_TOKEN", "OJOS_WORKLOAD_PRIVATE_KEY_FILE",
+                "ORCHESTRATOR_AUTH_WORKLOAD_TOKEN", "OJOS_WORKLOAD_KEY_ID",
+                "OJOS_WORKLOAD_ISSUER", "OJOS_WORKLOAD_AUDIENCE",
+                "ORCHESTRATOR_PLATFORM_ORIGIN", "ORCHESTRATOR_INTERNAL_TOKEN",
+                "ORCHESTRATOR_AUTH_ADMIN_TOKEN",
+                "ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN",
+                "AUTH_ADMIN_BOOTSTRAP_SECRET_FILE",
+            },
+        )
+        self.assertEqual(
+            set(gateway),
+            {
+                "OJOS_ENVIRONMENT", "OJOS_PLATFORM_BOOTSTRAP", "REDIS_URL",
+                "JWT_SECRET", "AUTH_SERVICE_ENDPOINT", "ORCHESTRATOR_PLATFORM_ORIGIN",
+                "ORCHESTRATOR_INTERNAL_TOKEN", "ORCHESTRATOR_GATEWAY_ADMIN_TOKEN",
+                "ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN", "ORCHESTRATOR_NODE_ID",
+                "OJOS_WORKLOAD_PUBLIC_KEY_FILE", "OJOS_WORKLOAD_KEY_ID",
+                "OJOS_WORKLOAD_ISSUER", "OJOS_WORKLOAD_AUDIENCE",
+            },
+        )
+        self.assertEqual(auth["OJOS_PLATFORM_BOOTSTRAP"], "1")
+        self.assertEqual(gateway["OJOS_PLATFORM_BOOTSTRAP"], "1")
+        self.assertEqual(
+            auth["AUTH_ADMIN_BOOTSTRAP_SECRET_FILE"],
+            full_components.AUTH_BOOTSTRAP_SECRET_CONTAINER_FILE,
+        )
+        self.assertNotIn("AUTH_ADMIN_BOOTSTRAP_SECRET", auth)
+        for legacy in (
+            "DATABASE_URL", "OJOS_WORKLOAD_CONTROL_PLANE_TOKEN",
+            "OJOS_WORKLOAD_TTL_SECONDS", "ORCHESTRATOR_ENDPOINT",
+        ):
+            self.assertNotIn(legacy, auth)
+            self.assertNotIn(legacy, gateway)
+        platform_tokens = {
+            auth["JWT_SECRET"], auth["AUTH_INTERNAL_TOKEN"],
+            auth["ORCHESTRATOR_AUTH_WORKLOAD_TOKEN"],
+            auth["ORCHESTRATOR_INTERNAL_TOKEN"],
+            auth["ORCHESTRATOR_AUTH_ADMIN_TOKEN"],
+            auth["ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN"],
+            gateway["ORCHESTRATOR_GATEWAY_ADMIN_TOKEN"],
+            gateway["ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN"],
+            scenario.auth_bootstrap_secret,
+        }
+        self.assertEqual(len(platform_tokens), 9)
+        auth_extra = calls["auth-a"]
+        mount = auth_extra[auth_extra.index("--mount") + 1]
+        self.assertEqual(
+            mount,
+            "type=bind,source=/var/lib/ojos-auth-bootstrap/initial-admin,"
+            "target=/run/secrets/ojos-auth-admin-bootstrap,readonly",
+        )
+
+    def test_agent_run_uses_disjoint_export_root_and_matching_policy(self) -> None:
+        source = FULL_COMPONENTS_MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn('"--workload-export-dir",\n            workload_export_root,', source)
+        self.assertIn('"--workload-export-dir", B_WORKLOAD_EXPORT_ROOT,', source)
+        self.assertIn(
+            '"service_context_root": workload_export_root + "/runtime-contexts"',
+            source,
+        )
+        self.assertIn(
+            '"service_context_root": B_WORKLOAD_EXPORT_ROOT + "/runtime-contexts"',
+            source,
+        )
+
     def test_specialization_scan_excludes_contract_tests_not_runtime_sources(self) -> None:
         source = MODULE_PATH.read_text(encoding="utf-8")
         self.assertIn('is_runtime_source = "tests" not in relative_parts', source)
@@ -2849,22 +3045,132 @@ class ContractTests(unittest.TestCase):
         scenario.root.command.side_effect = lambda *args, **kwargs: calls.append(
             ("root", args, kwargs)
         )
-        scenario.a.command.side_effect = lambda *args, **kwargs: calls.append(
-            ("engine", args, kwargs)
-        )
+
+        def engine_command(*args, **kwargs):
+            calls.append(("engine", args, kwargs))
+            if "readonly" in " ".join(str(value) for value in args):
+                if "target=/workload-export" in " ".join(
+                    str(value) for value in args
+                ):
+                    return types.SimpleNamespace(
+                        stdout=json.dumps(
+                            {
+                                "uid": 65532,
+                                "gid": 65532,
+                                "mode": "0700",
+                                "directory": True,
+                            }
+                        )
+                    )
+                return types.SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "root_uid": 65532,
+                            "root_gid": 65532,
+                            "root_mode": "0700",
+                            "directories": [
+                                {
+                                    "path": "identity",
+                                    "uid": 65532,
+                                    "gid": 65532,
+                                    "mode": "0700",
+                                    "directory": True,
+                                }
+                            ],
+                            "files": [
+                                {
+                                    "path": "policy.json",
+                                    "uid": 65532,
+                                    "gid": 65532,
+                                    "mode": "0600",
+                                    "regular": True,
+                                }
+                            ],
+                        }
+                    )
+                )
+            return types.SimpleNamespace(stdout="")
+
+        scenario.a.command.side_effect = engine_command
 
         scenario._seed_agent_host(
-            scenario.a, "/var/lib/ojos-agent-a", {"policy.json": b"{}\n"}
+            scenario.a,
+            "/var/lib/ojos-agent-a",
+            "/var/lib/ojos-workload-export-a",
+            {"policy.json": b"{}\n"},
         )
 
         self.assertEqual(calls[0][0], "root")
         self.assertEqual(
             calls[0][1],
-            ("exec", "engine-a-outer", "mkdir", "-p", "/var/lib/ojos-agent-a"),
+            (
+                "exec",
+                "engine-a-outer",
+                "mkdir",
+                "-p",
+                "/var/lib/ojos-agent-a",
+                "/var/lib/ojos-workload-export-a",
+            ),
         )
-        self.assertEqual(calls[1][0], "engine")
+        self.assertEqual(calls[1][0], "root")
+        self.assertEqual(calls[2][0], "root")
+        self.assertEqual(calls[3][0], "engine")
         self.assertIn(
-            "type=bind,source=/var/lib/ojos-agent-a,target=/host", calls[1][1]
+            "type=bind,source=/var/lib/ojos-agent-a,target=/host", calls[3][1]
+        )
+        self.assertIn("65532:65532", calls[3][1])
+        self.assertNotIn("0:0", calls[3][1])
+        self.assertIn("readonly", " ".join(str(value) for value in calls[4][1]))
+        self.assertIn(
+            "type=bind,source=/var/lib/ojos-workload-export-a,target=/workload-export,readonly",
+            calls[5][1],
+        )
+
+    def test_agent_container_arguments_are_non_root_and_capability_free(self) -> None:
+        arguments = full_components.FullComponentsScenario._agent_docker_arguments(
+            "/var/lib/ojos-agent",
+            "/var/lib/ojos-workload-export",
+            "agent-network",
+        )
+        self.assertIn("65532:65532", arguments)
+        self.assertIn("10004", arguments)
+        self.assertNotIn("0:0", arguments)
+        self.assertNotIn("--cap-add", arguments)
+        self.assertNotIn("--privileged", arguments)
+        self.assertIn(
+            "type=bind,source=/var/lib/ojos-workload-export,target=/var/lib/ojos-workload-export",
+            arguments,
+        )
+
+    def test_nested_process_identity_reads_outer_dind_proc_status(self) -> None:
+        scenario = full_components.FullComponentsScenario.__new__(
+            full_components.FullComponentsScenario
+        )
+        scenario.a = mock.Mock()
+        scenario.b = mock.Mock()
+        scenario.root = mock.Mock()
+        scenario.h = types.SimpleNamespace(
+            a_name="engine-a-outer", b_name="engine-b-outer"
+        )
+        scenario.root.command.return_value = types.SimpleNamespace(
+            stdout=(
+                "Name:\tojos-orchestrator\n"
+                "Uid:\t65532\t65532\t65532\t65532\n"
+                "Gid:\t65532\t65532\t65532\t65532\n"
+                "Groups:\t10004\n"
+            )
+        )
+
+        observed = scenario._nested_container_process_identity(
+            scenario.a, {"State": {"Pid": 417}}, "orchestrator-agent-a"
+        )
+
+        self.assertEqual(observed["euid"], 65532)
+        self.assertEqual(observed["egid"], 65532)
+        self.assertEqual(observed["groups"], [10004, 65532])
+        self.assertEqual(observed["supplementary_groups"], [10004])
+        scenario.root.command.assert_called_once_with(
+            "exec", "engine-a-outer", "cat", "/proc/417/status", timeout=30
         )
 
     def test_full_image_bundle_uses_explicit_argv_and_one_load_per_engine(self) -> None:
@@ -3680,11 +3986,94 @@ class ContractTests(unittest.TestCase):
 
     def test_auth_bootstrap_secret_is_not_embedded_in_failure_argv(self) -> None:
         source = FULL_COMPONENTS_MODULE_PATH.read_text(encoding="utf-8")
-        self.assertIn('"--env-file", str(bootstrap_env)', source)
-        self.assertIn("bootstrap_env.unlink(missing_ok=True)", source)
+        self.assertIn('AUTH_BOOTSTRAP_SECRET_CONTAINER_FILE', source)
+        self.assertIn('f"of={AUTH_BOOTSTRAP_SECRET_HOST_FILE}"', source)
+        self.assertIn('input_data=(self.auth_bootstrap_secret + "\\n").encode("ascii")', source)
         self.assertNotIn(
             '"--env", "AUTH_ADMIN_BOOTSTRAP_SECRET=" + self.auth_bootstrap_secret',
             source,
+        )
+        self.assertNotIn('"--env-file"', source)
+
+    def test_auth_bootstrap_secret_host_file_is_private_and_written_via_stdin(self) -> None:
+        scenario = full_components.FullComponentsScenario.__new__(
+            full_components.FullComponentsScenario
+        )
+        scenario.auth_bootstrap_secret = "bootstrap-" + "x" * 40
+        scenario.h = types.SimpleNamespace(a_name="engine-a")
+        scenario.root = mock.Mock()
+        scenario.root.command.side_effect = [
+            types.SimpleNamespace(stdout="", stderr="", returncode=0),
+            types.SimpleNamespace(stdout="", stderr="", returncode=0),
+            types.SimpleNamespace(stdout="", stderr="", returncode=0),
+            types.SimpleNamespace(stdout="", stderr="", returncode=0),
+            types.SimpleNamespace(stdout="", stderr="", returncode=0),
+            types.SimpleNamespace(stdout="", stderr="", returncode=0),
+            types.SimpleNamespace(stdout="65532 65532 600 regular file\n", stderr="", returncode=0),
+            types.SimpleNamespace(stdout="65532 65532 700 directory\n", stderr="", returncode=0),
+        ]
+
+        evidence = scenario._materialize_auth_bootstrap_secret_file()
+
+        write_call = scenario.root.command.call_args_list[3]
+        self.assertEqual(
+            write_call.args,
+            (
+                "exec", "--interactive", "engine-a", "dd",
+                "of=/var/lib/ojos-auth-bootstrap/initial-admin",
+            ),
+        )
+        self.assertEqual(
+            write_call.kwargs["input_data"],
+            (scenario.auth_bootstrap_secret + "\n").encode("ascii"),
+        )
+        self.assertNotIn(
+            scenario.auth_bootstrap_secret,
+            repr([call.args for call in scenario.root.command.call_args_list]),
+        )
+        self.assertEqual(evidence["host_file_mode"], "0600")
+        self.assertEqual(evidence["host_directory_mode"], "0700")
+
+    def test_auth_bootstrap_delivery_inspects_exact_read_only_mount(self) -> None:
+        scenario = full_components.FullComponentsScenario.__new__(
+            full_components.FullComponentsScenario
+        )
+        scenario.a = mock.Mock()
+        scenario.a.command.side_effect = [
+            types.SimpleNamespace(
+                stdout=json.dumps(
+                    [{
+                        "Config": {"Env": [
+                            "AUTH_ADMIN_BOOTSTRAP_SECRET_FILE=/run/secrets/ojos-auth-admin-bootstrap"
+                        ]},
+                        "Mounts": [{
+                            "Type": "bind",
+                            "Source": "/var/lib/ojos-auth-bootstrap/initial-admin",
+                            "Destination": "/run/secrets/ojos-auth-admin-bootstrap",
+                            "RW": False,
+                        }],
+                    }]
+                )
+            ),
+            types.SimpleNamespace(stdout="65532 65532 600 regular file\n"),
+        ]
+
+        evidence = scenario._inspect_auth_bootstrap_secret_delivery(
+            {
+                "host_file_path": "/var/lib/ojos-auth-bootstrap/initial-admin",
+                "host_file_uid": 65532,
+                "host_file_gid": 65532,
+                "host_file_mode": "0600",
+                "host_directory_mode": "0700",
+                "write_transport": "docker-exec-stdin",
+            }
+        )
+
+        self.assertTrue(evidence["mount_read_only"])
+        self.assertTrue(evidence["inline_environment_absent"])
+        self.assertFalse(evidence["production_one_time_unmount_proven"])
+        self.assertEqual(
+            evidence["cleanup_scope"], "run-scoped-outer-dind-container-teardown"
         )
 
     def test_full_result_evidence_waits_for_async_redis_outbox_relay(self) -> None:
@@ -3735,6 +4124,24 @@ class AuthBootstrapEvidenceTests(unittest.TestCase):
         scenario.admin_username = "initial-admin"
         scenario.admin_password = "admin-password-never-evidence"
         scenario.auth_bootstrap_secret = "bootstrap-secret-never-evidence-123456789"
+        scenario.auth_bootstrap_delivery_evidence = {
+            "delivery_mode": "host-private-file-read-only-bind",
+            "host_file_path": "/var/lib/ojos-auth-bootstrap/initial-admin",
+            "host_file_uid": 65532,
+            "host_file_gid": 65532,
+            "host_file_mode": "0600",
+            "host_directory_mode": "0700",
+            "write_transport": "docker-exec-stdin",
+            "container_file_path": "/run/secrets/ojos-auth-admin-bootstrap",
+            "mount_type": "bind",
+            "mount_read_only": True,
+            "inline_environment_absent": True,
+            "container_file_uid": 65532,
+            "container_file_gid": 65532,
+            "container_file_mode": "0600",
+            "cleanup_scope": "run-scoped-outer-dind-container-teardown",
+            "production_one_time_unmount_proven": False,
+        }
         scenario.h = types.SimpleNamespace(evidence={})
         gateway = mock.Mock()
         gateway.request.side_effect = [
@@ -3902,6 +4309,14 @@ def valid_evidence() -> dict:
     dind_digest = gate.DEFAULT_DIND_IMAGE.rsplit("@", 1)[1]
     image_config_id = "sha256:" + "c" * 64
     image_repo_digests = ["docker.io/library/docker@" + dind_digest]
+    docker_socket = {
+        "dockerd_group_argument": f"--group={gate.AGENT_DOCKER_SOCKET_GID}",
+        "gid": gate.AGENT_DOCKER_SOCKET_GID,
+        "mode": "0660",
+        "file_type": "socket",
+        "path": "/var/run/docker.sock",
+        "evidence_source": "outer-container-inspect-and-stat",
+    }
     engine_a_id = "11111111-1111-4111-8111-111111111111"
     engine_b_id = "22222222-2222-4222-8222-222222222222"
     resource = {
@@ -3947,6 +4362,7 @@ def valid_evidence() -> dict:
                 "marker_volume": gate.safe_name(run_id, "only-a"),
                 "image_config_id": image_config_id,
                 "image_repo_digests": image_repo_digests.copy(),
+                "docker_socket": copy.deepcopy(docker_socket),
             },
             "b": {
                 "engine_id": engine_b_id,
@@ -3964,6 +4380,7 @@ def valid_evidence() -> dict:
                 "marker_volume": gate.safe_name(run_id, "only-b"),
                 "image_config_id": image_config_id,
                 "image_repo_digests": image_repo_digests.copy(),
+                "docker_socket": copy.deepcopy(docker_socket),
             },
             "routing_proof": "host TCP endpoint ID matches outer unix socket",
             "storage_roots_distinct": True,
@@ -3992,6 +4409,7 @@ def valid_evidence() -> dict:
                 "docker_root_dir": "/var/lib/docker",
                 "image_config_id": image_config_id,
                 "image_repo_digests": image_repo_digests.copy(),
+                "docker_socket": copy.deepcopy(docker_socket),
             },
             "b": {
                 "host_endpoint": "tcp://127.0.0.1:32002",
@@ -4014,6 +4432,7 @@ def valid_evidence() -> dict:
                 "docker_root_dir": "/var/lib/docker",
                 "image_config_id": image_config_id,
                 "image_repo_digests": image_repo_digests.copy(),
+                "docker_socket": copy.deepcopy(docker_socket),
             },
             "dind_image": gate.DEFAULT_DIND_IMAGE,
         },
@@ -4155,6 +4574,124 @@ def valid_full_evidence() -> dict:
             "all_match": True,
         }
 
+    def agent_runtime_identity(root: str, export_root: str) -> dict:
+        return {
+            "config_user": "65532:65532",
+            "group_add": ["10004"],
+            "cap_add": [],
+            "privileged": False,
+            "process": {
+                "pid": 101,
+                "euid": 65532,
+                "egid": 65532,
+                "groups": [10004, 65532],
+                "supplementary_groups": [10004],
+                "outer_engine": "nested-engine",
+                "evidence_source": "dind-main-process-proc-status",
+            },
+            "state_root": root,
+            "state_mount_source": root,
+            "state_mount_destination": root,
+            "state_mount_read_write": True,
+            "workload_export_root": export_root,
+            "workload_export_mount_source": export_root,
+            "workload_export_mount_destination": export_root,
+            "workload_export_mount_read_write": True,
+            "state_export_roots_disjoint": True,
+            "daemon_namespace_path_exact": True,
+            "docker_socket_mount_source": "/var/run/docker.sock",
+            "docker_socket_mount_destination": "/var/run/docker.sock",
+            "docker_socket": {
+                "dockerd_group_argument": "--group=10004",
+                "gid": 10004,
+                "mode": "0660",
+                "file_type": "socket",
+                "path": "/var/run/docker.sock",
+                "evidence_source": "outer-container-inspect-and-stat",
+            },
+            "evidence_source": "container-inspect-and-proc",
+        }
+
+    def bootstrap_files(root: str, export_root: str) -> dict:
+        return {
+            "root_uid": 65532,
+            "root_gid": 65532,
+            "root_mode": "0700",
+            "directories": [
+                {
+                    "path": "identity",
+                    "uid": 65532,
+                    "gid": 65532,
+                    "mode": "0700",
+                    "directory": True,
+                }
+            ],
+            "files": [
+                {
+                    "path": "runtime-policy.json",
+                    "uid": 65532,
+                    "gid": 65532,
+                    "mode": "0600",
+                    "regular": True,
+                }
+            ],
+            "host_root": root,
+            "workload_export_root": export_root,
+            "workload_export": {
+                "uid": 65532,
+                "gid": 65532,
+                "mode": "0700",
+                "directory": True,
+            },
+            "state_export_roots_disjoint": True,
+            "helper_user": "65532:65532",
+            "privileged_setup_lifetime": "one-shot-before-agent-start",
+            "agent_cap_chown": False,
+            "evidence_source": "uid-65532-read-only-stat-helper",
+        }
+
+    def context_file_identity(source: str, container_id: str) -> dict:
+        return {
+            "directory": {
+                "uid": 65532,
+                "gid": 65532,
+                "mode": "0700",
+                "directory": True,
+            },
+            "files": [
+                {
+                    "path": name,
+                    "uid": 65532,
+                    "gid": 65532,
+                    "mode": "0600",
+                    "regular": True,
+                    "size": 1,
+                    "sha256": character * 64,
+                }
+                for name, character in (
+                    ("context.json", "a"),
+                    ("token", "b"),
+                    ("ca.pem", "c"),
+                )
+            ],
+            "source": source,
+            "mounted_read_only": True,
+            "reader_user": "65532:65532",
+            "actual_workload_config_user": "65532:65532",
+            "actual_workload_process": {
+                "pid": 202,
+                "euid": 65532,
+                "egid": 65532,
+                "groups": [65532],
+                "supplementary_groups": [],
+                "outer_engine": "nested-engine",
+                "evidence_source": "dind-main-process-proc-status",
+            },
+            "actual_workload_files_readable": ["context.json", "token", "ca.pem"],
+            "reader_network_namespace": "container:" + container_id,
+            "evidence_source": "fresh-standard-workload-read-and-stat",
+        }
+
     value["network_boundary"]["worker_bridge_denied"] = copy.deepcopy(
         value["network_boundary"]["denied"]
     )
@@ -4208,6 +4745,24 @@ def valid_full_evidence() -> dict:
                 "manual_database_role_seed": False,
                 "database_transactional": True,
                 "secret_or_token_recorded": False,
+                "credential_delivery": {
+                    "delivery_mode": "host-private-file-read-only-bind",
+                    "host_file_path": "/var/lib/ojos-auth-bootstrap/initial-admin",
+                    "host_file_uid": 65532,
+                    "host_file_gid": 65532,
+                    "host_file_mode": "0600",
+                    "host_directory_mode": "0700",
+                    "write_transport": "docker-exec-stdin",
+                    "container_file_path": "/run/secrets/ojos-auth-admin-bootstrap",
+                    "mount_type": "bind",
+                    "mount_read_only": True,
+                    "inline_environment_absent": True,
+                    "container_file_uid": 65532,
+                    "container_file_gid": 65532,
+                    "container_file_mode": "0600",
+                    "cleanup_scope": "run-scoped-outer-dind-container-teardown",
+                    "production_one_time_unmount_proven": False,
+                },
             },
         }
     )
@@ -4300,6 +4855,12 @@ def valid_full_evidence() -> dict:
                 "freshness_threshold_ms": 60_000,
                 "unhealthy_deployments": 0,
             },
+            "runtime_identity": agent_runtime_identity(
+                "/var/lib/ojos-agent", "/var/lib/ojos-workload-export"
+            ),
+            "bootstrap_files": bootstrap_files(
+                "/var/lib/ojos-agent", "/var/lib/ojos-workload-export"
+            ),
         },
         "store_validate": {
             "accepted": True,
@@ -4387,6 +4948,10 @@ def valid_full_evidence() -> dict:
             "mount_read_only": True,
             "credential_embedded": False,
             "management_token_present": False,
+            "file_identity": context_file_identity(
+                "/var/lib/ojos-workload-export/runtime-contexts/fixture/service",
+                "0123456789abcdef",
+            ),
         },
         "runtime": {
             "created_by_agent": True,
@@ -4397,8 +4962,15 @@ def valid_full_evidence() -> dict:
             "image_repo_digest": "sha256:" + "c" * 64,
             "container_id": "0123456789abcdef",
             "engine_id": value["engines"]["b"]["engine_id"],
+            "config_user": "0:0",
         },
     }
+    value["store_agent_evidence"]["service_context"]["file_identity"][
+        "actual_workload_config_user"
+    ] = "0:0"
+    value["store_agent_evidence"]["service_context"]["file_identity"][
+        "actual_workload_process"
+    ].update({"euid": 0, "egid": 0, "groups": [0]})
     recovered_flow = copy.deepcopy(value["component_flow"])
     recovered_flow["workload_transcript_correlated"] = True
     recovered_flow["problem"].update(
@@ -4522,6 +5094,12 @@ def valid_full_evidence() -> dict:
             "freshness_threshold_ms": 35_000,
             "unhealthy_deployments": 0,
         },
+        "runtime_identity": agent_runtime_identity(
+            "/var/lib/ojos-agent-a", "/var/lib/ojos-workload-export-a"
+        ),
+        "bootstrap_files": bootstrap_files(
+            "/var/lib/ojos-agent-a", "/var/lib/ojos-workload-export-a"
+        ),
     }
     value["managed_a_network"] = {
         "evidence_source": "live-socket-and-psql-probes",
@@ -4585,6 +5163,16 @@ def valid_full_evidence() -> dict:
             "node_id": "node-a",
             "created_by_agent": True,
             "container_id": container_digit * 64,
+            "config_user": "65532:65532",
+            "process_identity": {
+                "pid": 300 + int(container_digit),
+                "euid": 65532,
+                "egid": 65532,
+                "groups": [65532],
+                "supplementary_groups": [],
+                "outer_engine": "engine-a-outer",
+                "evidence_source": "dind-main-process-proc-status",
+            },
             "image_repo_digest": "sha256:" + container_digit * 64,
             "host_config_digest": "sha256:" + container_digit * 64,
             "engine_id": value["engines"]["a"]["engine_id"],
@@ -4618,6 +5206,10 @@ def valid_full_evidence() -> dict:
                     "credential_embedded": False,
                     "management_token_present": False,
                     "binding_ids": [item["binding_id"] for item in bindings],
+                    "file_identity": context_file_identity(
+                        f"/var/lib/ojos-workload-export-a/runtime-contexts/{service_id}/service",
+                        container_digit * 64,
+                    ),
                 }
                 if context_required
                 else {
@@ -4803,7 +5395,8 @@ def valid_full_evidence() -> dict:
             "logical_endpoint": "172.20.0.3:9101:judge-worker",
             "cache_volume_name": "ojos-judge-cache-" + failed_worker_component,
             "context_directory": (
-                "/var/lib/ojos-agent/runtime-contexts/" + failed_worker_component
+                "/var/lib/ojos-workload-export/runtime-contexts/"
+                + failed_worker_component
             ),
         },
         "operation": {
@@ -4853,7 +5446,10 @@ def valid_full_evidence() -> dict:
         "context_readback": {
             "source": "node-b-agent-host-filesystem",
             "deployment_id": failed_worker_id,
-            "path": "/var/lib/ojos-agent/runtime-contexts/" + failed_worker_component,
+            "path": (
+                "/var/lib/ojos-workload-export/runtime-contexts/"
+                + failed_worker_component
+            ),
             "exists": False,
             "context_or_credential_file_present": False,
         },
@@ -5538,7 +6134,9 @@ def valid_full_evidence() -> dict:
         "b_engine_id": value["engines"]["b"]["engine_id"],
         "gateway_mount_sources": [],
         "judge_mount_sources": [],
-        "worker_mount_sources": ["/var/lib/ojos-agent/runtime-contexts/example/service"],
+        "worker_mount_sources": [
+            "/var/lib/ojos-workload-export/runtime-contexts/example/service"
+        ],
     }
     canary_runtime = managed_a_deployment(
         "storage-service", "deployment-storage-canary-a", "6", [], [], []
@@ -5606,6 +6204,11 @@ def valid_full_evidence() -> dict:
                 "engine": "B",
                 "installed_via_store_agent": True,
                 "container_id": "echo-consumer-container",
+                "config_user": "65532:65532",
+                "service_context_file_identity": context_file_identity(
+                    "/var/lib/ojos-workload-export/runtime-contexts/echo-consumer/service",
+                    "echo-consumer-container",
+                ),
             },
             "binding_plan": {
                 "requirement_name": "echo",
@@ -6704,6 +7307,93 @@ class EvidenceTests(unittest.TestCase):
             "authorization"
         ] = "Bearer leaked"
         with self.assertRaisesRegex(gate.GateError, "package_get"):
+            gate.verify_evidence(value, require_full=True)
+
+    def test_require_full_rejects_agent_root_or_cap_chown(self) -> None:
+        for node, agent in (
+            ("node-a", lambda value: value["a_agent_evidence"]),
+            ("node-b", lambda value: value["store_agent_evidence"]["agent"]),
+        ):
+            value = valid_full_evidence()
+            agent(value)["runtime_identity"]["config_user"] = "0:0"
+            with self.subTest(node=node, mutation="root"), self.assertRaisesRegex(
+                gate.GateError, "runtime identity"
+            ):
+                gate.verify_evidence(value, require_full=True)
+
+            value = valid_full_evidence()
+            agent(value)["runtime_identity"]["cap_add"] = ["CHOWN"]
+            with self.subTest(node=node, mutation="cap-chown"), self.assertRaisesRegex(
+                gate.GateError, "runtime identity"
+            ):
+                gate.verify_evidence(value, require_full=True)
+
+            value = valid_full_evidence()
+            agent(value)["runtime_identity"]["process"]["euid"] = 0
+            with self.subTest(node=node, mutation="proc-root"), self.assertRaisesRegex(
+                gate.GateError, "runtime identity"
+            ):
+                gate.verify_evidence(value, require_full=True)
+
+    def test_require_full_rejects_wrong_socket_or_bootstrap_owner(self) -> None:
+        value = valid_full_evidence()
+        value["engines"]["a"]["docker_socket"]["gid"] = 0
+        with self.assertRaisesRegex(gate.GateError, "Docker socket identity"):
+            gate.verify_evidence(value, require_full=True)
+
+        value = valid_full_evidence()
+        value["store_agent_evidence"]["agent"]["bootstrap_files"]["files"][0][
+            "uid"
+        ] = 0
+        with self.assertRaisesRegex(gate.GateError, "bootstrap ownership"):
+            gate.verify_evidence(value, require_full=True)
+
+    def test_require_full_rejects_unreadable_or_wrong_owner_context(self) -> None:
+        value = valid_full_evidence()
+        value["store_agent_evidence"]["service_context"]["file_identity"]["files"][
+            0
+        ]["mode"] = "0640"
+        with self.assertRaisesRegex(gate.GateError, "private workload-readable"):
+            gate.verify_evidence(value, require_full=True)
+
+        value = valid_full_evidence()
+        value["third_party_fixture"]["consumer"][
+            "service_context_file_identity"
+        ]["reader_user"] = "0:0"
+        with self.assertRaisesRegex(gate.GateError, "private workload-readable"):
+            gate.verify_evidence(value, require_full=True)
+
+    def test_require_full_rejects_wrong_standard_runtime_user(self) -> None:
+        value = valid_full_evidence()
+        value["managed_a_deployments"]["problem-service"]["config_user"] = "0:0"
+        with self.assertRaisesRegex(gate.GateError, "managed A problem-service"):
+            gate.verify_evidence(value, require_full=True)
+
+        value = valid_full_evidence()
+        value["third_party_fixture"]["consumer"]["config_user"] = "0:0"
+        with self.assertRaisesRegex(gate.GateError, "manifest-only"):
+            gate.verify_evidence(value, require_full=True)
+
+        value = valid_full_evidence()
+        value["managed_a_deployments"]["problem-service"]["service_context"][
+            "file_identity"
+        ]["actual_workload_process"]["euid"] = 0
+        with self.assertRaisesRegex(gate.GateError, "private workload-readable"):
+            gate.verify_evidence(value, require_full=True)
+
+    def test_require_full_rejects_overlapping_agent_and_export_roots(self) -> None:
+        value = valid_full_evidence()
+        agent = value["store_agent_evidence"]["agent"]
+        overlapping = "/var/lib/ojos-agent/workload-export"
+        agent["runtime_identity"].update(
+            {
+                "workload_export_root": overlapping,
+                "workload_export_mount_source": overlapping,
+                "workload_export_mount_destination": overlapping,
+            }
+        )
+        agent["bootstrap_files"]["workload_export_root"] = overlapping
+        with self.assertRaisesRegex(gate.GateError, "runtime identity"):
             gate.verify_evidence(value, require_full=True)
 
     def test_atomic_evidence_round_trip(self) -> None:

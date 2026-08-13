@@ -44,7 +44,7 @@ func TestBoundObjectStoreUsesNamedBindingsTokenAndConditionalIdentity(t *testing
 	store := newBoundObjectStoreForTest(t, server.URL)
 	deleteTimeout, err := store.DeleteBindingTimeout()
 	if err != nil || deleteTimeout != 60*time.Second {
-		t.Fatalf("unexpected storage_delete binding timeout: %s (%v)", deleteTimeout, err)
+		t.Fatalf("unexpected storage.object.delete binding timeout: %s (%v)", deleteTimeout, err)
 	}
 	object, exists, err := store.Inspect(t.Context(), intent)
 	if err != nil || !exists || object.SHA256 != digest || object.SizeBytes != 17 {
@@ -200,6 +200,48 @@ func TestBoundObjectStoreRejectsDeleteRouteNotFound(t *testing.T) {
 	}
 }
 
+func TestBoundObjectStoreRejectsReloadedBindingWithWrongAPIID(t *testing.T) {
+	digest := "abababababababababababababababababababababababababababababababab"
+	intent := boundStoreIntent(digest)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set(storagecontract.ResultHeader, storagecontract.ResultDeleted)
+		_, _ = w.Write([]byte(`{"deleted":true}`))
+	}))
+	defer server.Close()
+
+	store := newBoundObjectStoreForTest(t, server.URL)
+	contextFile := os.Getenv("OJOS_SERVICE_CONTEXT_FILE")
+	bytes, err := os.ReadFile(contextFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(bytes, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["generation"] = 4
+	bindings := document["bindings"].(map[string]any)
+	deleteBinding := bindings[storageDeleteBinding].(map[string]any)
+	deleteBinding["api_id"] = "storage.object.remove"
+	deleteBinding["base_path"] = "/internal/apis/storage.object.remove"
+	bytes, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(contextFile, bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.DeleteIfMatches(t.Context(), intent); err == nil {
+		t.Fatal("reloaded binding with the wrong API ID was accepted")
+	}
+	if requests != 0 {
+		t.Fatalf("wrong provider was called %d times", requests)
+	}
+}
+
 func newBoundObjectStoreForTest(t *testing.T, origin string) *BoundObjectStore {
 	t.Helper()
 	dir := t.TempDir()
@@ -213,8 +255,8 @@ func newBoundObjectStoreForTest(t *testing.T, origin string) *BoundObjectStore {
 		"deployment":     map[string]any{"id": "problem-a", "service": "problem-service", "node": "node-a"},
 		"gateway":        map[string]any{"origin": origin},
 		"bindings": map[string]any{
-			"storage_head":   map[string]any{"binding_id": "head", "api_id": "storage.object.head", "base_path": "/internal/apis/storage.object.head", "timeout_ms": 300000},
-			"storage_delete": map[string]any{"binding_id": "delete", "api_id": "storage.object.delete", "base_path": "/internal/apis/storage.object.delete", "timeout_ms": 60000},
+			"storage.object.head":   map[string]any{"binding_id": "head", "api_id": "storage.object.head", "base_path": "/internal/apis/storage.object.head", "timeout_ms": 300000},
+			"storage.object.delete": map[string]any{"binding_id": "delete", "api_id": "storage.object.delete", "base_path": "/internal/apis/storage.object.delete", "timeout_ms": 60000},
 		},
 		"credential_file": token, "generation": 3,
 	}

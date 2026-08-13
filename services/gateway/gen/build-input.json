@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "ojos.dev/build-input/v1",
+  "serviceId": "gateway",
+  "serviceVersion": "0.1.0",
+  "contractDigest": "sha256:35fd35288c474d24d2b90b6e41679de7f3869b872bb82ff0bd9d0693e2b8299e",
+  "generatedFiles": 19,
+  "artifactRequirements": [
+    {
+      "role": "config-schema",
+      "slot": "config.schema",
+      "expectedDigest": "sha256:7108e14d8eeaf3851eec39caed76e5dc5bd4de57349248ad3a150f71393d7926",
+      "expectedSize": null
+    },
+    {
+      "role": "contract",
+      "slot": "contract",
+      "expectedDigest": "sha256:35fd35288c474d24d2b90b6e41679de7f3869b872bb82ff0bd9d0693e2b8299e",
+      "expectedSize": 15864
+    },
+    {
+      "role": "events-manifest",
+      "slot": "events",
+      "expectedDigest": "sha256:08bd3b65e1a5790fffed0ef69e19034c286f51f5e3dd2e2e0188e6059fe30981",
+      "expectedSize": 32
+    },
+    {
+      "role": "runtime",
+      "slot": "gateway-runtime",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:gateway.platform.api",
+      "slot": "openapi.gateway.platform.api",
+      "expectedDigest": "sha256:6d032c03486f851dcca4b4d961fc42fe456ec2c0b4dc2827555051a43e5c22c3",
+      "expectedSize": null
+    },
+    {
+      "role": "provenance",
+      "slot": "provenance",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "sbom",
+      "slot": "sbom",
+      "expectedDigest": null,
+      "expectedSize": null
+    }
+  ]
+}

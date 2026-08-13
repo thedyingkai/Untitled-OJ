@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ojos.dev/schemas/orchestrator/compatibility-report-v1.schema.json",
+  "title": "OJOS service compatibility report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "serviceId", "previousServiceVersion", "currentServiceVersion", "compatible", "issues"],
+  "properties": {
+    "schemaVersion": {"const": "ojos.dev/compatibility-report/v1"},
+    "serviceId": {"type": "string"},
+    "previousServiceVersion": {"type": "string"},
+    "currentServiceVersion": {"type": "string"},
+    "compatible": {"type": "boolean"},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "apiId", "operationId", "detail", "previousApiMajor", "acceptedByMajorBump"],
+        "properties": {
+          "kind": {"type": "string"},
+          "apiId": {"type": "string"},
+          "operationId": {"type": "string"},
+          "detail": {"type": "string"},
+          "previousApiMajor": {"type": "integer", "minimum": 0},
+          "currentApiMajor": {"type": "integer", "minimum": 0},
+          "acceptedByMajorBump": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

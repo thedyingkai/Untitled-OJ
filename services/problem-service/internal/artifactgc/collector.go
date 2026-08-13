@@ -63,7 +63,7 @@ type Collector struct {
 	Store      ObjectStore
 	Retention  time.Duration
 	ClaimLease time.Duration
-	// DeleteTimeout is the effective storage_delete ApiBinding timeout. A zero
+	// DeleteTimeout is the effective storage.object.delete ApiBinding timeout. A zero
 	// value uses the bound store timeout when available, then the release default.
 	DeleteTimeout time.Duration
 	Delete        bool

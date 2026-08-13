@@ -3,6 +3,7 @@ import { createPinia } from "pinia";
 import { createRouter, createWebHashHistory } from "vue-router";
 import App from "./App.vue";
 import { installBrowserAuthentication } from "./auth";
+import { startAdminFrontendHost } from "./ojos-frontend/shell-host";
 import "./styles/theme.css";
 
 installBrowserAuthentication();
@@ -45,3 +46,10 @@ const router = createRouter({
 });
 
 createApp(App).use(createPinia()).use(router).mount("#app");
+
+const frontendHost = startAdminFrontendHost(router);
+window.addEventListener("beforeunload", () => void frontendHost.dispose(), { once: true });
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => void frontendHost.dispose());
+}

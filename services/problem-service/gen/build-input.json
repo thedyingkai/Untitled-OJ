@@ -1,0 +1,117 @@
+{
+  "schemaVersion": "ojos.dev/build-input/v1",
+  "serviceId": "problem-service",
+  "serviceVersion": "0.1.0",
+  "contractDigest": "sha256:91067d68f758d267b8186e318924b72f51ca7b6e3d95426b8aa50d6db3c46965",
+  "generatedFiles": 19,
+  "artifactRequirements": [
+    {
+      "role": "config-schema",
+      "slot": "config.schema",
+      "expectedDigest": "sha256:6f80b8a0fa2020be97701152326da71031e83e977306130921acda80d6bc4962",
+      "expectedSize": null
+    },
+    {
+      "role": "contract",
+      "slot": "contract",
+      "expectedDigest": "sha256:91067d68f758d267b8186e318924b72f51ca7b6e3d95426b8aa50d6db3c46965",
+      "expectedSize": 38951
+    },
+    {
+      "role": "event-schema:io.ojos.problem.deleted.v1:v1",
+      "slot": "event.io.ojos.problem.deleted.v1.v1.schema",
+      "expectedDigest": "sha256:a462d8e67aa85c9d44b3233f465a8a88d6532afbb0159a7db3b2a6a611d900eb",
+      "expectedSize": null
+    },
+    {
+      "role": "event-schema:io.ojos.problem.snapshot.v1:v1",
+      "slot": "event.io.ojos.problem.snapshot.v1.v1.schema",
+      "expectedDigest": "sha256:9183e7026b3b50f60d0c50f30791273fe38e7daeb633807e54dea5b2b10ad9f7",
+      "expectedSize": null
+    },
+    {
+      "role": "events-manifest",
+      "slot": "events",
+      "expectedDigest": "sha256:fa887d0f9ef0b5d786cdfa031651a4bcddd70e985e90ffba5415ab518df22ca3",
+      "expectedSize": 2123
+    },
+    {
+      "role": "frontend-manifest:problem-service.admin",
+      "slot": "frontend.problem-service.admin.manifest",
+      "expectedDigest": "sha256:082582ab603c0c21b73d5e7f7c0c2438a1d5b4c4b6d8314fda4eab510f3601b6",
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-manifest:problem-service.user",
+      "slot": "frontend.problem-service.user.manifest",
+      "expectedDigest": "sha256:2eeb4e68f9e876ee1914601b5e873665564fcc8ae0ce02617fe8498c035c74ae",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:problem.artifact-gc.manage",
+      "slot": "openapi.problem.artifact-gc.manage",
+      "expectedDigest": "sha256:d6f0e327ae3965e0d57334a6adc4f16d4ab1b0cc1384035a6cca5ed950a72892",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:problem.problem.manage",
+      "slot": "openapi.problem.problem.manage",
+      "expectedDigest": "sha256:d1245b6c68be5daf85b585b1cc1c2bb78753756915811a013697459930797ebb",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:problem.problem.read",
+      "slot": "openapi.problem.problem.read",
+      "expectedDigest": "sha256:398b4dd87145546a780da2f360832838ecbf0851a72c4ff726880dede4e6fe80",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:problem.testdata.read",
+      "slot": "openapi.problem.testdata.read",
+      "expectedDigest": "sha256:459385c193f0b02010c79a42e8cd092ed60fcc390d5868a650ed45ff537efb98",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:problem.testdata.write",
+      "slot": "openapi.problem.testdata.write",
+      "expectedDigest": "sha256:bbd5a9bc2bf29f7a7046257402e3a2913b9d39275728f50fdb23976c2d432e0d",
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-bundle:problem-service.admin",
+      "slot": "problem-admin-frontend",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "migration:problem-schema-v1",
+      "slot": "problem-migration-v1",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "runtime",
+      "slot": "problem-runtime",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-bundle:problem-service.user",
+      "slot": "problem-user-frontend",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "provenance",
+      "slot": "provenance",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "sbom",
+      "slot": "sbom",
+      "expectedDigest": null,
+      "expectedSize": null
+    }
+  ]
+}

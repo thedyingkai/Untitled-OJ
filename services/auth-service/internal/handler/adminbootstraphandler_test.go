@@ -14,6 +14,9 @@ import (
 	"ojos-auth-service/internal/service"
 	"ojos-auth-service/internal/svc"
 	"ojos-auth-service/internal/types"
+
+	coreservice "github.com/zeromicro/go-zero/core/service"
+	"github.com/zeromicro/go-zero/rest"
 )
 
 type handlerBootstrapStore struct {
@@ -50,6 +53,51 @@ func TestAdminBootstrapRouteIsConditionalAndUnauthenticatedByJWT(t *testing.T) {
 	authMiddlewareIndex := strings.Index(source, "serverCtx.AuthMiddleware")
 	if bootstrapIndex < 0 || authMiddlewareIndex < 0 || bootstrapIndex > authMiddlewareIndex {
 		t.Fatal("bootstrap route must be separately guarded by its one-time credential, not JWT middleware")
+	}
+}
+
+func TestAdminBootstrapRouteDisappearsAfterRestartWithoutSecret(t *testing.T) {
+	newServer := func(bootstrap *service.AdminBootstrapService) *rest.Server {
+		server, err := rest.NewServer(rest.RestConf{
+			Host: "127.0.0.1", Port: 0,
+			ServiceConf: coreservice.ServiceConf{Name: "auth-bootstrap-route-test"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity := func(next http.HandlerFunc) http.HandlerFunc { return next }
+		RegisterHandlers(server, &svc.ServiceContext{
+			AdminBootstrap: bootstrap,
+			AuthMiddleware: identity, WorkloadControlPlaneMiddleware: identity,
+			DelegatedPermissionMiddleware: identity,
+		})
+		return server
+	}
+
+	bootstrap, err := service.NewAdminBootstrapService(
+		&handlerBootstrapStore{}, []byte(strings.Repeat("bootstrap-", 4)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := newServer(bootstrap)
+	defer enabled.Stop()
+	disabled := newServer(nil)
+	defer disabled.Stop()
+
+	hasRoute := func(server *rest.Server) bool {
+		for _, route := range server.Routes() {
+			if route.Method == http.MethodPost && route.Path == "/auth/bootstrap/admin" {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasRoute(enabled) {
+		t.Fatal("bootstrap route missing while one-time secret is configured")
+	}
+	if hasRoute(disabled) {
+		t.Fatal("bootstrap route remained registered after restart without the secret")
 	}
 }
 

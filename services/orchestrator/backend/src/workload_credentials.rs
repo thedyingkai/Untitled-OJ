@@ -36,11 +36,23 @@ pub(crate) struct HttpWorkloadTokenIssuer {
 }
 
 impl HttpWorkloadTokenIssuer {
-    pub(crate) fn from_env() -> Result<Option<Self>> {
-        Self::from_lookup(|name| std::env::var(name).ok())
+    pub(crate) fn from_env(production: bool) -> Result<Option<Self>> {
+        let allow_compose_bootstrap_http =
+            std::env::var("ORCHESTRATOR_ALLOW_COMPOSE_BOOTSTRAP_HTTP")
+                .ok()
+                .is_some_and(|value| {
+                    matches!(value.trim(), "1") || value.trim().eq_ignore_ascii_case("true")
+                });
+        Self::from_lookup(production, allow_compose_bootstrap_http, |name| {
+            std::env::var(name).ok()
+        })
     }
 
-    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Option<Self>> {
+    fn from_lookup(
+        production: bool,
+        allow_compose_bootstrap_http: bool,
+        mut lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<Option<Self>> {
         // Deliberately do not inspect AUTH admin or generic orchestrator
         // tokens. Workload issuance has a dedicated least-privilege
         // control-plane credential and must fail closed when only half of the
@@ -52,8 +64,14 @@ impl HttpWorkloadTokenIssuer {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         match (origin, token) {
-            (None, None) => Ok(None),
-            (Some(origin), Some(token)) => Self::new(&origin, token).map(Some),
+            (None, None) if !production => Ok(None),
+            (None, None) => Err(anyhow!(
+                "production requires ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN and ORCHESTRATOR_AUTH_WORKLOAD_TOKEN"
+            )),
+            (Some(origin), Some(token)) => {
+                validate_issuer_origin(&origin, production, allow_compose_bootstrap_http)?;
+                Self::new(&origin, token).map(Some)
+            }
             _ => Err(anyhow!(
                 "ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN and ORCHESTRATOR_AUTH_WORKLOAD_TOKEN must be configured together"
             )),
@@ -86,6 +104,29 @@ impl HttpWorkloadTokenIssuer {
             agent,
         })
     }
+}
+
+fn validate_issuer_origin(
+    origin: &str,
+    production: bool,
+    allow_compose_bootstrap_http: bool,
+) -> Result<()> {
+    let parsed = url::Url::parse(origin).context("parse Auth workload issuer origin")?;
+    if parsed.scheme() == "https" {
+        return Ok(());
+    }
+    if parsed.scheme() != "http" {
+        return Err(anyhow!("Auth workload issuer origin must use HTTPS"));
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
+    let compose_bootstrap = allow_compose_bootstrap_http && host == "auth-service";
+    if production && !loopback && !compose_bootstrap {
+        return Err(anyhow!(
+            "production Auth workload issuer origin must use HTTPS; plaintext is limited to loopback or the explicitly enabled auth-service Compose bootstrap network"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -139,7 +180,7 @@ mod tests {
             ),
         ]);
         assert!(
-            HttpWorkloadTokenIssuer::from_lookup(|name| values.get(name).cloned())
+            HttpWorkloadTokenIssuer::from_lookup(false, false, |name| values.get(name).cloned())
                 .unwrap()
                 .is_none()
         );
@@ -152,7 +193,10 @@ mod tests {
             "https://auth.example".to_string(),
         )]);
         assert!(
-            HttpWorkloadTokenIssuer::from_lookup(|name| origin_only.get(name).cloned()).is_err()
+            HttpWorkloadTokenIssuer::from_lookup(false, false, |name| origin_only
+                .get(name)
+                .cloned())
+            .is_err()
         );
 
         let dedicated = BTreeMap::from([
@@ -166,9 +210,47 @@ mod tests {
             ),
         ]);
         assert!(
-            HttpWorkloadTokenIssuer::from_lookup(|name| dedicated.get(name).cloned())
+            HttpWorkloadTokenIssuer::from_lookup(false, false, |name| dedicated.get(name).cloned())
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn production_requires_secure_and_complete_workload_issuer() {
+        assert!(HttpWorkloadTokenIssuer::from_lookup(true, false, |_| None).is_err());
+        let insecure = BTreeMap::from([
+            (
+                "ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN".to_string(),
+                "http://auth-service:8081".to_string(),
+            ),
+            (
+                "ORCHESTRATOR_AUTH_WORKLOAD_TOKEN".to_string(),
+                "dedicated-token".to_string(),
+            ),
+        ]);
+        assert!(
+            HttpWorkloadTokenIssuer::from_lookup(true, false, |name| insecure.get(name).cloned())
+                .is_err()
+        );
+        assert!(
+            HttpWorkloadTokenIssuer::from_lookup(true, true, |name| insecure.get(name).cloned())
+                .unwrap()
+                .is_some()
+        );
+        let arbitrary = BTreeMap::from([
+            (
+                "ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN".to_string(),
+                "http://auth-other:8081".to_string(),
+            ),
+            (
+                "ORCHESTRATOR_AUTH_WORKLOAD_TOKEN".to_string(),
+                "dedicated-token".to_string(),
+            ),
+        ]);
+        assert!(
+            HttpWorkloadTokenIssuer::from_lookup(true, true, |name| arbitrary.get(name).cloned())
+                .is_err()
         );
     }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from "vue";
+import { computed, onMounted, onUnmounted } from "vue";
 import { RouterLink, RouterView } from "vue-router";
 import {
   authError,
@@ -11,6 +11,7 @@ import {
   logoutBrowserSession,
 } from "./auth";
 import { useOrchestrator } from "./store";
+import { adminFrontendContributions } from "./ojos-frontend/shell-host";
 
 const store = useOrchestrator();
 
@@ -29,7 +30,7 @@ async function logout() {
   }
 }
 
-const nav = [
+const staticNav = [
   { to: "/topology", label: "拓扑", icon: "◈" },
   { to: "/market", label: "商店", icon: "▤" },
   { to: "/services", label: "服务", icon: "❖" },
@@ -37,6 +38,15 @@ const nav = [
   { to: "/operations", label: "操作", icon: "≡" },
   { to: "/diagnostics", label: "诊断", icon: "⌁" },
 ];
+
+const nav = computed(() => [
+  ...staticNav,
+  ...adminFrontendContributions.value.menus.map((item) => ({
+    to: item.path,
+    label: item.title,
+    icon: "◇",
+  })),
+]);
 </script>
 
 <template>

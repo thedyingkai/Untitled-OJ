@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ojos:event:contest-service.contest-created:v1",
+  "title": "Contest created event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contestId", "slug", "title", "startsAt", "endsAt"],
+  "properties": {
+    "contestId": {"type": "integer", "minimum": 1},
+    "slug": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"},
+    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+    "startsAt": {"type": "string", "format": "date-time"},
+    "endsAt": {"type": "string", "format": "date-time"}
+  }
+}

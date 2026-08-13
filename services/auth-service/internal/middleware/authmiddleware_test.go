@@ -158,3 +158,21 @@ func TestStrictWorkloadPermissionRouteRejectsInternalAndLegacyBearers(t *testing
 		t.Fatalf("strict provider rejected bound workload: status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestStrictWorkloadModeRejectsGlobalInternalBearerOnAdminRoutes(t *testing.T) {
+	middleware := NewStrictWorkloadAuthMiddleware(
+		"jwt-secret",
+		"global-internal-token",
+		func(context.Context, string, string, string, string) (bool, error) { return false, nil },
+	)
+	handler := middleware.Handle(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("production admin route must not accept the legacy global internal bearer")
+	})
+	req := httptest.NewRequest(http.MethodPost, "/auth/admin/roles", nil)
+	req.Header.Set("Authorization", "Bearer global-internal-token")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}

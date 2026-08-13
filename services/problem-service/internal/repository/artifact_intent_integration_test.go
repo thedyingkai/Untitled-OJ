@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
+	"ojos-problem-events/problemv1"
 	"ojos-problem-service/internal/artifactgc"
 	"ojos-problem-service/internal/config"
 	"ojos-problem-service/internal/packagefs"
 	problemstorage "ojos-problem-service/internal/storage"
-	"ojos-shared/eventing"
 	"ojos-shared/storagecontract"
 
 	"github.com/jackc/pgx/v5"
@@ -139,7 +139,7 @@ CREATE TABLE problem_artifact_upload_intents (
 	if pendingCount != 2 {
 		t.Fatalf("rolled-back file and package uploads did not remain PENDING: %d", pendingCount)
 	}
-	expectedIntents := map[string]eventing.ArtifactRef{
+	expectedIntents := map[string]problemv1.ArtifactRef{
 		orphan.URI: orphan,
 		synced[0].StoragePath: {
 			URI: synced[0].StoragePath, SHA256: synced[0].Sha256, SizeBytes: synced[0].SizeBytes,
@@ -185,8 +185,8 @@ CREATE TABLE problem_artifact_upload_intents (
 		"deployment":     map[string]any{"id": "problem-a", "service": "problem-service", "node": "node-a"},
 		"gateway":        map[string]any{"origin": server.URL},
 		"bindings": map[string]any{
-			"storage_head":   map[string]any{"binding_id": "head-a", "api_id": "storage.object.head", "base_path": "/internal/apis/storage.object.head", "timeout_ms": 300000},
-			"storage_delete": map[string]any{"binding_id": "delete-a", "api_id": "storage.object.delete", "base_path": "/internal/apis/storage.object.delete", "timeout_ms": 300000},
+			"storage.object.head":   map[string]any{"binding_id": "head-a", "api_id": "storage.object.head", "base_path": "/internal/apis/storage.object.head", "timeout_ms": 300000},
+			"storage.object.delete": map[string]any{"binding_id": "delete-a", "api_id": "storage.object.delete", "base_path": "/internal/apis/storage.object.delete", "timeout_ms": 300000},
 		},
 		"credential_file": tokenPath, "generation": 4,
 	}
@@ -305,7 +305,7 @@ INSERT INTO problem_artifact_upload_intents(
 	// Resolving is identity-aware: a row that merely reuses the URI but has
 	// drifted SHA/size cannot erase the upload evidence.
 	mismatchDigest := strings.Repeat("8", 64)
-	mismatchRef := eventing.ArtifactRef{
+	mismatchRef := problemv1.ArtifactRef{
 		URI:    "storage://problems/problem-4-objects-sha256-" + mismatchDigest,
 		SHA256: mismatchDigest, SizeBytes: 8,
 	}
@@ -335,7 +335,7 @@ INSERT INTO problem_artifact_upload_intents(
 	// NEEDS_ATTENTION is operator-owned, not an expired lease. Publishers must
 	// surface the terminal condition instead of overwriting it or promising a
 	// short automatic retry.
-	attention := eventing.ArtifactRef{
+	attention := problemv1.ArtifactRef{
 		URI:    "storage://problems/package-sha256-" + strings.Repeat("6", 64) + ".zip",
 		SHA256: strings.Repeat("6", 64), SizeBytes: 6, ContentType: "application/zip",
 	}
@@ -367,7 +367,7 @@ INSERT INTO problem_artifact_upload_intents(
 	// Even an expired DELETING lease remains GC-owned: a delayed provider
 	// response may still arrive. Publishers and link transactions must wait for
 	// GC to reclaim/finish rather than making the object visible again.
-	exclusive := eventing.ArtifactRef{
+	exclusive := problemv1.ArtifactRef{
 		URI:    "storage://problems/package-sha256-" + strings.Repeat("7", 64) + ".zip",
 		SHA256: strings.Repeat("7", 64), SizeBytes: 7, ContentType: "application/zip",
 	}

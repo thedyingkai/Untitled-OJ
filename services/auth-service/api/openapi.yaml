@@ -1,0 +1,521 @@
+openapi: 3.1.0
+info:
+  title: OJOS Auth Service API
+  version: 0.1.0
+x-ojos-api-id: auth-service.api
+x-ojos-service:
+  id: auth-service
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    ServiceCode:
+      name: service_code
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[A-Za-z0-9_.-]{1,128}$'}
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+  schemas:
+    Envelope:
+      type: object
+      additionalProperties: true
+      required: [code, msg]
+      properties:
+        code: {type: integer}
+        msg: {type: string}
+        data: {}
+        page: {}
+    Credentials:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 3, maxLength: 32}
+        password: {type: string, minLength: 6}
+    RegisterRequest:
+      allOf:
+        - $ref: '#/components/schemas/Credentials'
+        - type: object
+          additionalProperties: false
+          properties:
+            username: {type: string, minLength: 3, maxLength: 32}
+            password: {type: string, minLength: 6}
+            email: {type: string}
+    ListQuery:
+      type: object
+      additionalProperties: false
+      properties:
+        page: {type: integer, format: int64, minimum: 1}
+        page_size: {type: integer, format: int64, minimum: 1, maximum: 200}
+        q: {type: string}
+        service_code: {type: string}
+        principal_type: {type: string}
+        scope_type: {type: string}
+        action: {type: string}
+    Role:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {type: string}
+        service_code: {type: string}
+        description: {type: string}
+        is_system: {type: boolean}
+    RoleName:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {type: string}
+    RolePermission:
+      type: object
+      additionalProperties: false
+      required: [role, permission]
+      properties:
+        role: {type: string}
+        permission: {type: string}
+    PermissionDefinition:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code: {type: string}
+        service_code: {type: string}
+        name: {type: string}
+        description: {type: string}
+    PermissionCode:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code: {type: string}
+    ResourceType:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code: {type: string}
+        service_code: {type: string}
+        name: {type: string}
+        description: {type: string}
+    UserRole:
+      type: object
+      additionalProperties: false
+      required: [user_id, role]
+      properties:
+        user_id: {type: integer, format: int64, minimum: 1}
+        role: {type: string}
+    RoleBinding:
+      type: object
+      additionalProperties: false
+      required: [target_type, target_id, role]
+      properties:
+        target_type: {type: string}
+        target_id: {type: integer, format: int64, minimum: 1}
+        role: {type: string}
+        scope_type: {type: string}
+        scope_id: {type: integer, format: int64, minimum: 0}
+        expires_at: {type: string}
+    PermissionAssignment:
+      type: object
+      additionalProperties: false
+      required: [target_type, target_id, permission]
+      properties:
+        target_type: {type: string}
+        target_id: {type: integer, format: int64, minimum: 1}
+        permission: {type: string}
+        scope_type: {type: string}
+        scope_id: {type: integer, format: int64, minimum: 0}
+        effect: {type: string, enum: [allow, deny]}
+        reason: {type: string}
+        expires_at: {type: string}
+    ResourceEdge:
+      type: object
+      additionalProperties: false
+      required: [parent_type, parent_id, child_type, child_id]
+      properties:
+        parent_type: {type: string}
+        parent_id: {type: integer, format: int64, minimum: 1}
+        child_type: {type: string}
+        child_id: {type: integer, format: int64, minimum: 1}
+        relation: {type: string}
+    ProblemRole:
+      type: object
+      additionalProperties: false
+      required: [user_id, problem_id, role]
+      properties:
+        user_id: {type: integer, format: int64, minimum: 1}
+        problem_id: {type: integer, format: int64, minimum: 1}
+        role: {type: string}
+    PermissionCheck:
+      type: object
+      additionalProperties: false
+      required: [permission]
+      properties:
+        user_id: {type: integer, format: int64, minimum: 0}
+        permission: {type: string}
+        scope_type: {type: string}
+        scope_id: {type: integer, format: int64, minimum: 0}
+        caller_type: {type: string}
+        caller_service: {type: string}
+        caller_node_id: {type: string}
+        api_id: {type: string}
+    ServicePermissions:
+      type: object
+      additionalProperties: false
+      required: [permissions]
+      properties:
+        permissions:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [code]
+            properties:
+              code: {type: string}
+              name: {type: string}
+              description: {type: string}
+        default_role_bindings:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [role, permissions]
+            properties:
+              role: {type: string}
+              permissions: {type: array, items: {type: string}}
+        service_identity:
+          type: object
+          additionalProperties: false
+          properties:
+            service_name: {type: string}
+            allowed_apis: {type: array, items: {type: string}}
+            grants:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [api_id, permission]
+                properties:
+                  api_id: {type: string}
+                  permission: {type: string}
+            credential_token: {type: string, writeOnly: true}
+            credential_expires_at: {type: string}
+    ServiceCredential:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token: {type: string, writeOnly: true}
+        expires_at: {type: string}
+    RevokeServiceCredential:
+      type: object
+      additionalProperties: false
+      properties:
+        token_hint: {type: string}
+paths:
+  /auth/login:
+    post:
+      operationId: authLogin
+      x-ojos-audience: public
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/Credentials'}}
+      responses:
+        '200': {description: Authentication result, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}
+  /auth/register:
+    post:
+      operationId: authRegister
+      x-ojos-audience: public
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/RegisterRequest'}}
+      responses:
+        '200': {description: Registration result, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}
+  /auth/.well-known/workload-jwks.json:
+    get:
+      operationId: getWorkloadJwks
+      x-ojos-audience: public
+      security: []
+      responses:
+        '200': {description: Workload signing keys, content: {application/jwk-set+json: {schema: {type: object, additionalProperties: true}}}}
+        '503': {description: Workload identity is unavailable}
+  /auth/profile:
+    get:
+      operationId: getAuthProfile
+      x-ojos-audience: user
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Current Auth profile, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}
+  /auth/me:
+    get:
+      operationId: getAuthIdentity
+      x-ojos-audience: user
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Current Auth identity, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}
+  /auth/permission-check:
+    post:
+      operationId: checkOwnPermission
+      x-ojos-audience: user
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/PermissionCheck'}}
+      responses:
+        '200': {description: Permission decision, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}
+  /auth/admin/users:
+    get:
+      operationId: listAuthUsers
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      parameters:
+        - {name: page, in: query, schema: {type: integer, format: int64, minimum: 1}}
+        - {name: page_size, in: query, schema: {type: integer, format: int64, minimum: 1, maximum: 200}}
+        - {name: q, in: query, schema: {type: string}}
+      responses:
+        '200': {description: Users, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}
+  /auth/admin/roles:
+    get:
+      operationId: listAuthRoles
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Roles, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    post:
+      operationId: upsertAuthRole
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Role'}}}}
+      responses: {'200': {description: Role updated, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    delete:
+      operationId: deleteAuthRole
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RoleName'}}}}
+      responses: {'200': {description: Role deleted, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/role-permissions:
+    post:
+      operationId: grantAuthRolePermission
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RolePermission'}}}}
+      responses: {'200': {description: Permission granted, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    delete:
+      operationId: revokeAuthRolePermission
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RolePermission'}}}}
+      responses: {'200': {description: Permission revoked, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/permissions:
+    get:
+      operationId: listAuthPermissions
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Permissions, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    post:
+      operationId: upsertAuthPermission
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PermissionDefinition'}}}}
+      responses: {'200': {description: Permission updated, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    delete:
+      operationId: deleteAuthPermission
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PermissionCode'}}}}
+      responses: {'200': {description: Permission deleted, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/resource-types:
+    get:
+      operationId: listAuthResourceTypes
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Resource types, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    post:
+      operationId: upsertAuthResourceType
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ResourceType'}}}}
+      responses: {'200': {description: Resource type updated, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    delete:
+      operationId: deleteAuthResourceType
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PermissionCode'}}}}
+      responses: {'200': {description: Resource type deleted, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/users/roles:
+    post:
+      operationId: addAuthUserRole
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UserRole'}}}}
+      responses: {'200': {description: User role added, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    delete:
+      operationId: removeAuthUserRole
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UserRole'}}}}
+      responses: {'200': {description: User role removed, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/role-bindings:
+    get:
+      operationId: listAuthRoleBindings
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Role bindings, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    post:
+      operationId: bindAuthRole
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RoleBinding'}}}}
+      responses: {'200': {description: Role bound, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    delete:
+      operationId: unbindAuthRole
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RoleBinding'}}}}
+      responses: {'200': {description: Role unbound, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/permission-assignments:
+    get:
+      operationId: listAuthPermissionAssignments
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Permission assignments, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    post:
+      operationId: assignAuthPermission
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PermissionAssignment'}}}}
+      responses: {'200': {description: Permission assigned, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    delete:
+      operationId: revokeAuthPermission
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PermissionAssignment'}}}}
+      responses: {'200': {description: Permission revoked, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/resource-edges:
+    get:
+      operationId: listAuthResourceEdges
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Resource edges, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    post:
+      operationId: addAuthResourceEdge
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ResourceEdge'}}}}
+      responses: {'200': {description: Resource edge added, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    delete:
+      operationId: removeAuthResourceEdge
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ResourceEdge'}}}}
+      responses: {'200': {description: Resource edge removed, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/problems/roles:
+    post:
+      operationId: addAuthProblemRole
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProblemRole'}}}}
+      responses: {'200': {description: Problem role added, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    delete:
+      operationId: removeAuthProblemRole
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProblemRole'}}}}
+      responses: {'200': {description: Problem role removed, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/audit-logs:
+    get:
+      operationId: listAuthAuditLogs
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Audit logs, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/services/{service_code}/permissions:
+    parameters: [{$ref: '#/components/parameters/ServiceCode'}]
+    post:
+      operationId: registerAuthServicePermissions
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ServicePermissions'}}}}
+      responses: {'200': {description: Service permissions registered, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+    delete:
+      operationId: deleteAuthServicePermissions
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Service permissions retired, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/services/{service_code}/identity:
+    parameters: [{$ref: '#/components/parameters/ServiceCode'}]
+    get:
+      operationId: getAuthServiceIdentity
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Service identity, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/services/{service_code}/credentials:
+    parameters: [{$ref: '#/components/parameters/ServiceCode'}]
+    post:
+      operationId: addAuthServiceCredential
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ServiceCredential'}}}}
+      responses: {'200': {description: Service credential added, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/services/{service_code}/credentials/revoke:
+    parameters: [{$ref: '#/components/parameters/ServiceCode'}]
+    post:
+      operationId: revokeAuthServiceCredential
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RevokeServiceCredential'}}}}
+      responses: {'200': {description: Service credential revoked, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}
+  /auth/admin/users/{user_id}/effective-permissions:
+    parameters: [{$ref: '#/components/parameters/UserId'}]
+    get:
+      operationId: getAuthUserEffectivePermissions
+      x-ojos-audience: admin
+      x-ojos-permission: system.admin
+      security: [{ojosBearer: []}]
+      parameters:
+        - {name: scope_type, in: query, schema: {type: string}}
+        - {name: scope_id, in: query, schema: {type: integer, format: int64, minimum: 0}}
+      responses: {'200': {description: Effective permissions, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}}

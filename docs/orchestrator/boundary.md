@@ -5,7 +5,7 @@ OJOS Orchestrator 只负责控制面编排，不承载或代理 OJ 业务请求�
 ## 正式进程
 
 - `ojos-orchestrator-daemon`：远程单主动控制面。生产模式必须使用 PostgreSQL、TLS、OIDC、Node CA 和可信 Catalog；缺少任一项时在绑定端口前失败。只有显式 `--ephemeral` 才允许内存模式。
-- `ojos-orchestrator-desktop`：本地宿主。默认在应用数据目录创建 SQLite，并在同一进程启动 loopback backend 和 loopback Agent；原生 WebView 加载同源 Web UI，不打开外部浏览器。
+- `ojos-orchestrator-desktop`：本地管理宿主。默认在应用数据目录创建 SQLite 并启动 loopback backend；原生 WebView 加载同源 Web UI，不打开外部浏览器。Windows、Linux 与 macOS 当前均不启动 managed local execution worker、不注册 Node 或领取 Job，因为尚无可证明的宿主文件到容器 UID/ACL 契约；运行工作负载必须注册独立 Agent。
 - `ojos-orchestrator-agent`：Node worker。只领取分配给本 Node 的持久 Job，通过 Docker Engine API 执行固定类型任务，物化 Deployment ServiceContext/credential，并上报不可编辑的运行时事实；不接受任意 shell。
 - `ojos-orchestrator-tui`：远程控制客户端，使用与 Web 相同的 `/api/v1` 契约。
 

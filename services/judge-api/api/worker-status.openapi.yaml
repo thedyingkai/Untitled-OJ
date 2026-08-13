@@ -1,0 +1,30 @@
+openapi: 3.1.0
+info: {title: OJOS Judge Worker Status API, version: 1.0.0}
+x-ojos-api-id: judge.worker.status
+x-ojos-service: {id: judge-api, version: 0.1.0}
+components:
+  securitySchemes: {ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}}
+  schemas: {Object: {type: object, additionalProperties: true}}
+paths:
+  /judge/admin/workers:
+    get:
+      operationId: listJudgeWorkers
+      x-ojos-audience: admin
+      x-ojos-permission: judge.worker.status
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Judge worker status, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /judge/admin/workers/{id}/drain:
+    parameters: [{name: id, in: path, required: true, schema: {type: string, minLength: 1}}]
+    post:
+      operationId: drainJudgeWorker
+      x-ojos-audience: admin
+      x-ojos-permission: judge.admin
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Worker draining, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /judge/admin/tasks:
+    get:
+      operationId: listJudgeTasks
+      x-ojos-audience: admin
+      x-ojos-permission: judge.worker.status
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Judge task status, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}

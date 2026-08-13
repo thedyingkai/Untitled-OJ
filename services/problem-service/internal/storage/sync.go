@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"ojos-problem-events/problemv1"
 	"ojos-problem-service/internal/config"
 	"ojos-problem-service/internal/packagefs"
-	"ojos-shared/eventing"
 	"ojos-shared/servicecontext"
 )
 
@@ -38,6 +38,9 @@ func SyncProblemFiles(ctx context.Context, cfg config.StorageConfig, problemID i
 	if err != nil {
 		return nil, err
 	}
+	if managed != nil {
+		defer managed.close()
+	}
 	if managed == nil && strings.TrimSpace(cfg.InternalGatewayEndpoint) == "" && strings.TrimSpace(cfg.ServiceEndpoint) == "" {
 		return files, nil
 	}
@@ -46,9 +49,6 @@ func SyncProblemFiles(ctx context.Context, cfg config.StorageConfig, problemID i
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
-	if managed != nil {
-		client = managed.client
-	}
 	synced := make([]packagefs.IndexedFile, 0, len(files))
 	for _, file := range files {
 		data, err := os.ReadFile(file.StoragePath)
@@ -64,7 +64,7 @@ func SyncProblemFiles(ctx context.Context, cfg config.StorageConfig, problemID i
 		// therefore leave only an unreferenced object for GC; it cannot overwrite
 		// the bytes referenced by the previously committed problem_files row.
 		key := ProblemContentObjectKey(problemID, digest)
-		artifact := eventing.ArtifactRef{
+		artifact := problemv1.ArtifactRef{
 			URI:         "storage://" + bucket(cfg) + "/" + key,
 			SHA256:      digest,
 			SizeBytes:   int64(len(data)),
@@ -116,8 +116,13 @@ func putObject(ctx context.Context, managed *managedStorageClient, client *http.
 	var req *http.Request
 	var err error
 	if managed != nil {
+		snapshot, managedClient, managedErr := managed.snapshot(ctx)
+		if managedErr != nil {
+			return managedErr
+		}
 		relativePath := "/" + url.PathEscape(bucket(cfg)) + "/" + url.PathEscape(key)
-		req, err = managed.context.NewRequestWithOptions(ctx, storagePutBinding, http.MethodPut, relativePath, bytes.NewReader(data), servicecontext.RequestOptions{Headers: headers, ContentLength: int64(len(data))})
+		req, err = snapshot.NewRequestWithOptions(ctx, storagePutBinding, http.MethodPut, relativePath, bytes.NewReader(data), servicecontext.RequestOptions{Headers: headers, ContentLength: int64(len(data))})
+		client = managedClient
 	} else {
 		target, legacyHeaders := putTarget(cfg, key)
 		req, err = http.NewRequestWithContext(ctx, http.MethodPut, target, bytes.NewReader(data))

@@ -54,6 +54,24 @@ OPERATION_TIMEOUT_CORRELATED_LOG_MAX_CHARS = 128 * 1024
 OPERATION_TIMEOUT_DIAGNOSTIC_ERROR_MAX_CHARS = 4_000
 PROJECTION_INTEGRITY_CONVERGENCE_TIMEOUT_SECONDS = 120.0
 PROJECTION_INTEGRITY_CONVERGENCE_POLL_SECONDS = 1.0
+STANDARD_WORKLOAD_UID = 65532
+STANDARD_WORKLOAD_GID = 65532
+AGENT_DOCKER_SOCKET_GID = 10004
+AGENT_CONFIG_USER = f"{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}"
+AGENT_PRIVATE_DIRECTORY_MODE = "0700"
+AGENT_PRIVATE_FILE_MODE = "0600"
+A_AGENT_STATE_ROOT = "/var/lib/ojos-agent-a"
+A_WORKLOAD_EXPORT_ROOT = "/var/lib/ojos-workload-export-a"
+B_AGENT_STATE_ROOT = "/var/lib/ojos-agent"
+B_WORKLOAD_EXPORT_ROOT = "/var/lib/ojos-workload-export"
+AUTH_BOOTSTRAP_SECRET_HOST_DIRECTORY = "/var/lib/ojos-auth-bootstrap"
+AUTH_BOOTSTRAP_SECRET_HOST_FILE = (
+    AUTH_BOOTSTRAP_SECRET_HOST_DIRECTORY + "/initial-admin"
+)
+AUTH_BOOTSTRAP_SECRET_CONTAINER_FILE = "/run/secrets/ojos-auth-admin-bootstrap"
+WORKLOAD_KEY_ID = "workload-1"
+WORKLOAD_ISSUER = "ojos-auth/workload"
+WORKLOAD_AUDIENCE = "ojos-gateway"
 
 
 _TRANSIENT_DOCKER_BUILD_FAILURES: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -1008,12 +1026,17 @@ class FullComponentsScenario:
         self.internal_token = secrets.token_urlsafe(48)
         self.auth_internal_token = secrets.token_urlsafe(48)
         self.workload_issuer_token = secrets.token_urlsafe(48)
+        self.auth_management_token = secrets.token_urlsafe(48)
+        self.gateway_management_token = secrets.token_urlsafe(48)
+        self.auth_contribution_ack_token = secrets.token_urlsafe(48)
+        self.gateway_contribution_ack_token = secrets.token_urlsafe(48)
         self.auth_bootstrap_secret = secrets.token_urlsafe(48)
         self.minio_access = "ojos" + secrets.token_hex(10)
         self.minio_secret = secrets.token_urlsafe(40)
         self.admin_username = "cross_machine_admin_" + harness.run_id
         self.admin_password = "Admin-" + secrets.token_urlsafe(32) + "-9!"
         self.admin_token = ""
+        self.auth_bootstrap_delivery_evidence: dict[str, Any] = {}
         self.a_network = f"ojos-full-{harness.run_id}-a"
         self.b_service_network = f"ojos-full-{harness.run_id}-service"
         self.b_agent_network = f"ojos-full-{harness.run_id}-agent"
@@ -1321,6 +1344,7 @@ class FullComponentsScenario:
             self.fixture_image,
             {},
             [
+                "USER 65532:65532",
                 "HEALTHCHECK --interval=1s --timeout=2s --start-period=1s --retries=30 "
                 "CMD python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=1)\"",
             ],
@@ -1897,48 +1921,71 @@ class FullComponentsScenario:
                 )
 
     def _start_bootstrap_services(self) -> None:
+        self._require_distinct_platform_credentials()
         redis_url = "redis://redis-a:6379/0"
         db = lambda name: (
             f"postgresql://postgres:{self.postgres_password}@{self.h.a_ip}:5432/{name}"
             "?sslmode=verify-full&sslrootcert=/usr/local/share/ca-certificates/ojos-cross-machine.crt"
         )
-        # Never put the one-time bootstrap credential in Docker argv: Runner
-        # includes argv in bounded failure evidence. Docker reads this local
-        # mode-0600 file during container creation, after which it is removed.
-        bootstrap_env = self.tmp / "auth-bootstrap.env"
-        bootstrap_env.write_text(
-            "AUTH_ADMIN_BOOTSTRAP_SECRET=" + self.auth_bootstrap_secret + "\n",
-            encoding="utf-8",
+        bootstrap_file = self._materialize_auth_bootstrap_secret_file()
+        self._run_a_service(
+            "auth-a", "auth", 8081,
+            [
+                # Auth and Gateway form the bootstrap/control plane. Business
+                # workloads are installed later by the enrolled node-a Agent.
+                "--mount",
+                (
+                    f"type=bind,source={AUTH_BOOTSTRAP_SECRET_HOST_FILE},"
+                    f"target={AUTH_BOOTSTRAP_SECRET_CONTAINER_FILE},readonly"
+                ),
+                "--env", "OJOS_ENVIRONMENT=production",
+                "--env", "OJOS_PLATFORM_BOOTSTRAP=1",
+                "--env", "AUTH_DATABASE_URL=" + db("ojos_auth"),
+                "--env", "JWT_SECRET=" + self.jwt_secret,
+                "--env", "AUTH_INTERNAL_TOKEN=" + self.auth_internal_token,
+                "--env", "OJOS_WORKLOAD_PRIVATE_KEY_FILE=/opt/ojos-config/workload-private.pem",
+                "--env", "ORCHESTRATOR_AUTH_WORKLOAD_TOKEN=" + self.workload_issuer_token,
+                "--env", "OJOS_WORKLOAD_KEY_ID=" + WORKLOAD_KEY_ID,
+                "--env", "OJOS_WORKLOAD_ISSUER=" + WORKLOAD_ISSUER,
+                "--env", "OJOS_WORKLOAD_AUDIENCE=" + WORKLOAD_AUDIENCE,
+                "--env", "ORCHESTRATOR_PLATFORM_ORIGIN=https://orchestrator-a:8090",
+                "--env", "ORCHESTRATOR_INTERNAL_TOKEN=" + self.internal_token,
+                "--env", "ORCHESTRATOR_AUTH_ADMIN_TOKEN=" + self.auth_management_token,
+                "--env",
+                (
+                    "ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN="
+                    + self.auth_contribution_ack_token
+                ),
+                "--env",
+                "AUTH_ADMIN_BOOTSTRAP_SECRET_FILE="
+                + AUTH_BOOTSTRAP_SECRET_CONTAINER_FILE,
+            ],
+            ["./auth", "-f", "/opt/ojos-config/auth.yaml"],
         )
-        os.chmod(bootstrap_env, 0o600)
-        try:
-            self._run_a_service(
-                "auth-a", "auth", 8081,
-                [
-                    # Auth and Gateway form the bootstrap/control plane. Business
-                    # workloads are installed later by the enrolled node-a Agent.
-                    "--env-file", str(bootstrap_env),
-                    "--env", "OJOS_ENVIRONMENT=production", "--env", "DATABASE_URL=" + db("ojos_auth"),
-                    "--env", "JWT_SECRET=" + self.jwt_secret,
-                    "--env", "AUTH_INTERNAL_TOKEN=" + self.auth_internal_token,
-                    "--env", "OJOS_WORKLOAD_PRIVATE_KEY_FILE=/opt/ojos-config/workload-private.pem",
-                    "--env", "OJOS_WORKLOAD_CONTROL_PLANE_TOKEN=" + self.workload_issuer_token,
-                    "--env", "OJOS_WORKLOAD_TTL_SECONDS=900",
-                ],
-                ["./auth", "-f", "/opt/ojos-config/auth.yaml"],
-            )
-        finally:
-            bootstrap_env.unlink(missing_ok=True)
+        self.auth_bootstrap_delivery_evidence = (
+            self._inspect_auth_bootstrap_secret_delivery(bootstrap_file)
+        )
         self._run_a_service(
             "gateway-a", "gateway", 8080,
             [
-                "--env", "OJOS_ENVIRONMENT=production", "--env", "REDIS_URL=" + redis_url,
+                "--env", "OJOS_ENVIRONMENT=production",
+                "--env", "OJOS_PLATFORM_BOOTSTRAP=1",
+                "--env", "REDIS_URL=" + redis_url,
                 "--env", "JWT_SECRET=" + self.jwt_secret,
                 "--env", "AUTH_SERVICE_ENDPOINT=http://auth-a:8081",
-                "--env", "ORCHESTRATOR_ENDPOINT=https://orchestrator-a:8090",
+                "--env", "ORCHESTRATOR_PLATFORM_ORIGIN=https://orchestrator-a:8090",
                 "--env", "ORCHESTRATOR_INTERNAL_TOKEN=" + self.internal_token,
+                "--env", "ORCHESTRATOR_GATEWAY_ADMIN_TOKEN=" + self.gateway_management_token,
+                "--env",
+                (
+                    "ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN="
+                    + self.gateway_contribution_ack_token
+                ),
                 "--env", "ORCHESTRATOR_NODE_ID=node-a",
                 "--env", "OJOS_WORKLOAD_PUBLIC_KEY_FILE=/opt/ojos-config/workload-public.pem",
+                "--env", "OJOS_WORKLOAD_KEY_ID=" + WORKLOAD_KEY_ID,
+                "--env", "OJOS_WORKLOAD_ISSUER=" + WORKLOAD_ISSUER,
+                "--env", "OJOS_WORKLOAD_AUDIENCE=" + WORKLOAD_AUDIENCE,
             ],
             ["./gateway", "-f", "/opt/ojos-config/gateway.yaml"],
         )
@@ -1977,6 +2024,25 @@ class FullComponentsScenario:
             self.secure_fixture_image, "tls-proxy", "--port", "8443",
         )
 
+    def _require_distinct_platform_credentials(self) -> None:
+        credentials = {
+            "jwt": self.jwt_secret,
+            "orchestrator-internal": self.internal_token,
+            "auth-internal": self.auth_internal_token,
+            "auth-workload": self.workload_issuer_token,
+            "auth-management": self.auth_management_token,
+            "gateway-management": self.gateway_management_token,
+            "auth-contribution-ack": self.auth_contribution_ack_token,
+            "gateway-contribution-ack": self.gateway_contribution_ack_token,
+            "auth-admin-bootstrap": self.auth_bootstrap_secret,
+        }
+        if any(len(value) < 32 for value in credentials.values()) or len(
+            set(credentials.values())
+        ) != len(credentials):
+            raise FullGateError(
+                "platform bootstrap requires distinct credentials of at least 32 bytes"
+            )
+
     def _run_a_service(
         self,
         name: str,
@@ -1993,6 +2059,153 @@ class FullComponentsScenario:
         argv.append(self.images[image_key])
         argv.extend(command)
         self.a.command(*argv, timeout=180)
+
+    def _materialize_auth_bootstrap_secret_file(self) -> dict[str, Any]:
+        """Create the one-time Auth credential without putting it in argv/env."""
+
+        outer_engine = self.h.a_name
+        self.root.command(
+            "exec",
+            outer_engine,
+            "mkdir",
+            "-p",
+            AUTH_BOOTSTRAP_SECRET_HOST_DIRECTORY,
+            timeout=30,
+        )
+        self.root.command(
+            "exec",
+            outer_engine,
+            "chown",
+            f"{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}",
+            AUTH_BOOTSTRAP_SECRET_HOST_DIRECTORY,
+            timeout=30,
+        )
+        self.root.command(
+            "exec",
+            outer_engine,
+            "chmod",
+            "0700",
+            AUTH_BOOTSTRAP_SECRET_HOST_DIRECTORY,
+            timeout=30,
+        )
+        # docker exec stdin is not retained in Completed.argv or evidence. dd
+        # writes no file content to stdout, unlike tee.
+        self.root.command(
+            "exec",
+            "--interactive",
+            outer_engine,
+            "dd",
+            f"of={AUTH_BOOTSTRAP_SECRET_HOST_FILE}",
+            input_data=(self.auth_bootstrap_secret + "\n").encode("ascii"),
+            timeout=30,
+        )
+        self.root.command(
+            "exec",
+            outer_engine,
+            "chown",
+            f"{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}",
+            AUTH_BOOTSTRAP_SECRET_HOST_FILE,
+            timeout=30,
+        )
+        self.root.command(
+            "exec",
+            outer_engine,
+            "chmod",
+            "0600",
+            AUTH_BOOTSTRAP_SECRET_HOST_FILE,
+            timeout=30,
+        )
+        file_stat = self.root.command(
+            "exec",
+            outer_engine,
+            "stat",
+            "-c",
+            "%u %g %a %F",
+            AUTH_BOOTSTRAP_SECRET_HOST_FILE,
+            timeout=30,
+        ).stdout.strip().split(maxsplit=3)
+        directory_stat = self.root.command(
+            "exec",
+            outer_engine,
+            "stat",
+            "-c",
+            "%u %g %a %F",
+            AUTH_BOOTSTRAP_SECRET_HOST_DIRECTORY,
+            timeout=30,
+        ).stdout.strip().split(maxsplit=3)
+        if file_stat != ["65532", "65532", "600", "regular file"] or directory_stat != [
+            "65532",
+            "65532",
+            "700",
+            "directory",
+        ]:
+            raise FullGateError(
+                "Auth bootstrap credential is not a private workload-owned host file"
+            )
+        return {
+            "host_file_path": AUTH_BOOTSTRAP_SECRET_HOST_FILE,
+            "host_file_uid": STANDARD_WORKLOAD_UID,
+            "host_file_gid": STANDARD_WORKLOAD_GID,
+            "host_file_mode": "0600",
+            "host_directory_mode": "0700",
+            "write_transport": "docker-exec-stdin",
+        }
+
+    def _inspect_auth_bootstrap_secret_delivery(
+        self, host_file: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        inspected = json.loads(self.a.command("inspect", "auth-a", timeout=30).stdout)
+        if not isinstance(inspected, list) or len(inspected) != 1:
+            raise FullGateError("Auth bootstrap secret mount inspect is not singular")
+        container = inspected[0]
+        environment = [str(value) for value in container.get("Config", {}).get("Env", [])]
+        mount = next(
+            (
+                value
+                for value in container.get("Mounts", [])
+                if value.get("Destination") == AUTH_BOOTSTRAP_SECRET_CONTAINER_FILE
+            ),
+            None,
+        )
+        container_stat = self.a.command(
+            "exec",
+            "auth-a",
+            "stat",
+            "-c",
+            "%u %g %a %F",
+            AUTH_BOOTSTRAP_SECRET_CONTAINER_FILE,
+            timeout=30,
+        ).stdout.strip().split(maxsplit=3)
+        expected_file_env = (
+            "AUTH_ADMIN_BOOTSTRAP_SECRET_FILE="
+            + AUTH_BOOTSTRAP_SECRET_CONTAINER_FILE
+        )
+        if (
+            environment.count(expected_file_env) != 1
+            or any(value.startswith("AUTH_ADMIN_BOOTSTRAP_SECRET=") for value in environment)
+            or not isinstance(mount, Mapping)
+            or mount.get("Type") != "bind"
+            or mount.get("Source") != AUTH_BOOTSTRAP_SECRET_HOST_FILE
+            or mount.get("Destination") != AUTH_BOOTSTRAP_SECRET_CONTAINER_FILE
+            or mount.get("RW") is not False
+            or container_stat != ["65532", "65532", "600", "regular file"]
+        ):
+            raise FullGateError(
+                "Auth bootstrap credential is not delivered by the exact read-only private file boundary"
+            )
+        return {
+            **dict(host_file),
+            "delivery_mode": "host-private-file-read-only-bind",
+            "container_file_path": AUTH_BOOTSTRAP_SECRET_CONTAINER_FILE,
+            "mount_type": "bind",
+            "mount_read_only": True,
+            "inline_environment_absent": True,
+            "container_file_uid": STANDARD_WORKLOAD_UID,
+            "container_file_gid": STANDARD_WORKLOAD_GID,
+            "container_file_mode": "0600",
+            "cleanup_scope": "run-scoped-outer-dind-container-teardown",
+            "production_one_time_unmount_proven": False,
+        }
 
     def _wait_a_http(self, host: str, port: int, path: str, timeout: float = 120) -> None:
         inner_ip = self.a.command(
@@ -2307,11 +2520,17 @@ class FullComponentsScenario:
             "ORCHESTRATOR_PUBLIC_BASE_URL": f"https://{self.h.a_ip}:8090",
             "ORCHESTRATOR_INTERNAL_TOKEN": self.internal_token,
             "ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN": "http://gateway-a:8080",
-            "ORCHESTRATOR_GATEWAY_ADMIN_TOKEN": self.internal_token,
+            "ORCHESTRATOR_GATEWAY_ADMIN_TOKEN": self.gateway_management_token,
             "ORCHESTRATOR_AUTH_ADMIN_ORIGIN": "http://auth-a:8081",
-            "ORCHESTRATOR_AUTH_ADMIN_TOKEN": self.auth_internal_token,
+            "ORCHESTRATOR_AUTH_ADMIN_TOKEN": self.auth_management_token,
             "ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN": "http://auth-a:8081",
             "ORCHESTRATOR_AUTH_WORKLOAD_TOKEN": self.workload_issuer_token,
+            "ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN_SHA256": _sha256(
+                self.gateway_contribution_ack_token
+            ),
+            "ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN_SHA256": _sha256(
+                self.auth_contribution_ack_token
+            ),
             "ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN": f"https://{self.h.a_ip}:8443",
             "ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE": "/opt/ojos-pki/ca.pem",
             "ORCHESTRATOR_ALLOW_PRIVATE_RELEASE_SOURCE": "1",
@@ -2535,9 +2754,179 @@ class FullComponentsScenario:
         self._enroll_and_start_a_agent()
         self._enroll_and_start_b_agent()
 
+    @staticmethod
+    def _agent_docker_arguments(
+        state_root: str, workload_export_root: str, network: str
+    ) -> list[str]:
+        """Return the capability-free non-root Agent container boundary."""
+
+        return [
+            "--network",
+            network,
+            "--user",
+            AGENT_CONFIG_USER,
+            "--group-add",
+            str(AGENT_DOCKER_SOCKET_GID),
+            "--mount",
+            f"type=bind,source={state_root},target={state_root}",
+            "--mount",
+            (
+                "type=bind,source="
+                f"{workload_export_root},target={workload_export_root}"
+            ),
+            "--mount",
+            "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock",
+        ]
+
+    def _nested_container_process_identity(
+        self,
+        engine: Any,
+        inspected: Mapping[str, Any],
+        container_name: str,
+    ) -> dict[str, Any]:
+        """Read the real main-process credentials in the owning DinD namespace."""
+
+        if engine is self.a:
+            outer_engine = self.h.a_name
+        elif engine is self.b:
+            outer_engine = self.h.b_name
+        else:
+            raise FullGateError("cannot inspect a process on an unknown nested Engine")
+        pid = inspected.get("State", {}).get("Pid")
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            raise FullGateError(f"{container_name} has no live DinD process ID")
+        status = self.root.command(
+            "exec", outer_engine, "cat", f"/proc/{pid}/status", timeout=30
+        ).stdout
+        fields = {
+            name: value.strip()
+            for line in status.splitlines()
+            if ":" in line
+            for name, value in [line.split(":", 1)]
+        }
+        try:
+            uids = [int(value) for value in fields["Uid"].split()]
+            gids = [int(value) for value in fields["Gid"].split()]
+            supplementary = sorted(
+                int(value) for value in fields.get("Groups", "").split()
+            )
+        except (KeyError, ValueError) as exc:
+            raise FullGateError(
+                f"{container_name} returned malformed /proc identity evidence"
+            ) from exc
+        if len(uids) != 4 or len(gids) != 4:
+            raise FullGateError(
+                f"{container_name} returned incomplete /proc identity evidence"
+            )
+        return {
+            "pid": pid,
+            "euid": uids[1],
+            "egid": gids[1],
+            "groups": sorted(set([gids[1], *supplementary])),
+            "supplementary_groups": supplementary,
+            "outer_engine": outer_engine,
+            "evidence_source": "dind-main-process-proc-status",
+        }
+
+    def _inspect_agent_process_identity(
+        self,
+        engine: Any,
+        container_name: str,
+        expected_state_root: str,
+        expected_workload_export_root: str,
+        expected_socket: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Fail closed unless inspect and /proc agree on the exact Agent identity."""
+
+        inspected = json.loads(engine.command("inspect", container_name).stdout)[0]
+        config = inspected.get("Config", {})
+        host = inspected.get("HostConfig", {})
+        config_user = str(config.get("User", ""))
+        group_add = [str(value) for value in host.get("GroupAdd", []) or []]
+        cap_add = [str(value) for value in host.get("CapAdd", []) or []]
+        privileged = host.get("Privileged") is True
+        process_identity = self._nested_container_process_identity(
+            engine, inspected, container_name
+        )
+        mounts = inspected.get("Mounts", []) or []
+        state_mount = next(
+            (item for item in mounts if item.get("Destination") == expected_state_root),
+            None,
+        )
+        workload_export_mount = next(
+            (
+                item
+                for item in mounts
+                if item.get("Destination") == expected_workload_export_root
+            ),
+            None,
+        )
+        docker_mount = next(
+            (item for item in mounts if item.get("Destination") == "/var/run/docker.sock"),
+            None,
+        )
+        if (
+            config_user != AGENT_CONFIG_USER
+            or group_add != [str(AGENT_DOCKER_SOCKET_GID)]
+            or cap_add
+            or privileged
+            or process_identity.get("euid") != STANDARD_WORKLOAD_UID
+            or process_identity.get("egid") != STANDARD_WORKLOAD_GID
+            or process_identity.get("groups")
+            != [AGENT_DOCKER_SOCKET_GID, STANDARD_WORKLOAD_GID]
+            or process_identity.get("supplementary_groups")
+            != [AGENT_DOCKER_SOCKET_GID]
+            or process_identity.get("evidence_source")
+            != "dind-main-process-proc-status"
+            or not isinstance(state_mount, Mapping)
+            or state_mount.get("Type") != "bind"
+            or state_mount.get("Source") != expected_state_root
+            or state_mount.get("RW") is not True
+            or expected_workload_export_root == expected_state_root
+            or expected_workload_export_root.startswith(expected_state_root.rstrip("/") + "/")
+            or expected_state_root.startswith(
+                expected_workload_export_root.rstrip("/") + "/"
+            )
+            or not isinstance(workload_export_mount, Mapping)
+            or workload_export_mount.get("Type") != "bind"
+            or workload_export_mount.get("Source") != expected_workload_export_root
+            or workload_export_mount.get("RW") is not True
+            or not isinstance(docker_mount, Mapping)
+            or docker_mount.get("Type") != "bind"
+            or docker_mount.get("Source") != "/var/run/docker.sock"
+            or expected_socket.get("gid") != AGENT_DOCKER_SOCKET_GID
+            or expected_socket.get("mode") != "0660"
+            or expected_socket.get("file_type") != "socket"
+        ):
+            raise FullGateError(
+                f"{container_name} is not the capability-free 65532 Agent with its exact DinD paths"
+            )
+        return {
+            "config_user": config_user,
+            "group_add": group_add,
+            "cap_add": cap_add,
+            "privileged": privileged,
+            "process": process_identity,
+            "state_root": expected_state_root,
+            "state_mount_source": state_mount.get("Source"),
+            "state_mount_destination": state_mount.get("Destination"),
+            "state_mount_read_write": state_mount.get("RW"),
+            "workload_export_root": expected_workload_export_root,
+            "workload_export_mount_source": workload_export_mount.get("Source"),
+            "workload_export_mount_destination": workload_export_mount.get("Destination"),
+            "workload_export_mount_read_write": workload_export_mount.get("RW"),
+            "state_export_roots_disjoint": True,
+            "daemon_namespace_path_exact": True,
+            "docker_socket_mount_source": docker_mount.get("Source"),
+            "docker_socket_mount_destination": docker_mount.get("Destination"),
+            "docker_socket": copy.deepcopy(dict(expected_socket)),
+            "evidence_source": "container-inspect-and-proc",
+        }
+
     def _enroll_and_start_a_agent(self) -> None:
         assert self.control_client is not None
-        host_root = "/var/lib/ojos-agent-a"
+        host_root = A_AGENT_STATE_ROOT
+        workload_export_root = A_WORKLOAD_EXPORT_ROOT
         body = _standalone_node_enrollment(
             "node-a",
             self.h.a_ip,
@@ -2571,7 +2960,7 @@ class FullComponentsScenario:
         policy = {
             "schema_version": 1,
             "allowed_profiles": ["standard-container-v1"],
-            "service_context_root": host_root + "/runtime-contexts",
+            "service_context_root": workload_export_root + "/runtime-contexts",
         }
         database_url = lambda name: (
             f"postgresql://postgres:{self.postgres_password}@{self.h.a_ip}:5432/{name}"
@@ -2607,16 +2996,13 @@ class FullComponentsScenario:
             "secrets/minio-access": (self.minio_access + "\n").encode(),
             "secrets/minio-secret": (self.minio_secret + "\n").encode(),
         }
-        self._seed_agent_host(self.a, host_root, files)
+        bootstrap_files = self._seed_agent_host(
+            self.a, host_root, workload_export_root, files
+        )
         common = [
-            "--network",
-            self.a_network,
-            "--user",
-            "0:0",
-            "--mount",
-            f"type=bind,source={host_root},target={host_root}",
-            "--mount",
-            "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock",
+            *self._agent_docker_arguments(
+                host_root, workload_export_root, self.a_network
+            ),
             "--env",
             "OJOS_ENVIRONMENT=production",
             "--env",
@@ -2663,6 +3049,8 @@ class FullComponentsScenario:
             host_root + "/identity",
             "--ledger",
             host_root + "/execution-ledger.sqlite3",
+            "--workload-export-dir",
+            workload_export_root,
             "--runtime-policy",
             host_root + "/runtime-policy.json",
             "--instance",
@@ -2677,6 +3065,13 @@ class FullComponentsScenario:
         agent_inspect = json.loads(
             self.a.command("inspect", "orchestrator-agent-a").stdout
         )[0]
+        runtime_identity = self._inspect_agent_process_identity(
+            self.a,
+            "orchestrator-agent-a",
+            host_root,
+            workload_export_root,
+            self.h.evidence["engines"]["a"]["docker_socket"],
+        )
         environment_names = {
             str(value).split("=", 1)[0]
             for value in agent_inspect.get("Config", {}).get("Env", []) or []
@@ -2711,10 +3106,13 @@ class FullComponentsScenario:
             "instance_id": instance,
             "certificate_serial": identity.get("serial_hex"),
             "runtime_health": health,
+            "identity_source": "agent-enroll-output-and-final-runtime-facts",
             "management_credentials_present": False,
             "management_environment_inspected": True,
             "forbidden_management_environment": leaked_management,
             "container_id": agent_inspect.get("Id"),
+            "runtime_identity": runtime_identity,
+            "bootstrap_files": bootstrap_files,
         }
 
     def _enroll_and_start_b_agent(self) -> None:
@@ -2733,25 +3131,23 @@ class FullComponentsScenario:
         policy = {
             "schema_version": 1,
             "allowed_profiles": ["standard-container-v1", "judge-sandbox-v1"],
-            "service_context_root": "/var/lib/ojos-agent/runtime-contexts",
+            "service_context_root": B_WORKLOAD_EXPORT_ROOT + "/runtime-contexts",
             "judge_sandbox": {
                 "profile_sha256": self.PROFILE_SHA256,
-                "context_root": "/var/lib/ojos-agent/runtime-contexts",
+                "context_root": B_WORKLOAD_EXPORT_ROOT + "/runtime-contexts",
                 "allowed_images": [self.oci["worker"]],
             },
         }
-        self._seed_b_agent_host(
+        bootstrap_files = self._seed_b_agent_host(
             {
                 "server-ca.pem": self.ca_cert.read_bytes(),
                 "runtime-policy.json": (_canonical(policy) + "\n").encode(),
                 "enrollment-code": (code + "\n").encode(),
             }
         )
-        common = [
-            "--network", self.b_agent_network, "--user", "0:0",
-            "--mount", "type=bind,source=/var/lib/ojos-agent,target=/var/lib/ojos-agent",
-            "--mount", "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock",
-        ]
+        common = self._agent_docker_arguments(
+            B_AGENT_STATE_ROOT, B_WORKLOAD_EXPORT_ROOT, self.b_agent_network
+        )
         enroll = self.b.command(
             "run", "--rm", *common, self.images["agent"], "enroll",
             "--control-plane", f"https://{self.h.a_ip}:8090",
@@ -2768,11 +3164,22 @@ class FullComponentsScenario:
             "--control-plane", f"https://{self.h.a_ip}:8090",
             "--identity-dir", "/var/lib/ojos-agent/identity",
             "--ledger", "/var/lib/ojos-agent/execution-ledger.sqlite3",
+            "--workload-export-dir", B_WORKLOAD_EXPORT_ROOT,
             "--runtime-policy", "/var/lib/ojos-agent/runtime-policy.json",
             "--instance", instance, "--heartbeat-ms", "2000", "--transport-retry-ms", "500",
             timeout=120,
         )
         health = self._wait_node_ready("node-b", timeout=120)
+        agent_inspect = json.loads(
+            self.b.command("inspect", "orchestrator-agent-b").stdout
+        )[0]
+        runtime_identity = self._inspect_agent_process_identity(
+            self.b,
+            "orchestrator-agent-b",
+            B_AGENT_STATE_ROOT,
+            B_WORKLOAD_EXPORT_ROOT,
+            self.h.evidence["engines"]["b"]["docker_socket"],
+        )
         self.agent_identity = {
             "enrolled": identity.get("status") in {"ENROLLED", "RECOVERED"},
             "mtls": True,
@@ -2780,6 +3187,10 @@ class FullComponentsScenario:
             "instance_id": instance,
             "certificate_serial": identity.get("serial_hex"),
             "runtime_health": health,
+            "identity_source": "agent-enroll-output-and-final-runtime-facts",
+            "container_id": agent_inspect.get("Id"),
+            "runtime_identity": runtime_identity,
+            "bootstrap_files": bootstrap_files,
         }
 
     def _probe_managed_a_network(self) -> None:
@@ -2998,34 +3409,187 @@ class FullComponentsScenario:
             time.sleep(1)
             latest = read_projection()
 
-    def _seed_b_agent_host(self, files: Mapping[str, bytes]) -> None:
-        self._seed_agent_host(self.b, "/var/lib/ojos-agent", files)
+    def _seed_b_agent_host(self, files: Mapping[str, bytes]) -> dict[str, Any]:
+        return self._seed_agent_host(
+            self.b, B_AGENT_STATE_ROOT, B_WORKLOAD_EXPORT_ROOT, files
+        )
 
-    def _seed_agent_host(self, engine: Any, host_root: str, files: Mapping[str, bytes]) -> None:
+    def _seed_agent_host(
+        self,
+        engine: Any,
+        host_root: str,
+        workload_export_root: str,
+        files: Mapping[str, bytes],
+    ) -> dict[str, Any]:
         if engine is self.a:
             outer_engine = self.h.a_name
         elif engine is self.b:
             outer_engine = self.h.b_name
         else:
             raise FullGateError("cannot seed an unknown nested Docker Engine host")
+        if (
+            workload_export_root == host_root
+            or workload_export_root.startswith(host_root.rstrip("/") + "/")
+            or host_root.startswith(workload_export_root.rstrip("/") + "/")
+        ):
+            raise FullGateError(
+                "Agent state and daemon-visible workload export roots must be disjoint"
+            )
         # Docker's --mount bind syntax fails when the source is absent.  A new
         # DinD host has no /var/lib/ojos-agent* tree, so create the exact source
         # on that Engine host before the helper container materializes files.
-        self.root.command("exec", outer_engine, "mkdir", "-p", host_root, timeout=30)
+        # The outer helper is the sole privileged setup boundary.  It creates
+        # the DinD-visible bind source, then the disposable inner helper writes
+        # every bootstrap object directly as uid/gid 65532.  The long-running
+        # Agent receives neither root nor CAP_CHOWN.
+        self.root.command(
+            "exec",
+            outer_engine,
+            "mkdir",
+            "-p",
+            host_root,
+            workload_export_root,
+            timeout=30,
+        )
+        self.root.command(
+            "exec",
+            outer_engine,
+            "chown",
+            f"{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}",
+            host_root,
+            workload_export_root,
+            timeout=30,
+        )
+        self.root.command(
+            "exec",
+            outer_engine,
+            "chmod",
+            AGENT_PRIVATE_DIRECTORY_MODE.removeprefix("0"),
+            host_root,
+            workload_export_root,
+            timeout=30,
+        )
         payload = {name: base64.b64encode(value).decode("ascii") for name, value in files.items()}
+        directories = sorted(
+            {"identity"}
+            | {
+                str(Path(name).parent).replace("\\", "/")
+                for name in files
+                if str(Path(name).parent) != "."
+            }
+        )
         program = (
             "import base64,json,os,pathlib;"
-            "root=pathlib.Path('/host');root.mkdir(parents=True,exist_ok=True);"
-            "[(root.joinpath(k).parent.mkdir(parents=True,exist_ok=True),"
+            "root=pathlib.Path('/host');"
+            "[(root.joinpath(d).mkdir(parents=True,exist_ok=True,mode=0o700),"
+            "os.chmod(root.joinpath(d),0o700)) for d in "
+            "json.loads(os.environ['OJOS_DIRECTORIES'])];"
+            "[(root.joinpath(k).parent.mkdir(parents=True,exist_ok=True,mode=0o700),"
             "root.joinpath(k).write_bytes(base64.b64decode(v)),os.chmod(root.joinpath(k),0o600)) "
             "for k,v in json.loads(os.environ['OJOS_FILES']).items()]"
         )
         engine.command(
-            "run", "--rm", "--user", "0:0",
+            "run", "--rm", "--user", AGENT_CONFIG_USER,
             "--mount", f"type=bind,source={host_root},target=/host",
-            "--env", "OJOS_FILES=" + _canonical(payload), "--entrypoint", "python",
+            "--env", "OJOS_FILES=" + _canonical(payload),
+            "--env", "OJOS_DIRECTORIES=" + _canonical(directories),
+            "--entrypoint", "python",
             self.secure_fixture_image, "-c", program, timeout=60,
         )
+        verification = engine.command(
+            "run",
+            "--rm",
+            "--user",
+            AGENT_CONFIG_USER,
+            "--mount",
+            f"type=bind,source={host_root},target=/host,readonly",
+            "--env",
+            "OJOS_FILE_NAMES=" + _canonical(sorted(files)),
+            "--env",
+            "OJOS_DIRECTORY_NAMES=" + _canonical(directories),
+            "--entrypoint",
+            "python",
+            self.secure_fixture_image,
+            "-c",
+            "import json,os,pathlib,stat;root=pathlib.Path('/host');"
+            "rows=[];dirs=[];"
+            "[(lambda p,s:dirs.append({'path':d,'uid':s.st_uid,'gid':s.st_gid,"
+            "'mode':format(stat.S_IMODE(s.st_mode),'04o'),'directory':p.is_dir()}))"
+            "(root.joinpath(d),root.joinpath(d).stat()) for d in "
+            "json.loads(os.environ['OJOS_DIRECTORY_NAMES'])];"
+            "[(lambda p,s:rows.append({'path':k,'uid':s.st_uid,'gid':s.st_gid,"
+            "'mode':format(stat.S_IMODE(s.st_mode),'04o'),'regular':p.is_file()}))"
+            "(root.joinpath(k),root.joinpath(k).stat()) for k in "
+            "json.loads(os.environ['OJOS_FILE_NAMES'])];"
+            "print(json.dumps({'root_uid':root.stat().st_uid,'root_gid':root.stat().st_gid,"
+            "'root_mode':format(stat.S_IMODE(root.stat().st_mode),'04o'),"
+            "'directories':dirs,'files':rows},"
+            "sort_keys=True))",
+            timeout=60,
+        )
+        observed = json.loads(verification.stdout.strip())
+        export_verification = engine.command(
+            "run",
+            "--rm",
+            "--user",
+            AGENT_CONFIG_USER,
+            "--mount",
+            (
+                f"type=bind,source={workload_export_root},"
+                "target=/workload-export,readonly"
+            ),
+            "--entrypoint",
+            "python",
+            self.secure_fixture_image,
+            "-c",
+            "import json,pathlib,stat;p=pathlib.Path('/workload-export');s=p.stat();"
+            "print(json.dumps({'uid':s.st_uid,'gid':s.st_gid,"
+            "'mode':format(stat.S_IMODE(s.st_mode),'04o'),'directory':p.is_dir()}))",
+            timeout=60,
+        )
+        workload_export = json.loads(export_verification.stdout.strip())
+        if (
+            observed.get("root_uid") != STANDARD_WORKLOAD_UID
+            or observed.get("root_gid") != STANDARD_WORKLOAD_GID
+            or observed.get("root_mode") != AGENT_PRIVATE_DIRECTORY_MODE
+            or len(observed.get("directories", [])) != len(directories)
+            or any(
+                row.get("uid") != STANDARD_WORKLOAD_UID
+                or row.get("gid") != STANDARD_WORKLOAD_GID
+                or row.get("mode") != AGENT_PRIVATE_DIRECTORY_MODE
+                or row.get("directory") is not True
+                for row in observed.get("directories", [])
+            )
+            or len(observed.get("files", [])) != len(files)
+            or any(
+                row.get("uid") != STANDARD_WORKLOAD_UID
+                or row.get("gid") != STANDARD_WORKLOAD_GID
+                or row.get("mode") != AGENT_PRIVATE_FILE_MODE
+                or row.get("regular") is not True
+                for row in observed.get("files", [])
+            )
+            or workload_export
+            != {
+                "uid": STANDARD_WORKLOAD_UID,
+                "gid": STANDARD_WORKLOAD_GID,
+                "mode": AGENT_PRIVATE_DIRECTORY_MODE,
+                "directory": True,
+            }
+        ):
+            raise FullGateError(
+                f"nested Agent bootstrap files are not private workload-owned objects: {observed}"
+            )
+        return {
+            **observed,
+            "host_root": host_root,
+            "workload_export_root": workload_export_root,
+            "workload_export": workload_export,
+            "state_export_roots_disjoint": True,
+            "helper_user": AGENT_CONFIG_USER,
+            "privileged_setup_lifetime": "one-shot-before-agent-start",
+            "agent_cap_chown": False,
+            "evidence_source": "uid-65532-read-only-stat-helper",
+        }
 
     def _install_external_providers(self) -> None:
         providers = [
@@ -3471,6 +4035,21 @@ class FullComponentsScenario:
             )
         container_id = containers[0]
         inspected = json.loads(self.a.command("inspect", container_id).stdout)[0]
+        config_user = str(inspected.get("Config", {}).get("User", ""))
+        if config_user != AGENT_CONFIG_USER:
+            raise FullGateError(
+                f"managed A service {service_id} does not use signed standard-v3 user {AGENT_CONFIG_USER}"
+            )
+        process_identity = self._nested_container_process_identity(
+            self.a, inspected, container_id
+        )
+        if (
+            process_identity.get("euid") != STANDARD_WORKLOAD_UID
+            or process_identity.get("egid") != STANDARD_WORKLOAD_GID
+        ):
+            raise FullGateError(
+                f"managed A service {service_id} does not run as exact uid/gid 65532"
+            )
         host_config = inspected.get("HostConfig", {})
         health = str(inspected.get("State", {}).get("Health", {}).get("Status", ""))
         if health.lower() != "healthy":
@@ -3535,6 +4114,21 @@ class FullComponentsScenario:
             )
             if copied.returncode == 0:
                 events = json.loads(events_file.read_text(encoding="utf-8"))
+        context_file_identity: dict[str, Any] | None = None
+        if context is not None:
+            component = hashlib.sha256(deployment_id.encode("utf-8")).hexdigest()[:32]
+            context_source = (
+                f"{A_WORKLOAD_EXPORT_ROOT}/runtime-contexts/{component}/service"
+            )
+            if not isinstance(context_mount, Mapping) or context_mount.get(
+                "Source"
+            ) != context_source:
+                raise FullGateError(
+                    f"managed A service {service_id} context source escaped the Agent namespace"
+                )
+            context_file_identity = self._service_context_file_identity(
+                self.a, context_source, container_id
+            )
         context_required = bool(expected_requirements) or service_id in {
             "problem-service",
             "judge-api",
@@ -3563,6 +4157,8 @@ class FullComponentsScenario:
             "node_id": "node-a",
             "created_by_agent": True,
             "container_id": container_id,
+            "config_user": config_user,
+            "process_identity": process_identity,
             "image_repo_digest": image.split("@", 1)[-1],
             "host_config_digest": _sha256(_canonical(host_config)),
             "engine_id": self.h.evidence["engines"]["a"]["engine_id"],
@@ -3593,6 +4189,7 @@ class FullComponentsScenario:
                 "mount_read_only": context_mount is not None,
                 "credential_embedded": False,
                 "management_token_present": False,
+                "file_identity": context_file_identity,
             },
             "event_context": {
                 "required": events_required,
@@ -3659,7 +4256,7 @@ class FullComponentsScenario:
         )
         component = hashlib.sha256(deployment_id.encode("utf-8")).hexdigest()[:32]
         expected_source = (
-            f"/var/lib/ojos-agent-a/runtime-contexts/{component}/service"
+            f"{A_WORKLOAD_EXPORT_ROOT}/runtime-contexts/{component}/service"
         )
         if (
             not isinstance(mount, Mapping)
@@ -3671,6 +4268,112 @@ class FullComponentsScenario:
                 f"managed {service_id} has no read-only Agent Service Context bind mount"
             )
         return expected_source, container_id
+
+    def _service_context_file_identity(
+        self,
+        engine: Any,
+        context_source: str,
+        workload_container_id: str,
+        expected_workload_user: str = AGENT_CONFIG_USER,
+    ) -> dict[str, Any]:
+        """Prove private Agent files are workload-owned and actually readable."""
+
+        names = ["context.json", "token", "ca.pem"]
+        program = (
+            "import hashlib,json,os,pathlib,stat;root=pathlib.Path('/context');"
+            "rows=[];"
+            "[(lambda p,s,b:rows.append({'path':n,'uid':s.st_uid,'gid':s.st_gid,"
+            "'mode':format(stat.S_IMODE(s.st_mode),'04o'),'regular':p.is_file(),"
+            "'size':len(b),'sha256':hashlib.sha256(b).hexdigest()}))"
+            "(root.joinpath(n),root.joinpath(n).stat(),root.joinpath(n).read_bytes()) "
+            "for n in json.loads(os.environ['OJOS_CONTEXT_FILES'])];"
+            "s=root.stat();print(json.dumps({'directory':{'uid':s.st_uid,'gid':s.st_gid,"
+            "'mode':format(stat.S_IMODE(s.st_mode),'04o'),'directory':root.is_dir()},"
+            "'files':rows},sort_keys=True))"
+        )
+        observed = _json_from_last_line(
+            engine.command(
+                "run",
+                "--rm",
+                "--user",
+                AGENT_CONFIG_USER,
+                "--network",
+                "container:" + workload_container_id,
+                "--mount",
+                f"type=bind,source={context_source},target=/context,readonly",
+                "--env",
+                "OJOS_CONTEXT_FILES=" + _canonical(names),
+                "--entrypoint",
+                "python",
+                self.secure_fixture_image,
+                "-c",
+                program,
+                timeout=60,
+            ).stdout
+        )
+        directory = observed.get("directory", {})
+        rows = observed.get("files", [])
+        inspected = json.loads(engine.command("inspect", workload_container_id).stdout)[0]
+        actual_user = str(inspected.get("Config", {}).get("User", ""))
+        if actual_user != expected_workload_user:
+            raise FullGateError(
+                "ServiceContext readability proof observed the wrong actual workload identity"
+            )
+        workload_process = self._nested_container_process_identity(
+            engine, inspected, workload_container_id
+        )
+        expected_uid, expected_gid = (
+            int(value) for value in expected_workload_user.split(":", 1)
+        )
+        if (
+            workload_process.get("euid") != expected_uid
+            or workload_process.get("egid") != expected_gid
+        ):
+            raise FullGateError(
+                "ServiceContext workload process identity differs from its signed runtime user"
+            )
+        for name in names:
+            engine.command(
+                "exec",
+                workload_container_id,
+                "test",
+                "-r",
+                "/run/ojos/service/" + name,
+                timeout=30,
+            )
+        if (
+            directory
+            != {
+                "uid": STANDARD_WORKLOAD_UID,
+                "gid": STANDARD_WORKLOAD_GID,
+                "mode": AGENT_PRIVATE_DIRECTORY_MODE,
+                "directory": True,
+            }
+            or len(rows) != len(names)
+            or {row.get("path") for row in rows} != set(names)
+            or any(
+                row.get("uid") != STANDARD_WORKLOAD_UID
+                or row.get("gid") != STANDARD_WORKLOAD_GID
+                or row.get("mode") != AGENT_PRIVATE_FILE_MODE
+                or row.get("regular") is not True
+                or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", "")))
+                for row in rows
+            )
+        ):
+            raise FullGateError(
+                "Agent ServiceContext is not exact 65532:65532 0700/0600 workload-readable material"
+            )
+        return {
+            **observed,
+            "source": context_source,
+            "mounted_read_only": True,
+            "reader_user": AGENT_CONFIG_USER,
+            "actual_workload_config_user": actual_user,
+            "actual_workload_process": workload_process,
+            "actual_workload_files_readable": names,
+            "reader_network_namespace": "container:" + workload_container_id,
+            "evidence_source": "fresh-standard-workload-read-and-stat",
+        }
 
     def _binding_head_probe(
         self,
@@ -5243,10 +5946,10 @@ class FullComponentsScenario:
 
         if provider == "gateway":
             origin = "http://gateway-a:8080"
-            token = self.internal_token
+            token = self.gateway_management_token
         elif provider == "auth":
             origin = "http://auth-a:8081"
-            token = self.auth_internal_token
+            token = self.auth_management_token
         else:
             raise FullGateError(f"unknown Topology provider {provider!r}")
         # curl reads this tiny config from stdin.  The bearer is therefore not
@@ -5748,7 +6451,7 @@ class FullComponentsScenario:
         deployment_id = f"deployment-{service_id}-{digest}"[:56]
         component = hashlib.sha256(deployment_id.encode("utf-8")).hexdigest()[:32]
         cache_volume = "ojos-judge-cache-" + component
-        context_directory = "/var/lib/ojos-agent/runtime-contexts/" + component
+        context_directory = B_WORKLOAD_EXPORT_ROOT + "/runtime-contexts/" + component
         logical_endpoint = (
             f"{self.h.evidence['engines']['b']['outer_ip']}:9101:judge-worker"
         )
@@ -7162,10 +7865,12 @@ class FullComponentsScenario:
             raise FullGateError(f"expected exactly one Agent-created Worker container, got {output}")
         self.worker_container_id = output[0]
         inspected = json.loads(self.b.command("inspect", self.worker_container_id).stdout)[0]
+        config_user = str(inspected.get("Config", {}).get("User", ""))
         host = inspected.get("HostConfig", {})
         caps = set(host.get("CapAdd") or [])
         if (
             host.get("Privileged") is not True
+            or config_user != "0:0"
             or caps != {"SYS_ADMIN", "SYS_CHROOT", "NET_ADMIN"}
             or str(host.get("CgroupnsMode", "")).lower() != "host"
             or not _judge_sandbox_security_options_are_exact(
@@ -7199,6 +7904,20 @@ class FullComponentsScenario:
         }
         if context_binding_ids != api_binding_ids:
             raise FullGateError("materialized ServiceContext does not match durable ApiBindings")
+        context_source = str(context_mount.get("Source", ""))
+        component = hashlib.sha256(
+            self.worker_deployment_id.encode("utf-8")
+        ).hexdigest()[:32]
+        expected_context_source = (
+            f"{B_WORKLOAD_EXPORT_ROOT}/runtime-contexts/{component}/service"
+        )
+        if context_source != expected_context_source:
+            raise FullGateError(
+                "Worker ServiceContext source escaped the node-b Agent namespace"
+            )
+        context_file_identity = self._service_context_file_identity(
+            self.b, context_source, self.worker_container_id, "0:0"
+        )
         image_ref = str(inspected.get("Config", {}).get("Image", ""))
         if image_ref != self.oci["worker"]:
             raise FullGateError(f"Worker did not use exact Catalog RepoDigest: {image_ref}")
@@ -7215,6 +7934,7 @@ class FullComponentsScenario:
             "credential_embedded": False,
             "management_token_present": False,
             "gateway_origin": context.get("gateway", {}).get("origin"),
+            "file_identity": context_file_identity,
         }
         runtime = {
             "created_by_agent": True,
@@ -7230,6 +7950,7 @@ class FullComponentsScenario:
                 "cgroupns_mode": host.get("CgroupnsMode"), "security_opt": host.get("SecurityOpt"),
                 "port_bindings": host.get("PortBindings") or {},
             },
+            "config_user": config_user,
         }
         install["store_evidence"]["service_context"] = service_context_evidence
         install["store_evidence"]["runtime"] = runtime
@@ -7692,6 +8413,9 @@ class FullComponentsScenario:
             "manual_database_role_seed": False,
             "database_transactional": True,
             "secret_or_token_recorded": False,
+            "credential_delivery": copy.deepcopy(
+                self.auth_bootstrap_delivery_evidence
+            ),
         }
         return token
 
@@ -8250,6 +8974,35 @@ class FullComponentsScenario:
         ).stdout.strip()
         if not container_id:
             raise FullGateError("generic consumer was not created by Agent on Engine B")
+        inspected = json.loads(self.b.command("inspect", container_id).stdout)[0]
+        config_user = str(inspected.get("Config", {}).get("User", ""))
+        if config_user != AGENT_CONFIG_USER:
+            raise FullGateError(
+                "generic standard workload does not run as the signed 65532:65532 identity"
+            )
+        component = hashlib.sha256(deployment_id.encode("utf-8")).hexdigest()[:32]
+        context_source = (
+            f"{B_WORKLOAD_EXPORT_ROOT}/runtime-contexts/{component}/service"
+        )
+        context_mount = next(
+            (
+                item
+                for item in inspected.get("Mounts", []) or []
+                if item.get("Destination") == "/run/ojos/service"
+            ),
+            None,
+        )
+        if (
+            not isinstance(context_mount, Mapping)
+            or context_mount.get("Source") != context_source
+            or context_mount.get("RW") is not False
+        ):
+            raise FullGateError(
+                "generic standard workload does not use the exact read-only Agent context path"
+            )
+        context_file_identity = self._service_context_file_identity(
+            self.b, context_source, container_id
+        )
 
         result: dict[str, Any] = {}
         deadline = time.monotonic() + 120
@@ -8329,6 +9082,8 @@ class FullComponentsScenario:
                 "engine": "B",
                 "installed_via_store_agent": True,
                 "container_id": container_id,
+                "config_user": config_user,
+                "service_context_file_identity": context_file_identity,
             },
             "manifest_only": True,
             "binding_plan": binding,
@@ -9204,6 +9959,10 @@ class FullComponentsScenario:
             "internal_token",
             "auth_internal_token",
             "workload_issuer_token",
+            "auth_management_token",
+            "gateway_management_token",
+            "auth_contribution_ack_token",
+            "gateway_contribution_ack_token",
             "auth_bootstrap_secret",
             "minio_access",
             "minio_secret",

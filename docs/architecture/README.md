@@ -47,7 +47,7 @@ Store 安装负责服务放置，Topology 不隐式安装服务。Endpoint/Link 
 
 ## 正式入口
 
-- Desktop：Tauri WebView 内嵌同源 Web UI、随机 loopback backend 与 loopback Agent，默认 SQLite，不打开外部浏览器。
+- Desktop：Tauri WebView 内嵌同源 Web UI 与随机 loopback backend，默认 SQLite，不打开外部浏览器；本机 managed execution 为 `Unavailable`，容器任务只能交给独立 Agent。
 - 远程 Web：daemon 托管同一份 Vue bundle，使用 OIDC Authorization Code + PKCE 和 HttpOnly 会话。
 - TUI：OIDC Device Flow 的 `/api/v1` 客户端，不在进程内调用 core 执行 mutation。
 - daemon API：单一 `/api/v1` REST/SSE 契约，生产使用 PostgreSQL、TLS、OIDC 和固定 viewer/operator/admin RBAC。
@@ -62,7 +62,7 @@ Problem→Judge 使用 transactional outbox、Redis Stream relay、Judge inbox �
 
 ## 运行形态与边界
 
-- Desktop 的 SQLite、Agent ledger 和 artifact 位于 OS 应用数据目录；打开失败时不回退 Memory。
+- Desktop 的 SQLite 和 artifact 位于 OS 应用数据目录；打开失败时不回退 Memory。Agent ledger 只存在于独立 Node 的私有持久根。
 - 远程生产是单主动 PostgreSQL 控制面；专用 advisory-lock 连接保证只有一个 writer。
 - Node 使用一次性注册码换取带 SPIFFE Node ID 的 mTLS 证书，并长轮询领取本节点任务；0.2 push/shared bearer 不属于 v1。
 - 外部副作用是类型化 pipeline 步骤。API surface 与 ApiBinding 由控制面事务持久化，不依赖外部 API Registry；计划所需 provider、健康实例或 Binding 缺失时 fail fast，不生成 Deferred 或假成功。

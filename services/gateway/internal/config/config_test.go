@@ -7,7 +7,7 @@ import (
 	"github.com/zeromicro/go-zero/core/conf"
 )
 
-func TestProductionGatewayConfigStreamsWithBoundedRoutes(t *testing.T) {
+func TestPlatformBootstrapGatewayConfigHasOnlyAuthStaticRoute(t *testing.T) {
 	var cfg Config
 	if err := conf.Load(filepath.Join("..", "..", "etc", "gateway.yaml"), &cfg); err != nil {
 		t.Fatal(err)
@@ -21,17 +21,15 @@ func TestProductionGatewayConfigStreamsWithBoundedRoutes(t *testing.T) {
 	if cfg.Middlewares.Recover {
 		t.Fatal("native recovery must not swallow http.ErrAbortHandler from ReverseProxy")
 	}
-	foundWorker := false
-	for _, route := range cfg.Proxy.Routes {
-		if route.Prefix == "/api/judge/worker" {
-			foundWorker = true
-			if route.TimeoutMS < 35000 {
-				t.Fatalf("legacy worker route timeout = %dms, want at least 35000ms", route.TimeoutMS)
-			}
-		}
+	if len(cfg.Proxy.Routes) != 1 {
+		t.Fatalf("bootstrap static routes = %#v, want one Auth platform route", cfg.Proxy.Routes)
 	}
-	if !foundWorker {
-		t.Fatal("legacy worker route is missing")
+	route := cfg.Proxy.Routes[0]
+	if route.Prefix != "/api/auth" || route.Target != "http://auth-service:8081" || route.AuthMode != "optional" {
+		t.Fatalf("bootstrap Auth route = %#v", route)
+	}
+	if len(cfg.Proxy.TrustedServices) != 1 || cfg.Proxy.TrustedServices[0].ServiceID != "auth-service" {
+		t.Fatalf("bootstrap trusted services = %#v, want Auth only", cfg.Proxy.TrustedServices)
 	}
 }
 

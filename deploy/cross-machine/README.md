@@ -58,6 +58,32 @@ request names the target Node and confirmed API bindings but supplies no
 endpoint; the logical endpoint is derived from current Node facts and the
 backend-worker Release publishes no Docker port.
 
+The platform Auth bootstrap credential is generated per run and written to a
+private Engine-A host file through `docker exec` stdin. The host directory is
+`0700`, the regular file is `0600`, both are owned by `65532:65532`, and Auth
+receives only an exact read-only bind at
+`/run/secrets/ojos-auth-admin-bootstrap` plus
+`AUTH_ADMIN_BOOTSTRAP_SECRET_FILE`. Neither an inline environment variable nor
+a Docker argument contains the credential. The evidence reads both host and
+container file metadata and the Docker mount. This harness retains the mount
+for its uninterrupted scenario and destroys it with the run-scoped outer DinD
+container; it deliberately does **not** claim to prove the production
+post-bootstrap remove-secret-and-restart procedure documented by Auth.
+
+Both nested daemons create `/var/run/docker.sock` as group `10004`, mode
+`0660`. Each enrolled Agent runs as the production workload identity
+`65532:65532`, receives only that socket GID as a supplemental group, and is
+rejected if Docker inspect reports privileges, added capabilities, a different
+user, or a different bind-source namespace. A bounded one-shot setup helper
+creates both the private Agent state root and a disjoint daemon-visible workload
+export root as `65532:65532`; it leaves directories `0700` and files `0600`.
+Only the export root may appear as a workload bind source. The long-running
+Agent never runs as root and never receives `CAP_CHOWN`. Full evidence also
+records `/proc` identity, both exact DinD mount paths, socket stat, and a fresh
+uid-65532 workload read/stat of the real Agent-created Service Context. This
+verifies both DinD namespace resolution and actual workload readability, rather
+than inferring either from command strings.
+
 Pre-infrastructure images are exported as one target-specific multi-image
 archive for A and one for B. Each nested Engine performs exactly one
 `docker image load`, so shared layers are unpacked only once per Engine. The

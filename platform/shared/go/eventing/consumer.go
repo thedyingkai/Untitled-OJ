@@ -14,16 +14,32 @@ import (
 
 type ProjectionHandler func(context.Context, pgx.Tx, Envelope) error
 
+const DefaultMaxAttempts = 10
+
 type Consumer struct {
 	DB           *pgxpool.Pool
 	Redis        redis.UniversalClient
-	Stream       string
-	Group        string
 	ConsumerName string
 	BatchSize    int64
 	ClaimIdle    time.Duration
 	MaxAttempts  int
 	Handler      ProjectionHandler
+	streamName   string
+	groupName    string
+}
+
+func NewConsumer(db *pgxpool.Pool, redisClient redis.UniversalClient, transport TransportConfig, handler ProjectionHandler) (*Consumer, error) {
+	if transport.stream == "" || transport.consumerGroup == "" {
+		return nil, errors.New("projection transport stream and consumer group are required")
+	}
+	if db == nil || redisClient == nil || handler == nil {
+		return nil, errors.New("projection consumer dependencies are not configured")
+	}
+	return &Consumer{
+		DB: db, Redis: redisClient,
+		streamName: transport.stream, groupName: transport.consumerGroup,
+		Handler: handler,
+	}, nil
 }
 
 func (c *Consumer) Run(ctx context.Context) {
@@ -56,6 +72,9 @@ func (c *Consumer) Run(ctx context.Context) {
 func (c *Consumer) ensureGroup(ctx context.Context) error {
 	if c.Redis == nil {
 		return errors.New("projection Redis client is not configured")
+	}
+	if c.group() == "" {
+		return errors.New("projection consumer group is not configured")
 	}
 	err := c.Redis.XGroupCreateMkStream(ctx, c.stream(), c.group(), "0").Err()
 	if err == nil || redis.HasErrorPrefix(err, "BUSYGROUP") {
@@ -178,7 +197,7 @@ RETURNING attempts
 	}
 	maxAttempts := c.MaxAttempts
 	if maxAttempts <= 0 {
-		maxAttempts = 5
+		maxAttempts = DefaultMaxAttempts
 	}
 	if attempts >= maxAttempts {
 		_ = c.Redis.XAck(ctx, c.stream(), c.group(), message.ID).Err()
@@ -192,17 +211,17 @@ func (c *Consumer) clearFailure(ctx context.Context, eventID string) error {
 }
 
 func (c *Consumer) stream() string {
-	if c.Stream != "" {
-		return c.Stream
+	if c.streamName != "" {
+		return c.streamName
 	}
-	return "ojos:integration:problem:v1"
+	return DefaultEventStream
 }
 
 func (c *Consumer) group() string {
-	if c.Group != "" {
-		return c.Group
+	if c.groupName != "" {
+		return c.groupName
 	}
-	return "judge-api.problem-projection.v1"
+	return ""
 }
 
 func (c *Consumer) consumerName() string {

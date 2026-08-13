@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ojos:auth-service:config:v1",
+  "title": "Auth Service configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "jwt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expireHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168,
+          "default": 24
+        },
+        "secret": {
+          "type": "string",
+          "minLength": 32,
+          "writeOnly": true,
+          "x-ojos-secret": true
+        }
+      },
+      "required": ["secret"]
+    },
+    "management": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "token": {
+          "type": "string",
+          "minLength": 32,
+          "writeOnly": true,
+          "x-ojos-secret": true
+        }
+      },
+      "required": ["token"]
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "privateKeyPem": {
+          "type": "string",
+          "minLength": 64,
+          "writeOnly": true,
+          "x-ojos-secret": true
+        },
+        "controlPlaneToken": {
+          "type": "string",
+          "minLength": 32,
+          "writeOnly": true,
+          "x-ojos-secret": true
+        },
+        "keyId": {
+          "type": "string",
+          "minLength": 1,
+          "default": "workload-1"
+        },
+        "issuer": {
+          "type": "string",
+          "minLength": 1,
+          "default": "ojos-auth/workload"
+        },
+        "audience": {
+          "type": "string",
+          "minLength": 1,
+          "default": "ojos-gateway"
+        },
+        "ttlSeconds": {
+          "type": "integer",
+          "const": 900,
+          "default": 900
+        }
+      },
+      "required": ["privateKeyPem", "controlPlaneToken"]
+    },
+    "adminBootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secret": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512,
+          "writeOnly": true,
+          "x-ojos-secret": true
+        }
+      }
+    },
+    "orchestrator": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "format": "uri"
+        },
+        "internalToken": {
+          "type": "string",
+          "minLength": 32,
+          "writeOnly": true,
+          "x-ojos-secret": true
+		},
+		"contributionAckToken": {
+		  "type": "string",
+		  "minLength": 32,
+		  "writeOnly": true,
+		  "x-ojos-secret": true
+        }
+      },
+	  "required": ["endpoint", "internalToken", "contributionAckToken"]
+    },
+    "tracing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {"type": "string"}
+      }
+    }
+  },
+  "required": ["jwt", "management", "workload", "orchestrator"]
+}

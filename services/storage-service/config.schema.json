@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ojos:storage-service:config:v1",
+  "title": "Storage Service configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["development", "production"]
+    },
+    "backend": {
+      "type": "string",
+      "enum": ["local", "minio"]
+    },
+    "buckets": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]{1,62}(?:,[a-z0-9][a-z0-9.-]{1,62})*$"
+    },
+    "localRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "minioEndpoint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "minioUseSSL": {
+      "type": "boolean"
+    },
+    "minioAccessKey": {
+      "type": "string",
+      "minLength": 1,
+      "writeOnly": true,
+      "x-ojos-secret": true
+    },
+    "minioSecretKey": {
+      "type": "string",
+      "minLength": 8,
+      "writeOnly": true,
+      "x-ojos-secret": true
+    }
+  },
+  "required": ["mode", "backend", "buckets"],
+  "oneOf": [
+    {
+      "properties": {
+        "mode": {"const": "development"},
+        "backend": {"const": "local"}
+      },
+      "required": ["localRoot"],
+      "not": {
+        "anyOf": [
+          {"required": ["minioAccessKey"]},
+          {"required": ["minioSecretKey"]}
+        ]
+      }
+    },
+    {
+      "properties": {
+        "mode": {"const": "production"},
+        "backend": {"const": "minio"}
+      },
+      "required": [
+        "minioEndpoint",
+        "minioUseSSL",
+        "minioAccessKey",
+        "minioSecretKey"
+      ]
+    }
+  ]
+}

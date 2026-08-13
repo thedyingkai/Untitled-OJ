@@ -1,0 +1,124 @@
+openapi: 3.1.0
+info: {title: OJOS Problem Artifact GC Operator API, version: 1.0.0}
+x-ojos-api-id: problem.artifact-gc.manage
+x-ojos-service: {id: problem-service, version: 0.1.0}
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1, maxLength: 255}}
+  schemas:
+    LastFailure:
+      type: object
+      additionalProperties: false
+      required: [message, stage, kind, deterministic]
+      properties:
+        message: {type: string}
+        stage: {type: string}
+        kind: {type: string}
+        http_status: {type: integer, minimum: 100, maximum: 599}
+        provider_result: {type: string}
+        deterministic: {type: boolean}
+    Intent:
+      type: object
+      additionalProperties: false
+      required: [artifact_uri, artifact_sha256, artifact_size_bytes, status, failure_count, last_failure, updated_at]
+      properties:
+        artifact_uri: {type: string}
+        artifact_sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        artifact_size_bytes: {type: integer, format: int64, minimum: 0}
+        status: {type: string, enum: [PENDING, DELETING, NEEDS_ATTENTION]}
+        failure_count: {type: integer, minimum: 0}
+        last_failure: {$ref: '#/components/schemas/LastFailure'}
+        upload_completed_at: {type: string}
+        needs_attention_at: {type: string}
+        manual_reconcile_requested_at: {type: string}
+        last_operator_retry_reason: {type: string}
+        last_operator_retry_at: {type: string}
+        updated_at: {type: string}
+    IntentList:
+      type: object
+      additionalProperties: false
+      required: [intents]
+      properties:
+        intents: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/Intent'}}
+        next_cursor: {type: string}
+    ReconcileRequest:
+      type: object
+      additionalProperties: false
+      required: [artifact_uri, artifact_sha256, artifact_size_bytes, reason]
+      properties:
+        artifact_uri: {type: string}
+        artifact_sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        artifact_size_bytes: {type: integer, format: int64, minimum: 0}
+        reason: {type: string, minLength: 1, maxLength: 2000}
+    RetryRequest:
+      type: object
+      additionalProperties: false
+      required: [artifact_uri, expected_failure_count, reason]
+      properties:
+        artifact_uri: {type: string}
+        expected_failure_count: {type: integer, minimum: 1}
+        reason: {type: string, minLength: 1, maxLength: 2000}
+    Action:
+      type: object
+      additionalProperties: false
+      required: [action_id, request_id, artifact_uri, from_status, to_status, reason_recorded, queued, idempotent_replay]
+      properties:
+        action_id: {type: integer, format: int64, minimum: 1}
+        request_id: {type: string}
+        artifact_uri: {type: string}
+        from_status: {type: string}
+        to_status: {type: string, const: PENDING}
+        reason_recorded: {type: boolean, const: true}
+        queued: {type: boolean, const: true}
+        idempotent_replay: {type: boolean}
+paths:
+  /admin/artifact-gc/intents:
+    get:
+      operationId: listArtifactGCIntents
+      x-ojos-audience: admin
+      x-ojos-permission: problem.manage.data
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      parameters:
+        - {name: status, in: query, required: true, schema: {type: string, enum: [PENDING, DELETING, NEEDS_ATTENTION]}}
+        - {name: cursor, in: query, required: false, schema: {type: string}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200}}
+      responses:
+        '200': {description: Stable artifact URI ordered page without collector credentials, content: {application/json: {schema: {$ref: '#/components/schemas/IntentList'}}}}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.manage.data}
+        '503': {description: Operator unavailable}
+  /admin/artifact-gc/intents/reconcile:
+    post:
+      operationId: reconcileArtifactGCIntent
+      x-ojos-audience: admin
+      x-ojos-permission: problem.manage.data
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ReconcileRequest'}}}}
+      responses:
+        '202': {description: Durable reconciliation action recorded, content: {application/json: {schema: {$ref: '#/components/schemas/Action'}}}}
+        '400': {description: Invalid request}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.manage.data}
+        '409': {description: Stale identity or conflicting replay}
+        '503': {description: Operator unavailable}
+  /admin/artifact-gc/intents/retry:
+    post:
+      operationId: retryArtifactGCIntent
+      x-ojos-audience: admin
+      x-ojos-permission: problem.manage.data
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RetryRequest'}}}}
+      responses:
+        '202': {description: Durable retry action recorded, content: {application/json: {schema: {$ref: '#/components/schemas/Action'}}}}
+        '400': {description: Invalid request}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.manage.data}
+        '409': {description: Stale failure count or conflicting replay}
+        '503': {description: Operator unavailable}

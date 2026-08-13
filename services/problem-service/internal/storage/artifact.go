@@ -17,12 +17,14 @@ import (
 	"strings"
 	"time"
 
+	"ojos-problem-events/problemv1"
 	"ojos-problem-service/internal/config"
-	"ojos-shared/eventing"
 	"ojos-shared/servicecontext"
 )
 
 const maxPackageArtifactBytes int64 = 512 * 1024 * 1024
+
+const artifactBuildDirectory = ".ojos-artifact-builds"
 
 var deterministicZipTime = time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC)
 
@@ -32,21 +34,35 @@ var deterministicZipTime = time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC
 // A process crash at any point therefore leaves either a committed reference or
 // a recoverable orphan intent, never an untracked object.
 type ArtifactIntentRegistrar interface {
-	RegisterArtifactUploadIntent(context.Context, eventing.ArtifactRef) error
-	MarkArtifactUploadCompleted(context.Context, eventing.ArtifactRef) error
+	RegisterArtifactUploadIntent(context.Context, problemv1.ArtifactRef) error
+	MarkArtifactUploadCompleted(context.Context, problemv1.ArtifactRef) error
 }
 
 // PublishPackageArtifactTracked is the production publication path. Remote
 // storage uploads are preceded by a separately committed Problem-owned intent;
 // local development artifacts do not need a remote-object GC intent.
-func PublishPackageArtifactTracked(ctx context.Context, cfg config.StorageConfig, problemID int64, packageDir string, intents ArtifactIntentRegistrar) (eventing.ArtifactRef, error) {
+func PublishPackageArtifactTracked(ctx context.Context, cfg config.StorageConfig, problemID int64, packageDir string, intents ArtifactIntentRegistrar) (problemv1.ArtifactRef, error) {
 	managed, err := loadManagedStorageClient()
 	if err != nil {
-		return eventing.ArtifactRef{}, err
+		return problemv1.ArtifactRef{}, err
 	}
-	zipPath, digest, size, err := BuildDeterministicPackageArtifact(packageDir)
+	if managed != nil {
+		defer managed.close()
+	}
+	problemsRoot := strings.TrimSpace(cfg.ProblemsRoot)
+	if problemsRoot == "" {
+		// Unmanaged development historically supplied only a package directory.
+		// Managed service startup always sets ProblemsRoot to the signed RETAIN
+		// volume target, so production package builds never fall back to the
+		// container root filesystem.
+		if managed != nil {
+			return problemv1.ArtifactRef{}, errors.New("managed problem artifact publication requires ProblemsRoot")
+		}
+		problemsRoot = packageDir
+	}
+	zipPath, digest, size, err := BuildDeterministicPackageArtifact(problemsRoot, packageDir)
 	if err != nil {
-		return eventing.ArtifactRef{}, err
+		return problemv1.ArtifactRef{}, err
 	}
 	defer os.Remove(zipPath)
 
@@ -54,30 +70,30 @@ func PublishPackageArtifactTracked(ctx context.Context, cfg config.StorageConfig
 	if managed == nil && strings.TrimSpace(cfg.InternalGatewayEndpoint) == "" && strings.TrimSpace(cfg.ServiceEndpoint) == "" {
 		return persistLocalArtifact(cfg.ProblemsRoot, zipPath, key, digest, size)
 	}
-	artifact := eventing.ArtifactRef{
+	artifact := problemv1.ArtifactRef{
 		URI:         "storage://" + bucket(cfg) + "/" + key,
 		SHA256:      digest,
 		SizeBytes:   size,
 		ContentType: "application/zip",
 	}
 	if intents == nil {
-		return eventing.ArtifactRef{}, errors.New("remote problem package publication requires a durable upload-intent registrar")
+		return problemv1.ArtifactRef{}, errors.New("remote problem package publication requires a durable upload-intent registrar")
 	}
 	if err := intents.RegisterArtifactUploadIntent(ctx, artifact); err != nil {
-		return eventing.ArtifactRef{}, fmt.Errorf("register problem artifact upload intent: %w", err)
+		return problemv1.ArtifactRef{}, fmt.Errorf("register problem artifact upload intent: %w", err)
 	}
 	meta, err := putObjectMetadata(ctx, managed, cfg, key, "application/zip", zipPath, digest, size)
 	if err != nil {
-		return eventing.ArtifactRef{}, err
+		return problemv1.ArtifactRef{}, err
 	}
 	if !strings.EqualFold(strings.TrimSpace(meta.SHA256), digest) {
-		return eventing.ArtifactRef{}, fmt.Errorf("storage package digest mismatch: expected %s, got %s", digest, meta.SHA256)
+		return problemv1.ArtifactRef{}, fmt.Errorf("storage package digest mismatch: expected %s, got %s", digest, meta.SHA256)
 	}
 	if meta.SizeBytes != size {
-		return eventing.ArtifactRef{}, fmt.Errorf("storage package size mismatch: expected %d, got %d", size, meta.SizeBytes)
+		return problemv1.ArtifactRef{}, fmt.Errorf("storage package size mismatch: expected %d, got %d", size, meta.SizeBytes)
 	}
 	if err := intents.MarkArtifactUploadCompleted(ctx, artifact); err != nil {
-		return eventing.ArtifactRef{}, fmt.Errorf("mark problem artifact upload completed: %w", err)
+		return problemv1.ArtifactRef{}, fmt.Errorf("mark problem artifact upload completed: %w", err)
 	}
 	return artifact, nil
 }
@@ -85,21 +101,38 @@ func PublishPackageArtifactTracked(ctx context.Context, cfg config.StorageConfig
 // PublishPackageArtifact is retained for unmanaged/local compatibility and
 // tests. It deliberately refuses remote storage because that would recreate
 // the untracked-upload failure window closed by PublishPackageArtifactTracked.
-func PublishPackageArtifact(ctx context.Context, cfg config.StorageConfig, problemID int64, packageDir string) (eventing.ArtifactRef, error) {
+func PublishPackageArtifact(ctx context.Context, cfg config.StorageConfig, problemID int64, packageDir string) (problemv1.ArtifactRef, error) {
 	return PublishPackageArtifactTracked(ctx, cfg, problemID, packageDir, nil)
 }
 
-func BuildDeterministicPackageArtifact(packageDir string) (string, string, int64, error) {
+// BuildDeterministicPackageArtifact writes its temporary ZIP into a reserved
+// directory below problemsRoot. The managed runtime mounts that root from the
+// signed RETAIN volume, allowing the container root filesystem (including
+// /tmp) to remain read-only. The caller owns and must remove a successful
+// return path; every error path removes it before returning.
+func BuildDeterministicPackageArtifact(problemsRoot string, packageDir string) (string, string, int64, error) {
 	root, err := filepath.Abs(strings.TrimSpace(packageDir))
 	if err != nil {
 		return "", "", 0, err
 	}
-	stat, err := os.Stat(root)
+	volumeRoot, err := filepath.Abs(strings.TrimSpace(problemsRoot))
 	if err != nil {
 		return "", "", 0, err
 	}
-	if !stat.IsDir() {
-		return "", "", 0, fmt.Errorf("problem package is not a directory: %s", root)
+	if strings.TrimSpace(problemsRoot) == "" {
+		return "", "", 0, errors.New("problem artifact build root is required")
+	}
+	contained, err := filepath.Rel(volumeRoot, root)
+	if err != nil || contained == ".." || strings.HasPrefix(contained, ".."+string(filepath.Separator)) || filepath.IsAbs(contained) {
+		return "", "", 0, fmt.Errorf("problem package is outside the managed problems root: %s", root)
+	}
+	buildRoot := filepath.Join(volumeRoot, artifactBuildDirectory)
+	stat, err := os.Lstat(root)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if !stat.IsDir() || stat.Mode()&os.ModeSymlink != 0 {
+		return "", "", 0, fmt.Errorf("problem package is not a real directory: %s", root)
 	}
 
 	var files []string
@@ -107,6 +140,12 @@ func BuildDeterministicPackageArtifact(packageDir string) (string, string, int64
 	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if sameFilesystemPath(path, buildRoot) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return fmt.Errorf("problem artifact build path is not a directory: %s", path)
 		}
 		if entry.IsDir() {
 			return nil
@@ -134,7 +173,10 @@ func BuildDeterministicPackageArtifact(packageDir string) (string, string, int64
 		return filepath.ToSlash(left) < filepath.ToSlash(right)
 	})
 
-	tmp, err := os.CreateTemp("", "ojos-problem-package-*.zip")
+	if err := ensureArtifactBuildDirectory(buildRoot); err != nil {
+		return "", "", 0, err
+	}
+	tmp, err := os.CreateTemp(buildRoot, "ojos-problem-package-*.zip")
 	if err != nil {
 		return "", "", 0, err
 	}
@@ -143,6 +185,9 @@ func BuildDeterministicPackageArtifact(packageDir string) (string, string, int64
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 		return "", "", 0, e
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		return cleanup(err)
 	}
 
 	zw := zip.NewWriter(tmp)
@@ -206,6 +251,29 @@ func BuildDeterministicPackageArtifact(packageDir string) (string, string, int64
 	return tmpPath, hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
 
+func ensureArtifactBuildDirectory(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("problem artifact build path is not a private directory: %s", path)
+	}
+	return os.Chmod(path, 0o700)
+}
+
+func sameFilesystemPath(left string, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if filepath.Separator == '\\' {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
 type objectMetadata struct {
 	SizeBytes int64  `json:"size_bytes"`
 	SHA256    string `json:"sha256"`
@@ -225,9 +293,13 @@ func putObjectMetadata(ctx context.Context, managed *managedStorageClient, cfg c
 	var req *http.Request
 	var client *http.Client
 	if managed != nil {
+		snapshot, managedClient, managedErr := managed.snapshot(ctx)
+		if managedErr != nil {
+			return objectMetadata{}, managedErr
+		}
 		relativePath := "/" + url.PathEscape(bucket(cfg)) + "/" + url.PathEscape(key)
-		req, err = managed.context.NewRequestWithOptions(ctx, storagePutBinding, http.MethodPut, relativePath, file, servicecontext.RequestOptions{Headers: headers, ContentLength: size})
-		client = managed.client
+		req, err = snapshot.NewRequestWithOptions(ctx, storagePutBinding, http.MethodPut, relativePath, file, servicecontext.RequestOptions{Headers: headers, ContentLength: size})
+		client = managedClient
 	} else {
 		target, legacyHeaders := putTarget(cfg, key)
 		req, err = http.NewRequestWithContext(ctx, http.MethodPut, target, file)
@@ -271,8 +343,13 @@ func verifyExistingObject(ctx context.Context, managed *managedStorageClient, cl
 	var req *http.Request
 	var err error
 	if managed != nil {
+		snapshot, managedClient, managedErr := managed.snapshot(ctx)
+		if managedErr != nil {
+			return objectMetadata{}, managedErr
+		}
 		relativePath := "/" + url.PathEscape(bucket(cfg)) + "/" + url.PathEscape(key)
-		req, err = managed.context.NewRequest(ctx, storageHeadBinding, http.MethodHead, relativePath, nil)
+		req, err = snapshot.NewRequest(ctx, storageHeadBinding, http.MethodHead, relativePath, nil)
+		client = managedClient
 	} else {
 		target, headers := headTarget(cfg, key)
 		req, err = http.NewRequestWithContext(ctx, http.MethodHead, target, nil)
@@ -306,35 +383,35 @@ func verifyExistingObject(ctx context.Context, managed *managedStorageClient, cl
 	return objectMetadata{SHA256: actualDigest, SizeBytes: resp.ContentLength}, nil
 }
 
-func persistLocalArtifact(root, source, key, digest string, size int64) (eventing.ArtifactRef, error) {
+func persistLocalArtifact(root, source, key, digest string, size int64) (problemv1.ArtifactRef, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		root = filepath.Dir(source)
 	}
 	dir := filepath.Join(root, ".artifacts")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return eventing.ArtifactRef{}, err
+		return problemv1.ArtifactRef{}, err
 	}
 	target := filepath.Join(dir, key)
 	if _, err := os.Stat(target); err == nil {
 		existingDigest, existingSize, err := digestFile(target)
 		if err != nil {
-			return eventing.ArtifactRef{}, err
+			return problemv1.ArtifactRef{}, err
 		}
 		if existingDigest != digest || existingSize != size {
-			return eventing.ArtifactRef{}, fmt.Errorf("immutable local artifact collision: %s", target)
+			return problemv1.ArtifactRef{}, fmt.Errorf("immutable local artifact collision: %s", target)
 		}
 	} else if !os.IsNotExist(err) {
-		return eventing.ArtifactRef{}, err
+		return problemv1.ArtifactRef{}, err
 	} else {
 		in, err := os.Open(source)
 		if err != nil {
-			return eventing.ArtifactRef{}, err
+			return problemv1.ArtifactRef{}, err
 		}
 		defer in.Close()
 		out, err := os.CreateTemp(dir, ".ojos-problem-artifact-*.tmp")
 		if err != nil {
-			return eventing.ArtifactRef{}, err
+			return problemv1.ArtifactRef{}, err
 		}
 		tmp := out.Name()
 		copied, copyErr := io.Copy(out, in)
@@ -342,23 +419,23 @@ func persistLocalArtifact(root, source, key, digest string, size int64) (eventin
 		if copyErr != nil || closeErr != nil || copied != size {
 			_ = os.Remove(tmp)
 			if copyErr != nil {
-				return eventing.ArtifactRef{}, copyErr
+				return problemv1.ArtifactRef{}, copyErr
 			}
 			if closeErr != nil {
-				return eventing.ArtifactRef{}, closeErr
+				return problemv1.ArtifactRef{}, closeErr
 			}
-			return eventing.ArtifactRef{}, fmt.Errorf("local artifact size changed: expected %d, got %d", size, copied)
+			return problemv1.ArtifactRef{}, fmt.Errorf("local artifact size changed: expected %d, got %d", size, copied)
 		}
 		if err := os.Rename(tmp, target); err != nil {
 			_ = os.Remove(tmp)
-			return eventing.ArtifactRef{}, err
+			return problemv1.ArtifactRef{}, err
 		}
 	}
 	abs, err := filepath.Abs(target)
 	if err != nil {
-		return eventing.ArtifactRef{}, err
+		return problemv1.ArtifactRef{}, err
 	}
-	return eventing.ArtifactRef{
+	return problemv1.ArtifactRef{
 		URI:         "file://" + filepath.ToSlash(abs),
 		SHA256:      digest,
 		SizeBytes:   size,

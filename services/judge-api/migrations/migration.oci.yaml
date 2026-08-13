@@ -1,0 +1,24 @@
+schemaVersion: ojos.dev/migration-oci/v1
+artifactSlot: judge-migration-v1
+resource: submissions
+engine: postgresql
+entrypoint: ["/ojos-migrate"]
+command: ["apply", "/migrations"]
+transactions: required
+files:
+  - 000001_submission_schema.up.sql
+  - 000002_worker_link.up.sql
+  - 000003_problem_meta_cache.up.sql
+  - 000004_problem_projection_events.up.sql
+  - 000005_judge_result_outbox.up.sql
+  - 000006_task_retry_schedule.up.sql
+rollbackFiles:
+  - 000001_submission_schema.down.sql
+  - 000002_worker_link.down.sql
+  - 000003_problem_meta_cache.down.sql
+  - 000004_problem_projection_events.down.sql
+  - 000005_judge_result_outbox.down.sql
+  - 000006_task_retry_schedule.down.sql
+labels:
+  dev.ojos.migration.id: judge-schema-v1
+  dev.ojos.resource.kind: postgresql.database/v1

@@ -19,12 +19,9 @@ clap.workspace = true
 directories = "6"
 getrandom = "0.3"
 orchestrator-backend = { package = "ojos-orchestrator-daemon", path = "../../services/orchestrator/backend" }
-orchestrator-agent.workspace = true
-orchestrator-runtime.workspace = true
 ojos-orchestrator-installer.workspace = true
 serde_json.workspace = true
 tauri = "2.11.5"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 url = "2.5"
 

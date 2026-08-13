@@ -14,6 +14,13 @@ import (
 
 func adminBootstrapHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if svcCtx == nil || svcCtx.AdminBootstrap == nil {
+			writeAdminBootstrapJSON(w, http.StatusNotFound, types.AdminBootstrapResp{
+				Code: 40431,
+				Msg:  "initial administrator bootstrap is unavailable",
+			})
+			return
+		}
 		var req types.AdminBootstrapReq
 		if err := httpx.Parse(r, &req); err != nil {
 			writeAdminBootstrapJSON(w, http.StatusBadRequest, types.AdminBootstrapResp{

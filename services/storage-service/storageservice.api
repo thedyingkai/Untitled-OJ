@@ -59,6 +59,12 @@ type ListObjectsResp {
 service storageservice {
 	@handler health
 	get /health returns (HealthResp)
+
+	@handler healthz
+	get /healthz returns (HealthResp)
+
+	@handler readyz
+	get /readyz returns (HealthResp)
 }
 
 @server (

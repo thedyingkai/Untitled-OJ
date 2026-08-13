@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"ojos-problem-service/internal/artifactgc"
@@ -109,14 +110,33 @@ func TestArtifactGCActionRoutesUseLiteralColonAndReturnAccepted(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		"/problem/admin/artifact-gc/intents/reconcile",
-		"/problem/admin/artifact-gc/intents/retry",
+		"/admin/artifact-gc/intents/reconcile",
+		"/admin/artifact-gc/intents/retry",
 	} {
-		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("slash alias %s unexpectedly exists: status=%d body=%s", path, rec.Code, rec.Body.String())
+		body := map[string]any{"artifact_uri": "storage://problems/package-sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.zip", "reason": "slash alias"}
+		if strings.HasSuffix(path, "/reconcile") {
+			body["artifact_sha256"] = strings.Repeat("a", 64)
+			body["artifact_size_bytes"] = 17
+		} else {
+			body["expected_failure_count"] = 2
 		}
+		payload, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Auth-Verified", "true")
+		req.Header.Set("X-User-Id", "42")
+		req.Header.Set("Idempotency-Key", "slash-route-test-"+path)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("signed slash route %s failed: status=%d body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+	if ledger.reconcileCalls != 2 || ledger.retryCalls != 2 {
+		t.Fatalf("colon/slash compatibility routes reached wrong handlers: reconcile=%d retry=%d", ledger.reconcileCalls, ledger.retryCalls)
 	}
 }
 

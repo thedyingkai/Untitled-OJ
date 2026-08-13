@@ -11,13 +11,44 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 use time::OffsetDateTime;
 
 const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 10_000;
+const MAX_PIPELINE_CONFIG_BYTES: usize = 1024 * 1024;
+
+const MANAGED_PIPELINE_ENVIRONMENT: &[&str] = &[
+    "ORCHESTRATOR_SECRET_DIRECTORY",
+    "ORCHESTRATOR_PIPELINE_PROVIDER_TIMEOUT_MS",
+    "ORCHESTRATOR_REDIS_CONNECTIONS_JSON",
+    "ORCHESTRATOR_REDIS_CONNECTIONS_FILE",
+    "ORCHESTRATOR_STORAGE_CONNECTIONS_JSON",
+    "ORCHESTRATOR_STORAGE_CONNECTIONS_FILE",
+    "ORCHESTRATOR_FRONTEND_ASSET_STORES_JSON",
+    "ORCHESTRATOR_FRONTEND_ASSET_STORES_FILE",
+];
+
+const LEGACY_PIPELINE_ENVIRONMENT: &[&str] = &[
+    "OJOS_ENVIRONMENT",
+    "ORCHESTRATOR_ENABLE_EXTERNAL_PROVISIONER_FALLBACK",
+    "ORCHESTRATOR_AUTH_ADMIN_ENDPOINT",
+    "ORCHESTRATOR_AUTH_ADMIN_ORIGIN",
+    "ORCHESTRATOR_AUTH_ADMIN_TOKEN",
+    "AUTH_SERVICE_ENDPOINT",
+    "AUTH_SERVICE_ADMIN_TOKEN",
+    "ORCHESTRATOR_GATEWAY_ADMIN_ENDPOINT",
+    "ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN",
+    "ORCHESTRATOR_GATEWAY_ADMIN_TOKEN",
+    "GATEWAY_ENDPOINT",
+    "GATEWAY_ADMIN_TOKEN",
+    "ORCHESTRATOR_GATEWAY_TOKEN",
+    "ORCHESTRATOR_RELEASE_PROVISIONER_ENDPOINT",
+    "ORCHESTRATOR_RELEASE_PROVISIONER_ORIGIN",
+    "ORCHESTRATOR_RELEASE_PROVISIONER_TOKEN",
+];
 
 const NODE_FORBIDDEN_MANAGEMENT_ENV: &[&str] = &[
     "ORCHESTRATOR_AUTH_ADMIN_ENDPOINT",
@@ -87,14 +118,6 @@ impl PipelineProviderConfig {
                 .clamp(100, 60_000),
             ..Self::default()
         }
-    }
-
-    fn managed_node_from_env() -> Self {
-        Self::managed_node_from_lookup(|name| std::env::var(name).ok())
-    }
-
-    fn from_legacy_development_env() -> Self {
-        Self::from_lookup(|name| std::env::var(name).ok())
     }
 
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
@@ -168,10 +191,6 @@ fn first_value(lookup: &mut impl FnMut(&str) -> Option<String>, names: &[&str]) 
     })
 }
 
-fn first_env(names: &[&str]) -> Option<String> {
-    first_value(&mut |name| std::env::var(name).ok(), names)
-}
-
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RedisConnectionConfig {
@@ -182,10 +201,16 @@ pub struct RedisConnectionConfig {
 /// materialization. Callers receive URLs in-process; only identifier keys are
 /// ever published in runtime facts or persisted by the control plane.
 pub fn event_connection_urls_from_env() -> Result<BTreeMap<String, String>, PipelineProviderError> {
-    let configured: BTreeMap<String, RedisConnectionConfig> = json_env_or_file(
+    let values = snapshot_pipeline_environment(&[
+        "ORCHESTRATOR_REDIS_CONNECTIONS_JSON",
+        "ORCHESTRATOR_REDIS_CONNECTIONS_FILE",
+    ])?;
+    let configured: BTreeMap<String, RedisConnectionConfig> = json_env_or_file_source_with_lookup(
+        &mut |name| values.get(name).cloned(),
         "ORCHESTRATOR_REDIS_CONNECTIONS_JSON",
         "ORCHESTRATOR_REDIS_CONNECTIONS_FILE",
     )?
+    .value
     .unwrap_or_default();
     validated_event_connection_urls(configured)
 }
@@ -257,6 +282,177 @@ pub struct FrontendAssetStoreConfig {
     pub root: PathBuf,
 }
 
+/// A single immutable view of every Agent-local pipeline setting. Production
+/// startup captures environment variables and file-backed JSON exactly once;
+/// both the workload-export boundary and the release provider are then built
+/// from this object, removing any validate-then-reload window.
+#[derive(Clone)]
+pub struct PipelineBootstrapConfig {
+    http: PipelineProviderConfig,
+    redis_connections: BTreeMap<String, RedisConnectionConfig>,
+    storage_connections: BTreeMap<String, StorageConnectionConfig>,
+    frontend_asset_stores: BTreeMap<String, FrontendAssetStoreConfig>,
+    event_connection_urls: BTreeMap<String, String>,
+    internal_state_roots: Vec<PathBuf>,
+    allow_external_provisioner_fallback: bool,
+    mode: PipelineProviderMode,
+}
+
+impl PipelineBootstrapConfig {
+    /// Capture settings for a managed in-process Agent without inspecting
+    /// colocated control-plane management variables (used by safe loopback
+    /// callers).
+    pub fn from_managed_env() -> Result<Self, PipelineProviderError> {
+        Self::from_environment(PipelineProviderMode::ManagedNode)
+    }
+
+    /// Capture settings for a production remote Agent. Management variables
+    /// are presence-checked and rejected without reading their values.
+    pub fn from_remote_agent_env() -> Result<Self, PipelineProviderError> {
+        reject_node_management_environment()?;
+        Self::from_environment(PipelineProviderMode::ManagedNode)
+    }
+
+    /// Capture the explicitly development-only legacy provider settings.
+    pub fn from_legacy_development_env() -> Result<Self, PipelineProviderError> {
+        Self::from_environment(PipelineProviderMode::LegacyDevelopment)
+    }
+
+    fn from_environment(mode: PipelineProviderMode) -> Result<Self, PipelineProviderError> {
+        let mut values = BTreeMap::new();
+        if mode == PipelineProviderMode::LegacyDevelopment {
+            // Preserve the legacy trust gate: classify the environment before
+            // reading any management credential value.
+            values.extend(snapshot_pipeline_environment(&["OJOS_ENVIRONMENT"])?);
+            validate_legacy_development_environment(
+                values
+                    .get("OJOS_ENVIRONMENT")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            )?;
+        }
+        let names: Vec<_> = match mode {
+            PipelineProviderMode::ManagedNode => MANAGED_PIPELINE_ENVIRONMENT.to_vec(),
+            PipelineProviderMode::LegacyDevelopment => MANAGED_PIPELINE_ENVIRONMENT
+                .iter()
+                .chain(LEGACY_PIPELINE_ENVIRONMENT)
+                .copied()
+                .filter(|name| *name != "OJOS_ENVIRONMENT")
+                .collect(),
+        };
+        values.extend(snapshot_pipeline_environment(&names)?);
+        Self::from_lookup(mode, |name| values.get(name).cloned())
+    }
+
+    fn from_lookup(
+        mode: PipelineProviderMode,
+        mut lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<Self, PipelineProviderError> {
+        if mode == PipelineProviderMode::LegacyDevelopment {
+            validate_legacy_development_environment(
+                lookup("OJOS_ENVIRONMENT").as_deref().unwrap_or_default(),
+            )?;
+        }
+        let http = match mode {
+            PipelineProviderMode::ManagedNode => {
+                PipelineProviderConfig::managed_node_from_lookup(&mut lookup)
+            }
+            PipelineProviderMode::LegacyDevelopment => {
+                PipelineProviderConfig::from_lookup(&mut lookup)
+            }
+        };
+        let redis = json_env_or_file_source_with_lookup(
+            &mut lookup,
+            "ORCHESTRATOR_REDIS_CONNECTIONS_JSON",
+            "ORCHESTRATOR_REDIS_CONNECTIONS_FILE",
+        )?;
+        let storage = json_env_or_file_source_with_lookup(
+            &mut lookup,
+            "ORCHESTRATOR_STORAGE_CONNECTIONS_JSON",
+            "ORCHESTRATOR_STORAGE_CONNECTIONS_FILE",
+        )?;
+        let frontend = json_env_or_file_source_with_lookup(
+            &mut lookup,
+            "ORCHESTRATOR_FRONTEND_ASSET_STORES_JSON",
+            "ORCHESTRATOR_FRONTEND_ASSET_STORES_FILE",
+        )?;
+        let redis_connections: BTreeMap<String, RedisConnectionConfig> =
+            redis.value.unwrap_or_default();
+        let storage_connections: BTreeMap<String, StorageConnectionConfig> =
+            storage.value.unwrap_or_default();
+        let frontend_asset_stores: BTreeMap<String, FrontendAssetStoreConfig> =
+            frontend.value.unwrap_or_default();
+        let event_connection_urls = validated_event_connection_urls(redis_connections.clone())?;
+
+        let mut internal_state_roots = Vec::new();
+        if let Some(root) = http.secret_directory.as_ref() {
+            internal_state_roots.push(root.clone());
+        }
+        internal_state_roots.extend(
+            [redis.file_parent, storage.file_parent, frontend.file_parent]
+                .into_iter()
+                .flatten(),
+        );
+        internal_state_roots.extend(storage_connections.values().filter_map(|connection| {
+            match connection {
+                StorageConnectionConfig::NodeDirectory { root } => Some(root.clone()),
+                StorageConnectionConfig::S3 { .. } => None,
+            }
+        }));
+        internal_state_roots.extend(
+            frontend_asset_stores
+                .values()
+                .map(|store| store.root.clone()),
+        );
+        internal_state_roots.sort();
+        internal_state_roots.dedup();
+
+        let allow_external_provisioner_fallback = mode == PipelineProviderMode::LegacyDevelopment
+            && lookup("ORCHESTRATOR_ENABLE_EXTERNAL_PROVISIONER_FALLBACK").is_some_and(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
+        Ok(Self {
+            http,
+            redis_connections,
+            storage_connections,
+            frontend_asset_stores,
+            event_connection_urls,
+            internal_state_roots,
+            allow_external_provisioner_fallback,
+            mode,
+        })
+    }
+
+    pub fn internal_state_roots(&self) -> &[PathBuf] {
+        &self.internal_state_roots
+    }
+
+    pub fn event_connection_urls(&self) -> &BTreeMap<String, String> {
+        &self.event_connection_urls
+    }
+
+    fn provider_config(&self, state_database: impl Into<PathBuf>) -> BuiltInPipelineProviderConfig {
+        BuiltInPipelineProviderConfig {
+            state_database: state_database.into(),
+            redis_connections: self.redis_connections.clone(),
+            storage_connections: self.storage_connections.clone(),
+            frontend_asset_stores: self.frontend_asset_stores.clone(),
+            allow_external_provisioner_fallback: self.allow_external_provisioner_fallback,
+            mode: self.mode,
+        }
+    }
+
+    pub fn build_release_provider(
+        &self,
+        state_database: impl Into<PathBuf>,
+    ) -> Result<BuiltInReleasePipelineProvider, PipelineProviderError> {
+        BuiltInReleasePipelineProvider::new(self.http.clone(), self.provider_config(state_database))
+    }
+}
+
 #[derive(Clone)]
 pub struct BuiltInPipelineProviderConfig {
     pub state_database: PathBuf,
@@ -282,64 +478,29 @@ impl BuiltInPipelineProviderConfig {
     pub fn from_env_with_state_database(
         state_database: impl Into<PathBuf>,
     ) -> Result<Self, PipelineProviderError> {
-        let mut config = Self::new(state_database);
-        config.redis_connections = json_env_or_file(
-            "ORCHESTRATOR_REDIS_CONNECTIONS_JSON",
-            "ORCHESTRATOR_REDIS_CONNECTIONS_FILE",
-        )?
-        .unwrap_or_default();
-        config.storage_connections = json_env_or_file(
-            "ORCHESTRATOR_STORAGE_CONNECTIONS_JSON",
-            "ORCHESTRATOR_STORAGE_CONNECTIONS_FILE",
-        )?
-        .unwrap_or_default();
-        config.frontend_asset_stores = json_env_or_file(
-            "ORCHESTRATOR_FRONTEND_ASSET_STORES_JSON",
-            "ORCHESTRATOR_FRONTEND_ASSET_STORES_FILE",
-        )?
-        .unwrap_or_default();
-        Ok(config)
+        Ok(PipelineBootstrapConfig::from_managed_env()?.provider_config(state_database))
     }
+}
 
-    fn from_legacy_development_env_with_state_database(
-        state_database: impl Into<PathBuf>,
-    ) -> Result<Self, PipelineProviderError> {
-        require_legacy_development_environment()?;
-        let mut config = Self::from_env_with_state_database_unchecked(state_database)?;
-        config.mode = PipelineProviderMode::LegacyDevelopment;
-        config.allow_external_provisioner_fallback =
-            first_env(&["ORCHESTRATOR_ENABLE_EXTERNAL_PROVISIONER_FALLBACK"]).is_some_and(
-                |value| {
-                    matches!(
-                        value.to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                },
-            );
-        Ok(config)
-    }
+/// Return every Agent-local path whose contents or descendants must remain
+/// outside the workload-visible export tree. The paths are derived from the
+/// same environment surface consumed by the pipeline provider, preventing a
+/// deployment from passing startup isolation and loading credentials later
+/// from inside the daemon-visible tree.
+pub fn pipeline_internal_state_roots_from_env() -> Result<Vec<PathBuf>, PipelineProviderError> {
+    Ok(PipelineBootstrapConfig::from_managed_env()?
+        .internal_state_roots
+        .clone())
+}
 
-    fn from_env_with_state_database_unchecked(
-        state_database: impl Into<PathBuf>,
-    ) -> Result<Self, PipelineProviderError> {
-        let mut config = Self::new(state_database);
-        config.redis_connections = json_env_or_file(
-            "ORCHESTRATOR_REDIS_CONNECTIONS_JSON",
-            "ORCHESTRATOR_REDIS_CONNECTIONS_FILE",
-        )?
-        .unwrap_or_default();
-        config.storage_connections = json_env_or_file(
-            "ORCHESTRATOR_STORAGE_CONNECTIONS_JSON",
-            "ORCHESTRATOR_STORAGE_CONNECTIONS_FILE",
-        )?
-        .unwrap_or_default();
-        config.frontend_asset_stores = json_env_or_file(
-            "ORCHESTRATOR_FRONTEND_ASSET_STORES_JSON",
-            "ORCHESTRATOR_FRONTEND_ASSET_STORES_FILE",
-        )?
-        .unwrap_or_default();
-        Ok(config)
-    }
+#[cfg(test)]
+fn pipeline_internal_state_roots_from_lookup(
+    lookup: impl FnMut(&str) -> Option<String>,
+) -> Result<Vec<PathBuf>, PipelineProviderError> {
+    Ok(
+        PipelineBootstrapConfig::from_lookup(PipelineProviderMode::ManagedNode, lookup)?
+            .internal_state_roots,
+    )
 }
 
 fn reject_node_management_environment() -> Result<(), PipelineProviderError> {
@@ -365,11 +526,6 @@ fn configured_node_management_environment(
         .collect()
 }
 
-fn require_legacy_development_environment() -> Result<(), PipelineProviderError> {
-    let environment = std::env::var("OJOS_ENVIRONMENT").unwrap_or_default();
-    validate_legacy_development_environment(&environment)
-}
-
 fn validate_legacy_development_environment(environment: &str) -> Result<(), PipelineProviderError> {
     if environment.trim().eq_ignore_ascii_case("development") {
         Ok(())
@@ -381,13 +537,18 @@ fn validate_legacy_development_environment(environment: &str) -> Result<(), Pipe
     }
 }
 
-fn json_env_or_file<T: DeserializeOwned>(
+struct JsonConfigSource<T> {
+    value: Option<T>,
+    file_parent: Option<PathBuf>,
+}
+
+fn json_env_or_file_source_with_lookup<T: DeserializeOwned>(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
     json_name: &str,
     file_name: &str,
-) -> Result<Option<T>, PipelineProviderError> {
-    let inline = std::env::var(json_name).ok();
-    let file = std::env::var(file_name)
-        .ok()
+) -> Result<JsonConfigSource<T>, PipelineProviderError> {
+    let inline = lookup(json_name);
+    let file = lookup(file_name)
         .map(|value| PathBuf::from(value.trim()))
         .filter(|value| !value.as_os_str().is_empty());
     if inline.is_some() && file.is_some() {
@@ -395,20 +556,19 @@ fn json_env_or_file<T: DeserializeOwned>(
             "{json_name} and {file_name} are mutually exclusive"
         )));
     }
-    let payload = if let Some(payload) = inline {
-        Some(payload)
+    let (payload, file_parent) = if let Some(payload) = inline {
+        ensure_bounded_config(json_name, payload.as_bytes())?;
+        (Some(payload), None)
     } else if let Some(path) = file {
-        Some(fs::read_to_string(&path).map_err(|error| {
-            PipelineProviderError::Configuration(format!(
-                "read {} from {}: {error}",
-                file_name,
-                path.display()
-            ))
-        })?)
+        let parent = validate_pipeline_config_file_path(file_name, &path)?;
+        (
+            Some(read_bounded_utf8_config(file_name, &path)?),
+            Some(parent),
+        )
     } else {
-        None
+        (None, None)
     };
-    payload
+    let value = payload
         .map(|payload| {
             serde_json::from_str(&payload).map_err(|error| {
                 PipelineProviderError::Configuration(format!(
@@ -416,7 +576,99 @@ fn json_env_or_file<T: DeserializeOwned>(
                 ))
             })
         })
-        .transpose()
+        .transpose()?;
+    Ok(JsonConfigSource { value, file_parent })
+}
+
+fn snapshot_pipeline_environment(
+    names: &[&str],
+) -> Result<BTreeMap<String, String>, PipelineProviderError> {
+    let mut values = BTreeMap::new();
+    for name in names {
+        match std::env::var(name) {
+            Ok(value) => {
+                ensure_bounded_config(name, value.as_bytes())?;
+                values.insert((*name).to_string(), value);
+            }
+            Err(std::env::VarError::NotPresent) => {}
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(PipelineProviderError::Configuration(format!(
+                    "{name} must be valid UTF-8"
+                )));
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn ensure_bounded_config(name: &str, bytes: &[u8]) -> Result<(), PipelineProviderError> {
+    if bytes.len() > MAX_PIPELINE_CONFIG_BYTES {
+        Err(PipelineProviderError::Configuration(format!(
+            "{name} exceeds the {MAX_PIPELINE_CONFIG_BYTES}-byte configuration limit"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_pipeline_config_file_path(
+    name: &str,
+    path: &Path,
+) -> Result<PathBuf, PipelineProviderError> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(PipelineProviderError::Configuration(format!(
+            "{name} must be an absolute normalized path"
+        )));
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        PipelineProviderError::Configuration(format!(
+            "inspect {name} at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(PipelineProviderError::Configuration(format!(
+            "{name} at {} must be a regular file, not a symlink",
+            path.display()
+        )));
+    }
+    path.parent()
+        .filter(|parent| parent.is_absolute())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            PipelineProviderError::Configuration(format!(
+                "{name} must have an absolute parent directory"
+            ))
+        })
+}
+
+fn read_bounded_utf8_config(name: &str, path: &Path) -> Result<String, PipelineProviderError> {
+    let file = fs::File::open(path).map_err(|error| {
+        PipelineProviderError::Configuration(format!(
+            "read {name} from {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    file.take((MAX_PIPELINE_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            PipelineProviderError::Configuration(format!(
+                "read {name} from {}: {error}",
+                path.display()
+            ))
+        })?;
+    ensure_bounded_config(name, &bytes)?;
+    String::from_utf8(bytes).map_err(|_| {
+        PipelineProviderError::Configuration(format!(
+            "{name} at {} must be valid UTF-8",
+            path.display()
+        ))
+    })
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -675,10 +927,7 @@ impl BuiltInReleasePipelineProvider {
     pub fn from_env_with_state_database(
         state_database: impl Into<PathBuf>,
     ) -> Result<Self, PipelineProviderError> {
-        Self::new(
-            PipelineProviderConfig::managed_node_from_env(),
-            BuiltInPipelineProviderConfig::from_env_with_state_database(state_database)?,
-        )
+        PipelineBootstrapConfig::from_managed_env()?.build_release_provider(state_database)
     }
 
     /// Managed remote-Agent constructor. It refuses to start when deployment
@@ -688,8 +937,7 @@ impl BuiltInReleasePipelineProvider {
     pub fn from_remote_agent_env_with_state_database(
         state_database: impl Into<PathBuf>,
     ) -> Result<Self, PipelineProviderError> {
-        reject_node_management_environment()?;
-        Self::from_env_with_state_database(state_database)
+        PipelineBootstrapConfig::from_remote_agent_env()?.build_release_provider(state_database)
     }
 
     /// Explicit compatibility constructor for old local Compose development.
@@ -697,14 +945,8 @@ impl BuiltInReleasePipelineProvider {
     pub fn from_legacy_development_env_with_state_database(
         state_database: impl Into<PathBuf>,
     ) -> Result<Self, PipelineProviderError> {
-        // Check the environment class before looking up even one credential.
-        require_legacy_development_environment()?;
-        Self::new(
-            PipelineProviderConfig::from_legacy_development_env(),
-            BuiltInPipelineProviderConfig::from_legacy_development_env_with_state_database(
-                state_database,
-            )?,
-        )
+        PipelineBootstrapConfig::from_legacy_development_env()?
+            .build_release_provider(state_database)
     }
 }
 
@@ -2132,6 +2374,240 @@ mod tests {
 
     fn provider(config: BuiltInPipelineProviderConfig) -> BuiltInReleasePipelineProvider {
         BuiltInReleasePipelineProvider::new(PipelineProviderConfig::default(), config).unwrap()
+    }
+
+    #[test]
+    fn pipeline_internal_roots_cover_secret_files_and_local_store_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_dir = directory.path().join("private-config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let storage_file = config_dir.join("storage.json");
+        let frontend_file = config_dir.join("frontend.json");
+        let storage_root = directory.path().join("storage-data");
+        let frontend_root = directory.path().join("frontend-data");
+        fs::write(
+            &storage_file,
+            serde_json::to_vec(&BTreeMap::from([(
+                "local".to_string(),
+                StorageConnectionConfig::NodeDirectory {
+                    root: storage_root.clone(),
+                },
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &frontend_file,
+            serde_json::to_vec(&BTreeMap::from([(
+                "assets".to_string(),
+                FrontendAssetStoreConfig {
+                    root: frontend_root.clone(),
+                },
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        let secret_root = directory.path().join("secrets");
+        let redis_file = config_dir.join("redis.json");
+        fs::write(&redis_file, "{}").unwrap();
+        let values = BTreeMap::from([
+            (
+                "ORCHESTRATOR_SECRET_DIRECTORY".to_string(),
+                secret_root.display().to_string(),
+            ),
+            (
+                "ORCHESTRATOR_REDIS_CONNECTIONS_FILE".to_string(),
+                redis_file.display().to_string(),
+            ),
+            (
+                "ORCHESTRATOR_STORAGE_CONNECTIONS_FILE".to_string(),
+                storage_file.display().to_string(),
+            ),
+            (
+                "ORCHESTRATOR_FRONTEND_ASSET_STORES_FILE".to_string(),
+                frontend_file.display().to_string(),
+            ),
+        ]);
+        let roots = pipeline_internal_state_roots_from_lookup(|name| values.get(name).cloned())
+            .expect("pipeline paths");
+        assert!(roots.contains(&secret_root));
+        assert!(roots.contains(&config_dir));
+        assert!(roots.contains(&storage_root));
+        assert!(roots.contains(&frontend_root));
+
+        for export in [
+            secret_root.join("export"),
+            config_dir.join("export"),
+            storage_root.join("export"),
+            frontend_root.join("export"),
+        ] {
+            assert!(crate::validate_isolated_workload_roots(&export, &roots).is_err());
+        }
+    }
+
+    #[test]
+    fn pipeline_bootstrap_snapshot_is_immutable_and_shared_by_roots_and_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_dir = directory.path().join("private-config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let redis_file = config_dir.join("redis.json");
+        let storage_file = config_dir.join("storage.json");
+        let frontend_file = config_dir.join("frontend.json");
+        let original_storage_root = directory.path().join("original-storage");
+        let replacement_storage_root = directory.path().join("replacement-storage");
+        let original_frontend_root = directory.path().join("original-frontend");
+        let replacement_frontend_root = directory.path().join("replacement-frontend");
+        fs::create_dir_all(&original_storage_root).unwrap();
+        fs::create_dir_all(&original_frontend_root).unwrap();
+
+        fs::write(
+            &redis_file,
+            serde_json::to_vec(&BTreeMap::from([(
+                "events".to_string(),
+                RedisConnectionConfig {
+                    url: "rediss://original:secret@redis.internal:6380/1".to_string(),
+                },
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &storage_file,
+            serde_json::to_vec(&BTreeMap::from([(
+                "local".to_string(),
+                StorageConnectionConfig::NodeDirectory {
+                    root: original_storage_root.clone(),
+                },
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &frontend_file,
+            serde_json::to_vec(&BTreeMap::from([(
+                "assets".to_string(),
+                FrontendAssetStoreConfig {
+                    root: original_frontend_root.clone(),
+                },
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        let values = BTreeMap::from([
+            (
+                "ORCHESTRATOR_REDIS_CONNECTIONS_FILE".to_string(),
+                redis_file.display().to_string(),
+            ),
+            (
+                "ORCHESTRATOR_STORAGE_CONNECTIONS_FILE".to_string(),
+                storage_file.display().to_string(),
+            ),
+            (
+                "ORCHESTRATOR_FRONTEND_ASSET_STORES_FILE".to_string(),
+                frontend_file.display().to_string(),
+            ),
+        ]);
+        let snapshot =
+            PipelineBootstrapConfig::from_lookup(PipelineProviderMode::ManagedNode, |name| {
+                values.get(name).cloned()
+            })
+            .unwrap();
+
+        fs::write(
+            &redis_file,
+            r#"{"events":{"url":"rediss://replacement:secret@redis.internal:6380/2"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            &storage_file,
+            serde_json::to_vec(&BTreeMap::from([(
+                "local".to_string(),
+                StorageConnectionConfig::NodeDirectory {
+                    root: replacement_storage_root.clone(),
+                },
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &frontend_file,
+            serde_json::to_vec(&BTreeMap::from([(
+                "assets".to_string(),
+                FrontendAssetStoreConfig {
+                    root: replacement_frontend_root.clone(),
+                },
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            snapshot.event_connection_urls()["events"],
+            "rediss://original:secret@redis.internal:6380/1"
+        );
+        assert!(snapshot.internal_state_roots().contains(&config_dir));
+        assert!(
+            snapshot
+                .internal_state_roots()
+                .contains(&original_storage_root)
+        );
+        assert!(
+            snapshot
+                .internal_state_roots()
+                .contains(&original_frontend_root)
+        );
+        assert!(
+            !snapshot
+                .internal_state_roots()
+                .contains(&replacement_storage_root)
+        );
+        let provider = snapshot
+            .build_release_provider(directory.path().join("provider-state.sqlite3"))
+            .unwrap();
+        assert!(matches!(
+            provider.config.storage_connections.get("local"),
+            Some(StorageConnectionConfig::NodeDirectory { root }) if root == &original_storage_root
+        ));
+        assert_eq!(
+            provider.config.frontend_asset_stores["assets"].root,
+            original_frontend_root
+        );
+        assert_eq!(
+            provider.config.redis_connections["events"].url,
+            snapshot.event_connection_urls()["events"]
+        );
+    }
+
+    #[test]
+    fn pipeline_bootstrap_rejects_oversized_and_non_utf8_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let oversized = directory.path().join("oversized.json");
+        fs::write(&oversized, vec![b' '; MAX_PIPELINE_CONFIG_BYTES + 1]).unwrap();
+        let values = BTreeMap::from([(
+            "ORCHESTRATOR_REDIS_CONNECTIONS_FILE".to_string(),
+            oversized.display().to_string(),
+        )]);
+        let error =
+            PipelineBootstrapConfig::from_lookup(PipelineProviderMode::ManagedNode, |name| {
+                values.get(name).cloned()
+            })
+            .err()
+            .expect("oversized configuration must be rejected");
+        assert!(error.to_string().contains("exceeds"));
+
+        let non_utf8 = directory.path().join("non-utf8.json");
+        fs::write(&non_utf8, [0xff]).unwrap();
+        let values = BTreeMap::from([(
+            "ORCHESTRATOR_REDIS_CONNECTIONS_FILE".to_string(),
+            non_utf8.display().to_string(),
+        )]);
+        let error =
+            PipelineBootstrapConfig::from_lookup(PipelineProviderMode::ManagedNode, |name| {
+                values.get(name).cloned()
+            })
+            .err()
+            .expect("non-UTF-8 configuration must be rejected");
+        assert!(error.to_string().contains("valid UTF-8"));
     }
 
     #[test]

@@ -64,7 +64,7 @@ Node 用一次性注册码换取带 SPIFFE Node ID 的 mTLS 证书。Agent 只 c
 
 这条边界删除了共享 `ORCHESTRATOR_INTERNAL_TOKEN` 的 Node push 语义：Node 不持有可反向调用人类控制 API 的共享控制面 token，控制面也不向 Node 发送 shell 字符串。远程 Agent 不保存 Auth/Gateway/API Registry 管理凭据。
 
-Agent 只凭 Node mTLS 与 Deployment assignment 兑换 15 分钟 workload JWT，并在到期前原子替换 Deployment 私有 token 文件。容器只读挂载 `/run/ojos/service`；context 含 Gateway origin、CA、命名 Binding 和 generation，不含 Node 私钥或管理 token。Desktop 的 loopback Agent 复用同一 Job/runtime/context 语义，只是传输限定在本机。
+Agent 只凭 Node mTLS 与 Deployment assignment 兑换 15 分钟 workload JWT，并在到期前原子替换 Deployment 私有 token 文件。容器只读挂载 `/run/ojos/service`；context 含 Gateway origin、CA、命名 Binding 和 generation，不含 Node 私钥或管理 token。Desktop 不构造执行 Agent：缺少可证明的宿主文件到容器 UID/ACL 私密性契约时，managed execution 明确 `Unavailable`，并要求注册独立 Agent。
 
 ## 6. 所有客户端只耦合 `/api/v1`
 

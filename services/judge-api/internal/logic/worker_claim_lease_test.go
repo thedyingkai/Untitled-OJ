@@ -133,6 +133,28 @@ func TestClaimFinalizeFailureCompensationDoesNotOverwriteNewLease(t *testing.T) 
 	}
 }
 
+func TestWorkerClaimsDatabaseTaskWithoutRedisTaskID(t *testing.T) {
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeClaimMetadata(t, w)
+	}))
+	defer storage.Close()
+
+	repo := newClaimLeaseRepo(claimLeaseFixture("sub-db-only", 89))
+	svcCtx := claimLeaseServiceContext(repo, storage.URL, 30)
+	resp, err := NewWorkerClaimTasksLogic(context.Background(), svcCtx).WorkerClaimTasks(&types.WorkerClaimTasksReq{
+		WorkerId:           "worker-a",
+		SupportedLanguages: []string{"cpp17"},
+		AvailableSlots:     1,
+		TaskIds:            nil,
+	})
+	if err != nil {
+		t.Fatalf("claim PostgreSQL task without Redis signal: %v", err)
+	}
+	if len(resp.Tasks) != 1 || resp.Tasks[0].TaskId != "sub-db-only" {
+		t.Fatalf("database polling did not claim pending task: %#v", resp)
+	}
+}
+
 func TestWorkerArtifactHandlersRejectExpiredRunningLease(t *testing.T) {
 	fixture := claimLeaseFixture("sub-expired", 85)
 	fixture.WorkerID = "worker-a"
@@ -261,6 +283,12 @@ func (r *claimLeaseRepo) ClaimTasks(_ context.Context, workerID string, _ []stri
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	claimed := make([]repository.TaskLeaseView, 0, limit)
+	if len(taskIDs) == 0 {
+		taskIDs = make([]string, 0, len(r.leases))
+		for taskID := range r.leases {
+			taskIDs = append(taskIDs, taskID)
+		}
+	}
 	for _, taskID := range taskIDs {
 		lease, ok := r.leases[taskID]
 		if !ok || lease.Status != "PENDING" {

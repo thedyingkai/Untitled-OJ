@@ -3,7 +3,11 @@
 
 package config
 
-import "github.com/zeromicro/go-zero/rest"
+import (
+	"ojos-shared/servicecontext"
+
+	"github.com/zeromicro/go-zero/rest"
+)
 
 type Config struct {
 	rest.RestConf
@@ -65,6 +69,21 @@ type StorageConfig struct {
 	CallerService           string `json:",optional"`
 	CallerNodeID            string `json:",optional"`
 	ServiceToken            string `json:",optional"`
+
+	contextProvider *servicecontext.ContextProvider
+}
+
+// SetContextProvider wires the Agent-owned, hot-reloading Service Context into
+// the storage adapter without exposing an implementation detail to go-zero's
+// configuration decoder.
+func (c *StorageConfig) SetContextProvider(provider *servicecontext.ContextProvider) {
+	if c != nil {
+		c.contextProvider = provider
+	}
+}
+
+func (c StorageConfig) ContextProvider() *servicecontext.ContextProvider {
+	return c.contextProvider
 }
 
 type SubmissionConfig struct {

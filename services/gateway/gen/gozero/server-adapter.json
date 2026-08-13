@@ -1,0 +1,273 @@
+{
+  "schemaVersion": "ojos.dev/gozero-server-adapter/v1",
+  "serviceId": "gateway",
+  "operations": [
+    {
+      "operationId": "listGatewayEndpointGroups",
+      "handler": "ListGatewayEndpointGroups",
+      "method": "GET",
+      "path": "/api/admin/endpoint-groups",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getGatewayAdminHealth",
+      "handler": "GetGatewayAdminHealth",
+      "method": "GET",
+      "path": "/api/admin/health",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "listGatewayOrchestratorRoutes",
+      "handler": "ListGatewayOrchestratorRoutes",
+      "method": "GET",
+      "path": "/api/admin/orchestrator/routes",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "reloadGatewayOrchestratorRoutes",
+      "handler": "ReloadGatewayOrchestratorRoutes",
+      "method": "POST",
+      "path": "/api/admin/orchestrator/routes/reload",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [
+        "sha256:ef5c956637d97a5283bcd18c6857db7e583c4b830e0d65f009406129d082e767"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getGatewayOrchestratorSnapshot",
+      "handler": "GetGatewayOrchestratorSnapshot",
+      "method": "GET",
+      "path": "/api/admin/orchestrator/snapshot",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "listGatewayServices",
+      "handler": "ListGatewayServices",
+      "method": "GET",
+      "path": "/api/admin/services",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "listGatewayServiceStatuses",
+      "handler": "ListGatewayServiceStatuses",
+      "method": "GET",
+      "path": "/api/admin/services/status",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "listGatewayServiceOperations",
+      "handler": "ListGatewayServiceOperations",
+      "method": "GET",
+      "path": "/api/admin/services/status/operations",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getGatewayServiceOperation",
+      "handler": "GetGatewayServiceOperation",
+      "method": "GET",
+      "path": "/api/admin/services/status/operations/{id}",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getGatewayServiceStatus",
+      "handler": "GetGatewayServiceStatus",
+      "method": "GET",
+      "path": "/api/admin/services/status/{id}",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getGatewayService",
+      "handler": "GetGatewayService",
+      "method": "GET",
+      "path": "/api/admin/services/{id}",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getGatewayServiceTopology",
+      "handler": "GetGatewayServiceTopology",
+      "method": "GET",
+      "path": "/api/admin/topology",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "system.admin",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getGatewayUserContributionSnapshot",
+      "handler": "GetGatewayUserContributionSnapshot",
+      "method": "GET",
+      "path": "/api/v1/contributions/snapshot",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "deleteGatewayTopologyProjection",
+      "handler": "DeleteGatewayTopologyProjection",
+      "method": "DELETE",
+      "path": "/api/v1/topologies/{id}",
+      "audience": "internal",
+      "auth": "required",
+      "permission": null,
+      "requestSchemaDigests": [
+        "sha256:66dbc3b364e496e69ccf7698477f01bb7d9bfef8123e50024282938728d36dbd"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getGatewayTopologyProjection",
+      "handler": "GetGatewayTopologyProjection",
+      "method": "GET",
+      "path": "/api/v1/topologies/{id}",
+      "audience": "internal",
+      "auth": "required",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "applyGatewayTopologyProjection",
+      "handler": "ApplyGatewayTopologyProjection",
+      "method": "PUT",
+      "path": "/api/v1/topologies/{id}",
+      "audience": "internal",
+      "auth": "required",
+      "permission": null,
+      "requestSchemaDigests": [
+        "sha256:66dbc3b364e496e69ccf7698477f01bb7d9bfef8123e50024282938728d36dbd"
+      ],
+      "responseSchemaDigests": [
+        "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+      ]
+    },
+    {
+      "operationId": "getGatewayCompatibilityHealth",
+      "handler": "GetGatewayCompatibilityHealth",
+      "method": "GET",
+      "path": "/health",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:7c4bb65cda2f8731afa3a99a88289088d4fc8f822ae9a2b4e2a881cc1af9c765"
+      ]
+    },
+    {
+      "operationId": "getGatewayLiveness",
+      "handler": "GetGatewayLiveness",
+      "method": "GET",
+      "path": "/healthz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:7c4bb65cda2f8731afa3a99a88289088d4fc8f822ae9a2b4e2a881cc1af9c765"
+      ]
+    },
+    {
+      "operationId": "getGatewayMetrics",
+      "handler": "GetGatewayMetrics",
+      "method": "GET",
+      "path": "/metrics",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+      ]
+    },
+    {
+      "operationId": "getGatewayReadiness",
+      "handler": "GetGatewayReadiness",
+      "method": "GET",
+      "path": "/readyz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:7c4bb65cda2f8731afa3a99a88289088d4fc8f822ae9a2b4e2a881cc1af9c765",
+        "sha256:7c4bb65cda2f8731afa3a99a88289088d4fc8f822ae9a2b4e2a881cc1af9c765"
+      ]
+    }
+  ]
+}

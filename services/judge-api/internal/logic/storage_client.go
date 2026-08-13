@@ -33,7 +33,7 @@ type storageClient struct {
 	callerNodeID    string
 	serviceToken    string
 	client          *http.Client
-	managed         *servicecontext.ServiceContext
+	managed         *servicecontext.ContextProvider
 	managedErr      error
 }
 
@@ -54,8 +54,7 @@ type storedSubmissionSource struct {
 
 func storageEnabled(c config.StorageConfig) bool {
 	// ServiceEndpoint is a legacy fallback; internal gateway + api_id is the default path.
-	managed, err := servicecontext.LoadOptional()
-	return managed != nil || err != nil || strings.TrimSpace(c.ServiceEndpoint) != "" || strings.TrimSpace(c.InternalGatewayEndpoint) != ""
+	return c.ContextProvider() != nil || strings.TrimSpace(c.ServiceEndpoint) != "" || strings.TrimSpace(c.InternalGatewayEndpoint) != ""
 }
 
 func storeSubmissionSource(
@@ -224,25 +223,26 @@ func newStorageClient(config config.StorageConfig) storageClient {
 			Timeout: 15 * time.Second,
 		},
 	}
-	managed, err := servicecontext.LoadOptional()
+	managed := config.ContextProvider()
+	if managed == nil {
+		return result
+	}
+	snapshot, err := managed.Current(context.Background())
 	if err != nil {
 		result.managedErr = err
 		return result
 	}
-	if managed == nil {
-		return result
-	}
-	if err := managed.RequireService("judge-api"); err != nil {
+	if err := snapshot.RequireService("judge-api"); err != nil {
 		result.managedErr = err
 		return result
 	}
-	for _, requirement := range []string{"storage_get", "storage_put", "storage_head"} {
-		if _, err := managed.Binding(requirement); err != nil {
+	for _, requirement := range []string{"storage.object.get", "storage.object.put", "storage.object.head"} {
+		if _, err := managed.Binding(context.Background(), requirement); err != nil {
 			result.managedErr = fmt.Errorf("judge-api managed storage: %w", err)
 			return result
 		}
 	}
-	client, err := managed.Client()
+	client, err := managed.Client(context.Background())
 	if err != nil {
 		result.managedErr = err
 		return result
@@ -265,13 +265,13 @@ func (c storageClient) putObject(
 	if c.baseEndpoint() == "" {
 		return nil, errors.New("storage-service endpoint is empty")
 	}
-	req, err := c.newObjectRequest(ctx, "storage_put", http.MethodPut, bucket, key, body)
+	req, err := c.newObjectRequest(ctx, "storage.object.put", http.MethodPut, bucket, key, body)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
 	c.addInternalGatewayHeaders(req)
-	resp, err := c.client.Do(req)
+	resp, err := c.doRequest(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -301,12 +301,12 @@ func (c storageClient) getObject(
 	if err != nil {
 		return nil, nil, err
 	}
-	req, err := c.newObjectRequest(ctx, "storage_get", http.MethodGet, bucket, key, nil)
+	req, err := c.newObjectRequest(ctx, "storage.object.get", http.MethodGet, bucket, key, nil)
 	if err != nil {
 		return nil, nil, err
 	}
 	c.addInternalGatewayHeaders(req)
-	resp, err := c.client.Do(req)
+	resp, err := c.doRequest(ctx, req)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -333,7 +333,7 @@ func (c storageClient) getMetadata(
 		return nil, err
 	}
 	c.addInternalGatewayHeaders(req)
-	resp, err := c.client.Do(req)
+	resp, err := c.doRequest(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -356,12 +356,12 @@ func (c storageClient) headObject(
 	if c.managedErr != nil {
 		return nil, c.managedErr
 	}
-	req, err := c.newObjectRequest(ctx, "storage_head", http.MethodHead, bucket, key, nil)
+	req, err := c.newObjectRequest(ctx, "storage.object.head", http.MethodHead, bucket, key, nil)
 	if err != nil {
 		return nil, err
 	}
 	c.addInternalGatewayHeaders(req)
-	resp, err := c.client.Do(req)
+	resp, err := c.doRequest(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +381,7 @@ func (c storageClient) headObject(
 
 func (c storageClient) objectURL(bucket string, key string) string {
 	if c.managed != nil {
-		value, _ := c.managed.BindingURL("storage_get", c.relativeObjectPath(bucket, key))
+		value, _ := c.managed.BindingURL(context.Background(), "storage.object.get", c.relativeObjectPath(bucket, key))
 		return value
 	}
 	if c.internalGateway != "" {
@@ -397,7 +397,7 @@ func (c storageClient) metadataURL(bucket string, key string) string {
 
 func (c storageClient) putURL(bucket string, key string) string {
 	if c.managed != nil {
-		value, _ := c.managed.BindingURL("storage_put", c.relativeObjectPath(bucket, key))
+		value, _ := c.managed.BindingURL(context.Background(), "storage.object.put", c.relativeObjectPath(bucket, key))
 		return value
 	}
 	if c.internalGateway != "" {
@@ -408,7 +408,7 @@ func (c storageClient) putURL(bucket string, key string) string {
 
 func (c storageClient) headURL(bucket string, key string) string {
 	if c.managed != nil {
-		value, _ := c.managed.BindingURL("storage_head", c.relativeObjectPath(bucket, key))
+		value, _ := c.managed.BindingURL(context.Background(), "storage.object.head", c.relativeObjectPath(bucket, key))
 		return value
 	}
 	return c.apiURL(c.headApiID, bucket, key)
@@ -427,9 +427,9 @@ func (c storageClient) newObjectRequest(ctx context.Context, binding, method, bu
 	}
 	var target string
 	switch binding {
-	case "storage_put":
+	case "storage.object.put":
 		target = c.putURL(bucket, key)
-	case "storage_head":
+	case "storage.object.head":
 		target = c.headURL(bucket, key)
 	default:
 		target = c.objectURL(bucket, key)
@@ -443,9 +443,31 @@ func (c storageClient) apiURL(apiID string, bucket string, key string) string {
 
 func (c storageClient) baseEndpoint() string {
 	if c.managed != nil {
-		return c.managed.Gateway.Origin
+		snapshot, err := c.managed.Current(context.Background())
+		if err != nil {
+			return ""
+		}
+		return snapshot.Gateway.Origin
 	}
 	return firstNonEmpty(c.internalGateway, c.endpoint)
+}
+
+// doRequest rebuilds the managed HTTP transport from the current snapshot for
+// every call. Together with ContextProvider.NewRequest this makes gateway, CA,
+// binding and credential rotation effective without restarting judge-api.
+func (c storageClient) doRequest(ctx context.Context, req *http.Request) (*http.Response, error) {
+	client := c.client
+	if c.managed != nil {
+		current, err := c.managed.Client(ctx)
+		if err != nil {
+			return nil, err
+		}
+		client = current
+	}
+	if client == nil {
+		return nil, errors.New("storage HTTP client is unavailable")
+	}
+	return client.Do(req)
 }
 
 func (c storageClient) addInternalGatewayHeaders(req *http.Request) {

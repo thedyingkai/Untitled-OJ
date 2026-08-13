@@ -4,12 +4,12 @@ import (
 	"strings"
 	"testing"
 
-	"ojos-shared/eventing"
+	"ojos-problem-events/problemv1"
 )
 
 func TestNormalizedArtifactIntentAcceptsPackageAndContentKeys(t *testing.T) {
 	digest := strings.Repeat("a", 64)
-	for _, artifact := range []eventing.ArtifactRef{
+	for _, artifact := range []problemv1.ArtifactRef{
 		{
 			URI:    "storage://problems/package-sha256-" + digest + ".zip",
 			SHA256: digest, SizeBytes: 1,
@@ -27,7 +27,7 @@ func TestNormalizedArtifactIntentAcceptsPackageAndContentKeys(t *testing.T) {
 
 func TestNormalizedArtifactIntentRejectsAmbiguousKeysAndInvalidSizes(t *testing.T) {
 	digest := strings.Repeat("b", 64)
-	for _, artifact := range []eventing.ArtifactRef{
+	for _, artifact := range []problemv1.ArtifactRef{
 		{URI: "storage://problems/package-sha256-" + digest + ".zip", SHA256: digest, SizeBytes: 0},
 		{URI: "storage://Problems/problem-1-objects-sha256-" + digest, SHA256: digest, SizeBytes: 1},
 		{URI: "storage://p/problem-1-objects-sha256-" + digest, SHA256: digest, SizeBytes: 1},

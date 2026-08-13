@@ -1,0 +1,102 @@
+{
+  "schemaVersion": "ojos.dev/codegen-report/v1",
+  "serviceId": "auth-service",
+  "serviceVersion": "0.1.0",
+  "files": [
+    {
+      "path": "go/client.go",
+      "digest": "sha256:924645e7b80a9e914229c2d62f8b6fca9166a85f35bffb59c9447b8b009d3ab8",
+      "size": 43901
+    },
+    {
+      "path": "go/client_test.go",
+      "digest": "sha256:ab368c457bde18142d1acffcad062a27da2d705586f30e83190cc00ded6379b3",
+      "size": 5020
+    },
+    {
+      "path": "go/events.go",
+      "digest": "sha256:b641471b429b9aa277b3f77f25831b3dcb8943b743becf01d02c8323a8297a98",
+      "size": 496
+    },
+    {
+      "path": "go/events_test.go",
+      "digest": "sha256:48031deb5700cddba90dd324a26a1c604a90d23d0141fb6f9bffee529b6b3796",
+      "size": 69
+    },
+    {
+      "path": "go/go.mod",
+      "digest": "sha256:e9d60ef632863a0ef9f5f54d89932ec213e349da32f6528be17bb92970a43357",
+      "size": 44
+    },
+    {
+      "path": "gozero/server-adapter.json",
+      "digest": "sha256:5f4a134c4f8fe740267c1103552626f4508f3884cffecf5fef9cf52db6030912",
+      "size": 21547
+    },
+    {
+      "path": "gozero/service.api",
+      "digest": "sha256:94bbc9f4d86b1b6b6ea76a5ed506e9dc4f3117597bcb17560662d14b02de3ccc",
+      "size": 12380
+    },
+    {
+      "path": "rust/Cargo.toml",
+      "digest": "sha256:52855d008c7c9b5998dddeb4c46a38d445210ee7c619e512552a0d1425dc30a6",
+      "size": 212
+    },
+    {
+      "path": "rust/src/client.rs",
+      "digest": "sha256:0cb64af9cb4939ae55ad65d41706d4beb73d44b59bfa5bdfa0cf4cdd9f0ec725",
+      "size": 25297
+    },
+    {
+      "path": "rust/src/events.rs",
+      "digest": "sha256:edc6781fdbe3d48ce7d178f049ac4c34f31675fbe29e2133f6d7d192c037ed6b",
+      "size": 2465
+    },
+    {
+      "path": "rust/src/lib.rs",
+      "digest": "sha256:6c057a1385d4a58d0c845fcc13e82eb1fd4fa527b2e601b6b3d1541fc118fd3e",
+      "size": 169
+    },
+    {
+      "path": "service.contract.json",
+      "digest": "sha256:10e76b71630427ffca9b89683d0c396983d38ae00caf6f415d689e29997c0d64",
+      "size": 54136
+    },
+    {
+      "path": "ts/package.json",
+      "digest": "sha256:8d33f7d60dd44a5e537ec6019f4bacb95ffeda35958d01aaa377cb3379243332",
+      "size": 234
+    },
+    {
+      "path": "ts/src/client.test.ts",
+      "digest": "sha256:be96c5d6bf141c6ddc6382b6c2936cec16c5ed4d65bd45bf07f9c34fd8fd245f",
+      "size": 3952
+    },
+    {
+      "path": "ts/src/client.ts",
+      "digest": "sha256:328bf0eaa125df0d6c5120f6148f2e79a99bd0d73c369bba1116c57ba1b62705",
+      "size": 25480
+    },
+    {
+      "path": "ts/src/events.test.ts",
+      "digest": "sha256:afdfd092bc101ea76947334d457d26d927847566945de7e96aa2b158a81fd442",
+      "size": 59
+    },
+    {
+      "path": "ts/src/events.ts",
+      "digest": "sha256:66ea0ac44a9481522f19821a7fc000f22e1db1e6a5eb174606dd6ce5ac861b62",
+      "size": 3537
+    },
+    {
+      "path": "ts/src/index.ts",
+      "digest": "sha256:a71963cc03ac6a21e080d85bf3ffb7335a2d60e7fdcf6961e01c9735907da90b",
+      "size": 58
+    },
+    {
+      "path": "ts/tsconfig.json",
+      "digest": "sha256:37f5246ba9a03d1989e77af4ce6be1ccf8743c8b8ae579c976f8158ede1d59cc",
+      "size": 238
+    }
+  ]
+}

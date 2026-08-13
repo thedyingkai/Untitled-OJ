@@ -1,0 +1,68 @@
+openapi: 3.1.0
+info: {title: OJOS Problem Test Data Read API, version: 1.0.0}
+x-ojos-api-id: problem.testdata.read
+x-ojos-service: {id: problem-service, version: 0.1.0}
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    ProblemId: {name: id, in: path, required: true, schema: {type: integer, format: int64, minimum: 1}}
+  schemas:
+    GenericObject: {type: object, additionalProperties: true}
+    TestCase:
+      type: object
+      additionalProperties: false
+      required: [no, input, answer, score, group, sample, hidden, time_limit_ms, memory_limit_mb]
+      properties:
+        no: {type: integer, minimum: 1}
+        input: {type: string}
+        answer: {type: string}
+        score: {type: integer}
+        group: {type: integer}
+        sample: {type: boolean}
+        hidden: {type: boolean}
+        time_limit_ms: {type: integer}
+        memory_limit_mb: {type: integer}
+    Cases:
+      type: object
+      additionalProperties: false
+      required: [cases]
+      properties: {cases: {type: array, items: {$ref: '#/components/schemas/TestCase'}}}
+paths:
+  /problems/{id}/package:
+    parameters: [{$ref: '#/components/parameters/ProblemId'}]
+    get:
+      operationId: getProblemPackage
+      x-ojos-audience: user
+      x-ojos-permission: problem.testdata.read
+      x-ojos-scope: {type: problem, pathParameter: id}
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Package summary and validation, content: {application/json: {schema: {$ref: '#/components/schemas/GenericObject'}}}}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.testdata.read or ownership}
+        '404': {description: Problem not found}
+  /problems/{id}/package/cases:
+    parameters: [{$ref: '#/components/parameters/ProblemId'}]
+    get:
+      operationId: listPackageCases
+      x-ojos-audience: user
+      x-ojos-permission: problem.testdata.read
+      x-ojos-scope: {type: problem, pathParameter: id}
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Cases from the package, content: {application/json: {schema: {$ref: '#/components/schemas/Cases'}}}}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.testdata.read or ownership}
+  /problems/{id}/test-cases:
+    parameters: [{$ref: '#/components/parameters/ProblemId'}]
+    get:
+      operationId: listTestCases
+      x-ojos-audience: user
+      x-ojos-permission: problem.testdata.read
+      x-ojos-scope: {type: problem, pathParameter: id}
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Test cases, content: {application/json: {schema: {$ref: '#/components/schemas/Cases'}}}}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.testdata.read or ownership}

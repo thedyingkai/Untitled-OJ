@@ -1,0 +1,117 @@
+{
+  "schemaVersion": "ojos.dev/build-input/v1",
+  "serviceId": "judge-api",
+  "serviceVersion": "0.1.0",
+  "contractDigest": "sha256:43a0018463b3eb01812970c84493f943f5a033118c98be0a95dc85cc60f40fa2",
+  "generatedFiles": 19,
+  "artifactRequirements": [
+    {
+      "role": "config-schema",
+      "slot": "config.schema",
+      "expectedDigest": "sha256:3e3bd0900106e26478e908b494137223ee9055d8093f2a24794342fb90b398c4",
+      "expectedSize": null
+    },
+    {
+      "role": "contract",
+      "slot": "contract",
+      "expectedDigest": "sha256:43a0018463b3eb01812970c84493f943f5a033118c98be0a95dc85cc60f40fa2",
+      "expectedSize": 27558
+    },
+    {
+      "role": "event-schema:io.ojos.problem.deleted.v1:v1",
+      "slot": "event.io.ojos.problem.deleted.v1.v1.schema",
+      "expectedDigest": "sha256:a462d8e67aa85c9d44b3233f465a8a88d6532afbb0159a7db3b2a6a611d900eb",
+      "expectedSize": null
+    },
+    {
+      "role": "event-schema:io.ojos.problem.snapshot.v1:v1",
+      "slot": "event.io.ojos.problem.snapshot.v1.v1.schema",
+      "expectedDigest": "sha256:9183e7026b3b50f60d0c50f30791273fe38e7daeb633807e54dea5b2b10ad9f7",
+      "expectedSize": null
+    },
+    {
+      "role": "events-manifest",
+      "slot": "events",
+      "expectedDigest": "sha256:2b1e052a2e4f537fd0406d9ed42c5522fd17175e6cca6affc7324283ff2f96b1",
+      "expectedSize": 2123
+    },
+    {
+      "role": "frontend-manifest:judge-api.admin",
+      "slot": "frontend.judge-api.admin.manifest",
+      "expectedDigest": "sha256:5a199b25fd2c0ce8c19d184eb3de43cf1e7a978da31b5dc7f8d8133721f5784c",
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-manifest:judge-api.user",
+      "slot": "frontend.judge-api.user.manifest",
+      "expectedDigest": "sha256:6ad3cf34698adb44aa9d5dd235d21f134ac9e97913092137139b3f7d216d41e7",
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-bundle:judge-api.admin",
+      "slot": "judge-admin-frontend",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "migration:judge-schema-v1",
+      "slot": "judge-migration-v1",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "runtime",
+      "slot": "judge-runtime",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "frontend-bundle:judge-api.user",
+      "slot": "judge-user-frontend",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:judge.queue.status",
+      "slot": "openapi.judge.queue.status",
+      "expectedDigest": "sha256:3f2e7380c3c00a3ae4142a81fcbe9b71e69047b709c302bf03e12b0456e344c5",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:judge.submission.create",
+      "slot": "openapi.judge.submission.create",
+      "expectedDigest": "sha256:6bd4c4205e023f72f8260fcdcb92258f14e386dca23cd99d2d75fac23effa727",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:judge.submission.result",
+      "slot": "openapi.judge.submission.result",
+      "expectedDigest": "sha256:e3210e3977e18188748a17184da7203c9ece2849d88c0e644012d49ecc563fc6",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:judge.worker.control",
+      "slot": "openapi.judge.worker.control",
+      "expectedDigest": "sha256:2be0dec850017ff9bea57528452c95599895e2c9258d861c6f52f7231b5af1d7",
+      "expectedSize": null
+    },
+    {
+      "role": "openapi:judge.worker.status",
+      "slot": "openapi.judge.worker.status",
+      "expectedDigest": "sha256:69a9e68c2f556f2ed7982e32e7e79b27651bce903017346412a280d78233a9b6",
+      "expectedSize": null
+    },
+    {
+      "role": "provenance",
+      "slot": "provenance",
+      "expectedDigest": null,
+      "expectedSize": null
+    },
+    {
+      "role": "sbom",
+      "slot": "sbom",
+      "expectedDigest": null,
+      "expectedSize": null
+    }
+  ]
+}

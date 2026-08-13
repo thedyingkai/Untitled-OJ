@@ -590,6 +590,21 @@ async function handleApi(req, res, url) {
     });
     return;
   }
+  if (req.method === "GET" && pathname === "/api/v1/contributions/snapshot") {
+    envelope(res, {
+      schema_version: "ojos.dev/contribution-snapshot/v1",
+      digest: `sha256:${"0".repeat(64)}`,
+      scope_id: "default",
+      acknowledgements: [],
+      revisions: [],
+      api_surfaces: [],
+      gateway_routes: [],
+      permission_definitions: [],
+      user_frontend_modules: [],
+      admin_frontend_modules: [],
+    });
+    return;
+  }
   if (req.method === "GET" && pathname === "/api/v1/capabilities") {
     envelope(res, {
       actions: actionMatrix.actions.map((action) => ({

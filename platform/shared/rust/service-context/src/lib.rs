@@ -5,7 +5,7 @@ use opentelemetry::global;
 use opentelemetry::propagation::Injector;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Certificate, Client, ClientBuilder, Method, RequestBuilder};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,11 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
+
+mod provider;
+pub use provider::{
+    BindingUnavailable, ContextProvider, ContextUpdate, DEFAULT_CONTEXT_POLL_INTERVAL,
+};
 
 pub const DEFAULT_SERVICE_CONTEXT_FILE: &str = "/run/ojos/service/context.json";
 const MAX_CONTEXT_BYTES: u64 = 1024 * 1024;
@@ -60,7 +65,7 @@ struct WorkloadCredential {
     fingerprint: [u8; 32],
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceContext {
     pub schema_version: u32,
@@ -71,7 +76,7 @@ pub struct ServiceContext {
     pub generation: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeploymentIdentity {
     pub id: String,
@@ -79,7 +84,7 @@ pub struct DeploymentIdentity {
     pub node: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayContext {
     pub origin: String,
@@ -87,7 +92,7 @@ pub struct GatewayContext {
     pub ca_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiBinding {
     pub binding_id: String,

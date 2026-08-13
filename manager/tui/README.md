@@ -72,6 +72,11 @@ Use `-` for the Topology argument when a provider-only release has no Topology,
 but a pipeline options file still follows it. `secret_refs` contains references
 only; the TUI never accepts secret plaintext in this document.
 
+For Composition releases, `store validate` adds a read-only, redacted summary
+of the immutable plan, ResourceClaim providers, and unresolved inputs. The TUI
+does not edit Composition inputs or install from that summary; use the Web
+manager for the validate/edit/revalidate/install flow.
+
 Upgrade and rollback read the Deployment's current active consumer Bindings
 before submitting the replacement, so an omitted mapping cannot silently drop
 them. An intentional rebind uses `store upgrade|rollback <deployment>
@@ -82,6 +87,18 @@ set, prospective Topology diff, and the locally added deterministic
 mutation. The fingerprint is a change detector, not a signature or trust proof.
 Uninstall conflicts report the active
 Topology/Link requirements that must be removed and applied first.
+
+Permanent ResourceClaim deletion is intentionally available only through the
+explicit remote command (there is no shortcut or free-form JSON editor):
+
+```text
+resource purge <claim-id> <node-id> <sha256-digest> <generation> \
+  "PURGE <claim-id> <sha256-digest> GENERATION <generation>" "<audit reason>"
+```
+
+The TUI checks the confirmation byte-for-byte before making a request and sends
+only the five fields in `ResourcePurgeRequest`. It never accepts a database
+password, DSN, secret reference, or actor field for this action.
 
 `--legacy-local` is an explicit, deprecated 0.2 compatibility console. It is
 never selected automatically and is not a production v1 authentication path.

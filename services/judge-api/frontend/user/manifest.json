@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "ojos.frontend/v1",
+  "moduleId": "judge-api.user",
+  "target": "user-shell",
+  "artifact": "judge-user-frontend",
+  "hostApiRange": "^1.0",
+  "routes": [
+    {
+      "id": "judge-api.user.submissions",
+      "path": "/submissions",
+      "title": "Submissions",
+      "menu": true,
+      "order": 50,
+      "permission": "judge.submission.view.own"
+    }
+  ]
+}

@@ -1,3 +1,7 @@
+use crate::resource_claim::{
+    ResourceClaimFailureCodeV1, ResourceClaimPipelineExecutor, ResourceClaimPipelineHandle,
+    ResourceClaimStatusV1,
+};
 use crate::{
     AgentLedger, ArtifactFetcher, HttpReleasePipelineProvider, LeasedJob, LedgerError,
     MigrationDecision, PipelineProviderError, ReleasePipelineProvider, RuntimeContextProvider,
@@ -6,16 +10,22 @@ use crate::{
 use orchestrator_control_plane::{CompletionStatus, JobKind, NewJobEvent};
 use orchestrator_runtime::{
     BindingContextApplyPayload, ContainerRuntime, ContainerSpec, HealthGateDecision,
-    HealthGatePolicy, OciMigrationStep, ReleasePipelinePayload, ReleaseProviderRevision,
-    ReleaseReplacementPayload, ReplacementProviderSaga, RuntimeContext, RuntimeError,
-    RuntimeInstallPayload, RuntimeInstance, RuntimeObservedState, RuntimeProfile,
-    RuntimeReplacement, TypedProvisionerStep, WorkloadCredential, evaluate_health_gate,
+    HealthGatePolicy, MIGRATION_CHECKSUM_LABEL, MIGRATION_IDENTITY_LABEL, MIGRATION_JOB_ID_LABEL,
+    MIGRATION_MANAGED_BY, MIGRATION_MANAGED_BY_LABEL, MIGRATION_RESOURCE_CLAIMS_LABEL,
+    MIGRATION_RUNTIME_ROLE, MIGRATION_RUNTIME_ROLE_LABEL, MIGRATION_SERVICE_LABEL,
+    MIGRATION_VERSION_LABEL, OciMigrationStep, ReleasePipelinePayload, ReleaseProviderRevision,
+    ReleaseReplacementPayload, ReplacementProviderSaga, ResourcePurgePayloadV1,
+    ResourceSecretFileMount, RuntimeContext, RuntimeError, RuntimeInstallPayload, RuntimeInstance,
+    RuntimeObservedState, RuntimeProfile, RuntimeReplacement, TypedProvisionerStep,
+    WorkloadCredential, evaluate_health_gate, migration_identity_sha256,
+    migration_resource_claims_sha256,
 };
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -64,6 +74,7 @@ pub struct JobExecutor<R> {
     artifact_fetcher: Option<Arc<dyn ArtifactFetcher>>,
     runtime_context_provider: Option<Arc<dyn RuntimeContextProvider>>,
     workload_credentials: Option<Arc<WorkloadCredentialSupervisor>>,
+    resource_claims: Option<ResourceClaimPipelineHandle>,
 }
 
 #[derive(Clone)]
@@ -74,6 +85,86 @@ struct MaterializedRuntimeContext {
     credential_active: bool,
 }
 
+/// Tracks the Agent-local deployment binding created by ResourceClaim ensure.
+///
+/// `release_pipeline` deliberately owns this guard outside the async pipeline
+/// body so every non-success return, including a propagated LedgerError, crosses
+/// the same RETAIN compensation boundary.  A successful pipeline disarms by
+/// keeping the binding for the installed runtime; compensation only removes the
+/// deployment binding and never purges the retained provider resource.
+struct ReleasePipelineClaimGuard {
+    manager: Option<ResourceClaimPipelineHandle>,
+    deployment_id: String,
+    armed: bool,
+}
+
+impl ReleasePipelineClaimGuard {
+    fn new(manager: Option<ResourceClaimPipelineHandle>, deployment_id: String) -> Self {
+        Self {
+            manager,
+            deployment_id,
+            armed: false,
+        }
+    }
+
+    /// Arm before calling `ensure`: if a local persistence error makes the
+    /// bind result uncertain, idempotent release still probes the exact
+    /// deployment binding and safely becomes a no-op when none was committed.
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    async fn release(&mut self) -> Result<(), &'static str> {
+        if !self.armed {
+            return Ok(());
+        }
+        let Some(manager) = self.manager.as_ref() else {
+            return Err("the Agent-local ResourceClaim manager is unavailable");
+        };
+        let releases = manager
+            .release_deployment(&self.deployment_id)
+            .await
+            .map_err(|_| "the ResourceClaim deployment release failed")?;
+        let unsafe_state = releases.iter().any(|release| {
+            if release.provider_released {
+                release.claim.status != ResourceClaimStatusV1::Retained
+            } else {
+                release.claim.status != ResourceClaimStatusV1::Ready
+            }
+        });
+        if unsafe_state {
+            return Err("the ResourceClaim binding/provider state is not safely retained");
+        }
+        self.armed = false;
+        Ok(())
+    }
+
+    async fn finish(
+        &mut self,
+        execution: Result<ExecutionOutcome, LedgerError>,
+    ) -> Result<ExecutionOutcome, LedgerError> {
+        match execution {
+            Ok(outcome) if outcome.status == CompletionStatus::Succeeded => Ok(outcome),
+            Ok(mut outcome) => {
+                if let Err(reason) = self.release().await {
+                    mark_resource_claim_compensation_unknown(&mut outcome, reason);
+                }
+                Ok(outcome)
+            }
+            Err(error) => match self.release().await {
+                Ok(()) => Err(error),
+                Err(reason) => {
+                    let mut outcome = needs_attention_outcome(format!(
+                        "release pipeline stopped on an Agent ledger error and ResourceClaim RETAIN compensation could not be proven: {reason}"
+                    ));
+                    mark_resource_claim_compensation_evidence(&mut outcome);
+                    Ok(outcome)
+                }
+            },
+        }
+    }
+}
+
 impl<R> Clone for JobExecutor<R> {
     fn clone(&self) -> Self {
         Self {
@@ -82,6 +173,7 @@ impl<R> Clone for JobExecutor<R> {
             artifact_fetcher: self.artifact_fetcher.clone(),
             runtime_context_provider: self.runtime_context_provider.clone(),
             workload_credentials: self.workload_credentials.clone(),
+            resource_claims: self.resource_claims.clone(),
         }
     }
 }
@@ -97,6 +189,7 @@ where
             artifact_fetcher: None,
             runtime_context_provider: None,
             workload_credentials: None,
+            resource_claims: None,
         }
     }
 
@@ -107,6 +200,7 @@ where
             artifact_fetcher: None,
             runtime_context_provider: None,
             workload_credentials: None,
+            resource_claims: None,
         }
     }
 
@@ -130,6 +224,14 @@ where
         self
     }
 
+    pub fn with_resource_claims(
+        mut self,
+        resource_claims: Arc<dyn ResourceClaimPipelineExecutor>,
+    ) -> Self {
+        self.resource_claims = Some(ResourceClaimPipelineHandle::new(resource_claims));
+        self
+    }
+
     pub async fn execute(
         &self,
         job: &LeasedJob,
@@ -148,7 +250,22 @@ where
     ) -> Result<ExecutionOutcome, LedgerError> {
         match job.kind {
             JobKind::Install => self.install(job, ledger, cancellation).await,
-            JobKind::ReleasePipeline => self.release_pipeline(job, ledger, cancellation).await,
+            JobKind::ReleasePipeline => {
+                let deployment_id = job
+                    .payload
+                    .get("install")
+                    .and_then(|install| install.get("spec"))
+                    .and_then(|spec| spec.get("deployment_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let mut claim_guard =
+                    ReleasePipelineClaimGuard::new(self.resource_claims.clone(), deployment_id);
+                let execution = self
+                    .release_pipeline(job, ledger, cancellation, &mut claim_guard)
+                    .await;
+                claim_guard.finish(execution).await
+            }
             JobKind::Upgrade => {
                 self.replace_release(job, ledger, cancellation, "upgrade")
                     .await
@@ -163,16 +280,88 @@ where
             }
             JobKind::Health => self.health(job, ledger).await,
             JobKind::BindingContextApply => self.binding_context_apply(job, ledger).await,
+            JobKind::ResourcePurge => self.resource_purge(job).await,
             JobKind::Inventory => Ok(ExecutionOutcome::failed(
                 "inventory jobs are not part of the v1 mutation executor",
             )),
-            JobKind::TopologyApply | JobKind::ExternalHealth => Ok(ExecutionOutcome::failed(
-                "control-plane-only jobs cannot run on a Node Agent",
-            )),
+            JobKind::TopologyApply | JobKind::ContributionProjection | JobKind::ExternalHealth => {
+                Ok(ExecutionOutcome::failed(
+                    "control-plane-only jobs cannot run on a Node Agent",
+                ))
+            }
             JobKind::NodeDrain | JobKind::NodeRemove => Ok(ExecutionOutcome::failed(
                 "Node lifecycle jobs are control-plane-only and cannot run on a Node Agent",
             )),
         }
+    }
+
+    async fn resource_purge(&self, job: &LeasedJob) -> Result<ExecutionOutcome, LedgerError> {
+        let payload: ResourcePurgePayloadV1 = match decode_payload(job) {
+            Ok(payload) => payload,
+            Err(outcome) => return Ok(outcome),
+        };
+        if let Err(error) = payload.validate() {
+            return Ok(ExecutionOutcome::failed(format!(
+                "invalid resource purge payload: {error}"
+            )));
+        }
+        let Some(manager) = &self.resource_claims else {
+            return Ok(ExecutionOutcome::failed(
+                "resource purge requires an Agent-local resource provider",
+            ));
+        };
+        let claim = match manager.purge(&payload).await {
+            Ok(claim) => claim,
+            Err(crate::resource_claim::ResourceClaimError::ExecutionOutcomeUnknown) => {
+                return Ok(needs_attention_outcome(
+                    "resource purge ended without a proven provider outcome",
+                ));
+            }
+            Err(error) => {
+                return Ok(ExecutionOutcome::failed(format!(
+                    "resource purge rejected before completion: {error}"
+                )));
+            }
+        };
+        let result = json!({
+            "schema_version": "ojos.dev/resource-purge-result/v1",
+            "claim_id": claim.identity.claim_id,
+            "claim_digest": claim.claim_digest,
+            "generation": claim.generation,
+            "status": claim.status,
+            "purge_audit_intent_digest": claim.purge_audit_intent_digest,
+        });
+        Ok(match claim.status {
+            ResourceClaimStatusV1::Deleted => ExecutionOutcome::success(result),
+            ResourceClaimStatusV1::NeedsAttention => ExecutionOutcome {
+                status: CompletionStatus::NeedsAttention,
+                result,
+                error_message: "resource provider outcome is unknown and requires reconciliation"
+                    .to_string(),
+                events: vec![],
+            },
+            ResourceClaimStatusV1::Purging
+                if claim.failure.as_ref().is_some_and(|failure| {
+                    failure.retryable
+                        && failure.code == ResourceClaimFailureCodeV1::ProviderUnavailable
+                }) =>
+            {
+                ExecutionOutcome {
+                    status: CompletionStatus::RetryableFailure,
+                    result,
+                    error_message:
+                        "resource provider was unavailable before purge completion was observed"
+                            .to_string(),
+                    events: vec![],
+                }
+            }
+            _ => ExecutionOutcome {
+                status: CompletionStatus::Failed,
+                result,
+                error_message: "resource purge did not reach the proven DELETED state".to_string(),
+                events: vec![],
+            },
+        })
     }
 
     async fn binding_context_apply(
@@ -706,10 +895,34 @@ where
             .step_started(
                 &job.job_id,
                 step_index,
-                "compensate_remove_managed_release_volume",
+                if volume.lifecycle == orchestrator_runtime::RETAIN_VOLUME_LIFECYCLE {
+                    "compensate_retain_managed_volume"
+                } else {
+                    "compensate_remove_managed_release_volume"
+                },
                 crate::now_ms(),
             )
             .map_err(ContextCleanupError::Ledger)?;
+        if volume.lifecycle == orchestrator_runtime::RETAIN_VOLUME_LIFECYCLE {
+            ledger
+                .finish_managed_volume_cleanup(deployment_id, crate::now_ms())
+                .map_err(ContextCleanupError::Ledger)?;
+            ledger
+                .step_succeeded(
+                    &job.job_id,
+                    step_index,
+                    &json!({
+                        "deployment_id": deployment_id,
+                        "logical_name": volume.logical_name,
+                        "lifecycle": volume.lifecycle,
+                        "retained": true,
+                        "detached": true,
+                    }),
+                    crate::now_ms(),
+                )
+                .map_err(ContextCleanupError::Ledger)?;
+            return Ok(true);
+        }
         match self.runtime.remove_managed_volume(&volume).await {
             Ok(()) => {
                 ledger
@@ -798,10 +1011,21 @@ where
         ledger: &mut AgentLedger,
         cancellation: watch::Receiver<bool>,
     ) -> Result<ExecutionOutcome, LedgerError> {
-        let mut payload: InstallPayload = match decode_payload(job) {
+        let payload: InstallPayload = match decode_payload(job) {
             Ok(payload) => payload,
             Err(outcome) => return Ok(outcome),
         };
+        self.install_payload(job, ledger, cancellation, payload)
+            .await
+    }
+
+    async fn install_payload(
+        &self,
+        job: &LeasedJob,
+        ledger: &mut AgentLedger,
+        cancellation: watch::Receiver<bool>,
+        mut payload: InstallPayload,
+    ) -> Result<ExecutionOutcome, LedgerError> {
         if let Err(error) = payload
             .spec
             .runtime_contract
@@ -1083,6 +1307,7 @@ where
         job: &LeasedJob,
         ledger: &mut AgentLedger,
         cancellation: watch::Receiver<bool>,
+        claim_guard: &mut ReleasePipelineClaimGuard,
     ) -> Result<ExecutionOutcome, LedgerError> {
         const AUTH_APPLY_STEP: u32 = 1_000_000;
         const AUTH_COMPENSATE_STEP: u32 = 1_000_001;
@@ -1090,6 +1315,7 @@ where
         const GATEWAY_PUBLISH_STEP: u32 = 2_000_000;
         const GATEWAY_RUNTIME_COMPENSATE_STEP: u32 = 2_000_001;
         const GATEWAY_AUTH_COMPENSATE_STEP: u32 = 2_000_002;
+        const RESOURCE_CLAIM_BASE_STEP: u32 = 900_000;
 
         let mut payload: ReleasePipelinePayload = match decode_payload(job) {
             Ok(payload) => payload,
@@ -1097,6 +1323,82 @@ where
         };
         if let Err(message) = validate_pipeline_payload(&payload) {
             return Ok(ExecutionOutcome::failed(message));
+        }
+
+        let mut resource_outputs = std::collections::BTreeMap::new();
+        if !payload.resource_claims.is_empty() {
+            let Some(manager) = self.resource_claims.as_ref() else {
+                return Ok(ExecutionOutcome::failed(
+                    "ReleasePipeline carries resource claims but this Agent has no resource provider configured",
+                ));
+            };
+            for (index, step) in payload.resource_claims.iter().enumerate() {
+                claim_guard.arm();
+                let step_index = RESOURCE_CLAIM_BASE_STEP.saturating_add(index as u32);
+                ledger.step_started(
+                    &job.job_id,
+                    step_index,
+                    "resource_claim_ensure",
+                    crate::now_ms(),
+                )?;
+                let result = manager.ensure(step).await;
+                let claim = match result {
+                    Ok(claim) if claim.status == ResourceClaimStatusV1::Ready => claim,
+                    Ok(claim) => {
+                        let message = format!(
+                            "resource claim {} did not become READY ({:?})",
+                            step.claim_id, claim.status
+                        );
+                        ledger.step_failed(&job.job_id, step_index, &message, crate::now_ms())?;
+                        return Ok(if claim.status == ResourceClaimStatusV1::NeedsAttention {
+                            needs_attention_outcome(message)
+                        } else {
+                            ExecutionOutcome::failed(message)
+                        });
+                    }
+                    Err(error) => {
+                        let message =
+                            format!("resource claim {} ensure failed: {error}", step.claim_id);
+                        ledger.step_failed(&job.job_id, step_index, &message, crate::now_ms())?;
+                        return Ok(needs_attention_outcome(message));
+                    }
+                };
+                let output = claim.output_secret.as_ref().ok_or_else(|| {
+                    LedgerError::InvalidState(format!(
+                        "READY resource claim {} omitted output reference",
+                        step.claim_id
+                    ))
+                })?;
+                let output_path =
+                    manager
+                        .output_path(&output.reference)
+                        .await
+                        .map_err(|error| {
+                            LedgerError::InvalidState(format!(
+                                "resolve resource output for {}: {error}",
+                                step.claim_id
+                            ))
+                        })?;
+                resource_outputs.insert(
+                    step.resource_name.clone(),
+                    (
+                        step.output_path_environment.clone(),
+                        output.reference.clone(),
+                        output_path,
+                    ),
+                );
+                ledger.step_succeeded(
+                    &job.job_id,
+                    step_index,
+                    &json!({
+                        "claim_id": step.claim_id,
+                        "status": "READY",
+                        "output_reference": output.reference,
+                        "secret_values_persisted": false,
+                    }),
+                    crate::now_ms(),
+                )?;
+            }
         }
 
         if let Some(materialization) = payload.materialization.as_ref() {
@@ -1138,6 +1440,30 @@ where
                 }
             }
         }
+
+        for (resource_name, (environment, _reference, path)) in &resource_outputs {
+            let mount = ResourceSecretFileMount {
+                resource_name: resource_name.clone(),
+                host_source_path: strict_path_text(
+                    path,
+                    &format!("resource output for {resource_name}"),
+                )?,
+            };
+            let destination = mount
+                .container_destination()
+                .map_err(|error| LedgerError::InvalidState(error.to_string()))?;
+            payload
+                .install
+                .spec
+                .environment
+                .push(format!("{environment}={destination}"));
+            payload.install.spec.resource_secret_file_mounts.push(mount);
+        }
+        payload
+            .install
+            .spec
+            .resource_secret_file_mounts
+            .sort_by(|left, right| left.resource_name.cmp(&right.resource_name));
 
         let mut auth_applied = false;
         if let Some(auth) = payload.auth.as_ref() {
@@ -1255,7 +1581,43 @@ where
             }
             let index = u32::try_from(index).unwrap_or(u32::MAX / 16);
             let base = MIGRATION_BASE_STEP.saturating_add(index.saturating_mul(16));
-            match self.run_oci_migration(job, ledger, migration, base).await {
+            let mut migration = migration.clone();
+            let mut migration_mounts = Vec::new();
+            for resource_name in &migration.resource_claims {
+                let Some((environment, _reference, path)) = resource_outputs.get(resource_name)
+                else {
+                    return Ok(ExecutionOutcome::failed(format!(
+                        "OCI migration references unresolved resource claim {resource_name}"
+                    )));
+                };
+                let mount = ResourceSecretFileMount {
+                    resource_name: resource_name.clone(),
+                    host_source_path: strict_path_text(
+                        path,
+                        &format!("migration resource output for {resource_name}"),
+                    )?,
+                };
+                let destination = mount
+                    .container_destination()
+                    .map_err(|error| LedgerError::InvalidState(error.to_string()))?;
+                migration
+                    .environment
+                    .push(format!("{environment}={destination}"));
+                migration_mounts.push(mount);
+            }
+            if migration.resource_claims.len() == 1 {
+                let destination = migration_mounts[0]
+                    .container_destination()
+                    .map_err(|error| LedgerError::InvalidState(error.to_string()))?;
+                migration
+                    .environment
+                    .push(format!("OJOS_RESOURCE_OUTPUT_FILE={destination}"));
+            }
+            migration_mounts.sort_by(|left, right| left.resource_name.cmp(&right.resource_name));
+            match self
+                .run_oci_migration(job, ledger, &migration, migration_mounts, base)
+                .await
+            {
                 Ok(result) => {
                     applied_migration |= result
                         .get("status")
@@ -1294,10 +1656,8 @@ where
             }
         }
 
-        let mut install_job = job.clone();
-        install_job.payload = serde_json::to_value(&payload.install)?;
         let mut install_outcome = self
-            .install(&install_job, ledger, cancellation.clone())
+            .install_payload(job, ledger, cancellation.clone(), payload.install.clone())
             .await?;
         if install_outcome.status != CompletionStatus::Succeeded {
             let resource_errors = self
@@ -1446,6 +1806,11 @@ where
                 "provisioners": payload.provisioners.iter().map(TypedProvisionerStep::provider_name).collect::<Vec<_>>(),
                 "migrations": migration_results,
                 "gateway_published": payload.gateway.is_some(),
+                "resource_claims": payload.resource_claims.iter().map(|claim| json!({
+                    "claim_id": claim.claim_id,
+                    "resource_name": claim.resource_name,
+                    "status": "READY",
+                })).collect::<Vec<_>>(),
             }
         });
         Ok(install_outcome)
@@ -1526,6 +1891,7 @@ where
         job: &LeasedJob,
         ledger: &mut AgentLedger,
         migration: &OciMigrationStep,
+        resource_secret_file_mounts: Vec<ResourceSecretFileMount>,
         base_step: u32,
     ) -> Result<Value, PipelineExecutionError> {
         if migration.timeout_ms == 0 || migration.timeout_ms > 60 * 60_000 {
@@ -1554,6 +1920,20 @@ where
             migration.version,
             &migration.checksum[7..15]
         );
+        let resource_claims_sha256 = migration_resource_claims_sha256(&migration.resource_claims)
+            .map_err(|error| {
+            PipelineExecutionError::Outcome(ExecutionOutcome::failed(error.to_string()))
+        })?;
+        let migration_identity_sha256 = migration_identity_sha256(
+            &migration.service_name,
+            &migration.version,
+            &migration.checksum,
+            &migration.image,
+            &resource_claims_sha256,
+        )
+        .map_err(|error| {
+            PipelineExecutionError::Outcome(ExecutionOutcome::failed(error.to_string()))
+        })?;
         let spec = ContainerSpec {
             deployment_id: migration_id,
             service_id: migration.service_name.clone(),
@@ -1561,23 +1941,70 @@ where
             image: migration.image.clone(),
             runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
             runtime_context: None,
+            resource_secret_file_mounts,
+            retained_volume: None,
             managed_service_context: None,
             command: migration.command.clone(),
             environment: migration.environment.clone(),
             labels: std::collections::HashMap::from([
-                ("ojos.runtime_role".to_string(), "migration".to_string()),
                 (
-                    "ojos.migration_version".to_string(),
+                    MIGRATION_RUNTIME_ROLE_LABEL.to_string(),
+                    MIGRATION_RUNTIME_ROLE.to_string(),
+                ),
+                (
+                    MIGRATION_MANAGED_BY_LABEL.to_string(),
+                    MIGRATION_MANAGED_BY.to_string(),
+                ),
+                (MIGRATION_JOB_ID_LABEL.to_string(), job.job_id.clone()),
+                (
+                    MIGRATION_SERVICE_LABEL.to_string(),
+                    migration.service_name.clone(),
+                ),
+                (
+                    MIGRATION_VERSION_LABEL.to_string(),
                     migration.version.clone(),
                 ),
                 (
-                    "ojos.migration_checksum".to_string(),
+                    MIGRATION_CHECKSUM_LABEL.to_string(),
                     migration.checksum.clone(),
+                ),
+                (
+                    MIGRATION_RESOURCE_CLAIMS_LABEL.to_string(),
+                    resource_claims_sha256.clone(),
+                ),
+                (
+                    MIGRATION_IDENTITY_LABEL.to_string(),
+                    migration_identity_sha256.clone(),
                 ),
             ]),
             published_endpoint: None,
         };
-        let instance = self
+        let ledger_started = if migration.dry_run {
+            false
+        } else {
+            match ledger.begin_migration(
+                &migration.service_name,
+                &migration.version,
+                &migration.checksum,
+                &migration.image.to_string(),
+                &resource_claims_sha256,
+                &migration_identity_sha256,
+                &job.job_id,
+                crate::now_ms(),
+            )? {
+                MigrationDecision::AlreadyApplied(_) => {
+                    return Ok(json!({
+                        "version": migration.version,
+                        "checksum": migration.checksum,
+                        "image": migration.image,
+                        "status": "ALREADY_APPLIED",
+                    }));
+                }
+                MigrationDecision::Execute => true,
+            }
+        };
+
+        let instance = match self
             .runtime_step(
                 ledger,
                 job,
@@ -1587,49 +2014,40 @@ where
                 self.runtime.create_container(&spec),
             )
             .await
-            .map_err(PipelineExecutionError::from_step)?;
-
-        let ledger_started = if migration.dry_run {
-            false
-        } else {
-            match ledger.begin_migration(
-                &migration.service_name,
-                &migration.version,
-                &migration.checksum,
-                &migration.image.to_string(),
-                &job.job_id,
-                crate::now_ms(),
-            )? {
-                MigrationDecision::AlreadyApplied(_) => {
-                    self.runtime_step(
-                        ledger,
-                        job,
-                        base_step + 2,
-                        "migration_remove_replay_container",
-                        true,
-                        self.runtime.remove_container(&instance.container_id, true),
-                    )
-                    .await
-                    .map_err(PipelineExecutionError::from_step)?;
-                    return Ok(json!({
-                        "version": migration.version,
-                        "checksum": migration.checksum,
-                        "image": migration.image,
-                        "status": "ALREADY_APPLIED",
-                    }));
-                }
-                MigrationDecision::Execute => {
-                    ledger.set_migration_container(
+        {
+            Ok(instance) => instance,
+            Err(error) => {
+                if ledger_started {
+                    let detail = step_error_message(&error);
+                    ledger.mark_migration_needs_attention(
                         &migration.service_name,
                         &migration.version,
                         &job.job_id,
-                        &instance.container_id,
+                        &format!("migration container creation outcome is unknown: {detail}"),
                         crate::now_ms(),
                     )?;
-                    true
                 }
+                return Err(PipelineExecutionError::Outcome(needs_attention_outcome(
+                    "migration container creation outcome is unknown; refusing automatic replay",
+                )));
             }
         };
+        if ledger_started
+            && let Err(error) = ledger.set_migration_container(
+                &migration.service_name,
+                &migration.version,
+                &job.job_id,
+                &instance.container_id,
+                crate::now_ms(),
+            )
+        {
+            return Err(PipelineExecutionError::Outcome(needs_attention_outcome(
+                format!(
+                    "migration container {} was created but its identity could not be persisted: {error}; refusing cleanup or replay",
+                    instance.container_id
+                ),
+            )));
+        }
 
         if let Err(error) = self
             .runtime_step(
@@ -1778,7 +2196,15 @@ where
                 &message,
                 crate::now_ms(),
             )?;
+            return Err(PipelineExecutionError::Outcome(needs_attention_outcome(
+                format!(
+                    "{message}; preserving registered migration container {container_id} as reconciliation evidence and refusing automatic replay"
+                ),
+            )));
         }
+        // A dry-run has no durable migration fact. Its stopped or ambiguous
+        // container is still cleaned best-effort, while real migration
+        // containers above are preserved once the outcome becomes unknown.
         let cleanup = self
             .runtime_step(
                 ledger,
@@ -2086,7 +2512,13 @@ where
         action: &str,
         applied_migration: bool,
         runtime_context: Option<&MaterializedRuntimeContext>,
+        payload: &ReleaseReplacementPayload,
+        old_writer_state: ExclusiveOldWriterState,
     ) -> Result<ExecutionOutcome, LedgerError> {
+        let mutation_result_unproven = matches!(
+            &original_error,
+            StepError::Runtime(outcome) if outcome.status == CompletionStatus::NeedsAttention
+        );
         let mut outcome = self
             .compensate_uncommitted_container(
                 job,
@@ -2099,6 +2531,29 @@ where
                 runtime_context,
             )
             .await?;
+        if old_writer_state != ExclusiveOldWriterState::Unaffected {
+            outcome = self
+                .restore_exclusive_old_writer(
+                    job,
+                    ledger,
+                    payload,
+                    container_id,
+                    old_writer_state,
+                    outcome,
+                )
+                .await?;
+            if mutation_result_unproven {
+                outcome.status = CompletionStatus::NeedsAttention;
+                outcome.error_message = format!(
+                    "{}; a retained-volume writer mutation returned an unproven result and requires explicit reconciliation despite successful safety compensation",
+                    outcome.error_message
+                );
+                if let Some(object) = outcome.result.as_object_mut() {
+                    object.insert("mutation_result_unproven".to_string(), Value::Bool(true));
+                    object.insert("manual_recovery_required".to_string(), Value::Bool(true));
+                }
+            }
+        }
         if applied_migration {
             outcome.status = CompletionStatus::NeedsAttention;
             outcome.error_message = format!(
@@ -2110,6 +2565,214 @@ where
             }
         }
         Ok(outcome)
+    }
+
+    async fn restore_exclusive_old_writer(
+        &self,
+        job: &LeasedJob,
+        ledger: &mut AgentLedger,
+        payload: &ReleaseReplacementPayload,
+        candidate_container_id: &str,
+        old_writer_state: ExclusiveOldWriterState,
+        mut outcome: ExecutionOutcome,
+    ) -> Result<ExecutionOutcome, LedgerError> {
+        const INSPECT_STEP: u32 = 3_200_000;
+        const START_STEP: u32 = 3_200_001;
+        const HEALTH_STEP: u32 = 3_200_010;
+
+        let candidate_absence_proven = outcome
+            .result
+            .get("compensated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || outcome
+                .result
+                .get("container_compensated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        if !candidate_absence_proven {
+            return Ok(exclusive_restore_needs_attention(
+                outcome,
+                payload,
+                candidate_container_id,
+                "the replacement container could not be proven absent; the old writer was not restarted to avoid two concurrent writers",
+            ));
+        }
+
+        let deadline =
+            Instant::now() + Duration::from_millis(payload.health_gate.compensation_timeout_ms);
+        let mut must_start = old_writer_state == ExclusiveOldWriterState::StopProven;
+        if old_writer_state == ExclusiveOldWriterState::StopUncertain {
+            let inspected = self
+                .runtime_step(
+                    ledger,
+                    job,
+                    INSPECT_STEP,
+                    "inspect_old_writer_after_uncertain_stop",
+                    false,
+                    bounded_runtime_call(
+                        deadline,
+                        "old writer inspection",
+                        self.runtime.inspect_container(&payload.old_container_id),
+                    ),
+                )
+                .await;
+            match inspected {
+                Ok(instance) => match evaluate_health_gate(&instance, &payload.health_gate) {
+                    HealthGateDecision::Ready => {
+                        annotate_exclusive_restore(
+                            &mut outcome,
+                            payload,
+                            candidate_container_id,
+                            "already_running",
+                        );
+                        return Ok(outcome);
+                    }
+                    HealthGateDecision::Pending(_)
+                        if instance.observed_state == RuntimeObservedState::Running => {}
+                    HealthGateDecision::Pending(_) => must_start = true,
+                    HealthGateDecision::Failed(_)
+                        if matches!(
+                            instance.observed_state,
+                            RuntimeObservedState::Created
+                                | RuntimeObservedState::Exited
+                                | RuntimeObservedState::Stopped
+                        ) =>
+                    {
+                        must_start = true;
+                    }
+                    HealthGateDecision::Failed(reason) => {
+                        return Ok(exclusive_restore_needs_attention(
+                            outcome,
+                            payload,
+                            candidate_container_id,
+                            format!(
+                                "old writer inspection could not establish a restartable state: {reason}"
+                            ),
+                        ));
+                    }
+                },
+                Err(StepError::Ledger(error)) => return Err(error),
+                Err(StepError::Runtime(error)) => {
+                    return Ok(exclusive_restore_needs_attention(
+                        outcome,
+                        payload,
+                        candidate_container_id,
+                        format!(
+                            "old writer stop outcome and subsequent inspection were both unproven: {}",
+                            error.error_message
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let mut start_error = None;
+        if must_start
+            && let Err(error) = self
+                .runtime_step(
+                    ledger,
+                    job,
+                    START_STEP,
+                    "restart_old_writer_after_replacement_failure",
+                    true,
+                    bounded_runtime_call(
+                        deadline,
+                        "old writer restart",
+                        self.runtime.start_container(&payload.old_container_id),
+                    ),
+                )
+                .await
+        {
+            match error {
+                StepError::Ledger(error) => return Err(error),
+                StepError::Runtime(error) => start_error = Some(error.error_message),
+            }
+        }
+
+        let mut probe = 0_u32;
+        loop {
+            probe = probe.saturating_add(1);
+            let inspected = self
+                .runtime_step(
+                    ledger,
+                    job,
+                    HEALTH_STEP.saturating_add(probe),
+                    &format!("verify_restored_old_writer_{probe}"),
+                    false,
+                    bounded_runtime_call(
+                        deadline,
+                        "old writer health verification",
+                        self.runtime.inspect_container(&payload.old_container_id),
+                    ),
+                )
+                .await;
+            let instance = match inspected {
+                Ok(instance) => instance,
+                Err(StepError::Ledger(error)) => return Err(error),
+                Err(StepError::Runtime(error)) => {
+                    let detail = start_error
+                        .as_deref()
+                        .map(|start| format!("restart response was unproven ({start}); "))
+                        .unwrap_or_default();
+                    return Ok(exclusive_restore_needs_attention(
+                        outcome,
+                        payload,
+                        candidate_container_id,
+                        format!(
+                            "{detail}old writer health verification failed: {}",
+                            error.error_message
+                        ),
+                    ));
+                }
+            };
+            match evaluate_health_gate(&instance, &payload.health_gate) {
+                HealthGateDecision::Ready => {
+                    annotate_exclusive_restore(
+                        &mut outcome,
+                        payload,
+                        candidate_container_id,
+                        "restarted_and_healthy",
+                    );
+                    if let Some(start_error) = start_error.as_deref() {
+                        outcome.status = CompletionStatus::NeedsAttention;
+                        outcome.error_message = format!(
+                            "{}; old writer {} is healthy but its restart response was unproven ({start_error}); candidate {} is proven absent and manual reconciliation is required",
+                            outcome.error_message, payload.old_container_id, candidate_container_id,
+                        );
+                        if let Some(object) = outcome.result.as_object_mut() {
+                            object
+                                .insert("mutation_result_unproven".to_string(), Value::Bool(true));
+                            object
+                                .insert("manual_recovery_required".to_string(), Value::Bool(true));
+                        }
+                    }
+                    return Ok(outcome);
+                }
+                HealthGateDecision::Failed(reason) => {
+                    return Ok(exclusive_restore_needs_attention(
+                        outcome,
+                        payload,
+                        candidate_container_id,
+                        format!("old writer restart was not healthy: {reason}"),
+                    ));
+                }
+                HealthGateDecision::Pending(reason) => {
+                    if Instant::now() >= deadline {
+                        return Ok(exclusive_restore_needs_attention(
+                            outcome,
+                            payload,
+                            candidate_container_id,
+                            format!("old writer restart health deadline elapsed: {reason}"),
+                        ));
+                    }
+                    let wake_at = (Instant::now()
+                        + Duration::from_millis(payload.health_gate.poll_interval_ms))
+                    .min(deadline);
+                    tokio::time::sleep_until(wake_at).await;
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2389,6 +3052,32 @@ where
                 }),
             };
         }
+        if !payload.deployment_id.trim().is_empty()
+            && let Some(manager) = self.resource_claims.as_ref()
+        {
+            match manager.release_deployment(&payload.deployment_id).await {
+                Ok(claims) => {
+                    if claims.iter().any(|release| {
+                        (release.provider_released
+                            && !matches!(
+                                release.claim.status,
+                                ResourceClaimStatusV1::Retained | ResourceClaimStatusV1::Deleted
+                            ))
+                            || (!release.provider_released
+                                && release.claim.status != ResourceClaimStatusV1::Ready)
+                    }) {
+                        return Ok(needs_attention_outcome(
+                            "container was removed but a ResourceClaim binding/provider state was not safe",
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Ok(needs_attention_outcome(format!(
+                        "container was removed but ResourceClaim RETAIN release failed: {error}"
+                    )));
+                }
+            }
+        }
         Ok(ExecutionOutcome::success(json!({
             "container_id": payload.container_id,
             "removed": true,
@@ -2412,6 +3101,55 @@ where
         }
         if *cancellation.borrow() {
             return Ok(replacement_cancelled(&payload, action, vec![]));
+        }
+
+        // Claims are reusable only when the old deployment already owns the
+        // exact same stable identities. This gate runs before migration, image
+        // pull, or any Docker mutation, so an upgrade can never silently
+        // provision a second database.
+        let mut replacement_resource_outputs = std::collections::BTreeMap::new();
+        if !payload.resource_claims.is_empty() {
+            let Some(manager) = self.resource_claims.as_ref() else {
+                return Ok(ExecutionOutcome::failed(
+                    "replacement carries ResourceClaims but this Agent has no resource provider configured",
+                ));
+            };
+            let claims = match manager
+                .reuse_for_replacement(&payload.old_deployment_id, &payload.resource_claims)
+                .await
+            {
+                Ok(claims) => claims,
+                Err(error) => {
+                    return Ok(ExecutionOutcome::failed(format!(
+                        "replacement ResourceClaim reuse rejected before migration/runtime: {error}"
+                    )));
+                }
+            };
+            for (step, claim) in payload.resource_claims.iter().zip(claims) {
+                let output = claim.output_secret.as_ref().ok_or_else(|| {
+                    LedgerError::InvalidState(format!(
+                        "READY replacement claim {} omitted output reference",
+                        step.claim_id
+                    ))
+                })?;
+                let path = manager
+                    .output_path(&output.reference)
+                    .await
+                    .map_err(|error| {
+                        LedgerError::InvalidState(format!(
+                            "resolve replacement output for {}: {error}",
+                            step.claim_id
+                        ))
+                    })?;
+                replacement_resource_outputs.insert(
+                    step.resource_name.clone(),
+                    (
+                        step.output_path_environment.clone(),
+                        output.reference.clone(),
+                        path,
+                    ),
+                );
+            }
         }
 
         if let Some(materialization) = payload.materialization.as_ref() {
@@ -2458,6 +3196,28 @@ where
             }
         }
 
+        for (resource_name, (environment, _reference, path)) in &replacement_resource_outputs {
+            let mount = ResourceSecretFileMount {
+                resource_name: resource_name.clone(),
+                host_source_path: strict_path_text(
+                    path,
+                    &format!("replacement resource output for {resource_name}"),
+                )?,
+            };
+            let destination = mount
+                .container_destination()
+                .map_err(|error| LedgerError::InvalidState(error.to_string()))?;
+            payload
+                .new_spec
+                .environment
+                .push(format!("{environment}={destination}"));
+            payload.new_spec.resource_secret_file_mounts.push(mount);
+        }
+        payload
+            .new_spec
+            .resource_secret_file_mounts
+            .sort_by(|left, right| left.resource_name.cmp(&right.resource_name));
+
         let mut migration_results = Vec::with_capacity(payload.migrations.len());
         let mut applied_migration = false;
         for (index, migration) in payload.migrations.iter().enumerate() {
@@ -2466,7 +3226,40 @@ where
             }
             let index = u32::try_from(index).unwrap_or(u32::MAX / 16);
             let base = 2_910_000_u32.saturating_add(index.saturating_mul(16));
-            match self.run_oci_migration(job, ledger, migration, base).await {
+            let mut migration = migration.clone();
+            let mut migration_mounts = Vec::new();
+            for resource_name in &migration.resource_claims {
+                let (environment, _reference, path) = replacement_resource_outputs
+                    .get(resource_name)
+                    .expect("replacement payload validation resolved resource name");
+                let mount = ResourceSecretFileMount {
+                    resource_name: resource_name.clone(),
+                    host_source_path: strict_path_text(
+                        path,
+                        &format!("replacement migration resource output for {resource_name}"),
+                    )?,
+                };
+                let destination = mount
+                    .container_destination()
+                    .map_err(|error| LedgerError::InvalidState(error.to_string()))?;
+                migration
+                    .environment
+                    .push(format!("{environment}={destination}"));
+                migration_mounts.push(mount);
+            }
+            if migration.resource_claims.len() == 1 {
+                let destination = migration_mounts[0]
+                    .container_destination()
+                    .map_err(|error| LedgerError::InvalidState(error.to_string()))?;
+                migration
+                    .environment
+                    .push(format!("OJOS_RESOURCE_OUTPUT_FILE={destination}"));
+            }
+            migration_mounts.sort_by(|left, right| left.resource_name.cmp(&right.resource_name));
+            match self
+                .run_oci_migration(job, ledger, &migration, migration_mounts, base)
+                .await
+            {
                 Ok(result) => {
                     applied_migration |= result
                         .get("status")
@@ -2715,6 +3508,92 @@ where
             ));
         }
 
+        let mut old_writer_state = ExclusiveOldWriterState::Unaffected;
+        if payload.exclusive_retained_volume_cutover {
+            if *cancellation.borrow() {
+                let cancelled = replacement_cancelled(&payload, action, vec![]);
+                return self
+                    .compensate_replacement_container(
+                        job,
+                        ledger,
+                        3_090_000,
+                        &instance.container_id,
+                        StepError::Runtime(cancelled),
+                        payload.health_gate.compensation_timeout_ms,
+                        action,
+                        applied_migration,
+                        materialized.as_ref(),
+                        &payload,
+                        old_writer_state,
+                    )
+                    .await;
+            }
+            ledger.step_started(
+                &job.job_id,
+                3_089_999,
+                "record_exclusive_retained_volume_cutover_intent",
+                crate::now_ms(),
+            )?;
+            ledger.step_succeeded(
+                &job.job_id,
+                3_089_999,
+                &json!({
+                    "old_deployment_id": payload.old_deployment_id,
+                    "old_container_id": payload.old_container_id,
+                    "candidate_deployment_id": payload.new_spec.deployment_id,
+                    "candidate_container_id": instance.container_id,
+                    "manual_recovery_evidence": "if this job is interrupted after the next step starts, inspect both named containers and prove exactly one healthy writer before taking action",
+                    "secret_material_persisted": false,
+                }),
+                crate::now_ms(),
+            )?;
+            let stop_deadline =
+                Instant::now() + Duration::from_millis(payload.health_gate.compensation_timeout_ms);
+            match self
+                .runtime_step(
+                    ledger,
+                    job,
+                    3_090_001,
+                    "stop_old_writer_for_exclusive_retained_volume_cutover",
+                    true,
+                    bounded_runtime_call(
+                        stop_deadline,
+                        "old writer stop",
+                        self.runtime
+                            .stop_container(&payload.old_container_id, default_timeout_seconds()),
+                    ),
+                )
+                .await
+            {
+                Ok(()) => old_writer_state = ExclusiveOldWriterState::StopProven,
+                Err(StepError::Ledger(error)) => return Err(error),
+                Err(StepError::Runtime(stop_error)) => {
+                    old_writer_state = ExclusiveOldWriterState::StopUncertain;
+                    let mut outcome = replacement_context(stop_error, &payload, action);
+                    outcome.status = CompletionStatus::NeedsAttention;
+                    outcome.error_message = format!(
+                        "{}; old writer stop result is unproven, so the candidate writer was not started",
+                        outcome.error_message
+                    );
+                    return self
+                        .compensate_replacement_container(
+                            job,
+                            ledger,
+                            3_090_002,
+                            &instance.container_id,
+                            StepError::Runtime(outcome),
+                            payload.health_gate.compensation_timeout_ms,
+                            action,
+                            applied_migration,
+                            materialized.as_ref(),
+                            &payload,
+                            old_writer_state,
+                        )
+                        .await;
+                }
+            }
+        }
+
         if *cancellation.borrow() {
             let cancelled = replacement_cancelled(&payload, action, vec![]);
             return self
@@ -2728,6 +3607,8 @@ where
                     action,
                     applied_migration,
                     materialized.as_ref(),
+                    &payload,
+                    old_writer_state,
                 )
                 .await;
         }
@@ -2756,6 +3637,8 @@ where
                     action,
                     applied_migration,
                     materialized.as_ref(),
+                    &payload,
+                    old_writer_state,
                 )
                 .await;
         }
@@ -2790,6 +3673,8 @@ where
                         action,
                         applied_migration,
                         materialized.as_ref(),
+                        &payload,
+                        old_writer_state,
                     )
                     .await;
             }
@@ -2818,6 +3703,8 @@ where
                     action,
                     applied_migration,
                     materialized.as_ref(),
+                    &payload,
+                    old_writer_state,
                 )
                 .await;
         }
@@ -2847,6 +3734,8 @@ where
                             action,
                             applied_migration,
                             materialized.as_ref(),
+                            &payload,
+                            old_writer_state,
                         )
                         .await;
                 }
@@ -2887,11 +3776,33 @@ where
                     action,
                     applied_migration,
                     materialized.as_ref(),
+                    &payload,
+                    old_writer_state,
                 )
                 .await;
         }
 
         if payload.preserve_old_until_topology_cutover {
+            if !payload.resource_claims.is_empty() {
+                let claim_ids = payload
+                    .resource_claims
+                    .iter()
+                    .map(|step| step.claim_id.clone())
+                    .collect::<Vec<_>>();
+                if let Some(manager) = self.resource_claims.as_ref()
+                    && let Err(error) = manager
+                        .bind_replacement(
+                            &payload.old_deployment_id,
+                            &payload.new_spec.deployment_id,
+                            &claim_ids,
+                        )
+                        .await
+                {
+                    return Ok(needs_attention_outcome(format!(
+                        "healthy replacement exists but ResourceClaim binding commit failed: {error}"
+                    )));
+                }
+            }
             if let Some(materialized) = materialized.as_ref() {
                 self.activate_runtime_context(job, ledger, &payload.new_spec, materialized)
                     .await?;
@@ -2911,6 +3822,7 @@ where
                     "replaced_deployment_id": payload.old_deployment_id,
                     "replaced_container_id": payload.old_container_id,
                     "old_container_preserved": true,
+                    "old_container_stopped": payload.exclusive_retained_volume_cutover,
                     "topology_cutover_pending": true,
                     "provider_revision_id": payload.provider_saga.as_ref().map(|saga| &saga.desired.revision_id),
                     "migrations": migration_results,
@@ -2998,6 +3910,39 @@ where
 
         if payload.provider_saga.is_some() {
             ledger.set_provider_revision_state(&job.job_id, "COMMITTED", None, crate::now_ms())?;
+        }
+
+        if !payload.resource_claims.is_empty() {
+            let claim_ids = payload
+                .resource_claims
+                .iter()
+                .map(|step| step.claim_id.clone())
+                .collect::<Vec<_>>();
+            if let Some(manager) = self.resource_claims.as_ref() {
+                manager
+                    .bind_replacement(
+                        &payload.old_deployment_id,
+                        &payload.new_spec.deployment_id,
+                        &claim_ids,
+                    )
+                    .await
+                    .map_err(|error| {
+                        LedgerError::InvalidState(format!(
+                            "replacement ResourceClaim binding commit failed after runtime cutover: {error}"
+                        ))
+                    })?;
+                // The old runtime has been removed. Removing only its binding
+                // leaves the shared provider READY because the new binding now
+                // exists; it must not run ordinary RETAIN compensation here.
+                manager
+                    .release_deployment(&payload.old_deployment_id)
+                    .await
+                    .map_err(|error| {
+                        LedgerError::InvalidState(format!(
+                            "remove old ResourceClaim binding after cutover: {error}"
+                        ))
+                    })?;
+            }
         }
 
         let replacement = RuntimeReplacement {
@@ -3366,6 +4311,13 @@ where
 enum StepError {
     Ledger(LedgerError),
     Runtime(ExecutionOutcome),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExclusiveOldWriterState {
+    Unaffected,
+    StopProven,
+    StopUncertain,
 }
 
 enum ContextPreparationError {
@@ -3790,6 +4742,25 @@ fn step_result(error: StepError) -> Result<ExecutionOutcome, LedgerError> {
 }
 
 fn validate_pipeline_payload(payload: &ReleasePipelinePayload) -> Result<(), String> {
+    let mut resource_names = BTreeSet::new();
+    let mut output_environments = BTreeSet::new();
+    for resource in &payload.resource_claims {
+        resource.validate().map_err(|error| error.to_string())?;
+        if resource.deployment_id != payload.install.spec.deployment_id
+            || resource.service_id != payload.install.spec.service_id
+        {
+            return Err(
+                "resource claim deployment_id/service_id must match install spec".to_string(),
+            );
+        }
+        if !resource_names.insert(resource.resource_name.as_str())
+            || !output_environments.insert(resource.output_path_environment.as_str())
+        {
+            return Err(
+                "resource claim names and output environment keys must be unique".to_string(),
+            );
+        }
+    }
     payload
         .install
         .health_gate
@@ -3852,6 +4823,17 @@ fn validate_pipeline_payload(payload: &ReleasePipelinePayload) -> Result<(), Str
                     .to_string(),
             );
         }
+        let mut migration_resources = BTreeSet::new();
+        for resource in &migration.resource_claims {
+            if !migration_resources.insert(resource.as_str())
+                || !resource_names.contains(resource.as_str())
+            {
+                return Err(format!(
+                    "migration {} has a duplicate or unresolved resource claim {resource}",
+                    migration.version
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -3892,6 +4874,27 @@ fn needs_attention_outcome(message: impl Into<String>) -> ExecutionOutcome {
     }
 }
 
+fn mark_resource_claim_compensation_evidence(outcome: &mut ExecutionOutcome) {
+    let original = std::mem::replace(&mut outcome.result, Value::Null);
+    outcome.result = json!({
+        "failure": original,
+        "resource_claim_compensation": {
+            "deployment_binding_released": false,
+            "provider_lifecycle": "RETAIN",
+            "secret_material_persisted": false,
+        },
+    });
+}
+
+fn mark_resource_claim_compensation_unknown(outcome: &mut ExecutionOutcome, reason: &str) {
+    outcome.status = CompletionStatus::NeedsAttention;
+    outcome.error_message = format!(
+        "{}; ResourceClaim RETAIN compensation could not be proven: {reason}",
+        outcome.error_message
+    );
+    mark_resource_claim_compensation_evidence(outcome);
+}
+
 fn provider_error_outcome(action: &str, error: &PipelineProviderError) -> ExecutionOutcome {
     ExecutionOutcome {
         status: if error.outcome_is_ambiguous() {
@@ -3906,6 +4909,12 @@ fn provider_error_outcome(action: &str, error: &PipelineProviderError) -> Execut
         error_message: format!("{action} failed: {error}"),
         events: vec![],
     }
+}
+
+fn strict_path_text(path: &Path, purpose: &str) -> Result<String, LedgerError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| LedgerError::InvalidState(format!("{purpose} path is not valid UTF-8")))
 }
 
 fn pipeline_provider_failure(
@@ -4047,6 +5056,75 @@ fn default_timeout_seconds() -> i32 {
     30
 }
 
+async fn bounded_runtime_call<T>(
+    deadline: Instant,
+    action: &str,
+    future: impl Future<Output = Result<T, RuntimeError>>,
+) -> Result<T, RuntimeError> {
+    match tokio::time::timeout_at(deadline, future).await {
+        Ok(result) => result,
+        Err(_) => Err(RuntimeError::EngineUnavailable(format!(
+            "{action} exceeded the retained-volume compensation deadline"
+        ))),
+    }
+}
+
+fn annotate_exclusive_restore(
+    outcome: &mut ExecutionOutcome,
+    payload: &ReleaseReplacementPayload,
+    candidate_container_id: &str,
+    evidence: &str,
+) {
+    let previous = outcome.result.clone();
+    outcome.result = json!({
+        "exclusive_retained_volume_cutover": true,
+        "old_deployment_id": payload.old_deployment_id,
+        "old_container_id": payload.old_container_id,
+        "candidate_deployment_id": payload.new_spec.deployment_id,
+        "candidate_container_id": candidate_container_id,
+        "candidate_absence_proven": true,
+        "old_writer_restored": true,
+        "old_writer_restore_evidence": evidence,
+        "failure": previous,
+    });
+}
+
+fn exclusive_restore_needs_attention(
+    mut outcome: ExecutionOutcome,
+    payload: &ReleaseReplacementPayload,
+    candidate_container_id: &str,
+    reason: impl Into<String>,
+) -> ExecutionOutcome {
+    let reason = reason.into();
+    let previous = outcome.result.clone();
+    let original_error = outcome.error_message.clone();
+    outcome.status = CompletionStatus::NeedsAttention;
+    outcome.result = json!({
+        "exclusive_retained_volume_cutover": true,
+        "old_deployment_id": payload.old_deployment_id,
+        "old_container_id": payload.old_container_id,
+        "candidate_deployment_id": payload.new_spec.deployment_id,
+        "candidate_container_id": candidate_container_id,
+        "candidate_absence_proven": previous
+            .get("compensated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || previous
+                .get("container_compensated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        "old_writer_restored": false,
+        "manual_recovery_required": true,
+        "manual_recovery_evidence": reason,
+        "failure": previous,
+    });
+    outcome.error_message = format!(
+        "{original_error}; retained-volume single-writer recovery for old container {} and candidate {} needs attention: {}",
+        payload.old_container_id, candidate_container_id, reason
+    );
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4062,6 +5140,191 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(unix)]
+    #[test]
+    fn resource_output_paths_reject_non_utf8_text() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
+        let error = strict_path_text(&path, "resource output")
+            .expect_err("non-UTF-8 paths must fail closed");
+        assert!(error.to_string().contains("path is not valid UTF-8"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resource_output_paths_reject_non_utf8_text() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&[0xd800]));
+        let error = strict_path_text(&path, "resource output")
+            .expect_err("non-UTF-8 paths must fail closed");
+        assert!(error.to_string().contains("path is not valid UTF-8"));
+    }
+
+    #[derive(Default)]
+    struct FakeResourceClaims {
+        calls: Mutex<Vec<String>>,
+        output_root: Option<tempfile::TempDir>,
+        fail_release: bool,
+        nested_runtime_on_ensure: bool,
+        nested_runtime_on_release: bool,
+        panic_on_purge: bool,
+    }
+
+    impl FakeResourceClaims {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                output_root: Some(tempfile::tempdir().unwrap()),
+                fail_release: false,
+                nested_runtime_on_ensure: false,
+                nested_runtime_on_release: false,
+                panic_on_purge: false,
+            }
+        }
+
+        fn failing_release() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                output_root: Some(tempfile::tempdir().unwrap()),
+                fail_release: true,
+                nested_runtime_on_ensure: false,
+                nested_runtime_on_release: false,
+                panic_on_purge: false,
+            }
+        }
+
+        fn probing_nested_runtime(on_ensure: bool, on_release: bool) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                output_root: Some(tempfile::tempdir().unwrap()),
+                fail_release: false,
+                nested_runtime_on_ensure: on_ensure,
+                nested_runtime_on_release: on_release,
+                panic_on_purge: false,
+            }
+        }
+
+        fn panicking_purge() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                output_root: Some(tempfile::tempdir().unwrap()),
+                fail_release: false,
+                nested_runtime_on_ensure: false,
+                nested_runtime_on_release: false,
+                panic_on_purge: true,
+            }
+        }
+    }
+
+    fn run_synchronous_runtime_probe() {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {});
+    }
+
+    impl ResourceClaimPipelineExecutor for FakeResourceClaims {
+        fn ensure(
+            &self,
+            step: &orchestrator_runtime::ResourceClaimStepV1,
+        ) -> crate::resource_claim::Result<crate::resource_claim::ResourceClaimV1> {
+            if self.nested_runtime_on_ensure {
+                run_synchronous_runtime_probe();
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("ensure:{}", step.resource_name));
+            let mut claim = crate::resource_claim::ResourceClaimV1::requested(
+                crate::resource_claim::ResourceClaimIdentityV1 {
+                    claim_id: step.claim_id.clone(),
+                    owner_instance_id: step.owner_instance_id.clone(),
+                    service_id: step.service_id.clone(),
+                    resource_name: step.resource_name.clone(),
+                    resource_type: crate::resource_claim::RESOURCE_TYPE_POSTGRESQL_DATABASE
+                        .to_string(),
+                },
+                step.generation,
+                step.provider_id.clone(),
+            )?;
+            claim.status = ResourceClaimStatusV1::Ready;
+            claim.output_secret = Some(crate::resource_claim::ResourceOutputSecretV1 {
+                reference: "agent-secret://resource-outputs/fake/g1/dsn".to_string(),
+                content_digest: format!("sha256:{}", "d".repeat(64)),
+                mode: crate::resource_claim::OUTPUT_SECRET_MODE,
+                generation: step.generation,
+            });
+            Ok(claim)
+        }
+
+        fn release_deployment(
+            &self,
+            deployment_id: &str,
+        ) -> crate::resource_claim::Result<Vec<crate::resource_claim::ResourceClaimReleaseResultV1>>
+        {
+            if self.nested_runtime_on_release {
+                run_synchronous_runtime_probe();
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("release:{deployment_id}"));
+            if self.fail_release {
+                Err(crate::resource_claim::ResourceClaimError::Provider(
+                    "fixture release failed with postgresql://sensitive".to_string(),
+                ))
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        fn reuse_for_replacement(
+            &self,
+            old_deployment_id: &str,
+            steps: &[orchestrator_runtime::ResourceClaimStepV1],
+        ) -> crate::resource_claim::Result<Vec<crate::resource_claim::ResourceClaimV1>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("reuse:{old_deployment_id}"));
+            steps.iter().map(|step| self.ensure(step)).collect()
+        }
+
+        fn bind_replacement(
+            &self,
+            old_deployment_id: &str,
+            new_deployment_id: &str,
+            _claim_ids: &[String],
+        ) -> crate::resource_claim::Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("bind:{old_deployment_id}->{new_deployment_id}"));
+            Ok(())
+        }
+
+        fn purge(
+            &self,
+            _payload: &orchestrator_runtime::ResourcePurgePayloadV1,
+        ) -> crate::resource_claim::Result<crate::resource_claim::ResourceClaimV1> {
+            if self.panic_on_purge {
+                panic!("fixture panic contained postgresql://sensitive-provider-secret");
+            }
+            Err(crate::resource_claim::ResourceClaimError::Provider(
+                "fixture purge is not configured".to_string(),
+            ))
+        }
+
+        fn output_path(
+            &self,
+            _reference: &str,
+        ) -> crate::resource_claim::Result<std::path::PathBuf> {
+            Ok(self.output_root.as_ref().unwrap().path().join("dsn"))
+        }
+    }
+
     const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[derive(Default)]
@@ -4071,6 +5334,12 @@ mod tests {
 
     struct TraceRuntime {
         trace: Arc<Mutex<Vec<String>>>,
+    }
+
+    type EnvironmentTrace = Vec<(String, Vec<String>, Vec<ResourceSecretFileMount>)>;
+
+    struct EnvironmentTraceRuntime {
+        trace: Arc<Mutex<EnvironmentTrace>>,
     }
 
     struct StaticArtifactFetcher {
@@ -4267,9 +5536,74 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ContainerRuntime for EnvironmentTraceRuntime {
+        async fn pull_image(&self, _image: &OciImageReference) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        async fn create_container(
+            &self,
+            spec: &ContainerSpec,
+        ) -> Result<RuntimeInstance, RuntimeError> {
+            self.trace.lock().unwrap().push((
+                spec.deployment_id.clone(),
+                spec.environment.clone(),
+                spec.resource_secret_file_mounts.clone(),
+            ));
+            let mut instance = MockRuntime::instance(&format!("container-{}", spec.deployment_id));
+            instance.deployment_id = spec.deployment_id.clone();
+            instance.service_id = spec.service_id.clone();
+            instance.health = "HEALTHY".to_string();
+            Ok(instance)
+        }
+
+        async fn start_container(&self, _container_id: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn stop_container(
+            &self,
+            _container_id: &str,
+            _timeout_seconds: i32,
+        ) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn restart_container(
+            &self,
+            _container_id: &str,
+            _timeout_seconds: i32,
+        ) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn remove_container(
+            &self,
+            _container_id: &str,
+            _force: bool,
+        ) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn inspect_container(
+            &self,
+            container_id: &str,
+        ) -> Result<RuntimeInstance, RuntimeError> {
+            let deployment = container_id
+                .strip_prefix("container-")
+                .unwrap_or("deployment-1");
+            let mut instance = MockRuntime::instance(container_id);
+            instance.deployment_id = deployment.to_string();
+            instance.health = "HEALTHY".to_string();
+            Ok(instance)
+        }
+
+        async fn wait_container(&self, _container_id: &str) -> Result<i64, RuntimeError> {
+            Ok(0)
+        }
+    }
+
     struct TraceProvider {
         trace: Arc<Mutex<Vec<String>>>,
         gateway_failures_remaining: Mutex<u32>,
+        materialization_failures_remaining: Mutex<u32>,
     }
 
     #[async_trait]
@@ -4279,6 +5613,14 @@ mod tests {
             step: &orchestrator_runtime::RuntimeMaterializationStep,
         ) -> Result<Vec<String>, PipelineProviderError> {
             self.trace.lock().unwrap().push("materialize".to_string());
+            let mut failures = self.materialization_failures_remaining.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(PipelineProviderError::Rejected {
+                    status: 422,
+                    body: "fixture materialization rejected".to_string(),
+                });
+            }
             Ok(step
                 .environment_templates
                 .iter()
@@ -4616,6 +5958,9 @@ mod tests {
         create: bool,
         start: bool,
         inspect: bool,
+        stop_old: bool,
+        start_old: bool,
+        inspect_old: bool,
         remove_old: bool,
         remove_new: bool,
     }
@@ -4692,7 +6037,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("start:{container_id}"));
-            if self.failures.start {
+            if (container_id == "container-new" && self.failures.start)
+                || (container_id == "container-old" && self.failures.start_old)
+            {
                 Err(Self::failure("start response was lost"))
             } else {
                 Ok(())
@@ -4701,10 +6048,18 @@ mod tests {
 
         async fn stop_container(
             &self,
-            _container_id: &str,
+            container_id: &str,
             _timeout_seconds: i32,
         ) -> Result<(), RuntimeError> {
-            unreachable!("replacement saga never stops the old instance before cutover")
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("stop:{container_id}"));
+            if container_id == "container-old" && self.failures.stop_old {
+                Err(Self::failure("stop response was lost"))
+            } else {
+                Ok(())
+            }
         }
 
         async fn restart_container(
@@ -4712,7 +6067,7 @@ mod tests {
             _container_id: &str,
             _timeout_seconds: i32,
         ) -> Result<(), RuntimeError> {
-            unreachable!("replacement saga never restarts a container")
+            unreachable!("exclusive replacement uses idempotent start plus health attestation")
         }
 
         async fn remove_container(
@@ -4741,8 +6096,22 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("inspect:{container_id}"));
-            if self.failures.inspect {
+            if (container_id == "container-new" && self.failures.inspect)
+                || (container_id == "container-old" && self.failures.inspect_old)
+            {
                 return Err(Self::failure("inspect failed"));
+            }
+            if container_id == "container-old" {
+                let mut instance = self
+                    .created
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("replacement create precedes old inspection");
+                instance.deployment_id = "deployment-old".to_string();
+                instance.container_id = "container-old".to_string();
+                instance.health = "HEALTHY".to_string();
+                return Ok(instance);
             }
             let mut instance = self
                 .created
@@ -4921,6 +6290,8 @@ mod tests {
             image,
             runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
             runtime_context: None,
+            resource_secret_file_mounts: Vec::new(),
+            retained_volume: None,
             managed_service_context: None,
             command: vec![],
             environment: vec![],
@@ -4959,6 +6330,8 @@ mod tests {
                 .unwrap(),
             runtime_contract: RuntimeContract::judge_sandbox_v1(),
             runtime_context: None,
+            resource_secret_file_mounts: Vec::new(),
+            retained_volume: None,
             managed_service_context: Some(ManagedServiceContextSpec {
                 generation: 1,
                 node_id: "node-b".to_string(),
@@ -4966,6 +6339,7 @@ mod tests {
                 gateway_ca_pem: None,
                 bindings: Default::default(),
                 events: None,
+                workload_verifier: None,
             }),
             command: Vec::new(),
             environment: vec!["OJOS_MANAGED_WORKLOAD=true".to_string()],
@@ -4989,6 +6363,73 @@ mod tests {
         )
     }
 
+    fn retained_volume_install_job(job_id: &str) -> LeasedJob {
+        let mut spec = container_spec();
+        spec.service_id = "problem-service".to_string();
+        spec.deployment_id = "problem-deployment-v1".to_string();
+        spec.managed_service_context = Some(ManagedServiceContextSpec {
+            generation: 1,
+            node_id: "node-b".to_string(),
+            gateway_origin: "http://127.0.0.1".to_string(),
+            gateway_ca_pem: None,
+            bindings: Default::default(),
+            events: None,
+            workload_verifier: None,
+        });
+        spec.retained_volume = Some(orchestrator_runtime::RetainedVolumeAttachmentV1 {
+            owner_instance_id: "service-instance-problem".to_string(),
+            logical_name: "problem-packages".to_string(),
+            target: "/data/ojos/problems".to_string(),
+            access: "rw".to_string(),
+            lifecycle: orchestrator_runtime::RETAIN_VOLUME_LIFECYCLE.to_string(),
+        });
+        LeasedJob::new_for_test(
+            job_id,
+            JobKind::Install,
+            json!({
+                "spec": spec,
+                "start": true,
+                "health_gate": HealthGatePolicy::default(),
+            }),
+            &format!("lease-{job_id}"),
+        )
+    }
+
+    fn retained_volume_lifecycle_executor(
+        context_root: &std::path::Path,
+    ) -> (
+        JobExecutor<VolumeLifecycleRuntime>,
+        Arc<VolumeLifecycleRuntime>,
+    ) {
+        let runtime = Arc::new(VolumeLifecycleRuntime::new(VolumeFailurePoint::None));
+        let provider = Arc::new(UnboundContextProvider {
+            materialize_bound_calls: AtomicUsize::new(0),
+            materialize_unbound_calls: AtomicUsize::new(0),
+            context: RuntimeContext {
+                contract: RuntimeContract::standard_v1(),
+                runtime_policy_sha256: format!("sha256:{}", "d".repeat(64)),
+                scratch_directory: String::new(),
+                cache_volume_name: String::new(),
+                service_context_directory: context_root
+                    .join("problem-context")
+                    .join("service")
+                    .to_str()
+                    .expect("test context path must be UTF-8")
+                    .to_string(),
+            },
+            fail_materialization: false,
+        });
+        let executor = JobExecutor {
+            runtime: Arc::clone(&runtime),
+            pipeline_provider: Arc::new(HttpReleasePipelineProvider::from_env()),
+            artifact_fetcher: None,
+            runtime_context_provider: Some(provider),
+            workload_credentials: None,
+            resource_claims: None,
+        };
+        (executor, runtime)
+    }
+
     fn volume_lifecycle_executor(
         context_root: &std::path::Path,
         failure: VolumeFailurePoint,
@@ -5010,6 +6451,7 @@ mod tests {
             artifact_fetcher: None,
             runtime_context_provider: Some(provider.clone()),
             workload_credentials: None,
+            resource_claims: None,
         };
         (executor, runtime, provider)
     }
@@ -5049,6 +6491,26 @@ mod tests {
             }),
             "lease-replacement",
         )
+    }
+
+    fn retained_volume_replacement_job(
+        kind: JobKind,
+        policy: HealthGatePolicy,
+        preserve_old_until_topology_cutover: bool,
+    ) -> LeasedJob {
+        let mut job = replacement_job(kind, policy);
+        job.payload["new_spec"]["retained_volume"] = json!({
+            "owner_instance_id": "service-instance-problem",
+            "logical_name": "problem-packages",
+            "target": "/data/ojos/problems",
+            "access": "rw",
+            "lifecycle": orchestrator_runtime::RETAIN_VOLUME_LIFECYCLE,
+        });
+        job.payload["exclusive_retained_volume_cutover"] = json!(true);
+        job.payload["preserve_old_until_topology_cutover"] =
+            json!(preserve_old_until_topology_cutover);
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        job
     }
 
     fn replacement_job_with_provider_saga(job_id: &str) -> LeasedJob {
@@ -5124,6 +6586,7 @@ mod tests {
                 health_gate: HealthGatePolicy::default(),
                 offline_oci_artifact: None,
             },
+            resource_claims: vec![],
             materialization: None,
             auth: Some(AuthPipelineStep {
                 service_name: "service-1".to_string(),
@@ -5138,6 +6601,7 @@ mod tests {
                 image: migration_image,
                 command: vec!["migrate".to_string()],
                 environment: vec![],
+                resource_claims: vec![],
                 timeout_ms: 1_000,
                 dry_run: false,
             }],
@@ -5170,6 +6634,42 @@ mod tests {
             serde_json::to_value(payload).unwrap(),
             &format!("lease-{job_id}"),
         )
+    }
+
+    fn resource_pipeline_job(job_id: &str, include_gateway: bool) -> LeasedJob {
+        let mut job = pipeline_job(job_id, include_gateway);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.resource_claims = vec![orchestrator_runtime::ResourceClaimStepV1 {
+            claim_id: "claim-service-1-database".to_string(),
+            owner_instance_id: "service-instance-1".to_string(),
+            deployment_id: payload.install.spec.deployment_id.clone(),
+            service_id: payload.install.spec.service_id.clone(),
+            resource_name: "database".to_string(),
+            resource_type: "postgresql.database/v1".to_string(),
+            generation: 1,
+            provider_id: "postgresql-local".to_string(),
+            output_path_environment: "OJOS_RESOURCE_DATABASE_OUTPUT_FILE".to_string(),
+        }];
+        for migration in &mut payload.migrations {
+            migration.resource_claims = vec!["database".to_string()];
+        }
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        job
+    }
+
+    fn assert_claim_released_without_secret(
+        resources: &FakeResourceClaims,
+        outcome: &ExecutionOutcome,
+    ) {
+        assert_eq!(
+            resources.calls.lock().unwrap().as_slice(),
+            ["ensure:database", "release:deployment-1"]
+        );
+        let encoded = format!("{} {}", outcome.error_message, outcome.result);
+        assert!(!encoded.contains("postgresql://"));
+        assert!(!encoded.contains("agent-secret://"));
     }
 
     #[test]
@@ -5238,6 +6738,7 @@ mod tests {
             artifact_fetcher: None,
             runtime_context_provider: Some(provider.clone()),
             workload_credentials: None,
+            resource_claims: None,
         };
         let mut spec = container_spec();
         spec.managed_service_context = Some(ManagedServiceContextSpec {
@@ -5247,6 +6748,7 @@ mod tests {
             gateway_ca_pem: None,
             bindings: Default::default(),
             events: None,
+            workload_verifier: None,
         });
         let job = LeasedJob::new_for_test(
             "job-unbound-context",
@@ -5345,6 +6847,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standard_retained_volume_is_created_before_runtime_and_never_removed_by_compensation()
+    {
+        let context_root = tempfile::tempdir().unwrap();
+        let (executor, runtime) = retained_volume_lifecycle_executor(context_root.path());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job = retained_volume_install_job("job-retained-volume");
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+        assert_eq!(outcome.status, CompletionStatus::Succeeded);
+        assert_eq!(
+            runtime.calls(),
+            [
+                "volume-create:ojos-retain-3b772958644b162546dd5ac7ae65ce74",
+                "pull",
+                "create",
+                "start",
+                "inspect",
+            ]
+        );
+
+        runtime.clear_calls();
+        let uninstall = LeasedJob::new_for_test(
+            "job-retained-volume-uninstall",
+            JobKind::Uninstall,
+            json!({
+                "deployment_id": "problem-deployment-v1",
+                "container_id": "container-judge",
+                "grace_period_seconds": 30,
+            }),
+            "lease-retained-volume-uninstall",
+        );
+        begin_job(&mut ledger, &uninstall);
+        let outcome = executor.execute(&uninstall, &mut ledger).await.unwrap();
+        assert_eq!(outcome.status, CompletionStatus::Succeeded);
+        assert!(
+            !runtime
+                .calls()
+                .iter()
+                .any(|call| call.starts_with("volume-remove:")),
+            "RETAIN cleanup must never invoke Docker volume deletion"
+        );
+        let run = ledger
+            .runtime_context_for_deployment("problem-deployment-v1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "CLEANED");
+        assert_eq!(run.managed_volume_state, "CLEANED");
+        assert!(!run.managed_volume_owned);
+    }
+
+    #[tokio::test]
     async fn judge_precommit_failures_remove_owned_volume_in_reverse_order() {
         let cases = [
             (
@@ -5437,6 +6991,7 @@ mod tests {
             artifact_fetcher: None,
             runtime_context_provider: Some(provider),
             workload_credentials: None,
+            resource_claims: None,
         };
         let mut ledger = AgentLedger::open_in_memory().unwrap();
         let job = judge_install_job("job-judge-context-failure");
@@ -5566,6 +7121,7 @@ mod tests {
         let provider = Arc::new(TraceProvider {
             trace: Arc::clone(&trace),
             gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(0),
         });
         let executor = JobExecutor::from_shared(runtime).with_pipeline_provider(provider);
         let mut ledger = AgentLedger::open_in_memory().unwrap();
@@ -5603,6 +7159,398 @@ mod tests {
             .position(|call| call == "gateway:service-1")
             .unwrap();
         assert!(migration_wait < runtime_pull && runtime_pull < gateway);
+    }
+
+    #[tokio::test]
+    async fn resource_claim_is_ready_before_migration_and_runtime_share_its_file_path() {
+        let trace = Arc::new(Mutex::new(EnvironmentTrace::new()));
+        let runtime = Arc::new(EnvironmentTraceRuntime {
+            trace: Arc::clone(&trace),
+        });
+        let provider = Arc::new(TraceProvider {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(0),
+        });
+        let resources = Arc::new(FakeResourceClaims::new());
+        let expected_path = resources.output_root.as_ref().unwrap().path().join("dsn");
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = pipeline_job("job-pipeline-resource", false);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.resource_claims = vec![orchestrator_runtime::ResourceClaimStepV1 {
+            claim_id: "claim-service-1-database".to_string(),
+            owner_instance_id: "service-instance-1".to_string(),
+            deployment_id: "deployment-1".to_string(),
+            service_id: "service-1".to_string(),
+            resource_name: "database".to_string(),
+            resource_type: "postgresql.database/v1".to_string(),
+            generation: 1,
+            provider_id: "postgresql-local".to_string(),
+            output_path_environment: "OJOS_RESOURCE_DATABASE_OUTPUT_FILE".to_string(),
+        }];
+        payload.migrations[0].resource_claims = vec!["database".to_string()];
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Succeeded);
+        assert_eq!(
+            resources.calls.lock().unwrap().as_slice(),
+            ["ensure:database"]
+        );
+        let container_path = "/run/ojos/resources/database/output";
+        let expected = format!("OJOS_RESOURCE_DATABASE_OUTPUT_FILE={container_path}");
+        let payload_json = serde_json::to_string(&job.payload).unwrap();
+        assert!(!payload_json.contains("postgresql://"));
+        let expected_path_text = expected_path
+            .to_str()
+            .expect("test resource output path must be UTF-8");
+        assert!(!payload_json.contains(expected_path_text));
+        let trace = trace.lock().unwrap();
+        let migration_environment = trace
+            .iter()
+            .find(|(deployment, _, _)| deployment.starts_with("migration-"))
+            .map(|(_, environment, _)| environment)
+            .unwrap();
+        let runtime_environment = trace
+            .iter()
+            .find(|(deployment, _, _)| deployment == &container_spec().deployment_id)
+            .map(|(_, environment, _)| environment)
+            .unwrap();
+        assert!(migration_environment.contains(&expected));
+        assert!(
+            migration_environment.contains(&format!("OJOS_RESOURCE_OUTPUT_FILE={container_path}"))
+        );
+        assert!(runtime_environment.contains(&expected));
+        let migration_mounts = &trace
+            .iter()
+            .find(|(deployment, _, _)| deployment.starts_with("migration-"))
+            .unwrap()
+            .2;
+        let runtime_mounts = &trace
+            .iter()
+            .find(|(deployment, _, _)| deployment == &container_spec().deployment_id)
+            .unwrap()
+            .2;
+        assert_eq!(migration_mounts, runtime_mounts);
+        assert_eq!(migration_mounts.len(), 1);
+        assert_eq!(migration_mounts[0].resource_name, "database");
+        assert_eq!(migration_mounts[0].host_source_path, expected_path_text);
+        drop(trace);
+        let step = ledger
+            .steps(&job.job_id)
+            .unwrap()
+            .into_iter()
+            .find(|step| step.step_name == "resource_claim_ensure")
+            .unwrap();
+        let output = serde_json::to_string(&step.output.unwrap()).unwrap();
+        assert!(!output.contains("postgresql://"));
+        assert!(!output.contains(expected_path_text));
+        assert!(expected.contains("OJOS_RESOURCE_DATABASE_OUTPUT_FILE="));
+    }
+
+    #[tokio::test]
+    async fn synchronous_resource_claim_ensure_runs_outside_agent_tokio_runtime() {
+        let runtime = Arc::new(EnvironmentTraceRuntime {
+            trace: Arc::new(Mutex::new(EnvironmentTrace::new())),
+        });
+        let provider = Arc::new(TraceProvider {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(0),
+        });
+        let resources = Arc::new(FakeResourceClaims::probing_nested_runtime(true, false));
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = resource_pipeline_job("job-claim-blocking-ensure", false);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.migrations.clear();
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Succeeded);
+        assert_eq!(
+            resources.calls.lock().unwrap().as_slice(),
+            ["ensure:database"]
+        );
+    }
+
+    #[tokio::test]
+    async fn synchronous_resource_claim_compensation_runs_outside_agent_tokio_runtime() {
+        let runtime = Arc::new(MockRuntime::default());
+        let provider = Arc::new(TraceProvider {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(1),
+        });
+        let resources = Arc::new(FakeResourceClaims::probing_nested_runtime(false, true));
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = resource_pipeline_job("job-claim-blocking-compensation", false);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.materialization = Some(orchestrator_runtime::RuntimeMaterializationStep {
+            config: Default::default(),
+            secret_refs: Default::default(),
+            environment_templates: Default::default(),
+        });
+        payload.migrations.clear();
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Failed);
+        assert_claim_released_without_secret(&resources, &outcome);
+    }
+
+    #[tokio::test]
+    async fn panicked_resource_purge_is_unknown_and_never_leaks_panic_payload() {
+        let resources = Arc::new(FakeResourceClaims::panicking_purge());
+        let executor = JobExecutor::from_shared(Arc::new(MockRuntime::default()))
+            .with_resource_claims(resources);
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let payload = ResourcePurgePayloadV1 {
+            schema_version: orchestrator_runtime::RESOURCE_PURGE_JOB_SCHEMA_VERSION.to_string(),
+            node_id: "node-1".to_string(),
+            claim_id: "claim-service-1-database".to_string(),
+            claim_digest: digest.clone(),
+            generation: 1,
+            confirmation: format!("PURGE claim-service-1-database {digest} GENERATION 1"),
+            reason: "operator approved permanent resource deletion".to_string(),
+            audit_intent: orchestrator_runtime::ResourcePurgeAuditIntentV1 {
+                intent_id: "operation-resource-purge-001".to_string(),
+                actor_id: "admin@example.test".to_string(),
+                claim_digest: digest,
+                generation: 1,
+            },
+        };
+        let job = LeasedJob::new_for_test(
+            "job-resource-purge-panic",
+            JobKind::ResourcePurge,
+            serde_json::to_value(payload).unwrap(),
+            "lease-resource-purge-panic",
+        );
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::NeedsAttention);
+        assert!(
+            outcome
+                .error_message
+                .contains("without a proven provider outcome")
+        );
+        let encoded = format!("{} {}", outcome.error_message, outcome.result);
+        assert!(!encoded.contains("postgresql://"));
+        assert!(!encoded.contains("sensitive-provider-secret"));
+        assert!(!encoded.contains("fixture panic"));
+    }
+
+    #[tokio::test]
+    async fn resource_claim_binding_is_released_after_materialization_failure() {
+        let runtime = Arc::new(MockRuntime::default());
+        let provider = Arc::new(TraceProvider {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(1),
+        });
+        let resources = Arc::new(FakeResourceClaims::new());
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = resource_pipeline_job("job-claim-materialize-failure", false);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.materialization = Some(orchestrator_runtime::RuntimeMaterializationStep {
+            config: Default::default(),
+            secret_refs: Default::default(),
+            environment_templates: Default::default(),
+        });
+        payload.migrations.clear();
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Failed);
+        assert_claim_released_without_secret(&resources, &outcome);
+    }
+
+    #[tokio::test]
+    async fn resource_claim_binding_is_released_after_migration_failure() {
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Arc::new(TraceRuntime {
+            trace: Arc::clone(&trace),
+        });
+        let provider = Arc::new(TraceProvider {
+            trace,
+            gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(0),
+        });
+        let resources = Arc::new(FakeResourceClaims::new());
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = resource_pipeline_job("job-claim-migration-failure", false);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.migrations[0].timeout_ms = 0;
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Failed);
+        assert_claim_released_without_secret(&resources, &outcome);
+    }
+
+    #[tokio::test]
+    async fn resource_claim_binding_is_released_after_runtime_failure() {
+        let runtime = Arc::new(InstallFailureRuntime {
+            calls: Mutex::new(Vec::new()),
+            fail_compensation: false,
+        });
+        let provider = Arc::new(TraceProvider {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(0),
+        });
+        let resources = Arc::new(FakeResourceClaims::new());
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = resource_pipeline_job("job-claim-runtime-failure", false);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.migrations.clear();
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::RetryableFailure);
+        assert_claim_released_without_secret(&resources, &outcome);
+    }
+
+    #[tokio::test]
+    async fn resource_claim_binding_is_released_after_gateway_failure() {
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Arc::new(TraceRuntime {
+            trace: Arc::clone(&trace),
+        });
+        let provider = Arc::new(TraceProvider {
+            trace,
+            gateway_failures_remaining: Mutex::new(1),
+            materialization_failures_remaining: Mutex::new(0),
+        });
+        let resources = Arc::new(FakeResourceClaims::new());
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = resource_pipeline_job("job-claim-gateway-failure", true);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.migrations.clear();
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Failed);
+        assert_claim_released_without_secret(&resources, &outcome);
+    }
+
+    #[tokio::test]
+    async fn resource_claim_binding_is_released_after_cancellation() {
+        let runtime = Arc::new(MockRuntime::default());
+        let provider = Arc::new(TraceProvider {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(0),
+        });
+        let resources = Arc::new(FakeResourceClaims::new());
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job = resource_pipeline_job("job-claim-cancelled", false);
+        begin_job(&mut ledger, &job);
+        let (_cancel_sender, cancel_receiver) = watch::channel(true);
+
+        let outcome = executor
+            .execute_with_cancellation(&job, &mut ledger, cancel_receiver)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Cancelled);
+        assert_claim_released_without_secret(&resources, &outcome);
+    }
+
+    #[tokio::test]
+    async fn failed_resource_claim_release_is_needs_attention_and_redacted() {
+        let runtime = Arc::new(MockRuntime::default());
+        let provider = Arc::new(TraceProvider {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(1),
+        });
+        let resources = Arc::new(FakeResourceClaims::failing_release());
+        let executor = JobExecutor::from_shared(runtime)
+            .with_pipeline_provider(provider)
+            .with_resource_claims(resources.clone());
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let mut job = resource_pipeline_job("job-claim-release-failure", false);
+        let mut payload: ReleasePipelinePayload =
+            serde_json::from_value(job.payload.clone()).unwrap();
+        payload.materialization = Some(orchestrator_runtime::RuntimeMaterializationStep {
+            config: Default::default(),
+            secret_refs: Default::default(),
+            environment_templates: Default::default(),
+        });
+        payload.migrations.clear();
+        job.payload = serde_json::to_value(payload).unwrap();
+        job.payload_sha256 = orchestrator_control_plane::canonical_payload_sha256(&job.payload);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::NeedsAttention);
+        assert_eq!(
+            outcome.result["resource_claim_compensation"]["provider_lifecycle"],
+            "RETAIN"
+        );
+        assert_eq!(
+            outcome.result["resource_claim_compensation"]["secret_material_persisted"],
+            false
+        );
+        let encoded = format!("{} {}", outcome.error_message, outcome.result);
+        assert!(!encoded.contains("postgresql://"));
+        assert!(!encoded.contains("agent-secret://"));
     }
 
     #[tokio::test]
@@ -5655,6 +7603,7 @@ mod tests {
         let provider = Arc::new(TraceProvider {
             trace: Arc::clone(&trace),
             gateway_failures_remaining: Mutex::new(1),
+            materialization_failures_remaining: Mutex::new(0),
         });
         let executor = JobExecutor::from_shared(runtime).with_pipeline_provider(provider);
         let mut ledger = AgentLedger::open_in_memory().unwrap();
@@ -5694,6 +7643,7 @@ mod tests {
         let provider = Arc::new(TraceProvider {
             trace: Arc::clone(&trace),
             gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(0),
         });
         let executor = JobExecutor::from_shared(runtime).with_pipeline_provider(provider);
         let mut ledger = AgentLedger::open_in_memory().unwrap();
@@ -6055,6 +8005,268 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_volume_replacement_stops_old_before_starting_new_and_preserves_stopped_old() {
+        let runtime = Arc::new(ReplacementRuntime::new(
+            &["HEALTHY"],
+            ReplacementFailures::default(),
+        ));
+        let executor = JobExecutor::from_shared(Arc::clone(&runtime));
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job =
+            retained_volume_replacement_job(JobKind::Upgrade, HealthGatePolicy::default(), true);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Succeeded);
+        assert_eq!(outcome.result["old_container_preserved"], true);
+        assert_eq!(outcome.result["old_container_stopped"], true);
+        assert_eq!(
+            runtime.calls(),
+            [
+                "pull",
+                "create",
+                "stop:container-old",
+                "start:container-new",
+                "inspect:container-new",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_volume_candidate_health_failure_removes_new_before_restoring_old() {
+        let runtime = Arc::new(ReplacementRuntime::new(
+            &["UNHEALTHY"],
+            ReplacementFailures::default(),
+        ));
+        let executor = JobExecutor::from_shared(Arc::clone(&runtime));
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job =
+            retained_volume_replacement_job(JobKind::Upgrade, HealthGatePolicy::default(), false);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::RetryableFailure);
+        assert_eq!(outcome.result["candidate_absence_proven"], true);
+        assert_eq!(outcome.result["old_writer_restored"], true);
+        assert_eq!(
+            outcome.result["old_writer_restore_evidence"],
+            "restarted_and_healthy"
+        );
+        assert_eq!(
+            runtime.calls(),
+            [
+                "pull",
+                "create",
+                "stop:container-old",
+                "start:container-new",
+                "inspect:container-new",
+                "remove:container-new",
+                "start:container-old",
+                "inspect:container-old",
+            ]
+        );
+        let result_text = serde_json::to_string(&outcome.result).unwrap();
+        assert!(!result_text.contains("/data/ojos/problems"));
+        assert!(!result_text.contains("problem-packages"));
+    }
+
+    #[tokio::test]
+    async fn retained_volume_cancellation_removes_new_then_restores_old() {
+        let runtime = Arc::new(ReplacementRuntime::new(
+            &["STARTING"],
+            ReplacementFailures::default(),
+        ));
+        let executor = JobExecutor::from_shared(Arc::clone(&runtime));
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job = retained_volume_replacement_job(
+            JobKind::Upgrade,
+            HealthGatePolicy {
+                timeout_ms: 500,
+                poll_interval_ms: 100,
+                ..HealthGatePolicy::default()
+            },
+            false,
+        );
+        begin_job(&mut ledger, &job);
+        let (cancel_sender, cancel_receiver) = watch::channel(false);
+        let execution = executor.execute_with_cancellation(&job, &mut ledger, cancel_receiver);
+        tokio::pin!(execution);
+        tokio::select! {
+            result = &mut execution => panic!("replacement completed before cancellation: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => cancel_sender.send(true).unwrap(),
+        }
+
+        let outcome = execution.await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::Cancelled);
+        assert_eq!(outcome.result["old_writer_restored"], true);
+        let calls = runtime.calls();
+        let remove_new = calls
+            .iter()
+            .position(|call| call == "remove:container-new")
+            .unwrap();
+        let start_old = calls
+            .iter()
+            .position(|call| call == "start:container-old")
+            .unwrap();
+        assert!(remove_new < start_old);
+    }
+
+    #[tokio::test]
+    async fn retained_volume_unproven_old_stop_fails_closed_with_named_recovery_evidence() {
+        let runtime = Arc::new(ReplacementRuntime::new(
+            &["HEALTHY"],
+            ReplacementFailures {
+                stop_old: true,
+                inspect_old: true,
+                ..ReplacementFailures::default()
+            },
+        ));
+        let executor = JobExecutor::from_shared(Arc::clone(&runtime));
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job =
+            retained_volume_replacement_job(JobKind::Upgrade, HealthGatePolicy::default(), false);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::NeedsAttention);
+        assert_eq!(outcome.result["old_container_id"], "container-old");
+        assert_eq!(outcome.result["candidate_container_id"], "container-new");
+        assert_eq!(outcome.result["manual_recovery_required"], true);
+        assert!(
+            !runtime
+                .calls()
+                .iter()
+                .any(|call| call == "start:container-new")
+        );
+        assert!(outcome.error_message.contains("container-old"));
+        assert!(outcome.error_message.contains("container-new"));
+    }
+
+    #[tokio::test]
+    async fn retained_volume_unproven_old_stop_with_healthy_old_still_needs_reconciliation() {
+        let runtime = Arc::new(ReplacementRuntime::new(
+            &["HEALTHY"],
+            ReplacementFailures {
+                stop_old: true,
+                ..ReplacementFailures::default()
+            },
+        ));
+        let executor = JobExecutor::from_shared(Arc::clone(&runtime));
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job =
+            retained_volume_replacement_job(JobKind::Upgrade, HealthGatePolicy::default(), false);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::NeedsAttention);
+        assert_eq!(outcome.result["candidate_absence_proven"], true);
+        assert_eq!(outcome.result["old_writer_restored"], true);
+        assert_eq!(outcome.result["mutation_result_unproven"], true);
+        assert_eq!(outcome.result["manual_recovery_required"], true);
+        assert!(
+            !runtime
+                .calls()
+                .iter()
+                .any(|call| call == "start:container-new")
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_volume_old_restart_failure_is_needs_attention_and_keeps_volume_opaque() {
+        let runtime = Arc::new(ReplacementRuntime::new(
+            &["UNHEALTHY"],
+            ReplacementFailures {
+                start_old: true,
+                inspect_old: true,
+                ..ReplacementFailures::default()
+            },
+        ));
+        let executor = JobExecutor::from_shared(Arc::clone(&runtime));
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job =
+            retained_volume_replacement_job(JobKind::Rollback, HealthGatePolicy::default(), false);
+        begin_job(&mut ledger, &job);
+
+        let outcome = executor.execute(&job, &mut ledger).await.unwrap();
+
+        assert_eq!(outcome.status, CompletionStatus::NeedsAttention);
+        assert_eq!(outcome.result["old_writer_restored"], false);
+        assert_eq!(outcome.result["candidate_absence_proven"], true);
+        let text = format!("{} {}", outcome.error_message, outcome.result);
+        assert!(text.contains("container-old"));
+        assert!(text.contains("container-new"));
+        assert!(!text.contains("problem-packages"));
+        assert!(!text.contains("/data/ojos/problems"));
+    }
+
+    #[test]
+    fn retained_volume_cutover_crash_is_fail_closed_with_durable_named_evidence() {
+        let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let job =
+            retained_volume_replacement_job(JobKind::Upgrade, HealthGatePolicy::default(), false);
+        begin_job(&mut ledger, &job);
+        ledger
+            .step_started(
+                &job.job_id,
+                3_089_999,
+                "record_exclusive_retained_volume_cutover_intent",
+                10,
+            )
+            .unwrap();
+        ledger
+            .step_succeeded(
+                &job.job_id,
+                3_089_999,
+                &json!({
+                    "old_deployment_id": "deployment-old",
+                    "old_container_id": "container-old",
+                    "candidate_deployment_id": "deployment-new",
+                    "candidate_container_id": "container-new",
+                    "manual_recovery_evidence": "inspect both named containers and prove exactly one healthy writer",
+                    "secret_material_persisted": false,
+                }),
+                11,
+            )
+            .unwrap();
+        ledger
+            .step_started(
+                &job.job_id,
+                3_090_001,
+                "stop_old_writer_for_exclusive_retained_volume_cutover",
+                12,
+            )
+            .unwrap();
+
+        assert_eq!(ledger.recover_interrupted(13).unwrap(), 1);
+
+        let run = ledger.get(&job.job_id).unwrap().unwrap();
+        assert_eq!(run.state, crate::LedgerRunState::NeedsAttention);
+        assert_eq!(
+            run.completion.unwrap().status,
+            CompletionStatus::NeedsAttention
+        );
+        let intent = ledger
+            .steps(&job.job_id)
+            .unwrap()
+            .into_iter()
+            .find(|step| step.step_index == 3_089_999)
+            .unwrap()
+            .output
+            .unwrap();
+        assert_eq!(intent["old_container_id"], "container-old");
+        assert_eq!(intent["candidate_container_id"], "container-new");
+        assert_eq!(intent["secret_material_persisted"], false);
+        let encoded = intent.to_string();
+        assert!(!encoded.contains("problem-packages"));
+        assert!(!encoded.contains("/data/ojos/problems"));
+    }
+
+    #[tokio::test]
     async fn replacement_commits_provider_revision_only_after_gateway_and_old_removal() {
         let trace = Arc::new(Mutex::new(Vec::new()));
         let runtime = Arc::new(TraceRuntime {
@@ -6063,6 +8275,7 @@ mod tests {
         let provider = Arc::new(TraceProvider {
             trace: Arc::clone(&trace),
             gateway_failures_remaining: Mutex::new(0),
+            materialization_failures_remaining: Mutex::new(0),
         });
         let executor = JobExecutor::from_shared(runtime).with_pipeline_provider(provider);
         let mut ledger = AgentLedger::open_in_memory().unwrap();
@@ -6111,6 +8324,7 @@ mod tests {
         let provider = Arc::new(TraceProvider {
             trace: Arc::clone(&trace),
             gateway_failures_remaining: Mutex::new(1),
+            materialization_failures_remaining: Mutex::new(0),
         });
         let executor = JobExecutor::from_shared(runtime).with_pipeline_provider(provider);
         let mut ledger = AgentLedger::open_in_memory().unwrap();

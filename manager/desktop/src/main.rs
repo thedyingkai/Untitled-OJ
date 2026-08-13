@@ -3,11 +3,10 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use ojos_orchestrator_desktop::{
-    Cli, DESKTOP_SMOKE_FAILURE_PATH, DESKTOP_SMOKE_SUCCESS_PATH, DesktopAgentHandle,
-    DesktopAgentOptions, LaunchConfig, desktop_smoke_duration_ms, desktop_smoke_mode,
-    desktop_smoke_script_for, discover_external_authorization_origin, initialization_script,
-    navigation_allowed, resolve_embedded_paths, resolve_launch_config, same_origin,
-    start_desktop_agent,
+    Cli, DESKTOP_SMOKE_FAILURE_PATH, DESKTOP_SMOKE_SUCCESS_PATH, DesktopAgentHandle, LaunchConfig,
+    desktop_smoke_duration_ms, desktop_smoke_mode, desktop_smoke_script_for,
+    discover_external_authorization_origin, initialization_script, navigation_allowed,
+    resolve_embedded_paths, resolve_launch_config, same_origin, unavailable_desktop_agent,
 };
 use orchestrator_backend::{
     EmbeddedServerHandle, EmbeddedServerOptions, EmbeddedStorage, start_embedded_server,
@@ -71,13 +70,10 @@ fn start_launch_target(config: LaunchConfig, resource_dir: &Path) -> Result<Laun
             repo_root,
             web_root,
             data_dir,
-            registry_credentials_path,
             bootstrap_secret,
-            agent_secret,
         } => {
             let paths =
                 resolve_embedded_paths(repo_root.as_deref(), web_root.as_deref(), resource_dir)?;
-            let agent_data_dir = data_dir.clone();
             let server = start_embedded_server(EmbeddedServerOptions {
                 repo_root: paths.repo_root,
                 web_root: paths.web_root,
@@ -85,28 +81,14 @@ fn start_launch_target(config: LaunchConfig, resource_dir: &Path) -> Result<Laun
                 bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
                 internal_token: None,
                 desktop_bootstrap_secret: Some(bootstrap_secret.clone()),
-                desktop_agent_secret: Some(agent_secret.clone()),
+                desktop_agent_secret: None,
                 storage: EmbeddedStorage::Sqlite {
                     database_path: data_dir.join("orchestrator.db"),
                 },
             })?;
             let url = Url::parse(&format!("http://{}/", server.local_addr()))
                 .context("construct embedded control-plane URL")?;
-            let mut agent_options =
-                DesktopAgentOptions::embedded(url.clone(), agent_data_dir, agent_secret);
-            if let Some(path) = registry_credentials_path {
-                agent_options = agent_options.with_registry_credentials_file(path);
-            }
-            let agent = match start_desktop_agent(agent_options) {
-                Ok(agent) => Some(agent),
-                Err(error) => {
-                    server.shutdown()?;
-                    server.join()?;
-                    return Err(error).context(
-                        "start embedded loopback Agent; Desktop refuses a partial control plane",
-                    );
-                }
-            };
+            let agent = Some(unavailable_desktop_agent());
             Ok(LaunchTarget {
                 url,
                 bootstrap_secret: Some(bootstrap_secret),

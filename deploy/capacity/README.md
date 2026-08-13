@@ -23,6 +23,16 @@ The runner only drives the API and records evidence. It does not host the
 control plane, PostgreSQL, an Agent, a fixture container or a Docker Engine
 that executes business workloads.
 
+Each worker keeps two disjoint per-ordinal host roots. `agent-internal` contains
+the mTLS identity, execution/provider SQLite ledgers and generated provider
+credentials; it is mounted only into the Agent. `workload-exports` contains
+runtime contexts and ResourceClaim outputs; it is mounted read-write into the
+matching Agent and read-only at the same absolute path in the matching DinD
+daemon. Evidence rejects any Engine mount of the internal root, Registry
+credential, provider descriptor/admin URL, or transport CA. An older combined
+`agents/<ordinal>` tree stops provisioning after the Agents are stopped; the
+playbook never copies or classifies legacy credentials automatically.
+
 ## Protected inputs
 
 Copy `inventory.example.yml` and `group_vars/all.example.yml` outside the
@@ -32,7 +42,30 @@ is `repository@sha256:<64 lowercase hex>` and the candidate is a real 40-byte
 commit identity.
 
 The PostgreSQL bundle must contain `server.crt`, `server.key`, `root.crt` and
-`postgres-password`. The control-plane bundle must contain:
+`postgres-password`. Capacity also requires three distinct controller-protected
+Agent ResourceClaim inputs: a strict JSON descriptor, a single-line PostgreSQL
+administrator URL, and the CA used by its `verify-full` provider. The installed
+descriptor is schema v1 and must contain exactly:
+
+```json
+{
+  "schema_version": 1,
+  "provider_id": "postgresql-capacity",
+  "host": "postgres.capacity.internal",
+  "port": 5432,
+  "tls_mode": "verify-full",
+  "admin_url_file": "/run/agent-resource-provider/admin.url",
+  "ca_file": "/run/agent-resource-provider/postgres-ca.crt"
+}
+```
+
+The administrator URL stays in Agent-only configuration and uses
+`sslmode=require`; the provider descriptor plus the dedicated CA enforce
+hostname verification. Generated per-database credentials stay under
+`agent-internal`; only generated workload DSN outputs are placed in
+`workload-exports` with mode `0600`.
+
+The control-plane bundle must contain:
 
 - `orchestrator-postgres-ca.crt`;
 - `orchestrator-tls.crt` and `orchestrator-tls.key`;
@@ -43,6 +76,19 @@ The PostgreSQL bundle must contain `server.crt`, `server.key`, `root.crt` and
 The protected control-plane env file supplies the PostgreSQL URLs with
 `sslmode=verify-full`, OIDC configuration, Gateway/Auth management providers,
 internal compatibility credential and all other production preflight values.
+Capacity deliberately uses externally operated platform providers instead of
+starting Auth/Gateway on the candidate control-plane host. The three origins
+`ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN`, `ORCHESTRATOR_AUTH_ADMIN_ORIGIN`, and
+`ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN` must therefore be credential-free HTTPS
+origins. Their three raw credentials must be distinct, header-safe values of at
+least 32 bytes. Before any Node code is issued, Ansible performs authenticated
+read-only projection probes against Gateway and Auth and mints one disposable
+workload credential through Auth; a missing, unreachable, misidentified, or
+unauthorized provider stops provisioning.
+It also contains only the canonical SHA-256 verifiers for the dedicated
+Gateway and Auth Contribution acknowledgement tokens. The matching raw tokens
+are distributed separately to those managed services and never copied to the
+control-plane host.
 Catalog trust and source JSON are generated separately and override only the
 two Catalog variables.
 
@@ -304,10 +350,12 @@ The execution sequence is fail-closed:
 2. generate and self-verify the signed 20-service Catalog;
 3. start TLS PostgreSQL, run expand-only migrations and start the single
    control plane;
-4. read the pulled OCI revision label and check readiness build identity;
+4. read the pulled OCI revision label, check readiness build identity, and
+   prove both external projection providers plus the Auth workload issuer over
+   authenticated HTTPS;
 5. issue 100 one-time registration codes through `/api/v1`, including the
    canonical Docker/Linux/x86_64 Node labels, then redeem them into 100
-   independent Agent identities. Each code is staged as UID/GID 10004 mode
+   independent Agent identities. Each code is staged as UID/GID 65532 mode
    `0600` inside only that Agent's mode `0700` bootstrap directory, mounted
    read-only into only that enrollment container. Enrollment passes the exact
    provisioned Node ID, persists a CSR/private key bound to the code digest,

@@ -19,9 +19,9 @@
     - name: Stage the code only in this Agent state directory
       ansible.builtin.copy:
         src: "{{ capacity_fixture_output_dir }}/enrollment/capacity-node-{{ '%02d' | format(capacity_worker_ordinal | int) }}-{{ '%02d' | format(capacity_engine_ordinal) }}.code"
-        dest: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code"
-        owner: "10004"
-        group: "10004"
+        dest: "/var/lib/ojos/capacity/agent-internal/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code"
+        owner: "65532"
+        group: "65532"
         mode: "0600"
       when: controller_enrollment_code.stat.exists
       no_log: true
@@ -39,7 +39,7 @@
           - --rm
           - --no-deps
           - --volume
-          - "/var/lib/ojos/capacity/agents/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code:/run/secrets/enrollment-code:ro"
+          - "/var/lib/ojos/capacity/agent-internal/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code:/run/secrets/enrollment-code:ro"
           - "agent-{{ '%02d' | format(capacity_engine_ordinal) }}"
           - enroll
           - --control-plane
@@ -87,7 +87,7 @@
 
     - name: Remove this Agent staged code immediately after enrollment
       ansible.builtin.file:
-        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code"
+        path: "/var/lib/ojos/capacity/agent-internal/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code"
         state: absent
       when: controller_enrollment_code.stat.exists
       no_log: true
@@ -103,6 +103,6 @@
   always:
     - name: Erase this Agent staged code after any interrupted enrollment
       ansible.builtin.file:
-        path: "/var/lib/ojos/capacity/agents/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code"
+        path: "/var/lib/ojos/capacity/agent-internal/{{ '%02d' | format(capacity_engine_ordinal) }}/bootstrap/enrollment-code"
         state: absent
       no_log: true

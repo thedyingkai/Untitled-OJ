@@ -9,31 +9,33 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"ojos-problem-events/problemv1"
 	"ojos-problem-service/internal/config"
-	"ojos-shared/eventing"
 )
 
 type recordingIntentRegistrar struct {
-	artifacts []eventing.ArtifactRef
-	completed []eventing.ArtifactRef
+	artifacts []problemv1.ArtifactRef
+	completed []problemv1.ArtifactRef
 }
 
-func (r *recordingIntentRegistrar) MarkArtifactUploadCompleted(_ context.Context, artifact eventing.ArtifactRef) error {
+func (r *recordingIntentRegistrar) MarkArtifactUploadCompleted(_ context.Context, artifact problemv1.ArtifactRef) error {
 	r.completed = append(r.completed, artifact)
 	return nil
 }
 
-func (r *recordingIntentRegistrar) RegisterArtifactUploadIntent(_ context.Context, artifact eventing.ArtifactRef) error {
+func (r *recordingIntentRegistrar) RegisterArtifactUploadIntent(_ context.Context, artifact problemv1.ArtifactRef) error {
 	r.artifacts = append(r.artifacts, artifact)
 	return nil
 }
 
 func TestBuildDeterministicPackageArtifactIgnoresSourceMTime(t *testing.T) {
-	root := t.TempDir()
+	problemsRoot := t.TempDir()
+	root := filepath.Join(problemsRoot, "problem-1")
 	if err := os.MkdirAll(filepath.Join(root, "tests"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -46,11 +48,17 @@ func TestBuildDeterministicPackageArtifactIgnoresSourceMTime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	firstPath, firstDigest, firstSize, err := BuildDeterministicPackageArtifact(root)
+	firstPath, firstDigest, firstSize, err := BuildDeterministicPackageArtifact(problemsRoot, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(firstPath)
+	if filepath.Dir(firstPath) != filepath.Join(problemsRoot, artifactBuildDirectory) {
+		t.Fatalf("artifact temporary escaped problems volume: %s", firstPath)
+	}
+	if info, err := os.Stat(firstPath); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("artifact temporary must be a private regular file: info=%v err=%v", info, err)
+	}
 
 	future := time.Now().Add(24 * time.Hour)
 	if err := os.Chtimes(manifest, future, future); err != nil {
@@ -59,13 +67,45 @@ func TestBuildDeterministicPackageArtifactIgnoresSourceMTime(t *testing.T) {
 	if err := os.Chtimes(input, future, future); err != nil {
 		t.Fatal(err)
 	}
-	secondPath, secondDigest, secondSize, err := BuildDeterministicPackageArtifact(root)
+	secondPath, secondDigest, secondSize, err := BuildDeterministicPackageArtifact(problemsRoot, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(secondPath)
 	if firstDigest != secondDigest || firstSize != secondSize {
 		t.Fatalf("deterministic artifact changed: %s/%d != %s/%d", firstDigest, firstSize, secondDigest, secondSize)
+	}
+}
+
+func TestBuildDeterministicPackageArtifactRejectsPackageOutsideProblemsRoot(t *testing.T) {
+	problemsRoot := t.TempDir()
+	packageRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(packageRoot, "problem.yaml"), []byte("format: ojos\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if path, _, _, err := BuildDeterministicPackageArtifact(problemsRoot, packageRoot); err == nil || path != "" {
+		t.Fatalf("package outside managed volume was accepted: path=%q err=%v", path, err)
+	}
+}
+
+func TestBuildDeterministicPackageArtifactRejectsSymlinkEntries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symbolic links requires elevated privileges on some Windows hosts")
+	}
+	problemsRoot := t.TempDir()
+	packageRoot := filepath.Join(problemsRoot, "problem-1")
+	if err := os.MkdirAll(packageRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(external, []byte("must not be packaged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(packageRoot, "linked-secret.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if path, _, _, err := BuildDeterministicPackageArtifact(problemsRoot, packageRoot); err == nil || path != "" {
+		t.Fatalf("symbolic link entry was accepted: path=%q err=%v", path, err)
 	}
 }
 
@@ -153,8 +193,8 @@ func TestManagedProblemStorageUsesNamedBindingsAndWorkloadToken(t *testing.T) {
 		"deployment":     map[string]any{"id": "problem-a", "service": "problem-service", "node": "node-a"},
 		"gateway":        map[string]any{"origin": server.URL},
 		"bindings": map[string]any{
-			"storage_put":  map[string]any{"binding_id": "binding-put", "api_id": "storage.object.put", "base_path": "/internal/apis/storage.object.put", "timeout_ms": 300000},
-			"storage_head": map[string]any{"binding_id": "binding-head", "api_id": "storage.object.head", "base_path": "/internal/apis/storage.object.head", "timeout_ms": 300000},
+			"storage.object.put":  map[string]any{"binding_id": "binding-put", "api_id": "storage.object.put", "base_path": "/internal/apis/storage.object.put", "timeout_ms": 300000},
+			"storage.object.head": map[string]any{"binding_id": "binding-head", "api_id": "storage.object.head", "base_path": "/internal/apis/storage.object.head", "timeout_ms": 300000},
 		},
 		"credential_file": tokenPath,
 		"generation":      2,
@@ -166,7 +206,7 @@ func TestManagedProblemStorageUsesNamedBindingsAndWorkloadToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("OJOS_SERVICE_CONTEXT_FILE", contextPath)
-	artifact, err := PublishPackageArtifactTracked(t.Context(), config.StorageConfig{Bucket: "problems"}, 71, root, &recordingIntentRegistrar{})
+	artifact, err := PublishPackageArtifactTracked(t.Context(), config.StorageConfig{ProblemsRoot: root, Bucket: "problems"}, 71, root, &recordingIntentRegistrar{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +220,7 @@ func TestPublishPackageArtifactAcceptsMatchingConditionalCreateCollision(t *test
 	if err := os.WriteFile(filepath.Join(root, "problem.yaml"), []byte("format: ojos\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	artifactPath, digest, size, err := BuildDeterministicPackageArtifact(root)
+	artifactPath, digest, size, err := BuildDeterministicPackageArtifact(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}

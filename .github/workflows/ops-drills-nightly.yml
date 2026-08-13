@@ -45,6 +45,7 @@ jobs:
         shell: bash
         env:
           OJOS_EVIDENCE_DIR: artifacts/alert-firing-drill
+          OJOS_ALERT_DRILL_ALERTMANAGER_TIMEOUT_SECONDS: "180"
         run: bash deploy/ops/alert-firing-drill.sh
       - name: Orchestrator Web v1 control workflows
         shell: bash

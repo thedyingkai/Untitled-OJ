@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -128,6 +130,128 @@ type ServicePermissionInput struct {
 	Code        string
 	Name        string
 	Description string
+}
+
+type ContributionPermissionDefinitionInput struct {
+	Code        string
+	ServiceCode string
+	Title       string
+	Description string
+}
+
+// ReconcileContributionPermissions replaces only the set of permission
+// definitions owned by active Contribution revisions. Role bindings and
+// explicit permission assignments are independent aggregates and are never
+// deleted or rewritten by this operation. Definitions removed from a revision
+// remain as inactive rows while assignments still reference them.
+func (r *AdminRepository) ReconcileContributionPermissions(
+	ctx context.Context,
+	snapshotDigest string,
+	permissions []ContributionPermissionDefinitionInput,
+) error {
+	snapshotDigest = strings.TrimSpace(snapshotDigest)
+	if !canonicalSHA256(snapshotDigest) {
+		return errors.New("contribution snapshot digest is invalid")
+	}
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var current string
+	err = tx.QueryRow(ctx, `
+SELECT snapshot_digest
+FROM contribution_permission_projection
+WHERE singleton = TRUE
+FOR UPDATE
+`).Scan(&current)
+	if err != nil && err != pgx.ErrNoRows {
+		return err
+	}
+	if err == nil && current == snapshotDigest {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(permissions))
+	for _, item := range permissions {
+		code := strings.TrimSpace(item.Code)
+		serviceCode := strings.TrimSpace(item.ServiceCode)
+		if code == "" || serviceCode == "" {
+			return errors.New("contribution permission code and service owner are required")
+		}
+		if _, duplicate := seen[code]; duplicate {
+			return errors.New("contribution permission code is duplicated")
+		}
+		seen[code] = struct{}{}
+		title := strings.TrimSpace(item.Title)
+		if title == "" {
+			title = code
+		}
+		var registeredCode string
+		if err := tx.QueryRow(ctx, `
+INSERT INTO permissions(code, service_code, name, description)
+VALUES($1, $2, $3, $4)
+ON CONFLICT(code) DO UPDATE SET
+    name = EXCLUDED.name,
+    description = EXCLUDED.description
+	WHERE permissions.service_code = EXCLUDED.service_code
+RETURNING code
+`, code, serviceCode, title, strings.TrimSpace(item.Description)).Scan(&registeredCode); err != nil {
+			if err == pgx.ErrNoRows {
+				return fmt.Errorf("permission %s is already owned by another service", code)
+			}
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO contribution_permission_definitions(permission_code, service_code, snapshot_digest, active)
+VALUES($1, $2, $3, TRUE)
+ON CONFLICT(permission_code) DO UPDATE SET
+    service_code = EXCLUDED.service_code,
+    snapshot_digest = EXCLUDED.snapshot_digest,
+    active = TRUE,
+    updated_at = clock_timestamp()
+`, code, serviceCode, snapshotDigest); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE contribution_permission_definitions
+SET active = FALSE, snapshot_digest = $1, updated_at = clock_timestamp()
+WHERE NOT (permission_code = ANY($2::text[]))
+`, snapshotDigest, mapKeys(seen)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO contribution_permission_projection(singleton, snapshot_digest)
+VALUES(TRUE, $1)
+ON CONFLICT(singleton) DO UPDATE SET
+    snapshot_digest = EXCLUDED.snapshot_digest,
+    updated_at = clock_timestamp()
+`, snapshotDigest); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func canonicalSHA256(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, char := range value[len("sha256:"):] {
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func mapKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 type ServiceRoleBindingInput struct {

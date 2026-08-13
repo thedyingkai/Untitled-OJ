@@ -24,8 +24,14 @@ AdminBootstrap:
 
 WorkloadIdentity:
   PrivateKeyFile: ""
+  PrivateKeyPEM: ""
   ControlPlaneToken: ""
   KeyID: "workload-1"
   Issuer: "ojos-auth/workload"
   Audience: "ojos-gateway"
   TTLSeconds: 900
+
+Orchestrator:
+  Endpoint: ""
+  InternalToken: ""
+  ContributionAckToken: ""

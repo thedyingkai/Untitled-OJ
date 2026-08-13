@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"ojos-problem-events/problemv1"
 	"ojos-problem-service/internal/artifactgc"
 	"ojos-problem-service/internal/packagefs"
-	"ojos-shared/eventing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,7 +43,7 @@ func TestProblemFileCleanupCandidatesShareTheBusinessTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertCleanupCandidate(t, ctx, pool, deletedFile, true)
-	assertProblemFileIdentity(t, ctx, pool, deletedFileProblemID, "tests/1.in", eventing.ArtifactRef{}, false)
+	assertProblemFileIdentity(t, ctx, pool, deletedFileProblemID, "tests/1.in", problemv1.ArtifactRef{}, false)
 
 	deletedProblemID := int64(103)
 	insertProblemLifecycleRow(t, ctx, pool, deletedProblemID)
@@ -309,9 +309,9 @@ func insertProblemLifecycleRow(t *testing.T, ctx context.Context, pool *pgxpool.
 	}
 }
 
-func problemContentRef(problemID int64, digestCharacter string, size int64) eventing.ArtifactRef {
+func problemContentRef(problemID int64, digestCharacter string, size int64) problemv1.ArtifactRef {
 	digest := strings.Repeat(digestCharacter, 64)
-	return eventing.ArtifactRef{
+	return problemv1.ArtifactRef{
 		URI:         fmt.Sprintf("storage://problems/problem-%d-objects-sha256-%s", problemID, digest),
 		SHA256:      digest,
 		SizeBytes:   size,
@@ -319,9 +319,9 @@ func problemContentRef(problemID int64, digestCharacter string, size int64) even
 	}
 }
 
-func packageArtifactRef(digestCharacter string, size int64) eventing.ArtifactRef {
+func packageArtifactRef(digestCharacter string, size int64) problemv1.ArtifactRef {
 	digest := strings.Repeat(digestCharacter, 64)
-	return eventing.ArtifactRef{
+	return problemv1.ArtifactRef{
 		URI:         "storage://problems/package-sha256-" + digest + ".zip",
 		SHA256:      digest,
 		SizeBytes:   size,
@@ -329,7 +329,7 @@ func packageArtifactRef(digestCharacter string, size int64) eventing.ArtifactRef
 	}
 }
 
-func indexedArtifact(logicalPath string, artifact eventing.ArtifactRef) packagefs.IndexedFile {
+func indexedArtifact(logicalPath string, artifact problemv1.ArtifactRef) packagefs.IndexedFile {
 	return packagefs.IndexedFile{
 		LogicalPath: logicalPath,
 		FileKind:    "authoring",
@@ -340,7 +340,7 @@ func indexedArtifact(logicalPath string, artifact eventing.ArtifactRef) packagef
 	}
 }
 
-func assertCleanupCandidate(t *testing.T, ctx context.Context, pool *pgxpool.Pool, artifact eventing.ArtifactRef, want bool) {
+func assertCleanupCandidate(t *testing.T, ctx context.Context, pool *pgxpool.Pool, artifact problemv1.ArtifactRef, want bool) {
 	t.Helper()
 	var digest string
 	var size int64
@@ -363,7 +363,7 @@ WHERE artifact_uri=$1 AND status='PENDING'
 	}
 }
 
-func assertProblemFileIdentity(t *testing.T, ctx context.Context, pool *pgxpool.Pool, problemID int64, logicalPath string, artifact eventing.ArtifactRef, want bool) {
+func assertProblemFileIdentity(t *testing.T, ctx context.Context, pool *pgxpool.Pool, problemID int64, logicalPath string, artifact problemv1.ArtifactRef, want bool) {
 	t.Helper()
 	var uri, digest string
 	var size int64

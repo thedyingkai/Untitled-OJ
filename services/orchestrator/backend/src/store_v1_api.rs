@@ -3,6 +3,11 @@ use crate::catalog_registry::{
     CatalogRegistry, CatalogRegistryError, CatalogSourceRegistration, PackageQuery,
     ResolvedCatalogPlan, VerifiedReleaseDocument,
 };
+use crate::contribution_controller::{
+    ContributionReplacementDagV1, SignedContributionSuccessorV1, append_contribution_job_fragment,
+    append_contribution_replacement_job_fragment, contribution_job_steps, stage_contribution,
+    stage_signed_contribution_successor,
+};
 use crate::durable::{DurableError, DurableStore};
 use crate::http::{ApiRequest, ApiResponse, query_value};
 use crate::{market_api, routes::status_for_error};
@@ -11,8 +16,17 @@ use orchestrator_control_plane::{
     DurableOperation, DurableOperationStatus, JobKind, JobStore, OperationCoordinator,
     OperationRepository, PlanOperation, PlannedJob, PlannedJobCondition,
 };
+use orchestrator_legacy::composition::{
+    ApiRequirementV1 as CompositionApiRequirementV1, CompositionModeV1, CompositionNodeSpecV1,
+    CompositionPlanBindingV1, CompositionPlanV1, CompositionReleaseV1, ConfigRequirementV1,
+    INSTALL_INPUTS_SCHEMA_VERSION, InstallInputsV1, PackageDependencyV1, ProvidedApiV1,
+    ProviderCandidateV1, ProviderKindV1, ProviderPolicyV1, ReleaseGraphV1, ResourceLifecycleV1,
+    ResourceRequirementV1, SecretRequirementV1, ValidatedInstallInputsV1, build_composition_plan,
+    validate_install_inputs,
+};
 use orchestrator_legacy::{
-    ActionRequest, ApiBinding, ApiBindingResolutionRequest, ApiBindingState, ApiProviderCandidate,
+    ActionRequest, ApiBinding, ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState,
+    ApiBindingResolutionRequest, ApiBindingState, ApiProviderCandidate, ContributionRevisionV1,
     NodeRecord, OrchestratorActionConsole, ServiceRelease, ServiceReleaseContract,
     ServiceReleaseManifest, TopologyApiBindingSpec, TopologyEndpointSpec, TopologyLinkSpec,
     TopologySpec, api_version_matches, diff_topology_specs, parse_endpoint_id,
@@ -24,13 +38,15 @@ use orchestrator_runtime::{
     ArtifactReference, AuthPipelineStep, AuthServiceIdentitySpec, BindingContextApplyPayload,
     ContainerSpec, GatewayPipelineStep, GatewayRouteSpec, HealthGatePolicy,
     MANAGED_EVENT_STREAM_V1, ManagedApiBinding, ManagedEventBinding, ManagedEventSubscription,
-    ManagedServiceContextProjection, ManagedServiceContextSpec, OciImageReference,
-    OciMigrationStep, PublishedEndpoint, PublishedPortProtocol, RedisNamespaceSpec,
-    ReleasePipelinePayload, ReleaseProviderRevision, ReleaseReplacementPayload,
-    ReplacementProviderSaga, RuntimeContract, RuntimeInstallPayload, RuntimeMaterializationStep,
-    RuntimeObservedState, RuntimeProfile, StorageResourceSpec, TypedProvisionerStep,
+    ManagedServiceContextProjection, ManagedServiceContextSpec, ManagedWorkloadVerifierSpec,
+    OciImageReference, OciMigrationStep, PublishedEndpoint, PublishedPortProtocol,
+    RedisNamespaceSpec, ReleasePipelinePayload, ReleaseProviderRevision, ReleaseReplacementPayload,
+    ReplacementProviderSaga, ResourceClaimStepV1, RetainedVolumeAttachmentV1, RuntimeContract,
+    RuntimeInstallPayload, RuntimeMaterializationStep, RuntimeObservedState, RuntimeProfile,
+    SERVICE_CONTRACT_GENERATION_LABEL, StorageResourceSpec, TypedProvisionerStep,
     stable_container_name,
 };
+use orchestrator_storage::ContributionRepository;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -543,6 +559,11 @@ struct ValidateReleaseRequest {
     config: Value,
     #[serde(default)]
     secret_refs: BTreeMap<String, String>,
+    /// Optional provider choices and per-node values may be supplied to make
+    /// validation return `valid=true`; the full immutable CompositionPlan is
+    /// returned even when inputs remain unresolved.
+    #[serde(default)]
+    inputs: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 fn validate_release_catalog(
@@ -598,7 +619,25 @@ fn validate_release_catalog(
                 "resolved validation plan does not contain its requested root metadata",
             )
         })?;
+    let composition_plan = build_store_composition_plan(storage, &documents, service_id, &node)?;
     let contract = release_contract_from_document(root_document)?;
+    let composition_validation = validate_store_composition_inputs(
+        &composition_plan,
+        &composition_plan.plan_digest,
+        &composition_plan.release_graph_digest,
+        &input.inputs,
+        (!input.config.is_null()).then(|| input.config.clone()),
+        input.secret_refs.clone(),
+    );
+    let composition_validation = if contract.platform.is_none() {
+        legacy_composition_inputs(&composition_plan, &input.config, &input.secret_refs)
+    } else {
+        composition_validation
+    };
+    let composition_error_detail = composition_validation
+        .as_ref()
+        .err()
+        .map(|error| error.detail.clone());
     let runtime_contract = ensure_release_runtime_supported(
         storage,
         &node,
@@ -636,7 +675,9 @@ fn validate_release_catalog(
     } else {
         Vec::new()
     };
-    if contract.contract_version >= 2 {
+    if contract.contract_version >= 2
+        && (contract.platform.is_none() || composition_validation.is_ok())
+    {
         let image = OciImageReference::parse(root_document.selection.release.oci_image.as_str())
             .map_err(|error| {
                 StoreApiError::new(
@@ -660,10 +701,12 @@ fn validate_release_catalog(
             "ojos.service_contract_version".to_string(),
             contract.contract_version.to_string(),
         );
+        attach_release_runtime_volume(&mut preview_spec, &contract)?;
         if bindings_valid
             && (!contract.requirements().is_empty()
                 || !contract.events.publishes.is_empty()
-                || !contract.events.subscribes.is_empty())
+                || !contract.events.subscribes.is_empty()
+                || contract_has_retained_runtime_volume(&contract))
         {
             preview_spec.managed_service_context = managed_service_context_spec(
                 storage,
@@ -681,6 +724,13 @@ fn validate_release_catalog(
             health_gate: preview_health_gate,
             offline_oci_artifact: None,
         };
+        let (validated_config, validated_secret_refs) = composition_validation
+            .as_ref()
+            .ok()
+            .map(|validated| {
+                composition_inputs_for_service(&composition_plan, validated, service_id)
+            })
+            .unwrap_or_else(|| (input.config.clone(), input.secret_refs.clone()));
         let _validated_pipeline = release_pipeline_payload(
             &contract.release,
             &contract,
@@ -690,8 +740,8 @@ fn validate_release_catalog(
             &format!("store-validate-{request_id}"),
             &input.migration_policy,
             &input.gateway_node_id,
-            &input.config,
-            &input.secret_refs,
+            &validated_config,
+            &validated_secret_refs,
         )?;
     }
     let topology_diff = if bindings_valid {
@@ -733,7 +783,7 @@ fn validate_release_catalog(
     Ok(success(
         200,
         json!({
-            "valid": bindings_valid,
+            "valid": bindings_valid && (contract.platform.is_none() || composition_validation.is_ok()),
             "catalog_source_id": resolved.source_id,
             "catalog_id": resolved.catalog_id,
             "verified_key_ids": resolved.verified_key_ids,
@@ -742,6 +792,9 @@ fn validate_release_catalog(
             "metadata": metadata,
             "bindings": binding_plan,
             "requirements": requirements,
+            "composition_plan": composition_plan,
+            "composition_inputs_valid": composition_validation.is_ok(),
+            "composition_input_error": composition_error_detail,
             "topology_confirmation_required": topology_confirmation_required,
             "runtime": {
                 "node_id": node.node_id,
@@ -795,6 +848,14 @@ struct InstallReleaseRequest {
     config: Value,
     #[serde(default)]
     secret_refs: BTreeMap<String, String>,
+    #[serde(default)]
+    plan_digest: String,
+    #[serde(default)]
+    release_graph_digest: String,
+    /// Per Composition node inputs. Legacy root `config` and `secret_refs`
+    /// remain aliases for one release cycle.
+    #[serde(default)]
+    inputs: BTreeMap<String, BTreeMap<String, Value>>,
     #[serde(default)]
     bindings: Vec<InstallBindingSelection>,
     #[serde(default)]
@@ -1020,6 +1081,44 @@ fn install_release(
     let documents = catalog_registry
         .fetch_release_documents(storage, &resolved)
         .map_err(catalog_registry_error)?;
+    let composition_node = node.as_ref().ok_or_else(|| {
+        StoreApiError::new(
+            422,
+            "STORE_TARGET_NODE_REQUIRED",
+            "CompositionPlanV1 requires a target Node provider snapshot",
+        )
+    })?;
+    let composition_plan =
+        build_store_composition_plan(storage, &documents, &service_id, composition_node)?;
+    let has_platform_contract = documents
+        .iter()
+        .map(release_contract_from_document)
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|contract| contract.platform.is_some());
+    let supplied_plan_digest = if input.plan_digest.trim().is_empty() && !has_platform_contract {
+        composition_plan.plan_digest.as_str()
+    } else {
+        required_text(&input.plan_digest, "plan_digest")?
+    };
+    let supplied_graph_digest =
+        if input.release_graph_digest.trim().is_empty() && !has_platform_contract {
+            composition_plan.release_graph_digest.as_str()
+        } else {
+            required_text(&input.release_graph_digest, "release_graph_digest")?
+        };
+    let validated_composition = if has_platform_contract {
+        validate_store_composition_inputs(
+            &composition_plan,
+            supplied_plan_digest,
+            supplied_graph_digest,
+            &input.inputs,
+            (!input.config.is_null()).then(|| input.config.clone()),
+            input.secret_refs.clone(),
+        )?
+    } else {
+        legacy_composition_inputs(&composition_plan, &input.config, &input.secret_refs)?
+    };
     let external_missing_dependencies = if external {
         missing_resolved_dependencies(storage, &resolved, &service_id)?
     } else {
@@ -1164,12 +1263,28 @@ fn install_release(
             node.as_ref(),
             &external_missing_dependencies,
             artifact_store,
+            &composition_plan,
+            &validated_composition,
         );
     }
     let node = node.expect("managed install requires a target Node");
     let (root_deployment_id, mut binding_plan) = managed_binding_preflight
         .expect("managed binding preflight must run before release publication");
     let operation_id = operation_id("store-install", &root_deployment_id, request)?;
+    let staged_contribution = stage_release_contribution(
+        storage,
+        &operation_id,
+        &root_deployment_id,
+        &selected.contract,
+        root_release.release.oci_image.digest().as_str(),
+    )?;
+    if staged_contribution.is_some() && !input.start {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_CONTRIBUTION_START_REQUIRED",
+            "a release with an active Contribution must start and pass its runtime health gate before routes, permissions, or frontend modules can be activated",
+        ));
+    }
     let topology_apply = input
         .topology
         .as_ref()
@@ -1243,7 +1358,6 @@ fn install_release(
     }
     let mut planned_deployments = Vec::new();
     let mut root_spec = None;
-    let empty_secret_refs = BTreeMap::new();
     for selection in &missing {
         let release = select_catalog_document_release(
             console,
@@ -1298,6 +1412,7 @@ fn install_release(
             "ojos.service_contract_version".to_string(),
             release.contract.contract_version.to_string(),
         );
+        attach_release_runtime_volume(&mut spec, &release.contract)?;
         let deployment_bindings = if selection.module_id == service_id {
             binding_plan.as_slice()
         } else {
@@ -1306,6 +1421,7 @@ fn install_release(
         if selection.module_id == service_id
             || !release.contract.events.publishes.is_empty()
             || !release.contract.events.subscribes.is_empty()
+            || contract_has_retained_runtime_volume(&release.contract)
         {
             spec.managed_service_context = managed_service_context_spec(
                 storage,
@@ -1335,6 +1451,11 @@ fn install_release(
                 &selection.release.version,
             )?,
         };
+        let (release_config, release_secret_refs) = composition_inputs_for_service(
+            &composition_plan,
+            &validated_composition,
+            &selection.module_id,
+        );
         let pipeline = release_pipeline_payload(
             &release.manifest,
             &release.contract,
@@ -1344,16 +1465,8 @@ fn install_release(
             &operation_id,
             &input.migration_policy,
             &input.gateway_node_id,
-            if selection.module_id == service_id {
-                &input.config
-            } else {
-                &Value::Null
-            },
-            if selection.module_id == service_id {
-                &input.secret_refs
-            } else {
-                &empty_secret_refs
-            },
+            &release_config,
+            &release_secret_refs,
         )?;
         let (kind, payload, max_attempts) = if let Some(pipeline) = pipeline {
             (
@@ -1386,8 +1499,15 @@ fn install_release(
             .iter()
             .filter_map(|dependency| install_steps.get(&dependency.module_id).cloned())
             .collect();
-        if selection.module_id == service_id && topology_apply.is_some() {
-            depends_on.push("topology-binding-prepare".to_string());
+        if selection.module_id == service_id {
+            if topology_apply.is_some() {
+                depends_on.push("topology-binding-prepare".to_string());
+            }
+            if let Some(contribution) = &staged_contribution {
+                // The contribution fragment is appended after runtime jobs;
+                // its deterministic PREPARE id is safe to reference now.
+                depends_on.push(contribution_job_steps(contribution).prepare_step_id);
+            }
         }
         let step_id = install_steps
             .get(&selection.module_id)
@@ -1418,6 +1538,50 @@ fn install_release(
             &node.node_id,
             &root_deployment_id,
         );
+    }
+    if let Some(contribution) = &staged_contribution {
+        let root_step = install_steps.get(&service_id).cloned().ok_or_else(|| {
+            StoreApiError::new(500, "CATALOG_PLAN_INVALID", "root install step is missing")
+        })?;
+        let prepare_dependencies = topology_apply
+            .as_ref()
+            .map(|_| vec!["topology-binding-prepare".to_string()])
+            .unwrap_or_default();
+        let finalize_step = topology_apply
+            .as_ref()
+            .map(|_| "topology-binding-finalize-success".to_string());
+        let commit_dependencies = vec![root_step];
+        let contribution_steps = append_contribution_job_fragment(
+            &mut jobs,
+            contribution,
+            prepare_dependencies,
+            commit_dependencies,
+            finalize_step.clone().into_iter().collect(),
+        );
+        if let Some(finalize_step) = finalize_step {
+            add_job_dependency(
+                &mut jobs,
+                &finalize_step,
+                &contribution_steps.commit_step_id,
+            )?;
+            // A failed Contribution COMMIT leaves FINALIZE intentionally
+            // unmaterialized. Topology ABORT therefore needs the COMMIT as a
+            // direct failure witness; depending only on the unbound FINALIZE
+            // node would strand the PREPARE projection forever.
+            add_job_dependency(
+                &mut jobs,
+                "topology-binding-finalize-failure",
+                &contribution_steps.commit_step_id,
+            )?;
+            // Runtime cleanup is safe only after both projections have restored
+            // their previous active state.  Otherwise topology ABORT and
+            // Contribution ABORT can race with container removal.
+            add_job_dependency(
+                &mut jobs,
+                "remove-root-after-topology-abort",
+                &contribution_steps.abort_step_id,
+            )?;
+        }
     }
     // Every install/pipeline step compensates its own partially-created runtime
     // resources.  Successfully installed dependencies are intentionally retained:
@@ -1460,6 +1624,9 @@ fn install_release(
             "catalog_id": resolved.catalog_id,
             "catalog_verified_key_ids": resolved.verified_key_ids,
             "catalog_plan": resolved.plan,
+            "composition_plan_digest": composition_plan.plan_digest,
+            "composition_release_graph_digest": composition_plan.release_graph_digest,
+            "composition_inputs": validated_composition,
             "bindings": binding_plan,
             "topology": input.topology.as_ref().map(|selection| json!({
                 "topology_id": selection.topology_id,
@@ -1589,6 +1756,139 @@ fn append_install_topology_jobs(
     });
 }
 
+fn stage_release_contribution(
+    storage: &DurableStore,
+    operation_id: &str,
+    deployment_id: &str,
+    contract: &ServiceReleaseContract,
+    runtime_digest: &str,
+) -> Result<Option<crate::contribution_controller::StagedContributionV1>, StoreApiError> {
+    let Some(platform) = contract.platform.as_ref() else {
+        return Ok(None);
+    };
+    let contribution = &platform.contribution;
+    let head = storage
+        .contribution_head("default", &contract.release.service_name)
+        .map_err(contribution_storage_error)?;
+    if head.is_none()
+        && contribution.api_surfaces.is_empty()
+        && contribution.operation_routes.is_empty()
+        && contribution.permission_definitions.is_empty()
+        && contribution.user_frontend_modules.is_empty()
+        && contribution.admin_frontend_modules.is_empty()
+    {
+        return Ok(None);
+    }
+    let generation = crate::contribution_controller::next_contribution_generation(
+        storage,
+        "default",
+        &contract.release.service_name,
+        head.as_ref().map_or(0, |head| head.generation()),
+    )
+    .map_err(contribution_controller_error)?;
+    let previous_revision_id = head
+        .as_ref()
+        .map(|head| head.active_revision_id().to_string());
+    let revision = ContributionRevisionV1::stage(
+        "default",
+        deployment_id,
+        contract.release.service_name.clone(),
+        runtime_digest,
+        platform.contract_digest.clone(),
+        generation,
+        previous_revision_id,
+        contribution.api_surfaces.clone(),
+        contribution.operation_routes.clone(),
+        contribution.permission_definitions.clone(),
+        contribution.user_frontend_modules.clone(),
+        contribution.admin_frontend_modules.clone(),
+    )
+    .map_err(|error| {
+        StoreApiError::new(
+            422,
+            "STORE_CONTRIBUTION_INVALID",
+            format!("compile signed contribution revision: {error}"),
+        )
+    })?;
+    stage_contribution(storage, operation_id, &revision)
+        .map(Some)
+        .map_err(contribution_controller_error)
+}
+
+fn stage_replacement_contribution(
+    storage: &DurableStore,
+    operation_id: &str,
+    replaces_deployment_id: &str,
+    deployment_id: &str,
+    contract: &ServiceReleaseContract,
+    runtime_digest: &str,
+) -> Result<Option<crate::contribution_controller::StagedContributionV1>, StoreApiError> {
+    let head = storage
+        .contribution_head("default", &contract.release.service_name)
+        .map_err(contribution_storage_error)?;
+    let Some(head) = head else {
+        return stage_release_contribution(
+            storage,
+            operation_id,
+            deployment_id,
+            contract,
+            runtime_digest,
+        );
+    };
+    let platform = contract.platform.as_ref().ok_or_else(|| {
+        StoreApiError::new(
+            422,
+            "STORE_CONTRIBUTION_SUCCESSOR_REQUIRED",
+            format!(
+                "service {} has active Contribution head {}; a replacement release must carry a signed platform Contribution projection, including an explicit empty successor when withdrawing all contributions",
+                contract.release.service_name,
+                head.etag()
+            ),
+        )
+    })?;
+    let contribution = &platform.contribution;
+    stage_signed_contribution_successor(
+        storage,
+        operation_id,
+        SignedContributionSuccessorV1 {
+            scope_id: "default".to_string(),
+            replaces_deployment_id: replaces_deployment_id.to_string(),
+            deployment_id: deployment_id.to_string(),
+            service_id: contract.release.service_name.clone(),
+            release_digest: runtime_digest.to_string(),
+            contract_digest: platform.contract_digest.clone(),
+            api_surfaces: contribution.api_surfaces.clone(),
+            operation_routes: contribution.operation_routes.clone(),
+            permission_definitions: contribution.permission_definitions.clone(),
+            user_frontend_modules: contribution.user_frontend_modules.clone(),
+            admin_frontend_modules: contribution.admin_frontend_modules.clone(),
+        },
+    )
+    .map(Some)
+    .map_err(contribution_controller_error)
+}
+
+fn add_job_dependency(
+    jobs: &mut [PlannedJob],
+    step_id: &str,
+    dependency: &str,
+) -> Result<(), StoreApiError> {
+    let job = jobs
+        .iter_mut()
+        .find(|job| job.step_id == step_id)
+        .ok_or_else(|| {
+            StoreApiError::new(
+                500,
+                "STORE_CONTRIBUTION_DAG_INVALID",
+                format!("Contribution integration could not find step {step_id}"),
+            )
+        })?;
+    if !job.depends_on.iter().any(|value| value == dependency) {
+        job.depends_on.push(dependency.to_string());
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn enqueue_external_install(
     console: &OrchestratorActionConsole,
@@ -1607,6 +1907,8 @@ fn enqueue_external_install(
     node: Option<&NodeRecord>,
     missing_dependencies: &[&orchestrator_manager::catalog_v2::ResolvedReleaseV2],
     artifact_store: Option<&ArtifactStore>,
+    composition_plan: &CompositionPlanV1,
+    validated_composition: &ValidatedInstallInputsV1,
 ) -> Result<ApiResponse, StoreApiError> {
     let endpoint = input.endpoint.trim();
     if release_runtime_contract(&selected.contract)?.id == RuntimeProfile::JudgeSandboxV1 {
@@ -1677,7 +1979,6 @@ fn enqueue_external_install(
     let mut planned_dependency_deployments = Vec::new();
     if !missing_dependencies.is_empty() {
         let node = node.expect("missing External dependencies require a validated Node");
-        let empty_secret_refs = BTreeMap::new();
         for selection in missing_dependencies {
             let release = select_catalog_document_release(
                 console,
@@ -1723,8 +2024,10 @@ fn enqueue_external_install(
                 "ojos.service_contract_version".to_string(),
                 release.contract.contract_version.to_string(),
             );
+            attach_release_runtime_volume(&mut spec, &release.contract)?;
             if !release.contract.events.publishes.is_empty()
                 || !release.contract.events.subscribes.is_empty()
+                || contract_has_retained_runtime_volume(&release.contract)
             {
                 spec.managed_service_context = managed_service_context_spec(
                     storage,
@@ -1747,6 +2050,11 @@ fn enqueue_external_install(
                     &selection.release.version,
                 )?,
             };
+            let (release_config, release_secret_refs) = composition_inputs_for_service(
+                composition_plan,
+                validated_composition,
+                &selection.module_id,
+            );
             let pipeline = release_pipeline_payload(
                 &release.manifest,
                 &release.contract,
@@ -1756,8 +2064,8 @@ fn enqueue_external_install(
                 &operation_id,
                 &input.migration_policy,
                 &input.gateway_node_id,
-                &Value::Null,
-                &empty_secret_refs,
+                &release_config,
+                &release_secret_refs,
             )?;
             let (kind, payload, max_attempts) = if let Some(pipeline) = pipeline {
                 (
@@ -2303,6 +2611,14 @@ fn replace_release(
     );
     let operation_target = format!("{}->{}", current.instance.deployment_id, new_deployment_id);
     let operation_id = operation_id(action.operation_prefix(), &operation_target, request)?;
+    let staged_contribution = stage_replacement_contribution(
+        storage,
+        &operation_id,
+        &current.instance.deployment_id,
+        &new_deployment_id,
+        &selected.contract,
+        root_release.release.oci_image.digest().as_str(),
+    )?;
     let requested_replacement_endpoint = if input.endpoint.trim().is_empty() {
         current.endpoint.as_str()
     } else {
@@ -2341,6 +2657,7 @@ fn replace_release(
         "ojos.service_contract_version".to_string(),
         selected.contract.contract_version.to_string(),
     );
+    attach_release_runtime_volume(&mut spec, &selected.contract)?;
     let current_consumer_bindings = active_consumer_bindings(storage, current_deployment_id)?;
     let current_provider_bindings = active_provider_bindings(storage, current_deployment_id)?;
     let is_topology_consumer =
@@ -2537,6 +2854,7 @@ fn replace_release(
     if is_topology_consumer
         || !selected.contract.events.publishes.is_empty()
         || !selected.contract.events.subscribes.is_empty()
+        || contract_has_retained_runtime_volume(&selected.contract)
     {
         spec.managed_service_context = managed_service_context_spec(
             storage,
@@ -2573,19 +2891,26 @@ fn replace_release(
     )?;
     let previous_provider_revision =
         provider_revision_from_operation(storage, &current_proof.operation_id)?;
-    let (materialization, migrations, desired_auth, desired_provisioners, desired_gateway) =
-        desired_pipeline.map_or_else(
-            || (None, Vec::new(), None, Vec::new(), None),
-            |pipeline| {
-                (
-                    pipeline.materialization,
-                    pipeline.migrations,
-                    pipeline.auth,
-                    pipeline.provisioners,
-                    pipeline.gateway,
-                )
-            },
-        );
+    let (
+        materialization,
+        resource_claims,
+        migrations,
+        desired_auth,
+        desired_provisioners,
+        desired_gateway,
+    ) = desired_pipeline.map_or_else(
+        || (None, Vec::new(), Vec::new(), None, Vec::new(), None),
+        |pipeline| {
+            (
+                pipeline.materialization,
+                pipeline.resource_claims,
+                pipeline.migrations,
+                pipeline.auth,
+                pipeline.provisioners,
+                pipeline.gateway,
+            )
+        },
+    );
     let desired_provider_revision = ReleaseProviderRevision {
         revision_id: operation_id.clone(),
         auth: desired_auth,
@@ -2606,9 +2931,11 @@ fn replace_release(
         health_gate: replacement_health_gate,
         offline_oci_artifact: replacement_install.offline_oci_artifact,
         materialization,
+        resource_claims,
         migrations,
         provider_saga,
         preserve_old_until_topology_cutover: !topology_applies.is_empty(),
+        exclusive_retained_volume_cutover: spec.retained_volume.is_some(),
     };
     payload.validate().map_err(|error| {
         StoreApiError::new(
@@ -2680,8 +3007,10 @@ fn replace_release(
             "ojos.service_contract_version".to_string(),
             release.contract.contract_version.to_string(),
         );
+        attach_release_runtime_volume(&mut dependency_spec, &release.contract)?;
         if !release.contract.events.publishes.is_empty()
             || !release.contract.events.subscribes.is_empty()
+            || contract_has_retained_runtime_volume(&release.contract)
         {
             dependency_spec.managed_service_context =
                 managed_service_context_spec(storage, &release.contract, &node.node_id, &[], true)?;
@@ -2908,9 +3237,17 @@ fn replace_release(
             }),
             max_attempts: 1,
         });
-        let mut abort_dependencies = finalize_dependencies;
-        abort_dependencies.extend(bootstrap_steps.iter().cloned());
-        abort_dependencies.push(finalize_step.clone());
+        // A consumer-only replacement deliberately reuses its topology
+        // PREPARE as the bootstrap gate. Build this compensation fan-in as a
+        // set so the shared step cannot be emitted twice and make the durable
+        // Operation graph invalid.
+        let abort_dependencies = finalize_dependencies
+            .into_iter()
+            .chain(bootstrap_steps.iter().cloned())
+            .chain(std::iter::once(finalize_step.clone()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         for (index, topology) in topology_applies.iter().enumerate() {
             jobs.push(PlannedJob {
                 step_id: abort_steps[index].clone(),
@@ -2951,7 +3288,7 @@ fn replace_release(
             step_id: "remove-old-after-topology-cutover".to_string(),
             node_id: node.node_id.clone(),
             kind: JobKind::Uninstall,
-            depends_on: vec![finalize_step],
+            depends_on: vec![finalize_step.clone()],
             condition: PlannedJobCondition::OnSuccess,
             payload: json!({
                 "deployment_id": current.instance.deployment_id,
@@ -2973,6 +3310,34 @@ fn replace_release(
             }),
             max_attempts: 3,
         });
+    }
+    if let Some(contribution) = &staged_contribution {
+        let mut commit_dependencies = prepare_steps.clone();
+        commit_dependencies.extend(context_health_steps.iter().cloned());
+        let has_topology = !topology_applies.is_empty();
+        append_contribution_replacement_job_fragment(
+            &mut jobs,
+            contribution,
+            ContributionReplacementDagV1 {
+                prepare_depends_on: bootstrap_steps,
+                runtime_step_id: runtime_step,
+                commit_depends_on: commit_dependencies,
+                topology_finalize_step_ids: has_topology
+                    .then_some(finalize_step)
+                    .into_iter()
+                    .collect(),
+                topology_abort_step_ids: abort_steps,
+                success_cleanup_step_ids: has_topology
+                    .then_some("remove-old-after-topology-cutover".to_string())
+                    .into_iter()
+                    .collect(),
+                failure_cleanup_step_ids: has_topology
+                    .then_some("remove-new-after-topology-abort".to_string())
+                    .into_iter()
+                    .collect(),
+            },
+        )
+        .map_err(contribution_controller_error)?;
     }
     let plan = PlanOperation {
         operation_id: operation_id.clone(),
@@ -3604,6 +3969,403 @@ fn release_contract_from_document(
     Ok(contract)
 }
 
+fn build_store_composition_plan(
+    storage: &DurableStore,
+    documents: &[VerifiedReleaseDocument],
+    root_service_id: &str,
+    node: &NodeRecord,
+) -> Result<CompositionPlanV1, StoreApiError> {
+    let mut releases = Vec::with_capacity(documents.len());
+    for document in documents {
+        let contract = release_contract_from_document(document)?;
+        let platform = contract.platform.as_ref();
+        let mut package_dependencies = document
+            .selection
+            .release
+            .dependencies
+            .iter()
+            .map(|dependency| PackageDependencyV1 {
+                service_id: dependency.module_id.clone(),
+                version_requirement: dependency.requirement.to_string(),
+                development: false,
+            })
+            .collect::<Vec<_>>();
+        if let Some(platform) = platform {
+            package_dependencies.extend(platform.package_requirements.iter().map(|requirement| {
+                PackageDependencyV1 {
+                    service_id: requirement.service_id.clone(),
+                    version_requirement: requirement.version_requirement.clone(),
+                    development: requirement.development,
+                }
+            }));
+        }
+        package_dependencies.sort_by(|left, right| left.service_id.cmp(&right.service_id));
+        package_dependencies.dedup_by(|left, right| left.service_id == right.service_id);
+
+        let release_digest = contract
+            .platform
+            .as_ref()
+            .map(|platform| platform.release_lock_digest.clone())
+            .unwrap_or_else(|| document.checksum.clone());
+        let owner_instance_id = stable_service_instance_id(&contract.release.service_name);
+        let provided_apis = contract
+            .provides
+            .apis
+            .iter()
+            .map(|provided| {
+                let version = contract
+                    .release
+                    .apis
+                    .iter()
+                    .find(|api| api.api_id == provided.api_id())
+                    .and_then(|api| normalize_composition_version(&api.version))
+                    .unwrap_or_else(|| document.selection.release.version.clone());
+                ProvidedApiV1 {
+                    api_id: provided.api_id().to_string(),
+                    version,
+                }
+            })
+            .collect();
+        let required_apis = contract
+            .requirements()
+            .iter()
+            .map(|requirement| CompositionApiRequirementV1 {
+                name: requirement.binding_name().to_string(),
+                api_id: requirement.api_id().to_string(),
+                version_requirement: normalize_composition_requirement(
+                    requirement.version_requirement(),
+                ),
+                optional: requirement.optional(),
+                provider_policy: if requirement.selection() == "explicit" {
+                    ProviderPolicyV1::Explicit
+                } else {
+                    ProviderPolicyV1::UniqueHealthy
+                },
+            })
+            .collect();
+        let resource_claims = platform
+            .into_iter()
+            .flat_map(|platform| platform.resource_claims.iter())
+            .map(|resource| ResourceRequirementV1 {
+                name: resource.name.clone(),
+                resource_type: normalize_resource_capability(&resource.resource_type),
+                version_requirement: "^1.0.0".to_string(),
+                optional: false,
+                provider_policy: ProviderPolicyV1::UniqueHealthy,
+                lifecycle: ResourceLifecycleV1::Retain,
+            })
+            .collect();
+        let config = platform
+            .and_then(|platform| platform.config_schema.as_ref())
+            .map(|config| ConfigRequirementV1 {
+                schema: config.schema.clone(),
+                required: true,
+            });
+        let mut secrets = contract
+            .release
+            .secrets
+            .iter()
+            .map(|name| SecretRequirementV1 {
+                name: name.clone(),
+                required: true,
+            })
+            .collect::<Vec<_>>();
+        if let Some(config) = platform.and_then(|platform| platform.config_schema.as_ref()) {
+            let mut schema_secrets = BTreeSet::new();
+            collect_config_secret_paths(&config.schema, "", &mut schema_secrets)?;
+            secrets.extend(schema_secrets.into_iter().map(|name| SecretRequirementV1 {
+                // JSON Schema conditionals decide whether this secret is
+                // required for the submitted config. Marking it optional here
+                // lets validate return the whole input surface without forcing
+                // mutually-exclusive conditional secrets.
+                name,
+                required: false,
+            }));
+        }
+        secrets.sort_by(|left, right| left.name.cmp(&right.name));
+        secrets.dedup_by(|left, right| left.name == right.name);
+        releases.push(CompositionReleaseV1 {
+            service_id: contract.release.service_name.clone(),
+            owner_instance_id,
+            version: document.selection.release.version.clone(),
+            release_digest,
+            package_dependencies,
+            provided_apis,
+            required_apis,
+            resource_claims,
+            config,
+            secrets,
+        });
+    }
+    releases.sort_by(|left, right| left.service_id.cmp(&right.service_id));
+    let providers = store_composition_providers(storage, documents, node)?;
+    build_composition_plan(
+        ReleaseGraphV1 {
+            schema_version: orchestrator_legacy::composition::RELEASE_GRAPH_SCHEMA_VERSION
+                .to_string(),
+            root_service_id: root_service_id.to_string(),
+            releases,
+        },
+        &providers,
+        CompositionModeV1::Production,
+    )
+    .map_err(composition_error)
+}
+
+fn store_composition_providers(
+    storage: &DurableStore,
+    documents: &[VerifiedReleaseDocument],
+    node: &NodeRecord,
+) -> Result<Vec<ProviderCandidateV1>, StoreApiError> {
+    let mut providers = Vec::new();
+    for document in documents {
+        let contract = release_contract_from_document(document)?;
+        for api in &contract.release.apis {
+            let Some(version) = normalize_composition_version(&api.version) else {
+                continue;
+            };
+            providers.push(ProviderCandidateV1 {
+                provider_id: format!("package:{}:{}", contract.release.service_name, api.api_id),
+                capability: api.api_id.clone(),
+                version,
+                kind: ProviderKindV1::Package,
+                service_id: Some(contract.release.service_name.clone()),
+            });
+        }
+    }
+    let evidence_at_ms = now_ms();
+    for stored in storage.runtime_instances(None).map_err(storage_error)? {
+        let stored = storage
+            .runtime_with_current_evidence(stored, evidence_at_ms)
+            .map_err(storage_error)?;
+        let managed_evidence_ready =
+            if stored.management_mode == orchestrator_storage::RuntimeManagementMode::Managed {
+                stored.instance.runtime_attested
+                    && stored.drift_reason.is_empty()
+                    && storage
+                        .managed_runtime_report_unavailable_reason(&stored, evidence_at_ms)
+                        .map_err(storage_error)?
+                        .is_none()
+            } else {
+                stored.drift_reason.is_empty()
+            };
+        if stored.instance.observed_state != RuntimeObservedState::Running
+            || !stored.instance.health.eq_ignore_ascii_case("HEALTHY")
+            || !managed_evidence_ready
+            || stored.endpoint.trim().is_empty()
+        {
+            continue;
+        }
+        // Runtime API providers are independent of package dependencies in
+        // the release graph. Resolve their exact, already-registered Service
+        // Contract from durable identity rather than requiring the provider's
+        // release metadata to be repeated in this install's Catalog plan.
+        let Some(contract) = storage
+            .service_release_contract(
+                &stored.instance.service_id,
+                &stored.instance.release_version,
+            )
+            .map_err(storage_error)?
+        else {
+            continue;
+        };
+        if contract.release.service_name != stored.instance.service_id
+            || contract.release.version != stored.instance.release_version
+        {
+            return Err(StoreApiError::new(
+                409,
+                "STORE_COMPOSITION_PROVIDER_RELEASE_MISMATCH",
+                format!(
+                    "provider deployment {} runtime identity {}@{} does not match its registered contract {}@{}",
+                    stored.instance.deployment_id,
+                    stored.instance.service_id,
+                    stored.instance.release_version,
+                    contract.release.service_name,
+                    contract.release.version,
+                ),
+            ));
+        }
+        for api in &contract.release.apis {
+            if let Some(version) = normalize_composition_version(&api.version) {
+                providers.push(ProviderCandidateV1 {
+                    provider_id: stored.instance.deployment_id.clone(),
+                    capability: api.api_id.clone(),
+                    version,
+                    kind: match stored.management_mode {
+                        orchestrator_storage::RuntimeManagementMode::Managed => {
+                            ProviderKindV1::Managed
+                        }
+                        orchestrator_storage::RuntimeManagementMode::External => {
+                            ProviderKindV1::External
+                        }
+                    },
+                    service_id: Some(stored.instance.service_id.clone()),
+                });
+            }
+        }
+    }
+    if let Some(Value::Object(postgresql)) = node_provider_label(node, "postgresql") {
+        let enabled = postgresql
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let provider_id = postgresql
+            .get("provider_id")
+            .or_else(|| postgresql.get("connection_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if enabled && !provider_id.is_empty() {
+            providers.push(ProviderCandidateV1 {
+                provider_id: provider_id.to_string(),
+                capability: "postgresql.database".to_string(),
+                version: semver::Version::parse("1.0.0").expect("static semver"),
+                kind: ProviderKindV1::Managed,
+                service_id: None,
+            });
+        }
+    }
+    providers.sort_by(|left, right| {
+        left.capability
+            .cmp(&right.capability)
+            .then(left.provider_id.cmp(&right.provider_id))
+    });
+    providers.dedup_by(|left, right| {
+        left.capability == right.capability && left.provider_id == right.provider_id
+    });
+    Ok(providers)
+}
+
+fn validate_store_composition_inputs(
+    plan: &CompositionPlanV1,
+    plan_digest: &str,
+    release_graph_digest: &str,
+    inputs: &BTreeMap<String, BTreeMap<String, Value>>,
+    config: Option<Value>,
+    secret_refs: BTreeMap<String, String>,
+) -> Result<ValidatedInstallInputsV1, StoreApiError> {
+    validate_install_inputs(
+        plan,
+        &InstallInputsV1 {
+            schema_version: INSTALL_INPUTS_SCHEMA_VERSION.to_string(),
+            plan_digest: plan_digest.to_string(),
+            release_graph_digest: release_graph_digest.to_string(),
+            inputs: inputs.clone(),
+            config,
+            secret_refs,
+        },
+        &CompositionPlanBindingV1::from(plan),
+    )
+    .map_err(composition_error)
+}
+
+fn legacy_composition_inputs(
+    plan: &CompositionPlanV1,
+    config: &Value,
+    secret_refs: &BTreeMap<String, String>,
+) -> Result<ValidatedInstallInputsV1, StoreApiError> {
+    let mut inputs = BTreeMap::new();
+    if !config.is_null() || !secret_refs.is_empty() {
+        // v1/v2 releases predate Composition nodes. Preserve their root
+        // aliases in a synthetic private node so downstream Store code can
+        // continue forwarding the exact signed release inputs while the
+        // public plan remains truthful about having no v3 config contract.
+        let mut values = BTreeMap::new();
+        if !config.is_null() {
+            values.insert("config".to_string(), config.clone());
+        }
+        for (name, reference) in secret_refs {
+            values.insert(
+                format!("secretRef.{name}"),
+                Value::String(reference.clone()),
+            );
+        }
+        inputs.insert("legacy-root-inputs".to_string(), values);
+    }
+    Ok(ValidatedInstallInputsV1 {
+        schema_version: INSTALL_INPUTS_SCHEMA_VERSION.to_string(),
+        plan_digest: plan.plan_digest.clone(),
+        release_graph_digest: plan.release_graph_digest.clone(),
+        inputs,
+        normalized_legacy_aliases: !config.is_null() || !secret_refs.is_empty(),
+    })
+}
+
+fn composition_inputs_for_service(
+    plan: &CompositionPlanV1,
+    validated: &ValidatedInstallInputsV1,
+    service_id: &str,
+) -> (Value, BTreeMap<String, String>) {
+    let mut config = Value::Null;
+    let mut secrets = BTreeMap::new();
+    if service_id == plan.root_service_id
+        && let Some(values) = validated.inputs.get("legacy-root-inputs")
+    {
+        if let Some(value) = values.get("config") {
+            config = value.clone();
+        }
+        for (key, value) in values {
+            if let Some(name) = key.strip_prefix("secretRef.")
+                && let Some(reference) = value.as_str()
+            {
+                secrets.insert(name.to_string(), reference.to_string());
+            }
+        }
+    }
+    for node in plan
+        .nodes
+        .iter()
+        .filter(|node| node.service_id == service_id)
+    {
+        let Some(values) = validated.inputs.get(&node.node_id) else {
+            continue;
+        };
+        match &node.spec {
+            CompositionNodeSpecV1::Config { .. } => {
+                if let Some(value) = values.get("config") {
+                    config = value.clone();
+                }
+            }
+            CompositionNodeSpecV1::Secret { name, .. } => {
+                if let Some(reference) = values.get("secretRef").and_then(Value::as_str) {
+                    secrets.insert(name.clone(), reference.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    (config, secrets)
+}
+
+fn normalize_composition_requirement(value: &str) -> String {
+    let value = value.trim();
+    if semver::VersionReq::parse(value).is_ok() {
+        value.to_string()
+    } else if let Some(version) = normalize_composition_version(value) {
+        format!("={version}")
+    } else {
+        "*".to_string()
+    }
+}
+
+fn normalize_composition_version(value: &str) -> Option<semver::Version> {
+    let value = value.trim().strip_prefix('v').unwrap_or(value.trim());
+    semver::Version::parse(value).ok().or_else(|| {
+        value
+            .parse::<u64>()
+            .ok()
+            .map(|major| semver::Version::new(major, 0, 0))
+    })
+}
+
+fn normalize_resource_capability(value: &str) -> String {
+    value.strip_suffix("/v1").unwrap_or(value).to_string()
+}
+
+fn composition_error(error: impl std::fmt::Display) -> StoreApiError {
+    StoreApiError::new(422, "STORE_COMPOSITION_INVALID", error.to_string())
+}
+
 #[derive(Debug, Clone)]
 struct TopologyBindingContext {
     topology_id: String,
@@ -4034,9 +4796,9 @@ fn resolve_install_api_bindings(
                 credential_ref: String::new(),
                 credential_generation: 1,
                 context_generation: 1,
-                desired_state: "ACTIVE".to_string(),
-                observed_state: "RESOLVED".to_string(),
-                health: "UNKNOWN".to_string(),
+                desired_state: ApiBindingDesiredState::Active,
+                observed_state: ApiBindingObservedState::Resolved,
+                health: ApiBindingHealth::Unknown,
                 drift: Vec::new(),
                 last_operation_id: String::new(),
                 state: ApiBindingState::Resolved,
@@ -4103,7 +4865,7 @@ fn production_binding_plan<'a>(
             // resolution; activation remains represented by the Operation.
             if planned.state == ApiBindingState::Pending {
                 planned.state = ApiBindingState::Resolved;
-                planned.observed_state = "RESOLVED".to_string();
+                planned.observed_state = ApiBindingObservedState::Resolved;
             }
             planned
         })
@@ -4473,7 +5235,7 @@ impl StagedApplyDesiredContextBindings {
 
                 let mut resolved_view = binding.clone();
                 resolved_view.state = ApiBindingState::Resolved;
-                resolved_view.observed_state = "RESOLVED".to_string();
+                resolved_view.observed_state = ApiBindingObservedState::Resolved;
                 resolved_view.validate().map_err(|error| {
                     StoreApiError::new(
                         409,
@@ -4703,13 +5465,26 @@ pub(crate) fn binding_context_transition_plans(
                     format!("consumer deployment {deployment_id} has no previous managed context"),
                 )
             })?;
-        let desired = managed_service_context_spec(
-            storage,
-            &contract,
-            &runtime.node_id,
-            desired_bindings.as_slice(),
-            false,
-        )?;
+        // Removing the last required API is an explicit credential/context
+        // revocation before uninstall. A partial required set remains invalid,
+        // while optional-only and event-only contracts keep their ordinary
+        // materialization semantics.
+        let desired = if desired_bindings.as_slice().is_empty()
+            && contract
+                .requirements()
+                .iter()
+                .any(|requirement| !requirement.optional())
+        {
+            None
+        } else {
+            managed_service_context_spec(
+                storage,
+                &contract,
+                &runtime.node_id,
+                desired_bindings.as_slice(),
+                false,
+            )?
+        };
         let forward = BindingContextApplyPayload {
             deployment_id: deployment_id.clone(),
             service_id: runtime.instance.service_id.clone(),
@@ -5888,13 +6663,13 @@ fn unresolved_binding(
         credential_ref: String::new(),
         credential_generation: 1,
         context_generation: 1,
-        desired_state: "ACTIVE".to_string(),
+        desired_state: ApiBindingDesiredState::Active,
         observed_state: match state {
-            ApiBindingState::Unbound => "REVOKED".to_string(),
-            ApiBindingState::Error => "ERROR".to_string(),
-            _ => "PENDING".to_string(),
+            ApiBindingState::Unbound => ApiBindingObservedState::Revoked,
+            ApiBindingState::Error => ApiBindingObservedState::Error,
+            _ => ApiBindingObservedState::Pending,
         },
-        health: "UNKNOWN".to_string(),
+        health: ApiBindingHealth::Unknown,
         drift: Vec::new(),
         last_operation_id: String::new(),
         state,
@@ -5965,6 +6740,7 @@ fn release_pipeline_payload(
             ));
         }
     };
+    let resource_claims = build_resource_claim_steps(contract, install, node)?;
     let materialization =
         build_runtime_materialization(release, node, requested_config, requested_secret_refs)?;
 
@@ -6166,6 +6942,7 @@ fn release_pipeline_payload(
                     migration_policy == MigrationPolicyV2::DryRun
                 )))
                 .collect(),
+            resource_claims: migration_resource_claims(migration, &resource_claims)?,
             timeout_ms: oci.timeout_ms,
             dry_run: migration_policy == MigrationPolicyV2::DryRun,
         });
@@ -6342,6 +7119,7 @@ fn release_pipeline_payload(
 
     if materialization.is_none()
         && auth.is_none()
+        && resource_claims.is_empty()
         && provisioners.is_empty()
         && migrations.is_empty()
         && gateway.is_none()
@@ -6350,6 +7128,7 @@ fn release_pipeline_payload(
     } else {
         Ok(Some(ReleasePipelinePayload {
             install: install.clone(),
+            resource_claims,
             materialization,
             auth,
             provisioners,
@@ -6359,16 +7138,154 @@ fn release_pipeline_payload(
     }
 }
 
+fn build_resource_claim_steps(
+    contract: &ServiceReleaseContract,
+    install: &RuntimeInstallPayload,
+    node: &NodeRecord,
+) -> Result<Vec<ResourceClaimStepV1>, StoreApiError> {
+    let Some(platform) = contract.platform.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if platform.resource_claims.is_empty() {
+        return Ok(Vec::new());
+    }
+    let provider_id = provider_identifier(node, "postgresql", "provider_id")
+        .or_else(|_| provider_identifier(node, "postgresql", "connection_id"))?;
+    let mut claims = platform
+        .resource_claims
+        .iter()
+        .map(|resource| {
+            if resource.resource_type != "postgresql.database/v1" {
+                return Err(StoreApiError::new(
+                    422,
+                    "STORE_RESOURCE_TYPE_UNSUPPORTED",
+                    format!(
+                        "resource {} declares unsupported type {}; v1 implements postgresql.database/v1",
+                        resource.name, resource.resource_type
+                    ),
+                ));
+            }
+            if !resource.lifecycle.eq_ignore_ascii_case("retain") {
+                return Err(StoreApiError::new(
+                    422,
+                    "STORE_RESOURCE_LIFECYCLE_INVALID",
+                    format!(
+                        "resource {} must use RETAIN; deletion requires a separate audited purge",
+                        resource.name
+                    ),
+                ));
+            }
+            let step = ResourceClaimStepV1 {
+                claim_id: stable_resource_claim_id(&install.spec.service_id, &resource.name),
+                owner_instance_id: stable_service_instance_id(&install.spec.service_id),
+                deployment_id: install.spec.deployment_id.clone(),
+                service_id: install.spec.service_id.clone(),
+                resource_name: resource.name.clone(),
+                resource_type: resource.resource_type.clone(),
+                // Resource generation describes the durable resource spec, not
+                // the replaceable runtime container. postgresql.database/v1
+                // has no mutable resource shape in this release, so upgrades,
+                // rollbacks, and rescheduling must keep generation 1 and reuse
+                // the exact same claim.
+                generation: 1,
+                provider_id: provider_id.clone(),
+                output_path_environment: resource_output_environment(&resource.name),
+            };
+            step.validate().map_err(|error| {
+                StoreApiError::new(
+                    422,
+                    "STORE_RESOURCE_CLAIM_INVALID",
+                    format!("resource {} could not be materialized: {error}", resource.name),
+                )
+            })?;
+            Ok(step)
+        })
+        .collect::<Result<Vec<_>, StoreApiError>>()?;
+    claims.sort_by(|left, right| left.resource_name.cmp(&right.resource_name));
+    Ok(claims)
+}
+
+fn migration_resource_claims(
+    migration: &orchestrator_legacy::ReleaseMigrationDecl,
+    claims: &[ResourceClaimStepV1],
+) -> Result<Vec<String>, StoreApiError> {
+    let requested = migration
+        .oci
+        .as_ref()
+        .and_then(|oci| oci.env.get("OJOS_RESOURCE_CLAIM"))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    match requested {
+        Some(name) => claims
+            .iter()
+            .find(|claim| claim.resource_name == name)
+            .map(|claim| vec![claim.resource_name.clone()])
+            .ok_or_else(|| {
+                StoreApiError::new(
+                    422,
+                    "STORE_MIGRATION_RESOURCE_UNKNOWN",
+                    format!(
+                        "migration {} references undeclared resource {name}",
+                        migration.version
+                    ),
+                )
+            }),
+        None if claims.len() == 1 => Ok(vec![claims[0].resource_name.clone()]),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn stable_resource_claim_id(service_id: &str, resource_name: &str) -> String {
+    let owner_instance_id = stable_service_instance_id(service_id);
+    let digest = Sha256::digest(format!("{owner_instance_id}\0{resource_name}").as_bytes());
+    format!("claim-{digest:x}")
+}
+
+/// Store v1 has one installation slot for each service in the default scope.
+/// This identity deliberately excludes release, deployment, and Node so a
+/// retained resource survives upgrades, rollbacks, and rescheduling. Explicit
+/// multi-instance support must add a persisted slot id instead of changing this
+/// derivation implicitly.
+fn stable_service_instance_id(service_id: &str) -> String {
+    let digest = Sha256::digest(format!("default\0{service_id}").as_bytes());
+    format!("service-instance-{digest:x}")
+}
+
+fn resource_output_environment(resource_name: &str) -> String {
+    let token = resource_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("OJOS_RESOURCE_{token}_OUTPUT_FILE")
+}
+
 fn build_runtime_materialization(
     release: &ServiceReleaseManifest,
     node: &NodeRecord,
     requested_config: &Value,
     requested_secret_refs: &BTreeMap<String, String>,
 ) -> Result<Option<RuntimeMaterializationStep>, StoreApiError> {
-    let (config, schema_secrets) =
-        validate_release_config(&release.config_schema, requested_config)?;
-    let mut required_secrets = release.secrets.iter().cloned().collect::<BTreeSet<_>>();
-    required_secrets.extend(schema_secrets);
+    let (config, schema_secrets, schema_controls_requiredness) = validate_release_config(
+        &release.config_schema,
+        requested_config,
+        requested_secret_refs,
+    )?;
+    let mut allowed_secrets = release.secrets.iter().cloned().collect::<BTreeSet<_>>();
+    allowed_secrets.extend(schema_secrets.iter().cloned());
+    let mut required_secrets = if schema_controls_requiredness {
+        BTreeSet::new()
+    } else {
+        allowed_secrets.clone()
+    };
+    if !schema_controls_requiredness {
+        required_secrets.extend(schema_secrets);
+    }
     let supplied = requested_secret_refs
         .keys()
         .cloned()
@@ -6378,7 +7295,7 @@ fn build_runtime_materialization(
         .cloned()
         .collect::<Vec<_>>();
     let unknown = supplied
-        .difference(&required_secrets)
+        .difference(&allowed_secrets)
         .cloned()
         .collect::<Vec<_>>();
     if !missing.is_empty() || !unknown.is_empty() {
@@ -6404,21 +7321,13 @@ fn build_runtime_materialization(
 
     let mut environment_templates = release.runtime.env.clone();
     for key in config.keys() {
+        let environment_key = format!("OJOS_CONFIG_{}", environment_token(key));
         environment_templates
-            .entry(key.clone())
+            .entry(environment_key)
             .or_insert_with(|| format!("${{config.{key}}}"));
     }
-    for key in &required_secrets {
-        let environment_key = key
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() {
-                    character.to_ascii_uppercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
+    for key in &supplied {
+        let environment_key = format!("OJOS_SECRET_{}", environment_token(key));
         environment_templates
             .entry(environment_key)
             .or_insert_with(|| format!("${{secret.{key}}}"));
@@ -6474,10 +7383,31 @@ fn build_runtime_materialization(
     }))
 }
 
+fn environment_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+type ValidatedReleaseConfig = (BTreeMap<String, String>, BTreeSet<String>, bool);
+
 fn validate_release_config(
     schema: &Value,
     requested: &Value,
-) -> Result<(BTreeMap<String, String>, BTreeSet<String>), StoreApiError> {
+    requested_secret_refs: &BTreeMap<String, String>,
+) -> Result<ValidatedReleaseConfig, StoreApiError> {
+    if schema.get("$schema").is_some() {
+        let (config, secrets) =
+            validate_json_schema_config(schema, requested, requested_secret_refs)?;
+        return Ok((config, secrets, true));
+    }
     let requested = match requested {
         Value::Null => serde_json::Map::new(),
         Value::Object(values) => values.clone(),
@@ -6492,7 +7422,7 @@ fn validate_release_config(
     let Some(schema) = schema.as_object() else {
         if schema.is_null() {
             if requested.is_empty() {
-                return Ok((BTreeMap::new(), BTreeSet::new()));
+                return Ok((BTreeMap::new(), BTreeSet::new(), false));
             }
             return Err(StoreApiError::new(
                 422,
@@ -6602,7 +7532,306 @@ fn validate_release_config(
             }
         }
     }
-    Ok((output, secrets))
+    Ok((output, secrets, false))
+}
+
+fn validate_json_schema_config(
+    schema: &Value,
+    requested: &Value,
+    requested_secret_refs: &BTreeMap<String, String>,
+) -> Result<(BTreeMap<String, String>, BTreeSet<String>), StoreApiError> {
+    let requested = match requested {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(requested) => requested.clone(),
+        _ => {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_CONFIG_INVALID",
+                "config must be a JSON object",
+            ));
+        }
+    };
+    reject_unsupported_config_schema_keywords(schema)?;
+    let mut secret_paths = BTreeSet::new();
+    collect_config_secret_paths(schema, "", &mut secret_paths)?;
+
+    for path in &secret_paths {
+        if json_path(&requested, path).is_some() {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_SECRET_VALUE_FORBIDDEN",
+                format!("config field {path} is secret; submit only secret_refs.{path}"),
+            ));
+        }
+    }
+
+    // Secret references participate in conditional validation as opaque
+    // placeholders. The reference itself is never placed in the config map or
+    // exposed to schema expressions.
+    let unknown_secret_refs = requested_secret_refs
+        .keys()
+        .filter(|path| !secret_paths.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown_secret_refs.is_empty() {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_SECRET_REFS_INVALID",
+            format!(
+                "secret_refs contains undeclared JSON Schema field(s): {}",
+                unknown_secret_refs.join(", ")
+            ),
+        ));
+    }
+    let mut instance = Value::Object(requested.clone());
+    for path in requested_secret_refs.keys() {
+        insert_json_path(&mut instance, path, Value::String("opaque".to_string()))?;
+    }
+    let mut validation_schema = schema.clone();
+    relax_config_secret_value_constraints(&mut validation_schema);
+    let validator = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .should_validate_formats(true)
+        .build(&validation_schema)
+        .map_err(|error| {
+            StoreApiError::new(
+                422,
+                "STORE_CONFIG_SCHEMA_INVALID",
+                format!("compile signed JSON Schema 2020-12: {error}"),
+            )
+        })?;
+    let errors = validator
+        .iter_errors(&instance)
+        .take(8)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_CONFIG_INVALID",
+            format!(
+                "config does not satisfy signed JSON Schema: {}",
+                errors.join("; ")
+            ),
+        ));
+    }
+
+    let mut output = BTreeMap::new();
+    flatten_config_scalars("", &Value::Object(requested), &mut output)?;
+    Ok((output, secret_paths))
+}
+
+fn relax_config_secret_value_constraints(schema: &mut Value) {
+    match schema {
+        Value::Object(object) => {
+            let secret = object.get("writeOnly").and_then(Value::as_bool) == Some(true)
+                && object.get("x-ojos-secret").and_then(Value::as_bool) == Some(true);
+            if secret {
+                object.retain(|key, _| {
+                    matches!(
+                        key.as_str(),
+                        "type" | "writeOnly" | "x-ojos-secret" | "title" | "description"
+                    )
+                });
+                object.insert("type".to_string(), Value::String("string".to_string()));
+                return;
+            }
+            for child in object.values_mut() {
+                relax_config_secret_value_constraints(child);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                relax_config_secret_value_constraints(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn reject_unsupported_config_schema_keywords(schema: &Value) -> Result<(), StoreApiError> {
+    fn visit(value: &Value) -> Result<(), StoreApiError> {
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object {
+                    if matches!(
+                        key.as_str(),
+                        "unevaluatedProperties"
+                            | "patternProperties"
+                            | "propertyNames"
+                            | "contains"
+                            | "prefixItems"
+                    ) {
+                        return Err(StoreApiError::new(
+                            422,
+                            "STORE_CONFIG_SCHEMA_INVALID",
+                            format!(
+                                "JSON Schema keyword {key} is outside the supported configuration subset"
+                            ),
+                        ));
+                    }
+                    if key == "$ref"
+                        && !child.as_str().is_some_and(|reference| {
+                            reference.starts_with("#/") || reference.starts_with("sha256:")
+                        })
+                    {
+                        return Err(StoreApiError::new(
+                            422,
+                            "STORE_CONFIG_SCHEMA_INVALID",
+                            "JSON Schema $ref must be local or digest-pinned",
+                        ));
+                    }
+                    visit(child)?;
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    visit(value)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    visit(schema)
+}
+
+fn collect_config_secret_paths(
+    schema: &Value,
+    prefix: &str,
+    output: &mut BTreeSet<String>,
+) -> Result<(), StoreApiError> {
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for (name, declaration) in properties {
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}.{name}")
+            };
+            let secret = declaration.get("writeOnly").and_then(Value::as_bool) == Some(true)
+                && declaration.get("x-ojos-secret").and_then(Value::as_bool) == Some(true);
+            if secret {
+                output.insert(path);
+            } else {
+                collect_config_secret_paths(declaration, &path, output)?;
+            }
+        }
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
+            for branch in branches {
+                collect_config_secret_paths(branch, prefix, output)?;
+            }
+        }
+    }
+    for keyword in ["if", "then", "else", "not"] {
+        if let Some(branch) = schema.get(keyword) {
+            collect_config_secret_paths(branch, prefix, output)?;
+        }
+    }
+    Ok(())
+}
+
+fn json_path<'a>(root: &'a serde_json::Map<String, Value>, path: &str) -> Option<&'a Value> {
+    let mut value = root.get(path.split('.').next()?)?;
+    for segment in path.split('.').skip(1) {
+        value = value.as_object()?.get(segment)?;
+    }
+    Some(value)
+}
+
+fn insert_json_path(root: &mut Value, path: &str, value: Value) -> Result<(), StoreApiError> {
+    let mut segments = path.split('.').peekable();
+    let mut current = root;
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_none() {
+            current
+                .as_object_mut()
+                .ok_or_else(|| {
+                    StoreApiError::new(
+                        422,
+                        "STORE_CONFIG_INVALID",
+                        format!("config parent for secret {path} must be an object"),
+                    )
+                })?
+                .entry(segment.to_string())
+                .or_insert(value.clone());
+            return Ok(());
+        }
+        let Some(object) = current.as_object_mut() else {
+            return Err(StoreApiError::new(
+                422,
+                "STORE_CONFIG_INVALID",
+                format!("config parent for secret {path} must be an object"),
+            ));
+        };
+        current = object
+            .entry(segment.to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    }
+    Ok(())
+}
+
+fn flatten_config_scalars(
+    prefix: &str,
+    value: &Value,
+    output: &mut BTreeMap<String, String>,
+) -> Result<(), StoreApiError> {
+    match value {
+        Value::Object(object) => {
+            for (name, value) in object {
+                let path = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}.{name}")
+                };
+                flatten_config_scalars(&path, value, output)?;
+            }
+            Ok(())
+        }
+        Value::String(_) | Value::Bool(_) | Value::Number(_) => {
+            output.insert(prefix.to_string(), scalar_config_value(prefix, value)?);
+            Ok(())
+        }
+        Value::Null => Ok(()),
+        _ => Err(StoreApiError::new(
+            422,
+            "STORE_CONFIG_TYPE_INVALID",
+            format!("config field {prefix} must be a scalar or nested object"),
+        )),
+    }
+}
+
+#[cfg(test)]
+fn conditional_config_schema_fixture() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "registration": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "mode": {"enum": ["open", "invite-only"]},
+                    "inviteSigningKey": {
+                        "type": "string",
+                        "minLength": 32,
+                        "writeOnly": true,
+                        "x-ojos-secret": true
+                    }
+                },
+                "required": ["mode"],
+                "if": {
+                    "properties": {"mode": {"const": "invite-only"}},
+                    "required": ["mode"]
+                },
+                "then": {"required": ["inviteSigningKey"]},
+                "else": {"not": {"required": ["inviteSigningKey"]}}
+            }
+        },
+        "required": ["registration"]
+    })
 }
 
 fn validate_config_value(
@@ -7115,7 +8344,18 @@ fn managed_service_context_spec(
 ) -> Result<Option<ManagedServiceContextSpec>, StoreApiError> {
     let has_events =
         !contract.events.publishes.is_empty() || !contract.events.subscribes.is_empty();
-    if contract.requirements().is_empty() && !has_events {
+    let has_retained_volume = contract_has_retained_runtime_volume(contract);
+    let provides_workload_api = contract.platform.is_some()
+        && contract
+            .release
+            .apis
+            .iter()
+            .any(|api| api.auth_mode == "workload");
+    if contract.requirements().is_empty()
+        && !has_events
+        && !has_retained_volume
+        && !provides_workload_api
+    {
         return Ok(None);
     }
     let included = bindings
@@ -7149,7 +8389,12 @@ fn managed_service_context_spec(
             ),
         ));
     }
-    if included.is_empty() && !mount_unbound_optional_context && !has_events {
+    if included.is_empty()
+        && !mount_unbound_optional_context
+        && !has_events
+        && !has_retained_volume
+        && !provides_workload_api
+    {
         return Ok(None);
     }
     let generations = included
@@ -7220,6 +8465,9 @@ fn managed_service_context_spec(
             })
         })
         .transpose()?;
+    let workload_verifier = provides_workload_api
+        .then(load_managed_workload_verifier)
+        .transpose()?;
     let context = ManagedServiceContextSpec {
         generation,
         node_id: node_id.to_string(),
@@ -7227,6 +8475,7 @@ fn managed_service_context_spec(
         gateway_ca_pem,
         bindings,
         events,
+        workload_verifier,
     };
     context.validate().map_err(|error| {
         StoreApiError::new(
@@ -7236,6 +8485,113 @@ fn managed_service_context_spec(
         )
     })?;
     Ok(Some(context))
+}
+
+const MAX_WORKLOAD_PUBLIC_KEY_FILE_BYTES: u64 = 16 * 1024;
+
+fn load_managed_workload_verifier() -> Result<ManagedWorkloadVerifierSpec, StoreApiError> {
+    let path = required_workload_verifier_env("ORCHESTRATOR_WORKLOAD_PUBLIC_KEY_FILE")?;
+    let metadata = fs::metadata(&path).map_err(|error| {
+        StoreApiError::new(
+            503,
+            "STORE_WORKLOAD_VERIFIER_UNREADABLE",
+            format!("read workload verifier public key metadata: {error}"),
+        )
+    })?;
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_WORKLOAD_PUBLIC_KEY_FILE_BYTES
+    {
+        return Err(StoreApiError::new(
+            503,
+            "STORE_WORKLOAD_VERIFIER_INVALID",
+            "ORCHESTRATOR_WORKLOAD_PUBLIC_KEY_FILE must name one non-empty regular file no larger than 16 KiB",
+        ));
+    }
+    let public_key_pem = fs::read_to_string(&path).map_err(|error| {
+        StoreApiError::new(
+            503,
+            "STORE_WORKLOAD_VERIFIER_UNREADABLE",
+            format!("read workload verifier public key: {error}"),
+        )
+    })?;
+    let verifier = ManagedWorkloadVerifierSpec {
+        public_key_pem,
+        key_id: required_workload_verifier_env("ORCHESTRATOR_WORKLOAD_KEY_ID")?,
+        issuer: required_workload_verifier_env("ORCHESTRATOR_WORKLOAD_ISSUER")?,
+        audience: required_workload_verifier_env("ORCHESTRATOR_WORKLOAD_AUDIENCE")?,
+    };
+    verifier.validate().map_err(|error| {
+        StoreApiError::new(503, "STORE_WORKLOAD_VERIFIER_INVALID", error.to_string())
+    })?;
+    Ok(verifier)
+}
+
+fn required_workload_verifier_env(name: &str) -> Result<String, StoreApiError> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            StoreApiError::new(
+                503,
+                "STORE_WORKLOAD_VERIFIER_REQUIRED",
+                format!("signed v3 workload API providers require {name}"),
+            )
+        })
+}
+
+fn contract_has_retained_runtime_volume(contract: &ServiceReleaseContract) -> bool {
+    contract
+        .platform
+        .as_ref()
+        .is_some_and(|platform| !platform.runtime_volumes.is_empty())
+}
+
+fn attach_release_runtime_volume(
+    spec: &mut ContainerSpec,
+    contract: &ServiceReleaseContract,
+) -> Result<(), StoreApiError> {
+    if contract.platform.is_some() {
+        spec.labels.insert(
+            SERVICE_CONTRACT_GENERATION_LABEL.to_string(),
+            "3".to_string(),
+        );
+    }
+    let volumes = contract
+        .platform
+        .as_ref()
+        .map(|platform| platform.runtime_volumes.as_slice())
+        .unwrap_or_default();
+    let Some(volume) = volumes.first() else {
+        spec.retained_volume = None;
+        return Ok(());
+    };
+    if volumes.len() != 1 {
+        return Err(StoreApiError::new(
+            422,
+            "STORE_RUNTIME_VOLUME_INVALID",
+            "signed runtime volume contract must contain exactly one v1 RETAIN attachment",
+        ));
+    }
+    let attachment = RetainedVolumeAttachmentV1 {
+        owner_instance_id: stable_service_instance_id(&spec.service_id),
+        logical_name: volume.name.clone(),
+        target: volume.target.clone(),
+        access: volume.access.clone(),
+        lifecycle: volume.lifecycle.clone(),
+    };
+    attachment
+        .validate_for_service(&spec.service_id)
+        .map_err(|error| {
+            StoreApiError::new(
+                422,
+                "STORE_RUNTIME_VOLUME_INVALID",
+                format!("signed runtime volume contract is invalid: {error}"),
+            )
+        })?;
+    spec.retained_volume = Some(attachment);
+    Ok(())
 }
 
 fn managed_event_binding(
@@ -7344,6 +8700,8 @@ fn container_spec(
         runtime_contract,
         runtime_context: None,
         managed_service_context: None,
+        resource_secret_file_mounts: Vec::new(),
+        retained_volume: None,
         command,
         environment,
         labels,
@@ -7837,6 +9195,39 @@ fn storage_error(error: DurableError) -> StoreApiError {
     StoreApiError::new(status, "STORE_STORAGE_ERROR", error.to_string())
 }
 
+fn contribution_storage_error(
+    error: orchestrator_storage::ContributionRepositoryError,
+) -> StoreApiError {
+    let status = match &error {
+        orchestrator_storage::ContributionRepositoryError::Conflict(_) => 409,
+        orchestrator_storage::ContributionRepositoryError::Invalid(_) => 422,
+        orchestrator_storage::ContributionRepositoryError::NotFound(_) => 404,
+        orchestrator_storage::ContributionRepositoryError::Persistence(_) => 500,
+    };
+    StoreApiError::new(
+        status,
+        "STORE_CONTRIBUTION_STORAGE_ERROR",
+        error.to_string(),
+    )
+}
+
+fn contribution_controller_error(
+    error: crate::contribution_controller::ContributionControllerError,
+) -> StoreApiError {
+    let status = match &error {
+        crate::contribution_controller::ContributionControllerError::Conflict(_) => 409,
+        crate::contribution_controller::ContributionControllerError::NotFound(_) => 404,
+        crate::contribution_controller::ContributionControllerError::NeedsAttention(_) => 409,
+        crate::contribution_controller::ContributionControllerError::Retryable(_)
+        | crate::contribution_controller::ContributionControllerError::RetryableCompensation(_) => {
+            409
+        }
+        crate::contribution_controller::ContributionControllerError::Invalid(_) => 422,
+        crate::contribution_controller::ContributionControllerError::Persistence(_) => 500,
+    };
+    StoreApiError::new(status, error.code(), error.to_string())
+}
+
 fn core_error(error: orchestrator_legacy::OrchestratorError) -> StoreApiError {
     StoreApiError::new(422, "STORE_RELEASE_INVALID", error.to_string())
 }
@@ -7867,6 +9258,7 @@ fn operation_error(error: orchestrator_control_plane::OperationError) -> StoreAp
 mod tests {
     use super::*;
     use crate::catalog_registry::CatalogSource;
+    use crate::test_env::TestEnv;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
     use ed25519_dalek::{Signer, SigningKey};
@@ -7874,15 +9266,15 @@ mod tests {
         ClaimRequest, CompleteRequest, CompletionStatus, DurableOperationStatus, JobStatus,
         JobStore, MemoryJobStore, MemoryOperationStore, OperationRepository,
     };
-    use orchestrator_legacy::{OrchestratorStore, ServiceRelease};
+    use orchestrator_legacy::{ContributionRevisionV1, OrchestratorStore, ServiceRelease};
     use orchestrator_manager::catalog_v2::{
         CatalogModuleV2, CatalogReleaseV2, CatalogTrustStore, CatalogV2, Ed25519Signature,
         MetadataPackageV2, ReleaseDependencyV2, RuntimeCapabilityV2,
     };
     use orchestrator_runtime::{DockerRuntimeFacts, RuntimeDesiredState, RuntimeInstance};
     use orchestrator_storage::{
-        SqliteOrchestratorStore, StoredNodeRuntimeFacts, StoredRuntimeInstance,
-        TopologyApplyOutcome,
+        ContributionRepository, SqliteOrchestratorStore, StoredNodeRuntimeFacts,
+        StoredRuntimeInstance, TopologyApplyOutcome,
     };
     use semver::Version;
     use semver::VersionReq;
@@ -7903,6 +9295,33 @@ mod tests {
         "sha256:2222222222222222222222222222222222222222222222222222222222222222";
     const CHECKSUM: &str =
         "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    #[test]
+    fn json_schema_conditionals_require_only_the_active_secret_branch() {
+        let schema = conditional_config_schema_fixture();
+        let open = json!({"registration": {"mode": "open"}});
+        let invite = json!({"registration": {"mode": "invite-only"}});
+        let empty = BTreeMap::new();
+
+        let (config, declared, controlled) =
+            validate_release_config(&schema, &open, &empty).expect("open branch");
+        assert!(controlled);
+        assert_eq!(config["registration.mode"], "open");
+        assert!(declared.contains("registration.inviteSigningKey"));
+
+        let missing = validate_release_config(&schema, &invite, &empty).unwrap_err();
+        assert_eq!(missing.code, "STORE_CONFIG_INVALID");
+
+        let supplied = BTreeMap::from([(
+            "registration.inviteSigningKey".to_string(),
+            "file://opaque-ref".to_string(),
+        )]);
+        validate_release_config(&schema, &invite, &supplied)
+            .expect("invite branch with opaque secret reference");
+        let inactive = validate_release_config(&schema, &open, &supplied).unwrap_err();
+        assert_eq!(inactive.code, "STORE_CONFIG_INVALID");
+        assert!(!inactive.detail.contains("file://opaque-ref"));
+    }
     struct Fixture {
         state: market_api::StoreState,
         console: OrchestratorActionConsole,
@@ -8303,6 +9722,89 @@ mod tests {
         release
     }
 
+    #[test]
+    fn release_pipeline_preserves_published_migration_cmd_without_repeating_entrypoint() {
+        let service_id = "migration-command-projection";
+        let mut release = release_manifest(
+            service_id,
+            &format!("registry.example/ojos/{service_id}@{DIGEST}"),
+        );
+        release.migrations = serde_json::from_value(json!([{
+            "version": "schema-v1",
+            "path": format!("services/{service_id}/migrations/0001.sql"),
+            "checksum": format!("sha256:{}", "3".repeat(64)),
+            "destructive": false,
+            "oci": {
+                "image": format!("registry.example/ojos/migration@{DEPENDENCY_DIGEST}"),
+                "command": ["apply", "/migrations"],
+                "env": {},
+                "timeout_ms": 30000
+            }
+        }]))
+        .unwrap();
+        let contract =
+            ServiceReleaseContract::from_json_value(serde_json::to_value(&release).unwrap())
+                .unwrap();
+        let node = NodeRecord {
+            node_id: "node-migration-command".to_string(),
+            host_ip: "127.0.0.2".to_string(),
+            parent_node_id: String::new(),
+            role: "standalone".to_string(),
+            labels: json!({
+                "providers": {
+                    "migration": true
+                }
+            }),
+            status: "READY".to_string(),
+            created_at: "t0".to_string(),
+            updated_at: "t0".to_string(),
+        };
+        let install = RuntimeInstallPayload {
+            spec: ContainerSpec {
+                deployment_id: "deployment-migration-command".to_string(),
+                service_id: service_id.to_string(),
+                generation: 1,
+                image: OciImageReference::parse(&format!(
+                    "registry.example/ojos/{service_id}@{DIGEST}"
+                ))
+                .unwrap(),
+                runtime_contract: RuntimeContract::standard_v1(),
+                runtime_context: None,
+                managed_service_context: None,
+                resource_secret_file_mounts: Vec::new(),
+                retained_volume: None,
+                command: vec![],
+                environment: vec![],
+                labels: HashMap::new(),
+                published_endpoint: None,
+            },
+            start: true,
+            health_gate: HealthGatePolicy::default(),
+            offline_oci_artifact: None,
+        };
+
+        let pipeline = release_pipeline_payload(
+            &release,
+            &contract,
+            &install,
+            &[],
+            &node,
+            "operation-migration-command",
+            "APPLY",
+            "",
+            &json!({}),
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .expect("migration declaration creates a ReleasePipeline");
+
+        assert_eq!(
+            pipeline.migrations[0].command,
+            vec!["apply".to_string(), "/migrations".to_string()]
+        );
+        assert_ne!(pipeline.migrations[0].command, vec!["/ojos-migrate"]);
+    }
+
     fn event_contract(
         service_id: &str,
         publishes: Value,
@@ -8334,6 +9836,157 @@ mod tests {
             "credential_delivery": "file",
             "restart_on_change": false,
         });
+    }
+
+    fn add_empty_signed_platform(document: &mut Value, marker: char) {
+        let digest = |offset: u8| {
+            let nibble = char::from_digit(((marker as u8 + offset) % 16) as u32, 16)
+                .expect("hex fixture marker");
+            format!("sha256:{}", nibble.to_string().repeat(64))
+        };
+        document["platform"] = json!({
+            "schemaVersion": orchestrator_legacy::RELEASE_PLATFORM_SCHEMA_VERSION,
+            "contractDigest": digest(0),
+            "sourceDigest": digest(1),
+            "releaseLockDigest": digest(2),
+            "artifactSubjects": [
+                {
+                    "slot": "contract",
+                    "roles": ["contract"],
+                    "mediaType": "application/vnd.ojos.service-contract.v3+json",
+                    "digest": digest(3),
+                    "size": 1
+                },
+                {
+                    "slot": "provenance",
+                    "roles": ["provenance"],
+                    "mediaType": "application/vnd.in-toto+json",
+                    "digest": digest(4),
+                    "size": 1
+                },
+                {
+                    "slot": "sbom",
+                    "roles": ["sbom"],
+                    "mediaType": "application/spdx+json",
+                    "digest": digest(5),
+                    "size": 1
+                }
+            ],
+            "packageRequirements": [],
+            "resourceClaims": [],
+            "contribution": {}
+        });
+    }
+
+    fn provider_only_v3_contract() -> ServiceReleaseContract {
+        let mut document = serde_json::to_value(release_manifest(
+            "fixture-provider",
+            &format!("registry.example/ojos/fixture-provider@{DIGEST}"),
+        ))
+        .unwrap();
+        make_v2_release_document(&mut document);
+        document["permissions"] = json!(["fixture.read"]);
+        document["provides"] = json!({"apis": [{
+            "id": "fixture.provider.get",
+            "version": "1.0.0",
+            "protocol": "http",
+            "port_name": "http",
+            "path": "/",
+            "methods": ["GET"],
+            "visibility": "explicit",
+            "auth": "workload",
+            "permission": "fixture.read",
+            "stability": "stable"
+        }]});
+        add_empty_signed_platform(&mut document, 'a');
+        ServiceReleaseContract::from_json_value(document).unwrap()
+    }
+
+    fn fixture_ed25519_public_key_pem() -> String {
+        "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAERERERERERERERERERERERERERERERERERERERERERE=\n-----END PUBLIC KEY-----\n".to_string()
+    }
+
+    fn configure_workload_verifier(environment: &mut TestEnv, path: &Path) {
+        environment.set(
+            "ORCHESTRATOR_WORKLOAD_PUBLIC_KEY_FILE",
+            path.to_str().unwrap(),
+        );
+        environment.set("ORCHESTRATOR_WORKLOAD_KEY_ID", "workload-1");
+        environment.set("ORCHESTRATOR_WORKLOAD_ISSUER", "ojos-auth/workload");
+        environment.set("ORCHESTRATOR_WORKLOAD_AUDIENCE", "ojos-gateway");
+    }
+
+    #[test]
+    fn provider_only_v3_receives_platform_workload_verifier_and_fails_closed() {
+        let contract = provider_only_v3_contract();
+        let fixture = fixture(
+            release_manifest(
+                "fixture-root",
+                &format!("registry.example/ojos/api@{DIGEST}"),
+            ),
+            "READY",
+        );
+        let mut environment = TestEnv::lock();
+        for name in [
+            "ORCHESTRATOR_WORKLOAD_PUBLIC_KEY_FILE",
+            "ORCHESTRATOR_WORKLOAD_KEY_ID",
+            "ORCHESTRATOR_WORKLOAD_ISSUER",
+            "ORCHESTRATOR_WORKLOAD_AUDIENCE",
+        ] {
+            environment.remove(name);
+        }
+        let missing =
+            managed_service_context_spec(&fixture.durable, &contract, "node-1", &[], false)
+                .unwrap_err();
+        assert_eq!(missing.code, "STORE_WORKLOAD_VERIFIER_REQUIRED");
+
+        let key_path = fixture._directory.path().join("workload-public-key.pem");
+        fs::write(&key_path, fixture_ed25519_public_key_pem()).unwrap();
+        configure_workload_verifier(&mut environment, &key_path);
+        let context =
+            managed_service_context_spec(&fixture.durable, &contract, "node-1", &[], false)
+                .unwrap()
+                .expect("provider-only v3 receives a managed context");
+        assert!(context.bindings.is_empty());
+        assert_eq!(context.workload_verifier.unwrap().key_id, "workload-1");
+    }
+
+    #[test]
+    fn store_rejects_multiple_non_ed25519_and_oversized_workload_keys() {
+        let contract = provider_only_v3_contract();
+        let fixture = fixture(
+            release_manifest(
+                "fixture-root",
+                &format!("registry.example/ojos/api@{DIGEST}"),
+            ),
+            "READY",
+        );
+        let valid = fixture_ed25519_public_key_pem();
+        for (name, bytes) in [
+            ("multiple", format!("{valid}{valid}").into_bytes()),
+            (
+                "rsa",
+                b"-----BEGIN PUBLIC KEY-----\nMAwwDQYJKoZIhvcNAQEBBQADCwAwCAIBAwIDAQAB\n-----END PUBLIC KEY-----\n".to_vec(),
+            ),
+            (
+                "oversized",
+                vec![b'A'; MAX_WORKLOAD_PUBLIC_KEY_FILE_BYTES as usize + 1],
+            ),
+        ] {
+            let mut environment = TestEnv::lock();
+            let path = fixture._directory.path().join(format!("{name}.pem"));
+            fs::write(&path, bytes).unwrap();
+            configure_workload_verifier(&mut environment, &path);
+            let error = managed_service_context_spec(
+                &fixture.durable,
+                &contract,
+                "node-1",
+                &[],
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "STORE_WORKLOAD_VERIFIER_INVALID");
+        }
     }
 
     fn replace_fixture_release_metadata(
@@ -8522,6 +10175,8 @@ mod tests {
                 runtime_contract: RuntimeContract::standard_v1(),
                 runtime_context: None,
                 managed_service_context: Some(consumer_context),
+                resource_secret_file_mounts: Vec::new(),
+                retained_volume: None,
                 command: vec![],
                 environment: vec![],
                 labels: HashMap::new(),
@@ -8603,6 +10258,8 @@ mod tests {
                 runtime_contract: RuntimeContract::standard_v1(),
                 runtime_context: None,
                 managed_service_context: None,
+                resource_secret_file_mounts: Vec::new(),
+                retained_volume: None,
                 command: vec![],
                 environment: vec![],
                 labels: HashMap::new(),
@@ -9257,7 +10914,7 @@ mod tests {
 
         let mut staged = resolved[0].clone();
         staged.state = ApiBindingState::Pending;
-        staged.observed_state = "PENDING".to_string();
+        staged.observed_state = ApiBindingObservedState::Pending;
         staged.topology_id = topology.topology_id;
         staged.topology_revision_id = topology.revision_id;
         let public_plan = production_binding_plan([&staged]);
@@ -9934,6 +11591,155 @@ mod tests {
         assert_eq!(
             projections[0].instance.deployment_id,
             "deployment-current-v1"
+        );
+    }
+
+    #[test]
+    fn upgrade_stages_signed_contribution_successor_around_runtime_cutover() {
+        let service_id = "upgrade-contribution-api";
+        let mut fixture = fixture(
+            release_manifest(service_id, &format!("registry.example/ojos/api@{DIGEST}")),
+            "READY",
+        );
+        let mut current_document = serde_json::to_value(release_manifest(
+            service_id,
+            &format!("registry.example/ojos/api@{DIGEST}"),
+        ))
+        .unwrap();
+        make_v2_release_document(&mut current_document);
+        add_empty_signed_platform(&mut current_document, '1');
+        replace_fixture_release_metadata(&fixture, service_id, "1.2.3", &current_document);
+        let mut upgrade_document = serde_json::to_value(release_manifest(
+            service_id,
+            &format!("registry.example/ojos/api@{UPGRADE_DIGEST}"),
+        ))
+        .unwrap();
+        upgrade_document["version"] = json!("2.0.0");
+        make_v2_release_document(&mut upgrade_document);
+        add_empty_signed_platform(&mut upgrade_document, '2');
+        replace_fixture_release_metadata(&fixture, service_id, "2.0.0", &upgrade_document);
+
+        let current_image = format!("registry.example/ojos/api@{DIGEST}");
+        put_running_instance(
+            &fixture,
+            service_id,
+            "deployment-contribution-v1",
+            "container-contribution-v1",
+            &current_image,
+        );
+        record_release_history(
+            &fixture,
+            "op-history-contribution-v1",
+            "deployment-contribution-v1",
+            service_id,
+            "1.2.3",
+            &current_image,
+            100,
+        );
+        let current_revision = ContributionRevisionV1::stage(
+            "default",
+            "deployment-contribution-v1",
+            service_id,
+            DIGEST,
+            format!("sha256:{}", "1".repeat(64)),
+            1,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        fixture
+            .durable
+            .insert_contribution_revision(&current_revision)
+            .unwrap();
+        let current_head = fixture
+            .durable
+            .compare_and_swap_contribution_head(None, &current_revision.activate().unwrap())
+            .unwrap();
+
+        let response = route(
+            &fixture.state,
+            &mut fixture.console,
+            Some(&fixture.durable),
+            Some(&fixture.registry),
+            Some(&fixture.artifact_store),
+            &ApiRequest {
+                method: "POST".to_string(),
+                path: "/api/v1/store/releases:upgrade".to_string(),
+                headers: BTreeMap::from([(
+                    "idempotency-key".to_string(),
+                    "upgrade-contribution-1".to_string(),
+                )]),
+                body: json!({
+                    "deployment_id": "deployment-contribution-v1",
+                    "version": "2.0.0"
+                })
+                .to_string(),
+            },
+            "request-upgrade-contribution",
+        )
+        .unwrap();
+        assert_eq!(response.status, 202, "{}", response.body);
+        let operation_id = response.body["data"]["operation_id"].as_str().unwrap();
+        let operation = fixture
+            .durable
+            .operation_store()
+            .get(operation_id)
+            .unwrap()
+            .unwrap();
+        let runtime = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id == "runtime-upgrade")
+            .unwrap();
+        let prepare = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id.starts_with("contribution-prepare-"))
+            .unwrap();
+        let commit = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id.starts_with("contribution-commit-"))
+            .unwrap();
+        let abort = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id.starts_with("contribution-abort-"))
+            .unwrap();
+        let ack_gate = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id.starts_with("contribution-ack-gate-"))
+            .unwrap();
+        assert!(runtime.depends_on.contains(&prepare.step_id));
+        assert!(commit.depends_on.contains(&runtime.step_id));
+        assert!(commit.depends_on.contains(&prepare.step_id));
+        assert!(ack_gate.depends_on.contains(&commit.step_id));
+        assert!(abort.depends_on.contains(&ack_gate.step_id));
+        assert_eq!(abort.condition, PlannedJobCondition::OnFailure);
+
+        // Successor creation remains a read-only preflight until PREPARE is
+        // executed by the durable worker.
+        assert_eq!(
+            fixture
+                .durable
+                .contribution_head("default", service_id)
+                .unwrap()
+                .unwrap()
+                .etag(),
+            current_head.etag()
+        );
+        assert_eq!(
+            fixture
+                .durable
+                .contribution_revisions("default", Some(service_id))
+                .unwrap()
+                .len(),
+            1
         );
     }
 
@@ -11270,6 +13076,39 @@ mod tests {
     }
 
     #[test]
+    fn composition_discovers_running_api_provider_outside_install_release_graph() {
+        let fixture = fixture(
+            release_manifest(
+                "composition-consumer",
+                &format!("registry.example/ojos/consumer@{DIGEST}"),
+            ),
+            "READY",
+        );
+        register_running_provider(
+            &fixture,
+            "problem-service",
+            "deployment-problem-provider",
+            "10.0.0.1:8080:problem-service",
+            "problem.query.v1",
+        );
+        let node = fixture
+            .durable
+            .get_node("node-1")
+            .unwrap()
+            .expect("fixture node");
+
+        // The provider is intentionally absent from the current Catalog
+        // documents: requires.apis is a runtime binding, not a package edge.
+        let providers = store_composition_providers(&fixture.durable, &[], &node).unwrap();
+        assert!(providers.iter().any(|provider| {
+            provider.provider_id == "deployment-problem-provider"
+                && provider.capability == "problem.query.v1"
+                && provider.service_id.as_deref() == Some("problem-service")
+                && provider.kind == ProviderKindV1::Managed
+        }));
+    }
+
+    #[test]
     fn provider_candidates_reject_stale_external_probe_evidence() {
         let service_id = "external-provider";
         let mut manifest =
@@ -11456,9 +13295,9 @@ mod tests {
             credential_ref: String::new(),
             credential_generation: 2,
             context_generation: 2,
-            desired_state: "ACTIVE".to_string(),
-            observed_state: "ACTIVE".to_string(),
-            health: "HEALTHY".to_string(),
+            desired_state: ApiBindingDesiredState::Active,
+            observed_state: ApiBindingObservedState::Active,
+            health: ApiBindingHealth::Healthy,
             drift: Vec::new(),
             last_operation_id: "operation-1".to_string(),
             state: ApiBindingState::Active,
@@ -11489,8 +13328,8 @@ mod tests {
         binding.topology_revision_id = "revision-2".to_string();
         binding.credential_generation = 3;
         binding.context_generation = 3;
-        binding.observed_state = "PENDING".to_string();
-        binding.health = "UNKNOWN".to_string();
+        binding.observed_state = ApiBindingObservedState::Pending;
+        binding.health = ApiBindingHealth::Unknown;
         binding.last_operation_id = "operation-rebind".to_string();
         binding.state = ApiBindingState::Pending;
         binding.optional = optional;
@@ -11571,7 +13410,7 @@ mod tests {
             "metrics-a",
             true,
         );
-        optional_revoke.desired_state = "REVOKED".to_string();
+        optional_revoke.desired_state = ApiBindingDesiredState::Revoked;
         let required_sibling = staged_context_binding(
             "binding-storage-get",
             "storage_get",
@@ -11683,7 +13522,7 @@ mod tests {
             false,
         );
         only_storage_get.state = ApiBindingState::Active;
-        only_storage_get.observed_state = "ACTIVE".to_string();
+        only_storage_get.observed_state = ApiBindingObservedState::Active;
 
         let error = managed_service_context_spec(
             &fixture.durable,
@@ -11698,6 +13537,103 @@ mod tests {
         assert_eq!(error.code, "STORE_REQUIRED_BINDING_CONTEXT_MISSING");
         assert!(error.detail.contains("storage_head"));
         assert!(!error.detail.contains("storage_get"));
+    }
+
+    #[test]
+    fn binding_context_transition_revokes_last_required_binding_and_can_restore_it() {
+        let mut environment = TestEnv::lock();
+        environment.set(
+            "ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN",
+            "http://127.0.0.1:18000",
+        );
+        let consumer_manifest = legacy_consumer_manifest("consumer-worker", "storage.object.get");
+        let fixture = fixture(consumer_manifest, "READY");
+        put_running_instance(
+            &fixture,
+            "consumer-worker",
+            "consumer-worker",
+            "container-consumer-worker",
+            &format!("registry.example/ojos/consumer-worker@{DIGEST}"),
+        );
+        let mut previous = staged_context_binding(
+            "binding-storage-get",
+            "storage.object.get",
+            "storage.object.get",
+            "storage-a",
+            false,
+        );
+        previous.consumer_deployment_id = "consumer-worker".to_string();
+        previous.state = ApiBindingState::Active;
+        previous.observed_state = ApiBindingObservedState::Active;
+        previous.desired_state = ApiBindingDesiredState::Active;
+        previous.topology_revision_id = "revision-1".to_string();
+        fixture
+            .durable
+            .replace_topology_api_bindings("primary", std::slice::from_ref(&previous))
+            .unwrap();
+        let previous_context = ManagedServiceContextSpec {
+            generation: previous.context_generation,
+            node_id: "node-1".to_string(),
+            gateway_origin: "http://127.0.0.1:18000".to_string(),
+            gateway_ca_pem: None,
+            bindings: BTreeMap::from([(
+                previous.requirement_name.clone(),
+                ManagedApiBinding {
+                    binding_id: previous.binding_id.clone(),
+                    api_id: previous.api_id.clone(),
+                    timeout_ms: previous.timeout_ms.unwrap(),
+                    context_generation: previous.context_generation,
+                },
+            )]),
+            events: None,
+            workload_verifier: None,
+        };
+        previous_context.validate().unwrap();
+        fixture
+            .durable
+            .put_state(
+                "managed-service-context-v1",
+                "consumer-worker",
+                &ManagedServiceContextProjection {
+                    current: Some(previous_context.clone()),
+                    last_nonempty: previous_context.clone(),
+                    revoked: false,
+                },
+            )
+            .unwrap();
+        let mut revoked = previous.clone();
+        revoked.desired_state = ApiBindingDesiredState::Revoked;
+        revoked.observed_state = ApiBindingObservedState::Pending;
+        revoked.state = ApiBindingState::Pending;
+        revoked.topology_revision_id = "revision-2".to_string();
+        let plan = StoreTopologyApplyPlan {
+            topology_id: "primary".to_string(),
+            revision_id: "revision-2".to_string(),
+            staged_bindings: vec![revoked],
+            previous_bindings: vec![previous],
+        };
+
+        let transitions = binding_context_transition_plans(
+            &fixture.durable,
+            &[plan],
+            &BTreeSet::from(["consumer-worker".to_string()]),
+        )
+        .unwrap();
+
+        assert_eq!(transitions.len(), 1);
+        assert!(transitions[0].forward.context.is_none());
+        assert_eq!(
+            transitions[0].forward.previous_context.as_ref(),
+            Some(&previous_context)
+        );
+        assert_eq!(
+            transitions[0].rollback.context.as_ref(),
+            Some(&previous_context)
+        );
+        assert_eq!(
+            transitions[0].rollback.previous_context.as_ref(),
+            Some(&previous_context)
+        );
     }
 
     #[test]
@@ -11717,7 +13653,7 @@ mod tests {
             "10.0.0.1:8080:storage",
         );
         second.state = ApiBindingState::Resolved;
-        second.observed_state = "RESOLVED".to_string();
+        second.observed_state = ApiBindingObservedState::Resolved;
         let merged = merge_store_consumer_bindings(
             std::slice::from_ref(&first),
             std::slice::from_ref(&second),
@@ -11790,7 +13726,10 @@ mod tests {
         );
     }
 
-    fn topology_install_graph(operation_id: &str) -> PlanOperation {
+    fn topology_install_graph_with_contribution_abort(
+        operation_id: &str,
+        contribution_abort_step: Option<&str>,
+    ) -> PlanOperation {
         let mut jobs = vec![PlannedJob {
             step_id: "install-root".to_string(),
             node_id: "node-1".to_string(),
@@ -11812,6 +13751,26 @@ mod tests {
             "node-1",
             "deployment-root",
         );
+        if let Some(contribution_abort_step) = contribution_abort_step {
+            jobs.push(PlannedJob {
+                step_id: contribution_abort_step.to_string(),
+                node_id: CONTROL_PLANE_NODE_ID.to_string(),
+                kind: JobKind::TopologyApply,
+                depends_on: vec![
+                    "install-root".to_string(),
+                    "topology-binding-finalize-success".to_string(),
+                ],
+                condition: PlannedJobCondition::OnFailure,
+                payload: json!({"controller": "contribution", "phase": "ABORT"}),
+                max_attempts: 1,
+            });
+            add_job_dependency(
+                &mut jobs,
+                "remove-root-after-topology-abort",
+                contribution_abort_step,
+            )
+            .unwrap();
+        }
         PlanOperation {
             operation_id: operation_id.to_string(),
             action: "release.install".to_string(),
@@ -11820,6 +13779,54 @@ mod tests {
             request: json!({"auto_enqueue": true}),
             jobs,
         }
+    }
+
+    fn topology_install_graph(operation_id: &str) -> PlanOperation {
+        topology_install_graph_with_contribution_abort(operation_id, None)
+    }
+
+    fn topology_install_graph_with_contribution_commit(operation_id: &str) -> PlanOperation {
+        let mut plan = topology_install_graph(operation_id);
+        plan.jobs.push(PlannedJob {
+            step_id: "contribution-commit-test".to_string(),
+            node_id: CONTROL_PLANE_NODE_ID.to_string(),
+            kind: JobKind::TopologyApply,
+            depends_on: vec!["install-root".to_string()],
+            condition: PlannedJobCondition::OnSuccess,
+            payload: json!({"controller": "contribution", "phase": "COMMIT"}),
+            max_attempts: 1,
+        });
+        add_job_dependency(
+            &mut plan.jobs,
+            "topology-binding-finalize-success",
+            "contribution-commit-test",
+        )
+        .unwrap();
+        add_job_dependency(
+            &mut plan.jobs,
+            "topology-binding-finalize-failure",
+            "contribution-commit-test",
+        )
+        .unwrap();
+        plan.jobs.push(PlannedJob {
+            step_id: "contribution-abort-test".to_string(),
+            node_id: CONTROL_PLANE_NODE_ID.to_string(),
+            kind: JobKind::TopologyApply,
+            depends_on: vec![
+                "contribution-commit-test".to_string(),
+                "topology-binding-finalize-success".to_string(),
+            ],
+            condition: PlannedJobCondition::OnFailure,
+            payload: json!({"controller": "contribution", "phase": "ABORT"}),
+            max_attempts: 1,
+        });
+        add_job_dependency(
+            &mut plan.jobs,
+            "remove-root-after-topology-abort",
+            "contribution-abort-test",
+        )
+        .unwrap();
+        plan
     }
 
     fn start_topology_install_graph(operation_id: &str) -> (MemoryOperationStore, MemoryJobStore) {
@@ -11960,6 +13967,169 @@ mod tests {
         assert_eq!(
             operation.result["remove-root-after-topology-abort"]["status"],
             json!(JobStatus::Succeeded)
+        );
+    }
+
+    #[test]
+    fn topology_cleanup_waits_for_both_topology_and_contribution_abort() {
+        let operation_id = "install-dual-abort-gate";
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+        coordinator
+            .plan(
+                topology_install_graph_with_contribution_abort(
+                    operation_id,
+                    Some("contribution-abort-test"),
+                ),
+                0,
+            )
+            .unwrap();
+        coordinator.confirm(operation_id, 1).unwrap();
+        coordinator.enqueue(operation_id, 2).unwrap();
+
+        complete_next_topology_job(
+            &mut jobs,
+            "node-1",
+            "root-success",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 12)
+            .unwrap();
+        complete_next_topology_job(
+            &mut jobs,
+            CONTROL_PLANE_NODE_ID,
+            "finalize-failed",
+            CompletionStatus::Failed,
+            20,
+        );
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 22)
+            .unwrap();
+
+        complete_next_topology_job(
+            &mut jobs,
+            CONTROL_PLANE_NODE_ID,
+            "first-abort",
+            CompletionStatus::Succeeded,
+            30,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 32)
+            .unwrap();
+        assert!(
+            operation
+                .active_binding("remove-root-after-topology-abort")
+                .is_none(),
+            "runtime cleanup must wait while either projection ABORT is incomplete"
+        );
+
+        complete_next_topology_job(
+            &mut jobs,
+            CONTROL_PLANE_NODE_ID,
+            "second-abort",
+            CompletionStatus::Succeeded,
+            40,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 42)
+            .unwrap();
+        assert!(
+            operation
+                .active_binding("remove-root-after-topology-abort")
+                .is_some(),
+            "runtime cleanup may materialize only after both ABORT jobs succeed"
+        );
+    }
+
+    #[test]
+    fn contribution_commit_failure_materializes_both_aborts_before_runtime_cleanup() {
+        let operation_id = "install-contribution-commit-failure";
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+        coordinator
+            .plan(
+                topology_install_graph_with_contribution_commit(operation_id),
+                0,
+            )
+            .unwrap();
+        coordinator.confirm(operation_id, 1).unwrap();
+        coordinator.enqueue(operation_id, 2).unwrap();
+
+        complete_next_topology_job(
+            &mut jobs,
+            "node-1",
+            "root-success",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 12)
+            .unwrap();
+        complete_next_topology_job(
+            &mut jobs,
+            CONTROL_PLANE_NODE_ID,
+            "contribution-commit-failed",
+            CompletionStatus::Failed,
+            20,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 22)
+            .unwrap();
+        assert!(
+            operation
+                .active_binding("topology-binding-finalize-success")
+                .is_none(),
+            "Topology FINALIZE must remain frozen after Contribution COMMIT fails"
+        );
+        assert!(
+            operation
+                .active_binding("topology-binding-finalize-failure")
+                .is_some(),
+            "Topology ABORT must use the failed Contribution COMMIT as a direct witness"
+        );
+        assert!(
+            operation
+                .active_binding("contribution-abort-test")
+                .is_some(),
+            "Contribution ABORT must materialize alongside Topology ABORT"
+        );
+
+        complete_next_topology_job(
+            &mut jobs,
+            CONTROL_PLANE_NODE_ID,
+            "first-abort",
+            CompletionStatus::Succeeded,
+            30,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 32)
+            .unwrap();
+        assert!(
+            operation
+                .active_binding("remove-root-after-topology-abort")
+                .is_none(),
+            "runtime cleanup must not race the second projection ABORT"
+        );
+
+        complete_next_topology_job(
+            &mut jobs,
+            CONTROL_PLANE_NODE_ID,
+            "second-abort",
+            CompletionStatus::Succeeded,
+            40,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project(operation_id, 42)
+            .unwrap();
+        assert!(
+            operation
+                .active_binding("remove-root-after-topology-abort")
+                .is_some(),
+            "runtime cleanup may materialize only after both projections restore"
         );
     }
 

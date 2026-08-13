@@ -1,13 +1,13 @@
 # Problem Service
 
-`problem-service` 管题目元数据、authoring 工作区和不可变题目 artifact。`Storage.ProblemsRoot` 是本地 authoring/package build 目录，不是 Problem 与 Judge 的共享生产目录；生产题包和文件通过 Service Contract v2 的 Storage ApiBinding 写入内容寻址对象存储。
+`problem-service` 管题目元数据、authoring 工作区和不可变题目 artifact。生产环境的 `/data/ojos/problems` 由签名的 `standard-container-v1` RETAIN managed volume 提供，仅挂载给 Problem Service，用于 live/staging/backup/journal 和确定性 package build；它不是 Problem 与 Judge 的共享目录。发布后的题包和文件通过 Service Contract v3 声明的 Storage API Binding 写入内容寻址对象存储。
 
 ## 生产 artifact 与 Judge 投影
 
 每次在线创建、更新测试数据或删除题目都遵循同一条闭环：
 
 1. 在隔离 staging 目录构建并校验题目树；确定性 ZIP 对相同输入产生完全相同的字节与 SHA-256。
-2. 通过 `storage_put` Binding 条件写入 `problems/package-sha256-<digest>.zip`；authoring 文件使用 `problem-<id>-objects-sha256-<digest>`。上传前先登记持久 intent，响应必须与预期 SHA-256/size 一致。
+2. 通过 `storage.object.put` requirement 的热重载 Binding 条件写入 `problems/package-sha256-<digest>.zip`；authoring 文件使用 `problem-<id>-objects-sha256-<digest>`。上传前先登记持久 intent，响应必须与预期 SHA-256/size 一致。
 3. 在一个 PostgreSQL 事务中更新 Problem、递增 `aggregate_version`/必要时的 `package_revision`、保存不可变 revision，并写入 `integration_outbox`。事务失败不会发布 snapshot；未关联上传由 GC ledger 回收。
 4. relay 将 `io.ojos.problem.snapshot.v1` 或 `io.ojos.problem.deleted.v1` CloudEvent 投递到 Redis Stream。Judge API 通过 consumer group、inbox 和幂等 projection 消费，只有更大的 aggregate version 能推进投影。
 5. Submission 创建时复制题包 revision、artifact URI、SHA-256 和 size。题目后续更新或删除不会改变已经创建的任务；删除后禁止新提交，旧任务仍可完成。
@@ -189,19 +189,19 @@ config:
 
 judge-worker 已支持编译和执行四类 custom component。组件语言必须存在于 worker 的语言配置，源码和执行过程都走 worker 沙箱。Problem Service 的 package validation 只证明目录、manifest 和引用关系合法，不替代 worker 侧的编译与协议测试。
 
-## Service 本地路由
+## Service provider 路由
 
-Service 自身使用 `/problem` 前缀：
+Service Contract v3 的 provider path 不带 `/problem` 前缀；Gateway 根据 deployment-scoped exposure mount 编译公开路径。旧 `/problem/**` 路由仅作为一个迁移版本的兼容别名保留。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/health` | 健康检查 |
-| `POST` / `GET` | `/problem/problems` | 创建、分页查询题目 |
-| `GET` / `PUT` / `DELETE` | `/problem/problems/:id` | 读取、更新、删除题目 |
-| `GET` | `/problem/problems/:id/package` | 读取包摘要和校验结果 |
-| `POST` | `/problem/problems/:id/package/validate` | 重新校验题目包 |
-| `GET` | `/problem/problems/:id/package/cases` | 查看包内 case |
-| `POST` / `GET` | `/problem/problems/:id/test-cases` | 新增、查询测试点 |
-| `PUT` / `DELETE` | `/problem/problems/:id/test-cases/:case_no` | 更新、删除测试点 |
+| `GET` | `/healthz`、`/readyz` | 进程健康；数据库、required Binding、事件 transport 与 authoring volume 就绪 |
+| `POST` / `GET` | `/problems` | 创建、分页查询题目 |
+| `GET` / `PUT` / `DELETE` | `/problems/{id}` | 读取、更新、删除题目 |
+| `GET` | `/problems/{id}/package` | 读取包摘要和校验结果 |
+| `POST` | `/problems/{id}/package/validate` | 重新校验题目包 |
+| `GET` | `/problems/{id}/package/cases` | 查看包内 case |
+| `POST` / `GET` | `/problems/{id}/test-cases` | 新增、查询测试点 |
+| `PUT` / `DELETE` | `/problems/{id}/test-cases/{case_no}` | 更新、删除测试点 |
 
-外部访问路径由 Gateway route 决定，不能把 Service 本地前缀直接当成公开 API 地址。
+外部访问路径由当前 active Contribution revision 决定，不能把 provider path 或兼容别名直接当成公开 API 地址。

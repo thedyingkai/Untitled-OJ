@@ -2,9 +2,11 @@ package svc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,10 +14,13 @@ import (
 	"ojos-judge-api/internal/config"
 	"ojos-judge-api/internal/middleware"
 	"ojos-judge-api/internal/repository"
+	"ojos-problem-events/problemv1"
 	"ojos-shared/eventing"
+	"ojos-shared/resourceoutput"
 	"ojos-shared/security/internalauth"
 	sharedperm "ojos-shared/security/permission"
 	"ojos-shared/security/workload"
+	"ojos-shared/servicecontext"
 
 	"ojos-shared/database"
 	sharedlogger "ojos-shared/logger"
@@ -37,12 +42,15 @@ type ServiceContext struct {
 
 	Repo           *repository.Repository
 	SubmissionRepo SubmissionRepository
+	RejudgeRepo    RejudgeRepository
 	WorkerRepo     WorkerTaskRepository
 	Permission     PermissionChecker
 	Redis          *redis.Client
 	Events         *eventing.EventContext
 	EventRedis     redis.UniversalClient
 	ResultOutbox   *repository.JudgeResultOutboxRelay
+	Context        *servicecontext.ContextProvider
+	Managed        bool
 
 	UserContextMiddleware  rest.Middleware
 	InternalAuthMiddleware rest.Middleware
@@ -75,7 +83,23 @@ type SubmissionRepository interface {
 	MarkSubmissionSystemError(ctx context.Context, submissionID int64, message string) error
 }
 
+type RejudgeRepository interface {
+	GetProblemMeta(ctx context.Context, id int64) (*repository.ProblemMeta, error)
+	ResetSubmissionsForProblem(ctx context.Context, problemID int64) ([]int64, error)
+	EnsureTaskForSubmission(ctx context.Context, submissionID int64) error
+}
+
 type PermissionChecker = sharedperm.UserChecker
+
+const redisStartupProbeTimeout = 750 * time.Millisecond
+
+const (
+	permissionBindingName        = sharedperm.DefaultPermissionCheckApiID
+	storageGetBinding            = "storage.object.get"
+	storagePutBinding            = "storage.object.put"
+	storageHeadBinding           = "storage.object.head"
+	defaultSubmissionsOutputFile = "/run/ojos/resources/submissions/dsn"
+)
 
 func (s *ServiceContext) ActiveSubmissionRepo() SubmissionRepository {
 	if s == nil {
@@ -83,6 +107,16 @@ func (s *ServiceContext) ActiveSubmissionRepo() SubmissionRepository {
 	}
 	if s.SubmissionRepo != nil {
 		return s.SubmissionRepo
+	}
+	return s.Repo
+}
+
+func (s *ServiceContext) ActiveRejudgeRepo() RejudgeRepository {
+	if s == nil {
+		return nil
+	}
+	if s.RejudgeRepo != nil {
+		return s.RejudgeRepo
 	}
 	return s.Repo
 }
@@ -99,7 +133,9 @@ func (s *ServiceContext) ActivePermissionChecker() PermissionChecker {
 
 func NewServiceContext(c config.Config) *ServiceContext {
 	ctx := context.Background()
-	applyEnvOverrides(&c)
+	if err := applyEnvOverrides(&c); err != nil {
+		log.Fatalf("configure judge-api: %v", err)
+	}
 	if token := os.Getenv("OJOS_WORKER_TOKEN"); token != "" {
 		c.WorkerAuth.Token = token
 	}
@@ -128,47 +164,73 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		"judge-api",
 		nil,
 		[]eventing.EventSubscription{
-			{EventType: eventing.ProblemDeletedV1, ConsumerGroup: "judge-api"},
-			{EventType: eventing.ProblemSnapshotV1, ConsumerGroup: "judge-api"},
+			{EventType: problemv1.DeletedType, ConsumerGroup: "judge-api"},
+			{EventType: problemv1.SnapshotType, ConsumerGroup: "judge-api"},
 		},
 	)
 	if err != nil {
 		log.Fatalf("configure managed Event Contract failed: %v", err)
 	}
-	var redisClient *redis.Client
-	if eventContext != nil {
-		managedRedis, managedErr := eventContext.RedisClient()
-		if managedErr != nil {
-			log.Fatalf("load Agent-local event connection failed: %v", managedErr)
-		}
-		if managedErr = managedRedis.Ping(ctx).Err(); managedErr != nil {
-			_ = managedRedis.Close()
-			log.Fatalf("ping Agent-local event connection failed: %v", managedErr)
-		}
-		// Judge queue wakeups and event projection share the Agent-approved
-		// Redis connection. A managed container never needs a release-provided
-		// REDIS_URL or a control-plane/global Redis credential.
-		redisClient = managedRedis
-	} else {
-		redisOptions, parseErr := redis.ParseURL(c.Redis.Url)
-		if parseErr != nil {
-			log.Fatalf("parse redis url failed: %v", parseErr)
-		}
-		redisClient = redis.NewClient(redisOptions)
-		if pingErr := redisClient.Ping(ctx).Err(); pingErr != nil {
-			log.Fatalf("ping redis failed: %v", pingErr)
-		}
+	redisClient, err := newJudgeRedisClient(eventContext, c.Redis.Url)
+	if err != nil {
+		log.Fatalf("configure judge redis client failed: %v", err)
+	}
+	if pingErr := probeJudgeRedis(ctx, redisClient); pingErr != nil {
+		// Redis is an acceleration and event transport dependency, not the
+		// durable Judge task authority. Starting without connectivity lets the
+		// API persist submissions and lets Workers poll PostgreSQL; the existing
+		// consumers and relays retry Redis in the background.
+		zlog.Warn(
+			"redis unavailable at startup; continuing with PostgreSQL judge task polling",
+			zap.Error(pingErr),
+		)
 	}
 	var eventRedis redis.UniversalClient = redisClient
-	permissionChecker, err := sharedperm.NewManagedOrLegacyUserChecker(
-		"judge-api",
-		sharedperm.DefaultPermissionCheckBinding,
-		permissionCheckerConfig(c),
-		db,
-	)
+	var contextProvider *servicecontext.ContextProvider
+	var permissionChecker sharedperm.UserChecker
+	contextValue, err := servicecontext.LoadOptional()
 	if err != nil {
-		log.Fatalf("configure permission_check ApiBinding failed: %v", err)
+		log.Fatalf("load managed Service Context failed: %v", err)
 	}
+	if contextValue != nil {
+		if err := contextValue.RequireService("judge-api"); err != nil {
+			log.Fatalf("validate managed Service Context failed: %v", err)
+		}
+		contextPath := strings.TrimSpace(os.Getenv("OJOS_SERVICE_CONTEXT_FILE"))
+		if contextPath == "" {
+			contextPath = servicecontext.DefaultFile
+		}
+		contextProvider, err = servicecontext.NewContextProvider(contextPath, servicecontext.ProviderOptions{})
+		if err == nil {
+			permissionChecker, err = sharedperm.NewContextProviderUserChecker(contextProvider, permissionBindingName)
+		}
+		if err == nil {
+			for _, bindingName := range []string{storageGetBinding, storagePutBinding, storageHeadBinding} {
+				var binding servicecontext.APIBinding
+				binding, err = contextProvider.Binding(ctx, bindingName)
+				if err != nil || binding.APIID != bindingName {
+					err = fmt.Errorf("required API binding %s is unavailable", bindingName)
+					break
+				}
+			}
+		}
+		if err == nil {
+			err = contextProvider.Start(context.Background())
+		}
+		if err != nil {
+			_ = contextProvider.Close()
+			log.Fatalf("configure managed ApiBindings failed: %v", err)
+		}
+	} else {
+		if managedEnvironment() {
+			log.Fatal("managed judge-api requires an Agent Service Context")
+		}
+		permissionChecker = sharedperm.NewUserCheckerWithConfig(permissionCheckerConfig(c), db)
+		if permissionChecker == nil {
+			log.Fatal("configure permission checker failed")
+		}
+	}
+	c.Storage.SetContextProvider(contextProvider)
 
 	internalAuthCfg := internalauth.Config{
 		Enabled:       c.InternalAuth.Enabled,
@@ -227,7 +289,8 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		resultStream = "ojos:judge:result"
 	}
 	svcCtx := &ServiceContext{
-		Config: c,
+		Config:  c,
+		Managed: managedEnvironment(),
 
 		Logger: zlog,
 		DB:     db,
@@ -235,6 +298,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 
 		Repo:           repo,
 		SubmissionRepo: repo,
+		RejudgeRepo:    repo,
 		WorkerRepo:     repo,
 		Permission:     permissionChecker,
 		Redis:          redisClient,
@@ -247,6 +311,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 			RelayID:      c.Name,
 			PollInterval: 250 * time.Millisecond,
 		},
+		Context: contextProvider,
 
 		UserContextMiddleware: middleware.NewUserContextMiddleware().Handle,
 		InternalAuthMiddleware: middleware.NewInternalAuthMiddleware(
@@ -257,6 +322,38 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	}
 	svcCtx.startProblemProjectionConsumer()
 	return svcCtx
+}
+
+func newJudgeRedisClient(eventContext *eventing.EventContext, redisURL string) (*redis.Client, error) {
+	if eventContext != nil {
+		// Judge queue wakeups and event projection share the Agent-approved
+		// Redis connection. RedisClient validates the materialized connection
+		// file and URL without requiring the endpoint to be reachable yet.
+		client, err := eventContext.RedisClient()
+		if err != nil {
+			return nil, fmt.Errorf("load Agent-local event connection: %w", err)
+		}
+		return client, nil
+	}
+
+	redisURL = strings.TrimSpace(redisURL)
+	if redisURL == "" {
+		return nil, errors.New("redis url is required")
+	}
+	options, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse redis url: %w", err)
+	}
+	return redis.NewClient(options), nil
+}
+
+func probeJudgeRedis(ctx context.Context, client *redis.Client) error {
+	if client == nil {
+		return errors.New("redis client is not configured")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, redisStartupProbeTimeout)
+	defer cancel()
+	return client.Ping(probeCtx).Err()
 }
 
 func validateWorkerIdentityMode(c config.Config, verifierConfigured bool, environment string) error {
@@ -292,14 +389,12 @@ func (s *ServiceContext) startProblemProjectionConsumer() {
 			s.ResultOutbox.Run(ctx)
 		}()
 	}
-	stream := ""
-	group := ""
+	var transport eventing.TransportConfig
 	if s.Events != nil {
-		stream = s.Events.Stream
 		var err error
-		group, err = s.Events.ConsumerGroupFor(
-			eventing.ProblemDeletedV1,
-			eventing.ProblemSnapshotV1,
+		transport, err = s.Events.SubscriberTransport(
+			problemv1.DeletedType,
+			problemv1.SnapshotType,
 		)
 		if err != nil {
 			// The context was already checked against this exact Release contract
@@ -308,24 +403,25 @@ func (s *ServiceContext) startProblemProjectionConsumer() {
 		}
 	} else {
 		// Compatibility is intentionally limited to unmanaged development.
-		stream = strings.TrimSpace(os.Getenv("OJOS_PROBLEM_EVENT_STREAM"))
+		stream := strings.TrimSpace(os.Getenv("OJOS_PROBLEM_EVENT_STREAM"))
 		if stream == "" {
-			stream = "ojos:integration:problem:v1"
+			stream = eventing.DefaultEventStream
 		}
-		group = "judge-api.problem-projection.v1"
+		group := strings.TrimSpace(os.Getenv("OJOS_PROBLEM_EVENT_CONSUMER_GROUP"))
+		if group == "" {
+			group = s.Config.Name
+		}
+		transport = eventing.DevelopmentSubscriberTransport(stream, group)
 	}
 	hostname, _ := os.Hostname()
-	consumer := &eventing.Consumer{
-		DB:           s.DB,
-		Redis:        s.EventRedis,
-		Stream:       stream,
-		Group:        group,
-		ConsumerName: fmt.Sprintf("%s-%s-%d", s.Config.Name, hostname, os.Getpid()),
-		BatchSize:    100,
-		ClaimIdle:    30 * time.Second,
-		MaxAttempts:  5,
-		Handler:      repository.ApplyProblemProjection,
+	consumer, err := eventing.NewConsumer(s.DB, s.EventRedis, transport, repository.ApplyProblemProjection)
+	if err != nil {
+		s.Logger.Fatal("configure problem projection consumer failed", zap.Error(err))
 	}
+	consumer.ConsumerName = fmt.Sprintf("%s-%s-%d", s.Config.Name, hostname, os.Getpid())
+	consumer.BatchSize = 100
+	consumer.ClaimIdle = 30 * time.Second
+	consumer.MaxAttempts = eventing.DefaultMaxAttempts
 	s.backgroundWG.Add(1)
 	go func() {
 		defer s.backgroundWG.Done()
@@ -347,51 +443,102 @@ func permissionCheckerConfig(c config.Config) sharedperm.RemoteCheckerConfig {
 	}
 }
 
-func applyEnvOverrides(c *config.Config) {
-	if value := firstEnv("JUDGE_DATABASE_URL", "DATABASE_URL", "POSTGRES_DSN"); value != "" {
+func applyEnvOverrides(c *config.Config) error {
+	managed := managedEnvironment()
+	if managed {
+		path := firstEnv("OJOS_RESOURCE_SUBMISSIONS_OUTPUT_FILE", "OJOS_RESOURCE_OUTPUT_FILE")
+		if path == "" {
+			path = defaultSubmissionsOutputFile
+		}
+		dsn, err := resourceoutput.ReadPostgreSQLDSN(path)
+		if err != nil {
+			return fmt.Errorf("load submissions resource output: %w", err)
+		}
+		c.Database.Url = dsn
+	} else if value := firstEnv("JUDGE_DATABASE_URL", "DATABASE_URL", "POSTGRES_DSN"); value != "" {
 		c.Database.Url = value
 	}
-	if value := strings.TrimSpace(os.Getenv("REDIS_URL")); value != "" {
-		c.Redis.Url = value
+	if !managed {
+		// Direct URLs and long-lived service tokens are development-only escape
+		// hatches. A managed workload receives endpoints, TLS roots and rotated
+		// credentials exclusively through Agent materialization.
+		if value := strings.TrimSpace(os.Getenv("REDIS_URL")); value != "" {
+			c.Redis.Url = value
+		}
+		if value := strings.TrimSpace(os.Getenv("AUTH_SERVICE_ENDPOINT")); value != "" {
+			c.AuthService.Endpoint = value
+		}
+		if value := firstEnv("AUTH_SERVICE_ADMIN_TOKEN", "AUTH_INTERNAL_TOKEN"); value != "" {
+			c.AuthService.AdminToken = value
+		}
+		if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_SERVICE_ENDPOINT")); value != "" {
+			c.Storage.ServiceEndpoint = value
+		}
+		if value := strings.TrimSpace(os.Getenv("OJOS_INTERNAL_GATEWAY_ENDPOINT")); value != "" {
+			c.Storage.InternalGatewayEndpoint = value
+		}
+		if value := strings.TrimSpace(os.Getenv("OJOS_CALLER_NODE_ID")); value != "" {
+			c.Storage.CallerNodeID = value
+		}
+		if value := strings.TrimSpace(os.Getenv("OJOS_SERVICE_TOKEN")); value != "" {
+			c.Storage.ServiceToken = value
+		}
+		if value := strings.TrimSpace(os.Getenv("OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT")); value != "" {
+			c.AuthService.InternalGatewayEndpoint = value
+		}
+		if value := strings.TrimSpace(os.Getenv("OJOS_AUTH_PERMISSION_CALLER_NODE_ID")); value != "" {
+			c.AuthService.CallerNodeID = value
+		}
+		if value := firstEnv("OJOS_JUDGE_API_SERVICE_TOKEN", "OJOS_SERVICE_TOKEN"); value != "" {
+			c.AuthService.ServiceToken = value
+		}
+	} else {
+		// Clear values supplied by a legacy configuration file as well as env.
+		c.Redis.Url = ""
+		c.AuthService.Endpoint = ""
+		c.AuthService.AdminToken = ""
+		c.AuthService.InternalGatewayEndpoint = ""
+		c.AuthService.CallerNodeID = ""
+		c.AuthService.ServiceToken = ""
+		c.Storage.ServiceEndpoint = ""
+		c.Storage.InternalGatewayEndpoint = ""
+		c.Storage.CallerNodeID = ""
+		c.Storage.ServiceToken = ""
 	}
 	if value := strings.TrimSpace(os.Getenv("JAEGER_ENDPOINT")); value != "" {
 		c.Jaeger.Endpoint = value
 	}
-	if value := strings.TrimSpace(os.Getenv("AUTH_SERVICE_ENDPOINT")); value != "" {
-		c.AuthService.Endpoint = value
-	}
-	if value := firstEnv("AUTH_SERVICE_ADMIN_TOKEN", "AUTH_INTERNAL_TOKEN"); value != "" {
-		c.AuthService.AdminToken = value
-	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_SUBMISSIONS_ROOT")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("OJOS_SUBMISSIONS_ROOT")); value != "" && !managed {
 		c.Storage.SubmissionsRoot = value
 	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_SERVICE_ENDPOINT")); value != "" {
-		c.Storage.ServiceEndpoint = value
-	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_INTERNAL_GATEWAY_ENDPOINT")); value != "" {
-		c.Storage.InternalGatewayEndpoint = value
-	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_GET_API_ID")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_GET_API_ID")); value != "" && !managed {
 		c.Storage.GetApiID = value
 	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_PUT_API_ID")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_PUT_API_ID")); value != "" && !managed {
 		c.Storage.PutApiID = value
 	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_HEAD_API_ID")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_OBJECT_HEAD_API_ID")); value != "" && !managed {
 		c.Storage.HeadApiID = value
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_STORAGE_SUBMISSIONS_BUCKET")); value != "" {
 		c.Storage.Bucket = value
 	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_CALLER_SERVICE")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("OJOS_CONFIG_SUBMISSION_MAXCODEBYTES")); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || parsed < 1024 || parsed > 10*1024*1024 {
+			return errors.New("OJOS_CONFIG_SUBMISSION_MAXCODEBYTES is invalid")
+		}
+		c.Submission.MaxCodeBytes = parsed
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_CONFIG_WORKER_LEASETTLSECONDS")); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || parsed < 10 || parsed > 3600 {
+			return errors.New("OJOS_CONFIG_WORKER_LEASETTLSECONDS is invalid")
+		}
+		c.WorkerAuth.LeaseTTLSeconds = parsed
+	}
+	if value := strings.TrimSpace(os.Getenv("OJOS_CALLER_SERVICE")); value != "" && !managed {
 		c.Storage.CallerService = value
-	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_CALLER_NODE_ID")); value != "" {
-		c.Storage.CallerNodeID = value
-	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_SERVICE_TOKEN")); value != "" {
-		c.Storage.ServiceToken = value
 	}
 	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_PUBLIC_KEY_FILE")); value != "" {
 		c.WorkloadIdentity.PublicKeyFile = value
@@ -405,32 +552,64 @@ func applyEnvOverrides(c *config.Config) {
 	if value := strings.TrimSpace(os.Getenv("OJOS_WORKLOAD_AUDIENCE")); value != "" {
 		c.WorkloadIdentity.Audience = value
 	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_ALLOW_LEGACY_WORKER_TOKEN")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("OJOS_ALLOW_LEGACY_WORKER_TOKEN")); value != "" && !managed {
 		c.WorkloadIdentity.AllowLegacyWorkerToken = value == "1" || strings.EqualFold(value, "true")
 	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_ALLOW_LEGACY_PROBLEM_PACKAGE_DIR")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("OJOS_ALLOW_LEGACY_PROBLEM_PACKAGE_DIR")); value != "" && !managed {
 		c.ProblemProjection.AllowLegacyPackageDir = value == "1" || strings.EqualFold(value, "true")
 	}
-	// Deliberately a dedicated variable rather than reusing
-	// OJOS_INTERNAL_GATEWAY_ENDPOINT (which already drives the storage client):
-	// switching the permission check onto the gateway also requires a service
-	// credential and a service permission grant, so it must be an explicit
-	// opt-in per deployment.
-	if value := strings.TrimSpace(os.Getenv("OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT")); value != "" {
-		c.AuthService.InternalGatewayEndpoint = value
-	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_AUTH_PERMISSION_CHECK_API_ID")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("OJOS_AUTH_PERMISSION_CHECK_API_ID")); value != "" && !managed {
 		c.AuthService.PermissionCheckApiID = value
 	}
-	if value := strings.TrimSpace(os.Getenv("OJOS_CALLER_SERVICE")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("OJOS_AUTH_PERMISSION_CALLER_SERVICE")); value != "" && !managed {
 		c.AuthService.CallerService = value
 	}
-	if value := firstEnv("OJOS_CALLER_NODE_ID", "OJOS_NODE_ID"); value != "" {
-		c.AuthService.CallerNodeID = value
+	return nil
+}
+
+func managedEnvironment() bool {
+	value := strings.TrimSpace(os.Getenv("OJOS_MANAGED_WORKLOAD"))
+	return value == "1" || strings.EqualFold(value, "true") ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("OJOS_ENVIRONMENT")), "production")
+}
+
+func (s *ServiceContext) Ready(ctx context.Context) error {
+	if s == nil || s.DB == nil || s.DB.Ping(ctx) != nil {
+		return errors.New("claimed PostgreSQL database is unavailable")
 	}
-	if value := firstEnv("OJOS_JUDGE_API_SERVICE_TOKEN", "OJOS_SERVICE_TOKEN"); value != "" {
-		c.AuthService.ServiceToken = value
+	if s.EventRedis == nil || s.EventRedis.Ping(ctx).Err() != nil {
+		return errors.New("event transport is unavailable")
 	}
+	if s.Context == nil {
+		if managedEnvironment() {
+			return errors.New("managed Service Context is unavailable")
+		}
+		return nil
+	}
+	_ = s.Context.ReloadNow()
+	snapshot, err := s.Context.Current(ctx)
+	if err != nil || snapshot.RequireService("judge-api") != nil {
+		return errors.New("managed Service Context is invalid")
+	}
+	required := map[string]string{
+		permissionBindingName: sharedperm.DefaultPermissionCheckApiID,
+		storageGetBinding:     storageGetBinding,
+		storagePutBinding:     storagePutBinding,
+		storageHeadBinding:    storageHeadBinding,
+	}
+	for name, apiID := range required {
+		binding, bindingErr := snapshot.Binding(name)
+		if bindingErr != nil || binding.APIID != apiID {
+			return fmt.Errorf("required API binding %s is unavailable", name)
+		}
+	}
+	if _, err := snapshot.Client(); err != nil {
+		return errors.New("required API client is unavailable")
+	}
+	if _, err := s.Context.Credential(ctx); err != nil {
+		return errors.New("workload credential is unavailable")
+	}
+	return nil
 }
 
 func firstEnv(keys ...string) string {
@@ -458,6 +637,9 @@ func (s *ServiceContext) Close(ctx context.Context) {
 
 	if s.EventRedis != nil && s.EventRedis != s.Redis {
 		_ = s.EventRedis.Close()
+	}
+	if s.Context != nil {
+		_ = s.Context.Close()
 	}
 
 	if s.Redis != nil {

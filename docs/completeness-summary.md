@@ -21,7 +21,7 @@
 | Gateway/Auth | 控制面事务持久化 API surface；Gateway 以 consumer Deployment + API ID 路由并实时校验 Binding/generation；Auth 签发每 Deployment 独立的 Ed25519 JWT，不回退 admin bearer。 |
 | Problem/Judge | Problem 确定性题包与内容寻址 artifact、事务 outbox、CloudEvents snapshot/tombstone、Judge inbox/projection/backfill；Submission 固定题包 revision，Worker 只经 Gateway 长轮询和下载 `ApiResourceRef`。 |
 | Judge Worker | 签名 `judge-sandbox-v1` 固定 HostConfig、Agent 本地 policy、Docker HEALTHCHECK、live/ready/healthcheck、资源 SHA-256/size 校验和重连恢复。 |
-| Desktop / Web / TUI | Tauri WebView 内嵌 backend/loopback Agent；远程 OIDC Web 与 Device Flow TUI；Store Binding 选择、Topology Binding、Deployment runtime/context/health 和 Operation 控制使用同一 `/api/v1` 契约。 |
+| Desktop / Web / TUI | Tauri WebView 内嵌 backend，managed execution 明确不可用并引导独立 Agent；远程 OIDC Web 与 Device Flow TUI；Store Binding 选择、Topology Binding、Deployment runtime/context/health 和 Operation 控制使用同一 `/api/v1` 契约。 |
 
 0.2 Console、旧 PostgreSQL 仓储、共享 worker token、Docker Compose/本地进程适配和旧路由被隔离在开发兼容或 `orchestrator-legacy` 路径，不是 v1 生产路径。
 

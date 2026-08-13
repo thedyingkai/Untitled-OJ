@@ -1,0 +1,98 @@
+openapi: 3.1.0
+info: {title: OJOS Judge Submission Result API, version: 1.0.0}
+x-ojos-api-id: judge.submission.result
+x-ojos-service: {id: judge-api, version: 0.1.0}
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    SubmissionId: {name: id, in: path, required: true, schema: {type: integer, format: int64, minimum: 1}}
+    ProblemId: {name: id, in: path, required: true, schema: {type: integer, format: int64, minimum: 1}}
+  schemas:
+    Object: {type: object, additionalProperties: true}
+    Cancel:
+      type: object
+      additionalProperties: false
+      properties: {reason: {type: string, maxLength: 2000}}
+paths:
+  /healthz:
+    get:
+      operationId: judgeHealth
+      x-ojos-audience: internal
+      security: []
+      responses: {'200': {description: Process is alive}}
+  /readyz:
+    get:
+      operationId: judgeReady
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200': {description: Database, event transport, credentials and required API bindings are ready}
+        '503': {description: A required dependency is unavailable}
+  /judge/languages:
+    get:
+      operationId: listJudgeLanguages
+      x-ojos-audience: user
+      x-ojos-permission: judge.submission.view.own
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Enabled judge languages, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /judge/submissions:
+    get:
+      operationId: listSubmissions
+      x-ojos-audience: user
+      x-ojos-permission: judge.submission.view.own
+      security: [{ojosBearer: []}]
+      parameters:
+        - {name: page, in: query, required: false, schema: {type: integer, minimum: 1}}
+        - {name: page_size, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200}}
+        - {name: status, in: query, required: false, schema: {type: string}}
+        - {name: problem_id, in: query, required: false, schema: {type: integer, format: int64, minimum: 1}}
+        - {name: user_id, in: query, required: false, schema: {type: integer, format: int64, minimum: 1}}
+        - {name: language, in: query, required: false, schema: {type: string}}
+        - {name: created_from, in: query, required: false, schema: {type: string}}
+        - {name: created_to, in: query, required: false, schema: {type: string}}
+      responses: {'200': {description: Authorized submission list, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /judge/submissions/{id}:
+    parameters: [{$ref: '#/components/parameters/SubmissionId'}]
+    get:
+      operationId: getSubmission
+      x-ojos-audience: user
+      x-ojos-permission: judge.submission.view.own
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Authorized submission, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /judge/submissions/{id}/cases:
+    parameters: [{$ref: '#/components/parameters/SubmissionId'}]
+    get:
+      operationId: getSubmissionCases
+      x-ojos-audience: user
+      x-ojos-permission: judge.submission.view.own
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Authorized per-case results, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /judge/submissions/{id}/debug-logs:
+    parameters: [{$ref: '#/components/parameters/SubmissionId'}]
+    get:
+      operationId: getSubmissionDebugLogs
+      x-ojos-audience: user
+      x-ojos-permission: judge.submission.view.all
+      security: [{ojosBearer: []}]
+      parameters:
+        - {name: case_no, in: query, required: false, schema: {type: integer, minimum: 1}}
+        - {name: max_bytes, in: query, required: false, schema: {type: integer, minimum: 1}}
+      responses: {'200': {description: Authorized bounded debug output, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /judge/submissions/{id}/cancel:
+    parameters: [{$ref: '#/components/parameters/SubmissionId'}]
+    post:
+      operationId: cancelSubmission
+      x-ojos-audience: user
+      x-ojos-permission: judge.submission.manage
+      security: [{ojosBearer: []}]
+      requestBody: {required: false, content: {application/json: {schema: {$ref: '#/components/schemas/Cancel'}}}}
+      responses: {'200': {description: Submission cancelled, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}
+  /judge/problems/{id}/rejudge:
+    parameters: [{$ref: '#/components/parameters/ProblemId'}]
+    post:
+      operationId: rejudgeProblem
+      x-ojos-audience: admin
+      x-ojos-permission: judge.submission.manage
+      security: [{ojosBearer: []}]
+      responses: {'200': {description: Durable judge tasks reset and enqueued, content: {application/json: {schema: {$ref: '#/components/schemas/Object'}}}}}

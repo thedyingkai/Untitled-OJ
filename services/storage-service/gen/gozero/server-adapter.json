@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "ojos.dev/gozero-server-adapter/v1",
+  "serviceId": "storage-service",
+  "operations": [
+    {
+      "operationId": "deleteStorageObject",
+      "handler": "DeleteStorageObject",
+      "method": "DELETE",
+      "path": "/{bucket}/{key}",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "storage.object.delete",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:dfcd1e653de172182efa2ed16260de864cd2075d4b2d710371e3b492f724a300"
+      ]
+    },
+    {
+      "operationId": "storageHealth",
+      "handler": "StorageHealth",
+      "method": "GET",
+      "path": "/healthz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": []
+    },
+    {
+      "operationId": "storageReady",
+      "handler": "StorageReady",
+      "method": "GET",
+      "path": "/readyz",
+      "audience": "internal",
+      "auth": "anonymous",
+      "permission": null,
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": []
+    },
+    {
+      "operationId": "getStorageObject",
+      "handler": "GetStorageObject",
+      "method": "GET",
+      "path": "/{bucket}/{key}",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "storage.object.read",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": [
+        "sha256:b59fb230a42e6430e1fd83a90db268a5b7709148d6ac19e6a4a79bed7ab10c36"
+      ]
+    },
+    {
+      "operationId": "headStorageObject",
+      "handler": "HeadStorageObject",
+      "method": "HEAD",
+      "path": "/{bucket}/{key}",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "storage.object.read",
+      "requestSchemaDigests": [],
+      "responseSchemaDigests": []
+    },
+    {
+      "operationId": "putStorageObject",
+      "handler": "PutStorageObject",
+      "method": "PUT",
+      "path": "/{bucket}/{key}",
+      "audience": "internal",
+      "auth": "required",
+      "permission": "storage.object.write",
+      "requestSchemaDigests": [
+        "sha256:b59fb230a42e6430e1fd83a90db268a5b7709148d6ac19e6a4a79bed7ab10c36"
+      ],
+      "responseSchemaDigests": [
+        "sha256:8615ca218d4a795bcdff285e008a9d5c0ea7ac749f177c72e9e4c33bc4d330dc"
+      ]
+    }
+  ]
+}

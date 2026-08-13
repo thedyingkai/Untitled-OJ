@@ -38,8 +38,6 @@ func (l *AdminRequeueSubmissionLogic) AdminRequeueSubmission(req *types.AdminSub
 		}
 		return nil, err
 	}
-	if err := publishJudgeSignal(l.ctx, l.svcCtx, "submission.requeued", "judge-api-admin", req.Id); err != nil {
-		return nil, err
-	}
+	notifyJudgeTaskAvailable(l.ctx, l.svcCtx, "submission.requeued", "judge-api-admin", req.Id)
 	return &types.AdminActionResp{Ok: true}, nil
 }

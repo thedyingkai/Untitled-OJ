@@ -1,0 +1,14 @@
+schemaVersion: ojos.dev/migration-oci/v1
+artifactSlot: contest-migration-v1
+resource: contests
+engine: postgresql
+entrypoint: ["/ojos-migrate"]
+command: ["apply", "/migrations"]
+transactions: required
+files:
+  - 000001_contest_schema.up.sql
+rollbackFiles:
+  - 000001_contest_schema.down.sql
+labels:
+  dev.ojos.migration.id: contest-schema-v1
+  dev.ojos.resource.kind: postgresql.database/v1

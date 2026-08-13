@@ -1,6 +1,7 @@
 use crate::{
-    OrchestratorError, ReleaseApiSurfaceDecl, Result, ServiceReleaseManifest,
-    validate_service_release,
+    ContributionApiSurfaceV1, ContributionFrontendModuleV1, ContributionOperationRouteV1,
+    ContributionPermissionDefinitionV1, ContributionRevisionV1, OrchestratorError,
+    ReleaseApiSurfaceDecl, Result, ServiceReleaseManifest, validate_service_release,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -8,12 +9,104 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const SERVICE_CONTRACT_VERSION: u32 = 2;
+pub const RELEASE_PLATFORM_SCHEMA_VERSION: &str = "ojos.dev/release-platform/v1";
 pub const STANDARD_CONTAINER_RUNTIME_ID: &str = "standard-container-v1";
 pub const STANDARD_CONTAINER_RUNTIME_SHA256: &str =
     "sha256:56c8ec1e421205dbebb97ad40cbda30bf468d198dd8c3fc50151e39465ea573f";
 const LEGACY_STANDARD_RUNTIME_ID: &str = "standard-v1";
 const LEGACY_STANDARD_RUNTIME_SHA256: &str =
     "sha256:6d80096a6119d715b7e7c46b5a23afc5cc6b213409cc2af7e64ae7b5b6b386f2";
+
+/// Strict, signed projection of Service Contract v3 data into a Catalog v2
+/// Release document.  Catalog v2 remains the trust root while older readers
+/// can continue consuming the normalized v1/v2 release fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleasePlatformContractV1 {
+    pub schema_version: String,
+    pub contract_digest: String,
+    pub source_digest: String,
+    pub release_lock_digest: String,
+    #[serde(default)]
+    pub artifact_subjects: Vec<ReleaseArtifactSubjectV1>,
+    #[serde(default)]
+    pub package_requirements: Vec<ReleasePackageRequirementV1>,
+    #[serde(default)]
+    pub resource_claims: Vec<ReleaseResourceClaimV1>,
+    #[serde(default)]
+    pub runtime_volumes: Vec<ReleaseRuntimeVolumeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_schema: Option<ReleaseConfigSchemaV1>,
+    #[serde(default)]
+    pub contribution: ReleaseContributionSpecV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseArtifactSubjectV1 {
+    pub slot: String,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    pub media_type: String,
+    pub digest: String,
+    pub size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleasePackageRequirementV1 {
+    pub service_id: String,
+    pub version_requirement: String,
+    #[serde(default)]
+    pub development: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseResourceClaimV1 {
+    pub name: String,
+    pub resource_type: String,
+    #[serde(default = "default_resource_lifecycle")]
+    pub lifecycle: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseRuntimeVolumeV1 {
+    pub name: String,
+    pub kind: String,
+    pub target: String,
+    pub access: String,
+    pub lifecycle: String,
+}
+
+fn default_resource_lifecycle() -> String {
+    "retain".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseConfigSchemaV1 {
+    pub digest: String,
+    pub schema: Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseContributionSpecV1 {
+    #[serde(default)]
+    pub api_surfaces: Vec<ContributionApiSurfaceV1>,
+    #[serde(default)]
+    pub operation_routes: Vec<ContributionOperationRouteV1>,
+    #[serde(default)]
+    pub permission_definitions: Vec<ContributionPermissionDefinitionV1>,
+    #[serde(default)]
+    pub user_frontend_modules: Vec<ContributionFrontendModuleV1>,
+    #[serde(default)]
+    pub admin_frontend_modules: Vec<ContributionFrontendModuleV1>,
+}
 
 /// Versioned provider declarations. `apis` deliberately reuses the signed v1
 /// API surface shape so a v1 release can be normalized without losing any
@@ -357,6 +450,9 @@ pub struct ServiceReleaseContract {
     pub requires: ReleaseRequiresContract,
     pub events: ReleaseEventsContract,
     pub runtime_contract: ReleaseRuntimeContractDecl,
+    /// Optional Service Contract v3 projection. Its complete contents are
+    /// covered by the Catalog v2 metadata digest and Catalog signature.
+    pub platform: Option<ReleasePlatformContractV1>,
 }
 
 impl ServiceReleaseContract {
@@ -390,6 +486,7 @@ impl ServiceReleaseContract {
         let requires_value = object.remove("requires");
         let events_value = object.remove("events");
         let runtime_contract_value = object.remove("runtime_contract");
+        let platform_value = object.remove("platform");
         // The normalized release remains schema v1 for the already-published
         // runtime/install contract. The outer document owns the v2 version.
         object.insert("schema_version".to_string(), Value::from(1_u64));
@@ -409,6 +506,8 @@ impl ServiceReleaseContract {
             .transpose()?
             .unwrap_or_default();
         normalize_legacy_runtime_contract(&mut runtime_contract)?;
+        let platform: Option<ReleasePlatformContractV1> =
+            platform_value.map(serde_json::from_value).transpose()?;
 
         merge_provided_apis(&mut release, &mut provides)?;
         merge_required_apis(&mut release, &mut requires)?;
@@ -421,6 +520,9 @@ impl ServiceReleaseContract {
             &events,
             &runtime_contract,
         )?;
+        if let Some(platform) = &platform {
+            validate_platform_extension(&release, &runtime_contract, platform)?;
+        }
 
         Ok(Self {
             contract_version,
@@ -429,6 +531,7 @@ impl ServiceReleaseContract {
             requires,
             events,
             runtime_contract,
+            platform,
         })
     }
 
@@ -465,6 +568,9 @@ impl ServiceReleaseContract {
                 "runtime_contract".to_string(),
                 serde_json::to_value(&self.runtime_contract)?,
             );
+        }
+        if let Some(platform) = &self.platform {
+            object.insert("platform".to_string(), serde_json::to_value(platform)?);
         }
         Ok(Value::Object(object))
     }
@@ -580,6 +686,184 @@ fn merge_events(
     events
         .subscribes
         .sort_by(|left, right| left.event_id().cmp(right.event_id()));
+}
+
+fn validate_platform_extension(
+    release: &ServiceReleaseManifest,
+    runtime: &ReleaseRuntimeContractDecl,
+    platform: &ReleasePlatformContractV1,
+) -> Result<()> {
+    if platform.schema_version != RELEASE_PLATFORM_SCHEMA_VERSION {
+        return Err(OrchestratorError::InvalidManifest(format!(
+            "platform.schemaVersion must be {RELEASE_PLATFORM_SCHEMA_VERSION}"
+        )));
+    }
+    for (field, digest) in [
+        ("platform.contractDigest", platform.contract_digest.as_str()),
+        ("platform.sourceDigest", platform.source_digest.as_str()),
+        (
+            "platform.releaseLockDigest",
+            platform.release_lock_digest.as_str(),
+        ),
+    ] {
+        validate_canonical_digest(field, digest)?;
+    }
+
+    let stable = Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$").expect("valid regex");
+    let mut slots = BTreeSet::new();
+    for subject in &platform.artifact_subjects {
+        if !stable.is_match(&subject.slot) || !slots.insert(subject.slot.as_str()) {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "platform artifact slot {} is invalid or duplicated",
+                subject.slot
+            )));
+        }
+        if subject.roles.is_empty()
+            || subject.media_type.trim().is_empty()
+            || subject.size == 0
+            || subject.roles.iter().any(|role| !stable.is_match(role))
+        {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "platform artifact {} has invalid roles, media type, or size",
+                subject.slot
+            )));
+        }
+        let mut roles = subject.roles.clone();
+        roles.sort();
+        roles.dedup();
+        if roles != subject.roles {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "platform artifact {} roles must be sorted and unique",
+                subject.slot
+            )));
+        }
+        validate_canonical_digest("platform.artifact.digest", &subject.digest)?;
+        if let Some(reference) = &subject.reference
+            && (reference.trim() != reference
+                || reference.is_empty()
+                || reference.chars().any(char::is_whitespace))
+        {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "platform artifact {} reference is invalid",
+                subject.slot
+            )));
+        }
+    }
+    if !slots.contains("contract") || !slots.contains("sbom") || !slots.contains("provenance") {
+        return Err(OrchestratorError::InvalidManifest(
+            "platform artifact graph must contain contract, sbom, and provenance slots".to_string(),
+        ));
+    }
+
+    let mut package_ids = BTreeSet::new();
+    for package in &platform.package_requirements {
+        if !stable.is_match(&package.service_id)
+            || !package_ids.insert(package.service_id.as_str())
+            || semver::VersionReq::parse(&package.version_requirement).is_err()
+        {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "platform package requirement {} is invalid or duplicated",
+                package.service_id
+            )));
+        }
+    }
+    let mut resource_names = BTreeSet::new();
+    for resource in &platform.resource_claims {
+        if !stable.is_match(&resource.name)
+            || !resource_names.insert(resource.name.as_str())
+            || resource.resource_type != "postgresql.database/v1"
+            || resource.lifecycle != "retain"
+        {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "platform resource claim {} is invalid, duplicated, or not RETAIN-only PostgreSQL v1",
+                resource.name
+            )));
+        }
+    }
+    if platform.runtime_volumes.len() > 1 {
+        return Err(OrchestratorError::InvalidManifest(
+            "platform runtimeVolumes supports at most one volume in v1".to_string(),
+        ));
+    }
+    if !platform.runtime_volumes.is_empty() && runtime.id != STANDARD_CONTAINER_RUNTIME_ID {
+        return Err(OrchestratorError::InvalidManifest(
+            "platform runtimeVolumes requires standard-container-v1".to_string(),
+        ));
+    }
+    let mut volume_names = BTreeSet::new();
+    let mut volume_targets = BTreeSet::new();
+    for volume in &platform.runtime_volumes {
+        let target = volume.target.as_str();
+        let target_reserved = target == "/"
+            || ["/run/ojos", "/proc", "/sys", "/dev"]
+                .iter()
+                .any(|reserved| target == *reserved || target.starts_with(&format!("{reserved}/")));
+        if !stable.is_match(&volume.name)
+            || !volume_names.insert(volume.name.as_str())
+            || !volume_targets.insert(target)
+            || volume.kind != "managed-volume"
+            || volume.access != "rw"
+            || volume.lifecycle != "retain"
+            || !target.starts_with('/')
+            || (target.len() > 1 && target.ends_with('/'))
+            || target.contains("//")
+            || target.contains('?')
+            || target.contains('#')
+            || target_reserved
+        {
+            return Err(OrchestratorError::InvalidManifest(format!(
+                "platform runtime volume {} is invalid, duplicated, or outside the managed RETAIN v1 contract",
+                volume.name
+            )));
+        }
+    }
+    if let Some(config) = &platform.config_schema {
+        validate_canonical_digest("platform.configSchema.digest", &config.digest)?;
+        if !config.schema.is_object() {
+            return Err(OrchestratorError::InvalidManifest(
+                "platform.configSchema.schema must be an object".to_string(),
+            ));
+        }
+    }
+
+    // Reuse the Contribution domain constructor as the authoritative content
+    // validator. A deterministic dummy deployment identity is sufficient: the
+    // signed Release stores contribution content, while installation binds it
+    // to the real deployment/generation and computes the final revision ID.
+    ContributionRevisionV1::stage(
+        "release-validation",
+        "release-validation",
+        release.service_name.clone(),
+        platform.release_lock_digest.clone(),
+        platform.contract_digest.clone(),
+        1,
+        None,
+        platform.contribution.api_surfaces.clone(),
+        platform.contribution.operation_routes.clone(),
+        platform.contribution.permission_definitions.clone(),
+        platform.contribution.user_frontend_modules.clone(),
+        platform.contribution.admin_frontend_modules.clone(),
+    )
+    .map_err(|error| {
+        OrchestratorError::InvalidManifest(format!(
+            "platform contribution content is invalid: {error}"
+        ))
+    })?;
+    Ok(())
+}
+
+fn validate_canonical_digest(field: &str, value: &str) -> Result<()> {
+    let hex = value.strip_prefix("sha256:").unwrap_or_default();
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(OrchestratorError::InvalidManifest(format!(
+            "{field} must be sha256:<64 lowercase hex>"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_contract_extensions(

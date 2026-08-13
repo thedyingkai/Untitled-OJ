@@ -114,9 +114,10 @@ type RemoteUserChecker struct {
 // ServiceContext.NewRequest reloads the workload credential for every request,
 // so token rotation never requires restarting the service.
 type ServiceContextUserChecker struct {
-	context     servicecontext.ServiceContext
+	context     *servicecontext.ServiceContext
+	provider    *servicecontext.ContextProvider
 	bindingName string
-	client      *http.Client
+	service     string
 }
 
 type permissionCheckRequest struct {
@@ -230,11 +231,39 @@ func NewServiceContextUserChecker(value *servicecontext.ServiceContext, bindingN
 	if binding.APIID != DefaultPermissionCheckApiID {
 		return nil, fmt.Errorf("binding %q resolves %s, expected %s", bindingName, binding.APIID, DefaultPermissionCheckApiID)
 	}
-	client, err := value.Client()
-	if err != nil {
+	if _, err := value.Client(); err != nil {
 		return nil, fmt.Errorf("configure permission binding client: %w", err)
 	}
-	return ServiceContextUserChecker{context: *value, bindingName: bindingName, client: client}, nil
+	copy := *value
+	return ServiceContextUserChecker{
+		context: &copy, bindingName: bindingName, service: value.Deployment.Service,
+	}, nil
+}
+
+// NewContextProviderUserChecker binds permission checks to the latest valid
+// Agent snapshot. Invalid or partially-written replacements never displace the
+// last-known-good generation.
+func NewContextProviderUserChecker(provider *servicecontext.ContextProvider, bindingName string) (UserChecker, error) {
+	if provider == nil {
+		return nil, errors.New("managed service context provider is required")
+	}
+	bindingName = strings.TrimSpace(bindingName)
+	if bindingName == "" {
+		bindingName = DefaultPermissionCheckBinding
+	}
+	snapshot, err := provider.Current(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePermissionBinding(snapshot, bindingName); err != nil {
+		return nil, err
+	}
+	if _, err := snapshot.Client(); err != nil {
+		return nil, fmt.Errorf("configure permission binding client: %w", err)
+	}
+	return ServiceContextUserChecker{
+		provider: provider, bindingName: bindingName, service: snapshot.Deployment.Service,
+	}, nil
 }
 
 // NewManagedOrLegacyUserChecker is the service startup boundary. Managed
@@ -254,7 +283,20 @@ func NewManagedOrLegacyUserChecker(expectedService, bindingName string, cfg Remo
 	if err := value.RequireService(strings.TrimSpace(expectedService)); err != nil {
 		return nil, err
 	}
-	return NewServiceContextUserChecker(value, bindingName)
+	path := strings.TrimSpace(os.Getenv("OJOS_SERVICE_CONTEXT_FILE"))
+	if path == "" {
+		path = servicecontext.DefaultFile
+	}
+	provider, err := servicecontext.NewContextProvider(path, servicecontext.ProviderOptions{})
+	if err != nil {
+		return nil, err
+	}
+	checker, err := NewContextProviderUserChecker(provider, bindingName)
+	if err != nil {
+		_ = provider.Close()
+		return nil, err
+	}
+	return checker, nil
 }
 
 // NewUserCheckerWithConfig prefers the orchestrator-resolved gateway route, then
@@ -317,9 +359,23 @@ func (p ServiceContextUserChecker) HasUserPermission(ctx context.Context, userID
 	if err != nil {
 		return false, err
 	}
-	response, err := p.context.DoWithOptions(
+	snapshot, err := p.snapshot(ctx)
+	if err != nil {
+		return false, fmt.Errorf("permission check via %s failed: %w", RouteServiceContext, err)
+	}
+	if err := validatePermissionBinding(snapshot, p.bindingName); err != nil {
+		return false, err
+	}
+	if err := snapshot.RequireService(p.service); err != nil {
+		return false, err
+	}
+	client, err := snapshot.Client()
+	if err != nil {
+		return false, fmt.Errorf("permission check via %s failed: %w", RouteServiceContext, err)
+	}
+	response, err := snapshot.DoWithOptions(
 		ctx,
-		p.client,
+		client,
 		p.bindingName,
 		http.MethodPost,
 		"",
@@ -334,6 +390,30 @@ func (p ServiceContextUserChecker) HasUserPermission(ctx context.Context, userID
 	}
 	defer response.Body.Close()
 	return decodePermissionResponse(response, RouteServiceContext)
+}
+
+func (p ServiceContextUserChecker) snapshot(ctx context.Context) (servicecontext.ServiceContext, error) {
+	if p.provider != nil {
+		// A rejected candidate is expected during atomic file replacement. The
+		// provider retains the previous valid generation, which remains usable.
+		_ = p.provider.ReloadNow()
+		return p.provider.Current(ctx)
+	}
+	if p.context == nil {
+		return servicecontext.ServiceContext{}, errors.New("managed service context is unavailable")
+	}
+	return *p.context, nil
+}
+
+func validatePermissionBinding(snapshot servicecontext.ServiceContext, bindingName string) error {
+	binding, err := snapshot.Binding(bindingName)
+	if err != nil {
+		return err
+	}
+	if binding.APIID != DefaultPermissionCheckApiID {
+		return fmt.Errorf("binding %q resolves %s, expected %s", bindingName, binding.APIID, DefaultPermissionCheckApiID)
+	}
+	return nil
 }
 
 func (p RemoteUserChecker) HasUserPermission(ctx context.Context, userID int64, permissionCode string, scope Scope) (bool, error) {

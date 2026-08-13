@@ -1,0 +1,27 @@
+[package]
+name = "ojos-service"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ojos"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+clap.workspace = true
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
+orchestrator-core.workspace = true
+orchestrator-manager.workspace = true
+regex.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_json_canonicalizer.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

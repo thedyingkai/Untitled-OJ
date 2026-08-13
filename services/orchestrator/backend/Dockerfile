@@ -55,6 +55,7 @@ COPY services/storage-service ./services/storage-service
 COPY services/user-service ./services/user-service
 COPY manager ./manager
 COPY platform ./platform
+COPY tools ./tools
 COPY sets ./sets
 COPY store ./store
 

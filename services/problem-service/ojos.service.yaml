@@ -1,0 +1,106 @@
+apiVersion: ojos.dev/v1
+kind: Service
+metadata:
+  id: problem-service
+  version: 0.1.0
+  displayName: Problem Service
+  permissionNamespace: problem
+runtime:
+  profile: standard-container-v1
+  artifact: problem-runtime
+  httpPort: 8083
+  health:
+    path: /readyz
+  volumes:
+    - name: problem-packages
+      kind: managed-volume
+      target: /data/ojos/problems
+      access: rw
+      lifecycle: retain
+provides:
+  apis:
+    - document: api/problem-read.openapi.yaml
+    - document: api/problem-manage.openapi.yaml
+    - document: api/testdata-read.openapi.yaml
+    - document: api/testdata-write.openapi.yaml
+    - document: api/artifact-gc.openapi.yaml
+requires:
+  apis:
+    - id: auth.user.permission.check
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+    - id: storage.object.put
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+    - id: storage.object.head
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+    - id: storage.object.delete
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+resources:
+  - name: problems
+    type: postgresql.database/v1
+    lifecycle: retain
+migrations:
+  - id: problem-schema-v1
+    artifact: problem-migration-v1
+    resource: problems
+events:
+  publishes:
+    - type: io.ojos.problem.snapshot.v1
+      version: 1
+      schema: events/problem-snapshot-v1.schema.json
+      delivery: durable
+    - type: io.ojos.problem.deleted.v1
+      version: 1
+      schema: events/problem-deleted-v1.schema.json
+      delivery: durable
+permissions:
+  - key: problem.view
+    title: View public and owned problems
+  - key: problem.view.private
+    title: View private problems
+  - key: problem.create
+    title: Create problems
+  - key: problem.edit
+    title: Edit problems
+  - key: problem.delete
+    title: Delete problems
+  - key: problem.manage.data
+    title: Manage problem artifact lifecycle
+  - key: problem.testdata.read
+    title: Read problem test data
+  - key: problem.testdata.write
+    title: Change problem test data
+exposures:
+  - id: user-problem-read
+    api: problem.problem.read
+    audience: user
+    mount: /api/problem
+  - id: admin-problem-manage
+    api: problem.problem.manage
+    audience: admin
+    mount: /api/problem
+  - id: user-testdata-read
+    api: problem.testdata.read
+    audience: user
+    mount: /api/problem
+  - id: admin-testdata-write
+    api: problem.testdata.write
+    audience: admin
+    mount: /api/problem
+  - id: admin-artifact-gc
+    api: problem.artifact-gc.manage
+    audience: admin
+    mount: /api/problem
+frontends:
+  - target: user-shell
+    manifest: frontend/user/manifest.json
+  - target: admin-shell
+    manifest: frontend/admin/manifest.json
+configSchema: config.schema.json

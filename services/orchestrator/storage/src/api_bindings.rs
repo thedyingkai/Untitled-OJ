@@ -17,7 +17,7 @@ impl SqliteOrchestratorStore {
                 binding.topology_id,
                 binding.topology_revision_id,
                 binding.api_id,
-                state(binding.state),
+                state(binding.derived_state()),
                 payload,
             ],
         )?;
@@ -50,7 +50,7 @@ impl SqliteOrchestratorStore {
                     binding.topology_id,
                     binding.topology_revision_id,
                     binding.api_id,
-                    state(binding.state),
+                    state(binding.derived_state()),
                     serde_json::to_string(binding)?,
                 ],
             )?;
@@ -86,7 +86,7 @@ impl SqliteOrchestratorStore {
                     binding.topology_id,
                     binding.topology_revision_id,
                     binding.api_id,
-                    state(binding.state),
+                    state(binding.derived_state()),
                     serde_json::to_string(binding)?,
                 ],
             )?;
@@ -96,15 +96,17 @@ impl SqliteOrchestratorStore {
     }
 
     pub fn api_binding(&self, binding_id: &str) -> StorageResult<Option<ApiBinding>> {
-        let payload = self
+        let stored = self
             .connection()?
             .query_row(
-                "SELECT payload FROM orchestrator_api_bindings WHERE binding_id = ?1",
+                "SELECT binding_state, payload FROM orchestrator_api_bindings WHERE binding_id = ?1",
                 [binding_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
-        payload.map(|payload| decode(&payload)).transpose()
+        stored
+            .map(|(stored_state, payload)| decode(&stored_state, &payload))
+            .transpose()
     }
 
     pub fn api_bindings_for_deployment(
@@ -113,7 +115,7 @@ impl SqliteOrchestratorStore {
     ) -> StorageResult<Vec<ApiBinding>> {
         query_bindings(
             &self.connection()?,
-            "SELECT payload FROM orchestrator_api_bindings WHERE consumer_deployment_id = ?1 ORDER BY binding_id",
+            "SELECT binding_state, payload FROM orchestrator_api_bindings WHERE consumer_deployment_id = ?1 ORDER BY binding_id",
             deployment_id,
         )
     }
@@ -121,7 +123,7 @@ impl SqliteOrchestratorStore {
     pub fn api_bindings_for_topology(&self, topology_id: &str) -> StorageResult<Vec<ApiBinding>> {
         query_bindings(
             &self.connection()?,
-            "SELECT payload FROM orchestrator_api_bindings WHERE topology_id = ?1 ORDER BY consumer_deployment_id, binding_id",
+            "SELECT binding_state, payload FROM orchestrator_api_bindings WHERE topology_id = ?1 ORDER BY consumer_deployment_id, binding_id",
             topology_id,
         )
     }
@@ -141,11 +143,13 @@ fn query_bindings(
 ) -> StorageResult<Vec<ApiBinding>> {
     let mut statement = connection.prepare(sql)?;
     let payloads = statement
-        .query_map([parameter], |row| row.get::<_, String>(0))?
+        .query_map([parameter], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     payloads
         .into_iter()
-        .map(|payload| decode(&payload))
+        .map(|(stored_state, payload)| decode(&stored_state, &payload))
         .collect()
 }
 
@@ -213,9 +217,16 @@ fn validate_topology_set(topology_id: &str, bindings: &[ApiBinding]) -> StorageR
     Ok(())
 }
 
-fn decode(payload: &str) -> StorageResult<ApiBinding> {
+fn decode(stored_state: &str, payload: &str) -> StorageResult<ApiBinding> {
     let binding: ApiBinding = serde_json::from_str(payload)?;
     validate(&binding)?;
+    let derived = state(binding.derived_state());
+    if stored_state != derived {
+        return Err(StorageError::Invariant(format!(
+            "API binding {} indexed state {stored_state} disagrees with derived state {derived}",
+            binding.binding_id
+        )));
+    }
     Ok(binding)
 }
 
@@ -233,6 +244,7 @@ fn state(state: ApiBindingState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orchestrator_legacy::{ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState};
     use tempfile::tempdir;
 
     fn binding(id: &str, requirement: &str) -> ApiBinding {
@@ -264,9 +276,9 @@ mod tests {
             credential_ref: String::new(),
             credential_generation: 1,
             context_generation: 1,
-            desired_state: "ACTIVE".to_string(),
-            observed_state: "RESOLVED".to_string(),
-            health: "UNKNOWN".to_string(),
+            desired_state: ApiBindingDesiredState::Active,
+            observed_state: ApiBindingObservedState::Resolved,
+            health: ApiBindingHealth::Unknown,
             drift: Vec::new(),
             last_operation_id: String::new(),
             state: ApiBindingState::Resolved,
@@ -366,5 +378,33 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn compatibility_state_and_index_cannot_diverge_from_typed_facts() {
+        let directory = tempdir().unwrap();
+        let store =
+            SqliteOrchestratorStore::open(directory.path().join("orchestrator.db")).unwrap();
+        let mut inconsistent = binding("binding-invalid", "STORAGE_GET");
+        inconsistent.state = ApiBindingState::Active;
+        assert!(matches!(
+            store.put_api_binding(&inconsistent),
+            Err(StorageError::Invariant(_))
+        ));
+
+        let valid = binding("binding-index", "STORAGE_HEAD");
+        store.put_api_binding(&valid).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE orchestrator_api_bindings SET binding_state = 'ACTIVE' WHERE binding_id = ?1",
+                [&valid.binding_id],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.api_binding(&valid.binding_id),
+            Err(StorageError::Invariant(_))
+        ));
     }
 }

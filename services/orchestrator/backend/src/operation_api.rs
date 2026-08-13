@@ -457,8 +457,10 @@ fn derive_rollback_plan(
             | JobKind::Uninstall
             | JobKind::Health
             | JobKind::BindingContextApply
+            | JobKind::ResourcePurge
             | JobKind::Inventory
             | JobKind::TopologyApply
+            | JobKind::ContributionProjection
             | JobKind::ExternalHealth
             | JobKind::NodeDrain
             | JobKind::NodeRemove => {

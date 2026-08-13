@@ -50,6 +50,21 @@ async function fulfillJson(route: Route, body: unknown, status = 200): Promise<v
 }
 
 async function mockApi(page: Page): Promise<void> {
+  await page.route('**/api/v1/contributions/snapshot', async (route) => {
+    await fulfillJson(route, {
+      schema_version: 'ojos.dev/contribution-snapshot/v1',
+      digest: `sha256:${'0'.repeat(64)}`,
+      generated_at_ms: 1,
+      scope_id: 'default',
+      ack_obligation: null,
+      revisions: [],
+      api_surfaces: [],
+      gateway_routes: [],
+      permission_definitions: [],
+      frontend_modules: [],
+    })
+  })
+
   await page.route('**/api/auth/login', async (route) => {
     const body = route.request().postDataJSON() as { username?: string; password?: string }
     if (body.username === 'operator' && body.password === 'correct-password') {
@@ -131,11 +146,11 @@ test('gateway app loads and protects authenticated routes', async ({ page }) => 
   await page.goto('/')
   await expect(page.getByTestId('login-page')).toBeVisible()
 
-  await page.goto('/problems')
-  await expect(page).toHaveURL(/\/login\?redirect=\/problems/)
+  await page.goto('/dashboard')
+  await expect(page).toHaveURL(/\/login\?redirect=\/dashboard/)
 })
 
-test('login, problem, submission, and result browser path works', async ({ page }) => {
+test('login exposes only platform routes until a signed Contribution is active', async ({ page }) => {
   await page.goto('/login')
   await expect(page.getByTestId('login-page')).toBeVisible()
 
@@ -149,18 +164,6 @@ test('login, problem, submission, and result browser path works', async ({ page 
   await expect(page).toHaveURL(/\/dashboard/)
 
   await page.goto('/problems')
-  await expect(page.getByTestId('problem-list-page')).toBeVisible()
-  await expect(page.getByText('A+B Problem')).toBeVisible()
-
-  await page.goto('/problems/1')
-  await expect(page.getByTestId('problem-detail-page')).toBeVisible()
-  await expect(page.getByText('Read two integers')).toBeVisible()
-
-  await page.goto('/problems/1/submit')
-  await expect(page.getByTestId('submission-page')).toBeVisible()
-  await page.getByTestId('submit-solution').click()
-  await expect(page).toHaveURL(/\/submissions\/5001/)
-
-  await expect(page.getByTestId('result-page')).toBeVisible()
-  await expect(page.getByText('Accepted')).toBeVisible()
+  await expect(page.getByText('Page not found', { exact: true })).toBeVisible()
+  await expect(page.getByTestId('problem-list-page')).toHaveCount(0)
 })

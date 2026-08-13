@@ -29,6 +29,7 @@ actions:
   - { action: deployment.restart, target_type: Deployment, role: operator, asynchronous: true }
   - { action: deployment.uninstall, target_type: Deployment, role: admin, asynchronous: true }
   - { action: deployment.health, target_type: Deployment, role: viewer, asynchronous: false }
+  - { action: resource.purge, target_type: ResourceClaim, role: admin, asynchronous: true }
   - { action: topology.draft, target_type: Topology, role: operator, asynchronous: false }
   - { action: topology.revision, target_type: Topology, role: operator, asynchronous: false }
   - { action: topology.endpoint.edit, target_type: Topology, role: operator, asynchronous: false }

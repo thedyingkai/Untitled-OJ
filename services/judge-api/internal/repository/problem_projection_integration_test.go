@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"ojos-problem-events/problemv1"
 	"ojos-shared/eventing"
 
 	"github.com/jackc/pgx/v5"
@@ -169,7 +170,7 @@ VALUES(88, '/legacy/problem-88', 'ready', 'public', 9)
 	stream := fmt.Sprintf("ojos:test:problem-projection:%d", suffix)
 	defer redisClient.Del(context.Background(), stream)
 
-	snapshot := eventing.ProblemSnapshotData{
+	snapshot := problemv1.Snapshot{
 		ProblemID:        77,
 		AggregateVersion: 1,
 		PackageRevision:  1,
@@ -181,7 +182,7 @@ VALUES(88, '/legacy/problem-88', 'ready', 'public', 9)
 		CreatedBy:        9,
 		TimeLimitMS:      1000,
 		MemoryLimitMB:    256,
-		PackageArtifact: eventing.ArtifactRef{
+		PackageArtifact: problemv1.ArtifactRef{
 			URI:         "storage://problems/package-sha256-test.zip",
 			SHA256:      strings.Repeat("a", 64),
 			SizeBytes:   321,
@@ -189,37 +190,44 @@ VALUES(88, '/legacy/problem-88', 'ready', 'public', 9)
 		},
 		SourceUpdatedAtUTC: time.Now().UTC(),
 	}
-	envelope, err := eventing.NewEnvelope(ctx, "ojos://problem-service", eventing.ProblemSnapshotV1, "problem/77", "", 1, snapshot)
+	event, err := problemv1.SnapshotCodec.NewEvent(ctx, "ojos://problem-service", "problem/77", 1, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
+	envelope := event.Envelope()
 	tx, err := sourceDB.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eventing.Enqueue(ctx, tx, envelope); err != nil {
+	if err := eventing.Enqueue(ctx, tx, event); err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	relay := &eventing.Relay{DB: sourceDB, Redis: redisClient, Stream: stream, RelayID: "integration-test"}
+	relay, err := eventing.NewRelay(sourceDB, redisClient, eventing.DevelopmentPublisherTransport(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay.RelayID = "integration-test"
 	if published, err := relay.PublishBatch(ctx); err != nil || published != 1 {
 		t.Fatalf("publish outbox: published=%d err=%v", published, err)
 	}
 
 	consumerCtx, stopConsumer := context.WithCancel(ctx)
-	consumer := &eventing.Consumer{
-		DB:           judgeDB,
-		Redis:        redisClient,
-		Stream:       stream,
-		Group:        "judge-api.problem-projection.v1",
-		ConsumerName: "integration-test",
-		ClaimIdle:    time.Second,
-		MaxAttempts:  1,
-		Handler:      ApplyProblemProjection,
+	consumer, err := eventing.NewConsumer(
+		judgeDB,
+		redisClient,
+		eventing.DevelopmentSubscriberTransport(stream, "judge-api.problem-projection.v1"),
+		ApplyProblemProjection,
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
+	consumer.ConsumerName = "integration-test"
+	consumer.ClaimIdle = time.Second
+	consumer.MaxAttempts = 1
 	go consumer.Run(consumerCtx)
 	defer stopConsumer()
 
@@ -280,17 +288,30 @@ func exerciseProjectionOrderingDeletionAndDeduplication(
 	stream string,
 	relay *eventing.Relay,
 	originalEnvelope eventing.Envelope,
-	original eventing.ProblemSnapshotData,
+	original problemv1.Snapshot,
 	originalSubmissionID int64,
 ) {
 	t.Helper()
 	publish := func(envelope eventing.Envelope) {
 		t.Helper()
+		var event eventing.TypedEvent
+		var err error
+		switch envelope.Type {
+		case problemv1.SnapshotType:
+			event, err = problemv1.SnapshotCodec.Bind(envelope)
+		case problemv1.DeletedType:
+			event, err = problemv1.DeletedCodec.Bind(envelope)
+		default:
+			t.Fatalf("unsupported fixture event type %q", envelope.Type)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
 		tx, err := sourceDB.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := eventing.Enqueue(ctx, tx, envelope); err != nil {
+		if err := eventing.Enqueue(ctx, tx, event); err != nil {
 			_ = tx.Rollback(ctx)
 			t.Fatal(err)
 		}
@@ -319,15 +340,7 @@ func exerciseProjectionOrderingDeletionAndDeduplication(
 	newer.PackageArtifact.URI = "storage://problems/package-sha256-newer.zip"
 	newer.PackageArtifact.SHA256 = strings.Repeat("b", 64)
 	newer.SourceUpdatedAtUTC = time.Now().UTC()
-	newerEnvelope, err := eventing.NewEnvelope(
-		ctx,
-		"ojos://problem-service",
-		eventing.ProblemSnapshotV1,
-		"problem/77",
-		"",
-		newer.AggregateVersion,
-		newer,
-	)
+	newerEnvelope, err := problemv1.SnapshotCodec.NewEnvelope(ctx, "ojos://problem-service", "problem/77", newer.AggregateVersion, newer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,15 +352,7 @@ func exerciseProjectionOrderingDeletionAndDeduplication(
 	older.PackageArtifact.URI = "storage://problems/package-sha256-stale.zip"
 	older.PackageArtifact.SHA256 = strings.Repeat("c", 64)
 	older.SourceUpdatedAtUTC = newer.SourceUpdatedAtUTC.Add(-time.Minute)
-	olderEnvelope, err := eventing.NewEnvelope(
-		ctx,
-		"ojos://problem-service",
-		eventing.ProblemSnapshotV1,
-		"problem/77",
-		"",
-		older.AggregateVersion,
-		older,
-	)
+	olderEnvelope, err := problemv1.SnapshotCodec.NewEnvelope(ctx, "ojos://problem-service", "problem/77", older.AggregateVersion, older)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,16 +388,8 @@ func exerciseProjectionOrderingDeletionAndDeduplication(
 		return inboxCount == 1 && version == newer.AggregateVersion
 	})
 
-	deleted := eventing.ProblemDeletedData{ProblemID: original.ProblemID, AggregateVersion: 4}
-	deletedEnvelope, err := eventing.NewEnvelope(
-		ctx,
-		"ojos://problem-service",
-		eventing.ProblemDeletedV1,
-		"problem/77",
-		"",
-		deleted.AggregateVersion,
-		deleted,
-	)
+	deleted := problemv1.Deleted{ProblemID: original.ProblemID, AggregateVersion: 4}
+	deletedEnvelope, err := problemv1.DeletedCodec.NewEnvelope(ctx, "ojos://problem-service", "problem/77", deleted.AggregateVersion, deleted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,15 +421,7 @@ func exerciseProjectionOrderingDeletionAndDeduplication(
 	invalid.PackageArtifact.URI = "storage://problems/package-sha256-invalid-contract.zip"
 	invalid.PackageArtifact.SHA256 = strings.Repeat("d", 64)
 	invalid.SourceUpdatedAtUTC = time.Now().UTC()
-	invalidEnvelope, err := eventing.NewEnvelope(
-		ctx,
-		"ojos://problem-service",
-		eventing.ProblemSnapshotV1,
-		"problem/77",
-		"",
-		invalid.AggregateVersion,
-		invalid,
-	)
+	invalidEnvelope, err := problemv1.SnapshotCodec.NewEnvelope(ctx, "ojos://problem-service", "problem/77", invalid.AggregateVersion, invalid)
 	if err != nil {
 		t.Fatal(err)
 	}

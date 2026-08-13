@@ -25,17 +25,19 @@ COPY platform/shared/go /platform/shared/go
 WORKDIR /app/user-service
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/user-service .
 
-FROM debian:bookworm-slim AS runtime
+FROM alpine:3.22 AS runtime
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN addgroup -S -g 65532 ojos && adduser -S -D -H -u 65532 -G ojos ojos
 
 WORKDIR /app
 
-COPY --from=build /out/user-service ./user-service
-COPY --from=build /app/user-service/etc ./etc
+COPY --from=build --chown=65532:65532 --chmod=0555 /out/user-service ./user-service
+COPY --from=build --chown=65532:65532 --chmod=0444 /app/user-service/etc ./etc
 
-RUN mkdir -p /data/ojos/users
+USER 65532:65532
+EXPOSE 8084
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+  CMD ["/app/user-service", "readycheck"]
 
-CMD ["./user-service", "-f", "etc/userservice.yaml"]
+ENTRYPOINT ["/app/user-service"]
+CMD ["-f", "etc/userservice.yaml"]

@@ -6,10 +6,20 @@ package handler
 import (
 	"net/http"
 
+	storagemw "ojos-storage-service/internal/middleware"
 	"ojos-storage-service/internal/svc"
 
 	"github.com/zeromicro/go-zero/rest"
 )
+
+func authoritativeObjectRoutes(serverCtx *svc.ServiceContext) []rest.Route {
+	return []rest.Route{
+		{Method: http.MethodPut, Path: "/:bucket/:key", Handler: putObjectHandler(serverCtx)},
+		{Method: http.MethodGet, Path: "/:bucket/:key", Handler: getObjectHandler(serverCtx)},
+		{Method: http.MethodHead, Path: "/:bucket/:key", Handler: headObjectHandler(serverCtx)},
+		{Method: http.MethodDelete, Path: "/:bucket/:key", Handler: deleteObjectHandler(serverCtx)},
+	}
+}
 
 func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 	server.AddRoutes(
@@ -19,9 +29,48 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Path:    "/health",
 				Handler: healthHandler(serverCtx),
 			},
+			{Method: http.MethodGet, Path: "/healthz", Handler: healthHandler(serverCtx)},
+			{Method: http.MethodGet, Path: "/readyz", Handler: readyHandler(serverCtx)},
 		},
 	)
 
+	// These four routes are the authoritative Service Contract v3 provider
+	// surface. Each middleware binds the request to the API id selected by the
+	// Gateway, preventing a valid read Binding from reaching delete/put.
+	authoritative := authoritativeObjectRoutes(serverCtx)
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{storagemw.NewWorkloadAuthMiddleware(serverCtx.WorkloadAuthEnabled, serverCtx.WorkloadVerifier, "storage.object.put").Handle},
+			[]rest.Route{authoritative[0]}...,
+		),
+	)
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{storagemw.NewWorkloadAuthMiddleware(serverCtx.WorkloadAuthEnabled, serverCtx.WorkloadVerifier, "storage.object.get").Handle},
+			[]rest.Route{authoritative[1]}...,
+		),
+	)
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{storagemw.NewWorkloadAuthMiddleware(serverCtx.WorkloadAuthEnabled, serverCtx.WorkloadVerifier, "storage.object.head").Handle},
+			[]rest.Route{authoritative[2]}...,
+		),
+	)
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{storagemw.NewWorkloadAuthMiddleware(serverCtx.WorkloadAuthEnabled, serverCtx.WorkloadVerifier, "storage.object.delete").Handle},
+			[]rest.Route{authoritative[3]}...,
+		),
+	)
+
+	if serverCtx.WorkloadAuthEnabled {
+		return
+	}
+
+	// One-release migration aliases for unmanaged Compose and legacy v2
+	// clients. They are not registered at all in production, because an active
+	// object Binding must not become a wildcard capability for unsigned
+	// bucket/list/metadata operations.
 	server.AddRoutes(
 		[]rest.Route{
 			{
@@ -40,11 +89,6 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Handler: getMetadataHandler(serverCtx),
 			},
 			{
-				Method:  http.MethodPut,
-				Path:    "/objects/:bucket/:key",
-				Handler: putObjectHandler(serverCtx),
-			},
-			{
 				Method:  http.MethodGet,
 				Path:    "/objects/:bucket",
 				Handler: listObjectsHandler(serverCtx),
@@ -54,17 +98,19 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Path:    "/objects/:bucket/:key",
 				Handler: getObjectHandler(serverCtx),
 			},
-			{
-				Method:  http.MethodHead,
-				Path:    "/objects/:bucket/:key",
-				Handler: headObjectHandler(serverCtx),
-			},
-			{
-				Method:  http.MethodDelete,
-				Path:    "/objects/:bucket/:key",
-				Handler: deleteObjectHandler(serverCtx),
-			},
 		},
+		rest.WithPrefix("/api/storage"),
+	)
+	server.AddRoutes(
+		[]rest.Route{{Method: http.MethodPut, Path: "/objects/:bucket/:key", Handler: putObjectHandler(serverCtx)}},
+		rest.WithPrefix("/api/storage"),
+	)
+	server.AddRoutes(
+		[]rest.Route{{Method: http.MethodHead, Path: "/objects/:bucket/:key", Handler: headObjectHandler(serverCtx)}},
+		rest.WithPrefix("/api/storage"),
+	)
+	server.AddRoutes(
+		[]rest.Route{{Method: http.MethodDelete, Path: "/objects/:bucket/:key", Handler: deleteObjectHandler(serverCtx)}},
 		rest.WithPrefix("/api/storage"),
 	)
 }

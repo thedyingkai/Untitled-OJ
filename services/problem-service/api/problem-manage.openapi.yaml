@@ -1,0 +1,124 @@
+openapi: 3.1.0
+info:
+  title: OJOS Problem Management API
+  version: 1.0.0
+x-ojos-api-id: problem.problem.manage
+x-ojos-service: {id: problem-service, version: 0.1.0}
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    ProblemId: {name: id, in: path, required: true, schema: {type: integer, format: int64, minimum: 1}}
+  schemas:
+    Component:
+      type: object
+      additionalProperties: false
+      properties:
+        type: {type: string}
+        name: {type: string}
+        language: {type: string}
+        source_path: {type: string}
+        source_code: {type: string}
+        args: {type: array, items: {type: string}}
+    LanguageLimit:
+      type: object
+      additionalProperties: false
+      required: [language, time_limit_ms, memory_limit_mb]
+      properties:
+        language: {type: string}
+        time_limit_ms: {type: integer, minimum: 1}
+        memory_limit_mb: {type: integer, minimum: 1}
+    ProblemMutation:
+      type: object
+      additionalProperties: false
+      properties:
+        problem_no: {type: string}
+        title: {type: string}
+        slug: {type: string}
+        statement: {type: string}
+        solution: {type: string}
+        time_limit_ms: {type: integer, minimum: 1}
+        memory_limit_mb: {type: integer, minimum: 1}
+        language_limits: {type: array, items: {$ref: '#/components/schemas/LanguageLimit'}}
+        runner: {$ref: '#/components/schemas/Component'}
+        checker: {$ref: '#/components/schemas/Component'}
+        validator: {$ref: '#/components/schemas/Component'}
+        scorer: {$ref: '#/components/schemas/Component'}
+        problem_type: {type: string}
+        visibility: {type: string}
+        difficulty: {type: string}
+        tags: {type: string}
+        status: {type: string}
+    CreateProblem:
+      allOf:
+        - {$ref: '#/components/schemas/ProblemMutation'}
+        - {type: object, required: [title]}
+    CreateResult:
+      type: object
+      additionalProperties: false
+      required: [problem_id, problem_no, slug]
+      properties:
+        problem_id: {type: integer, format: int64, minimum: 1}
+        problem_no: {type: string}
+        slug: {type: string}
+    GenericObject: {type: object, additionalProperties: true}
+    DeleteResult:
+      type: object
+      additionalProperties: false
+      required: [deleted]
+      properties: {deleted: {type: boolean, const: true}}
+paths:
+  /problems:
+    post:
+      operationId: createProblem
+      x-ojos-audience: admin
+      x-ojos-permission: problem.create
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateProblem'}}}
+      responses:
+        '200': {description: Problem created, content: {application/json: {schema: {$ref: '#/components/schemas/CreateResult'}}}}
+        '400': {description: Invalid problem definition}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.create}
+  /admin/problems:
+    get:
+      operationId: adminListProblems
+      x-ojos-audience: admin
+      x-ojos-permission: problem.edit
+      x-ojos-scope: system
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Admin problem list, content: {application/json: {schema: {$ref: '#/components/schemas/GenericObject'}}}}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.edit}
+  /problems/{id}:
+    parameters: [{$ref: '#/components/parameters/ProblemId'}]
+    put:
+      operationId: updateProblem
+      x-ojos-audience: admin
+      x-ojos-permission: problem.edit
+      x-ojos-scope: {type: problem, pathParameter: id}
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ProblemMutation'}}}
+      responses:
+        '200': {description: Updated problem, content: {application/json: {schema: {$ref: '#/components/schemas/GenericObject'}}}}
+        '400': {description: Invalid update}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.edit or ownership}
+        '404': {description: Problem not found}
+    delete:
+      operationId: deleteProblem
+      x-ojos-audience: admin
+      x-ojos-permission: problem.delete
+      x-ojos-scope: {type: problem, pathParameter: id}
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Problem deleted, content: {application/json: {schema: {$ref: '#/components/schemas/DeleteResult'}}}}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.delete or ownership}
+        '404': {description: Problem not found}

@@ -33,6 +33,6 @@ paths:
         id: auth.user.permissions
         version: 1.0.0
         auth: user
-        permission: auth.admin
+        permission: system.admin
       responses:
         "200": {description: Effective permissions}

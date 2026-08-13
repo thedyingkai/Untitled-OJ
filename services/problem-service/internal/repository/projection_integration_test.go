@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"ojos-shared/eventing"
+	"ojos-problem-events/problemv1"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -76,7 +76,7 @@ INSERT INTO problem_artifact_upload_intents(
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact := eventing.ArtifactRef{
+	artifact := problemv1.ArtifactRef{
 		SHA256:      strings.Repeat("b", 64),
 		SizeBytes:   456,
 		ContentType: "application/zip",

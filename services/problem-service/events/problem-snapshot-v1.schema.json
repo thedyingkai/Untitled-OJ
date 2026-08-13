@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ojos.local/events/problem-snapshot-v1.schema.json",
+  "title": "OJOS Problem Snapshot Event v1",
+  "type": "object",
+  "required": ["problem_id", "aggregate_version", "package_revision", "status", "visibility", "created_by", "package_artifact", "source_updated_at"],
+  "properties": {
+    "problem_id": { "type": "integer", "minimum": 1 },
+    "aggregate_version": { "type": "integer", "minimum": 1 },
+    "package_revision": { "type": "integer", "minimum": 1 },
+    "problem_no": { "type": "string" },
+    "title": { "type": "string" },
+    "problem_type": { "type": "string" },
+    "status": { "enum": ["draft", "ready", "published", "archived"] },
+    "visibility": { "enum": ["private", "public"] },
+    "created_by": { "type": "integer", "minimum": 0 },
+    "time_limit_ms": { "type": "integer", "minimum": 1 },
+    "memory_limit_mb": { "type": "integer", "minimum": 1 },
+    "manifest_sha256": { "type": "string" },
+    "package_artifact": {
+      "type": "object",
+      "required": ["uri", "sha256", "size_bytes", "content_type"],
+      "properties": {
+        "uri": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "content_type": { "const": "application/zip" }
+      },
+      "additionalProperties": false
+    },
+    "source_updated_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

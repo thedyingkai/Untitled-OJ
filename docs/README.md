@@ -27,7 +27,7 @@
 
 ## 客户端
 
-- [Desktop 本地应用](orchestrator/desktop.md)：Tauri WebView、embedded backend/Agent、SQLite 和制品资源布局。
+- [Desktop 本地应用](orchestrator/desktop.md)：Tauri WebView、embedded backend、SQLite、制品资源布局，以及 managed execution 明确不可用的边界。
 - [Desktop、Web 与 TUI 能力一致性](orchestrator/gui-tui-parity.md)：身份、published action 和共同协议规则。
 - [Web UI 与 Store](orchestrator/web-ui.md)：Catalog v2、Store/Topology 页面、SSE 和持续运行门禁。
 - [Web 开发说明](../manager/web/README.md)。

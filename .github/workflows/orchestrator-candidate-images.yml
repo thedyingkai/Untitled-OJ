@@ -147,6 +147,13 @@ jobs:
             echo "pulled OCI revision $revision does not match $GITHUB_SHA" >&2
             exit 1
           }
+          if [[ "$COMPONENT" == "agent" ]]; then
+            runtime_user="$(docker image inspect --format '{{.Config.User}}' "$reference")"
+            [[ "$runtime_user" == "65532:65532" ]] || {
+              echo "Agent OCI must run as the standard workload identity 65532:65532; observed ${runtime_user:-<empty>}" >&2
+              exit 1
+            }
+          fi
           mkdir -p evidence
           jq -n \
             --arg component "$COMPONENT" \

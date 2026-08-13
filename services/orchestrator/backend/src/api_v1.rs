@@ -6,13 +6,17 @@
 use crate::artifact_store::ArtifactStore;
 use crate::audit::{MutationAudit, operation_id as audited_operation_id};
 use crate::auth::Principal;
+use crate::auth_permission_check::AuthPermissionChecker;
 use crate::build_identity::BuildIdentity;
 use crate::catalog_registry::CatalogRegistry;
+use crate::contribution_ack;
+use crate::contribution_snapshot::active_contribution_snapshot;
 use crate::deployment_api;
 use crate::durable::{DurableError, DurableStore};
 use crate::http::{ApiRequest, ApiResponse};
 use crate::node_api;
 use crate::operation_api;
+use crate::resource_api;
 use crate::routes::handle_api_request_with_internal_token;
 use crate::topology_api;
 use crate::topology_provider::TopologyProviderSaga;
@@ -98,6 +102,7 @@ pub(crate) fn lock_free_response(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn handle(
     console: &mut OrchestratorActionConsole,
     durable_store: Option<&DurableStore>,
@@ -106,6 +111,35 @@ pub(crate) fn handle(
     artifact_store: Option<&ArtifactStore>,
     store_state: &market_api::StoreState,
     repo_root: &Path,
+    request: ApiRequest,
+    expected_internal_token: Option<&str>,
+    principal: Option<&Principal>,
+) -> ApiResponse {
+    handle_with_permission_checker(
+        console,
+        durable_store,
+        topology_provider,
+        catalog_registry,
+        artifact_store,
+        store_state,
+        repo_root,
+        None,
+        request,
+        expected_internal_token,
+        principal,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_with_permission_checker(
+    console: &mut OrchestratorActionConsole,
+    durable_store: Option<&DurableStore>,
+    topology_provider: Option<&TopologyProviderSaga>,
+    catalog_registry: Option<&CatalogRegistry>,
+    artifact_store: Option<&ArtifactStore>,
+    store_state: &market_api::StoreState,
+    repo_root: &Path,
+    auth_permission_checker: Option<&AuthPermissionChecker>,
     mut request: ApiRequest,
     expected_internal_token: Option<&str>,
     principal: Option<&Principal>,
@@ -324,6 +358,7 @@ pub(crate) fn handle(
         artifact_store,
         store_state,
         repo_root,
+        auth_permission_checker,
         request,
         expected_internal_token,
         principal,
@@ -385,6 +420,7 @@ fn dispatch_authenticated(
     artifact_store: Option<&ArtifactStore>,
     store_state: &market_api::StoreState,
     repo_root: &Path,
+    auth_permission_checker: Option<&AuthPermissionChecker>,
     request: ApiRequest,
     expected_internal_token: Option<&str>,
     principal: &Principal,
@@ -394,10 +430,55 @@ fn dispatch_authenticated(
     if path == "/api/v1/ui/layout" {
         return ui_layout_response(durable_store, repo_root, &request, principal, &request_id);
     }
+    if request.method == "POST" && path == "/api/v1/auth/permissions:check" {
+        return permission_check_response(
+            auth_permission_checker,
+            &request,
+            principal,
+            &request_id,
+        );
+    }
+    if request.method == "GET" && path == "/api/v1/contributions/snapshot" {
+        let Some(storage) = durable_store else {
+            return ApiResponse::problem(
+                503,
+                "CONTRIBUTION_STORAGE_UNAVAILABLE",
+                "a durable store is required to publish the active Contribution snapshot",
+                &request_id,
+                None,
+            )
+            .with_header("X-Request-ID", request_id);
+        };
+        return match active_contribution_snapshot(storage, "default") {
+            Ok(snapshot) => {
+                let etag = snapshot
+                    .get("digest")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                envelope(200, snapshot, request_id).with_header("ETag", etag)
+            }
+            Err(error) => ApiResponse::problem(
+                503,
+                "CONTRIBUTION_SNAPSHOT_UNAVAILABLE",
+                error.to_string(),
+                &request_id,
+                None,
+            )
+            .with_header("Retry-After", "1")
+            .with_header("X-Request-ID", request_id),
+        };
+    }
+    if request.method == "POST" && path == "/api/v1/contributions/projections:ack" {
+        return contribution_ack::response(durable_store, &request, principal, &request_id);
+    }
     if let Some(response) = operation_api::route(durable_store, &request, &request_id) {
         return response;
     }
     if let Some(response) = deployment_api::route(durable_store, &request, &request_id) {
+        return response;
+    }
+    if let Some(response) = resource_api::route(durable_store, &request, &request_id) {
         return response;
     }
     if let Some(response) = node_api::route(console, durable_store, &request, &request_id) {
@@ -568,6 +649,7 @@ fn authorization_target(method: &str, path: &str) -> V1AuthorizationTarget {
             && matches!(
                 segments.as_slice(),
                 ["api", "v1", "capabilities"]
+                    | ["api", "v1", "contributions", "snapshot"]
                     | ["api", "v1", "healthz", "live"]
                     | ["api", "v1", "healthz", "ready"]
             ))
@@ -577,6 +659,12 @@ fn authorization_target(method: &str, path: &str) -> V1AuthorizationTarget {
 
     let action = match (method, segments.as_slice()) {
         ("GET" | "PUT", ["api", "v1", "ui", "layout"]) => {
+            return V1AuthorizationTarget::Meta;
+        }
+        ("POST", ["api", "v1", "auth", "permissions:check"]) => {
+            return V1AuthorizationTarget::Meta;
+        }
+        ("POST", ["api", "v1", "contributions", "projections:ack"]) => {
             return V1AuthorizationTarget::Meta;
         }
         ("GET", ["api", "v1", "store", "catalogs"]) => "catalog.list",
@@ -616,6 +704,10 @@ fn authorization_target(method: &str, path: &str) -> V1AuthorizationTarget {
         }
         ("POST", ["api", "v1", "deployments", action]) if action.ends_with(":uninstall") => {
             "deployment.uninstall"
+        }
+
+        ("POST", ["api", "v1", "resources", action]) if action.ends_with(":purge") => {
+            "resource.purge"
         }
 
         ("POST", ["api", "v1", "operations:plan"]) => "operation.plan",
@@ -730,6 +822,104 @@ fn ui_layout_response(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PermissionCheckRequest {
+    permissions: Vec<String>,
+}
+
+fn permission_check_response(
+    checker: Option<&AuthPermissionChecker>,
+    request: &ApiRequest,
+    principal: &Principal,
+    request_id: &str,
+) -> ApiResponse {
+    let payload = match serde_json::from_str::<PermissionCheckRequest>(&request.body) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return ApiResponse::problem(
+                400,
+                "PERMISSION_CHECK_REQUEST_INVALID",
+                format!("permission check body must contain only a permissions array: {error}"),
+                request_id,
+                None,
+            )
+            .with_header("Cache-Control", "no-store")
+            .with_header("X-Request-ID", request_id);
+        }
+    };
+    if payload.permissions.is_empty()
+        || payload.permissions.len() > 128
+        || payload
+            .permissions
+            .iter()
+            .any(|permission| !valid_permission_key(permission))
+    {
+        return ApiResponse::problem(
+            400,
+            "PERMISSION_CHECK_REQUEST_INVALID",
+            "permissions must contain 1-128 unique lowercase namespaced permission keys",
+            request_id,
+            None,
+        )
+        .with_header("Cache-Control", "no-store")
+        .with_header("X-Request-ID", request_id);
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    if payload
+        .permissions
+        .iter()
+        .any(|permission| !unique.insert(permission.as_str()))
+    {
+        return ApiResponse::problem(
+            400,
+            "PERMISSION_CHECK_REQUEST_INVALID",
+            "permissions must contain 1-128 unique lowercase namespaced permission keys",
+            request_id,
+            None,
+        )
+        .with_header("Cache-Control", "no-store")
+        .with_header("X-Request-ID", request_id);
+    }
+    let effective = checker.and_then(|checker| checker.effective_permissions(principal));
+    let decisions = payload
+        .permissions
+        .iter()
+        .map(|permission| {
+            json!({
+                "permission": permission,
+                "allowed": effective
+                    .as_ref()
+                    .is_some_and(|permissions| permissions.contains(permission)),
+            })
+        })
+        .collect::<Vec<_>>();
+    envelope(200, json!({"decisions": decisions}), request_id.to_string())
+        .with_header("Cache-Control", "no-store")
+}
+
+fn valid_permission_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.contains('.')
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+}
+
+#[cfg(test)]
+fn permission_check_response_for_test(
+    request: &ApiRequest,
+    principal: &Principal,
+    request_id: &str,
+) -> ApiResponse {
+    permission_check_response(None, request, principal, request_id)
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -836,6 +1026,7 @@ fn supported_v1_actions(
             "deployment.restart",
             "deployment.uninstall",
             "deployment.health",
+            "resource.purge",
             "operation.plan",
             "operation.confirm",
             "operation.apply",
@@ -1018,6 +1209,15 @@ mod tests {
         );
         assert_eq!(operator_admin_action.status, 403);
 
+        let operator_purge = request_as(
+            V1Role::Operator,
+            "POST",
+            "/api/v1/resources/claim-1:purge",
+            [("x-actor-id", "forged-admin")],
+        );
+        assert_eq!(operator_purge.status, 403);
+        assert_eq!(operator_purge.body["code"], "FORBIDDEN");
+
         let admin_action = request_as(V1Role::Admin, "POST", "/api/v1/store/releases:delete", []);
         assert_eq!(admin_action.status, 400);
         assert_eq!(admin_action.body["code"], "IDEMPOTENCY_KEY_REQUIRED");
@@ -1038,6 +1238,8 @@ mod tests {
         let admin = capability_actions(V1Role::Admin);
         assert!(admin.contains("deployment.start"));
         assert!(admin.contains("deployment.uninstall"));
+        assert!(admin.contains("resource.purge"));
+        assert!(!operator.contains("resource.purge"));
     }
 
     #[test]
@@ -1294,6 +1496,47 @@ mod tests {
             V1AuthorizationTarget::Unknown
         );
         assert!(v1_action("node.renew").is_none());
+    }
+
+    #[test]
+    fn frontend_permission_check_route_is_meta_and_rejects_identity_smuggling() {
+        assert_eq!(
+            authorization_target("POST", "/api/v1/auth/permissions:check"),
+            V1AuthorizationTarget::Meta
+        );
+        let principal = principal(V1Role::Viewer);
+        let valid = permission_check_response_for_test(
+            &ApiRequest {
+                method: "POST".to_string(),
+                path: "/api/v1/auth/permissions:check".to_string(),
+                headers: BTreeMap::new(),
+                body: r#"{"permissions":["contest-service.contest.read"]}"#.to_string(),
+            },
+            &principal,
+            "req-permissions",
+        );
+        assert_eq!(valid.status, 200);
+        assert_eq!(valid.body["data"]["decisions"][0]["allowed"], false);
+        assert!(valid.body["data"].get("principal").is_none());
+
+        for body in [
+            r#"{"permissions":[]}"#,
+            r#"{"permissions":["contest-service.contest.read","contest-service.contest.read"]}"#,
+            r#"{"permissions":["SYSTEM.ADMIN"]}"#,
+            r#"{"permissions":["contest-service.contest.read"],"principal":"victim"}"#,
+        ] {
+            let response = permission_check_response_for_test(
+                &ApiRequest {
+                    method: "POST".to_string(),
+                    path: "/api/v1/auth/permissions:check".to_string(),
+                    headers: BTreeMap::new(),
+                    body: body.to_string(),
+                },
+                &principal,
+                "req-permissions-invalid",
+            );
+            assert_eq!(response.status, 400, "accepted {body}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Orchestrator v1 Web UI
 
-Web UI 是 Desktop WebView 与远程 daemon 共用的图形控制面。Desktop 启动内嵌 backend、随机 loopback 端口和 loopback Agent，再由原生 WebView 加载同源页面；默认路径不会打开外部浏览器。远程模式由 daemon 直接托管同一份 `manager/web/dist`。
+Web UI 是 Desktop WebView 与远程 daemon 共用的图形控制面。Desktop 启动内嵌 backend 和随机 loopback 端口，再由原生 WebView 加载同源页面；默认路径不会打开外部浏览器。Desktop 不启动执行 Agent，managed 安装必须选择已注册的独立 Agent。远程模式由 daemon 直接托管同一份 `manager/web/dist`。
 
 前端只使用 `/api/v1` 正式契约。旧的 `/store/install`、`/ui/layout`、Node push/bearer 和通用 CRUD 不属于 v1 页面能力。
 

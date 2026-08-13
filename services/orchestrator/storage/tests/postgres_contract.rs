@@ -5,8 +5,8 @@ use orchestrator_control_plane::{
     OperationStoreError, PlanOperation, PlannedJob, ResolveExpiredSuccessRequest,
 };
 use orchestrator_legacy::{
-    ApiBinding, ApiBindingState, NodeRecord, OrchestratorStore, TopologyEndpointSpec,
-    TopologyLinkSpec, TopologySpec,
+    ApiBinding, ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState, ApiBindingState,
+    NodeRecord, OrchestratorStore, TopologyEndpointSpec, TopologyLinkSpec, TopologySpec,
 };
 use orchestrator_runtime::{RuntimeDesiredState, RuntimeInstance, RuntimeObservedState};
 use orchestrator_storage::{
@@ -24,12 +24,36 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// Opt-in integration contract. CI can provide a dedicated TLS database with
-/// `OJOS_TEST_POSTGRES_URL`; developer machines without PostgreSQL still run
-/// all pure schema/configuration tests.
+fn required_database_url(name: &str) -> Option<String> {
+    let configured = std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if configured.is_none() && require_postgres_contract() {
+        panic!("{name} must be set when OJOS_REQUIRE_POSTGRES_CONTRACT=1");
+    }
+    if configured.is_none() {
+        eprintln!("skipping local PostgreSQL contract: {name} is not configured");
+    }
+    configured
+}
+
+fn require_postgres_contract() -> bool {
+    std::env::var("OJOS_REQUIRE_POSTGRES_CONTRACT")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// CI provides a dedicated TLS database and requires this contract. Developer
+/// machines without PostgreSQL still run the pure schema/configuration tests.
 #[test]
 fn postgres_repository_contract_when_configured() {
-    let Some(database_url) = std::env::var("OJOS_TEST_POSTGRES_URL").ok() else {
+    let Some(database_url) = required_database_url("OJOS_TEST_POSTGRES_URL") else {
         return;
     };
     let mut options = PostgresOptions {
@@ -841,7 +865,7 @@ fn verify_history_retention_contract(
 
 #[test]
 fn postgres_legacy_upgrade_imports_draft_and_external_unknown_when_configured() {
-    let Some(database_url) = std::env::var("OJOS_TEST_POSTGRES_URL").ok() else {
+    let Some(database_url) = required_database_url("OJOS_TEST_POSTGRES_URL") else {
         return;
     };
     let mut options = PostgresOptions::default();
@@ -1436,6 +1460,7 @@ fn verify_topology_contract(store: &PostgresOrchestratorStore, suffix: u64) {
             "t3",
         )
         .expect("finish failed apply");
+    assert_eq!(failed.draft_revision_id, first.revision_id());
     assert_eq!(failed.applied_revision_id, None);
     store
         .begin_topology_apply(&topology_id, first.revision_id(), "op-success", "t4")
@@ -1492,6 +1517,225 @@ fn verify_topology_contract(store: &PostgresOrchestratorStore, suffix: u64) {
     assert_eq!(rollback.spec(), first.spec());
     assert_eq!(store.topology_revisions(&topology_id).unwrap().len(), 3);
 
+    let abort_topology_id = format!("pg-topology-abort-{suffix}");
+    let abort_first = store
+        .create_initial_topology_revision(
+            topology_spec(&abort_topology_id, "abort baseline"),
+            "t-abort-1",
+            "admin",
+            "initial",
+        )
+        .expect("abort baseline revision");
+    store
+        .begin_topology_apply(
+            &abort_topology_id,
+            abort_first.revision_id(),
+            "op-abort-seed",
+            "t-abort-2",
+        )
+        .expect("begin abort baseline apply");
+    store
+        .finish_topology_apply(
+            &abort_topology_id,
+            abort_first.revision_id(),
+            "op-abort-seed",
+            TopologyApplyOutcome::Succeeded,
+            "t-abort-3",
+        )
+        .expect("commit abort baseline");
+    let abort_candidate = store
+        .create_next_topology_revision(
+            &abort_topology_id,
+            abort_first.revision_id(),
+            topology_spec(&abort_topology_id, "abort candidate"),
+            "t-abort-4",
+            "admin",
+            "candidate",
+        )
+        .expect("create abort candidate");
+    store
+        .begin_topology_apply(
+            &abort_topology_id,
+            abort_candidate.revision_id(),
+            "op-abort-failed",
+            "t-abort-5",
+        )
+        .expect("begin abort candidate");
+    let failed_candidate = store
+        .finish_topology_apply(
+            &abort_topology_id,
+            abort_candidate.revision_id(),
+            "op-abort-failed",
+            TopologyApplyOutcome::Failed,
+            "t-abort-5a",
+        )
+        .expect("normal failure keeps candidate draft");
+    assert_eq!(
+        failed_candidate.draft_revision_id,
+        abort_candidate.revision_id()
+    );
+    assert_eq!(
+        failed_candidate.applied_revision_id.as_deref(),
+        Some(abort_first.revision_id())
+    );
+    store
+        .begin_topology_apply(
+            &abort_topology_id,
+            abort_candidate.revision_id(),
+            "op-abort-candidate",
+            "t-abort-5b",
+        )
+        .expect("reacquire abort candidate");
+    let before_stale_operation = store
+        .topology_heads(&abort_topology_id)
+        .expect("read abort heads")
+        .expect("abort heads");
+    assert!(matches!(
+        store.complete_compensated_topology_abort(
+            &abort_topology_id,
+            abort_candidate.revision_id(),
+            abort_first.revision_id(),
+            "op-stale",
+            "t-abort-6",
+        ),
+        Err(PostgresError::Conflict(_))
+    ));
+    assert_eq!(
+        store
+            .topology_heads(&abort_topology_id)
+            .expect("read unchanged abort heads")
+            .expect("unchanged abort heads"),
+        before_stale_operation
+    );
+    let abort_restored = store
+        .complete_compensated_topology_abort(
+            &abort_topology_id,
+            abort_candidate.revision_id(),
+            abort_first.revision_id(),
+            "op-abort-candidate",
+            "t-abort-7",
+        )
+        .expect("complete compensated abort");
+    assert_eq!(abort_restored.draft_revision_id, abort_first.revision_id());
+    assert_eq!(
+        abort_restored.applied_revision_id.as_deref(),
+        Some(abort_first.revision_id())
+    );
+    assert!(abort_restored.applying_revision_id.is_none());
+
+    let committed_candidate = store
+        .create_next_topology_revision(
+            &abort_topology_id,
+            abort_first.revision_id(),
+            topology_spec(&abort_topology_id, "committed candidate"),
+            "t-abort-8",
+            "admin",
+            "committed candidate",
+        )
+        .expect("create committed candidate");
+    assert_eq!(committed_candidate.revision_number(), 3);
+    assert_eq!(
+        committed_candidate.parent_revision_id(),
+        Some(abort_first.revision_id())
+    );
+    store
+        .begin_topology_apply(
+            &abort_topology_id,
+            committed_candidate.revision_id(),
+            "op-committed-candidate",
+            "t-abort-9",
+        )
+        .expect("begin committed candidate");
+    store
+        .finish_topology_apply(
+            &abort_topology_id,
+            committed_candidate.revision_id(),
+            "op-committed-candidate",
+            TopologyApplyOutcome::Succeeded,
+            "t-abort-10",
+        )
+        .expect("commit candidate before compensation");
+    let committed_restored = store
+        .compensate_completed_topology_apply(
+            &abort_topology_id,
+            committed_candidate.revision_id(),
+            abort_first.revision_id(),
+            "op-committed-candidate",
+            "t-abort-11",
+        )
+        .expect("compensate committed candidate");
+    assert_eq!(
+        committed_restored.draft_revision_id,
+        abort_first.revision_id()
+    );
+    assert_eq!(
+        committed_restored.applied_revision_id.as_deref(),
+        Some(abort_first.revision_id())
+    );
+
+    let stale_candidate = store
+        .create_next_topology_revision(
+            &abort_topology_id,
+            abort_first.revision_id(),
+            topology_spec(&abort_topology_id, "stale compensation candidate"),
+            "t-abort-12",
+            "admin",
+            "stale compensation candidate",
+        )
+        .expect("create stale compensation candidate");
+    store
+        .begin_topology_apply(
+            &abort_topology_id,
+            stale_candidate.revision_id(),
+            "op-stale-candidate",
+            "t-abort-13",
+        )
+        .expect("begin stale compensation candidate");
+    store
+        .finish_topology_apply(
+            &abort_topology_id,
+            stale_candidate.revision_id(),
+            "op-stale-candidate",
+            TopologyApplyOutcome::Succeeded,
+            "t-abort-14",
+        )
+        .expect("commit stale compensation candidate");
+    let new_writer = store
+        .create_next_topology_revision(
+            &abort_topology_id,
+            stale_candidate.revision_id(),
+            topology_spec(&abort_topology_id, "new writer"),
+            "t-abort-15",
+            "admin",
+            "new writer",
+        )
+        .expect("advance draft with new writer");
+    let before_stale_compensation = store
+        .topology_heads(&abort_topology_id)
+        .expect("read new writer heads")
+        .expect("new writer heads");
+    assert_eq!(
+        before_stale_compensation.draft_revision_id,
+        new_writer.revision_id()
+    );
+    assert!(matches!(
+        store.compensate_completed_topology_apply(
+            &abort_topology_id,
+            stale_candidate.revision_id(),
+            abort_first.revision_id(),
+            "op-stale-candidate",
+            "t-abort-16",
+        ),
+        Err(PostgresError::Conflict(_))
+    ));
+    assert_eq!(
+        store
+            .topology_heads(&abort_topology_id)
+            .expect("read unchanged new writer heads")
+            .expect("unchanged new writer heads"),
+        before_stale_compensation
+    );
+
     let group_topology_id = format!("pg-topology-group-{suffix}");
     let group_revision = store
         .create_initial_topology_revision(
@@ -1526,9 +1770,9 @@ fn verify_topology_contract(store: &PostgresOrchestratorStore, suffix: u64) {
         group_revision.revision_id(),
         &operation_id,
     );
-    revoked.desired_state = "REVOKED".to_string();
-    revoked.observed_state = "REVOKED".to_string();
-    revoked.health = "UNKNOWN".to_string();
+    revoked.desired_state = ApiBindingDesiredState::Revoked;
+    revoked.observed_state = ApiBindingObservedState::Revoked;
+    revoked.health = ApiBindingHealth::Unknown;
     revoked.state = ApiBindingState::Revoked;
     revoked.optional = true;
     let members = vec![TopologyApplyGroupMember {
@@ -1886,9 +2130,9 @@ fn finalized_api_binding(
         credential_ref: String::new(),
         credential_generation: 2,
         context_generation: 2,
-        desired_state: "ACTIVE".to_string(),
-        observed_state: "ACTIVE".to_string(),
-        health: "HEALTHY".to_string(),
+        desired_state: ApiBindingDesiredState::Active,
+        observed_state: ApiBindingObservedState::Active,
+        health: ApiBindingHealth::Healthy,
         drift: Vec::new(),
         last_operation_id: operation_id.to_string(),
         state: ApiBindingState::Active,

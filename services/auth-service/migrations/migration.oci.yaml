@@ -1,0 +1,36 @@
+schemaVersion: ojos.dev/migration-oci/v1
+artifactSlot: auth-migration-v1
+resource: auth
+engine: postgresql
+entrypoint: ["/ojos-migrate"]
+command: ["apply", "/migrations"]
+transactions: required
+files:
+  - 000001_init_schema.up.sql
+  - 000003_permission_core.up.sql
+  - 000006_add_internal_auth_keys.up.sql
+  - 000007_service_identity_grants.up.sql
+  - 000008_service_credentials.up.sql
+  - 000009_service_credentials_lifecycle.up.sql
+  - 000010_seed_service_permissions.up.sql
+  - 000011_grant_problem_setter_create.up.sql
+  - 000012_grant_service_permission_check.up.sql
+  - 000013_topology_binding_projection.up.sql
+  - 000014_initial_admin_bootstrap.up.sql
+  - 000015_contribution_permission_projection.up.sql
+rollbackFiles:
+  - 000015_contribution_permission_projection.down.sql
+  - 000014_initial_admin_bootstrap.down.sql
+  - 000013_topology_binding_projection.down.sql
+  - 000012_grant_service_permission_check.down.sql
+  - 000011_grant_problem_setter_create.down.sql
+  - 000010_seed_service_permissions.down.sql
+  - 000009_service_credentials_lifecycle.down.sql
+  - 000008_service_credentials.down.sql
+  - 000007_service_identity_grants.down.sql
+  - 000006_add_internal_auth_keys.down.sql
+  - 000003_permission_core.down.sql
+  - 000001_init_schema.down.sql
+labels:
+  dev.ojos.migration.id: auth-schema-v1
+  dev.ojos.resource.kind: postgresql.database/v1

@@ -1,0 +1,39 @@
+openapi: 3.1.0
+info: {title: OJOS Judge Submission Create API, version: 1.0.0}
+x-ojos-api-id: judge.submission.create
+x-ojos-service: {id: judge-api, version: 0.1.0}
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  schemas:
+    SubmissionCreate:
+      type: object
+      additionalProperties: false
+      required: [problem_id, language, code]
+      properties:
+        problem_id: {type: integer, format: int64, minimum: 1}
+        language: {type: string, minLength: 1, maxLength: 64}
+        code: {type: string, minLength: 1, maxLength: 10485760}
+    SubmissionCreated:
+      type: object
+      additionalProperties: false
+      required: [submission_id, status]
+      properties:
+        submission_id: {type: integer, format: int64, minimum: 1}
+        status: {const: PENDING}
+paths:
+  /judge/submissions:
+    post:
+      operationId: createSubmission
+      x-ojos-audience: user
+      x-ojos-permission: judge.submit
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SubmissionCreate'}}}
+      responses:
+        '200': {description: Durable PostgreSQL submission and task created, content: {application/json: {schema: {$ref: '#/components/schemas/SubmissionCreated'}}}}
+        '400': {description: Invalid submission}
+        '401': {description: User authentication required}
+        '403': {description: Missing judge.submit}
+        '409': {description: Problem package projection is not ready}

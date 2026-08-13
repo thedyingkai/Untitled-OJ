@@ -367,6 +367,13 @@ pub(crate) fn write_http_response(stream: &mut impl Write, response: ApiResponse
     write_http_response_with_legacy_status(stream, response, true)
 }
 
+/// Writes the versioned public API exactly as declared by the v1 schemas.
+/// V1 envelopes are closed at the root and contain only `data` and `meta`;
+/// the legacy `status: "ok"` decoration is intentionally not applied.
+pub(crate) fn write_v1_response(stream: &mut impl Write, response: ApiResponse) -> Result<()> {
+    write_http_response_with_legacy_status(stream, response, false)
+}
+
 /// Writes the frozen Agent protocol v1 body without public/legacy API
 /// decoration. Agent response schemas are closed (`additionalProperties:
 /// false`), so adding `status: "ok"` here would be a wire-contract break.
@@ -733,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_protocol_writer_preserves_the_closed_success_schema() {
+    fn typed_writers_preserve_closed_success_schemas() {
         let credential = json!({
             "access_token": "redacted",
             "token_type": "Bearer",
@@ -747,6 +754,22 @@ mod tests {
         let body = agent_wire.split_once("\r\n\r\n").unwrap().1;
         let value: Value = serde_json::from_str(body).unwrap();
         assert_eq!(value, credential);
+        assert!(value.get("status").is_none());
+
+        let envelope = json!({
+            "data": {"accepted": true},
+            "meta": {"request_id": "req-v1", "api_version": "v1"},
+        });
+        let mut v1_wire = Vec::new();
+        write_v1_response(&mut v1_wire, ApiResponse::ok(envelope.clone())).unwrap();
+        let v1_wire = String::from_utf8(v1_wire).unwrap();
+        let body = v1_wire.split_once("\r\n\r\n").unwrap().1;
+        let value: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(value, envelope);
+        let root = value.as_object().unwrap();
+        assert_eq!(root.len(), 2);
+        assert!(root.contains_key("data"));
+        assert!(root.contains_key("meta"));
         assert!(value.get("status").is_none());
 
         let mut public_wire = Vec::new();

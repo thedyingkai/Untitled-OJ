@@ -7,7 +7,9 @@
 
 mod action;
 mod api_binding;
+pub mod composition;
 mod contract_v1;
+mod contribution;
 mod model;
 mod planner;
 mod schema;
@@ -21,11 +23,26 @@ pub use action::{
     FORMAL_ACTION_PREFIXES, action_catalog, action_descriptor, validate_action_catalog,
 };
 pub use api_binding::{
-    ApiBinding, ApiBindingResolutionError, ApiBindingResolutionRequest, ApiBindingState,
+    ApiBinding, ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState,
+    ApiBindingResolutionError, ApiBindingResolutionRequest, ApiBindingState,
     ApiBindingValidationError, ApiProviderCandidate, api_version_matches,
     resolve_api_binding_candidate,
 };
 pub use contract_v1::{V1_ACTIONS, V1ActionDescriptor, V1Role, v1_action};
+pub use contribution::{
+    CONTRIBUTION_REVISION_SCHEMA_VERSION, ContributionActivationStateV1, ContributionActivationV1,
+    ContributionApiSurfaceV1, ContributionAudienceV1, ContributionDomainError,
+    ContributionFrontendModuleV1, ContributionHeadClearV1, ContributionHeadRestoreV1,
+    ContributionHeadV1, ContributionHttpMethodV1, ContributionOperationRouteV1,
+    ContributionPathPermissionScopeV1, ContributionPermissionDefinitionV1,
+    ContributionPermissionScopeV1, ContributionResult, ContributionRevisionStatusV1,
+    ContributionRevisionV1, ContributionRouteAuthV1, ContributionRouteCollisionV1,
+    ContributionSystemPermissionScopeV1, ContributionTerminationIntentV1, PermissionAssignmentV1,
+    PermissionSubjectKindV1, ProjectionReceiptStateV1, ProjectionReceiptV1, ProjectionTargetV1,
+    RESERVED_CONTRIBUTION_PATH_PREFIXES, clear_initial_contribution_head,
+    compare_and_swap_contribution_head, restore_contribution_head, route_templates_overlap,
+    stage_route_collisions, validate_stage_route_collisions,
+};
 pub use model::{
     DeployedServiceApi, DiagnosticFinding, DiagnosticReport, EffectiveApiRoute, Endpoint,
     HostService, Link, LogView, NodeRecord, Operation, OperationLock, OperationLogRecord,
@@ -70,12 +87,14 @@ pub use service::{
     validate_endpoint_service_name, validate_service_manifest, validate_service_release,
 };
 pub use service_contract_v2::{
-    ReleaseApiAuthDecl, ReleaseEventContractDecl, ReleaseEventDecl, ReleaseEventsContract,
+    RELEASE_PLATFORM_SCHEMA_VERSION, ReleaseApiAuthDecl, ReleaseArtifactSubjectV1,
+    ReleaseConfigSchemaV1, ReleaseContributionSpecV1, ReleaseEventContractDecl, ReleaseEventDecl,
+    ReleaseEventsContract, ReleasePackageRequirementV1, ReleasePlatformContractV1,
     ReleaseProvidedApiContractDecl, ReleaseProvidedApiDecl, ReleaseProvidesContract,
     ReleaseRequiredApiBindingDecl, ReleaseRequiredApiDecl, ReleaseRequiredEventContractDecl,
-    ReleaseRequiredEventDecl, ReleaseRequiresContract, ReleaseRuntimeContractDecl,
-    SERVICE_CONTRACT_VERSION, STANDARD_CONTAINER_RUNTIME_ID, STANDARD_CONTAINER_RUNTIME_SHA256,
-    ServiceReleaseContract,
+    ReleaseRequiredEventDecl, ReleaseRequiresContract, ReleaseResourceClaimV1,
+    ReleaseRuntimeContractDecl, ReleaseRuntimeVolumeV1, SERVICE_CONTRACT_VERSION,
+    STANDARD_CONTAINER_RUNTIME_ID, STANDARD_CONTAINER_RUNTIME_SHA256, ServiceReleaseContract,
 };
 pub use service_openapi::{
     ServiceOpenApiLintError, ServiceOpenApiLintReport, ServiceOpenApiOperation,

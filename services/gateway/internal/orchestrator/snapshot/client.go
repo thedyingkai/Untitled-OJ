@@ -1,10 +1,12 @@
 package orchestratorsnapshot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -12,11 +14,18 @@ import (
 	"time"
 )
 
-const orchestratorTokenHeader = "x-ojos-orchestrator-token"
+const (
+	orchestratorTokenHeader       = "x-ojos-orchestrator-token"
+	contributionAckTokenHeader    = "x-ojos-contribution-ack-token"
+	contributionAckSchema         = "ojos.dev/contribution-projection-ack/v1"
+	contributionAckPath           = "/api/v1/contributions/projections:ack"
+	maximumContributionAckBodyLen = 1024 * 1024
+)
 
 type Client struct {
 	endpoint      string
 	internalToken string
+	ackToken      string
 	httpClient    *http.Client
 }
 
@@ -24,6 +33,14 @@ type envelope[T any] struct {
 	Code int    `json:"code"`
 	Msg  string `json:"msg"`
 	Data T      `json:"data"`
+}
+
+type v1Envelope[T any] struct {
+	Data T `json:"data"`
+	Meta struct {
+		RequestID  string `json:"request_id"`
+		APIVersion string `json:"api_version"`
+	} `json:"meta"`
 }
 
 type OperationsResponse struct {
@@ -44,16 +61,41 @@ type Operation struct {
 	UpdatedAt     string          `json:"updated_at"`
 }
 
-func NewClient(endpoint string, internalToken string) *Client {
+type contributionAckRequest struct {
+	SchemaVersion    string                        `json:"schema_version"`
+	Target           string                        `json:"target"`
+	ScopeID          string                        `json:"scope_id"`
+	SnapshotDigest   string                        `json:"snapshot_digest"`
+	Acknowledgements []ContributionAcknowledgement `json:"acknowledgements"`
+}
+
+type contributionAckResponse struct {
+	SchemaVersion  string `json:"schema_version"`
+	Target         string `json:"target"`
+	ScopeID        string `json:"scope_id"`
+	SnapshotDigest string `json:"snapshot_digest"`
+	Accepted       bool   `json:"accepted"`
+}
+
+func NewClient(endpoint string, internalToken string, contributionAckToken ...string) *Client {
+	ackToken := ""
+	if len(contributionAckToken) > 0 {
+		ackToken = contributionAckToken[0]
+	}
 	return &Client{
 		endpoint:      strings.TrimRight(strings.TrimSpace(endpoint), "/"),
 		internalToken: strings.TrimSpace(internalToken),
+		ackToken:      strings.TrimSpace(ackToken),
 		httpClient:    &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
 func (c *Client) Configured() bool {
 	return c != nil && c.endpoint != "" && c.internalToken != ""
+}
+
+func (c *Client) ContributionAcknowledgementsConfigured() bool {
+	return c != nil && c.Configured() && c.ackToken != ""
 }
 
 func (c *Client) DecodeOrchestratorSnapshot(ctx context.Context, includeDisabled bool, out any) error {
@@ -77,6 +119,81 @@ func (c *Client) DecodeNodeOrchestratorRoutes(ctx context.Context, nodeID string
 	return c.get(ctx, "/internal/orchestrator/nodes/"+url.PathEscape(nodeID)+"/routes", url.Values{
 		"include_upstream": []string{boolString(includeUpstream)},
 	}, out)
+}
+
+func (c *Client) ContributionSnapshot(ctx context.Context) (ContributionSnapshot, error) {
+	var snapshot ContributionSnapshot
+	if err := c.get(ctx, "/api/v1/contributions/snapshot", nil, &snapshot); err != nil {
+		return ContributionSnapshot{}, err
+	}
+	if strings.TrimSpace(snapshot.SchemaVersion) != "ojos.dev/contribution-snapshot/v1" {
+		return ContributionSnapshot{}, fmt.Errorf("unsupported contribution snapshot schema %q", snapshot.SchemaVersion)
+	}
+	return snapshot, nil
+}
+
+// AcknowledgeContributionSnapshot reports the exact obligations carried by a
+// snapshot only after Gateway has atomically installed its routes and frontend
+// artifact view. The stable idempotency key makes transport retries harmless.
+func (c *Client) AcknowledgeContributionSnapshot(ctx context.Context, snapshot ContributionSnapshot) error {
+	if !c.ContributionAcknowledgementsConfigured() {
+		return errors.New("contribution acknowledgement client is not configured")
+	}
+	if strings.TrimSpace(snapshot.ScopeID) == "" || !canonicalSHA256(snapshot.Digest) {
+		return errors.New("contribution snapshot acknowledgement identity is invalid")
+	}
+	requestBody := contributionAckRequest{
+		SchemaVersion:    contributionAckSchema,
+		Target:           "GATEWAY",
+		ScopeID:          snapshot.ScopeID,
+		SnapshotDigest:   snapshot.Digest,
+		Acknowledgements: append([]ContributionAcknowledgement{}, snapshot.Acknowledgements...),
+	}
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("encode contribution acknowledgement: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+contributionAckPath, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create contribution acknowledgement: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set(orchestratorTokenHeader, c.internalToken)
+	req.Header.Set(contributionAckTokenHeader, c.ackToken)
+	req.Header.Set("Idempotency-Key", "contribution-projection-ack:GATEWAY:"+snapshot.Digest)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send contribution acknowledgement: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("contribution acknowledgement returned %s", resp.Status)
+	}
+	if mediaType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]); mediaType != "application/json" {
+		return fmt.Errorf("contribution acknowledgement returned unsupported Content-Type %q", mediaType)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maximumContributionAckBodyLen+1))
+	if err != nil {
+		return fmt.Errorf("read contribution acknowledgement: %w", err)
+	}
+	if len(data) > maximumContributionAckBodyLen {
+		return errors.New("contribution acknowledgement response exceeds the configured limit")
+	}
+	var wrapped v1Envelope[contributionAckResponse]
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wrapped); err != nil {
+		return fmt.Errorf("decode contribution acknowledgement: %w", err)
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return err
+	}
+	ack := wrapped.Data
+	if ack.SchemaVersion != contributionAckSchema || ack.Target != "GATEWAY" || ack.ScopeID != snapshot.ScopeID || ack.SnapshotDigest != snapshot.Digest || !ack.Accepted {
+		return errors.New("contribution acknowledgement response identity is invalid")
+	}
+	return nil
 }
 
 func (c *Client) ListEndpoints(ctx context.Context) ([]Endpoint, error) {
@@ -311,7 +428,37 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 		}
 		return json.Unmarshal(wrapped.Data, out)
 	}
+	var v1 v1Envelope[json.RawMessage]
+	if err := json.Unmarshal(raw, &v1); err == nil && (len(v1.Data) > 0 || v1.Meta.APIVersion != "" || v1.Meta.RequestID != "") {
+		if len(v1.Data) == 0 {
+			return nil
+		}
+		return json.Unmarshal(v1.Data, out)
+	}
 	return json.Unmarshal(raw, out)
+}
+
+func canonicalSHA256(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, character := range value[len("sha256:"):] {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("contribution acknowledgement response contains trailing JSON")
+		}
+		return fmt.Errorf("decode contribution acknowledgement trailer: %w", err)
+	}
+	return nil
 }
 
 func boolString(value bool) string {

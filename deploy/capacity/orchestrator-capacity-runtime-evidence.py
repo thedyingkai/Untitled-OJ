@@ -236,6 +236,30 @@ def oidc_projection(environment: dict[str, str]) -> dict[str, Any]:
 def control_plane_environment_projection(
     environment: dict[str, str], control_plane_origin: str
 ) -> dict[str, Any]:
+    gateway_admin_token = required_env(
+        environment, "ORCHESTRATOR_GATEWAY_ADMIN_TOKEN"
+    )
+    auth_admin_token = required_env(environment, "ORCHESTRATOR_AUTH_ADMIN_TOKEN")
+    auth_workload_token = required_env(
+        environment, "ORCHESTRATOR_AUTH_WORKLOAD_TOKEN"
+    )
+    provider_tokens = (
+        gateway_admin_token,
+        auth_admin_token,
+        auth_workload_token,
+    )
+    if (
+        any(
+            len(token) < 32
+            or len(token) > 4096
+            or not all(character.isascii() and character.isprintable() and not character.isspace() for character in token)
+            for token in provider_tokens
+        )
+        or len(set(provider_tokens)) != len(provider_tokens)
+    ):
+        raise RuntimeEvidenceError(
+            "platform provider credentials must be distinct 32-4096 byte header-safe secrets"
+        )
     result = {
         "profile": required_env(environment, "OJOS_ENVIRONMENT"),
         "legacy_api_mode": required_env(environment, "ORCHESTRATOR_LEGACY_API_MODE"),
@@ -255,6 +279,25 @@ def control_plane_environment_projection(
             )
         },
         "healthcheck_url": required_env(environment, "ORCHESTRATOR_HEALTHCHECK_URL"),
+        "platform_providers": {
+            "gateway_admin_origin": normalize_https_origin(
+                required_env(environment, "ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN"),
+                "Gateway management provider",
+            ),
+            "auth_admin_origin": normalize_https_origin(
+                required_env(environment, "ORCHESTRATOR_AUTH_ADMIN_ORIGIN"),
+                "Auth management provider",
+            ),
+            "auth_workload_origin": normalize_https_origin(
+                required_env(environment, "ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN"),
+                "Auth workload issuer",
+            ),
+            "credentials_present": {
+                "gateway_admin": True,
+                "auth_admin": True,
+                "auth_workload": True,
+            },
+        },
     }
     expected_paths = {
         "ORCHESTRATOR_POSTGRES_CA_CERT": "/run/secrets/orchestrator-postgres-ca.crt",
@@ -748,6 +791,8 @@ def generate_manifest(
         "postgres": {"image": postgres_image, "configuration": postgres_configuration},
         "agent": {
             "image": agent_image,
+            "primary_user": "65532:65532",
+            "socket_supplemental_groups": ["10004"],
             "command_prefix": [
                 "run",
                 "--control-plane",
@@ -756,11 +801,25 @@ def generate_manifest(
                 "/var/lib/ojos-agent/identity",
                 "--ledger",
                 "/var/lib/ojos-agent/execution-ledger.sqlite3",
+                "--workload-export-dir",
+                "/var/lib/ojos-workload-export",
+                "--registry-credentials",
+                "/run/secrets/registry-credentials.json",
+                "--postgres-resource-provider",
+                "/run/agent-resource-provider/provider.json",
+                "--resource-secret-dir",
+                "/var/lib/ojos-agent/resource-provider-secrets",
                 "--instance",
             ],
             "socket_destination": "/var/run",
             "ledger_destination": "/var/lib/ojos-agent",
-            "ledger_root": "/var/lib/ojos/capacity/agents",
+            "ledger_root": "/var/lib/ojos/capacity/agent-internal",
+            "export_destination": "/var/lib/ojos-workload-export",
+            "export_root": "/var/lib/ojos/capacity/workload-exports",
+            "provider_destination": "/run/agent-resource-provider",
+            "provider_source": "/etc/ojos/capacity/agent-resource-provider",
+            "registry_destination": "/run/secrets/registry-credentials.json",
+            "registry_source": "/etc/ojos/capacity/registry-credentials.json",
             "ca_destination": "/run/secrets/control-plane-ca.pem",
             "ca_source": "/etc/ojos/capacity/control-plane-ca.pem",
         },
@@ -777,6 +836,9 @@ def generate_manifest(
             "privileged": True,
             "socket_destination": "/var/run",
             "data_destination": "/var/lib/docker",
+            "workload_export_destination": "/var/lib/ojos-workload-export",
+            "workload_export_root": "/var/lib/ojos/capacity/workload-exports",
+            "workload_export_read_only": True,
             "host_ip": "0.0.0.0",
             "first_host_port": 20_000,
             "engines_per_worker": 10,
@@ -846,6 +908,11 @@ def validate_manifest(document: Any) -> dict[str, Any]:
         cp_environment.get("database") if isinstance(cp_environment, dict) else None
     )
     oidc = cp_environment.get("oidc") if isinstance(cp_environment, dict) else None
+    providers = (
+        cp_environment.get("platform_providers")
+        if isinstance(cp_environment, dict)
+        else None
+    )
     if (
         not isinstance(cp_environment, dict)
         or set(cp_environment)
@@ -856,6 +923,7 @@ def validate_manifest(document: Any) -> dict[str, Any]:
             "oidc",
             "paths",
             "healthcheck_url",
+            "platform_providers",
         }
         or not isinstance(database, dict)
         or set(database)
@@ -888,6 +956,29 @@ def validate_manifest(document: Any) -> dict[str, Any]:
             "admin_role",
             "jwks_cache_seconds",
             "http_timeout_seconds",
+        }
+        or not isinstance(providers, dict)
+        or set(providers)
+        != {
+            "gateway_admin_origin",
+            "auth_admin_origin",
+            "auth_workload_origin",
+            "credentials_present",
+        }
+        or any(
+            providers.get(name)
+            != normalize_https_origin(str(providers.get(name, "")), name)
+            for name in (
+                "gateway_admin_origin",
+                "auth_admin_origin",
+                "auth_workload_origin",
+            )
+        )
+        or providers.get("credentials_present")
+        != {
+            "gateway_admin": True,
+            "auth_admin": True,
+            "auth_workload": True,
         }
     ):
         raise RuntimeEvidenceError("provision manifest production identity is invalid")
@@ -964,10 +1055,18 @@ def validate_manifest(document: Any) -> dict[str, Any]:
         raise RuntimeEvidenceError("provision manifest container structure is invalid")
     expected_agent_keys = {
         "image",
+        "primary_user",
+        "socket_supplemental_groups",
         "command_prefix",
         "socket_destination",
         "ledger_destination",
         "ledger_root",
+        "export_destination",
+        "export_root",
+        "provider_destination",
+        "provider_source",
+        "registry_destination",
+        "registry_source",
         "ca_destination",
         "ca_source",
     }
@@ -977,6 +1076,9 @@ def validate_manifest(document: Any) -> dict[str, Any]:
         "privileged",
         "socket_destination",
         "data_destination",
+        "workload_export_destination",
+        "workload_export_root",
+        "workload_export_read_only",
         "host_ip",
         "first_host_port",
         "engines_per_worker",
@@ -984,6 +1086,8 @@ def validate_manifest(document: Any) -> dict[str, Any]:
     }
     if (
         set(agent) != expected_agent_keys
+        or agent.get("primary_user") != "65532:65532"
+        or agent.get("socket_supplemental_groups") != ["10004"]
         or agent.get("command_prefix")
         != [
             "run",
@@ -993,11 +1097,25 @@ def validate_manifest(document: Any) -> dict[str, Any]:
             "/var/lib/ojos-agent/identity",
             "--ledger",
             "/var/lib/ojos-agent/execution-ledger.sqlite3",
+            "--workload-export-dir",
+            "/var/lib/ojos-workload-export",
+            "--registry-credentials",
+            "/run/secrets/registry-credentials.json",
+            "--postgres-resource-provider",
+            "/run/agent-resource-provider/provider.json",
+            "--resource-secret-dir",
+            "/var/lib/ojos-agent/resource-provider-secrets",
             "--instance",
         ]
         or agent.get("socket_destination") != "/var/run"
         or agent.get("ledger_destination") != "/var/lib/ojos-agent"
-        or agent.get("ledger_root") != "/var/lib/ojos/capacity/agents"
+        or agent.get("ledger_root") != "/var/lib/ojos/capacity/agent-internal"
+        or agent.get("export_destination") != "/var/lib/ojos-workload-export"
+        or agent.get("export_root") != "/var/lib/ojos/capacity/workload-exports"
+        or agent.get("provider_destination") != "/run/agent-resource-provider"
+        or agent.get("provider_source") != "/etc/ojos/capacity/agent-resource-provider"
+        or agent.get("registry_destination") != "/run/secrets/registry-credentials.json"
+        or agent.get("registry_source") != "/etc/ojos/capacity/registry-credentials.json"
         or agent.get("ca_destination") != "/run/secrets/control-plane-ca.pem"
         or agent.get("ca_source") != "/etc/ojos/capacity/control-plane-ca.pem"
         or set(engine) != expected_engine_keys
@@ -1013,6 +1131,9 @@ def validate_manifest(document: Any) -> dict[str, Any]:
         or engine.get("privileged") is not True
         or engine.get("socket_destination") != "/var/run"
         or engine.get("data_destination") != "/var/lib/docker"
+        or engine.get("workload_export_destination") != "/var/lib/ojos-workload-export"
+        or engine.get("workload_export_root") != "/var/lib/ojos/capacity/workload-exports"
+        or engine.get("workload_export_read_only") is not True
         or engine.get("first_host_port") != 20_000
         or engine.get("engines_per_worker") != 10
         or engine.get("services_per_engine") != 20
@@ -1276,7 +1397,7 @@ def collect_postgres(
 
 
 def require_owned_regular_file(
-    path: pathlib.Path, *, expected_uid: int = 10_004, private: bool = False
+    path: pathlib.Path, *, expected_uid: int = 65_532, private: bool = False
 ) -> os.stat_result:
     try:
         if path.is_symlink() or not path.is_file():
@@ -1296,6 +1417,12 @@ def collect_agent_state(state_root: pathlib.Path, node_id: str) -> dict[str, Any
             raise RuntimeEvidenceError("Agent state root is not a real directory")
     except OSError as error:
         raise RuntimeEvidenceError("cannot inspect Agent state root") from error
+    state_root_stat = state_root.stat()
+    state_root_mode = stat.S_IMODE(state_root_stat.st_mode)
+    if state_root_stat.st_uid != 65_532 or state_root_mode & 0o007:
+        raise RuntimeEvidenceError(
+            "Agent state root owner/mode is not private workload UID 65532 state"
+        )
     identity_root = state_root / "identity"
     current_path = identity_root / "current.json"
     require_owned_regular_file(current_path)
@@ -1412,7 +1539,43 @@ def collect_agent_state(state_root: pathlib.Path, node_id: str) -> dict[str, Any
             "device": ledger.st_dev,
             "inode": ledger.st_ino,
             "size_bytes": ledger.st_size,
+            "owner_uid": ledger.st_uid,
         },
+        "state_root_owner_uid": state_root_stat.st_uid,
+        "state_root_mode": f"{state_root_mode:04o}",
+    }
+
+
+def collect_workload_export(export_root: pathlib.Path) -> dict[str, Any]:
+    try:
+        metadata = export_root.stat()
+        if export_root.is_symlink() or not export_root.is_dir():
+            raise RuntimeEvidenceError("workload export root is not a real directory")
+    except OSError as error:
+        raise RuntimeEvidenceError("cannot inspect workload export root") from error
+    mode = stat.S_IMODE(metadata.st_mode)
+    if metadata.st_uid != 65_532 or mode != 0o700:
+        raise RuntimeEvidenceError("workload export root owner/mode is invalid")
+    allowed = {"runtime-contexts", "resource-outputs"}
+    try:
+        children = list(export_root.iterdir())
+    except OSError as error:
+        raise RuntimeEvidenceError("cannot enumerate workload export root") from error
+    unexpected = [child.name for child in children if child.name not in allowed]
+    if unexpected:
+        raise RuntimeEvidenceError("workload export contains Agent-internal state")
+    for child in children:
+        child_metadata = child.stat()
+        if child.is_symlink() or not child.is_dir():
+            raise RuntimeEvidenceError("workload export child is not a real directory")
+        child_mode = stat.S_IMODE(child_metadata.st_mode)
+        if child_metadata.st_uid != 65_532 or child_mode != 0o700:
+            raise RuntimeEvidenceError("workload export child owner/mode is invalid")
+    return {
+        "path": str(export_root),
+        "owner_uid": metadata.st_uid,
+        "mode": f"{mode:04o}",
+        "allowed_children": sorted(child.name for child in children),
     }
 
 
@@ -1425,7 +1588,10 @@ def validate_agent_mounts(
     if {item.get("Destination") for item in mounts if isinstance(item, dict)} != {
         expected["socket_destination"],
         expected["ledger_destination"],
+        expected["export_destination"],
         expected["ca_destination"],
+        expected["registry_destination"],
+        expected["provider_destination"],
     }:
         raise RuntimeEvidenceError("Agent mount set differs from provisioning")
     volume = f"ojos-capacity-{worker_ordinal:02d}_engine-{engine_ordinal:02d}-socket"
@@ -1442,6 +1608,13 @@ def validate_agent_mounts(
         mount_type="bind",
         read_only=False,
         source=f"{expected['ledger_root']}/{engine_ordinal:02d}",
+    )
+    export_mount = exact_mount(
+        mounts,
+        destination=expected["export_destination"],
+        mount_type="bind",
+        read_only=False,
+        source=f"{expected['export_root']}/{engine_ordinal:02d}",
     )
     source = str(
         next(
@@ -1461,9 +1634,24 @@ def validate_agent_mounts(
         read_only=True,
         source=expected["ca_source"],
     )
+    exact_mount(
+        mounts,
+        destination=expected["registry_destination"],
+        mount_type="bind",
+        read_only=True,
+        source=expected["registry_source"],
+    )
+    exact_mount(
+        mounts,
+        destination=expected["provider_destination"],
+        mount_type="bind",
+        read_only=True,
+        source=expected["provider_source"],
+    )
     return {
         "socket_volume": socket_mount["source"],
         "ledger_source": source,
+        "export_source": export_mount["source"],
         "ca_source": str(
             next(
                 item
@@ -1552,11 +1740,86 @@ def collect_agents(
         command = [*expected_agent["command_prefix"], instance]
         if agent_config.get("Cmd") != command:
             raise RuntimeEvidenceError(f"{agent_service} command is not exact")
+        agent_host_config = agent_inspection.get("HostConfig")
+        if (
+            agent_config.get("User") != expected_agent["primary_user"]
+            or not isinstance(agent_host_config, dict)
+            or agent_host_config.get("GroupAdd")
+            != expected_agent["socket_supplemental_groups"]
+            or agent_host_config.get("CapAdd") not in (None, [])
+            or agent_host_config.get("Privileged") is not False
+        ):
+            raise RuntimeEvidenceError(
+                f"{agent_service} workload/socket identity is invalid"
+            )
+        try:
+            effective_uid = int(
+                client.run(
+                    ("docker", "container", "exec", agent_inspection["Id"], "id", "-u")
+                ).strip()
+            )
+            effective_gid = int(
+                client.run(
+                    ("docker", "container", "exec", agent_inspection["Id"], "id", "-g")
+                ).strip()
+            )
+            effective_groups = sorted(
+                {
+                    int(value)
+                    for value in client.run(
+                        (
+                            "docker",
+                            "container",
+                            "exec",
+                            agent_inspection["Id"],
+                            "id",
+                            "-G",
+                        )
+                    ).split()
+                }
+            )
+            socket_gid_text, socket_mode_text = client.run(
+                (
+                    "docker",
+                    "container",
+                    "exec",
+                    agent_inspection["Id"],
+                    "stat",
+                    "--format=%g:%a",
+                    "/var/run/docker.sock",
+                )
+            ).strip().split(":", 1)
+            socket_gid = int(socket_gid_text)
+            socket_mode = int(socket_mode_text, 8)
+        except (ValueError, TypeError) as error:
+            raise RuntimeEvidenceError(
+                f"{agent_service} effective identity evidence is malformed"
+            ) from error
+        if (
+            effective_uid != 65_532
+            or effective_gid != 65_532
+            or effective_groups != [10_004, 65_532]
+            or socket_gid != 10_004
+            or socket_mode != 0o660
+        ):
+            raise RuntimeEvidenceError(
+                f"{agent_service} cannot prove exact workload/socket identity"
+            )
+        effective_identity = {
+            "uid": effective_uid,
+            "gid": effective_gid,
+            "supplemental_groups": [group for group in effective_groups if group != effective_gid],
+            "docker_socket_gid": socket_gid,
+            "docker_socket_mode": f"{socket_mode:04o}",
+        }
         agent_mount_identity = validate_agent_mounts(
             agent_mounts, worker_ordinal, engine_ordinal, expected_agent
         )
         durable_state = collect_agent_state(
             pathlib.Path(agent_mount_identity["ledger_source"]), node_id
+        )
+        workload_export = collect_workload_export(
+            pathlib.Path(agent_mount_identity["export_source"])
         )
         transport_ca = pem_certificate_fingerprints(
             pathlib.Path(agent_mount_identity["ca_source"])
@@ -1576,7 +1839,11 @@ def collect_agents(
                 "repo_digest": agent_image["repo_digest"],
                 "oci_revision": manifest["candidate_sha"],
                 "state": "RUNNING",
+                "primary_user": agent_config["User"],
+                "socket_supplemental_groups": agent_host_config["GroupAdd"],
+                "effective_identity": effective_identity,
                 "mount_identity": agent_mount_identity,
+                "workload_export": workload_export,
                 "transport_ca_certificates_sha256": transport_ca,
                 **durable_state,
             }
@@ -1604,6 +1871,7 @@ def collect_agents(
         } != {
             expected_engine["socket_destination"],
             expected_engine["data_destination"],
+            expected_engine["workload_export_destination"],
         }:
             raise RuntimeEvidenceError(f"{engine_service} mount set is invalid")
         volume_prefix = (
@@ -1623,9 +1891,37 @@ def collect_agents(
             read_only=False,
             source=f"{volume_prefix}-data",
         )
+        expected_workload_export_source = (
+            f"{expected_engine['workload_export_root']}/{engine_ordinal:02d}"
+        )
+        workload_export_mount = exact_mount(
+            engine_mounts,
+            destination=expected_engine["workload_export_destination"],
+            mount_type="bind",
+            read_only=expected_engine["workload_export_read_only"],
+            source=expected_workload_export_source,
+        )
         if socket_mount["source"] != agent_mount_identity["socket_volume"]:
             raise RuntimeEvidenceError(
                 "Agent is not bound to its exact isolated Engine socket"
+            )
+        if workload_export_mount["source"] != agent_mount_identity["export_source"]:
+            raise RuntimeEvidenceError(
+                "Engine cannot resolve the exact isolated workload export"
+            )
+        forbidden_engine_destinations = {
+            expected_agent["ledger_destination"],
+            expected_agent["provider_destination"],
+            expected_agent["registry_destination"],
+            expected_agent["ca_destination"],
+        }
+        if any(
+            item.get("Destination") in forbidden_engine_destinations
+            for item in engine_mounts
+            if isinstance(item, dict)
+        ):
+            raise RuntimeEvidenceError(
+                f"{engine_service} can see Agent-internal state or credentials"
             )
         first_port = expected_engine["first_host_port"] + engine_ordinal * 20
         observed_ports = [
@@ -1689,6 +1985,7 @@ def collect_agents(
                 "repo_digest": engine_image["repo_digest"],
                 "socket_volume": socket_mount["source"],
                 "data_volume": data_mount["source"],
+                "workload_export_mount": workload_export_mount,
                 "published_ports": observed_ports,
                 "inner_daemon": inner,
             }
@@ -1859,6 +2156,9 @@ def aggregate(input_dir: pathlib.Path, manifest: dict[str, Any]) -> dict[str, An
             inner = engine.get("inner_daemon", {}) if isinstance(engine, dict) else {}
             node_identity = agent.get("identity", {}) if isinstance(agent, dict) else {}
             ledger = agent.get("ledger", {}) if isinstance(agent, dict) else {}
+            workload_export = (
+                agent.get("workload_export", {}) if isinstance(agent, dict) else {}
+            )
             if (
                 not isinstance(agent, dict)
                 or agent.get("node_id") != expected_node
@@ -1867,6 +2167,17 @@ def aggregate(input_dir: pathlib.Path, manifest: dict[str, Any]) -> dict[str, An
                 or agent.get("repo_digest") != manifest["agent"]["image"]
                 or agent.get("oci_revision") != candidate_sha
                 or agent.get("state") != "RUNNING"
+                or agent.get("primary_user") != manifest["agent"]["primary_user"]
+                or agent.get("socket_supplemental_groups")
+                != manifest["agent"]["socket_supplemental_groups"]
+                or agent.get("effective_identity")
+                != {
+                    "uid": 65_532,
+                    "gid": 65_532,
+                    "supplemental_groups": [10_004],
+                    "docker_socket_gid": 10_004,
+                    "docker_socket_mode": "0660",
+                }
                 or not isinstance(agent.get("container_id"), str)
                 or not agent["container_id"]
                 or not isinstance(agent.get("started_at"), str)
@@ -1876,10 +2187,25 @@ def aggregate(input_dir: pathlib.Path, manifest: dict[str, Any]) -> dict[str, An
                 != {
                     "socket_volume": expected_socket,
                     "ledger_source": f"{manifest['agent']['ledger_root']}/{engine_ordinal:02d}",
+                    "export_source": f"{manifest['agent']['export_root']}/{engine_ordinal:02d}",
                     "ca_source": manifest["agent"]["ca_source"],
                 }
                 or agent.get("transport_ca_certificates_sha256")
                 != node_identity.get("server_ca_certificates_sha256")
+                or agent.get("state_root_owner_uid") != 65_532
+                or agent.get("state_root_mode") not in ("0700", "0750")
+                or workload_export
+                != {
+                    "path": f"{manifest['agent']['export_root']}/{engine_ordinal:02d}",
+                    "owner_uid": 65_532,
+                    "mode": "0700",
+                    "allowed_children": workload_export.get("allowed_children"),
+                }
+                or not isinstance(workload_export.get("allowed_children"), list)
+                or any(
+                    child not in ("runtime-contexts", "resource-outputs")
+                    for child in workload_export.get("allowed_children", [])
+                )
                 or not isinstance(node_identity, dict)
                 or node_identity.get("node_id") != expected_node
                 or node_identity.get("spiffe_id")
@@ -1911,6 +2237,7 @@ def aggregate(input_dir: pathlib.Path, manifest: dict[str, Any]) -> dict[str, An
                 or ledger.get("path")
                 != f"{manifest['agent']['ledger_root']}/{engine_ordinal:02d}/execution-ledger.sqlite3"
                 or ledger.get("format") != "sqlite3"
+                or ledger.get("owner_uid") != 65_532
                 or not isinstance(ledger.get("device"), int)
                 or not isinstance(ledger.get("inode"), int)
                 or ledger.get("inode", 0) <= 0
@@ -1925,6 +2252,15 @@ def aggregate(input_dir: pathlib.Path, manifest: dict[str, Any]) -> dict[str, An
                 or not IMAGE_ID.fullmatch(str(engine.get("image_id", "")))
                 or engine.get("socket_volume") != expected_socket
                 or engine.get("data_volume") != expected_data
+                or engine.get("workload_export_mount")
+                != {
+                    "type": "bind",
+                    "source": f"{manifest['engine']['workload_export_root']}/{engine_ordinal:02d}",
+                    "destination": manifest["engine"]["workload_export_destination"],
+                    "read_only": manifest["engine"]["workload_export_read_only"],
+                }
+                or engine.get("workload_export_mount", {}).get("source")
+                != agent.get("mount_identity", {}).get("export_source")
                 or engine.get("published_ports") != expected_ports
                 or not isinstance(engine.get("container_id"), str)
                 or not engine["container_id"]

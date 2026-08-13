@@ -15,9 +15,9 @@ import (
 	"sync"
 	"testing"
 
+	"ojos-problem-events/problemv1"
 	"ojos-problem-service/internal/config"
 	"ojos-problem-service/internal/packagefs"
-	"ojos-shared/eventing"
 )
 
 func TestSyncProblemFilesUsesImmutableContentAddressedObjects(t *testing.T) {
@@ -304,12 +304,12 @@ type orderedIntentRegistrar struct {
 	events *[]string
 }
 
-func (r *orderedIntentRegistrar) RegisterArtifactUploadIntent(_ context.Context, artifact eventing.ArtifactRef) error {
+func (r *orderedIntentRegistrar) RegisterArtifactUploadIntent(_ context.Context, artifact problemv1.ArtifactRef) error {
 	*r.events = append(*r.events, "intent:"+filepath.Base(artifact.URI))
 	return nil
 }
 
-func (r *orderedIntentRegistrar) MarkArtifactUploadCompleted(_ context.Context, artifact eventing.ArtifactRef) error {
+func (r *orderedIntentRegistrar) MarkArtifactUploadCompleted(_ context.Context, artifact problemv1.ArtifactRef) error {
 	*r.events = append(*r.events, "completed:"+filepath.Base(artifact.URI))
 	return nil
 }

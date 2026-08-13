@@ -92,9 +92,24 @@ impl SqliteOrchestratorStore {
                     "draft revision {expected_draft_revision_id} is missing"
                 ))
             })?;
-        let revision = current
+        let validated = current
             .next(spec, created_at, created_by, message)
             .map_err(domain_error)?;
+        let revision_number = next_persisted_revision_number(&transaction, topology_id)?;
+        let revision = if validated.revision_number() == revision_number {
+            validated
+        } else {
+            TopologyRevision::from_parts(
+                revision_number,
+                Some(current.revision_id().to_string()),
+                None,
+                validated.spec().clone(),
+                validated.created_at(),
+                validated.created_by(),
+                validated.message(),
+            )
+            .map_err(domain_error)?
+        };
         insert_revision(&transaction, &revision)?;
         let changed = transaction.execute(
             "UPDATE orchestrator_topology_heads SET draft_revision_id = ?3, updated_at = unixepoch() WHERE topology_id = ?1 AND draft_revision_id = ?2 AND applying_revision_id IS NULL",
@@ -141,9 +156,24 @@ impl SqliteOrchestratorStore {
             load_revision(&transaction, topology_id, target_revision_id)?.ok_or_else(|| {
                 StorageError::Invariant(format!("rollback target {target_revision_id} is missing"))
             })?;
-        let revision = current
+        let validated = current
             .rollback_to(&target, created_at, created_by, message)
             .map_err(domain_error)?;
+        let revision_number = next_persisted_revision_number(&transaction, topology_id)?;
+        let revision = if validated.revision_number() == revision_number {
+            validated
+        } else {
+            TopologyRevision::from_parts(
+                revision_number,
+                Some(current.revision_id().to_string()),
+                Some(target.revision_id().to_string()),
+                validated.spec().clone(),
+                validated.created_at(),
+                validated.created_by(),
+                validated.message(),
+            )
+            .map_err(domain_error)?
+        };
         insert_revision(&transaction, &revision)?;
         let changed = transaction.execute(
             "UPDATE orchestrator_topology_heads SET draft_revision_id = ?3, updated_at = unixepoch() WHERE topology_id = ?1 AND draft_revision_id = ?2 AND applying_revision_id IS NULL",
@@ -366,13 +396,15 @@ impl SqliteOrchestratorStore {
     ) -> StorageResult<TopologyHeads> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if load_revision(&transaction, topology_id, previous_revision_id)?.is_none() {
-            return Err(StorageError::Invariant(format!(
-                "previous topology revision {previous_revision_id} is missing"
-            )));
-        }
+        ensure_compensation_revisions(
+            &transaction,
+            topology_id,
+            revision_id,
+            previous_revision_id,
+            operation_id,
+        )?;
         let changed = transaction.execute(
-            "UPDATE orchestrator_topology_heads SET applied_revision_id = ?3, last_operation_id = ?4, updated_at = unixepoch() WHERE topology_id = ?1 AND applied_revision_id = ?2 AND applying_revision_id IS NULL AND last_operation_id = ?4",
+            "UPDATE orchestrator_topology_heads SET draft_revision_id = ?3, applied_revision_id = ?3, applying_revision_id = NULL, applying_operation_id = NULL, last_operation_id = ?4, updated_at = unixepoch() WHERE topology_id = ?1 AND draft_revision_id = ?2 AND applied_revision_id = ?2 AND applying_revision_id IS NULL AND applying_operation_id IS NULL AND last_operation_id = ?4",
             params![topology_id, revision_id, previous_revision_id, operation_id],
         )?;
         if changed != 1 {
@@ -380,20 +412,62 @@ impl SqliteOrchestratorStore {
                 "topology {topology_id} completed apply no longer belongs to operation {operation_id}"
             )));
         }
-        let status = TopologyStatus {
-            topology_id: topology_id.to_string(),
-            desired_revision_id: Some(revision_id.to_string()),
-            observed_revision_id: Some(previous_revision_id.to_string()),
-            state: TopologyReconciliationState::Failed,
-            deployments: Vec::new(),
-            endpoints: Vec::new(),
-            links: Vec::new(),
-            drift: Vec::new(),
-            last_operation_id: Some(operation_id.to_string()),
-            updated_at: updated_at.to_string(),
-        };
-        status.validate().map_err(domain_error)?;
-        upsert_status(&transaction, &status)?;
+        upsert_compensated_status(
+            &transaction,
+            topology_id,
+            previous_revision_id,
+            operation_id,
+            updated_at,
+        )?;
+        let completed = load_heads(&transaction, topology_id)?.ok_or_else(|| {
+            StorageError::Invariant(format!("topology {topology_id} head disappeared"))
+        })?;
+        transaction.commit()?;
+        Ok(completed)
+    }
+
+    /// Atomically publishes a successful provider/binding ABORT while the
+    /// candidate still owns the apply lease. A normal failed apply deliberately
+    /// keeps its draft retryable; only this explicit compensated transition
+    /// rewinds both durable heads to the previously applied revision.
+    pub fn complete_compensated_topology_abort(
+        &self,
+        topology_id: &str,
+        candidate_revision_id: &str,
+        previous_revision_id: &str,
+        operation_id: &str,
+        updated_at: &str,
+    ) -> StorageResult<TopologyHeads> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_compensation_revisions(
+            &transaction,
+            topology_id,
+            candidate_revision_id,
+            previous_revision_id,
+            operation_id,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE orchestrator_topology_heads SET draft_revision_id = ?3, applied_revision_id = ?3, applying_revision_id = NULL, applying_operation_id = NULL, last_operation_id = ?4, updated_at = unixepoch() WHERE topology_id = ?1 AND draft_revision_id = ?2 AND applying_revision_id = ?2 AND applying_operation_id = ?4 AND applied_revision_id = ?3",
+            params![
+                topology_id,
+                candidate_revision_id,
+                previous_revision_id,
+                operation_id
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::Conflict(format!(
+                "topology {topology_id} compensated abort no longer owns candidate {candidate_revision_id} for operation {operation_id}"
+            )));
+        }
+        upsert_compensated_status(
+            &transaction,
+            topology_id,
+            previous_revision_id,
+            operation_id,
+            updated_at,
+        )?;
         let completed = load_heads(&transaction, topology_id)?.ok_or_else(|| {
             StorageError::Invariant(format!("topology {topology_id} head disappeared"))
         })?;
@@ -698,7 +772,7 @@ fn finish_topology_apply_group_transaction(
                     binding.topology_id,
                     binding.topology_revision_id,
                     binding.api_id,
-                    binding_state_label(binding.state),
+                    binding_state_label(binding.derived_state()),
                     serde_json::to_string(binding)?,
                 ],
             )?;
@@ -778,6 +852,24 @@ fn insert_revision(
     Ok(())
 }
 
+fn next_persisted_revision_number(
+    transaction: &Transaction<'_>,
+    topology_id: &str,
+) -> StorageResult<u64> {
+    let maximum = transaction.query_row(
+        "SELECT MAX(revision_number) FROM orchestrator_topology_revisions WHERE topology_id = ?1",
+        [topology_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )?;
+    let maximum = maximum.ok_or_else(|| {
+        StorageError::Invariant(format!("topology {topology_id} has no revision history"))
+    })?;
+    u64::try_from(maximum)
+        .map_err(|_| StorageError::Invariant("negative topology revision number".to_string()))?
+        .checked_add(1)
+        .ok_or_else(|| StorageError::Invariant("topology revision number overflow".to_string()))
+}
+
 fn load_revision(
     connection: &rusqlite::Connection,
     topology_id: &str,
@@ -837,6 +929,60 @@ fn ensure_status_revision(
         )));
     }
     Ok(())
+}
+
+fn ensure_compensation_revisions(
+    transaction: &Transaction<'_>,
+    topology_id: &str,
+    candidate_revision_id: &str,
+    previous_revision_id: &str,
+    operation_id: &str,
+) -> StorageResult<()> {
+    if topology_id.trim().is_empty()
+        || candidate_revision_id.trim().is_empty()
+        || previous_revision_id.trim().is_empty()
+        || operation_id.trim().is_empty()
+        || candidate_revision_id == previous_revision_id
+    {
+        return Err(StorageError::Invariant(
+            "compensated topology abort requires distinct non-empty candidate/previous revisions and a non-empty operation_id"
+                .to_string(),
+        ));
+    }
+    if load_revision(transaction, topology_id, candidate_revision_id)?.is_none() {
+        return Err(StorageError::Invariant(format!(
+            "candidate topology revision {candidate_revision_id} is missing"
+        )));
+    }
+    if load_revision(transaction, topology_id, previous_revision_id)?.is_none() {
+        return Err(StorageError::Invariant(format!(
+            "previous topology revision {previous_revision_id} is missing; an initial topology apply cannot be automatically rewound"
+        )));
+    }
+    Ok(())
+}
+
+fn upsert_compensated_status(
+    transaction: &Transaction<'_>,
+    topology_id: &str,
+    previous_revision_id: &str,
+    operation_id: &str,
+    updated_at: &str,
+) -> StorageResult<()> {
+    let status = TopologyStatus {
+        topology_id: topology_id.to_string(),
+        desired_revision_id: Some(previous_revision_id.to_string()),
+        observed_revision_id: Some(previous_revision_id.to_string()),
+        state: TopologyReconciliationState::InSync,
+        deployments: Vec::new(),
+        endpoints: Vec::new(),
+        links: Vec::new(),
+        drift: Vec::new(),
+        last_operation_id: Some(operation_id.to_string()),
+        updated_at: updated_at.to_string(),
+    };
+    status.validate().map_err(domain_error)?;
+    upsert_status(transaction, &status)
 }
 
 fn upsert_status(transaction: &Transaction<'_>, status: &TopologyStatus) -> StorageResult<()> {
@@ -931,6 +1077,7 @@ mod tests {
     use orchestrator_control_plane::{
         ClaimRequest, CompleteRequest, CompletionStatus, JobKind, JobStore, NewJob,
     };
+    use orchestrator_legacy::{ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState};
     use orchestrator_legacy::{TopologyEndpointSpec, TopologyLinkSpec};
     use serde_json::json;
     use tempfile::tempdir;
@@ -1019,9 +1166,9 @@ mod tests {
             credential_ref: String::new(),
             credential_generation: 2,
             context_generation: 2,
-            desired_state: "ACTIVE".to_string(),
-            observed_state: "ACTIVE".to_string(),
-            health: "HEALTHY".to_string(),
+            desired_state: ApiBindingDesiredState::Active,
+            observed_state: ApiBindingObservedState::Active,
+            health: ApiBindingHealth::Healthy,
             drift: Vec::new(),
             last_operation_id: operation_id.to_string(),
             state: ApiBindingState::Active,
@@ -1149,6 +1296,341 @@ mod tests {
             store.topology_status("primary").unwrap().unwrap().state,
             TopologyReconciliationState::InSync
         );
+    }
+
+    #[test]
+    fn compensated_abort_rewinds_both_heads_but_normal_failure_keeps_retryable_draft() {
+        let (_directory, store) = store();
+        let first = store
+            .create_initial_topology_revision(spec("primary", "first"), "t1", "admin", "initial")
+            .unwrap();
+        store
+            .begin_topology_apply("primary", first.revision_id(), "op-seed", "t2")
+            .unwrap();
+        store
+            .finish_topology_apply(
+                "primary",
+                first.revision_id(),
+                "op-seed",
+                TopologyApplyOutcome::Succeeded,
+                "t3",
+            )
+            .unwrap();
+        let second = store
+            .create_next_topology_revision(
+                "primary",
+                first.revision_id(),
+                spec("primary", "second"),
+                "t4",
+                "admin",
+                "candidate",
+            )
+            .unwrap();
+        store
+            .begin_topology_apply("primary", second.revision_id(), "op-failed", "t5")
+            .unwrap();
+        let failed = store
+            .finish_topology_apply(
+                "primary",
+                second.revision_id(),
+                "op-failed",
+                TopologyApplyOutcome::Failed,
+                "t6",
+            )
+            .unwrap();
+        assert_eq!(failed.draft_revision_id, second.revision_id());
+        assert_eq!(
+            failed.applied_revision_id.as_deref(),
+            Some(first.revision_id())
+        );
+
+        store
+            .begin_topology_apply("primary", second.revision_id(), "op-abort", "t7")
+            .unwrap();
+        let restored = store
+            .complete_compensated_topology_abort(
+                "primary",
+                second.revision_id(),
+                first.revision_id(),
+                "op-abort",
+                "t8",
+            )
+            .unwrap();
+        assert_eq!(restored.draft_revision_id, first.revision_id());
+        assert_eq!(
+            restored.applied_revision_id.as_deref(),
+            Some(first.revision_id())
+        );
+        assert!(restored.applying_revision_id.is_none());
+        assert!(restored.applying_operation_id.is_none());
+        assert_eq!(restored.last_operation_id.as_deref(), Some("op-abort"));
+        assert!(
+            store
+                .topology_revision("primary", second.revision_id())
+                .unwrap()
+                .is_some(),
+            "immutable candidate history must be retained"
+        );
+        let status = store.topology_status("primary").unwrap().unwrap();
+        assert_eq!(
+            status.desired_revision_id.as_deref(),
+            Some(first.revision_id())
+        );
+        assert_eq!(
+            status.observed_revision_id.as_deref(),
+            Some(first.revision_id())
+        );
+        assert_eq!(status.state, TopologyReconciliationState::InSync);
+
+        let next_after_abort = store
+            .create_next_topology_revision(
+                "primary",
+                first.revision_id(),
+                spec("primary", "next after abort"),
+                "t9",
+                "admin",
+                "new candidate after immutable aborted history",
+            )
+            .unwrap();
+        assert_eq!(next_after_abort.revision_number(), 3);
+        assert_eq!(
+            next_after_abort.parent_revision_id(),
+            Some(first.revision_id())
+        );
+        assert!(
+            store
+                .topology_revision("primary", second.revision_id())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn completed_apply_compensation_rewinds_both_heads() {
+        let (_directory, store) = store();
+        let first = store
+            .create_initial_topology_revision(spec("primary", "first"), "t1", "admin", "initial")
+            .unwrap();
+        store
+            .begin_topology_apply("primary", first.revision_id(), "op-seed", "t2")
+            .unwrap();
+        store
+            .finish_topology_apply(
+                "primary",
+                first.revision_id(),
+                "op-seed",
+                TopologyApplyOutcome::Succeeded,
+                "t3",
+            )
+            .unwrap();
+        let second = store
+            .create_next_topology_revision(
+                "primary",
+                first.revision_id(),
+                spec("primary", "second"),
+                "t4",
+                "admin",
+                "candidate",
+            )
+            .unwrap();
+        store
+            .begin_topology_apply("primary", second.revision_id(), "op-commit", "t5")
+            .unwrap();
+        store
+            .finish_topology_apply(
+                "primary",
+                second.revision_id(),
+                "op-commit",
+                TopologyApplyOutcome::Succeeded,
+                "t6",
+            )
+            .unwrap();
+
+        let restored = store
+            .compensate_completed_topology_apply(
+                "primary",
+                second.revision_id(),
+                first.revision_id(),
+                "op-commit",
+                "t7",
+            )
+            .unwrap();
+        assert_eq!(restored.draft_revision_id, first.revision_id());
+        assert_eq!(
+            restored.applied_revision_id.as_deref(),
+            Some(first.revision_id())
+        );
+        assert_eq!(
+            store.topology_status("primary").unwrap().unwrap().state,
+            TopologyReconciliationState::InSync
+        );
+    }
+
+    #[test]
+    fn compensated_abort_cas_rejects_stale_operation_and_new_draft_without_mutation() {
+        let (_directory, store) = store();
+        let first = store
+            .create_initial_topology_revision(spec("primary", "first"), "t1", "admin", "initial")
+            .unwrap();
+        store
+            .begin_topology_apply("primary", first.revision_id(), "op-seed", "t2")
+            .unwrap();
+        store
+            .finish_topology_apply(
+                "primary",
+                first.revision_id(),
+                "op-seed",
+                TopologyApplyOutcome::Succeeded,
+                "t3",
+            )
+            .unwrap();
+        let second = store
+            .create_next_topology_revision(
+                "primary",
+                first.revision_id(),
+                spec("primary", "second"),
+                "t4",
+                "admin",
+                "candidate",
+            )
+            .unwrap();
+        store
+            .begin_topology_apply("primary", second.revision_id(), "op-abort", "t5")
+            .unwrap();
+        let before_wrong_operation = store.topology_heads("primary").unwrap().unwrap();
+        assert!(matches!(
+            store.complete_compensated_topology_abort(
+                "primary",
+                second.revision_id(),
+                first.revision_id(),
+                "op-stale",
+                "t6",
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        assert_eq!(
+            store.topology_heads("primary").unwrap().unwrap(),
+            before_wrong_operation
+        );
+
+        store
+            .finish_topology_apply(
+                "primary",
+                second.revision_id(),
+                "op-abort",
+                TopologyApplyOutcome::Succeeded,
+                "t7",
+            )
+            .unwrap();
+        let third = store
+            .create_next_topology_revision(
+                "primary",
+                second.revision_id(),
+                spec("primary", "third"),
+                "t8",
+                "admin",
+                "new writer",
+            )
+            .unwrap();
+        let before_stale_compensation = store.topology_heads("primary").unwrap().unwrap();
+        assert_eq!(
+            before_stale_compensation.draft_revision_id,
+            third.revision_id()
+        );
+        assert!(matches!(
+            store.compensate_completed_topology_apply(
+                "primary",
+                second.revision_id(),
+                first.revision_id(),
+                "op-abort",
+                "t9",
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        assert_eq!(
+            store.topology_heads("primary").unwrap().unwrap(),
+            before_stale_compensation
+        );
+    }
+
+    #[test]
+    fn rollback_after_compensated_abort_uses_history_max_without_false_parent() {
+        let (_directory, store) = store();
+        let first = store
+            .create_initial_topology_revision(spec("primary", "first"), "t1", "admin", "initial")
+            .unwrap();
+        let second = store
+            .create_next_topology_revision(
+                "primary",
+                first.revision_id(),
+                spec("primary", "second"),
+                "t2",
+                "admin",
+                "second",
+            )
+            .unwrap();
+        let third = store
+            .create_next_topology_revision(
+                "primary",
+                second.revision_id(),
+                spec("primary", "third"),
+                "t3",
+                "admin",
+                "third",
+            )
+            .unwrap();
+        store
+            .begin_topology_apply("primary", third.revision_id(), "op-active", "t4")
+            .unwrap();
+        store
+            .finish_topology_apply(
+                "primary",
+                third.revision_id(),
+                "op-active",
+                TopologyApplyOutcome::Succeeded,
+                "t5",
+            )
+            .unwrap();
+        let aborted = store
+            .create_next_topology_revision(
+                "primary",
+                third.revision_id(),
+                spec("primary", "aborted"),
+                "t6",
+                "admin",
+                "aborted",
+            )
+            .unwrap();
+        store
+            .begin_topology_apply("primary", aborted.revision_id(), "op-abort", "t7")
+            .unwrap();
+        store
+            .complete_compensated_topology_abort(
+                "primary",
+                aborted.revision_id(),
+                third.revision_id(),
+                "op-abort",
+                "t8",
+            )
+            .unwrap();
+
+        let rollback = store
+            .create_topology_rollback_revision(
+                "primary",
+                third.revision_id(),
+                second.revision_id(),
+                "t9",
+                "admin",
+                "rollback after abort",
+            )
+            .unwrap();
+        assert_eq!(rollback.revision_number(), 5);
+        assert_eq!(rollback.parent_revision_id(), Some(third.revision_id()));
+        assert_eq!(
+            rollback.rollback_of_revision_id(),
+            Some(second.revision_id())
+        );
+        assert_eq!(store.topology_revisions("primary").unwrap().len(), 5);
     }
 
     #[test]
@@ -1510,9 +1992,9 @@ mod tests {
             first.revision_id(),
             operation_id,
         );
-        revoked_echo.desired_state = "REVOKED".to_string();
-        revoked_echo.observed_state = "REVOKED".to_string();
-        revoked_echo.health = "UNKNOWN".to_string();
+        revoked_echo.desired_state = ApiBindingDesiredState::Revoked;
+        revoked_echo.observed_state = ApiBindingObservedState::Revoked;
+        revoked_echo.health = ApiBindingHealth::Unknown;
         revoked_echo.state = ApiBindingState::Revoked;
         revoked_echo.optional = true;
         let members = vec![
@@ -1554,8 +2036,8 @@ mod tests {
 
         let mut pending = members.clone();
         let pending_binding = &mut pending[0].active_bindings[0];
-        pending_binding.observed_state = "PENDING".to_string();
-        pending_binding.health = "UNKNOWN".to_string();
+        pending_binding.observed_state = ApiBindingObservedState::Pending;
+        pending_binding.health = ApiBindingHealth::Unknown;
         pending_binding.state = ApiBindingState::Pending;
         assert!(matches!(
             store.finish_topology_apply_group(&pending, operation_id, "t3"),

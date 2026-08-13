@@ -25,7 +25,7 @@ func NewAdminWorkersLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Admi
 }
 
 func (l *AdminWorkersLogic) AdminWorkers() (resp *types.AdminWorkersResp, err error) {
-	if err := requireJudgeAdmin(l.ctx, l.svcCtx); err != nil {
+	if err := requireJudgePermission(l.ctx, l.svcCtx, "judge.worker.status"); err != nil {
 		return nil, err
 	}
 

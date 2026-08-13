@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -16,11 +17,24 @@ type SQLExecutor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
+// TypedEvent is an envelope that has already passed its domain codec. Keeping
+// this wrapper opaque prevents business publishers from bypassing type/schema
+// and payload validation before writing the durable outbox.
+type TypedEvent struct {
+	envelope Envelope
+}
+
+func (event TypedEvent) Envelope() Envelope { return event.envelope }
+
 // Enqueue writes an event through the caller's transaction. Passing a pool is
 // supported for repair tools, but mutation paths must pass their active pgx.Tx.
-func Enqueue(ctx context.Context, db SQLExecutor, envelope Envelope) error {
+func Enqueue(ctx context.Context, db SQLExecutor, event TypedEvent) error {
 	if db == nil {
 		return errors.New("outbox database is not configured")
+	}
+	envelope := event.envelope
+	if envelope.Type == "" {
+		return errors.New("outbox event was not produced by a codec")
 	}
 	if err := envelope.Validate(); err != nil {
 		return err
@@ -42,18 +56,28 @@ INSERT INTO integration_outbox(
 )
 VALUES($1, $2, $3, $4, $5, $6::jsonb, $7, NOW())
 ON CONFLICT(event_id) DO NOTHING
-`, envelope.ID, aggregateType(envelope.Type), envelope.Subject, envelope.AggregateVersion, envelope.Type, payload, envelope.Time)
+`, envelope.ID, aggregateType(envelope.Subject), envelope.Subject, envelope.AggregateVersion, envelope.Type, payload, envelope.Time)
 	return err
 }
 
 type Relay struct {
 	DB            *pgxpool.Pool
 	Redis         redis.UniversalClient
-	Stream        string
 	RelayID       string
 	BatchSize     int
 	LeaseDuration time.Duration
 	PollInterval  time.Duration
+	streamName    string
+}
+
+func NewRelay(db *pgxpool.Pool, redisClient redis.UniversalClient, transport TransportConfig) (*Relay, error) {
+	if transport.stream == "" {
+		return nil, errors.New("outbox relay transport stream is required")
+	}
+	if db == nil || redisClient == nil {
+		return nil, errors.New("outbox relay dependencies are not configured")
+	}
+	return &Relay{DB: db, Redis: redisClient, streamName: transport.stream}, nil
 }
 
 type outboxRecord struct {
@@ -110,9 +134,9 @@ func (r *Relay) PublishBatch(ctx context.Context) (int, error) {
 	if r.DB == nil || r.Redis == nil {
 		return 0, errors.New("outbox relay dependencies are not configured")
 	}
-	stream := r.Stream
+	stream := r.streamName
 	if stream == "" {
-		stream = "ojos:integration:problem:v1"
+		stream = DefaultEventStream
 	}
 	relayID := r.RelayID
 	if relayID == "" {
@@ -219,9 +243,18 @@ WHERE sequence = $1 AND lease_owner = $2 AND published_at IS NULL
 `, record.Sequence, relayID, intervalLiteral(delay), truncateError(publishErr))
 }
 
-func aggregateType(eventType string) string {
-	if eventType == ProblemSnapshotV1 || eventType == ProblemDeletedV1 {
-		return "problem"
+func aggregateType(subject string) string {
+	// The outbox aggregate is a transport/indexing concern. Derive it from the
+	// generic CloudEvents subject instead of maintaining an event-type registry.
+	subject = strings.TrimSpace(subject)
+	if separator := strings.IndexByte(subject, '/'); separator > 0 {
+		candidate := subject[:separator]
+		for _, char := range candidate {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' && char != '_' {
+				return "integration"
+			}
+		}
+		return candidate
 	}
 	return "integration"
 }

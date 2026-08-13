@@ -6,7 +6,8 @@
 
 use crate::api_client::{
     ApiClient, ApiError, ApiSuccess, CapabilitySet, CatalogSourceInput, InstallApiBindingSelection,
-    InstallTopologySelection, StoreInstallInput, StorePackageQuery, StorePipelineOptions,
+    InstallTopologySelection, ResourcePurgeInput, StoreInstallInput, StorePackageQuery,
+    StorePipelineOptions,
 };
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -20,12 +21,16 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::fs;
 use std::io;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+
+const COMPOSITION_TUI_STATUS_KEY: &str = "tui_composition_status";
+const COMPOSITION_TUI_NOTICE: &str = "Composition install input editing is unsupported in this TUI; use the Web manager to supply inputs and install.";
+const COMPOSITION_TUI_MALFORMED: &str = "Composition status unavailable: the control-plane CompositionPlan response was malformed. Use the Web manager; this TUI will not display or install it.";
 
 #[cfg(test)]
 const TUI_V1_CONTROL_ACTIONS: &[&str] = &[
@@ -70,6 +75,7 @@ const TUI_V1_CONTROL_ACTIONS: &[&str] = &[
     "deployment.stop",
     "deployment.restart",
     "deployment.uninstall",
+    "resource.purge",
     "diagnostic.create",
     "diagnostic.list",
     "diagnostic.get",
@@ -319,6 +325,14 @@ pub enum RemoteCommand {
     DeploymentAction {
         deployment_id: String,
         action: String,
+    },
+    ResourcePurge {
+        claim_id: String,
+        node_id: String,
+        claim_digest: String,
+        generation: u64,
+        confirmation: String,
+        reason: String,
     },
     DiagnosticList {
         cursor: Option<String>,
@@ -735,6 +749,25 @@ impl RemoteCommand {
                 deployment_id: (*deployment_id).to_string(),
                 action: (*action).to_string(),
             },
+            [
+                "resource",
+                "purge",
+                claim_id,
+                node_id,
+                claim_digest,
+                generation,
+                confirmation,
+                reason,
+            ] => Self::ResourcePurge {
+                claim_id: (*claim_id).to_string(),
+                node_id: (*node_id).to_string(),
+                claim_digest: (*claim_digest).to_string(),
+                generation: generation.parse::<u64>().map_err(|_| {
+                    "resource purge generation must be an integer of at least 1".to_string()
+                })?,
+                confirmation: (*confirmation).to_string(),
+                reason: (*reason).to_string(),
+            },
             ["diagnostic", "list"] => Self::DiagnosticList { cursor: None },
             ["diagnostic", "list", cursor] => Self::DiagnosticList {
                 cursor: optional_token(cursor),
@@ -824,8 +857,9 @@ impl RemoteCommand {
                     },
                 );
                 let fingerprint = selection_fingerprint(&body);
-                let response = client.validate_release(body)?;
-                Ok(with_selection_fingerprint(response, &fingerprint))
+                let response = client.validate_release(body.clone())?;
+                let response = with_selection_fingerprint(response, &fingerprint);
+                Ok(with_composition_tui_status(response, &body))
             }
             Self::StoreInstall {
                 service_id,
@@ -1038,6 +1072,23 @@ impl RemoteCommand {
                 deployment_id,
                 action,
             } => client.mutate_deployment(deployment_id, action),
+            Self::ResourcePurge {
+                claim_id,
+                node_id,
+                claim_digest,
+                generation,
+                confirmation,
+                reason,
+            } => client.purge_resource_claim(
+                claim_id,
+                ResourcePurgeInput {
+                    node_id: node_id.clone(),
+                    claim_digest: claim_digest.clone(),
+                    generation: *generation,
+                    confirmation: confirmation.clone(),
+                    reason: reason.clone(),
+                },
+            ),
             Self::DiagnosticList { cursor } => client.list_diagnostics(cursor.as_deref()),
             Self::DiagnosticCreate => client.create_diagnostic(json!({})),
             Self::DiagnosticGet { report_id } => client.diagnostic(report_id),
@@ -1106,6 +1157,7 @@ impl RemoteCommand {
             }
             Self::DeploymentHealth { .. } => Some("deployment.health".to_string()),
             Self::DeploymentAction { action, .. } => Some(format!("deployment.{action}")),
+            Self::ResourcePurge { .. } => Some("resource.purge".to_string()),
             Self::DiagnosticList { .. } => Some("diagnostic.list".to_string()),
             Self::DiagnosticCreate => Some("diagnostic.create".to_string()),
             Self::DiagnosticGet { .. } => Some("diagnostic.get".to_string()),
@@ -1298,8 +1350,7 @@ impl RemoteApp {
                         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
                         self.next_cursor.clone_from(&response.meta.next_cursor);
                     }
-                    self.detail = serde_json::to_string_pretty(&response.data)
-                        .unwrap_or_else(|_| response.data.to_string());
+                    self.detail = remote_response_detail(&event.command, &response.data);
                     self.message = format!(
                         "HTTP {} · request {}{}",
                         response.status,
@@ -1316,6 +1367,13 @@ impl RemoteApp {
                             serde_json::from_value::<Vec<String>>(response.data["actions"].clone())
                     {
                         self.message = format!("{} published capabilities", actions.len());
+                    }
+                    if matches!(event.command, RemoteCommand::StoreValidate { .. })
+                        && response.data.get(COMPOSITION_TUI_STATUS_KEY).is_some()
+                    {
+                        self.message.push_str(
+                            " · Composition inputs are read-only here; use Web to edit/install",
+                        );
                     }
                 }
                 Err(error) => {
@@ -1972,6 +2030,407 @@ fn with_selection_fingerprint(mut response: ApiSuccess, fingerprint: &str) -> Ap
     response
 }
 
+fn with_composition_tui_status(mut response: ApiSuccess, submitted: &Value) -> ApiSuccess {
+    if !has_composition_plan_field(&response.data) {
+        return response;
+    }
+    let secret_values = submitted_secret_ref_values(&response.data, submitted);
+    redact_strings(&mut response.data, &secret_values);
+    let summary = composition_tui_status(&response.data, submitted)
+        .unwrap_or_else(|| json!({"error": COMPOSITION_TUI_MALFORMED}));
+    if let Some(data) = response.data.as_object_mut() {
+        data.insert(COMPOSITION_TUI_STATUS_KEY.to_string(), summary);
+    }
+    response
+}
+
+fn composition_tui_status(data: &Value, submitted: &Value) -> Option<Value> {
+    let plan = data
+        .get("composition_plan")
+        .or_else(|| data.get("compositionPlan"))?
+        .as_object()
+        .filter(|plan| !plan.is_empty())?;
+    let root_service_id = string_field(plan, "rootServiceId", "root_service_id")?;
+    let plan_digest = string_field(plan, "planDigest", "plan_digest")?;
+    let release_graph_digest = string_field(plan, "releaseGraphDigest", "release_graph_digest")?;
+    let plan_nodes = value_field(plan, "nodes", "nodes")?.as_array()?;
+    let nodes = plan_nodes
+        .iter()
+        .map(|node| composition_node_status(node, Some(root_service_id), submitted))
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut status = Map::new();
+    status.insert(
+        "plan_digest".to_string(),
+        Value::String(plan_digest.to_string()),
+    );
+    status.insert(
+        "release_graph_digest".to_string(),
+        Value::String(release_graph_digest.to_string()),
+    );
+    status.insert(
+        "root_service_id".to_string(),
+        Value::String(root_service_id.to_string()),
+    );
+    if let Some(valid) = data
+        .get("composition_inputs_valid")
+        .or_else(|| data.get("compositionInputsValid"))
+        .and_then(Value::as_bool)
+    {
+        status.insert("inputs_valid".to_string(), Value::Bool(valid));
+    }
+    if let Some(error) = data
+        .get("composition_input_error")
+        .or_else(|| data.get("compositionInputError"))
+        .and_then(Value::as_str)
+        .filter(|error| !error.trim().is_empty())
+    {
+        let mut error = error.to_string();
+        redact_text(&mut error, &submitted_secret_ref_values(data, submitted));
+        status.insert("input_error".to_string(), Value::String(error));
+    }
+    status.insert("nodes".to_string(), Value::Array(nodes));
+    status.insert(
+        "install_input_editing".to_string(),
+        Value::String("UNSUPPORTED".to_string()),
+    );
+    status.insert(
+        "notice".to_string(),
+        Value::String(COMPOSITION_TUI_NOTICE.to_string()),
+    );
+    Some(Value::Object(status))
+}
+
+fn has_composition_plan_field(data: &Value) -> bool {
+    data.get("composition_plan")
+        .or_else(|| data.get("compositionPlan"))
+        .is_some_and(|plan| !plan.is_null())
+}
+
+fn composition_node_status(
+    node: &Value,
+    root_service_id: Option<&str>,
+    submitted: &Value,
+) -> Option<Value> {
+    let node = node.as_object()?;
+    let node_id = string_field(node, "nodeId", "node_id")?;
+    let kind = string_field(node, "kind", "kind").unwrap_or("unknown");
+    let mut status = Map::new();
+    status.insert("node_id".to_string(), Value::String(node_id.to_string()));
+    insert_string_field(
+        &mut status,
+        "service_id",
+        value_field(node, "serviceId", "service_id"),
+    );
+    status.insert("kind".to_string(), Value::String(kind.to_string()));
+    insert_string_field(&mut status, "name", value_field(node, "name", "name"));
+    insert_string_field(
+        &mut status,
+        "resource_type",
+        value_field(node, "resourceType", "resource_type"),
+    );
+    insert_string_field(
+        &mut status,
+        "lifecycle",
+        value_field(node, "lifecycle", "lifecycle"),
+    );
+
+    if let Some(provider) = value_field(node, "provider", "provider") {
+        status.insert(
+            "provider".to_string(),
+            provider_status(provider.as_object()?, node_id, submitted),
+        );
+    }
+
+    let inputs = value_field(node, "unresolvedInputs", "unresolved_inputs")?
+        .as_array()?
+        .iter()
+        .map(|declaration| {
+            composition_input_status(node, node_id, kind, root_service_id, declaration, submitted)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    status.insert("unresolved_inputs".to_string(), Value::Array(inputs));
+    Some(Value::Object(status))
+}
+
+fn provider_status(provider: &Map<String, Value>, node_id: &str, submitted: &Value) -> Value {
+    let candidates = value_field(provider, "candidates", "candidates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|candidate| {
+            let candidate = candidate.as_object()?;
+            let provider_id = string_field(candidate, "providerId", "provider_id")?;
+            let mut status = Map::new();
+            status.insert(
+                "provider_id".to_string(),
+                Value::String(provider_id.to_string()),
+            );
+            status.insert(
+                "kind".to_string(),
+                Value::String(
+                    string_field(candidate, "kind", "kind")
+                        .unwrap_or("UNKNOWN")
+                        .to_ascii_uppercase(),
+                ),
+            );
+            insert_string_field(
+                &mut status,
+                "service_id",
+                value_field(candidate, "serviceId", "service_id"),
+            );
+            Some(Value::Object(status))
+        })
+        .collect::<Vec<_>>();
+    let planned_id = string_field(provider, "selectedProviderId", "selected_provider_id");
+    let requested_id = submitted
+        .get("inputs")
+        .and_then(Value::as_object)
+        .and_then(|inputs| inputs.get(node_id))
+        .and_then(Value::as_object)
+        .and_then(|inputs| {
+            inputs
+                .get("providerId")
+                .or_else(|| inputs.get("provider_id"))
+        })
+        .and_then(Value::as_str)
+        .filter(|provider_id| !provider_id.trim().is_empty());
+    let selected_id = planned_id.or_else(|| {
+        requested_id.filter(|requested| {
+            candidates.iter().any(|candidate| {
+                candidate.get("provider_id").and_then(Value::as_str) == Some(*requested)
+            })
+        })
+    });
+    let source = if planned_id.is_some() {
+        "plan"
+    } else if selected_id.is_some() {
+        "request"
+    } else if requested_id.is_some() {
+        "invalid"
+    } else {
+        "none"
+    };
+    let selected = selected_id.map(|provider_id| {
+        let kind = candidates
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|candidate| {
+                candidate.get("provider_id").and_then(Value::as_str) == Some(provider_id)
+            })
+            .and_then(|candidate| candidate.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("UNKNOWN");
+        json!({"provider_id": provider_id, "kind": kind, "source": source})
+    });
+    json!({
+        "selected": selected,
+        "selection_status": if source == "invalid" { "invalid" } else if selected_id.is_some() { "selected" } else { "unresolved" },
+        "candidates": candidates,
+    })
+}
+
+fn composition_input_status(
+    node: &Map<String, Value>,
+    node_id: &str,
+    node_kind: &str,
+    root_service_id: Option<&str>,
+    declaration: &Value,
+    submitted: &Value,
+) -> Option<Value> {
+    let declaration = declaration.as_object()?;
+    let name = string_field(declaration, "key", "key")?;
+    let value_type = string_field(declaration, "valueType", "value_type").unwrap_or("unknown");
+    let required = value_field(declaration, "required", "required")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let sensitive = value_field(declaration, "sensitive", "sensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| value_type.eq_ignore_ascii_case("secret-ref"));
+    let provided = submitted_node_input(submitted, node_id, name)
+        || submitted_legacy_input(
+            submitted,
+            node,
+            node_kind,
+            root_service_id,
+            name,
+            value_type,
+        );
+    Some(json!({
+        "name": name,
+        "type": value_type,
+        "required": required,
+        "sensitive": sensitive,
+        "state": if provided { "provided" } else { "missing" },
+    }))
+}
+
+fn submitted_node_input(submitted: &Value, node_id: &str, key: &str) -> bool {
+    submitted
+        .get("inputs")
+        .and_then(Value::as_object)
+        .and_then(|inputs| inputs.get(node_id))
+        .and_then(Value::as_object)
+        .and_then(|values| values.get(key))
+        .is_some_and(value_is_present)
+}
+
+fn submitted_legacy_input(
+    submitted: &Value,
+    node: &Map<String, Value>,
+    node_kind: &str,
+    root_service_id: Option<&str>,
+    key: &str,
+    value_type: &str,
+) -> bool {
+    if node_kind.eq_ignore_ascii_case("config")
+        && value_type.eq_ignore_ascii_case("json-object")
+        && key == "config"
+    {
+        return submitted.get("config").is_some_and(value_is_present);
+    }
+    if !node_kind.eq_ignore_ascii_case("secret") && !value_type.eq_ignore_ascii_case("secret-ref") {
+        return false;
+    }
+    if string_field(node, "serviceId", "service_id") != root_service_id {
+        return false;
+    }
+    let secret_name = string_field(node, "name", "name").unwrap_or(key);
+    submitted
+        .get("secret_refs")
+        .and_then(Value::as_object)
+        .and_then(|references| references.get(secret_name).or_else(|| references.get(key)))
+        .is_some_and(value_is_present)
+}
+
+fn value_is_present(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(value) => !value.trim().is_empty(),
+        _ => true,
+    }
+}
+
+fn submitted_secret_ref_values(data: &Value, submitted: &Value) -> Vec<String> {
+    let mut values = submitted
+        .get("secret_refs")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|references| references.values())
+        .filter_map(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let plan_nodes = data
+        .get("composition_plan")
+        .or_else(|| data.get("compositionPlan"))
+        .and_then(Value::as_object)
+        .and_then(|plan| value_field(plan, "nodes", "nodes"))
+        .and_then(Value::as_array);
+    if let (Some(nodes), Some(inputs)) = (
+        plan_nodes,
+        submitted.get("inputs").and_then(Value::as_object),
+    ) {
+        for node in nodes {
+            let Some(node) = node.as_object() else {
+                continue;
+            };
+            let Some(node_id) = string_field(node, "nodeId", "node_id") else {
+                continue;
+            };
+            let Some(submitted_values) = inputs.get(node_id).and_then(Value::as_object) else {
+                continue;
+            };
+            for declaration in value_field(node, "unresolvedInputs", "unresolved_inputs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(declaration) = declaration.as_object() else {
+                    continue;
+                };
+                let sensitive = value_field(declaration, "sensitive", "sensitive")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let Some(key) = string_field(declaration, "key", "key") else {
+                    continue;
+                };
+                if sensitive
+                    && let Some(value) = submitted_values.get(key).and_then(Value::as_str)
+                    && !value.is_empty()
+                {
+                    values.push(value.to_string());
+                }
+            }
+        }
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn redact_strings(value: &mut Value, secrets: &[String]) {
+    match value {
+        Value::String(value) => redact_text(value, secrets),
+        Value::Array(values) => {
+            for value in values {
+                redact_strings(value, secrets);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_strings(value, secrets);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_text(value: &mut String, secrets: &[String]) {
+    for secret in secrets {
+        if value.contains(secret) {
+            *value = value.replace(secret, "[REDACTED]");
+        }
+    }
+}
+
+fn remote_response_detail(command: &RemoteCommand, data: &Value) -> String {
+    if !matches!(command, RemoteCommand::StoreValidate { .. }) || !has_composition_plan_field(data)
+    {
+        return serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());
+    }
+    let Some(status) = data.get(COMPOSITION_TUI_STATUS_KEY) else {
+        return COMPOSITION_TUI_MALFORMED.to_string();
+    };
+    if status.get("error").is_some() {
+        return COMPOSITION_TUI_MALFORMED.to_string();
+    }
+    let summary = serde_json::to_string_pretty(status).unwrap_or_else(|_| status.to_string());
+    format!("Composition status (read-only)\n{summary}")
+}
+
+fn value_field<'a>(
+    object: &'a Map<String, Value>,
+    camel_case: &str,
+    snake_case: &str,
+) -> Option<&'a Value> {
+    object.get(camel_case).or_else(|| object.get(snake_case))
+}
+
+fn string_field<'a>(
+    object: &'a Map<String, Value>,
+    camel_case: &str,
+    snake_case: &str,
+) -> Option<&'a str> {
+    value_field(object, camel_case, snake_case).and_then(Value::as_str)
+}
+
+fn insert_string_field(output: &mut Map<String, Value>, name: &str, value: Option<&Value>) {
+    if let Some(value) = value.and_then(Value::as_str) {
+        output.insert(name.to_string(), Value::String(value.to_string()));
+    }
+}
+
 fn replacement_selection_body(
     deployment_id: &str,
     version: Option<&str>,
@@ -2155,7 +2614,7 @@ fn split_command_line(source: &str) -> Result<Vec<String>, String> {
 }
 
 fn command_usage() -> String {
-    "commands: store catalogs|catalog add <id> <url> <required-key-id> [env:AUTH_TOKEN_VAR|-] [padded-base64-public-key|-]|catalog remove <id>|list/search|import <service> <node> [version|-] [catalog|-] [channel]|validate|install <service> <node> <version|-> <catalog|-> <channel|-> <requirement=provider,..|-> <topology@applied-revision|-> [pipeline-options.json|-]|upgrade|rollback <deployment> <version|-> <catalog|-> <requirement=provider,..|-> <topology@revision,..|->|release delete <service> <version>|uninstall <deployment>; topology list|get|draft <spec.json>|revisions|revision get/create|endpoint put/delete|link put/delete|validate <id> <spec.json>|diff|apply|rollback|status|export; operation list|plan <plan.json>|get|logs|events|confirm|apply|cancel|retry|rollback; node list|get|health|register|revoke-certificates|drain|remove; deployment list|get|health|bindings|start|stop|restart|uninstall; diagnostic list|create|get|export".to_string()
+    "commands: store catalogs|catalog add <id> <url> <required-key-id> [env:AUTH_TOKEN_VAR|-] [padded-base64-public-key|-]|catalog remove <id>|list/search|import <service> <node> [version|-] [catalog|-] [channel]|validate|install <service> <node> <version|-> <catalog|-> <channel|-> <requirement=provider,..|-> <topology@applied-revision|-> [pipeline-options.json|-]|upgrade|rollback <deployment> <version|-> <catalog|-> <requirement=provider,..|-> <topology@revision,..|->|release delete <service> <version>|uninstall <deployment>; topology list|get|draft <spec.json>|revisions|revision get/create|endpoint put/delete|link put/delete|validate <id> <spec.json>|diff|apply|rollback|status|export; operation list|plan <plan.json>|get|logs|events|confirm|apply|cancel|retry|rollback; node list|get|health|register|revoke-certificates|drain|remove; deployment list|get|health|bindings|start|stop|restart|uninstall; resource purge <claim> <node> <sha256-digest> <generation> <exact-confirmation> <reason>; diagnostic list|create|get|export".to_string()
 }
 
 #[cfg(test)]
@@ -2249,6 +2708,30 @@ mod tests {
         assert_eq!(
             uninstall.capability().as_deref(),
             Some("deployment.uninstall")
+        );
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let confirmation = format!("PURGE claim-1 {digest} GENERATION 3");
+        let purge = RemoteCommand::parse(&format!(
+            "resource purge claim-1 node-1 {digest} 3 \"{confirmation}\" \"retention period expired\""
+        ))
+        .unwrap();
+        assert_eq!(
+            purge,
+            RemoteCommand::ResourcePurge {
+                claim_id: "claim-1".to_string(),
+                node_id: "node-1".to_string(),
+                claim_digest: digest,
+                generation: 3,
+                confirmation,
+                reason: "retention period expired".to_string(),
+            }
+        );
+        assert_eq!(purge.capability().as_deref(), Some("resource.purge"));
+        assert!(
+            RemoteCommand::parse(
+                "resource purge claim-1 node-1 sha256:bad 3 PURGE reason extra-field"
+            )
+            .is_err()
         );
         assert!(RemoteCommand::parse("store install gateway node-a 1.2.3").is_err());
         assert_eq!(
@@ -2603,6 +3086,301 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn composition_validate_status_is_concise_and_redacts_secret_references() {
+        let root_secret = "vault://DO-NOT-PRINT-root-signing-key";
+        let node_secret = "vault://DO-NOT-PRINT-node-token";
+        let data = json!({
+            "valid": false,
+            "composition_inputs_valid": false,
+            "composition_input_error": format!("secret reference {node_secret} is invalid"),
+            "composition_plan": {
+                "schemaVersion": "ojos.dev/composition-plan/v1",
+                "rootServiceId": "contest-service",
+                "planDigest": "sha256:plan",
+                "releaseGraphDigest": "sha256:graph",
+                "nodes": [
+                    {
+                        "nodeId": "api-node",
+                        "serviceId": "contest-service",
+                        "kind": "api-binding",
+                        "name": "storage",
+                        "provider": {
+                            "selectedProviderId": "storage-package",
+                            "candidates": [{
+                                "providerId": "storage-package",
+                                "kind": "PACKAGE",
+                                "serviceId": "storage-service"
+                            }]
+                        },
+                        "unresolvedInputs": []
+                    },
+                    {
+                        "nodeId": "claim-node",
+                        "serviceId": "contest-service",
+                        "kind": "resource-claim",
+                        "name": "database",
+                        "resourceType": "postgresql.database/v1",
+                        "lifecycle": "RETAIN",
+                        "provider": {
+                            "candidates": [
+                                {"providerId": "postgres-local", "kind": "MANAGED"},
+                                {"providerId": "postgres-external", "kind": "EXTERNAL"}
+                            ]
+                        },
+                        "unresolvedInputs": [{
+                            "key": "providerId",
+                            "valueType": "provider-id",
+                            "required": true,
+                            "sensitive": false,
+                            "allowedValues": ["postgres-local", "postgres-external"]
+                        }]
+                    },
+                    {
+                        "nodeId": "root-secret",
+                        "serviceId": "contest-service",
+                        "kind": "secret",
+                        "name": "signing-key",
+                        "unresolvedInputs": [{
+                            "key": "secretRef",
+                            "valueType": "secret-ref",
+                            "required": true,
+                            "sensitive": true
+                        }]
+                    },
+                    {
+                        "nodeId": "dependency-secret",
+                        "serviceId": "worker-service",
+                        "kind": "secret",
+                        "name": "signing-key",
+                        "unresolvedInputs": [{
+                            "key": "secretRef",
+                            "valueType": "secret-ref",
+                            "required": true,
+                            "sensitive": true
+                        }]
+                    },
+                    {
+                        "nodeId": "conditional-secret",
+                        "serviceId": "contest-service",
+                        "kind": "secret",
+                        "name": "invite-key",
+                        "unresolvedInputs": [{
+                            "key": "secretRef",
+                            "valueType": "secret-ref",
+                            "required": false,
+                            "sensitive": true
+                        }]
+                    }
+                ],
+                "edges": []
+            }
+        });
+        let submitted = json!({
+            "inputs": {
+                "claim-node": {"providerId": "postgres-local"},
+                "conditional-secret": {"secretRef": node_secret}
+            },
+            "secret_refs": {"signing-key": root_secret}
+        });
+        let response = ApiSuccess {
+            status: 200,
+            data,
+            meta: crate::api_client::ResponseMeta {
+                request_id: "req-composition".to_string(),
+                api_version: "v1".to_string(),
+                next_cursor: None,
+            },
+            etag: None,
+        };
+
+        let response = with_composition_tui_status(response, &submitted);
+        let summary = &response.data[COMPOSITION_TUI_STATUS_KEY];
+        assert_eq!(summary["plan_digest"], "sha256:plan");
+        assert_eq!(summary["release_graph_digest"], "sha256:graph");
+        assert_eq!(summary["root_service_id"], "contest-service");
+        assert_eq!(summary["inputs_valid"], false);
+        assert_eq!(summary["install_input_editing"], "UNSUPPORTED");
+        assert!(
+            summary["notice"]
+                .as_str()
+                .unwrap()
+                .contains("use the Web manager")
+        );
+
+        let node = |id: &str| {
+            summary["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["node_id"] == id)
+                .unwrap()
+        };
+        assert_eq!(node("api-node")["provider"]["selected"]["kind"], "PACKAGE");
+        assert_eq!(node("api-node")["provider"]["selected"]["source"], "plan");
+        assert_eq!(
+            node("claim-node")["provider"]["candidates"][0]["kind"],
+            "MANAGED"
+        );
+        assert_eq!(
+            node("claim-node")["provider"]["candidates"][1]["kind"],
+            "EXTERNAL"
+        );
+        assert_eq!(
+            node("claim-node")["resource_type"],
+            "postgresql.database/v1"
+        );
+        assert_eq!(node("claim-node")["lifecycle"], "RETAIN");
+        assert_eq!(
+            node("claim-node")["provider"]["selected"]["provider_id"],
+            "postgres-local"
+        );
+        assert_eq!(
+            node("claim-node")["provider"]["selected"]["source"],
+            "request"
+        );
+        assert_eq!(
+            node("claim-node")["unresolved_inputs"][0]["state"],
+            "provided"
+        );
+        assert_eq!(
+            node("root-secret")["unresolved_inputs"][0]["state"],
+            "provided"
+        );
+        assert_eq!(
+            node("dependency-secret")["unresolved_inputs"][0]["state"],
+            "missing"
+        );
+        assert_eq!(
+            node("conditional-secret")["unresolved_inputs"][0]["state"],
+            "provided"
+        );
+
+        let serialized = serde_json::to_string(&response.data).unwrap();
+        assert!(!serialized.contains(root_secret));
+        assert!(!serialized.contains(node_secret));
+        assert!(serialized.contains("[REDACTED]"));
+        let detail = remote_response_detail(
+            &RemoteCommand::StoreValidate {
+                service_id: "contest-service".to_string(),
+                target_node_id: "node-a".to_string(),
+                version: None,
+                catalog_source_id: None,
+                channel: None,
+                bindings: Vec::new(),
+                topology: None,
+                pipeline_options_path: None,
+            },
+            &response.data,
+        );
+        assert!(detail.contains("Composition status (read-only)"));
+        assert!(detail.contains(COMPOSITION_TUI_NOTICE));
+        assert!(!detail.contains("Raw API response"));
+        assert!(!detail.contains("composition_plan"));
+        assert!(!detail.contains(root_secret));
+        assert!(!detail.contains(node_secret));
+    }
+
+    #[test]
+    fn composition_status_fails_closed_for_malformed_plan_and_invalid_provider() {
+        let command = RemoteCommand::StoreValidate {
+            service_id: "contest-service".to_string(),
+            target_node_id: "node-a".to_string(),
+            version: None,
+            catalog_source_id: None,
+            channel: None,
+            bindings: Vec::new(),
+            topology: None,
+            pipeline_options_path: None,
+        };
+        let malformed = json!({
+            "composition_plan": {"planDigest": "sha256:plan"},
+            "private": "DO-NOT-DISPLAY"
+        });
+        assert_eq!(
+            remote_response_detail(&command, &malformed),
+            COMPOSITION_TUI_MALFORMED
+        );
+        let malformed_response = ApiSuccess {
+            status: 200,
+            data: malformed,
+            meta: crate::api_client::ResponseMeta {
+                request_id: "req-malformed".to_string(),
+                api_version: "v1".to_string(),
+                next_cursor: None,
+            },
+            etag: None,
+        };
+        let malformed_response = with_composition_tui_status(malformed_response, &json!({}));
+        assert_eq!(
+            remote_response_detail(&command, &malformed_response.data),
+            COMPOSITION_TUI_MALFORMED
+        );
+
+        let attacker_value = "attacker-controlled\nprovider";
+        let data = json!({
+            "composition_inputs_valid": false,
+            "composition_plan": {
+                "rootServiceId": "contest-service",
+                "planDigest": "sha256:plan",
+                "releaseGraphDigest": "sha256:graph",
+                "nodes": [{
+                    "nodeId": "claim-node",
+                    "serviceId": "contest-service",
+                    "kind": "resource-claim",
+                    "name": "database",
+                    "resourceType": "postgresql.database/v1",
+                    "lifecycle": "RETAIN",
+                    "provider": {
+                        "candidates": [{"providerId": "postgres-local", "kind": "MANAGED"}]
+                    },
+                    "unresolvedInputs": [{
+                        "key": "providerId",
+                        "valueType": "provider-id",
+                        "required": true,
+                        "sensitive": false,
+                        "allowedValues": ["postgres-local"]
+                    }]
+                }]
+            }
+        });
+        let summary = composition_tui_status(
+            &data,
+            &json!({"inputs": {"claim-node": {"providerId": attacker_value}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            summary["nodes"][0]["provider"]["selection_status"],
+            "invalid"
+        );
+        assert!(summary["nodes"][0]["provider"]["selected"].is_null());
+        assert!(
+            !serde_json::to_string(&summary)
+                .unwrap()
+                .contains(attacker_value)
+        );
+    }
+
+    #[test]
+    fn non_composition_response_detail_preserves_existing_raw_behavior() {
+        let data = json!({"operation_id": "op-1", "status": "RUNNING"});
+        assert_eq!(
+            remote_response_detail(&RemoteCommand::Capabilities, &data),
+            serde_json::to_string_pretty(&data).unwrap()
+        );
+        let response = ApiSuccess {
+            status: 200,
+            data: data.clone(),
+            meta: crate::api_client::ResponseMeta {
+                request_id: "req-raw".to_string(),
+                api_version: "v1".to_string(),
+                next_cursor: None,
+            },
+            etag: None,
+        };
+        assert_eq!(with_composition_tui_status(response, &json!({})).data, data);
     }
 
     #[test]

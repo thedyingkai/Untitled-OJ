@@ -38,53 +38,59 @@ scrape_configs:
           - postgres-exporter-orchestrator:9187
         labels:
           database: orchestrator
+
+  - job_name: ojos-active-services
+    honor_labels: true
+    http_sd_configs:
+      - url: https://orchestrator:8090/internal/v1/observability/metrics/targets
+        refresh_interval: 15s
+        authorization:
+          type: Bearer
+          credentials_file: /etc/prometheus/secrets/orchestrator-observability-token
+        tls_config:
+          ca_file: /etc/prometheus/tls/orchestrator-ca.crt
+          server_name: orchestrator
+    relabel_configs:
+      - source_labels: [__scheme__]
+        regex: https?
+        action: keep
+    tls_config:
+      ca_file: /etc/prometheus/tls/gateway-ca.crt
+
+  - job_name: ojos-orchestrator
+    scheme: https
+    metrics_path: /internal/v1/observability/metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/orchestrator-observability-token
+    tls_config:
+      ca_file: /etc/prometheus/tls/orchestrator-ca.crt
+      server_name: orchestrator
+    static_configs:
       - targets:
-          - postgres-exporter-auth:9187
+          - orchestrator:8090
         labels:
-          database: auth
-      - targets:
-          - postgres-exporter-problem:9187
-        labels:
-          database: problem
-      - targets:
-          - postgres-exporter-judge:9187
-        labels:
-          database: judge
-      - targets:
-          - postgres-exporter-user:9187
-        labels:
-          database: user
+          service: orchestrator
 
   - job_name: ojos-health
     metrics_path: /probe
     params:
       module:
         - http_2xx
+    http_sd_configs:
+      - url: https://orchestrator:8090/internal/v1/observability/health/targets
+        refresh_interval: 15s
+        authorization:
+          type: Bearer
+          credentials_file: /etc/prometheus/secrets/orchestrator-observability-token
+        tls_config:
+          ca_file: /etc/prometheus/tls/orchestrator-ca.crt
+          server_name: orchestrator
     static_configs:
       - targets:
-          - http://gateway:8080/health
-        labels:
-          service: gateway
-      - targets:
-          - http://orchestrator:8090/health
+          - https://orchestrator:8090/api/v1/healthz/ready
         labels:
           service: orchestrator
-      - targets:
-          - http://auth-service:8081/health
-        labels:
-          service: auth-service
-      - targets:
-          - http://problem-service:8083/health
-        labels:
-          service: problem-service
-      - targets:
-          - http://judge-api:8082/health
-        labels:
-          service: judge-api
-      - targets:
-          - http://storage-service:8085/health
-        labels:
-          service: storage-service
       - targets:
           - http://minio:9000/minio/health/live
         labels:
@@ -96,5 +102,15 @@ scrape_configs:
       - source_labels:
           - __param_target
         target_label: instance
+      - source_labels:
+          - service
+        regex: orchestrator
+        target_label: __param_module
+        replacement: http_2xx_orchestrator_tls
+      - source_labels:
+          - source
+        regex: explicit-platform
+        target_label: __param_module
+        replacement: http_2xx_gateway_tls
       - target_label: __address__
         replacement: blackbox-exporter:9115

@@ -22,7 +22,7 @@
       "tags": ["core", "auth"],
       "repo": "",
       "source_url": "services/auth-service",
-      "checksum": "sha256:e7dad74748b0c17e130ef29e49f8ca842e07411961aef831b4d3f593c1d30b2f"
+      "checksum": "sha256:50affba62109cb71f9c5717d54db75e19cd3678894a2d25a2504d830ea400587"
     },
     {
       "id": "user-service",

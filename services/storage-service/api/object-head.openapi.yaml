@@ -1,0 +1,45 @@
+openapi: 3.1.0
+info:
+  title: OJOS Storage Object Head API
+  version: 1.0.0
+x-ojos-api-id: storage.object.head
+x-ojos-service:
+  id: storage-service
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    Bucket: {name: bucket, in: path, required: true, schema: {type: string, pattern: '^[a-z0-9][a-z0-9.-]{1,62}$'}}
+    Key: {name: key, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 1024, pattern: '^[^/]+$'}}
+security: [{ojosBearer: []}]
+paths:
+  /{bucket}/{key}:
+    parameters:
+      - {$ref: '#/components/parameters/Bucket'}
+      - {$ref: '#/components/parameters/Key'}
+    head:
+      operationId: headStorageObject
+      x-ojos-audience: internal
+      x-ojos-permission: storage.object.read
+      x-ojos-scope: system
+      responses:
+        '200':
+          description: Object metadata headers
+          headers:
+            X-OJOS-Storage-Result:
+              required: true
+              schema: {type: string, const: present}
+            X-OJOS-Object-Sha256:
+              required: true
+              schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+            Content-Length:
+              required: true
+              schema: {type: integer, format: int64, minimum: 0}
+        '401': {description: A valid bound workload identity is required}
+        '404':
+          description: Storage provider authoritatively confirmed that the object is absent
+          headers:
+            X-OJOS-Storage-Result:
+              required: true
+              schema: {type: string, const: object-not-found}

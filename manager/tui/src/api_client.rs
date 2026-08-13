@@ -313,6 +313,51 @@ pub struct StoreInstallInput {
     pub topology_etag: Option<String>,
 }
 
+/// The complete, deliberately narrow body accepted by ResourceClaim purge.
+/// Credentials, secret references and actor identity are not part of this
+/// type, so the TUI cannot forward them even if they are supplied elsewhere.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResourcePurgeInput {
+    pub node_id: String,
+    pub claim_digest: String,
+    pub generation: u64,
+    pub confirmation: String,
+    pub reason: String,
+}
+
+impl ResourcePurgeInput {
+    fn validate(&self, claim_id: &str) -> Result<(), ApiError> {
+        validate_resource_identifier(&self.node_id, "node_id")?;
+        if !is_sha256_digest(&self.claim_digest) {
+            return Err(ApiError::InvalidRequest(
+                "resource purge claim_digest must be sha256 followed by 64 lowercase hexadecimal characters"
+                    .to_string(),
+            ));
+        }
+        if self.generation == 0 {
+            return Err(ApiError::InvalidRequest(
+                "resource purge generation must be at least 1".to_string(),
+            ));
+        }
+        let expected = format!(
+            "PURGE {claim_id} {} GENERATION {}",
+            self.claim_digest, self.generation
+        );
+        if self.confirmation != expected {
+            return Err(ApiError::InvalidRequest(format!(
+                "resource purge confirmation must exactly equal {expected:?}"
+            )));
+        }
+        let reason_length = self.reason.chars().count();
+        if self.reason.trim().chars().count() < 8 || reason_length > 512 {
+            return Err(ApiError::InvalidRequest(
+                "resource purge reason must contain 8 to 512 characters".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl StoreInstallInput {
     pub fn managed(service_id: impl Into<String>, target_node_id: impl Into<String>) -> Self {
         Self {
@@ -752,6 +797,22 @@ impl ApiClient {
             "POST",
             &format!("/deployments/{}:{action}", path_segment(deployment_id)?),
             json!({}),
+            &[],
+        )
+    }
+
+    pub fn purge_resource_claim(
+        &self,
+        claim_id: &str,
+        input: ResourcePurgeInput,
+    ) -> Result<ApiSuccess, ApiError> {
+        validate_resource_identifier(claim_id, "claim_id")?;
+        input.validate(claim_id)?;
+        self.mutate(
+            "resource.purge",
+            "POST",
+            &format!("/resources/{}:purge", path_segment(claim_id)?),
+            serde_json::to_value(input).map_err(|err| ApiError::InvalidRequest(err.to_string()))?,
             &[],
         )
     }
@@ -1221,6 +1282,39 @@ fn path_segment(value: &str) -> Result<String, ApiError> {
     Ok(value.to_string())
 }
 
+fn validate_resource_identifier(value: &str, field: &str) -> Result<(), ApiError> {
+    let length = value.len();
+    if value.trim() != value
+        || !(2..=180).contains(&length)
+        || !value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || !value
+            .bytes()
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || value.bytes().any(|byte| {
+            !(byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'_' | b'.' | b':' | b'-'))
+        })
+    {
+        return Err(ApiError::InvalidRequest(format!(
+            "resource purge {field} does not match the ResourceClaim identifier contract"
+        )));
+    }
+    Ok(())
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn required_etag(value: &str, subject: &str) -> Result<String, ApiError> {
     let value = value.trim();
     if value.is_empty() || value.starts_with("W/") {
@@ -1438,6 +1532,81 @@ mod tests {
             "https://control.example/api/v1/operations/op-42:retry"
         );
         assert!(requests[1].headers.contains_key("Idempotency-Key"));
+    }
+
+    #[test]
+    fn resource_purge_requires_exact_confirmation_and_sends_no_secret_fields() {
+        let transport = FixtureTransport::from_bodies([
+            (200, include_str!("../tests/fixtures/capabilities.json")),
+            (
+                202,
+                include_str!("../tests/fixtures/operation-accepted.json"),
+            ),
+        ]);
+        let client = ApiClient::with_transport(config(), transport.clone());
+        let claim_id = "claim-1";
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let confirmation = format!("PURGE {claim_id} {digest} GENERATION 7");
+        let input = ResourcePurgeInput {
+            node_id: "node-1".to_string(),
+            claim_digest: digest.clone(),
+            generation: 7,
+            confirmation: format!("{confirmation} "),
+            reason: "approved cleanup after retention review".to_string(),
+        };
+
+        assert!(matches!(
+            client.purge_resource_claim(claim_id, input.clone()),
+            Err(ApiError::InvalidRequest(message)) if message.contains("exactly equal")
+        ));
+        // Exact confirmation is validated before even the capability lookup.
+        assert!(transport.requests.lock().unwrap().is_empty());
+
+        client
+            .purge_resource_claim(
+                claim_id,
+                ResourcePurgeInput {
+                    confirmation,
+                    ..input
+                },
+            )
+            .unwrap();
+        let requests = transport.requests.lock().unwrap();
+        let request = &requests[1];
+        assert_eq!(request.method, "POST");
+        assert_eq!(
+            request.url,
+            "https://control.example/api/v1/resources/claim-1:purge"
+        );
+        assert!(request.headers.contains_key("Idempotency-Key"));
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(
+            body.as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "claim_digest".to_string(),
+                "confirmation".to_string(),
+                "generation".to_string(),
+                "node_id".to_string(),
+                "reason".to_string(),
+            ])
+        );
+        for forbidden in [
+            "actor",
+            "actor_id",
+            "dsn",
+            "password",
+            "secret",
+            "secret_refs",
+        ] {
+            assert!(
+                body.get(forbidden).is_none(),
+                "purge body leaked {forbidden}"
+            );
+        }
     }
 
     #[test]

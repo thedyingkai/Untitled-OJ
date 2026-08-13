@@ -1,0 +1,88 @@
+openapi: 3.1.0
+info: {title: OJOS Problem Test Data Write API, version: 1.0.0}
+x-ojos-api-id: problem.testdata.write
+x-ojos-service: {id: problem-service, version: 0.1.0}
+components:
+  securitySchemes:
+    ojosBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    ProblemId: {name: id, in: path, required: true, schema: {type: integer, format: int64, minimum: 1}}
+    CaseNo: {name: case_no, in: path, required: true, schema: {type: integer, minimum: 1}}
+  schemas:
+    TestCaseInput:
+      type: object
+      additionalProperties: false
+      required: [input, answer]
+      properties:
+        case_no: {type: integer, minimum: 1}
+        input: {type: string}
+        answer: {type: string}
+        score: {type: integer}
+        group: {type: integer}
+        sample: {type: boolean}
+        hidden: {type: boolean}
+        time_limit_ms: {type: integer}
+        memory_limit_mb: {type: integer}
+    CaseResult:
+      type: object
+      additionalProperties: false
+      required: [case_no]
+      properties: {case_no: {type: integer, minimum: 1}}
+    DeleteResult:
+      type: object
+      additionalProperties: false
+      required: [deleted]
+      properties: {deleted: {type: boolean, const: true}}
+paths:
+  /problems/{id}/package/validate:
+    parameters: [{$ref: '#/components/parameters/ProblemId'}]
+    post:
+      operationId: validateProblemPackage
+      x-ojos-audience: admin
+      x-ojos-permission: problem.testdata.read
+      x-ojos-scope: {type: problem, pathParameter: id}
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Package validation result}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.testdata.read or ownership}
+  /problems/{id}/test-cases:
+    parameters: [{$ref: '#/components/parameters/ProblemId'}]
+    post:
+      operationId: addTestCase
+      x-ojos-audience: admin
+      x-ojos-permission: problem.testdata.write
+      x-ojos-scope: {type: problem, pathParameter: id}
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TestCaseInput'}}}}
+      responses:
+        '200': {description: Test case added, content: {application/json: {schema: {$ref: '#/components/schemas/CaseResult'}}}}
+        '400': {description: Invalid test case}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.testdata.write or ownership}
+  /problems/{id}/test-cases/{case_no}:
+    parameters:
+      - {$ref: '#/components/parameters/ProblemId'}
+      - {$ref: '#/components/parameters/CaseNo'}
+    put:
+      operationId: updateTestCase
+      x-ojos-audience: admin
+      x-ojos-permission: problem.testdata.write
+      x-ojos-scope: {type: problem, pathParameter: id}
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TestCaseInput'}}}}
+      responses:
+        '200': {description: Test case updated, content: {application/json: {schema: {$ref: '#/components/schemas/CaseResult'}}}}
+        '400': {description: Invalid test case}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.testdata.write or ownership}
+    delete:
+      operationId: deleteTestCase
+      x-ojos-audience: admin
+      x-ojos-permission: problem.testdata.write
+      x-ojos-scope: {type: problem, pathParameter: id}
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Test case deleted, content: {application/json: {schema: {$ref: '#/components/schemas/DeleteResult'}}}}
+        '401': {description: User authentication required}
+        '403': {description: Missing problem.testdata.write or ownership}

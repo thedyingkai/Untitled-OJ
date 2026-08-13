@@ -7,6 +7,7 @@ use thiserror::Error;
 
 pub const OPERATION_SCHEMA_VERSION: u16 = 1;
 const PROJECT_MAX_CAS_ATTEMPTS: usize = 4;
+const ENQUEUE_MAX_CAS_ATTEMPTS: usize = 4;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -322,6 +323,29 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         operation_id: &str,
         now_ms: i64,
     ) -> Result<DurableOperation, OperationError> {
+        for attempt in 0..ENQUEUE_MAX_CAS_ATTEMPTS {
+            match self.enqueue_once(operation_id, now_ms) {
+                Err(OperationError::Store(OperationStoreError::RevisionConflict { .. }))
+                    if attempt + 1 < ENQUEUE_MAX_CAS_ATTEMPTS =>
+                {
+                    // Materialization enqueues deterministic Job IDs before
+                    // persisting their bindings. A control-plane worker may
+                    // complete one of those Jobs and project the Operation in
+                    // the same window. Reloading and replaying is safe because
+                    // JobStore::enqueue is idempotent for the same identity.
+                    continue;
+                }
+                result => return result,
+            }
+        }
+        unreachable!("the final bounded enqueue attempt always returns")
+    }
+
+    fn enqueue_once(
+        &mut self,
+        operation_id: &str,
+        now_ms: i64,
+    ) -> Result<DurableOperation, OperationError> {
         let mut operation = self.required(operation_id)?;
         match operation.status {
             DurableOperationStatus::Confirmed => {
@@ -516,8 +540,15 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         ) {
             return Ok(operation);
         }
-        if operation.status == DurableOperationStatus::Running
-            && !operation.pending_step_ids.is_empty()
+        if matches!(
+            operation.status,
+            DurableOperationStatus::Running | DurableOperationStatus::Cancelling
+        ) && !operation.pending_step_ids.is_empty()
+            // A missing Job behind an already-persisted binding is an
+            // unprovable durable side-effect outcome.  Do not start more
+            // compensation in that state; the cancelling projection below
+            // will move the Operation to NEEDS_ATTENTION.
+            && !self.has_missing_active_job(&operation)?
         {
             operation = self.materialize_pending(operation, now_ms)?;
         }
@@ -609,8 +640,17 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         now_ms: i64,
     ) -> Result<DurableOperation, OperationError> {
         let pending = operation.pending_step_ids.clone();
+        let compensation_steps = compensation_step_ids(&operation);
         let mut ready = Vec::new();
         for step_id in &pending {
+            // Cancellation freezes the forward graph.  ON_FAILURE steps and
+            // their downstream ON_SUCCESS cleanup are the only jobs allowed
+            // to become durable after cancellation intent is persisted.
+            if operation.status == DurableOperationStatus::Cancelling
+                && !compensation_steps.contains(step_id)
+            {
+                continue;
+            }
             let planned = operation
                 .planned_jobs
                 .iter()
@@ -670,6 +710,11 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         operation: &DurableOperation,
         planned: &PlannedJob,
     ) -> Result<bool, OperationError> {
+        if operation.status == DurableOperationStatus::Cancelling
+            && planned.condition == PlannedJobCondition::OnFailure
+        {
+            return self.cancellation_compensator_ready(operation, planned);
+        }
         if planned.depends_on.is_empty() {
             return Ok(planned.condition == PlannedJobCondition::OnSuccess);
         }
@@ -712,22 +757,27 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         operation: &DurableOperation,
         now_ms: i64,
     ) -> Result<(), OperationError> {
-        let mut job_ids = operation
-            .job_bindings
-            .iter()
-            .map(|binding| binding.job_id.clone())
-            .collect::<BTreeSet<_>>();
-        for step_id in &operation.pending_step_ids {
-            if let Some(planned) = operation
-                .planned_jobs
-                .iter()
-                .find(|planned| &planned.step_id == step_id)
-            {
+        let compensation_steps = compensation_step_ids(operation);
+        let mut job_ids = BTreeSet::new();
+        for planned in &operation.planned_jobs {
+            if compensation_steps.contains(&planned.step_id) {
+                continue;
+            }
+            if let Some(binding) = operation.active_binding(&planned.step_id) {
+                job_ids.insert(binding.job_id.clone());
+            } else if operation.pending_step_ids.contains(&planned.step_id) {
+                // Enqueue is intentionally a two-write protocol.  The
+                // deterministic Job may exist even if its binding CAS did not
+                // complete, so cancellation must still find it.
                 job_ids.insert(binding_for(operation, planned).job_id);
             }
         }
         for job_id in job_ids {
-            if self.jobs.get(&job_id)?.is_some() {
+            if self
+                .jobs
+                .get(&job_id)?
+                .is_some_and(|job| !job.status.is_terminal())
+            {
                 self.jobs.request_cancel(&job_id, now_ms)?;
             }
         }
@@ -744,6 +794,24 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
                 operation.result.clone(),
                 operation.error_message.clone(),
             ));
+        }
+        if operation.status == DurableOperationStatus::Cancelling {
+            let (status, result, error_message) = self.derive_cancelling_projection(operation)?;
+            if status == DurableOperationStatus::Cancelling
+                && operation.pending_step_ids.iter().any(|step_id| {
+                    compensation_step_ids(operation).contains(step_id)
+                        && result[step_id]["status"] == "BLOCKED"
+                })
+                && !self.cancellation_has_active_jobs(operation)?
+            {
+                return Ok((
+                    DurableOperationStatus::NeedsAttention,
+                    result,
+                    "applicable compensation cannot be materialized from the durable dependency graph"
+                        .to_string(),
+                ));
+            }
+            return Ok((status, result, error_message));
         }
         let mut jobs = Vec::with_capacity(operation.planned_jobs.len());
         let mut statuses = Vec::with_capacity(operation.planned_jobs.len());
@@ -858,6 +926,290 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         Ok((status, Value::Object(result), error_message))
     }
 
+    /// Project a cancellation independently from the normal success/failure
+    /// aggregate.  Forward failures are expected cancellation triggers; only
+    /// failed, cancelled, or unprovable compensation requires attention.
+    fn derive_cancelling_projection(
+        &self,
+        operation: &DurableOperation,
+    ) -> Result<(DurableOperationStatus, Value, String), OperationError> {
+        let compensation_steps = compensation_step_ids(operation);
+        let mut result = Map::new();
+        let mut jobs = Vec::new();
+        let mut forward_pending = false;
+        let mut compensation_pending = false;
+        let mut needs_attention = false;
+        let mut attention_reasons = Vec::new();
+
+        for planned in &operation.planned_jobs {
+            let is_compensation = compensation_steps.contains(&planned.step_id);
+            let active_binding = operation.active_binding(&planned.step_id).cloned();
+            let candidate_binding = active_binding.clone().or_else(|| {
+                operation
+                    .pending_step_ids
+                    .contains(&planned.step_id)
+                    .then(|| binding_for(operation, planned))
+            });
+            let job = match candidate_binding.as_ref() {
+                Some(binding) => self.jobs.get(&binding.job_id)?,
+                None => None,
+            };
+
+            if let Some(job) = job {
+                result.insert(planned.step_id.clone(), job_projection(&job));
+                if is_compensation {
+                    match &job.status {
+                        JobStatus::Failed | JobStatus::Cancelled | JobStatus::NeedsAttention => {
+                            needs_attention = true;
+                            attention_reasons.push(format!(
+                                "compensation step {} ended in {:?}",
+                                planned.step_id, job.status
+                            ));
+                        }
+                        status if !status.is_terminal() => compensation_pending = true,
+                        JobStatus::Succeeded => {}
+                        _ => unreachable!("all terminal compensation states are handled"),
+                    }
+                } else if job.status == JobStatus::NeedsAttention {
+                    needs_attention = true;
+                    attention_reasons.push(format!(
+                        "forward step {} has an unproven cancellation outcome",
+                        planned.step_id
+                    ));
+                } else if !job.status.is_terminal() {
+                    forward_pending = true;
+                }
+                jobs.push(job);
+                continue;
+            }
+
+            if let Some(binding) = active_binding {
+                // A binding proves that a durable Job should exist.  Its
+                // absence is not equivalent to a successfully skipped step.
+                needs_attention = true;
+                attention_reasons.push(format!(
+                    "step {} references missing durable job {}",
+                    planned.step_id, binding.job_id
+                ));
+                result.insert(
+                    planned.step_id.clone(),
+                    json!({
+                        "job_id": binding.job_id,
+                        "status": "UNKNOWN",
+                        "attempt": 0,
+                        "result": Value::Null,
+                        "error_message": "durable job is missing",
+                    }),
+                );
+                continue;
+            }
+
+            if !operation.pending_step_ids.contains(&planned.step_id) {
+                return Err(OperationError::InvalidPlan(format!(
+                    "step {} has no active job binding",
+                    planned.step_id
+                )));
+            }
+
+            if !is_compensation {
+                // This forward step was frozen before it became durable.
+                result.insert(
+                    planned.step_id.clone(),
+                    json!({
+                        "job_id": Value::Null,
+                        "status": JobStatus::Cancelled,
+                        "attempt": 0,
+                        "result": Value::Null,
+                        "error_message": Value::Null,
+                    }),
+                );
+                continue;
+            }
+
+            let (pending_status, waits_for_compensation) = if planned.condition
+                == PlannedJobCondition::OnFailure
+            {
+                if self.cancellation_compensation_applicable(operation, planned)? {
+                    ("BLOCKED", true)
+                } else {
+                    ("DORMANT", false)
+                }
+            } else if self.planned_step_is_impossible(operation, planned, &mut BTreeSet::new())? {
+                ("SKIPPED", false)
+            } else {
+                ("BLOCKED", true)
+            };
+            compensation_pending |= waits_for_compensation;
+            result.insert(
+                planned.step_id.clone(),
+                json!({
+                    "job_id": Value::Null,
+                    "status": pending_status,
+                    "attempt": 0,
+                    "result": Value::Null,
+                    "error_message": Value::Null,
+                }),
+            );
+        }
+
+        let status = if needs_attention {
+            DurableOperationStatus::NeedsAttention
+        } else if forward_pending || compensation_pending {
+            DurableOperationStatus::Cancelling
+        } else {
+            DurableOperationStatus::Cancelled
+        };
+        let mut error_messages = jobs
+            .iter()
+            .filter_map(|job| {
+                job.error_message
+                    .as_ref()
+                    .map(|message| format!("{}: {message}", job.job_id))
+            })
+            .collect::<Vec<_>>();
+        error_messages.extend(attention_reasons);
+        Ok((status, Value::Object(result), error_messages.join("; ")))
+    }
+
+    fn has_missing_active_job(&self, operation: &DurableOperation) -> Result<bool, OperationError> {
+        for planned in &operation.planned_jobs {
+            if let Some(binding) = operation.active_binding(&planned.step_id)
+                && self.jobs.get(&binding.job_id)?.is_none()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn cancellation_has_active_jobs(
+        &self,
+        operation: &DurableOperation,
+    ) -> Result<bool, OperationError> {
+        for planned in &operation.planned_jobs {
+            if let Some(job) = self.materialized_job(operation, planned)?
+                && !job.status.is_terminal()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn cancellation_compensator_ready(
+        &self,
+        operation: &DurableOperation,
+        planned: &PlannedJob,
+    ) -> Result<bool, OperationError> {
+        if !self.cancellation_compensation_applicable(operation, planned)? {
+            return Ok(false);
+        }
+        let compensation_steps = compensation_step_ids(operation);
+
+        // Never race compensation against a forward Job whose cancellation
+        // outcome is still unknown.
+        for forward in operation
+            .planned_jobs
+            .iter()
+            .filter(|job| !compensation_steps.contains(&job.step_id))
+        {
+            if let Some(job) = self.materialized_job(operation, forward)?
+                && !job.status.is_terminal()
+            {
+                return Ok(false);
+            }
+        }
+
+        for dependency_id in &planned.depends_on {
+            let dependency = operation
+                .planned_jobs
+                .iter()
+                .find(|candidate| candidate.step_id == *dependency_id)
+                .ok_or_else(|| {
+                    OperationError::InvalidPlan(format!(
+                        "step {} depends on unknown step {dependency_id}",
+                        planned.step_id
+                    ))
+                })?;
+            match self.materialized_job(operation, dependency)? {
+                Some(job) if job.status == JobStatus::NeedsAttention => return Ok(false),
+                Some(job) if !job.status.is_terminal() => return Ok(false),
+                Some(_) => {}
+                None if compensation_steps.contains(dependency_id)
+                    && self.cancellation_compensation_applicable(operation, dependency)? =>
+                {
+                    return Ok(false);
+                }
+                None => {}
+            }
+        }
+        Ok(true)
+    }
+
+    fn cancellation_compensation_applicable(
+        &self,
+        operation: &DurableOperation,
+        planned: &PlannedJob,
+    ) -> Result<bool, OperationError> {
+        let mut visiting = BTreeSet::new();
+        for dependency in &planned.depends_on {
+            if self.step_has_materialized_evidence(operation, dependency, &mut visiting)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn step_has_materialized_evidence(
+        &self,
+        operation: &DurableOperation,
+        step_id: &str,
+        visiting: &mut BTreeSet<String>,
+    ) -> Result<bool, OperationError> {
+        if !visiting.insert(step_id.to_string()) {
+            return Ok(false);
+        }
+        let planned = operation
+            .planned_jobs
+            .iter()
+            .find(|candidate| candidate.step_id == step_id)
+            .ok_or_else(|| {
+                OperationError::InvalidPlan(format!("unknown planned step {step_id}"))
+            })?;
+        if operation.active_binding(step_id).is_some()
+            || (operation.pending_step_ids.contains(&planned.step_id)
+                && self
+                    .jobs
+                    .get(&binding_for(operation, planned).job_id)?
+                    .is_some())
+        {
+            visiting.remove(step_id);
+            return Ok(true);
+        }
+        for dependency in &planned.depends_on {
+            if self.step_has_materialized_evidence(operation, dependency, visiting)? {
+                visiting.remove(step_id);
+                return Ok(true);
+            }
+        }
+        visiting.remove(step_id);
+        Ok(false)
+    }
+
+    fn materialized_job(
+        &self,
+        operation: &DurableOperation,
+        planned: &PlannedJob,
+    ) -> Result<Option<Job>, OperationError> {
+        if let Some(binding) = operation.active_binding(&planned.step_id) {
+            return Ok(self.jobs.get(&binding.job_id)?);
+        }
+        if operation.pending_step_ids.contains(&planned.step_id) {
+            return Ok(self.jobs.get(&binding_for(operation, planned).job_id)?);
+        }
+        Ok(None)
+    }
+
     fn planned_step_is_impossible(
         &self,
         operation: &DurableOperation,
@@ -956,6 +1308,32 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         operation.finished_at_ms.get_or_insert(now_ms);
         self.save(operation, now_ms)?;
         Ok(())
+    }
+}
+
+/// Cancellation compensation is rooted at every ON_FAILURE step and includes
+/// the success-only cleanup steps that depend on those compensators.
+fn compensation_step_ids(operation: &DurableOperation) -> BTreeSet<String> {
+    let mut compensation = operation
+        .planned_jobs
+        .iter()
+        .filter(|planned| planned.condition == PlannedJobCondition::OnFailure)
+        .map(|planned| planned.step_id.clone())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let before = compensation.len();
+        for planned in &operation.planned_jobs {
+            if planned
+                .depends_on
+                .iter()
+                .any(|dependency| compensation.contains(dependency))
+            {
+                compensation.insert(planned.step_id.clone());
+            }
+        }
+        if compensation.len() == before {
+            return compensation;
+        }
     }
 }
 
@@ -1291,6 +1669,63 @@ mod tests {
         }
     }
 
+    fn prepare_and_abort_plan(operation_id: &str) -> PlanOperation {
+        PlanOperation {
+            operation_id: operation_id.to_string(),
+            action: "topology.apply".to_string(),
+            target_type: "Topology".to_string(),
+            target_id: "primary".to_string(),
+            request: json!({"auto_enqueue": true}),
+            jobs: vec![
+                PlannedJob {
+                    step_id: "prepare".to_string(),
+                    node_id: "control-plane".to_string(),
+                    kind: JobKind::TopologyApply,
+                    depends_on: vec![],
+                    condition: PlannedJobCondition::OnSuccess,
+                    payload: json!({"phase": "PREPARE"}),
+                    max_attempts: 1,
+                },
+                PlannedJob {
+                    step_id: "apply".to_string(),
+                    node_id: "node-0".to_string(),
+                    kind: JobKind::Install,
+                    depends_on: vec!["prepare".to_string()],
+                    condition: PlannedJobCondition::OnSuccess,
+                    payload: json!({"deployment_id": "deployment-a"}),
+                    max_attempts: 1,
+                },
+                PlannedJob {
+                    step_id: "finalize".to_string(),
+                    node_id: "control-plane".to_string(),
+                    kind: JobKind::TopologyApply,
+                    depends_on: vec!["apply".to_string()],
+                    condition: PlannedJobCondition::OnSuccess,
+                    payload: json!({"phase": "FINALIZE"}),
+                    max_attempts: 1,
+                },
+                PlannedJob {
+                    step_id: "abort".to_string(),
+                    node_id: "control-plane".to_string(),
+                    kind: JobKind::TopologyApply,
+                    depends_on: vec!["apply".to_string(), "finalize".to_string()],
+                    condition: PlannedJobCondition::OnFailure,
+                    payload: json!({"phase": "ABORT", "previous_bindings": ["old"]}),
+                    max_attempts: 1,
+                },
+                PlannedJob {
+                    step_id: "cleanup".to_string(),
+                    node_id: "node-0".to_string(),
+                    kind: JobKind::Uninstall,
+                    depends_on: vec!["apply".to_string(), "abort".to_string()],
+                    condition: PlannedJobCondition::OnSuccess,
+                    payload: json!({"deployment_id": "deployment-a"}),
+                    max_attempts: 1,
+                },
+            ],
+        }
+    }
+
     fn run_to_running(
         operations: &mut MemoryOperationStore,
         jobs: &mut MemoryJobStore,
@@ -1335,6 +1770,7 @@ mod tests {
     #[derive(Debug)]
     struct RevisionConflictOperationStore {
         inner: MemoryOperationStore,
+        successful_compares_before_conflict: usize,
         remaining_conflicts: usize,
         compare_attempts: usize,
     }
@@ -1343,6 +1779,20 @@ mod tests {
         fn new(inner: MemoryOperationStore, remaining_conflicts: usize) -> Self {
             Self {
                 inner,
+                successful_compares_before_conflict: 0,
+                remaining_conflicts,
+                compare_attempts: 0,
+            }
+        }
+
+        fn after_successful_compares(
+            inner: MemoryOperationStore,
+            successful_compares_before_conflict: usize,
+            remaining_conflicts: usize,
+        ) -> Self {
+            Self {
+                inner,
+                successful_compares_before_conflict,
                 remaining_conflicts,
                 compare_attempts: 0,
             }
@@ -1367,6 +1817,10 @@ mod tests {
             operation: DurableOperation,
         ) -> Result<DurableOperation, OperationStoreError> {
             self.compare_attempts += 1;
+            if self.successful_compares_before_conflict != 0 {
+                self.successful_compares_before_conflict -= 1;
+                return self.inner.compare_and_swap(expected_revision, operation);
+            }
             if self.remaining_conflicts != 0 {
                 self.remaining_conflicts -= 1;
                 let mut concurrent = self
@@ -1460,6 +1914,69 @@ mod tests {
             operations.get("op-project-conflict").unwrap().unwrap(),
             projected
         );
+    }
+
+    #[test]
+    fn enqueue_reloads_after_a_concurrent_operation_projection() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator.plan(plan("op-enqueue-conflict", 1), 0).unwrap();
+            coordinator.confirm("op-enqueue-conflict", 1).unwrap();
+        }
+        let mut operations = RevisionConflictOperationStore::new(operations, 1);
+
+        let running = OperationCoordinator::new(&mut operations, &mut jobs)
+            .enqueue("op-enqueue-conflict", 2)
+            .unwrap();
+
+        assert_eq!(running.status, DurableOperationStatus::Running);
+        assert_eq!(running.job_bindings.len(), 1);
+        assert!(running.pending_step_ids.is_empty());
+        assert_eq!(
+            jobs.list()
+                .unwrap()
+                .into_iter()
+                .filter(|job| job.operation_id == "op-enqueue-conflict")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn enqueue_replays_the_same_job_after_the_binding_save_conflicts() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator
+                .plan(plan("op-binding-save-conflict", 1), 0)
+                .unwrap();
+            coordinator.confirm("op-binding-save-conflict", 1).unwrap();
+        }
+        // The first compare persists CONFIRMED -> ENQUEUING. The injected
+        // conflict is therefore the second compare, after JobStore::enqueue
+        // has already made the deterministic Job durable but before its
+        // Operation binding is saved.
+        let mut operations =
+            RevisionConflictOperationStore::after_successful_compares(operations, 1, 1);
+
+        let running = OperationCoordinator::new(&mut operations, &mut jobs)
+            .enqueue("op-binding-save-conflict", 2)
+            .unwrap();
+
+        assert_eq!(running.status, DurableOperationStatus::Running);
+        assert_eq!(running.job_bindings.len(), 1);
+        assert_eq!(operations.compare_attempts, 3);
+        let durable_jobs = jobs
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|job| job.operation_id == "op-binding-save-conflict")
+            .collect::<Vec<_>>();
+        assert_eq!(durable_jobs.len(), 1);
+        assert_eq!(durable_jobs[0].job_id, running.job_bindings[0].job_id);
     }
 
     #[test]
@@ -1891,6 +2408,316 @@ mod tests {
         let cancelled = after_restart.cancel("op-partial-cancel", 3).unwrap();
         assert_eq!(cancelled.status, DurableOperationStatus::Cancelled);
         assert!(cancelled.finished_at_ms.is_some());
+    }
+
+    #[test]
+    fn cancellation_after_prepare_materializes_and_preserves_abort() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator
+                .plan(prepare_and_abort_plan("op-cancel-after-prepare"), 0)
+                .unwrap();
+            coordinator.confirm("op-cancel-after-prepare", 1).unwrap();
+            coordinator.enqueue("op-cancel-after-prepare", 2).unwrap();
+        }
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "prepare-token",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            let running = coordinator.project("op-cancel-after-prepare", 12).unwrap();
+            assert_eq!(running.status, DurableOperationStatus::Running);
+            assert!(running.active_binding("apply").is_some());
+
+            let cancelling = coordinator.cancel("op-cancel-after-prepare", 13).unwrap();
+            assert_eq!(cancelling.status, DurableOperationStatus::Cancelling);
+            assert_eq!(cancelling.result["apply"]["status"], "CANCELLED");
+            assert_eq!(cancelling.result["finalize"]["status"], "CANCELLED");
+            assert_eq!(cancelling.result["abort"]["status"], "QUEUED");
+            assert!(cancelling.active_binding("abort").is_some());
+
+            // Repeating cancellation must never cancel the compensator.
+            let replay = coordinator.cancel("op-cancel-after-prepare", 14).unwrap();
+            let abort = replay.active_binding("abort").unwrap();
+            assert_eq!(
+                coordinator.jobs.get(&abort.job_id).unwrap().unwrap().status,
+                JobStatus::Queued
+            );
+        }
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "abort-token",
+            CompletionStatus::Succeeded,
+            20,
+        );
+        let cancelled = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-cancel-after-prepare", 22)
+            .unwrap();
+        assert_eq!(cancelled.status, DurableOperationStatus::Cancelled);
+        assert_eq!(cancelled.result["abort"]["status"], "SUCCEEDED");
+        assert_eq!(cancelled.result["cleanup"]["status"], "SKIPPED");
+    }
+
+    #[test]
+    fn successful_abort_materializes_applicable_cleanup_before_cancel_finishes() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator
+                .plan(prepare_and_abort_plan("op-cancel-cleanup"), 0)
+                .unwrap();
+            coordinator.confirm("op-cancel-cleanup", 1).unwrap();
+            coordinator.enqueue("op-cancel-cleanup", 2).unwrap();
+        }
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "prepare-token",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-cancel-cleanup", 12)
+            .unwrap();
+        let apply = jobs
+            .claim(ClaimRequest {
+                node_id: "node-0".to_string(),
+                instance_id: "worker-node-0".to_string(),
+                lease_token: "apply-token".to_string(),
+                now_ms: 13,
+                lease_ms: 30_000,
+            })
+            .unwrap()
+            .unwrap();
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .cancel("op-cancel-cleanup", 14)
+            .unwrap();
+        jobs.complete(CompleteRequest {
+            job_id: apply.job_id,
+            lease_token: "apply-token".to_string(),
+            status: CompletionStatus::Succeeded,
+            result: json!({"installed": true}),
+            error_message: String::new(),
+            now_ms: 15,
+            events: vec![],
+        })
+        .unwrap();
+        {
+            let recovered = OperationCoordinator::new(&mut operations, &mut jobs)
+                .recover(16)
+                .unwrap();
+            assert_eq!(recovered[0].result["abort"]["status"], "QUEUED");
+        }
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "abort-token",
+            CompletionStatus::Succeeded,
+            20,
+        );
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            let cleaning = coordinator.project("op-cancel-cleanup", 22).unwrap();
+            assert_eq!(cleaning.status, DurableOperationStatus::Cancelling);
+            assert_eq!(cleaning.result["cleanup"]["status"], "QUEUED");
+        }
+        claim_and_complete(
+            &mut jobs,
+            "node-0",
+            "cleanup-token",
+            CompletionStatus::Succeeded,
+            30,
+        );
+        let cancelled = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-cancel-cleanup", 32)
+            .unwrap();
+        assert_eq!(cancelled.status, DurableOperationStatus::Cancelled);
+        assert_eq!(cancelled.result["cleanup"]["status"], "SUCCEEDED");
+    }
+
+    #[test]
+    fn cancellation_does_not_materialize_unrelated_forward_jobs() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        let mut graph = prepare_and_abort_plan("op-cancel-freezes-forward");
+        graph.jobs.push(PlannedJob {
+            step_id: "unrelated-forward".to_string(),
+            node_id: "node-1".to_string(),
+            kind: JobKind::Install,
+            depends_on: vec!["prepare".to_string()],
+            condition: PlannedJobCondition::OnSuccess,
+            payload: json!({"deployment_id": "must-not-start"}),
+            max_attempts: 1,
+        });
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator.plan(graph, 0).unwrap();
+            coordinator.confirm("op-cancel-freezes-forward", 1).unwrap();
+            coordinator.enqueue("op-cancel-freezes-forward", 2).unwrap();
+            let cancelling = coordinator.cancel("op-cancel-freezes-forward", 3).unwrap();
+            assert_eq!(cancelling.status, DurableOperationStatus::Cancelling);
+            assert!(cancelling.active_binding("unrelated-forward").is_none());
+            assert_eq!(
+                cancelling.result["unrelated-forward"]["status"],
+                "CANCELLED"
+            );
+            assert_eq!(cancelling.result["abort"]["status"], "QUEUED");
+        }
+        assert!(
+            jobs.list()
+                .unwrap()
+                .iter()
+                .all(|job| job.node_id != "node-1")
+        );
+    }
+
+    #[test]
+    fn restart_resumes_cancellation_and_materializes_abort_after_forward_settles() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator
+                .plan(prepare_and_abort_plan("op-cancel-restart"), 0)
+                .unwrap();
+            coordinator.confirm("op-cancel-restart", 1).unwrap();
+            coordinator.enqueue("op-cancel-restart", 2).unwrap();
+        }
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "prepare-token",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-cancel-restart", 12)
+            .unwrap();
+        let apply = jobs
+            .claim(ClaimRequest {
+                node_id: "node-0".to_string(),
+                instance_id: "worker-node-0".to_string(),
+                lease_token: "apply-token".to_string(),
+                now_ms: 13,
+                lease_ms: 30_000,
+            })
+            .unwrap()
+            .unwrap();
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            let cancelling = coordinator.cancel("op-cancel-restart", 14).unwrap();
+            assert_eq!(cancelling.status, DurableOperationStatus::Cancelling);
+            assert!(cancelling.active_binding("abort").is_none());
+        }
+        // The worker may cross the cancellation race and prove that the
+        // forward side effect completed.  Recovery must compensate it.
+        jobs.complete(CompleteRequest {
+            job_id: apply.job_id,
+            lease_token: "apply-token".to_string(),
+            status: CompletionStatus::Succeeded,
+            result: json!({"installed": true}),
+            error_message: String::new(),
+            now_ms: 15,
+            events: vec![],
+        })
+        .unwrap();
+
+        let mut after_restart = OperationCoordinator::new(&mut operations, &mut jobs);
+        let recovered = after_restart.recover(16).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, DurableOperationStatus::Cancelling);
+        assert_eq!(recovered[0].result["abort"]["status"], "QUEUED");
+        assert_eq!(recovered[0].result["cleanup"]["status"], "BLOCKED");
+        let abort_job_id = recovered[0].active_binding("abort").unwrap().job_id.clone();
+
+        // A second restart is idempotent and does not cancel or duplicate ABORT.
+        let replay = after_restart.recover(17).unwrap();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(
+            replay[0].active_binding("abort").unwrap().job_id,
+            abort_job_id
+        );
+        assert_eq!(
+            after_restart
+                .jobs
+                .get(&abort_job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Queued
+        );
+    }
+
+    #[test]
+    fn failed_compensation_requires_attention_instead_of_reporting_cancelled() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator
+                .plan(prepare_and_abort_plan("op-abort-failed"), 0)
+                .unwrap();
+            coordinator.confirm("op-abort-failed", 1).unwrap();
+            coordinator.enqueue("op-abort-failed", 2).unwrap();
+        }
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "prepare-token",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator.project("op-abort-failed", 12).unwrap();
+            let cancelling = coordinator.cancel("op-abort-failed", 13).unwrap();
+            assert_eq!(cancelling.status, DurableOperationStatus::Cancelling);
+        }
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "abort-token",
+            CompletionStatus::Failed,
+            20,
+        );
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-abort-failed", 22)
+            .unwrap();
+        assert_eq!(operation.status, DurableOperationStatus::NeedsAttention);
+        assert!(operation.error_message.contains("compensation step abort"));
+        assert!(operation.finished_at_ms.is_some());
+    }
+
+    #[test]
+    fn missing_materialized_job_during_cancellation_requires_attention() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator.plan(plan("op-missing-job", 1), 0).unwrap();
+            coordinator.confirm("op-missing-job", 1).unwrap();
+            let mut operation = coordinator.required("op-missing-job").unwrap();
+            operation.status = DurableOperationStatus::Enqueuing;
+            operation.started_at_ms = Some(2);
+            let binding = binding_for(&operation, &operation.planned_jobs[0]);
+            operation.job_bindings.push(binding);
+            coordinator.save(operation, 2).unwrap();
+        }
+
+        let operation = OperationCoordinator::new(&mut operations, &mut jobs)
+            .cancel("op-missing-job", 3)
+            .unwrap();
+        assert_eq!(operation.status, DurableOperationStatus::NeedsAttention);
+        assert_eq!(operation.result["step-0"]["status"], "UNKNOWN");
+        assert!(operation.error_message.contains("missing durable job"));
     }
 
     #[test]

@@ -1,0 +1,56 @@
+apiVersion: ojos.dev/v1
+kind: Service
+metadata:
+  id: user-service
+  version: 0.1.0
+  displayName: User Service
+  permissionNamespace: user
+runtime:
+  profile: standard-container-v1
+  artifact: user-runtime
+  httpPort: 8084
+  health:
+    path: /readyz
+provides:
+  apis:
+    - document: api/openapi.yaml
+requires:
+  apis:
+    - id: auth.user.permission.check
+      version: ^1.0
+      optional: false
+      selection: unique-healthy
+resources:
+  - name: profiles
+    type: postgresql.database/v1
+    lifecycle: retain
+migrations:
+  - id: user-schema-v1
+    artifact: user-migration-v1
+    resource: profiles
+permissions:
+  - key: user.profile.read.self
+    title: View own user profile
+  - key: user.profile.update.self
+    title: Update own user profile
+  - key: user.profile.read.any
+    title: View any user profile
+  - key: user.profile.update.any
+    title: Update any user profile
+  - key: user.stats.read
+    title: View user statistics
+exposures:
+  - id: user-profiles
+    api: user-service.api
+    audience: user
+    mount: /
+  - id: admin-profiles
+    api: user-service.api
+    audience: admin
+    mount: /
+frontends:
+  - target: user-shell
+    manifest: frontend/user/manifest.json
+  - target: admin-shell
+    manifest: frontend/admin/manifest.json
+configSchema: config.schema.json

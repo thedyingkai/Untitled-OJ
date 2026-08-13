@@ -22,7 +22,11 @@ type topologyPath struct {
 
 func topologyProjectionHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !validTopologyManagementToken(r, svcCtx.Config.Orchestrator.InternalToken) {
+		expected := svcCtx.Config.Orchestrator.ManagementToken
+		if strings.TrimSpace(expected) == "" {
+			expected = svcCtx.Config.Orchestrator.InternalToken
+		}
+		if !validTopologyManagementToken(r, expected) {
 			writeTopologyProblem(w, http.StatusUnauthorized, "TOPOLOGY_PROVIDER_UNAUTHORIZED", "valid Orchestrator management bearer is required")
 			return
 		}

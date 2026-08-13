@@ -1,0 +1,129 @@
+openapi: 3.1.0
+info:
+  title: OJOS Auth Control API
+  version: 1.0.0
+x-ojos-api-id: auth.control.v1
+x-ojos-service:
+  id: auth-service
+  version: 0.1.0
+components:
+  securitySchemes:
+    ojosBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  parameters:
+    TopologyId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 256}
+  schemas:
+    Status:
+      type: object
+      additionalProperties: false
+      required: [status, service]
+      properties:
+        status: {const: ok}
+        service: {const: auth-service}
+    WorkloadTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [deployment_id, service_id, node_id, credential_generation]
+      properties:
+        deployment_id: {type: string, minLength: 1}
+        service_id: {type: string, minLength: 1}
+        node_id: {type: string, minLength: 1}
+        credential_generation: {type: integer, format: uint64, minimum: 1}
+    WorkloadTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [access_token, token_type, expires_at, expires_in]
+      properties:
+        access_token: {type: string, writeOnly: true}
+        token_type: {const: Bearer}
+        expires_at: {type: string, format: date-time}
+        expires_in: {type: integer, format: int64, minimum: 0}
+    AdminBootstrapRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 3, maxLength: 32}
+        email: {type: string}
+        password: {type: string, minLength: 6}
+    TopologyDocument:
+      type: object
+      additionalProperties: true
+paths:
+  /healthz:
+    get:
+      operationId: authHealth
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200': {description: Process is alive, content: {application/json: {schema: {$ref: '#/components/schemas/Status'}}}}
+  /readyz:
+    get:
+      operationId: authReady
+      x-ojos-audience: internal
+      security: []
+      responses:
+        '200': {description: Auth dependencies are ready, content: {application/json: {schema: {$ref: '#/components/schemas/Status'}}}}
+        '503': {description: A required dependency is unavailable}
+  /auth/bootstrap/admin:
+    post:
+      operationId: bootstrapInitialAdministrator
+      x-ojos-audience: internal
+      security: []
+      parameters:
+        - name: X-OJOS-Bootstrap-Secret
+          in: header
+          required: true
+          schema: {type: string, minLength: 32, maxLength: 512, writeOnly: true}
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/AdminBootstrapRequest'}}
+      responses:
+        '201': {description: Initial administrator created}
+        '403': {description: Bootstrap credential rejected}
+        '409': {description: Bootstrap already consumed}
+  /auth/internal/workload-tokens:issue:
+    post:
+      operationId: issueWorkloadToken
+      x-ojos-audience: internal
+      x-ojos-permission: auth.control
+      security: [{ojosBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/WorkloadTokenRequest'}}
+      responses:
+        '200': {description: Short-lived workload token, content: {application/json: {schema: {$ref: '#/components/schemas/WorkloadTokenResponse'}}}}
+        '403': {description: Dedicated control-plane credential rejected}
+  /api/v1/topologies/{id}:
+    parameters: [{$ref: '#/components/parameters/TopologyId'}]
+    get:
+      operationId: getAuthTopologyProjection
+      x-ojos-audience: internal
+      x-ojos-permission: auth.control
+      security: [{ojosBearer: []}]
+      responses:
+        '200': {description: Topology projection status, content: {application/json: {schema: {$ref: '#/components/schemas/TopologyDocument'}}}}
+    put:
+      operationId: applyAuthTopologyProjection
+      x-ojos-audience: internal
+      x-ojos-permission: auth.control
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TopologyDocument'}}}}
+      responses:
+        '200': {description: Projection applied, content: {application/json: {schema: {$ref: '#/components/schemas/TopologyDocument'}}}}
+    delete:
+      operationId: deleteAuthTopologyProjection
+      x-ojos-audience: internal
+      x-ojos-permission: auth.control
+      security: [{ojosBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TopologyDocument'}}}}
+      responses:
+        '200': {description: Projection deleted, content: {application/json: {schema: {$ref: '#/components/schemas/TopologyDocument'}}}}

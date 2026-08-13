@@ -61,6 +61,13 @@ DIND_CONTAINER_REMOVE_RETRY_TIMEOUT_SECONDS = 120
 DIND_VOLUME_REMOVE_TIMEOUT_SECONDS = 180
 DIND_VOLUME_REMOVE_RETRY_TIMEOUT_SECONDS = 120
 CLEANUP_RECONCILE_INSPECT_TIMEOUT_SECONDS = 30
+# The full-components Agent runs as the same non-root identity used by signed
+# standard-v3 workloads.  DinD exposes its unix socket to this one supplemental
+# group; the Agent never needs uid 0 or CAP_CHOWN.
+STANDARD_WORKLOAD_UID = 65532
+STANDARD_WORKLOAD_GID = 65532
+AGENT_DOCKER_SOCKET_GID = 10004
+DOCKER_SOCKET_MODE = "0660"
 DEFAULT_DIND_IMAGE = (
     "docker:29-dind@sha256:"
     "e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c"
@@ -73,6 +80,58 @@ CONTROL_PLANE_HEALTHCHECK_CA_CERT = "/opt/ojos-pki/ca.pem"
 
 class GateError(RuntimeError):
     pass
+
+
+def nested_engine_socket_evidence(root: "Docker", container_name: str) -> dict[str, Any]:
+    """Inspect the live DinD command and unix socket from its own namespace."""
+
+    inspected = json.loads(root.command("inspect", container_name, timeout=30).stdout)
+    if not isinstance(inspected, list) or len(inspected) != 1:
+        raise GateError(f"nested Engine {container_name} inspect result is not singular")
+    container = inspected[0]
+    command = container.get("Config", {}).get("Cmd", [])
+    expected_group_argument = f"--group={AGENT_DOCKER_SOCKET_GID}"
+    if not isinstance(command, list) or command.count(expected_group_argument) != 1:
+        raise GateError(
+            f"nested Engine {container_name} did not start dockerd with the isolated socket group"
+        )
+    observed = root.command(
+        "exec",
+        container_name,
+        "stat",
+        "-c",
+        "%g %a %F",
+        "/var/run/docker.sock",
+        timeout=30,
+    ).stdout.strip()
+    parts = observed.split(maxsplit=2)
+    if len(parts) != 3:
+        raise GateError(f"nested Engine {container_name} returned malformed socket stat evidence")
+    try:
+        gid = int(parts[0])
+        mode = f"0{int(parts[1], 8):03o}"
+    except ValueError as exc:
+        raise GateError(
+            f"nested Engine {container_name} returned non-numeric socket ownership"
+        ) from exc
+    file_type = parts[2].lower()
+    if (
+        gid != AGENT_DOCKER_SOCKET_GID
+        or mode != DOCKER_SOCKET_MODE
+        or "socket" not in file_type
+    ):
+        raise GateError(
+            f"nested Engine {container_name} socket identity is unsafe: "
+            f"gid={gid} mode={mode} type={file_type!r}"
+        )
+    return {
+        "dockerd_group_argument": expected_group_argument,
+        "gid": gid,
+        "mode": mode,
+        "file_type": "socket",
+        "path": "/var/run/docker.sock",
+        "evidence_source": "outer-container-inspect-and-stat",
+    }
 
 
 def bounded_diagnostic_error(operation: str, error: BaseException | str) -> dict[str, Any]:
@@ -1193,6 +1252,7 @@ class LiveGate:
                 "--tls=false",
                 "--host=tcp://0.0.0.0:2375",
                 "--host=unix:///var/run/docker.sock",
+                f"--group={AGENT_DOCKER_SOCKET_GID}",
                 "--insecure-registry=engine-a:5000",
                 "--insecure-registry=127.0.0.1:5000",
                 f"--storage-driver={self.dind_storage_driver}",
@@ -1228,6 +1288,8 @@ class LiveGate:
                 "inspect", "--format", "{{.Id}}", self.b_name
             ).stdout.strip()
         )
+        a_socket = nested_engine_socket_evidence(self.root, self.a_name)
+        b_socket = nested_engine_socket_evidence(self.root, self.b_name)
         data_volume_a = docker_data_volume(self.root, self.a_name)
         data_volume_b = docker_data_volume(self.root, self.b_name)
         if data_volume_a != self.a_data_volume or data_volume_b != self.b_data_volume:
@@ -1266,6 +1328,7 @@ class LiveGate:
                 "docker_root_dir": a_identity[5],
                 "image_config_id": image_config_a,
                 "image_repo_digests": image_repo_digests_a,
+                "docker_socket": a_socket,
             },
             "b": {
                 "host_endpoint": b_host,
@@ -1288,6 +1351,7 @@ class LiveGate:
                 "docker_root_dir": b_identity[5],
                 "image_config_id": image_config_b,
                 "image_repo_digests": image_repo_digests_b,
+                "docker_socket": b_socket,
             },
             "dind_image": dind_image,
         }
@@ -1338,6 +1402,7 @@ class LiveGate:
                 "data_volume": data_volume_a,
                 "image_config_id": image_config_a,
                 "image_repo_digests": image_repo_digests_a,
+                "docker_socket": a_socket,
             },
             "b": {
                 "engine_id": b_id,
@@ -1355,6 +1420,7 @@ class LiveGate:
                 "data_volume": data_volume_b,
                 "image_config_id": image_config_b,
                 "image_repo_digests": image_repo_digests_b,
+                "docker_socket": b_socket,
             },
             "routing_proof": "host TCP endpoint ID matches outer unix socket",
             "storage_roots_distinct": True,
@@ -2256,6 +2322,19 @@ def verify_evidence(
             raise GateError("evidence does not prove distinct nested Engine data roots")
         if engine.get("marker_volume") != safe_name(run_id, marker_suffix):
             raise GateError("evidence does not prove Engine storage isolation")
+        socket = engine.get("docker_socket")
+        expected_socket = {
+            "dockerd_group_argument": f"--group={AGENT_DOCKER_SOCKET_GID}",
+            "gid": AGENT_DOCKER_SOCKET_GID,
+            "mode": DOCKER_SOCKET_MODE,
+            "file_type": "socket",
+            "path": "/var/run/docker.sock",
+            "evidence_source": "outer-container-inspect-and-stat",
+        }
+        if socket != expected_socket:
+            raise GateError(
+                f"evidence Engine {label.upper()} does not prove its isolated Docker socket identity"
+            )
         image_config_id = required_image_config_id(engine.get("image_config_id"))
         repo_digests = required_repo_digests(engine.get("image_repo_digests"))
         if not any(item.endswith("@" + requested_dind_digest) for item in repo_digests):
@@ -2296,6 +2375,7 @@ def verify_evidence(
             or side_probe.get("data_volume") != expected_volume
             or side_probe.get("image_config_id") != image_config_id
             or side_probe.get("image_repo_digests") != repo_digests
+            or side_probe.get("docker_socket") != expected_socket
         ):
             raise GateError(
                 f"evidence Engine {label.upper()} probe does not match final identity"
@@ -2375,6 +2455,152 @@ def verify_evidence(
     validate_resource_ref(task.get("problem_package", {}))
     if not gateway.get("identity_headers_removed") or int(gateway.get("workload_requests", 0)) < 1:
         raise GateError("Gateway workload identity evidence is incomplete")
+
+
+def _verify_agent_runtime_identity(agent: Any, label: str) -> None:
+    if not isinstance(agent, Mapping):
+        raise GateError(f"{label} Agent evidence is missing")
+    identity = agent.get("runtime_identity", {})
+    process = identity.get("process", {}) if isinstance(identity, Mapping) else {}
+    if (
+        not isinstance(identity, Mapping)
+        or identity.get("config_user") != f"{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}"
+        or identity.get("group_add") != [str(AGENT_DOCKER_SOCKET_GID)]
+        or identity.get("cap_add") != []
+        or identity.get("privileged") is not False
+        or identity.get("evidence_source") != "container-inspect-and-proc"
+        or identity.get("state_mount_source") != identity.get("state_root")
+        or identity.get("state_mount_destination") != identity.get("state_root")
+        or identity.get("state_mount_read_write") is not True
+        or identity.get("workload_export_mount_source")
+        != identity.get("workload_export_root")
+        or identity.get("workload_export_mount_destination")
+        != identity.get("workload_export_root")
+        or identity.get("workload_export_mount_read_write") is not True
+        or identity.get("state_export_roots_disjoint") is not True
+        or identity.get("daemon_namespace_path_exact") is not True
+        or not str(identity.get("state_root", "")).startswith("/var/lib/")
+        or not str(identity.get("workload_export_root", "")).startswith("/var/lib/")
+        or identity.get("workload_export_root") == identity.get("state_root")
+        or str(identity.get("workload_export_root", "")).startswith(
+            str(identity.get("state_root", "")).rstrip("/") + "/"
+        )
+        or str(identity.get("state_root", "")).startswith(
+            str(identity.get("workload_export_root", "")).rstrip("/") + "/"
+        )
+        or identity.get("docker_socket_mount_source") != "/var/run/docker.sock"
+        or identity.get("docker_socket_mount_destination") != "/var/run/docker.sock"
+        or identity.get("docker_socket")
+        != {
+            "dockerd_group_argument": f"--group={AGENT_DOCKER_SOCKET_GID}",
+            "gid": AGENT_DOCKER_SOCKET_GID,
+            "mode": DOCKER_SOCKET_MODE,
+            "file_type": "socket",
+            "path": "/var/run/docker.sock",
+            "evidence_source": "outer-container-inspect-and-stat",
+        }
+        or not isinstance(process, Mapping)
+        or process.get("euid") != STANDARD_WORKLOAD_UID
+        or process.get("egid") != STANDARD_WORKLOAD_GID
+        or process.get("groups")
+        != [AGENT_DOCKER_SOCKET_GID, STANDARD_WORKLOAD_GID]
+        or process.get("supplementary_groups") != [AGENT_DOCKER_SOCKET_GID]
+        or isinstance(process.get("pid"), bool)
+        or not isinstance(process.get("pid"), int)
+        or int(process.get("pid", 0)) <= 0
+        or not str(process.get("outer_engine", "")).strip()
+        or process.get("evidence_source") != "dind-main-process-proc-status"
+    ):
+        raise GateError(f"{label} Agent did not prove its exact capability-free runtime identity")
+    bootstrap = agent.get("bootstrap_files", {})
+    if (
+        not isinstance(bootstrap, Mapping)
+        or bootstrap.get("root_uid") != STANDARD_WORKLOAD_UID
+        or bootstrap.get("root_gid") != STANDARD_WORKLOAD_GID
+        or bootstrap.get("root_mode") != "0700"
+        or bootstrap.get("workload_export_root")
+        != identity.get("workload_export_root")
+        or bootstrap.get("state_export_roots_disjoint") is not True
+        or bootstrap.get("workload_export")
+        != {
+            "uid": STANDARD_WORKLOAD_UID,
+            "gid": STANDARD_WORKLOAD_GID,
+            "mode": "0700",
+            "directory": True,
+        }
+        or bootstrap.get("helper_user")
+        != f"{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}"
+        or bootstrap.get("agent_cap_chown") is not False
+        or bootstrap.get("evidence_source") != "uid-65532-read-only-stat-helper"
+        or not bootstrap.get("files")
+        or not bootstrap.get("directories")
+        or any(
+            item.get("uid") != STANDARD_WORKLOAD_UID
+            or item.get("gid") != STANDARD_WORKLOAD_GID
+            or item.get("mode") != "0600"
+            or item.get("regular") is not True
+            for item in bootstrap.get("files", [])
+        )
+        or any(
+            item.get("uid") != STANDARD_WORKLOAD_UID
+            or item.get("gid") != STANDARD_WORKLOAD_GID
+            or item.get("mode") != "0700"
+            or item.get("directory") is not True
+            for item in bootstrap.get("directories", [])
+        )
+    ):
+        raise GateError(f"{label} Agent bootstrap ownership evidence is incomplete")
+
+
+def _verify_service_context_file_identity(value: Any, label: str) -> None:
+    if not isinstance(value, Mapping):
+        raise GateError(f"{label} ServiceContext file identity is missing")
+    directory = value.get("directory", {})
+    files = value.get("files", [])
+    process = value.get("actual_workload_process", {})
+    expected_user = value.get("actual_workload_config_user")
+    expected_ids = {
+        f"{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}": (
+            STANDARD_WORKLOAD_UID,
+            STANDARD_WORKLOAD_GID,
+        ),
+        "0:0": (0, 0),
+    }
+    if (
+        directory
+        != {
+            "uid": STANDARD_WORKLOAD_UID,
+            "gid": STANDARD_WORKLOAD_GID,
+            "mode": "0700",
+            "directory": True,
+        }
+        or value.get("mounted_read_only") is not True
+        or value.get("reader_user")
+        != f"{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}"
+        or expected_user not in expected_ids
+        or not isinstance(process, Mapping)
+        or process.get("euid") != expected_ids.get(expected_user, (-1, -1))[0]
+        or process.get("egid") != expected_ids.get(expected_user, (-1, -1))[1]
+        or isinstance(process.get("pid"), bool)
+        or not isinstance(process.get("pid"), int)
+        or int(process.get("pid", 0)) <= 0
+        or not str(process.get("outer_engine", "")).strip()
+        or process.get("evidence_source") != "dind-main-process-proc-status"
+        or value.get("actual_workload_files_readable")
+        != ["context.json", "token", "ca.pem"]
+        or value.get("evidence_source") != "fresh-standard-workload-read-and-stat"
+        or not str(value.get("reader_network_namespace", "")).startswith("container:")
+        or {item.get("path") for item in files} != {"context.json", "token", "ca.pem"}
+        or any(
+            item.get("uid") != STANDARD_WORKLOAD_UID
+            or item.get("gid") != STANDARD_WORKLOAD_GID
+            or item.get("mode") != "0600"
+            or item.get("regular") is not True
+            or re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))) is None
+            for item in files
+        )
+    ):
+        raise GateError(f"{label} ServiceContext is not exact private workload-readable material")
 
 
 def _verify_full_evidence(
@@ -2484,6 +2710,7 @@ def _verify_full_evidence(
     _verify_no_secret_material(value)
 
     a_agent = _verify_managed_a_stack(value, engines)
+    _verify_agent_runtime_identity(a_agent, "node-a")
     _verify_problem_artifact_gc(value)
 
     store_agent = value.get("store_agent_evidence", {})
@@ -2527,6 +2754,7 @@ def _verify_full_evidence(
         raise GateError(
             "full-components evidence does not prove an enrolled mTLS Agent with a final runtime report"
         )
+    _verify_agent_runtime_identity(enrolled, "node-b")
 
     validation = store_agent.get("store_validate", {})
     if (
@@ -2624,6 +2852,9 @@ def _verify_full_evidence(
         or set(service_context.get("binding_ids", [])) != binding_ids
     ):
         raise GateError("Agent ServiceContext evidence is incomplete or does not match active bindings")
+    _verify_service_context_file_identity(
+        service_context.get("file_identity"), "node-b Worker"
+    )
 
     runtime = store_agent.get("runtime", {})
     if (
@@ -2636,6 +2867,7 @@ def _verify_full_evidence(
         or not _sha256_digest(runtime.get("image_repo_digest"))
         or not str(runtime.get("container_id", "")).strip()
         or runtime.get("engine_id") != engines.get("b", {}).get("engine_id")
+        or runtime.get("config_user") != "0:0"
     ):
         raise GateError("runtime evidence does not prove Agent-created digest-pinned judge-sandbox-v1 on Engine B")
 
@@ -2786,6 +3018,8 @@ def _verify_full_evidence(
         or consumer.get("installed_via_store_agent") is not True
         or not str(consumer.get("deployment_id", "")).strip()
         or not str(consumer.get("container_id", "")).strip()
+        or consumer.get("config_user")
+        != f"{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}"
         or not isinstance(generic_binding, Mapping)
         or generic_binding.get("requirement_name") != "echo"
         or generic_binding.get("api_id") != "fixture.contract.echo"
@@ -2808,6 +3042,9 @@ def _verify_full_evidence(
         raise GateError(
             "full-components evidence does not prove a generic manifest-only Store/Topology/Agent binding"
         )
+    _verify_service_context_file_identity(
+        consumer.get("service_context_file_identity"), "generic node-b consumer"
+    )
     _verify_runtime_inventory_takeover(
         generic.get("runtime_projection"),
         deployment_id=str(consumer.get("deployment_id", "")),
@@ -3540,7 +3777,7 @@ def _verify_worker_install_failure_compensation(
     gateway = proof.get("gateway_recovery", {}) if isinstance(proof, Mapping) else {}
     component = hashlib.sha256(worker_deployment_id.encode("utf-8")).hexdigest()[:32]
     expected_volume = "ojos-judge-cache-" + component
-    expected_context = "/var/lib/ojos-agent/runtime-contexts/" + component
+    expected_context = "/var/lib/ojos-workload-export/runtime-contexts/" + component
     gateway_container_id = str(fault.get("container_id", ""))
 
     if (
@@ -4398,6 +4635,7 @@ def _verify_worker_recovery(
 def _verify_auth_admin_bootstrap(value: Mapping[str, Any]) -> None:
     bootstrap = value.get("auth_admin_bootstrap", {})
     database = bootstrap.get("database_proof", {}) if isinstance(bootstrap, Mapping) else {}
+    delivery = bootstrap.get("credential_delivery", {}) if isinstance(bootstrap, Mapping) else {}
     created_user_id = str(bootstrap.get("created_user_id", "")) if isinstance(bootstrap, Mapping) else ""
     if (
         not isinstance(bootstrap, Mapping)
@@ -4427,6 +4665,25 @@ def _verify_auth_admin_bootstrap(value: Mapping[str, Any]) -> None:
         or bootstrap.get("manual_database_role_seed") is not False
         or bootstrap.get("database_transactional") is not True
         or bootstrap.get("secret_or_token_recorded") is not False
+        or not isinstance(delivery, Mapping)
+        or delivery.get("delivery_mode") != "host-private-file-read-only-bind"
+        or delivery.get("host_file_path") != "/var/lib/ojos-auth-bootstrap/initial-admin"
+        or delivery.get("host_file_uid") != STANDARD_WORKLOAD_UID
+        or delivery.get("host_file_gid") != STANDARD_WORKLOAD_GID
+        or delivery.get("host_file_mode") != "0600"
+        or delivery.get("host_directory_mode") != "0700"
+        or delivery.get("write_transport") != "docker-exec-stdin"
+        or delivery.get("container_file_path")
+        != "/run/secrets/ojos-auth-admin-bootstrap"
+        or delivery.get("mount_type") != "bind"
+        or delivery.get("mount_read_only") is not True
+        or delivery.get("inline_environment_absent") is not True
+        or delivery.get("container_file_uid") != STANDARD_WORKLOAD_UID
+        or delivery.get("container_file_gid") != STANDARD_WORKLOAD_GID
+        or delivery.get("container_file_mode") != "0600"
+        or delivery.get("cleanup_scope")
+        != "run-scoped-outer-dind-container-teardown"
+        or delivery.get("production_one_time_unmount_proven") is not False
     ):
         raise GateError(
             "full-components evidence does not prove one-time Auth admin bootstrap, "
@@ -4653,6 +4910,7 @@ def _verify_managed_a_deployment(
     if not isinstance(evidence, Mapping):
         raise GateError(f"managed A deployment evidence is missing for {service_id}")
     job = evidence.get("agent_job", {})
+    process = evidence.get("process_identity", {})
     if (
         evidence.get("service_id") != service_id
         or evidence.get("node_id") != "node-a"
@@ -4674,6 +4932,16 @@ def _verify_managed_a_deployment(
         or str(evidence.get("drift_reason", "")).strip()
         or evidence.get("engine_id") != engine_id
         or not re.fullmatch(r"[0-9a-f]{12,64}", str(evidence.get("container_id", "")))
+        or evidence.get("config_user")
+        != f"{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}"
+        or not isinstance(process, Mapping)
+        or process.get("euid") != STANDARD_WORKLOAD_UID
+        or process.get("egid") != STANDARD_WORKLOAD_GID
+        or isinstance(process.get("pid"), bool)
+        or not isinstance(process.get("pid"), int)
+        or int(process.get("pid", 0)) <= 0
+        or not str(process.get("outer_engine", "")).strip()
+        or process.get("evidence_source") != "dind-main-process-proc-status"
         or not _sha256_digest(evidence.get("image_repo_digest"))
         or not _sha256_digest(evidence.get("host_config_digest"))
         or evidence.get("legacy_environment_present") is not False
@@ -4721,6 +4989,9 @@ def _verify_managed_a_deployment(
             or len(context.get("binding_ids", [])) != len(binding_ids)
         ):
             raise GateError(f"managed A {service_id} ServiceContext proof is incomplete")
+        _verify_service_context_file_identity(
+            context.get("file_identity"), f"managed A {service_id}"
+        )
     elif (
         context.get("required") is not False
         or context.get("present") is not False

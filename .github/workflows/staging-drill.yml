@@ -26,23 +26,114 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      redis:
+        image: redis:8.2.4-alpine
+        ports:
+          - 56379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v6
       - name: Run v1 database and artifact recovery drill
         shell: bash
         run: |
           set -euo pipefail
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
           # Use the same PostgreSQL major for pg_dump/pg_restore as the server;
           # ubuntu-latest's distro client may lag and refuse a newer server.
-          docker run --rm --network host \
+          docker run --rm --network host --user "$runner_uid:$runner_gid" \
             -v "$PWD:/workspace" -w /workspace \
+            -e HOME=/tmp \
             -e 'ORCHESTRATOR_DRILL_DATABASE_URL=postgresql://postgres:ojos-orchestrator-recovery-ci@127.0.0.1:55436/ojos_orchestrator_backup_restore_drill?sslmode=disable' \
             -e OJOS_EVIDENCE_DIR=artifacts/orchestrator-backup-restore \
             postgres:17 \
             bash deploy/ops/tests/orchestrator-backup-restore-drill.sh
-      - name: Upload staging drill evidence
+      - name: Run full-stack clean-target recovery drill
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          drill_image="ojos-full-stack-recovery:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker build --tag "$drill_image" - <<'DOCKERFILE'
+          FROM postgres:17
+          RUN apt-get update -qq \
+              && apt-get install -y -qq --no-install-recommends python3 jq redis-tools redis-server \
+              && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+          docker run --rm --network host --user "$runner_uid:$runner_gid" \
+            -v "$PWD:/workspace" -w /workspace \
+            -e HOME=/tmp \
+            -e PGHOST=127.0.0.1 -e PGPORT=55436 -e PGUSER=postgres \
+            -e PGPASSWORD=ojos-orchestrator-recovery-ci \
+            "$drill_image" bash -Eeuo pipefail -c '
+              services=(orchestrator auth problem judge user)
+              for service in "${services[@]}"; do
+                createdb "ojos_${service}_backup_restore_drill_source"
+                createdb "ojos_${service}_backup_restore_drill_target"
+              done
+              redis-cli -h 127.0.0.1 -p 56379 SET ojos:environment-id full-stack-backup-restore-drill-source >/dev/null
+              export OJOS_CONFIRM_FULL_STACK_RESTORE_DRILL=full-stack-clean-target-drill-v1
+              export OJOS_FULL_STACK_DRILL_EVIDENCE_DIR=/workspace/artifacts/full-stack-backup-restore
+              export OJOS_DRILL_SOURCE_REDIS_URL=redis://127.0.0.1:56379/0
+              for service in "${services[@]}"; do
+                upper="${service^^}"
+                export "OJOS_DRILL_SOURCE_${upper}_DATABASE_URL=postgresql://postgres:ojos-orchestrator-recovery-ci@127.0.0.1:55436/ojos_${service}_backup_restore_drill_source?sslmode=disable"
+                export "OJOS_DRILL_TARGET_${upper}_DATABASE_URL=postgresql://postgres:ojos-orchestrator-recovery-ci@127.0.0.1:55436/ojos_${service}_backup_restore_drill_target?sslmode=disable"
+              done
+              bash deploy/ops/tests/full-stack-backup-restore-drill.sh
+            '
+      - name: Validate recovery artifact suite
+        id: recovery-artifact-suite
         if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence=(
+            artifacts/orchestrator-backup-restore
+            artifacts/full-stack-backup-restore
+          )
+          for root in "${evidence[@]}"; do
+            [[ -d "$root" ]] || {
+              echo "missing recovery evidence directory: $root" >&2
+              exit 1
+            }
+            [[ -n "$(find "$root" -type f -print -quit)" ]] || {
+              echo "recovery evidence directory is empty: $root" >&2
+              exit 1
+            }
+            while IFS= read -r -d '' path; do
+              [[ -r "$path" && -x "$path" ]] || {
+                echo "recovery evidence directory is not traversable: $path" >&2
+                exit 1
+              }
+            done < <(find "$root" -type d -print0)
+            while IFS= read -r -d '' path; do
+              [[ -r "$path" ]] || {
+                echo "recovery evidence file is not readable: $path" >&2
+                exit 1
+              }
+            done < <(find "$root" -type f -print0)
+          done
+          archive="$RUNNER_TEMP/orchestrator-v1-recovery-evidence.tar.gz"
+          tar -czf "$archive" "${evidence[@]}"
+          tar -tzf "$archive" >/dev/null
+          archive_bytes="$(stat -c '%s' "$archive")"
+          [[ "$archive_bytes" -gt 0 && "$archive_bytes" -le 1073741824 ]] || {
+            echo "recovery evidence archive size is invalid: ${archive_bytes} bytes" >&2
+            exit 1
+          }
+      - name: Upload staging drill evidence
+        if: ${{ always() && steps.recovery-artifact-suite.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: orchestrator-v1-recovery-evidence
-          path: artifacts/orchestrator-backup-restore
+          path: |
+            artifacts/orchestrator-backup-restore
+            artifacts/full-stack-backup-restore
+          if-no-files-found: error
+          include-hidden-files: true

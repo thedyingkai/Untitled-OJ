@@ -8,6 +8,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY services/orchestrator ./services/orchestrator
 COPY manager ./manager
 COPY platform ./platform
+COPY tools ./tools
 
 RUN OJOS_BUILD_COMMIT="$OJOS_BUILD_COMMIT" \
     cargo build --locked --release -p orchestrator-agent --bin ojos-orchestrator-agent
@@ -21,15 +22,15 @@ LABEL org.opencontainers.image.revision="$OJOS_BUILD_COMMIT"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd -g 10004 ojos-agent \
-    && useradd -u 10004 -g 10004 -M -s /usr/sbin/nologin ojos-agent \
-    && install -d -o 10004 -g 10004 -m 0750 /var/lib/ojos-agent
+    && groupadd -g 65532 ojos-agent \
+    && useradd -u 65532 -g 65532 -M -s /usr/sbin/nologin ojos-agent \
+    && install -d -o 65532 -g 65532 -m 0750 /var/lib/ojos-agent
 
 COPY --from=build /workspace/target/release/ojos-orchestrator-agent /usr/local/bin/ojos-orchestrator-agent
 
-# Production hosts normally add the Docker socket group at runtime. The
-# capacity compose does that per isolated Engine; the image itself stays
-# non-root and has no Docker CLI or shell-based execution path.
-USER 10004:10004
+# Production adds only the isolated Docker socket GID as a supplemental group.
+# The primary identity matches signed standard-v3 workloads so the Agent can
+# atomically rotate 0600 bind-mounted context/resource files without CHOWN.
+USER 65532:65532
 WORKDIR /var/lib/ojos-agent
 ENTRYPOINT ["/usr/local/bin/ojos-orchestrator-agent"]

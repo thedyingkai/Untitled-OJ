@@ -16,6 +16,8 @@ pg_user="ojos_credential_drill"
 pg_password="OjosCredentialPg_0123456789abcdef"
 pg_db="ojos_credential_drill"
 postgres_image="${OJOS_DRILL_POSTGRES_IMAGE:-postgres:17}"
+postgres_ready_timeout="${OJOS_CREDENTIAL_DRILL_READY_TIMEOUT_SECONDS:-120}"
+postgres_init_complete="PostgreSQL init process complete; ready for start up."
 status="failed"
 start_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -44,6 +46,55 @@ sha256_text() {
 
 docker_exec() {
   MSYS2_ARG_CONV_EXCL='*' docker exec "$@"
+}
+
+container_is_running() {
+  [[ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" == "true" ]]
+}
+
+final_postgres_is_pid_one() {
+  docker_exec "$container" sh -ec 'test "$(cat /proc/1/comm)" = postgres' >/dev/null 2>&1
+}
+
+wait_for_final_postgres() {
+  local deadline=$((SECONDS + postgres_ready_timeout))
+
+  # postgres' official entrypoint starts a temporary server during initdb and
+  # stops it before exec-ing the final server. pg_isready alone can therefore
+  # succeed inside a short-lived window. This marker is emitted only after the
+  # temporary server has completed its shutdown.
+  while ((SECONDS < deadline)); do
+    if docker logs "$container" 2>&1 | grep -F "$postgres_init_complete" >/dev/null; then
+      break
+    fi
+    if ! container_is_running; then
+      echo "PostgreSQL container exited before initdb completed" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  if ! docker logs "$container" 2>&1 | grep -F "$postgres_init_complete" >/dev/null; then
+    echo "Timed out waiting for PostgreSQL initdb temporary server shutdown" >&2
+    return 1
+  fi
+
+  # The marker precedes the entrypoint's final exec by a few instructions.
+  # Require PID 1 to have become postgres and then take a fresh readiness
+  # observation. The temporary initdb server is a child of the entrypoint and
+  # therefore cannot satisfy this identity gate.
+  while ((SECONDS < deadline)); do
+    if final_postgres_is_pid_one && \
+      docker_exec "$container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null 2>&1; then
+      return 0
+    fi
+    if ! container_is_running; then
+      echo "PostgreSQL container exited before final server readiness" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for final PostgreSQL server readiness" >&2
+  return 1
 }
 
 finish() {
@@ -81,6 +132,17 @@ trap finish EXIT
 need_cmd docker
 need_cmd jq
 
+case "$postgres_ready_timeout" in
+  '' | *[!0-9]*)
+    echo "OJOS_CREDENTIAL_DRILL_READY_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 64
+    ;;
+esac
+if ((postgres_ready_timeout < 1)); then
+  echo "OJOS_CREDENTIAL_DRILL_READY_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 64
+fi
+
 docker run -d \
   --name "$container" \
   -e "POSTGRES_USER=$pg_user" \
@@ -88,13 +150,7 @@ docker run -d \
   -e "POSTGRES_DB=$pg_db" \
   "$postgres_image" >/dev/null
 
-for _ in $(seq 1 60); do
-  if docker_exec "$container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-docker_exec "$container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null
+wait_for_final_postgres
 
 psql() {
   docker_exec -i -e "PGPASSWORD=$pg_password" "$container" \

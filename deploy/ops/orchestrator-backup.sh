@@ -8,6 +8,15 @@ done
 [[ -n "${ORCHESTRATOR_DATABASE_URL:-}" ]] || die "ORCHESTRATOR_DATABASE_URL is required"
 [[ "${ORCHESTRATOR_CONFIRM_QUIESCED_BACKUP:-}" == "backup-orchestrator-v1" ]] || \
   die "stop or drain the daemon, then set ORCHESTRATOR_CONFIRM_QUIESCED_BACKUP=backup-orchestrator-v1"
+[[ -n "${ORCHESTRATOR_BACKUP_FENCE_TOKEN:-}" ]] || \
+  die "ORCHESTRATOR_BACKUP_FENCE_TOKEN is required"
+if [[ -n "${ORCHESTRATOR_BACKUP_FENCE_CHECK_COMMAND:-}" ]]; then
+  ORCHESTRATOR_FENCE_TOKEN="$ORCHESTRATOR_BACKUP_FENCE_TOKEN" \
+    bash -Eeuo pipefail -c "$ORCHESTRATOR_BACKUP_FENCE_CHECK_COMMAND" || \
+    die "external control-plane write fence check failed"
+elif [[ "${ORCHESTRATOR_BACKUP_ALLOW_DECLARED_FENCE:-0}" != "1" ]]; then
+  die "ORCHESTRATOR_BACKUP_FENCE_CHECK_COMMAND is required; use ORCHESTRATOR_BACKUP_ALLOW_DECLARED_FENCE=1 only for an isolated drill"
+fi
 artifact_root="${ORCHESTRATOR_ARTIFACT_DIR:-}"
 [[ -n "$artifact_root" && -d "$artifact_root" ]] || die "ORCHESTRATOR_ARTIFACT_DIR must be an existing directory"
 artifact_root="$(cd "$artifact_root" && pwd -P)"
@@ -39,8 +48,11 @@ temporary="$backup_root/.${stamp}.tmp.$$"
 [[ ! -e "$final" && ! -e "$temporary" ]] || die "backup target already exists"
 umask 077
 mkdir -p "$temporary"
-cleanup() { rm -rf -- "$temporary"; }
+cleanup() { local rc=$?; [[ ! -e "$temporary" ]] || rm -rf -- "$temporary"; exit "$rc"; }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 pg_dump --format=custom --compress=9 --no-owner --no-acl \
   --file "$temporary/orchestrator.dump" "$ORCHESTRATOR_DATABASE_URL"
@@ -58,7 +70,8 @@ cat >"$temporary/manifest.json" <<EOF
   "artifact_archive": "orchestrator-artifacts.tar.gz",
   "artifact_files": $artifact_files,
   "artifact_bytes": $artifact_bytes,
-  "consistency": "control-plane-quiesced"
+  "consistency": "control-plane-quiesced",
+  "fence_id_sha256": "$(printf '%s' "$ORCHESTRATOR_BACKUP_FENCE_TOKEN" | sha256sum | awk '{print $1}')"
 }
 EOF
 (
@@ -67,7 +80,7 @@ EOF
   sha256sum -c SHA256SUMS >/dev/null
 )
 mv "$temporary" "$final"
-trap - EXIT
+trap - EXIT INT TERM HUP
 
 # Retention only touches timestamp-shaped directories directly below the
 # explicitly configured backup root.

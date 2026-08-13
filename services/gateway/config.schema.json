@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ojos:gateway:config:v1",
+  "title": "OJOS Gateway configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "redis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "writeOnly": true,
+          "x-ojos-secret": true
+        }
+      },
+      "required": ["url"]
+    },
+    "jwt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secret": {
+          "type": "string",
+          "minLength": 32,
+          "writeOnly": true,
+          "x-ojos-secret": true
+        }
+      },
+      "required": ["secret"]
+    },
+    "orchestrator": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {"type": "string", "format": "uri"},
+        "internalToken": {
+          "type": "string",
+          "minLength": 32,
+          "writeOnly": true,
+          "x-ojos-secret": true
+        },
+		"contributionAckToken": {
+		  "type": "string",
+		  "minLength": 32,
+		  "writeOnly": true,
+		  "x-ojos-secret": true
+		},
+        "nodeId": {"type": "string", "minLength": 1}
+      },
+	  "required": ["endpoint", "internalToken", "contributionAckToken", "nodeId"]
+    },
+    "tracing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {"type": "string"}
+      }
+    }
+  },
+  "required": ["redis", "jwt", "orchestrator"]
+}

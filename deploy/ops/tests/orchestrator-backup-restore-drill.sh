@@ -70,6 +70,8 @@ ORCHESTRATOR_BACKUP_DIR="$backup_root" \
 ORCHESTRATOR_BACKUP_STAMP="$stamp" \
 ORCHESTRATOR_HEALTH_URL= \
 ORCHESTRATOR_CONFIRM_QUIESCED_BACKUP=backup-orchestrator-v1 \
+ORCHESTRATOR_BACKUP_FENCE_TOKEN="isolated-drill-$stamp" \
+ORCHESTRATOR_BACKUP_ALLOW_DECLARED_FENCE=1 \
   bash "$repo_root/deploy/ops/orchestrator-backup.sh"
 
 psql "$database_url" -v ON_ERROR_STOP=1 -c \
@@ -96,12 +98,20 @@ mapfile -t previous_artifacts < <(
   die "restore must retain exactly one previous artifact directory"
 grep -qx 'after-backup artifact' "${previous_artifacts[0]}/probe.txt" || \
   die "previous artifact directory does not contain the pre-restore state"
+mapfile -t previous_databases < <(
+  find "$evidence_root" -mindepth 1 -maxdepth 1 -type f \
+    -name ".live-artifacts-$stamp.database-before-restore.*.dump" -print
+)
+[[ "${#previous_databases[@]}" -eq 1 ]] || \
+  die "restore must retain exactly one pre-restore database snapshot"
+pg_restore --list "${previous_databases[0]}" >/dev/null
 
 {
   printf 'commit=%s\n' "${GITHUB_SHA:-local}"
   printf 'database_probe=restored\n'
   printf 'artifact_probe=restored\n'
   printf 'previous_artifacts=%s\n' "${previous_artifacts[0]}"
+  printf 'previous_database=%s\n' "${previous_databases[0]}"
 } >"$evidence_root/result.txt"
 
 echo "orchestrator-backup-restore-drill: passed; evidence=$evidence_root"
