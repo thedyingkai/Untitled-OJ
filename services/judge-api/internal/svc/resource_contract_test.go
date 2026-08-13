@@ -22,6 +22,8 @@ func TestManagedEnvironmentUsesAgentSubmissionsResourceOutputAndDropsLegacySecre
 	t.Setenv("AUTH_SERVICE_ADMIN_TOKEN", "legacy-auth-secret")
 	t.Setenv("OJOS_STORAGE_SERVICE_ENDPOINT", "http://legacy-storage:8080")
 	t.Setenv("OJOS_INTERNAL_GATEWAY_ENDPOINT", "http://legacy-gateway:8080")
+	t.Setenv("OJOS_CALLER_NODE_ID", "legacy-node")
+	t.Setenv("OJOS_AUTH_PERMISSION_CALLER_NODE_ID", "legacy-permission-node")
 	t.Setenv("OJOS_SERVICE_TOKEN", "legacy-service-secret")
 	t.Setenv("OJOS_ALLOW_LEGACY_WORKER_TOKEN", "true")
 	value := config.Config{
@@ -42,8 +44,9 @@ func TestManagedEnvironmentUsesAgentSubmissionsResourceOutputAndDropsLegacySecre
 		t.Fatalf("managed DSN did not come from resource output")
 	}
 	if value.Redis.Url != "" || value.AuthService.Endpoint != "" || value.AuthService.AdminToken != "" ||
-		value.AuthService.InternalGatewayEndpoint != "" || value.AuthService.ServiceToken != "" ||
-		value.Storage.ServiceEndpoint != "" || value.Storage.InternalGatewayEndpoint != "" || value.Storage.ServiceToken != "" {
+		value.AuthService.InternalGatewayEndpoint != "" || value.AuthService.CallerNodeID != "" || value.AuthService.ServiceToken != "" ||
+		value.Storage.ServiceEndpoint != "" || value.Storage.InternalGatewayEndpoint != "" ||
+		value.Storage.CallerNodeID != "" || value.Storage.ServiceToken != "" {
 		t.Fatal("managed configuration retained a legacy URL or token")
 	}
 	if value.WorkloadIdentity.AllowLegacyWorkerToken {
@@ -75,6 +78,41 @@ func TestUnmanagedEnvironmentRetainsLegacyDevelopmentAliases(t *testing.T) {
 	}
 	if value.Database.Url != "postgres://local:secret@database:5432/judge" || value.Redis.Url != "redis://local:6379/0" {
 		t.Fatal("development aliases were not retained")
+	}
+}
+
+func TestUnmanagedPermissionCallerNodeFallsBackToTheWorkloadNode(t *testing.T) {
+	t.Setenv("OJOS_MANAGED_WORKLOAD", "")
+	t.Setenv("OJOS_ENVIRONMENT", "development")
+	t.Setenv("OJOS_CALLER_NODE_ID", "child-node")
+
+	var value config.Config
+	if err := applyEnvOverrides(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value.AuthService.CallerNodeID != "child-node" {
+		t.Fatalf("permission caller node = %q, want child-node", value.AuthService.CallerNodeID)
+	}
+	if value.Storage.CallerNodeID != "child-node" {
+		t.Fatalf("storage caller node = %q, want child-node", value.Storage.CallerNodeID)
+	}
+}
+
+func TestUnmanagedPermissionCallerNodePrefersItsDedicatedOverride(t *testing.T) {
+	t.Setenv("OJOS_MANAGED_WORKLOAD", "")
+	t.Setenv("OJOS_ENVIRONMENT", "development")
+	t.Setenv("OJOS_AUTH_PERMISSION_CALLER_NODE_ID", "permission-node")
+	t.Setenv("OJOS_CALLER_NODE_ID", "storage-node")
+
+	var value config.Config
+	if err := applyEnvOverrides(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value.AuthService.CallerNodeID != "permission-node" {
+		t.Fatalf("permission caller node = %q, want permission-node", value.AuthService.CallerNodeID)
+	}
+	if value.Storage.CallerNodeID != "storage-node" {
+		t.Fatalf("storage caller node = %q, want storage-node", value.Storage.CallerNodeID)
 	}
 }
 

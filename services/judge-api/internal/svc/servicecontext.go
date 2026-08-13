@@ -486,7 +486,11 @@ func applyEnvOverrides(c *config.Config) error {
 		if value := strings.TrimSpace(os.Getenv("OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT")); value != "" {
 			c.AuthService.InternalGatewayEndpoint = value
 		}
-		if value := strings.TrimSpace(os.Getenv("OJOS_AUTH_PERMISSION_CALLER_NODE_ID")); value != "" {
+		if value := firstEnv(
+			"OJOS_AUTH_PERMISSION_CALLER_NODE_ID",
+			"OJOS_CALLER_NODE_ID",
+			"OJOS_NODE_ID",
+		); value != "" {
 			c.AuthService.CallerNodeID = value
 		}
 		if value := firstEnv("OJOS_JUDGE_API_SERVICE_TOKEN", "OJOS_SERVICE_TOKEN"); value != "" {
