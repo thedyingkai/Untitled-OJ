@@ -860,17 +860,41 @@ class CapacityGateTests(unittest.TestCase):
             )
             writer = CAPACITY.EvidenceWriter(report, path)
             writer.checkpoint()
-            writer.start_periodic_checkpoints(0.02)
-            time_started = CAPACITY.time.monotonic()
-            CAPACITY.time.sleep(0.075)
-            writer.stop_periodic_checkpoints()
-            elapsed = CAPACITY.time.monotonic() - time_started
+
+            clock_seconds = [CAPACITY.time.monotonic()]
+            wait_delays: list[float] = []
+            checkpoints_reached = CAPACITY.threading.Event()
+            release_periodic_thread = CAPACITY.threading.Event()
+
+            def clock() -> float:
+                return clock_seconds[0]
+
+            def controlled_wait(delay: float) -> bool:
+                wait_delays.append(delay)
+                if len(wait_delays) <= 3:
+                    clock_seconds[0] += delay
+                    return False
+                checkpoints_reached.set()
+                self.assertTrue(release_periodic_thread.wait(5))
+                return True
+
+            with mock.patch.object(
+                writer._periodic_stop, "wait", side_effect=controlled_wait
+            ):
+                writer.start_periodic_checkpoints(0.02, clock=clock)
+                try:
+                    self.assertTrue(checkpoints_reached.wait(5))
+                finally:
+                    release_periodic_thread.set()
+                    writer.stop_periodic_checkpoints()
+
+            clock_seconds[0] += 0.02
             writer.finalize()
 
             on_disk = json.loads(path.read_text(encoding="utf-8"))
             history = on_disk["evidence"]["checkpoint_history"]
             timestamps = [entry["clock_seconds"] for entry in history]
-            self.assertGreaterEqual(len(history), 4)
+            self.assertEqual(len(history), 5)
             self.assertEqual(
                 on_disk["evidence"]["checkpoint_count"], len(history)
             )
@@ -879,14 +903,11 @@ class CapacityGateTests(unittest.TestCase):
                 [entry["sequence"] for entry in history],
                 list(range(1, len(history) + 1)),
             )
-            self.assertGreater(elapsed, 0)
-            self.assertLess(
-                max(
-                    right - left
-                    for left, right in zip(timestamps, timestamps[1:])
-                ),
-                0.05,
-            )
+            self.assertEqual(len(wait_delays), 4)
+            for delay in wait_delays:
+                self.assertAlmostEqual(delay, 0.02)
+            for left, right in zip(timestamps[1:], timestamps[2:]):
+                self.assertAlmostEqual(right - left, 0.02)
 
     def test_checkpoint_io_does_not_hold_the_report_mutation_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
