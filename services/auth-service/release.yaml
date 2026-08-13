@@ -62,6 +62,9 @@ migrations:
   - version: "000015_contribution_permission_projection"
     path: services/auth-service/migrations/000015_contribution_permission_projection.up.sql
     checksum: sha256:e369ec0789e6c02b53a8878a635b06c0d5ba0d7e4ed8f0b619ed2239ce0b6ec3
+  - version: "000016_judge_permission_namespace"
+    path: services/auth-service/migrations/000016_judge_permission_namespace.up.sql
+    checksum: sha256:d8a5a5197975eea854f44b79d0c2de50650ecc45a8b0ef12654b994e3e529d88
 permissions:
   - auth.permission.check
   - system.admin

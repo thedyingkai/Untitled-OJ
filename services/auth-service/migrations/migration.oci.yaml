@@ -18,7 +18,9 @@ files:
   - 000013_topology_binding_projection.up.sql
   - 000014_initial_admin_bootstrap.up.sql
   - 000015_contribution_permission_projection.up.sql
+  - 000016_judge_permission_namespace.up.sql
 rollbackFiles:
+  - 000016_judge_permission_namespace.down.sql
   - 000015_contribution_permission_projection.down.sql
   - 000014_initial_admin_bootstrap.down.sql
   - 000013_topology_binding_projection.down.sql

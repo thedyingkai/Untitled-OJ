@@ -69,6 +69,19 @@ def assert_in_order(test: unittest.TestCase, body: str, *needles: str) -> None:
 
 
 class ReleaseWorkflowPolicyTests(unittest.TestCase):
+    def test_docker_e2e_runs_judge_permission_namespace_postgres_contract(self) -> None:
+        step = workflow_step(
+            "Auth Judge permission namespace PostgreSQL contract",
+            DOCKER_E2E_WORKFLOW,
+        )
+        self.assertNotIn("if:", step)
+        self.assertIn("AUTH_JUDGE_PERMISSION_TEST_DATABASE_URL:", step)
+        self.assertIn(
+            "go test ./internal/repository -run "
+            "'^TestJudgePermissionNamespacePostgres' -count=1",
+            step,
+        )
+
     def test_prometheus_validation_mounts_a_nonempty_read_only_token_fixture(self) -> None:
         step = workflow_step(
             "Validate Prometheus configuration and alert rules",

@@ -73,7 +73,7 @@ async function mockApi(page: Page): Promise<void> {
         user_id: 7,
         username: 'operator',
         roles: ['user'],
-        permissions: ['judge.submit', 'submission.view.own', 'problem.read'],
+        permissions: ['judge.submit', 'judge.submission.view.own', 'problem.read'],
       })
       return
     }
@@ -85,7 +85,7 @@ async function mockApi(page: Page): Promise<void> {
       user_id: 7,
       username: 'operator',
       roles: ['user'],
-      permissions: ['judge.submit', 'submission.view.own', 'problem.read'],
+      permissions: ['judge.submit', 'judge.submission.view.own', 'problem.read'],
     })
   })
 

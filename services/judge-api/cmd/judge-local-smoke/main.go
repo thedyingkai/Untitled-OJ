@@ -1410,7 +1410,7 @@ func composeSmokePushedRouteTable(endpoints map[string]composeSmokeServiceEndpoi
 		childNodeID,
 		"/api/judge",
 		"user",
-		"submission.view.own",
+		"judge.submission.view.own",
 		[]string{"ANY"},
 		"/api/judge",
 		"/judge",

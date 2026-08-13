@@ -50,8 +50,9 @@ migrations:
 permissions:
   - judge.submit
   - judge.admin
-  - submission.view.own
-  - submission.view.all
+  - judge.submission.view.own
+  - judge.submission.view.all
+  - judge.submission.manage
   - judge.worker
   - judge.worker.status
 routes:
@@ -59,7 +60,7 @@ routes:
     method: ANY
     target_type: endpoint-group
     target: judge-api[*]
-    permission: submission.view.own
+    permission: judge.submission.view.own
 provides:
   apis:
     - id: judge.submission.create
@@ -78,7 +79,7 @@ provides:
       methods: [GET]
       visibility: descendants
       auth: user
-      permission: submission.view.own
+      permission: judge.submission.view.own
       stability: stable
     - id: judge.worker.status
       version: 1.0.0

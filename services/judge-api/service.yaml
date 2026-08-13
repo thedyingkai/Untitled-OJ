@@ -80,12 +80,13 @@ ui:
   menus:
     - submissions
   permissions:
-    - submission.view.own
+    - judge.submission.view.own
 permissions:
   - judge.submit
   - judge.admin
-  - submission.view.own
-  - submission.view.all
+  - judge.submission.view.own
+  - judge.submission.view.all
+  - judge.submission.manage
   - judge.worker.status
 health:
   checks:

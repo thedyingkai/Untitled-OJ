@@ -107,6 +107,14 @@ jobs:
         run: |
           npm ci --registry=https://registry.npmjs.org
           npm run build
+      - name: Auth Judge permission namespace PostgreSQL contract
+        working-directory: services/auth-service
+        shell: bash
+        env:
+          AUTH_JUDGE_PERMISSION_TEST_DATABASE_URL: postgres://postgres:ojos-live-ci@127.0.0.1:55432/ojos_orchestrator_live?sslmode=disable
+        run: |
+          set -euo pipefail
+          go test ./internal/repository -run '^TestJudgePermissionNamespacePostgres' -count=1
       - name: Rust checks
         shell: bash
         run: |

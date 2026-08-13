@@ -22,7 +22,7 @@
       "tags": ["core", "auth"],
       "repo": "",
       "source_url": "services/auth-service",
-      "checksum": "sha256:50affba62109cb71f9c5717d54db75e19cd3678894a2d25a2504d830ea400587"
+      "checksum": "sha256:43674b42fc2e09b28b356f24863caad6c0b0e6941fec77d2900fa27c62173652"
     },
     {
       "id": "user-service",
@@ -52,7 +52,7 @@
       "tags": ["oj", "judge"],
       "repo": "",
       "source_url": "services/judge-api",
-      "checksum": "sha256:aafb56b843b163e7d58ca92d9a6478da2bb171324dfa72d3f94aa53a881d0493"
+      "checksum": "sha256:2a8c4de9bbcf718bfa72380b63515331359b5795f1f4a53014040831e4008e4b"
     },
     {
       "id": "judge-worker",

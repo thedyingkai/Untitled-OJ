@@ -24,7 +24,7 @@ paths:
         id: judge.submission.result
         version: 1.0.0
         auth: user
-        permission: submission.view.own
+        permission: judge.submission.view.own
       responses:
         "200": {description: Submission list}
   /judge/submissions/{id}:

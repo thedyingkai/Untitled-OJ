@@ -53,6 +53,26 @@ fn cross_machine_services_publish_unambiguous_v2_contracts() {
         requirement.binding_name() == "permission_check"
             && requirement.api_id() == "auth.user.permission.check"
     }));
+    let mut judge_submission_permissions = judge
+        .release
+        .permissions
+        .iter()
+        .map(String::as_str)
+        .filter(|permission| permission.starts_with("judge.submission."))
+        .collect::<Vec<_>>();
+    judge_submission_permissions.sort_unstable();
+    assert_eq!(
+        judge_submission_permissions,
+        vec![
+            "judge.submission.manage",
+            "judge.submission.view.all",
+            "judge.submission.view.own",
+        ]
+    );
+    assert_eq!(
+        judge.release.routes[0].permission,
+        "judge.submission.view.own"
+    );
     assert!(
         judge
             .events

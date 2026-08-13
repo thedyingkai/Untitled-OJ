@@ -244,7 +244,8 @@ func TestComposeSmokePushedRouteTableCoversLiveJudgeChain(t *testing.T) {
 	}
 	judge := findComposeGatewayServiceRoute(request.Routes, judgeAPIService)
 	if judge == nil || judge.Prefix != "/api/judge" || judge.StripPrefix != "/api/judge" ||
-		judge.RewritePrefix != "/judge" || judge.UpstreamBase != "http://172.20.0.12:8082" || judge.AuthMode != "user" {
+		judge.RewritePrefix != "/judge" || judge.UpstreamBase != "http://172.20.0.12:8082" ||
+		judge.AuthMode != "user" || judge.RequiredPermission != "judge.submission.view.own" {
 		t.Fatalf("invalid judge route: %#v", judge)
 	}
 }

@@ -51,7 +51,7 @@ const isTerminal = computed(() => Boolean(submission.value && isTerminalStatus(s
 const canDebug = computed(
   () =>
     auth.hasAnyRole(['super_admin', 'admin']) ||
-    auth.hasAnyPermission(['system.admin', 'submission.view.all', 'problem.manage.data']),
+    auth.hasAnyPermission(['system.admin', 'judge.submission.view.all', 'problem.manage.data']),
 )
 
 const columns: DataTableColumns<SubmissionCaseItem> = [
