@@ -136,6 +136,8 @@ jobs:
       # Gateway/contest binaries, signed artifacts, or driver evidence is absent.
       - name: Contest service real Docker vertical
         shell: bash
+        env:
+          OJOS_CONTEST_E2E_REDIS_HOST_PORT: "56379"
         run: bash deploy/ops/contest-service-real-vertical-e2e.sh
 
       - name: Build nsjail for strict judge-worker live tests

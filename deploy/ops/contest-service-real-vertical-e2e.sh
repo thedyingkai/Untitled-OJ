@@ -88,6 +88,17 @@ if [[ ! "$docker_socket_gid" =~ ^[0-9]+$ || "$docker_socket_gid" == 0 ]]; then
   exit 1
 fi
 workload_groups="$docker_socket_gid"
+redis_host_port="${OJOS_CONTEST_E2E_REDIS_HOST_PORT:-}"
+if [[ ! "$redis_host_port" =~ ^[0-9]+$ || "$redis_host_port" -lt 1 \
+    || "$redis_host_port" -gt 65535 ]]; then
+  echo "contest real vertical requires OJOS_CONTEST_E2E_REDIS_HOST_PORT (1-65535)" >&2
+  exit 1
+fi
+redis_host_url="redis://127.0.0.1:${redis_host_port}/0"
+if ! redis-cli -u "$redis_host_url" ping | grep -qx PONG; then
+  echo "contest real vertical cannot reach the isolated host Redis at $redis_host_url" >&2
+  exit 1
+fi
 
 cleanup() {
   [[ -z "$artifact_pid" ]] || kill "$artifact_pid" >/dev/null 2>&1 || true
@@ -275,6 +286,12 @@ gateway_tls_port="$(free_port)"
 bridge_gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
 if [[ ! "$bridge_gateway" =~ ^[0-9a-fA-F:.]+$ ]]; then
   echo "could not resolve the Docker bridge gateway" >&2
+  exit 1
+fi
+redis_runtime_url="redis://${bridge_gateway}:${redis_host_port}/0"
+if ! docker run --rm --network bridge redis:8.8.0 \
+    redis-cli -u "$redis_runtime_url" ping | grep -qx PONG; then
+  echo "contest real vertical cannot reach the isolated Redis from Docker at $redis_runtime_url" >&2
   exit 1
 fi
 
@@ -469,7 +486,8 @@ sudo env -i \
   "OJOS_CONTEST_E2E_POSTGRES_PROVIDER_PORT=$postgres_port" \
   "OJOS_CONTEST_E2E_POSTGRES_ADMIN_URL=postgresql://postgres:${postgres_password}@${bridge_gateway}:${postgres_port}/postgres?sslmode=require" \
   "OJOS_CONTEST_E2E_POSTGRES_CA_FILE=$run_root/tls/ca.crt" \
-  "OJOS_CONTEST_E2E_REDIS_URL=redis://${bridge_gateway}:6379/0" \
+  "OJOS_CONTEST_E2E_REDIS_HOST_URL=$redis_host_url" \
+  "OJOS_CONTEST_E2E_REDIS_RUNTIME_URL=$redis_runtime_url" \
   "OJOS_CONTEST_E2E_EVIDENCE=$evidence" \
   "OJOS_CONTEST_E2E_SCRATCH_ROOT=$scratch_root" \
   "$(command -v setpriv)" \

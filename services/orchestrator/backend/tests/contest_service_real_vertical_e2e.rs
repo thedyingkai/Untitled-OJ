@@ -116,7 +116,8 @@ struct LiveConfig {
     migration_image: OciImageReference,
     gateway_origin: String,
     postgres_admin_url: String,
-    redis_url: String,
+    redis_host_url: String,
+    redis_runtime_url: String,
     evidence_path: PathBuf,
     driver_output: PathBuf,
     gateway_bin: PathBuf,
@@ -157,7 +158,8 @@ impl LiveConfig {
             .context("parse digest-pinned contest migration image")?,
             gateway_origin: required_https_origin("OJOS_CONTEST_E2E_GATEWAY_ORIGIN")?,
             postgres_admin_url: required_env("OJOS_CONTEST_E2E_POSTGRES_ADMIN_URL")?,
-            redis_url: required_env("OJOS_CONTEST_E2E_REDIS_URL")?,
+            redis_host_url: required_redis_url("OJOS_CONTEST_E2E_REDIS_HOST_URL", true)?,
+            redis_runtime_url: required_redis_url("OJOS_CONTEST_E2E_REDIS_RUNTIME_URL", false)?,
             evidence_path: required_env("OJOS_CONTEST_E2E_EVIDENCE")?.into(),
             driver_output: required_env("OJOS_CONTEST_E2E_DRIVER_OUTPUT")?.into(),
             gateway_bin: required_env("OJOS_CONTEST_E2E_GATEWAY_BIN")?.into(),
@@ -763,7 +765,7 @@ fn assert_redis_event(
         let output = Command::new("redis-cli")
             .args([
                 "-u",
-                &config.redis_url,
+                &config.redis_host_url,
                 "--raw",
                 "XREVRANGE",
                 &evidence.event_stream,
@@ -943,6 +945,37 @@ fn required_https_origin(name: &str) -> Result<String> {
     let value = required_env(name)?;
     ensure!(value.starts_with("https://"), "{name} must use HTTPS");
     Ok(value.trim_end_matches('/').to_string())
+}
+
+fn required_redis_url(name: &str, require_loopback: bool) -> Result<String> {
+    let value = required_env(name)?;
+    let parsed = url::Url::parse(&value).with_context(|| format!("parse {name}"))?;
+    ensure!(parsed.scheme() == "redis", "{name} must use redis://");
+    ensure!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "{name} must not contain credentials"
+    );
+    let host = parsed
+        .host_str()
+        .context(format!("{name} must contain a host"))?;
+    ensure!(
+        parsed.port().is_some(),
+        "{name} must contain an explicit port"
+    );
+    ensure!(parsed.path() == "/0", "{name} must select Redis database 0");
+    ensure!(
+        parsed.query().is_none() && parsed.fragment().is_none(),
+        "{name} must not contain a query or fragment"
+    );
+    if require_loopback {
+        ensure!(host == "127.0.0.1", "{name} must use IPv4 loopback");
+    } else {
+        ensure!(
+            host.parse::<std::net::Ipv4Addr>()?.is_private() && host != "127.0.0.1",
+            "{name} must use a non-loopback private IPv4 bridge address"
+        );
+    }
+    Ok(value)
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -1207,7 +1240,7 @@ impl LiveAgent {
             .with_workload_file_ownership(WorkloadFileOwnership::standard_v3())?
             .with_event_connections(BTreeMap::from([(
                 "shared-events".to_string(),
-                config.redis_url.clone(),
+                config.redis_runtime_url.clone(),
             )])),
         );
         let transport =
@@ -1594,7 +1627,7 @@ impl GatewayProcess {
             .args(["-f", path_text(gateway_config)?])
             .env("OJOS_PLATFORM_BOOTSTRAP", "1")
             .env("OJOS_ENVIRONMENT", "production")
-            .env("REDIS_URL", &config.redis_url)
+            .env("REDIS_URL", &config.redis_host_url)
             .env("JWT_SECRET", JWT_SECRET)
             .env("ORCHESTRATOR_PLATFORM_ORIGIN", orchestrator_origin)
             .env("ORCHESTRATOR_INTERNAL_TOKEN", INTERNAL_TOKEN)

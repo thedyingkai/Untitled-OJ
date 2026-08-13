@@ -169,6 +169,32 @@ class ContestRealVerticalPolicyTests(unittest.TestCase):
             '"OJOS_CONTEST_E2E_CONTRACT_SOURCE=$staged_contract_source"', execution
         )
 
+    def test_redis_host_and_runtime_boundaries_use_the_isolated_workflow_port(self) -> None:
+        for marker in (
+            'redis_host_port="${OJOS_CONTEST_E2E_REDIS_HOST_PORT:-}"',
+            '"$redis_host_port" -lt 1',
+            '"$redis_host_port" -gt 65535',
+            'redis_host_url="redis://127.0.0.1:${redis_host_port}/0"',
+            'redis_runtime_url="redis://${bridge_gateway}:${redis_host_port}/0"',
+            'redis-cli -u "$redis_host_url" ping | grep -qx PONG',
+            'docker run --rm --network bridge redis:8.8.0',
+            'redis-cli -u "$redis_runtime_url" ping | grep -qx PONG',
+            '"OJOS_CONTEST_E2E_REDIS_HOST_URL=$redis_host_url"',
+            '"OJOS_CONTEST_E2E_REDIS_RUNTIME_URL=$redis_runtime_url"',
+        ):
+            self.assertIn(marker, HARNESS)
+        self.assertNotIn("OJOS_CONTEST_E2E_REDIS_URL", HARNESS)
+        self.assertNotIn("redis://${bridge_gateway}:6379/0", HARNESS)
+
+        for marker in (
+            'required_redis_url("OJOS_CONTEST_E2E_REDIS_HOST_URL", true)',
+            '"OJOS_CONTEST_E2E_REDIS_RUNTIME_URL"',
+            '.env("REDIS_URL", &config.redis_host_url)',
+            '&config.redis_host_url,',
+            'config.redis_runtime_url.clone()',
+        ):
+            self.assertIn(marker, RUST_DRIVER)
+
     def test_rust_driver_uses_only_canonical_staged_repo_inputs(self) -> None:
         for forbidden in ('env!("CARGO_MANIFEST_DIR")', "workspace_root()"):
             self.assertNotIn(forbidden, RUST_DRIVER)

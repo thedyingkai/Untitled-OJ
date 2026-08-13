@@ -128,6 +128,11 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
         self.assertIn("OJOS_REAL_MINIO_ENDPOINT: 127.0.0.1:19000", job)
         self.assertNotIn("--name ojos-e2e-minio ", job)
 
+        contest_vertical = workflow_step("Contest service real Docker vertical", job)
+        self.assertIn(
+            'OJOS_CONTEST_E2E_REDIS_HOST_PORT: "56379"', contest_vertical
+        )
+
         trace_drill = workflow_step("Compose trace E2E drill", job)
         self.assertNotIn("continue-on-error", trace_drill)
         self.assertIn('REDIS_HOST_PORT: "16379"', trace_drill)
