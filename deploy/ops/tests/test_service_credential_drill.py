@@ -59,6 +59,15 @@ class ServiceCredentialDrillContractTests(unittest.TestCase):
             r"pg_isready.*(?:\n.*){0,4}\bbreak\b",
         )
 
+    def test_each_auth_migration_runs_in_its_own_transaction(self) -> None:
+        migration_loop = self.drill.split(
+            'for migration in "$repo_root"/services/auth-service/migrations/*.up.sql; do',
+            1,
+        )[1].split("\ndone", 1)[0]
+
+        self.assertIn('psql --single-transaction -f "/tmp/$name"', migration_loop)
+        self.assertNotRegex(migration_loop, r"(?m)^\s*psql\s+-f\s")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -160,7 +160,7 @@ psql() {
 for migration in "$repo_root"/services/auth-service/migrations/*.up.sql; do
   name="$(basename "$migration")"
   docker cp "$migration" "$container:/tmp/$name"
-  psql -f "/tmp/$name"
+  psql --single-transaction -f "/tmp/$name"
 done
 
 valid_token="service-valid-token-$run_id"
