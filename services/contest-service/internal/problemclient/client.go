@@ -24,7 +24,10 @@ func (client *Client) Probe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	response, err := client.provider.Do(ctx, httpClient, BindingName, http.MethodGet, "/problems?limit=1", nil)
+	// The binding base path already identifies the required API. The Gateway
+	// rewrites that virtual root to the provider's declared /problems path, so
+	// appending /problems here would address /problems/problems upstream.
+	response, err := client.provider.Do(ctx, httpClient, BindingName, http.MethodGet, "", nil)
 	if err != nil {
 		return err
 	}
