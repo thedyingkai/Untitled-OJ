@@ -651,51 +651,54 @@ fi
 docker compose --env-file "$repo_root/.env.example" \
   -f "$repo_root/deploy/compose/docker-compose.yml" \
   -f "$repo_root/deploy/compose/docker-compose.dev.yml" config >"$dev_rendered"
-grep -Fq -- '- --ephemeral' "$dev_rendered" || {
-  echo "ops-ci: development Compose must opt into the explicit ephemeral daemon" >&2
-  exit 1
-}
-grep -Fq 'ORCHESTRATOR_DATABASE_URL: ""' "$dev_rendered" || {
-  echo "ops-ci: development Compose must not connect the daemon to PostgreSQL" >&2
-  exit 1
-}
-grep -Fq 'ORCHESTRATOR_HEALTHCHECK_URL: http://127.0.0.1:8090/api/v1/healthz/live' "$dev_rendered" || {
-  echo "ops-ci: development Compose must use the bounded loopback live check" >&2
-  exit 1
-}
-grep -Fq 'AUTH_ADMIN_BOOTSTRAP_SECRET_FILE: ""' "$dev_rendered" || {
-  echo "ops-ci: development Compose must disable the production admin bootstrap route" >&2
-  exit 1
-}
-if grep -Fq '/run/secrets/ojos-auth-admin-bootstrap' "$dev_rendered"; then
-  echo "ops-ci: development Compose must not inherit the production admin bootstrap mount" >&2
-  exit 1
-fi
-if grep -Eq 'ORCHESTRATOR_CATALOG_(TRUST_KEYS|SOURCES): ""' "$dev_rendered"; then
-  echo "ops-ci: development Compose must unset Catalog variables, not export empty JSON" >&2
-  exit 1
-fi
-for variable in ORCHESTRATOR_CATALOG_TRUST_KEYS ORCHESTRATOR_CATALOG_SOURCES; do
-  grep -Eq "^[[:space:]]+$variable: null$" "$dev_rendered" || {
-    echo "ops-ci: development Compose must leave $variable unset" >&2
-    exit 1
-  }
-done
-for variable in \
-  ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN \
-  ORCHESTRATOR_AUTH_ADMIN_ORIGIN
-do
-  grep -Eq "^[[:space:]]+$variable: null$" "$dev_rendered" || {
-    echo "ops-ci: development Compose must leave optional provider variable $variable unset" >&2
-    exit 1
-  }
-done
-for variable in ORCHESTRATOR_GATEWAY_ADMIN_TOKEN ORCHESTRATOR_AUTH_ADMIN_TOKEN; do
-  grep -Eq "^[[:space:]]+$variable: \"\"$" "$dev_rendered" || {
-    echo "ops-ci: development Compose must clear bootstrap credential $variable" >&2
-    exit 1
-  }
-done
+python3 - "$legacy_rendered_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    services = json.load(stream)["services"]
+
+gateway = services["gateway"]
+gateway_env = gateway["environment"]
+assert set(gateway.get("depends_on", {})) == {"auth-service"}, (
+    "development Gateway must depend only on Auth; the retired Orchestrator "
+    "0.2 control-plane path must not be revived"
+)
+assert gateway_env["OJOS_ENVIRONMENT"] == "development"
+assert gateway_env.get("OJOS_PLATFORM_BOOTSTRAP") is None
+for variable in (
+    "ORCHESTRATOR_ENDPOINT",
+    "ORCHESTRATOR_INTERNAL_TOKEN",
+    "ORCHESTRATOR_NODE_ID",
+    "ORCHESTRATOR_GATEWAY_ADMIN_TOKEN",
+    "CONTRIBUTION_ACK_TOKEN",
+    "OJOS_WORKLOAD_PUBLIC_KEY_FILE",
+):
+    assert gateway_env.get(variable) == "", (
+        f"development Gateway must clear {variable}"
+    )
+
+auth = services["auth-service"]
+auth_env = auth["environment"]
+assert auth_env["OJOS_ENVIRONMENT"] == "development"
+assert auth_env.get("OJOS_PLATFORM_BOOTSTRAP") is None
+for variable in (
+    "AUTH_ADMIN_BOOTSTRAP_SECRET_FILE",
+    "ORCHESTRATOR_AUTH_ADMIN_TOKEN",
+    "ORCHESTRATOR_ENDPOINT",
+    "ORCHESTRATOR_INTERNAL_TOKEN",
+    "CONTRIBUTION_ACK_TOKEN",
+    "OJOS_WORKLOAD_PRIVATE_KEY_FILE",
+    "OJOS_WORKLOAD_CONTROL_PLANE_TOKEN",
+):
+    assert auth_env.get(variable) == "", (
+        f"development Auth must clear {variable}"
+    )
+assert not any(
+    mount.get("target") == "/run/secrets/ojos-auth-admin-bootstrap"
+    for mount in auth.get("volumes", [])
+), "development Auth must not inherit the production admin bootstrap mount"
+PY
 grep -Fq -e 'dev-secrets/placeholder' -e 'dev-secrets\placeholder' "$dev_rendered" || {
   echo "ops-ci: development Compose must resolve its harmless placeholder mounts" >&2
   exit 1

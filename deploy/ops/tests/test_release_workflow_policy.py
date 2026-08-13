@@ -21,6 +21,9 @@ COMPOSE = COMPOSE_PATH.read_text(encoding="utf-8")
 COMPOSE_DEV = (
     ROOT / "deploy" / "compose" / "docker-compose.dev.yml"
 ).read_text(encoding="utf-8")
+OPS_CI_POLICY = (ROOT / "deploy" / "ops" / "ci-policy.sh").read_text(
+    encoding="utf-8"
+)
 TRACE_DRILL = (ROOT / "deploy" / "ops" / "trace-e2e-drill.sh").read_text(
     encoding="utf-8"
 )
@@ -208,6 +211,18 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
             startup_block = drill.split("compose_up_args+=(", 1)[1].split(")", 1)[0]
             self.assertNotIn("orchestrator-migrations", migration_block)
             self.assertNotIn("\n    orchestrator\n", startup_block)
+        self.assertNotIn(
+            "development Compose must opt into the explicit ephemeral daemon",
+            OPS_CI_POLICY,
+        )
+        self.assertIn(
+            'set(gateway.get("depends_on", {})) == {"auth-service"}',
+            OPS_CI_POLICY,
+        )
+        self.assertIn(
+            'development Auth must clear {variable}',
+            OPS_CI_POLICY,
+        )
 
     def test_workflow_is_manual_only_and_candidate_is_the_safe_default(self) -> None:
         trigger = WORKFLOW.split("\nrun-name:", 1)[0]
