@@ -119,6 +119,22 @@ queue_status() {
     'http://127.0.0.1:8082/judge/admin/queue/status' >"$out"
 }
 
+validate_load_gate() {
+  local metrics_file="$1"
+  local queue_after_file="$2"
+  local required_min_success_rate="$3"
+
+  jq -e --arg min_success_rate "$required_min_success_rate" '
+    ((.success_rate | type) == "number")
+    and (.success_rate >= ($min_success_rate | tonumber))
+    and (.by_operation["judge-submit"].total == 1)
+    and (.by_operation["judge-submit"].ok == 1)
+    and ((.worker_processed_count | type) == "number")
+    and (.worker_processed_count >= 1)
+  ' "$metrics_file" >/dev/null
+  jq -e '.pending_count == 0' "$queue_after_file" >/dev/null
+}
+
 finish() {
   local rc=$?
   [[ $rc -eq 0 ]] && status="passed" || status="failed"
@@ -439,9 +455,10 @@ success_rate="$(jq -r '.success_rate' "$evidence_dir/responses/metrics.json")"
 p95_ms="$(jq -r '.p95_ms' "$evidence_dir/responses/metrics.json")"
 error_count="$(jq -r '.error_count' "$evidence_dir/responses/metrics.json")"
 
-jq -e --arg min_success_rate "$min_success_rate" \
-  '.success_rate >= ($min_success_rate | tonumber)' \
-  "$evidence_dir/responses/metrics.json" >/dev/null
+validate_load_gate \
+  "$evidence_dir/responses/metrics.json" \
+  "$evidence_dir/responses/queue-after.json" \
+  "$min_success_rate"
 
 # Opt-in p95 latency ceiling: only enforced when OJOS_LOAD_MAX_P95_MS is set.
 if [[ -n "$max_p95_ms" ]]; then
