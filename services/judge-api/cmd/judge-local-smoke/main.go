@@ -37,6 +37,7 @@ const (
 	consumerGroup        = "judge-worker"
 	childNodeID          = "child-node"
 	rootNodeID           = "root-node"
+	authService          = "auth-service"
 	storageService       = "storage-service"
 	problemService       = "problem-service"
 	workerService        = "judge-worker"
@@ -1306,6 +1307,7 @@ func composeSmokeServiceEndpoints(ctx context.Context, cfg smokeConfig) (map[str
 		name string
 		port int
 	}{
+		{name: authService, port: 8081},
 		{name: storageService, port: 8085},
 		{name: problemService, port: 8083},
 		{name: judgeAPIService, port: 8082},
@@ -1333,7 +1335,7 @@ func composeSmokeServiceEndpoints(ctx context.Context, cfg smokeConfig) (map[str
 }
 
 func composeSmokePushedRouteTable(endpoints map[string]composeSmokeServiceEndpoint, generatedAt time.Time) (composeGatewayRoutesReloadRequest, error) {
-	required := []string{storageService, problemService, judgeAPIService}
+	required := []string{authService, storageService, problemService, judgeAPIService}
 	for _, service := range required {
 		endpoint, ok := endpoints[service]
 		if !ok || net.ParseIP(endpoint.host) == nil || endpoint.port <= 0 || strings.TrimSpace(endpoint.providerEndpoint) == "" {
@@ -1341,7 +1343,22 @@ func composeSmokePushedRouteTable(endpoints map[string]composeSmokeServiceEndpoi
 		}
 	}
 
-	routes := make([]composeGatewayRoute, 0, 6)
+	routes := make([]composeGatewayRoute, 0, 7)
+	auth := endpoints[authService]
+	routes = append(routes, composeSmokeRoute(
+		"compose-smoke:auth.user.permission.check",
+		"auth.user.permission.check",
+		authService,
+		auth,
+		rootNodeID,
+		"/auth/admin/permission-check",
+		"service",
+		"auth.permission.check",
+		[]string{http.MethodPost},
+		"",
+		"",
+		5_000,
+	))
 	storage := endpoints[storageService]
 	for _, api := range []struct {
 		id         string
@@ -3534,17 +3551,48 @@ func composeServiceIP(parent context.Context, cfg smokeConfig, service string) (
 		return "", fmt.Errorf("compose service %s has no container id", service)
 	}
 	first := strings.Fields(containerID)[0]
-	inspect := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}", first)
+	inspect := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{json .NetworkSettings.Networks}}", first)
 	inspect.Dir = cfg.repoRoot
 	out, err = inspect.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("docker inspect %s failed: %s", service, oneLine(out, err))
 	}
-	ip := strings.TrimSpace(string(out))
-	if net.ParseIP(ip) == nil {
-		return "", fmt.Errorf("compose service %s returned invalid ip %q", service, ip)
+	ip, err := composeDefaultNetworkIP(out)
+	if err != nil {
+		return "", fmt.Errorf("compose service %s network address: %w", service, err)
 	}
 	return ip, nil
+}
+
+func composeDefaultNetworkIP(raw []byte) (string, error) {
+	var networks map[string]struct {
+		IPAddress string `json:"IPAddress"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &networks); err != nil {
+		return "", fmt.Errorf("decode Docker networks: %w", err)
+	}
+	defaultIPs := make([]string, 0, 1)
+	allIPs := make([]string, 0, len(networks))
+	for name, network := range networks {
+		ip := strings.TrimSpace(network.IPAddress)
+		if net.ParseIP(ip) == nil {
+			continue
+		}
+		allIPs = append(allIPs, ip)
+		if name == "default" || strings.HasSuffix(name, "_default") {
+			defaultIPs = append(defaultIPs, ip)
+		}
+	}
+	if len(defaultIPs) == 1 {
+		return defaultIPs[0], nil
+	}
+	if len(defaultIPs) > 1 {
+		return "", errors.New("multiple Compose default networks are attached")
+	}
+	if len(allIPs) == 1 {
+		return allIPs[0], nil
+	}
+	return "", errors.New("Compose default network address is unavailable")
 }
 
 func composeRestartService(parent context.Context, cfg smokeConfig, service string) error {

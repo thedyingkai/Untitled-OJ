@@ -8,6 +8,29 @@ import (
 	"time"
 )
 
+func TestComposeDefaultNetworkIPSelectsDefaultFromMultiNetworkContainer(t *testing.T) {
+	got, err := composeDefaultNetworkIP([]byte(`{
+		"ojos_platform-control":{"IPAddress":"172.21.0.4"},
+		"ojos_default":{"IPAddress":"172.20.0.9"}
+	}`))
+	if err != nil {
+		t.Fatalf("select default network: %v", err)
+	}
+	if got != "172.20.0.9" {
+		t.Fatalf("default network ip = %q", got)
+	}
+}
+
+func TestComposeDefaultNetworkIPRejectsAmbiguousNetworks(t *testing.T) {
+	_, err := composeDefaultNetworkIP([]byte(`{
+		"network-a":{"IPAddress":"172.21.0.4"},
+		"network-b":{"IPAddress":"172.20.0.9"}
+	}`))
+	if err == nil {
+		t.Fatal("ambiguous network addresses were accepted")
+	}
+}
+
 func TestComposeDockerArgsMatchDrillOrdering(t *testing.T) {
 	t.Setenv("OJOS_COMPOSE_ENV_FILE", "")
 	t.Setenv("OJOS_COMPOSE_DEV_OVERRIDE", "")
@@ -44,6 +67,11 @@ func TestComposeDockerArgsHonorEnvFileAndDevOverride(t *testing.T) {
 
 func TestComposeSmokePushedRouteTableCoversLiveJudgeChain(t *testing.T) {
 	endpoints := map[string]composeSmokeServiceEndpoint{
+		authService: {
+			host:             "172.20.0.9",
+			port:             8081,
+			providerEndpoint: "172.20.0.9:8081:auth-service",
+		},
 		storageService: {
 			host:             "172.20.0.10",
 			port:             8085,
@@ -72,8 +100,16 @@ func TestComposeSmokePushedRouteTableCoversLiveJudgeChain(t *testing.T) {
 	if request.GeneratedAt != generatedAt.Format(time.RFC3339Nano) {
 		t.Fatalf("generated_at = %q", request.GeneratedAt)
 	}
-	if len(request.Routes) != 6 {
-		t.Fatalf("routes = %d, want 6", len(request.Routes))
+	if len(request.Routes) != 7 {
+		t.Fatalf("routes = %d, want 7", len(request.Routes))
+	}
+
+	auth := findComposeGatewayRoute(request.Routes, "auth.user.permission.check")
+	if auth == nil || auth.ProviderService != authService || auth.ProviderNodeID != rootNodeID ||
+		auth.UpstreamBase != "http://172.20.0.9:8081" || auth.Prefix != "/auth/admin/permission-check" ||
+		auth.AuthMode != "service" || auth.RequiredPermission != "auth.permission.check" ||
+		len(auth.Methods) != 1 || auth.Methods[0] != http.MethodPost || !auth.ProxyEnabled {
+		t.Fatalf("invalid delegated permission route: %#v", auth)
 	}
 
 	wantStorage := map[string]struct {

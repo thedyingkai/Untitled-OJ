@@ -73,3 +73,11 @@ services:
       OJOS_WORKLOAD_PUBLIC_KEY_FILE: ""
       OJOS_ALLOW_LEGACY_WORKER_TOKEN: "true"
       OJOS_WORKER_TOKEN: ${OJOS_WORKER_TOKEN:-ojos-local-worker}
+      # The smoke-pushed auth.user.permission.check route validates the
+      # service credential at Gateway and again at Auth. Never substitute the
+      # Auth management token for this delegated call.
+      OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT: http://gateway:8080
+
+  problem-service:
+    environment:
+      OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT: http://gateway:8080

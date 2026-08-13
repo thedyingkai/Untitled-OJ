@@ -223,6 +223,16 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
             'development Auth must clear {variable}',
             OPS_CI_POLICY,
         )
+        self.assertEqual(
+            COMPOSE_DEV.count(
+                "OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT: http://gateway:8080"
+            ),
+            2,
+        )
+        self.assertIn(
+            'development {service_name} must use the smoke-pushed delegated permission route',
+            OPS_CI_POLICY,
+        )
 
     def test_workflow_is_manual_only_and_candidate_is_the_safe_default(self) -> None:
         trigger = WORKFLOW.split("\nrun-name:", 1)[0]

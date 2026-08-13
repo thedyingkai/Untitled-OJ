@@ -698,6 +698,12 @@ assert not any(
     mount.get("target") == "/run/secrets/ojos-auth-admin-bootstrap"
     for mount in auth.get("volumes", [])
 ), "development Auth must not inherit the production admin bootstrap mount"
+
+for service_name in ("problem-service", "judge-api"):
+    service_env = services[service_name]["environment"]
+    assert service_env["OJOS_AUTH_PERMISSION_GATEWAY_ENDPOINT"] == "http://gateway:8080", (
+        f"development {service_name} must use the smoke-pushed delegated permission route"
+    )
 PY
 grep -Fq -e 'dev-secrets/placeholder' -e 'dev-secrets\placeholder' "$dev_rendered" || {
   echo "ops-ci: development Compose must resolve its harmless placeholder mounts" >&2
