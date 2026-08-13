@@ -2,13 +2,143 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestEnsureComposeSmokeAdminUsesPersistedAdminIdentity(t *testing.T) {
+	const (
+		serviceToken = "compose-auth-management-token"
+		adminToken   = "persisted-compose-admin-jwt"
+	)
+
+	var (
+		assignmentAuthorization string
+		assignmentUserID        int64
+		assignmentPermission    string
+		assignmentScopeType     string
+		assignmentEffect        string
+		loginCount              int
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/auth/register":
+			_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{"user_id":42}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/auth/login":
+			loginCount++
+			roles := []string{"user"}
+			permissions := []string{"judge.submit"}
+			if loginCount > 1 {
+				permissions = append(permissions, "judge.admin")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"token":       adminToken,
+					"user_id":     42,
+					"roles":       roles,
+					"permissions": permissions,
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/auth/admin/permission-assignments":
+			assignmentAuthorization = r.Header.Get("Authorization")
+			var body struct {
+				TargetType string `json:"target_type"`
+				TargetID   int64  `json:"target_id"`
+				Permission string `json:"permission"`
+				ScopeType  string `json:"scope_type"`
+				Effect     string `json:"effect"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode permission assignment: %v", err)
+			}
+			if body.TargetType != "user" {
+				t.Errorf("assignment target_type = %q", body.TargetType)
+			}
+			assignmentUserID = body.TargetID
+			assignmentPermission = body.Permission
+			assignmentScopeType = body.ScopeType
+			assignmentEffect = body.Effect
+			_, _ = w.Write([]byte(`{"code":0,"msg":"success"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	userID, token, err := ensureComposeSmokeAdmin(context.Background(), smokeConfig{
+		auth:         endpointFromServerURL(t, server.URL),
+		serviceToken: serviceToken,
+	})
+	if err != nil {
+		t.Fatalf("ensure compose admin: %v", err)
+	}
+	if userID != 42 || token != adminToken || loginCount != 2 {
+		t.Fatalf("admin identity = user_id=%d token=%q login_count=%d", userID, token, loginCount)
+	}
+	if assignmentAuthorization != "Bearer "+serviceToken || assignmentUserID != 42 ||
+		assignmentPermission != "judge.admin" || assignmentScopeType != "system" || assignmentEffect != "allow" {
+		t.Fatalf(
+			"judge admin assignment = auth=%q user_id=%d permission=%q scope=%q effect=%q",
+			assignmentAuthorization,
+			assignmentUserID,
+			assignmentPermission,
+			assignmentScopeType,
+			assignmentEffect,
+		)
+	}
+
+	cfg := smokeConfig{gatewayAdminJWT: "unrelated-gateway-management-jwt", composeAdminJWT: token}
+	if got := composeJudgeAdminHeaders(cfg)["Authorization"]; got != "Bearer "+adminToken {
+		t.Fatalf("judge admin authorization = %q", got)
+	}
+}
+
+func TestEnsureComposeSmokeAdminRejectsMissingJudgePermission(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/auth/register", "/auth/admin/permission-assignments":
+			_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{"user_id":42}}`))
+		case "/auth/login":
+			_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{"token":"admin-token","user_id":42,"roles":["user"],"permissions":["judge.submit"]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	_, _, err := ensureComposeSmokeAdmin(context.Background(), smokeConfig{
+		auth:         endpointFromServerURL(t, server.URL),
+		serviceToken: "compose-auth-management-token",
+	})
+	if err == nil {
+		t.Fatal("compose admin without judge.admin was accepted")
+	}
+}
+
+func endpointFromServerURL(t *testing.T, raw string) endpoint {
+	t.Helper()
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(raw, "http://"))
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("parse test server port: %v", err)
+	}
+	return endpoint{host: host, port: portNumber}
+}
 
 func TestComposeDefaultNetworkIPSelectsDefaultFromMultiNetworkContainer(t *testing.T) {
 	got, err := composeDefaultNetworkIP([]byte(`{
@@ -202,8 +332,8 @@ func TestComposeSmokePushedRouteTableCoversLiveJudgeChain(t *testing.T) {
 	if request.GeneratedAt != generatedAt.Format(time.RFC3339Nano) {
 		t.Fatalf("generated_at = %q", request.GeneratedAt)
 	}
-	if len(request.Routes) != 7 {
-		t.Fatalf("routes = %d, want 7", len(request.Routes))
+	if len(request.Routes) != 8 {
+		t.Fatalf("routes = %d, want 8", len(request.Routes))
 	}
 
 	auth := findComposeGatewayRoute(request.Routes, "auth.user.permission.check")
@@ -248,6 +378,19 @@ func TestComposeSmokePushedRouteTableCoversLiveJudgeChain(t *testing.T) {
 		judge.AuthMode != "user" || judge.RequiredPermission != "judge.submission.view.own" {
 		t.Fatalf("invalid judge route: %#v", judge)
 	}
+	judgeQueue := findComposeGatewayRouteByID(request.Routes, "compose-smoke:judge-api-admin-queue")
+	if judgeQueue == nil || judgeQueue.RouteID != "compose-smoke:judge-api-admin-queue" ||
+		judgeQueue.APIID != "" ||
+		judgeQueue.ProviderService != judgeAPIService || judgeQueue.ProviderNodeID != childNodeID ||
+		judgeQueue.Prefix != "/api/judge/admin/queue" || judgeQueue.StripPrefix != "/api/judge/admin/queue" ||
+		judgeQueue.RewritePrefix != "/judge/admin/queue" || judgeQueue.AuthMode != "user" ||
+		judgeQueue.RequiredPermission != "judge.admin" || len(judgeQueue.Methods) != 1 ||
+		judgeQueue.Methods[0] != http.MethodGet || !judgeQueue.ProxyEnabled {
+		t.Fatalf("invalid judge queue admin route: %#v", judgeQueue)
+	}
+	if judgeQueue.Priority <= judge.Priority {
+		t.Fatalf("judge queue route priority = %d, wildcard priority = %d", judgeQueue.Priority, judge.Priority)
+	}
 }
 
 func TestComposeSmokePushedRouteTableRejectsMissingEndpoint(t *testing.T) {
@@ -266,9 +409,18 @@ func findComposeGatewayRoute(routes []composeGatewayRoute, apiID string) *compos
 	return nil
 }
 
+func findComposeGatewayRouteByID(routes []composeGatewayRoute, routeID string) *composeGatewayRoute {
+	for i := range routes {
+		if routes[i].RouteID == routeID {
+			return &routes[i]
+		}
+	}
+	return nil
+}
+
 func findComposeGatewayServiceRoute(routes []composeGatewayRoute, service string) *composeGatewayRoute {
 	for i := range routes {
-		if routes[i].APIID == "" && routes[i].ServiceID == service {
+		if routes[i].RouteID == "compose-smoke:"+service && routes[i].APIID == "" && routes[i].ServiceID == service {
 			return &routes[i]
 		}
 	}

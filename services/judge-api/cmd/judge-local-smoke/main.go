@@ -65,6 +65,7 @@ type smokeConfig struct {
 	serviceToken     string
 	workerToken      string
 	gatewayAdminJWT  string
+	composeAdminJWT  string
 	composeUserJWT   string
 	composeProblemID int64
 	orchestrator     endpoint
@@ -686,6 +687,16 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 	}
 	cfg.composeUserJWT = userJWT
 	ok("compose auth user login: user_id=%d", userID)
+
+	adminUserID, adminJWT, err := ensureComposeSmokeAdmin(ctx, cfg)
+	if err != nil {
+		return fail("compose auth admin login", err)
+	}
+	if adminUserID == userID {
+		return fail("compose auth admin login", errors.New("admin and user smoke identities must be distinct"))
+	}
+	cfg.composeAdminJWT = adminJWT
+	ok("compose auth admin login: user_id=%d", adminUserID)
 
 	problemID, err := ensureComposeJudgeProblemFixture(ctx, cfg)
 	if err != nil {
@@ -1343,7 +1354,7 @@ func composeSmokePushedRouteTable(endpoints map[string]composeSmokeServiceEndpoi
 		}
 	}
 
-	routes := make([]composeGatewayRoute, 0, 7)
+	routes := make([]composeGatewayRoute, 0, 8)
 	auth := endpoints[authService]
 	routes = append(routes, composeSmokeRoute(
 		"compose-smoke:auth.user.permission.check",
@@ -1402,6 +1413,20 @@ func composeSmokePushedRouteTable(endpoints map[string]composeSmokeServiceEndpoi
 		30_000,
 	))
 	judge := endpoints[judgeAPIService]
+	routes = append(routes, composeSmokeRoute(
+		"compose-smoke:judge-api-admin-queue",
+		"",
+		judgeAPIService,
+		judge,
+		childNodeID,
+		"/api/judge/admin/queue",
+		"user",
+		"judge.admin",
+		[]string{http.MethodGet},
+		"/api/judge/admin/queue",
+		"/judge/admin/queue",
+		30_000,
+	))
 	routes = append(routes, composeSmokeRoute(
 		"compose-smoke:judge-api",
 		"",
@@ -2435,7 +2460,7 @@ func verifyQueueStatusAPIViaGateway(ctx context.Context, cfg smokeConfig) error 
 			InactiveMs int64  `json:"inactive_ms"`
 		} `json:"consumers"`
 	}
-	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.gateway.baseURL()+"/api/judge/admin/queue/status", nil, composeAdminHeaders(cfg), &resp); err != nil {
+	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.gateway.baseURL()+"/api/judge/admin/queue/status", nil, composeJudgeAdminHeaders(cfg), &resp); err != nil {
 		return fail("compose queue status API returned pending/lag", err)
 	}
 	if resp.TaskStream != cfg.taskStream || resp.ResultStream != cfg.resultStream || resp.Group != consumerGroup {
@@ -2574,11 +2599,48 @@ func validateComposeProblemTestCase(cases []composeProblemTestCase, want compose
 }
 
 func ensureComposeSmokeUser(ctx context.Context, cfg smokeConfig) (int64, string, error) {
-	username := "compose-smoke"
-	password := "compose-smoke-password"
+	return ensureComposeAuthUser(
+		ctx,
+		cfg,
+		"compose-smoke",
+		"compose-smoke@example.test",
+		"compose-smoke-password",
+		[]string{"problem_setter"},
+		nil,
+	)
+}
+
+func ensureComposeSmokeAdmin(ctx context.Context, cfg smokeConfig) (int64, string, error) {
+	return ensureComposeAuthUser(
+		ctx,
+		cfg,
+		"compose-smoke-admin",
+		"compose-smoke-admin@example.test",
+		"compose-smoke-admin-password",
+		nil,
+		[]string{"judge.admin"},
+	)
+}
+
+type composeAuthLoginData struct {
+	Token       string   `json:"token"`
+	UserID      int64    `json:"user_id"`
+	Roles       []string `json:"roles"`
+	Permissions []string `json:"permissions"`
+}
+
+func ensureComposeAuthUser(
+	ctx context.Context,
+	cfg smokeConfig,
+	username string,
+	email string,
+	password string,
+	requiredRoles []string,
+	requiredPermissions []string,
+) (int64, string, error) {
 	registerBody := map[string]any{
 		"username": username,
-		"email":    "compose-smoke@example.test",
+		"email":    email,
 		"password": password,
 	}
 	var registerResp struct {
@@ -2599,33 +2661,53 @@ func ensureComposeSmokeUser(ctx context.Context, cfg smokeConfig) (int64, string
 		"username": username,
 		"password": password,
 	}
-	var loginResp struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			Token  string `json:"token"`
-			UserID int64  `json:"user_id"`
-		} `json:"data"`
+	login := func() (composeAuthLoginData, error) {
+		var loginResp struct {
+			Code int                  `json:"code"`
+			Msg  string               `json:"msg"`
+			Data composeAuthLoginData `json:"data"`
+		}
+		if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.auth.baseURL()+"/auth/login", loginBody, nil, &loginResp); err != nil {
+			return composeAuthLoginData{}, err
+		}
+		if loginResp.Code != 0 {
+			return composeAuthLoginData{}, fmt.Errorf("login compose user failed: code=%d msg=%s", loginResp.Code, loginResp.Msg)
+		}
+		if strings.TrimSpace(loginResp.Data.Token) == "" || loginResp.Data.UserID <= 0 {
+			return composeAuthLoginData{}, fmt.Errorf("invalid compose user login response: user_id=%d token_empty=%t", loginResp.Data.UserID, strings.TrimSpace(loginResp.Data.Token) == "")
+		}
+		return loginResp.Data, nil
 	}
-	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.auth.baseURL()+"/auth/login", loginBody, nil, &loginResp); err != nil {
+
+	loginResp, err := login()
+	if err != nil {
 		return 0, "", err
 	}
-	if loginResp.Code != 0 {
-		return 0, "", fmt.Errorf("login compose user failed: code=%d msg=%s", loginResp.Code, loginResp.Msg)
+	for _, role := range requiredRoles {
+		if err := grantComposeUserRole(ctx, cfg, loginResp.UserID, role); err != nil {
+			return 0, "", err
+		}
 	}
-	if strings.TrimSpace(loginResp.Data.Token) == "" || loginResp.Data.UserID <= 0 {
-		return 0, "", fmt.Errorf("invalid compose user login response: user_id=%d token_empty=%t", loginResp.Data.UserID, strings.TrimSpace(loginResp.Data.Token) == "")
+	for _, permission := range requiredPermissions {
+		if err := assignComposeUserPermission(ctx, cfg, loginResp.UserID, permission); err != nil {
+			return 0, "", err
+		}
 	}
-	if err := grantComposeUserRole(ctx, cfg, loginResp.Data.UserID, "problem_setter"); err != nil {
+	loginResp, err = login()
+	if err != nil {
 		return 0, "", err
 	}
-	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.auth.baseURL()+"/auth/login", loginBody, nil, &loginResp); err != nil {
-		return 0, "", err
+	for _, role := range requiredRoles {
+		if !containsString(loginResp.Roles, role) {
+			return 0, "", fmt.Errorf("compose user %q login is missing required role %q", username, role)
+		}
 	}
-	if loginResp.Code != 0 {
-		return 0, "", fmt.Errorf("login compose user after role grant failed: code=%d msg=%s", loginResp.Code, loginResp.Msg)
+	for _, permission := range requiredPermissions {
+		if !containsString(loginResp.Permissions, permission) {
+			return 0, "", fmt.Errorf("compose user %q login is missing required permission %q", username, permission)
+		}
 	}
-	return loginResp.Data.UserID, loginResp.Data.Token, nil
+	return loginResp.UserID, loginResp.Token, nil
 }
 
 func grantComposeUserRole(ctx context.Context, cfg smokeConfig, userID int64, role string) error {
@@ -2637,13 +2719,37 @@ func grantComposeUserRole(ctx context.Context, cfg smokeConfig, userID int64, ro
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
-	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.auth.baseURL()+"/auth/admin/users/roles", body, composeAdminHeaders(cfg), &resp); err != nil {
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.auth.baseURL()+"/auth/admin/users/roles", body, composeAuthManagementHeaders(cfg), &resp); err != nil {
 		return err
 	}
 	if resp.Code != 0 {
 		return fmt.Errorf("grant compose user role failed: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	ok("compose auth user role granted: user_id=%d role=%s", userID, role)
+	return nil
+}
+
+func assignComposeUserPermission(ctx context.Context, cfg smokeConfig, userID int64, permission string) error {
+	body := map[string]any{
+		"target_type": "user",
+		"target_id":   userID,
+		"permission":  permission,
+		"scope_type":  "system",
+		"scope_id":    0,
+		"effect":      "allow",
+		"reason":      "compose smoke fixture",
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.auth.baseURL()+"/auth/admin/permission-assignments", body, composeAuthManagementHeaders(cfg), &resp); err != nil {
+		return err
+	}
+	if resp.Code != 0 {
+		return fmt.Errorf("assign compose user permission failed: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	ok("compose auth user permission assigned: user_id=%d permission=%s", userID, permission)
 	return nil
 }
 
@@ -2672,11 +2778,26 @@ func composeUserHeaders(cfg smokeConfig) map[string]string {
 	}
 }
 
-func composeAdminHeaders(cfg smokeConfig) map[string]string {
+func composeAuthManagementHeaders(cfg smokeConfig) map[string]string {
 	return map[string]string{
-		"Authorization":  "Bearer " + cfg.gatewayAdminJWT,
+		"Authorization": "Bearer " + cfg.serviceToken,
+	}
+}
+
+func composeJudgeAdminHeaders(cfg smokeConfig) map[string]string {
+	return map[string]string{
+		"Authorization":  "Bearer " + cfg.composeAdminJWT,
 		"X-OJOS-Node-Id": childNodeID,
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func doJSON(ctx context.Context, method string, target string, body any, out any) error {
