@@ -447,5 +447,15 @@ mod tests {
         );
         assert_eq!(accepted.status, 200);
         assert_eq!(accepted.body["data"]["accepted"], true);
+
+        let mut wire = Vec::new();
+        crate::http::write_v1_response(&mut wire, accepted).unwrap();
+        let wire = String::from_utf8(wire).unwrap();
+        let body: Value = serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
+        let root = body.as_object().expect("v1 acknowledgement envelope");
+        assert_eq!(root.len(), 2);
+        assert!(root.contains_key("data"));
+        assert!(root.contains_key("meta"));
+        assert!(root.get("status").is_none());
     }
 }

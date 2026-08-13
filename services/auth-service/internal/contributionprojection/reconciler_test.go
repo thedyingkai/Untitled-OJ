@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -201,6 +202,37 @@ func TestReconcilerRejectsInvalidAcknowledgementResponse(t *testing.T) {
 	}
 	if err := reconciler.Reconcile(t.Context()); err == nil {
 		t.Fatal("invalid acknowledgement response was accepted")
+	}
+}
+
+func TestReconcilerRejectsLegacyRootStatusDecoration(t *testing.T) {
+	digest := "sha256:" + repeat("a", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"schema_version": snapshotSchema, "digest": digest, "scope_id": "default",
+				"acknowledgements": []map[string]any{}, "permission_definitions": []map[string]any{},
+			}})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"schema_version": acknowledgementSchema, "target": "AUTH", "scope_id": "default",
+				"snapshot_digest": digest, "accepted": true,
+			},
+			"meta":   map[string]any{"api_version": "v1", "request_id": "ack"},
+			"status": "ok",
+		})
+	}))
+	defer server.Close()
+	reconciler, err := New(server.URL, "projection-token", "ack-token", &fakeStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = reconciler.Reconcile(t.Context())
+	if err == nil || !strings.Contains(err.Error(), `unknown field "status"`) {
+		t.Fatalf("legacy root status decoration was not rejected: %v", err)
 	}
 }
 

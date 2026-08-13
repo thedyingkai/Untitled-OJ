@@ -170,6 +170,49 @@ func TestContributionAcknowledgementRejectsInvalidResponse(t *testing.T) {
 	}
 }
 
+func TestContributionAcknowledgementAcceptsExactV1Envelope(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+			"schema_version":  contributionAckSchema,
+			"target":          "GATEWAY",
+			"scope_id":        "default",
+			"snapshot_digest": digest,
+			"accepted":        true,
+		}, "meta": map[string]any{"request_id": "request", "api_version": "v1"}})
+	}))
+	defer server.Close()
+	err := NewClient(server.URL, "internal", "ack").AcknowledgeContributionSnapshot(context.Background(), ContributionSnapshot{
+		SchemaVersion: "ojos.dev/contribution-snapshot/v1", Digest: digest, ScopeID: "default",
+	})
+	if err != nil {
+		t.Fatalf("exact v1 acknowledgement envelope was rejected: %v", err)
+	}
+}
+
+func TestContributionAcknowledgementRejectsLegacyRootStatusDecoration(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"schema_version": contributionAckSchema, "target": "GATEWAY", "scope_id": "default",
+				"snapshot_digest": digest, "accepted": true,
+			},
+			"meta":   map[string]any{"request_id": "request", "api_version": "v1"},
+			"status": "ok",
+		})
+	}))
+	defer server.Close()
+	err := NewClient(server.URL, "internal", "ack").AcknowledgeContributionSnapshot(context.Background(), ContributionSnapshot{
+		SchemaVersion: "ojos.dev/contribution-snapshot/v1", Digest: digest, ScopeID: "default",
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown field "status"`) {
+		t.Fatalf("legacy root status decoration was not rejected: %v", err)
+	}
+}
+
 func TestPermissionScopeUsesStableWireRepresentation(t *testing.T) {
 	resource := PermissionScope{Kind: "path_parameter", Type: "contest", PathParameter: "contestId"}
 	encoded, err := json.Marshal(resource)

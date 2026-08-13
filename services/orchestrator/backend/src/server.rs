@@ -16,7 +16,7 @@ use crate::frontend_extensions::FrontendExtensionService;
 use crate::http::{
     ApiRequest, ApiResponse, HttpStream, SECURITY_RESPONSE_HEADERS, WRITE_TIMEOUT,
     has_json_content_type, query_bool, query_value, read_http_request, requires_json_content_type,
-    write_agent_protocol_response, write_http_response,
+    write_agent_protocol_response, write_http_response, write_v1_response,
 };
 use crate::node_identity::{NodeIdentityService, NodePeerIdentity};
 use crate::observability::{self, Observability};
@@ -1289,6 +1289,18 @@ fn dispatch_request(
                 ),
             );
         }
+        if api_v1::is_v1_path(&path) {
+            return write_v1_response(
+                stream,
+                ApiResponse::problem(
+                    415,
+                    "CONTENT_TYPE_REQUIRED",
+                    "mutating requests must send Content-Type: application/json",
+                    api_v1::next_request_id(),
+                    None,
+                ),
+            );
+        }
         return write_http_response(
             stream,
             ApiResponse::error(
@@ -1325,7 +1337,7 @@ fn dispatch_request(
         } else {
             serde_json::json!({"mode": "unconfigured", "local_session": false})
         };
-        return write_http_response(
+        return write_v1_response(
             stream,
             api_v1::envelope(200, data, request_id).with_header("Cache-Control", "no-store"),
         );
@@ -1333,7 +1345,7 @@ fn dispatch_request(
 
     if request.method == "GET" && path == "/api/v1/auth/oidc/start" {
         let Some(manager) = &context.oidc_web_session else {
-            return write_http_response(
+            return write_v1_response(
                 stream,
                 ApiResponse::problem(
                     404,
@@ -1347,7 +1359,7 @@ fn dispatch_request(
         let return_to = match query_value(&query, "return_to") {
             Ok(value) => value,
             Err(error) => {
-                return write_http_response(
+                return write_v1_response(
                     stream,
                     ApiResponse::problem(
                         400,
@@ -1363,20 +1375,20 @@ fn dispatch_request(
             Ok(start) => {
                 let mut response = ApiResponse::ok(serde_json::json!({"redirect": start.location}));
                 response.status = 302;
-                write_http_response(
+                write_v1_response(
                     stream,
                     response
                         .with_header("Location", start.location)
                         .with_header("Cache-Control", "no-store"),
                 )
             }
-            Err(error) => write_http_response(stream, oidc_web_problem(error)),
+            Err(error) => write_v1_response(stream, oidc_web_problem(error)),
         };
     }
 
     if request.method == "GET" && path == "/api/v1/auth/oidc/callback" {
         let Some(manager) = &context.oidc_web_session else {
-            return write_http_response(
+            return write_v1_response(
                 stream,
                 ApiResponse::problem(
                     404,
@@ -1388,7 +1400,7 @@ fn dispatch_request(
             );
         };
         let Some(verifier) = &context.oidc_verifier else {
-            return write_http_response(
+            return write_v1_response(
                 stream,
                 ApiResponse::problem(
                     503,
@@ -1402,7 +1414,7 @@ fn dispatch_request(
         let state = query_value(&query, "state").ok().flatten();
         if let Some(provider_error) = query_value(&query, "error").ok().flatten() {
             let _ = manager.reject(state.as_deref());
-            return write_http_response(
+            return write_v1_response(
                 stream,
                 ApiResponse::problem(
                     401,
@@ -1423,7 +1435,7 @@ fn dispatch_request(
                     "return_to": completion.return_to,
                 }));
                 response.status = 302;
-                write_http_response(
+                write_v1_response(
                     stream,
                     response
                         .with_header("Location", completion.return_to)
@@ -1434,13 +1446,13 @@ fn dispatch_request(
                         .with_header("Cache-Control", "no-store"),
                 )
             }
-            Err(error) => write_http_response(stream, oidc_web_problem(error)),
+            Err(error) => write_v1_response(stream, oidc_web_problem(error)),
         };
     }
 
     if path == "/api/v1/auth/desktop/exchange" {
         let Some(session_manager) = &context.desktop_session else {
-            return write_http_response(
+            return write_v1_response(
                 stream,
                 ApiResponse::problem(
                     404,
@@ -1456,7 +1468,7 @@ fn dispatch_request(
             .map(|address| address.ip().is_loopback())
             .unwrap_or(false)
         {
-            return write_http_response(
+            return write_v1_response(
                 stream,
                 ApiResponse::problem(
                     403,
@@ -1473,7 +1485,7 @@ fn dispatch_request(
             .map(String::as_str)
             .unwrap_or_default();
         return match session_manager.exchange(secret) {
-            Ok(session) => write_http_response(
+            Ok(session) => write_v1_response(
                 stream,
                 ApiResponse::ok(serde_json::json!({
                     "status": "ok",
@@ -1481,7 +1493,7 @@ fn dispatch_request(
                 }))
                 .with_header("Set-Cookie", session_cookie(&session.session_id)),
             ),
-            Err(error) => write_http_response(
+            Err(error) => write_v1_response(
                 stream,
                 ApiResponse::problem(
                     401,
@@ -1517,7 +1529,7 @@ fn dispatch_request(
             }
             Ok(false) => {}
             Err(error) => {
-                return write_http_response(
+                return write_v1_response(
                     stream,
                     ApiResponse::problem(
                         403,
@@ -1543,7 +1555,7 @@ fn dispatch_request(
                 oidc_session_csrf = Some(session.csrf_token);
             }
             Ok(None) => {}
-            Err(error) => return write_http_response(stream, oidc_web_problem(error)),
+            Err(error) => return write_v1_response(stream, oidc_web_problem(error)),
         }
     }
 
@@ -1559,7 +1571,7 @@ fn dispatch_request(
             }),
             None => serde_json::json!({"authenticated": false}),
         };
-        return write_http_response(
+        return write_v1_response(
             stream,
             api_v1::envelope(200, data, request_id).with_header("Cache-Control", "no-store"),
         );
@@ -1567,7 +1579,7 @@ fn dispatch_request(
 
     if request.method == "POST" && path == "/api/v1/auth/logout" {
         let Some(manager) = &context.oidc_web_session else {
-            return write_http_response(
+            return write_v1_response(
                 stream,
                 ApiResponse::problem(
                     404,
@@ -1582,7 +1594,7 @@ fn dispatch_request(
             request.headers.get("cookie").map(String::as_str),
             request.headers.get(OIDC_CSRF_HEADER).map(String::as_str),
         ) {
-            Ok(()) => write_http_response(
+            Ok(()) => write_v1_response(
                 stream,
                 api_v1::envelope(
                     200,
@@ -1592,7 +1604,7 @@ fn dispatch_request(
                 .with_header("Set-Cookie", expired_session_cookie())
                 .with_header("Cache-Control", "no-store"),
             ),
-            Err(error) => write_http_response(stream, oidc_web_problem(error)),
+            Err(error) => write_v1_response(stream, oidc_web_problem(error)),
         };
     }
 
@@ -1615,7 +1627,7 @@ fn dispatch_request(
     }
 
     if api_v1::is_lock_free_path(&request.method, &path) {
-        return write_http_response(
+        return write_v1_response(
             stream,
             api_v1::lock_free_response(
                 &path,
@@ -1715,7 +1727,7 @@ fn dispatch_request(
             && path == "/api/v1/auth/permissions:check"
             && session_principal.is_none()
         {
-            return write_http_response(
+            return write_v1_response(
                 stream,
                 ApiResponse::problem(
                     401,
@@ -1736,7 +1748,7 @@ fn dispatch_request(
         ) {
             Ok(principal) => principal,
             Err(error) => {
-                return write_http_response(
+                return write_v1_response(
                     stream,
                     ApiResponse::problem(
                         401,
@@ -1772,7 +1784,7 @@ fn dispatch_request(
                 None,
             ),
         };
-        return write_http_response(stream, response);
+        return write_v1_response(stream, response);
     }
 
     // 画布布局持久化（无需 console；与控制面一样受内部令牌门禁约束）。
@@ -2338,9 +2350,19 @@ mod tests {
         let permission_body = response_body(&permission_check);
         assert_eq!(permission_body["data"]["decisions"][0]["allowed"], false);
         assert!(permission_body["data"].get("principal").is_none());
+        let permission_root = permission_body.as_object().expect("v1 permission envelope");
+        assert_eq!(permission_root.len(), 2);
+        assert!(permission_root.contains_key("data"));
+        assert!(permission_root.contains_key("meta"));
+        assert!(permission_root.get("status").is_none());
         let readiness = raw_request(first.local_addr(), "GET", "/api/v1/healthz/ready", &[], "");
         assert!(readiness.starts_with("HTTP/1.1 200"), "{readiness}");
         let readiness = response_body(&readiness);
+        let readiness_root = readiness.as_object().expect("v1 readiness envelope");
+        assert_eq!(readiness_root.len(), 2);
+        assert!(readiness_root.contains_key("data"));
+        assert!(readiness_root.contains_key("meta"));
+        assert!(readiness_root.get("status").is_none());
         let build = &readiness["data"]["build"];
         assert_eq!(build["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(build["profile"], "desktop");
