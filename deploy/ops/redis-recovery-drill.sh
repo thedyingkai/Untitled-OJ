@@ -28,6 +28,11 @@ pg_db="ojos_judge_drill"
 judge_api_port="${OJOS_REDIS_DRILL_JUDGE_API_PORT:-18082}"
 judge_api_pid=""
 judge_api_config="$evidence_dir/judge-api.yaml"
+permission_fixture="$repo_root/deploy/ops/fixtures/redis_recovery_permission_fixture.py"
+permission_ready="$evidence_dir/permission-fixture-ready.json"
+permission_evidence="$evidence_dir/permission-check.json"
+permission_token="redis-recovery-permission-$run_id"
+permission_pid=""
 queue_status_api="not-run"
 
 docker_exec() {
@@ -58,6 +63,10 @@ finish() {
     kill "$judge_api_pid" >/dev/null 2>&1 || true
     wait "$judge_api_pid" >/dev/null 2>&1 || true
   fi
+  if [[ -n "$permission_pid" ]]; then
+    kill "$permission_pid" >/dev/null 2>&1 || true
+    wait "$permission_pid" >/dev/null 2>&1 || true
+  fi
   docker rm -f "$container" "$pg_container" >/dev/null 2>&1 || true
   jq -n \
     --arg status "$status" \
@@ -78,7 +87,8 @@ finish() {
       evidence: {
         log: "logs/redis-recovery-drill.log",
         result: "result.json",
-        queue_status: "queue-status.json"
+        queue_status: "queue-status.json",
+        permission_check: "permission-check.json"
       }
     }' >"$evidence_dir/manifest.json" || true
   if [[ $rc -eq 0 ]]; then
@@ -94,6 +104,7 @@ need_cmd docker
 need_cmd jq
 need_cmd go
 need_cmd curl
+need_cmd python3
 
 docker run -d \
   --name "$container" \
@@ -179,6 +190,33 @@ jq -n \
     result_stream_length_after_restart: ($result_len | tonumber)
   }' >"$evidence_dir/result.json"
 
+# Exercise judge-api's supported unmanaged Auth permission-check route instead
+# of copying Auth ownership tables into the Judge database. The fixture is
+# fail-closed: it only allows the exact admin check this drill performs and
+# records the request as durable evidence.
+python3 "$permission_fixture" \
+  --host 127.0.0.1 \
+  --port 0 \
+  --token "$permission_token" \
+  --ready-file "$permission_ready" \
+  --evidence-file "$permission_evidence" \
+  >"$evidence_dir/logs/permission-fixture.log" 2>&1 &
+permission_pid="$!"
+
+for _ in $(seq 1 60); do
+  if [[ -s "$permission_ready" ]] && jq -e '.ready == true and (.port | type == "number" and . > 0)' "$permission_ready" >/dev/null 2>&1; then
+    break
+  fi
+  if ! kill -0 "$permission_pid" >/dev/null 2>&1; then
+    echo "permission fixture exited early" >&2
+    cat "$evidence_dir/logs/permission-fixture.log" >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
+permission_port="$(jq -er '.port | select(type == "number" and . > 0)' "$permission_ready")"
+permission_endpoint="http://127.0.0.1:$permission_port"
+
 cat >"$judge_api_config" <<YAML
 Name: judge-api-redis-recovery-drill
 Host: 127.0.0.1
@@ -194,8 +232,8 @@ Jaeger:
   Endpoint: ""
 
 AuthService:
-  Endpoint: ""
-  AdminToken: ""
+  Endpoint: "$permission_endpoint"
+  AdminToken: "$permission_token"
 
 Storage:
   SubmissionsRoot: "$evidence_dir/submissions"
@@ -255,6 +293,17 @@ curl -fsS \
   -H 'X-Username: redis-drill-admin' \
   -H 'X-Roles: admin' \
   "http://127.0.0.1:$judge_api_port/judge/admin/queue/status" >"$evidence_dir/queue-status.json"
+
+jq -e \
+  '.method == "POST"
+    and .path == "/auth/admin/permission-check"
+    and .authorization_verified == true
+    and .request.user_id == 1
+    and .request.permission == "judge.admin"
+    and .request.scope_type == "system"
+    and ((.request.scope_id // 0) == 0)
+    and .decision == "allowed"' \
+  "$permission_evidence" >/dev/null
 
 jq -e \
   --arg stream "$stream" \
