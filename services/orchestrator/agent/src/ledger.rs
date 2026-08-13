@@ -1,6 +1,7 @@
 use orchestrator_control_plane::{CompletionStatus, JobKind, NewJobEvent};
 use orchestrator_runtime::{
-    ManagedServiceContextSpec, ManagedVolumeSpec, ReleaseProviderRevision, RuntimeContext,
+    ManagedServiceContextSpec, ManagedVolumeSpec, MigrationContainerIdentityV1,
+    ReleaseProviderRevision, RuntimeContext,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
@@ -128,6 +129,8 @@ pub struct MigrationRun {
     pub version: String,
     pub checksum: String,
     pub image: String,
+    pub resource_claims_sha256: String,
+    pub identity_sha256: String,
     pub state: String,
     pub job_id: String,
     pub container_id: Option<String>,
@@ -137,7 +140,14 @@ pub struct MigrationRun {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationDecision {
     Execute,
-    AlreadyApplied(MigrationRun),
+    AlreadyApplied(Box<MigrationRun>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationRegistration {
+    Missing,
+    Exact(MigrationRun),
+    Conflict(MigrationRun),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +246,8 @@ impl AgentLedger {
                 migration_version TEXT NOT NULL,
                 checksum TEXT NOT NULL,
                 image TEXT NOT NULL,
+                resource_claims_sha256 TEXT NOT NULL DEFAULT '',
+                identity_sha256 TEXT NOT NULL DEFAULT '',
                 state TEXT NOT NULL CHECK (state IN (
                     'RUNNING', 'SUCCEEDED', 'FAILED', 'NEEDS_ATTENTION'
                 )),
@@ -317,6 +329,23 @@ impl AgentLedger {
                 "ALTER TABLE job_runs ADD COLUMN events_json TEXT NOT NULL DEFAULT '[]'",
                 [],
             )?;
+        }
+        let migration_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(migration_runs)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (name, declaration) in [
+            ("resource_claims_sha256", "TEXT NOT NULL DEFAULT ''"),
+            ("identity_sha256", "TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !migration_columns.iter().any(|column| column == name) {
+                connection.execute(
+                    &format!("ALTER TABLE migration_runs ADD COLUMN {name} {declaration}"),
+                    [],
+                )?;
+            }
         }
         let runtime_context_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(runtime_context_runs)")?;
@@ -598,7 +627,15 @@ impl AgentLedger {
         if current.job_id != job_id
             || current.state != "MATERIALIZING"
             || spec.deployment_id != deployment_id
-            || spec.name != current.context.cache_volume_name
+            || match spec.runtime_contract.id {
+                orchestrator_runtime::RuntimeProfile::JudgeSandboxV1 => {
+                    spec.name != current.context.cache_volume_name
+                }
+                orchestrator_runtime::RuntimeProfile::StandardV1 => {
+                    !current.context.cache_volume_name.is_empty()
+                        || spec.lifecycle != orchestrator_runtime::RETAIN_VOLUME_LIFECYCLE
+                }
+            }
         {
             return Err(LedgerError::InvalidState(format!(
                 "managed volume for deployment {deployment_id} does not match its MATERIALIZING runtime context"
@@ -789,11 +826,11 @@ impl AgentLedger {
                     "runtime context for deployment {deployment_id} was not found"
                 ))
             })?;
-        if current.context.contract.id == orchestrator_runtime::RuntimeProfile::JudgeSandboxV1
+        if current.managed_volume.is_some()
             && (current.managed_volume_state != "CREATED" || !current.managed_volume_owned)
         {
             return Err(LedgerError::InvalidState(format!(
-                "judge runtime context for deployment {deployment_id} cannot create a container before its managed volume is durably owned"
+                "runtime context for deployment {deployment_id} cannot create a container before its managed volume is durably owned"
             )));
         }
         self.transition_runtime_context(
@@ -1199,21 +1236,37 @@ impl AgentLedger {
             .transpose()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn begin_migration(
         &mut self,
         service_name: &str,
         version: &str,
         checksum: &str,
         image: &str,
+        resource_claims_sha256: &str,
+        identity_sha256: &str,
         job_id: &str,
         now_ms: i64,
     ) -> Result<MigrationDecision, LedgerError> {
+        let identity = MigrationContainerIdentityV1 {
+            job_id: job_id.to_string(),
+            service_name: service_name.to_string(),
+            version: version.to_string(),
+            checksum: checksum.to_string(),
+            image: image.to_string(),
+            resource_claims_sha256: resource_claims_sha256.to_string(),
+            identity_sha256: identity_sha256.to_string(),
+        };
+        identity
+            .validate()
+            .map_err(|error| LedgerError::InvalidState(error.to_string()))?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
-                "SELECT checksum, image, state, job_id, container_id, error_message
+                "SELECT checksum, image, resource_claims_sha256, identity_sha256,
+                        state, job_id, container_id, error_message
                  FROM migration_runs
                  WHERE service_name = ?1 AND migration_version = ?2",
                 params![service_name, version],
@@ -1223,10 +1276,12 @@ impl AgentLedger {
                         version: version.to_string(),
                         checksum: row.get(0)?,
                         image: row.get(1)?,
-                        state: row.get(2)?,
-                        job_id: row.get(3)?,
-                        container_id: row.get(4)?,
-                        error_message: row.get(5)?,
+                        resource_claims_sha256: row.get(2)?,
+                        identity_sha256: row.get(3)?,
+                        state: row.get(4)?,
+                        job_id: row.get(5)?,
+                        container_id: row.get(6)?,
+                        error_message: row.get(7)?,
                     })
                 },
             )
@@ -1235,20 +1290,39 @@ impl AgentLedger {
             None => {
                 transaction.execute(
                     "INSERT INTO migration_runs (
-                        service_name, migration_version, checksum, image, state,
+                        service_name, migration_version, checksum, image,
+                        resource_claims_sha256, identity_sha256, state,
                         job_id, started_at_ms, updated_at_ms
-                     ) VALUES (?1, ?2, ?3, ?4, 'RUNNING', ?5, ?6, ?6)",
-                    params![service_name, version, checksum, image, job_id, now_ms],
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'RUNNING', ?7, ?8, ?8)",
+                    params![
+                        service_name,
+                        version,
+                        checksum,
+                        image,
+                        resource_claims_sha256,
+                        identity_sha256,
+                        job_id,
+                        now_ms
+                    ],
                 )?;
                 MigrationDecision::Execute
             }
-            Some(run) if run.checksum != checksum || run.image != image => {
+            Some(run)
+                if run.checksum != checksum
+                    || run.image != image
+                    || (!run.resource_claims_sha256.is_empty()
+                        && run.resource_claims_sha256 != resource_claims_sha256)
+                    || (!run.identity_sha256.is_empty()
+                        && run.identity_sha256 != identity_sha256) =>
+            {
                 return Err(LedgerError::MigrationConflict {
                     service_name: service_name.to_string(),
                     version: version.to_string(),
                 });
             }
-            Some(run) if run.state == "SUCCEEDED" => MigrationDecision::AlreadyApplied(run),
+            Some(run) if run.state == "SUCCEEDED" => {
+                MigrationDecision::AlreadyApplied(Box::new(run))
+            }
             Some(_) => {
                 return Err(LedgerError::MigrationNeedsAttention {
                     service_name: service_name.to_string(),
@@ -1343,7 +1417,8 @@ impl AgentLedger {
     ) -> Result<Option<MigrationRun>, LedgerError> {
         self.connection
             .query_row(
-                "SELECT checksum, image, state, job_id, container_id, error_message
+                "SELECT checksum, image, resource_claims_sha256, identity_sha256,
+                        state, job_id, container_id, error_message
                  FROM migration_runs
                  WHERE service_name = ?1 AND migration_version = ?2",
                 params![service_name, version],
@@ -1353,15 +1428,81 @@ impl AgentLedger {
                         version: version.to_string(),
                         checksum: row.get(0)?,
                         image: row.get(1)?,
-                        state: row.get(2)?,
-                        job_id: row.get(3)?,
-                        container_id: row.get(4)?,
-                        error_message: row.get(5)?,
+                        resource_claims_sha256: row.get(2)?,
+                        identity_sha256: row.get(3)?,
+                        state: row.get(4)?,
+                        job_id: row.get(5)?,
+                        container_id: row.get(6)?,
+                        error_message: row.get(7)?,
                     })
                 },
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Finds a migration using the complete immutable Docker identity. A row
+    /// for the same service/version but a different job or digest is a
+    /// conflict, never evidence that an observed container is registered.
+    pub fn migration_registration(
+        &self,
+        identity: &MigrationContainerIdentityV1,
+    ) -> Result<MigrationRegistration, LedgerError> {
+        let Some(run) = self.migration(&identity.service_name, &identity.version)? else {
+            return Ok(MigrationRegistration::Missing);
+        };
+        if run.job_id == identity.job_id
+            && run.checksum == identity.checksum
+            && run.image == identity.image
+            && run.resource_claims_sha256 == identity.resource_claims_sha256
+            && run.identity_sha256 == identity.identity_sha256
+        {
+            Ok(MigrationRegistration::Exact(run))
+        } else {
+            Ok(MigrationRegistration::Conflict(run))
+        }
+    }
+
+    /// Persists an ambiguous orphan before Docker cleanup. This tombstone is
+    /// intentionally keyed by service/version so any subsequent migration
+    /// attempt is rejected until a human reconciles the database outcome.
+    pub fn tombstone_unregistered_migration(
+        &mut self,
+        identity: &MigrationContainerIdentityV1,
+        container_id: &str,
+        evidence: &str,
+        now_ms: i64,
+    ) -> Result<MigrationRegistration, LedgerError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "INSERT INTO migration_runs (
+                service_name, migration_version, checksum, image,
+                resource_claims_sha256, identity_sha256, state, job_id,
+                container_id, error_message, started_at_ms, completed_at_ms,
+                updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'NEEDS_ATTENTION', ?7,
+                       ?8, ?9, ?10, ?10, ?10)
+             ON CONFLICT(service_name, migration_version) DO NOTHING",
+            params![
+                identity.service_name,
+                identity.version,
+                identity.checksum,
+                identity.image,
+                identity.resource_claims_sha256,
+                identity.identity_sha256,
+                identity.job_id,
+                container_id,
+                evidence,
+                now_ms,
+            ],
+        )?;
+        transaction.commit()?;
+        if changed == 1 {
+            return self.migration_registration(identity);
+        }
+        self.migration_registration(identity)
     }
 
     pub fn begin(
@@ -1833,6 +1974,8 @@ mod tests {
             runtime_contract: orchestrator_runtime::RuntimeContract::judge_sandbox_v1(),
             logical_name: orchestrator_runtime::JUDGE_CACHE_VOLUME_LOGICAL_NAME.to_string(),
             lifecycle: orchestrator_runtime::RELEASE_VOLUME_LIFECYCLE.to_string(),
+            owner_instance_id: String::new(),
+            target: "/var/lib/ojos-worker/cache".to_string(),
         }
     }
 
@@ -1997,6 +2140,19 @@ mod tests {
     #[test]
     fn migration_ledger_replays_exact_success_and_rejects_changed_artifact() {
         let mut ledger = AgentLedger::open_in_memory().unwrap();
+        let image = orchestrator_runtime::OciImageReference::parse(
+            "ghcr.io/acme/migrate@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        let resources = orchestrator_runtime::migration_resource_claims_sha256(&[]).unwrap();
+        let identity = orchestrator_runtime::migration_identity_sha256(
+            "demo",
+            "0001",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &image,
+            &resources,
+        )
+        .unwrap();
         assert_eq!(
             ledger
                 .begin_migration(
@@ -2004,6 +2160,8 @@ mod tests {
                     "0001",
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "ghcr.io/acme/migrate@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    &resources,
+                    &identity,
                     "job-1",
                     10,
                 )
@@ -2023,11 +2181,13 @@ mod tests {
                     "0001",
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "ghcr.io/acme/migrate@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    &resources,
+                    &identity,
                     "job-2",
                     20,
                 )
                 .unwrap(),
-            MigrationDecision::AlreadyApplied(MigrationRun { state, .. }) if state == "SUCCEEDED"
+            MigrationDecision::AlreadyApplied(run) if run.state == "SUCCEEDED"
         ));
         assert!(matches!(
             ledger.begin_migration(
@@ -2035,6 +2195,15 @@ mod tests {
                 "0001",
                 "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 "ghcr.io/acme/migrate@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &resources,
+                &orchestrator_runtime::migration_identity_sha256(
+                    "demo",
+                    "0001",
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    &image,
+                    &resources,
+                )
+                .unwrap(),
                 "job-3",
                 30,
             ),
@@ -2048,12 +2217,27 @@ mod tests {
         let path = directory.path().join("migration-ledger.sqlite3");
         {
             let mut ledger = AgentLedger::open(&path).unwrap();
+            let image = orchestrator_runtime::OciImageReference::parse(
+                "ghcr.io/acme/migrate@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .unwrap();
+            let resources = orchestrator_runtime::migration_resource_claims_sha256(&[]).unwrap();
+            let identity = orchestrator_runtime::migration_identity_sha256(
+                "demo",
+                "0001",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &image,
+                &resources,
+            )
+            .unwrap();
             ledger
                 .begin_migration(
                     "demo",
                     "0001",
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "ghcr.io/acme/migrate@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    &resources,
+                    &identity,
                     "job-1",
                     10,
                 )

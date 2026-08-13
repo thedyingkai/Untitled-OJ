@@ -6,6 +6,7 @@
 
 mod api_bindings;
 mod audit;
+mod contribution;
 mod idempotency;
 mod jobs;
 mod legacy_import;
@@ -14,6 +15,7 @@ mod operations;
 mod postgres;
 mod postgres_api_bindings;
 mod postgres_audit;
+mod postgres_contribution;
 mod postgres_idempotency;
 mod postgres_jobs;
 mod postgres_operations;
@@ -25,9 +27,14 @@ mod retention;
 mod runtime_facts;
 mod runtime_instances;
 mod sqlite;
+mod sqlite_contribution;
 mod topology;
 
 pub use audit::{AuditOutcome, AuditRecord, NewAuditRecord};
+pub use contribution::{
+    ContributionRepository, ContributionRepositoryError, ContributionRepositoryResult,
+    MemoryContributionStore,
+};
 pub use idempotency::{IdempotencyBegin, StoredIdempotentResponse};
 pub use jobs::{JobMetricsSnapshot, SqliteJobStore};
 pub use legacy_import::LegacyImportReport;
@@ -37,7 +44,9 @@ pub use node_identity::{
     NewNodeCertificate, NodeCertificateRecord, NodeEnrollmentCode, classify_enrollment_replay,
 };
 pub use operations::{ControlPlaneAnomalyCounters, SqliteOperationStore};
-pub use orchestrator_legacy::{ApiBinding, ApiBindingState};
+pub use orchestrator_legacy::{
+    ApiBinding, ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState, ApiBindingState,
+};
 pub use postgres::{
     AdvisoryLockGuard, DEFAULT_CONTROL_PLANE_LOCK_KEY, PooledPostgresConnection, PostgresError,
     PostgresOptions, PostgresPool, PostgresPreflight, PostgresReadinessReport, PostgresResult,

@@ -4,6 +4,7 @@ use crate::artifact_store::{ArtifactRetentionPolicy, ArtifactStore};
 use crate::auth::{
     ORCHESTRATOR_INTERNAL_TOKEN_HEADER, Principal, internal_token_check, resolve_principal,
 };
+use crate::auth_permission_check::AuthPermissionChecker;
 use crate::build_identity::{BuildIdentity, RuntimeProfile};
 use crate::catalog_registry::CatalogRegistry;
 use crate::compatibility::{self, LegacyApiMode};
@@ -11,6 +12,7 @@ use crate::desktop_session::{
     DESKTOP_BOOTSTRAP_HEADER, DESKTOP_CSRF_HEADER, DesktopSessionManager, session_cookie,
 };
 use crate::durable::{DurableJobStore, DurableStore};
+use crate::frontend_extensions::FrontendExtensionService;
 use crate::http::{
     ApiRequest, ApiResponse, HttpStream, SECURITY_RESPONSE_HEADERS, WRITE_TIMEOUT,
     has_json_content_type, query_bool, query_value, read_http_request, requires_json_content_type,
@@ -18,6 +20,10 @@ use crate::http::{
 };
 use crate::node_identity::{NodeIdentityService, NodePeerIdentity};
 use crate::observability::{self, Observability};
+use crate::observability_discovery::{
+    DiscoveryKind, HEALTH_DISCOVERY_PATH, METRICS_DISCOVERY_PATH, OBSERVABILITY_METRICS_PATH,
+    ObservabilityDiscoveryAuth, active_targets, fail_closed_groups, render_target_readiness,
+};
 use crate::oidc::{OidcConfig, OidcVerifier};
 use crate::oidc_web::{
     CSRF_HEADER as OIDC_CSRF_HEADER, OidcBrowserConfig, OidcWebError, OidcWebSessionManager,
@@ -85,8 +91,11 @@ struct ServerContext {
     desktop_agent_secret: Option<String>,
     legacy_api_mode: LegacyApiMode,
     observability: Arc<Observability>,
+    observability_discovery_auth: ObservabilityDiscoveryAuth,
     history_retention: Option<HistoryRetentionPolicy>,
     workload_token_issuer: Option<Arc<dyn WorkloadTokenIssuer>>,
+    auth_permission_checker: Option<AuthPermissionChecker>,
+    frontend_extensions: FrontendExtensionService,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -378,7 +387,7 @@ fn max_workers(production: bool) -> usize {
         .unwrap_or(default)
 }
 
-fn configured_topology_provider() -> Result<Option<TopologyProviderSaga>> {
+fn configured_topology_provider(production: bool) -> Result<Option<TopologyProviderSaga>> {
     let gateway_origin = std::env::var("ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -387,17 +396,24 @@ fn configured_topology_provider() -> Result<Option<TopologyProviderSaga>> {
         .filter(|value| !value.trim().is_empty());
     let (gateway_origin, auth_origin) = match (gateway_origin, auth_origin) {
         (Some(gateway_origin), Some(auth_origin)) => (gateway_origin, auth_origin),
-        (None, None) => return Ok(None),
+        (None, None) if !production => return Ok(None),
+        (None, None) => {
+            return Err(anyhow!(
+                "production requires Gateway and Auth topology management providers"
+            ));
+        }
         _ => {
             return Err(anyhow!(
                 "Gateway and Auth topology management origins must be configured together"
             ));
         }
     };
-    let mut gateway = HttpManagementProviderConfig::new(gateway_origin)
+    let mut gateway = HttpManagementProviderConfig::new(gateway_origin.clone())
         .context("validate Gateway topology management origin")?;
-    let mut auth = HttpManagementProviderConfig::new(auth_origin)
+    let mut auth = HttpManagementProviderConfig::new(auth_origin.clone())
         .context("validate Auth topology management origin")?;
+    validate_platform_provider_origin(&gateway_origin, "gateway", production)?;
+    validate_platform_provider_origin(&auth_origin, "auth-service", production)?;
     if let Some(token) = std::env::var("ORCHESTRATOR_GATEWAY_ADMIN_TOKEN")
         .ok()
         .filter(|value| !value.is_empty())
@@ -405,6 +421,10 @@ fn configured_topology_provider() -> Result<Option<TopologyProviderSaga>> {
         gateway = gateway
             .with_bearer_token(token)
             .context("validate Gateway topology management token")?;
+    } else if production {
+        return Err(anyhow!(
+            "production requires ORCHESTRATOR_GATEWAY_ADMIN_TOKEN"
+        ));
     }
     if let Some(token) = std::env::var("ORCHESTRATOR_AUTH_ADMIN_TOKEN")
         .ok()
@@ -413,6 +433,8 @@ fn configured_topology_provider() -> Result<Option<TopologyProviderSaga>> {
         auth = auth
             .with_bearer_token(token)
             .context("validate Auth topology management token")?;
+    } else if production {
+        return Err(anyhow!("production requires ORCHESTRATOR_AUTH_ADMIN_TOKEN"));
     }
     let mut config = TopologyProviderConfig::new(Some(gateway), Some(auth));
     let max_request_bytes = std::env::var("ORCHESTRATOR_PROVIDER_MAX_REQUEST_BYTES")
@@ -443,6 +465,33 @@ fn configured_topology_provider() -> Result<Option<TopologyProviderSaga>> {
     TopologyProviderSaga::from_config(config)
         .map(Some)
         .context("configure topology management providers")
+}
+
+fn validate_platform_provider_origin(
+    origin: &str,
+    compose_host: &str,
+    production: bool,
+) -> Result<()> {
+    if !production {
+        return Ok(());
+    }
+    let parsed = url::Url::parse(origin).context("parse platform provider origin")?;
+    if parsed.scheme() == "https" {
+        return Ok(());
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    let loopback = parsed.scheme() == "http" && matches!(host, "localhost" | "127.0.0.1" | "::1");
+    let compose_enabled = std::env::var("ORCHESTRATOR_ALLOW_COMPOSE_BOOTSTRAP_HTTP")
+        .ok()
+        .is_some_and(|value| {
+            matches!(value.trim(), "1") || value.trim().eq_ignore_ascii_case("true")
+        });
+    if loopback || (compose_enabled && parsed.scheme() == "http" && host == compose_host) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "production platform provider origin must use HTTPS; plaintext is limited to loopback or the explicitly enabled {compose_host} Compose bootstrap network"
+    ))
 }
 
 /// Reconciles durable state before a listener is bound. Startup therefore
@@ -638,7 +687,13 @@ fn start_embedded_server_with_components(
     } else {
         None
     };
-    let topology_provider = configured_topology_provider()?;
+    let topology_provider = configured_topology_provider(production)?;
+    let workload_token_issuer = HttpWorkloadTokenIssuer::from_env(production)?
+        .map(|issuer| Arc::new(issuer) as Arc<dyn WorkloadTokenIssuer>);
+    let auth_permission_checker =
+        AuthPermissionChecker::from_env().context("configure Auth frontend permission provider")?;
+    let frontend_extensions = FrontendExtensionService::from_env()
+        .context("configure frontend extension artifact delivery")?;
     let mut catalog_registry = CatalogRegistry::from_env(&options.repo_root)
         .map_err(|error| anyhow!("configure Catalog v2 registry: {error}"))?;
     if production && catalog_registry.is_none() {
@@ -684,6 +739,9 @@ fn start_embedded_server_with_components(
             gc.removed_files, gc.removed_bytes, gc.retained_bytes
         );
     }
+    let observability_discovery_auth =
+        ObservabilityDiscoveryAuth::from_env(production, options.internal_token.as_deref())
+            .context("configure dedicated observability discovery credential")?;
     let listener = TcpListener::bind(options.bind_addr)
         .with_context(|| format!("bind {}", options.bind_addr))?;
     let local_addr = listener.local_addr().context("read bound server address")?;
@@ -706,7 +764,11 @@ fn start_embedded_server_with_components(
                 node_identity,
                 legacy_api_mode,
                 observability,
+                observability_discovery_auth,
                 topology_provider,
+                workload_token_issuer,
+                auth_permission_checker,
+                frontend_extensions,
                 catalog_registry,
                 artifact_store,
                 job_store,
@@ -760,7 +822,11 @@ fn run_server(
     node_identity: Option<Arc<NodeIdentityService>>,
     legacy_api_mode: LegacyApiMode,
     observability: Arc<Observability>,
+    observability_discovery_auth: ObservabilityDiscoveryAuth,
     topology_provider: Option<TopologyProviderSaga>,
+    workload_token_issuer: Option<Arc<dyn WorkloadTokenIssuer>>,
+    auth_permission_checker: Option<AuthPermissionChecker>,
+    frontend_extensions: FrontendExtensionService,
     catalog_registry: Option<CatalogRegistry>,
     artifact_store: ArtifactStore,
     job_store: Option<Mutex<DurableJobStore>>,
@@ -793,8 +859,6 @@ fn run_server(
         .internal_token
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty());
-    let workload_token_issuer = HttpWorkloadTokenIssuer::from_env()?
-        .map(|issuer| Arc::new(issuer) as Arc<dyn WorkloadTokenIssuer>);
     let desktop_session = options
         .desktop_bootstrap_secret
         .as_deref()
@@ -830,8 +894,11 @@ fn run_server(
         desktop_agent_secret,
         legacy_api_mode,
         observability,
+        observability_discovery_auth,
         history_retention,
         workload_token_issuer,
+        auth_permission_checker,
+        frontend_extensions,
     });
 
     let production = matches!(&options.storage, EmbeddedStorage::Postgres { .. });
@@ -1122,7 +1189,60 @@ fn dispatch_request(
     let path = request.path.split('?').next().unwrap_or("/").to_string();
     let legacy_request = compatibility::is_legacy_api_path(&path);
 
-    if request.method == "GET" && path == "/metrics" {
+    let observability_path = matches!(
+        path.as_str(),
+        OBSERVABILITY_METRICS_PATH | METRICS_DISCOVERY_PATH | HEALTH_DISCOVERY_PATH
+    );
+    if request.method == "GET"
+        && observability_path
+        && !context.observability_discovery_auth.authorize(&request)
+    {
+        return write_http_response(
+            stream,
+            ApiResponse::problem(
+                401,
+                "OBSERVABILITY_CREDENTIAL_REJECTED",
+                "a dedicated observability Bearer credential is required",
+                api_v1::next_request_id(),
+                None,
+            )
+            .with_header("WWW-Authenticate", "Bearer realm=\"ojos-observability\"")
+            .with_header("Cache-Control", "no-store"),
+        );
+    }
+    if request.method == "GET"
+        && matches!(
+            path.as_str(),
+            METRICS_DISCOVERY_PATH | HEALTH_DISCOVERY_PATH
+        )
+    {
+        let kind = if path == METRICS_DISCOVERY_PATH {
+            DiscoveryKind::Metrics
+        } else {
+            DiscoveryKind::Health
+        };
+        let (mut targets, degraded) = match context.durable_store.as_ref() {
+            Some(storage) => match active_targets(storage, "default", kind, current_time_ms()) {
+                Ok(targets) => (targets, false),
+                Err(_) => (fail_closed_groups(kind), true),
+            },
+            None => (fail_closed_groups(kind), true),
+        };
+        if !degraded {
+            targets.extend(
+                context
+                    .observability_discovery_auth
+                    .platform_targets(kind, &targets),
+            );
+        }
+        let mut response = ApiResponse::ok(serde_json::to_value(targets)?)
+            .with_header("Cache-Control", "no-store");
+        if degraded {
+            response = response.with_header("X-OJOS-Discovery-Status", "fail-closed");
+        }
+        return write_http_response(stream, response);
+    }
+    if request.method == "GET" && matches!(path.as_str(), "/metrics" | OBSERVABILITY_METRICS_PATH) {
         let now_ms = current_time_ms();
         let observation = match context.durable_store.as_ref() {
             Some(store) => context
@@ -1136,6 +1256,11 @@ fn dispatch_request(
             observation.as_ref().ok().and_then(Option::as_ref),
             context.job_store.is_some(),
         ));
+        if path == OBSERVABILITY_METRICS_PATH
+            && let Some(storage) = context.durable_store.as_ref()
+        {
+            metrics.push_str(&render_target_readiness(storage, now_ms));
+        }
         let status = if observation.is_ok() { 200 } else { 503 };
         return write_http_response(
             stream,
@@ -1574,7 +1699,34 @@ fn dispatch_request(
         );
     }
 
+    if FrontendExtensionService::is_route(&path) {
+        return write_static_response(
+            stream,
+            context.frontend_extensions.serve(
+                context.durable_store.as_ref(),
+                request.method.as_str(),
+                &path,
+            ),
+        );
+    }
+
     if api_v1::is_v1_path(&path) {
+        if request.method == "POST"
+            && path == "/api/v1/auth/permissions:check"
+            && session_principal.is_none()
+        {
+            return write_http_response(
+                stream,
+                ApiResponse::problem(
+                    401,
+                    "BROWSER_SESSION_REQUIRED",
+                    "frontend permission checks require an authenticated HttpOnly browser session",
+                    api_v1::next_request_id(),
+                    None,
+                )
+                .with_header("Cache-Control", "no-store"),
+            );
+        }
         let principal = match resolve_principal(
             &request,
             session_principal.as_ref(),
@@ -1597,7 +1749,7 @@ fn dispatch_request(
             }
         };
         let response = match context.with_console(|console| {
-            api_v1::handle(
+            api_v1::handle_with_permission_checker(
                 console,
                 context.durable_store.as_ref(),
                 context.topology_provider.as_ref(),
@@ -1605,6 +1757,7 @@ fn dispatch_request(
                 Some(&context.artifact_store),
                 &context.store_state,
                 &context.repo_root,
+                context.auth_permission_checker.as_ref(),
                 request,
                 context.internal_token.as_deref(),
                 principal.as_ref(),
@@ -1882,7 +2035,9 @@ fn write_static_response(
     let status_text = match response.status {
         200 => "OK",
         404 => "Not Found",
-        _ => "OK",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Error",
     };
     write!(
         stream,
@@ -1890,7 +2045,7 @@ fn write_static_response(
         response.status,
         status_text,
         response.content_type,
-        response.body.len(),
+        response.content_length.unwrap_or(response.body.len()),
         response.cache_control,
         SECURITY_RESPONSE_HEADERS
     )?;
@@ -2016,13 +2171,14 @@ mod tests {
         let mut env = TestEnv::lock();
         env.set("ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN", "  \t");
         env.set("ORCHESTRATOR_AUTH_ADMIN_ORIGIN", "\r\n");
-        assert!(configured_topology_provider().unwrap().is_none());
+        assert!(configured_topology_provider(false).unwrap().is_none());
+        assert!(configured_topology_provider(true).is_err());
 
         env.set(
             "ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN",
             "https://gateway.example.test",
         );
-        let missing_auth = match configured_topology_provider() {
+        let missing_auth = match configured_topology_provider(false) {
             Err(error) => error,
             Ok(_) => panic!("one-sided Gateway origin must fail closed"),
         };
@@ -2037,7 +2193,7 @@ mod tests {
             "ORCHESTRATOR_AUTH_ADMIN_ORIGIN",
             "https://auth.example.test",
         );
-        let missing_gateway = match configured_topology_provider() {
+        let missing_gateway = match configured_topology_provider(false) {
             Err(error) => error,
             Ok(_) => panic!("one-sided Auth origin must fail closed"),
         };
@@ -2046,6 +2202,28 @@ mod tests {
                 .to_string()
                 .contains("must be configured together")
         );
+    }
+
+    #[test]
+    fn production_topology_providers_require_tokens_and_reject_arbitrary_plaintext() {
+        let mut env = TestEnv::lock();
+        env.set("ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN", "http://gateway:8080");
+        env.set("ORCHESTRATOR_AUTH_ADMIN_ORIGIN", "http://auth-service:8081");
+        env.remove("ORCHESTRATOR_GATEWAY_ADMIN_TOKEN");
+        env.remove("ORCHESTRATOR_AUTH_ADMIN_TOKEN");
+        env.remove("ORCHESTRATOR_ALLOW_COMPOSE_BOOTSTRAP_HTTP");
+        assert!(configured_topology_provider(true).is_err());
+
+        env.set("ORCHESTRATOR_ALLOW_COMPOSE_BOOTSTRAP_HTTP", "1");
+        env.set("ORCHESTRATOR_GATEWAY_ADMIN_TOKEN", "gateway-token");
+        env.set("ORCHESTRATOR_AUTH_ADMIN_TOKEN", "auth-token");
+        assert!(configured_topology_provider(true).unwrap().is_some());
+
+        env.set(
+            "ORCHESTRATOR_AUTH_ADMIN_ORIGIN",
+            "http://arbitrary-auth:8081",
+        );
+        assert!(configured_topology_provider(true).is_err());
     }
 
     #[test]
@@ -2107,6 +2285,59 @@ mod tests {
             "",
         );
         assert!(capabilities.starts_with("HTTP/1.1 200"), "{capabilities}");
+        let no_session_permission_check = raw_request(
+            first.local_addr(),
+            "POST",
+            "/api/v1/auth/permissions:check",
+            &[
+                ("Content-Type", "application/json"),
+                ("Idempotency-Key", "permission-no-session"),
+                (DESKTOP_CSRF_HEADER, "not-a-session"),
+            ],
+            r#"{"permissions":["contest-service.contest.read"]}"#,
+        );
+        assert!(
+            no_session_permission_check.starts_with("HTTP/1.1 401"),
+            "{no_session_permission_check}"
+        );
+        let missing_csrf_permission_check = raw_request(
+            first.local_addr(),
+            "POST",
+            "/api/v1/auth/permissions:check",
+            &[
+                ("Content-Type", "application/json"),
+                ("Idempotency-Key", "permission-no-csrf"),
+                ("Cookie", &cookie),
+            ],
+            r#"{"permissions":["contest-service.contest.read"]}"#,
+        );
+        assert!(
+            missing_csrf_permission_check.starts_with("HTTP/1.1 403"),
+            "{missing_csrf_permission_check}"
+        );
+        let csrf_token = response_body(&exchange)["csrf_token"]
+            .as_str()
+            .expect("desktop exchange csrf token")
+            .to_string();
+        let permission_check = raw_request(
+            first.local_addr(),
+            "POST",
+            "/api/v1/auth/permissions:check",
+            &[
+                ("Content-Type", "application/json"),
+                ("Idempotency-Key", "permission-with-session"),
+                ("Cookie", &cookie),
+                (DESKTOP_CSRF_HEADER, &csrf_token),
+            ],
+            r#"{"permissions":["contest-service.contest.read"]}"#,
+        );
+        assert!(
+            permission_check.starts_with("HTTP/1.1 200"),
+            "{permission_check}"
+        );
+        let permission_body = response_body(&permission_check);
+        assert_eq!(permission_body["data"]["decisions"][0]["allowed"], false);
+        assert!(permission_body["data"].get("principal").is_none());
         let readiness = raw_request(first.local_addr(), "GET", "/api/v1/healthz/ready", &[], "");
         assert!(readiness.starts_with("HTTP/1.1 200"), "{readiness}");
         let readiness = response_body(&readiness);

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 fs2 = "0.4"
+orchestrator-core.workspace = true
 orchestrator-control-plane.workspace = true
 orchestrator-legacy.workspace = true
 orchestrator-runtime.workspace = true

@@ -1,6 +1,12 @@
+use crate::contribution_controller::{
+    ContributionUninstallDagV1, append_contribution_uninstall_job_fragment,
+    stage_contribution_uninstall,
+};
 use crate::durable::{DurableError, DurableStore};
 use crate::http::{ApiRequest, ApiResponse, query_value};
-use orchestrator_control_plane::{JobKind, OperationCoordinator, PlanOperation, PlannedJob};
+use orchestrator_control_plane::{
+    JobKind, OperationCoordinator, PlanOperation, PlannedJob, PlannedJobCondition,
+};
 use orchestrator_storage::{ApiBinding, ApiBindingState};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -257,21 +263,57 @@ fn enqueue_lifecycle(
     let digest =
         Sha256::digest(format!("{action_id}\0{deployment_id}\0{idempotency_key}").as_bytes());
     let operation_id = format!("op-deployment-{digest:x}");
+    let staged_contribution = if action == "uninstall" {
+        stage_contribution_uninstall(
+            storage,
+            &operation_id,
+            "default",
+            deployment_id,
+            &deployment.instance.service_id,
+        )
+        .map_err(contribution_error)?
+    } else {
+        None
+    };
+    let mut planned_jobs = vec![PlannedJob {
+        step_id: action.to_string(),
+        node_id: deployment.node_id.clone(),
+        kind,
+        depends_on: vec![],
+        condition: Default::default(),
+        payload,
+        max_attempts: 3,
+    }];
+    if let Some(contribution) = &staged_contribution {
+        let restore_health_step_id = "contribution-restore-runtime-health".to_string();
+        planned_jobs.push(PlannedJob {
+            step_id: restore_health_step_id.clone(),
+            node_id: deployment.node_id.clone(),
+            kind: JobKind::Health,
+            depends_on: vec![action.to_string()],
+            condition: PlannedJobCondition::OnFailure,
+            payload: json!({"container_id": deployment.instance.container_id}),
+            max_attempts: 3,
+        });
+        append_contribution_uninstall_job_fragment(
+            &mut planned_jobs,
+            contribution,
+            ContributionUninstallDagV1 {
+                prepare_depends_on: Vec::new(),
+                commit_depends_on: Vec::new(),
+                runtime_uninstall_step_id: action.to_string(),
+                restore_health_step_id,
+            },
+        )
+        .map_err(contribution_error)?;
+    }
     let plan = PlanOperation {
         operation_id: operation_id.clone(),
         action: action_id.to_string(),
         target_type: "Deployment".to_string(),
         target_id: deployment_id.to_string(),
         request: json!({"deployment_id": deployment_id, "auto_enqueue": true}),
-        jobs: vec![PlannedJob {
-            step_id: action.to_string(),
-            node_id: deployment.node_id,
-            kind,
-            depends_on: vec![],
-            condition: Default::default(),
-            payload,
-            max_attempts: 3,
-        }],
+        jobs: planned_jobs,
     };
     let mut operations = storage.operation_store();
     let mut jobs = storage.job_store();
@@ -426,6 +468,27 @@ fn storage_error(error: DurableError) -> DeploymentApiError {
     }
 }
 
+fn contribution_error(
+    error: crate::contribution_controller::ContributionControllerError,
+) -> DeploymentApiError {
+    DeploymentApiError {
+        status: match &error {
+            crate::contribution_controller::ContributionControllerError::Conflict(_) => 409,
+            crate::contribution_controller::ContributionControllerError::NotFound(_) => 404,
+            crate::contribution_controller::ContributionControllerError::NeedsAttention(_) => 409,
+            crate::contribution_controller::ContributionControllerError::Retryable(_)
+            | crate::contribution_controller::ContributionControllerError::RetryableCompensation(
+                _,
+            ) => 409,
+            crate::contribution_controller::ContributionControllerError::Invalid(_) => 422,
+            crate::contribution_controller::ContributionControllerError::Persistence(_) => 500,
+        },
+        code: error.code(),
+        detail: error.to_string(),
+        operation_id: None,
+    }
+}
+
 fn operation_error(error: orchestrator_control_plane::OperationError) -> DeploymentApiError {
     let operation_id = match &error {
         orchestrator_control_plane::OperationError::NotFound(operation_id) => {
@@ -452,8 +515,9 @@ fn operation_error(error: orchestrator_control_plane::OperationError) -> Deploym
 mod tests {
     use super::*;
     use orchestrator_control_plane::{JobStatus, JobStore, OperationRepository};
-    use orchestrator_legacy::{TopologyEndpointSpec, TopologySpec};
+    use orchestrator_legacy::{ContributionRevisionV1, TopologyEndpointSpec, TopologySpec};
     use orchestrator_storage::{
+        ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState, ContributionRepository,
         SqliteOrchestratorStore, StoredNodeRuntimeFacts, StoredRuntimeInstance,
     };
 
@@ -541,9 +605,9 @@ mod tests {
             credential_ref: String::new(),
             credential_generation: 1,
             context_generation: 1,
-            desired_state: "ACTIVE".to_string(),
-            observed_state: "ACTIVE".to_string(),
-            health: "HEALTHY".to_string(),
+            desired_state: ApiBindingDesiredState::Active,
+            observed_state: ApiBindingObservedState::Active,
+            health: ApiBindingHealth::Healthy,
             drift: Vec::new(),
             last_operation_id: "operation-1".to_string(),
             state: ApiBindingState::Active,
@@ -615,6 +679,112 @@ mod tests {
         assert_eq!(job.node_id, "node-1");
         assert_eq!(job.kind, JobKind::Restart);
         assert_eq!(job.payload["container_id"], "container-1");
+    }
+
+    #[test]
+    fn uninstall_logically_clears_contribution_before_runtime_and_restores_on_failure() {
+        let (_directory, storage) = fixture();
+        let revision = ContributionRevisionV1::stage(
+            "default",
+            "deployment-1",
+            "judge",
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+            1,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("contribution fixture");
+        storage
+            .insert_contribution_revision(&revision)
+            .expect("persist staged contribution");
+        let active = revision.activate().expect("activate contribution fixture");
+        let original_head = storage
+            .compare_and_swap_contribution_head(None, &active)
+            .expect("activate contribution head");
+
+        let response = route(
+            Some(&storage),
+            &request(
+                "POST",
+                "/api/v1/deployments/deployment-1:uninstall",
+                Some("uninstall-with-contribution"),
+            ),
+            "req-uninstall-contribution",
+        )
+        .expect("deployment route");
+        assert_eq!(response.status, 202, "{:?}", response.body);
+        let operation_id = response.body["data"]["operation_id"]
+            .as_str()
+            .expect("operation id");
+        let operation = storage
+            .operation_store()
+            .get(operation_id)
+            .expect("load operation")
+            .expect("stored operation");
+        assert_eq!(operation.planned_jobs.len(), 6);
+
+        let prepare = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id.starts_with("contribution-prepare-"))
+            .expect("Contribution PREPARE");
+        let commit = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id.starts_with("contribution-commit-"))
+            .expect("Contribution COMMIT");
+        let abort = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id.starts_with("contribution-abort-"))
+            .expect("Contribution ABORT");
+        let ack_gate = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id.starts_with("contribution-ack-gate-"))
+            .expect("Contribution ACK gate");
+        let uninstall = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id == "uninstall")
+            .expect("runtime Uninstall");
+        let restore_health = operation
+            .planned_jobs
+            .iter()
+            .find(|job| job.step_id == "contribution-restore-runtime-health")
+            .expect("restore Health gate");
+        assert!(prepare.depends_on.is_empty());
+        assert!(commit.depends_on.contains(&prepare.step_id));
+        assert!(ack_gate.depends_on.contains(&commit.step_id));
+        assert!(uninstall.depends_on.contains(&ack_gate.step_id));
+        assert_eq!(restore_health.condition, PlannedJobCondition::OnFailure);
+        assert!(restore_health.depends_on.contains(&uninstall.step_id));
+        assert!(abort.depends_on.contains(&uninstall.step_id));
+        assert!(abort.depends_on.contains(&restore_health.step_id));
+        assert!(abort.depends_on.contains(&ack_gate.step_id));
+
+        // Planning/enqueue is read-only for Contribution state. The worker
+        // stages the empty successor only when PREPARE actually executes.
+        assert_eq!(
+            storage
+                .contribution_head("default", "judge")
+                .expect("load head")
+                .expect("active head")
+                .etag(),
+            original_head.etag()
+        );
+        assert_eq!(
+            storage
+                .contribution_revisions("default", Some("judge"))
+                .expect("list revisions")
+                .len(),
+            1
+        );
     }
 
     #[test]

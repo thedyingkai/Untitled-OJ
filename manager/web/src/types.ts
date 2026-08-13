@@ -300,6 +300,9 @@ export interface StoreValidationResult {
   metadata: Array<Record<string, unknown>>;
   bindings: ApiBinding[];
   requirements: ApiBindingRequirementPlan[];
+  composition_plan: CompositionPlan | null;
+  composition_inputs_valid: boolean;
+  composition_input_error: string;
   topology_confirmation_required: boolean;
   runtime: NodeRuntimeValidation | null;
   topology: {
@@ -313,6 +316,55 @@ export interface StoreValidationResult {
     jobs: number;
     runtime_calls: number;
   };
+}
+
+export interface CompositionInputDeclaration {
+  key: string;
+  valueType: "provider-id" | "json-object" | "secret-ref" | string;
+  required: boolean;
+  sensitive: boolean;
+  allowedValues: string[];
+}
+
+export interface CompositionProviderCandidate {
+  providerId: string;
+  version: string;
+  kind: "MANAGED" | "EXTERNAL" | "PACKAGE" | string;
+  serviceId?: string;
+}
+
+export interface CompositionProviderSelection {
+  capability: string;
+  versionRequirement: string;
+  policy: string;
+  candidates: CompositionProviderCandidate[];
+  selectedProviderId?: string;
+}
+
+export interface CompositionNode {
+  nodeId: string;
+  serviceId: string;
+  kind:
+    "package" | "api-binding" | "resource-claim" | "config" | "secret" | string;
+  name?: string;
+  resourceType?: string;
+  versionRequirement?: string;
+  optional?: boolean;
+  lifecycle?: string;
+  required?: boolean;
+  schema?: Record<string, unknown>;
+  provider?: CompositionProviderSelection;
+  unresolvedInputs: CompositionInputDeclaration[];
+}
+
+export interface CompositionPlan {
+  schemaVersion: string;
+  mode: string;
+  rootServiceId: string;
+  planDigest: string;
+  releaseGraphDigest: string;
+  nodes: CompositionNode[];
+  edges: Array<Record<string, unknown>>;
 }
 
 export interface ApiProviderCandidate {
@@ -443,6 +495,9 @@ export interface StorePipelineOptions {
   gateway_node_id?: string;
   config?: Record<string, unknown>;
   secret_refs?: Record<string, string>;
+  plan_digest?: string;
+  release_graph_digest?: string;
+  inputs?: Record<string, Record<string, unknown>>;
 }
 
 export interface InstallTopologySelection {

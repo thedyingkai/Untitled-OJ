@@ -1,3 +1,4 @@
+use crate::contribution_controller;
 use crate::durable::DurableStore;
 use crate::topology_provider::{
     RuntimeProjectionOrder, TopologyProviderApplyState, TopologyProviderObservation,
@@ -8,13 +9,14 @@ use getrandom::fill as random_fill;
 use orchestrator_control_plane::{
     ClaimRequest, CompleteRequest, CompletionStatus, DEFAULT_LEASE_MS, DurableOperationStatus,
     HeartbeatRequest, Job, JobError, JobKind, JobStore, OperationCoordinator, OperationRepository,
+    ResolveExpiredSuccessRequest,
 };
 use orchestrator_legacy::{
-    ApiBinding, ApiBindingState, Endpoint, EndpointProbe, TcpEndpointProbe,
-    TopologyDeploymentStatus, TopologyDesiredDeploymentState, TopologyDrift, TopologyDriftKind,
-    TopologyEndpointStatus, TopologyHealth, TopologyLinkStatus, TopologyObservedDeploymentState,
-    TopologyReconciliationState, TopologyResourceKind, TopologySpec, TopologyStatus,
-    parse_endpoint_id, validate_endpoint_id,
+    ApiBinding, ApiBindingHealth, ApiBindingObservedState, ApiBindingState, Endpoint,
+    EndpointProbe, TcpEndpointProbe, TopologyDeploymentStatus, TopologyDesiredDeploymentState,
+    TopologyDrift, TopologyDriftKind, TopologyEndpointStatus, TopologyHealth, TopologyLinkStatus,
+    TopologyObservedDeploymentState, TopologyReconciliationState, TopologyResourceKind,
+    TopologySpec, TopologyStatus, parse_endpoint_id, validate_endpoint_id,
 };
 use orchestrator_runtime::{RuntimeDesiredState, RuntimeInstance, RuntimeObservedState};
 use orchestrator_storage::{RuntimeManagementMode, StoredRuntimeInstance, TopologyApplyOutcome};
@@ -2015,13 +2017,13 @@ fn activate_staged_bindings(mut bindings: Vec<ApiBinding>, observed_at: &str) ->
     for binding in &mut bindings {
         if binding.desired_state == "ACTIVE" {
             binding.state = ApiBindingState::Active;
-            binding.observed_state = "ACTIVE".to_string();
-            binding.health = "HEALTHY".to_string();
+            binding.observed_state = ApiBindingObservedState::Active;
+            binding.health = ApiBindingHealth::Healthy;
             binding.reason.clear();
         } else {
             binding.state = ApiBindingState::Revoked;
-            binding.observed_state = "REVOKED".to_string();
-            binding.health = "UNKNOWN".to_string();
+            binding.observed_state = ApiBindingObservedState::Revoked;
+            binding.health = ApiBindingHealth::Unknown;
             binding.reason = "removed or disabled by applied Topology revision".to_string();
         }
         binding.updated_at = observed_at.to_string();
@@ -2217,7 +2219,40 @@ fn recover_expired(storage: &DurableStore, now_ms: i64) -> Result<(), String> {
     drop(jobs);
 
     for job in &expired {
-        if job.kind != JobKind::TopologyApply {
+        if !matches!(
+            job.kind,
+            JobKind::TopologyApply | JobKind::ContributionProjection
+        ) {
+            continue;
+        }
+        if contribution_controller::is_contribution_job(job) {
+            match contribution_controller::recover_expired_contribution_job(storage, job) {
+                Ok(Some(result)) => {
+                    let mut jobs = storage.job_store();
+                    jobs.resolve_expired_success(ResolveExpiredSuccessRequest {
+                        job_id: job.job_id.clone(),
+                        now_ms,
+                        result,
+                    })
+                    .map_err(|error| {
+                        format!(
+                            "resolve expired contribution Job {} from durable evidence: {error}",
+                            job.job_id
+                        )
+                    })?;
+                }
+                Ok(None) => {
+                    // No side-effect outcome can be proved. JobStore recovery
+                    // will move this non-retry-safe lease to NEEDS_ATTENTION;
+                    // the durable activation/receipts remain the repair source.
+                }
+                Err(error) => {
+                    eprintln!(
+                        "expired contribution Job {} could not be reconciled: {error}",
+                        job.job_id
+                    );
+                }
+            }
             continue;
         }
         let payload = serde_json::from_value::<TopologyApplyPayload>(job.payload.clone()).map_err(
@@ -2474,6 +2509,50 @@ pub(crate) fn process_one(
             .ok_or_else(|| "claimed topology job has no lease expiry".to_string())?,
     )?;
     lease_heartbeat.checkpoint(&mut jobs)?;
+    if contribution_controller::is_contribution_job(&job) {
+        let outcome = contribution_controller::execute_contribution_job(
+            storage,
+            &job.payload,
+            &job.operation_id,
+            || lease_heartbeat.checkpoint(&mut jobs),
+        );
+        match outcome {
+            Ok(outcome) => complete_and_project(
+                storage,
+                &mut jobs,
+                &job.job_id,
+                &job.operation_id,
+                lease_token,
+                CompletionStatus::Succeeded,
+                outcome.result,
+                String::new(),
+            )?,
+            Err(error) => {
+                let status = if error.retryable() {
+                    if error.retry_exhaustion_needs_attention() && job.attempt >= job.max_attempts {
+                        CompletionStatus::NeedsAttention
+                    } else {
+                        CompletionStatus::RetryableFailure
+                    }
+                } else if error.needs_attention() {
+                    CompletionStatus::NeedsAttention
+                } else {
+                    CompletionStatus::Failed
+                };
+                complete_and_project(
+                    storage,
+                    &mut jobs,
+                    &job.job_id,
+                    &job.operation_id,
+                    lease_token,
+                    status,
+                    serde_json::json!({"code": error.code()}),
+                    error.to_string(),
+                )?;
+            }
+        }
+        return Ok(true);
+    }
     if matches!(job.kind, JobKind::NodeDrain | JobKind::NodeRemove) {
         let outcome = process_node_lifecycle(storage, &job.kind, &job.payload);
         match outcome {
@@ -2616,10 +2695,27 @@ pub(crate) fn process_one(
         || heads.applying_operation_id.as_deref() != Some(job.operation_id.as_str()))
         && !aborting_completed_group_member
     {
+        let compensated_failure_kept_retryable_draft = heads.draft_revision_id
+            == payload.revision_id
+            && heads.applied_revision_id.as_deref() != Some(payload.revision_id.as_str());
+        let compensated_abort_restored_previous_draft = heads
+            .applied_revision_id
+            .as_ref()
+            .is_some_and(|applied| heads.draft_revision_id == *applied)
+            && heads.applied_revision_id.as_deref() != Some(payload.revision_id.as_str());
         if payload.phase == TopologyApplyPhase::Abort
             && heads.applying_revision_id.is_none()
-            && heads.applied_revision_id.as_deref() != Some(payload.revision_id.as_str())
+            && heads.last_operation_id.as_deref() == Some(job.operation_id.as_str())
+            && (compensated_failure_kept_retryable_draft
+                || compensated_abort_restored_previous_draft)
         {
+            // A FAILED forward phase releases topology ownership only after
+            // it has proved provider and binding compensation. It deliberately
+            // leaves the candidate as the draft so an explicit retry can
+            // reacquire the same immutable revision. A completed ABORT instead
+            // restores draft and applied to the previous revision. Both are
+            // durable, writer-fenced terminal facts, so replaying the planned
+            // ABORT must be a no-op rather than manufacturing NEEDS_ATTENTION.
             complete_and_project(
                 storage,
                 &mut jobs,
@@ -2631,6 +2727,7 @@ pub(crate) fn process_one(
                     "phase": "ABORT",
                     "restored": true,
                     "replayed": true,
+                    "retryable_draft": compensated_failure_kept_retryable_draft,
                 }),
                 String::new(),
             )?;
@@ -2679,7 +2776,12 @@ pub(crate) fn process_one(
         let binding_compensation =
             storage.replace_topology_api_bindings(&payload.topology_id, &payload.previous_bindings);
         let degraded = provider_compensation.is_err() || binding_compensation.is_err();
-        let finish = if aborting_completed_group_member {
+        let finish = if degraded {
+            Err(
+                "provider or binding restoration failed; durable candidate ownership was retained"
+                    .to_string(),
+            )
+        } else if aborting_completed_group_member {
             previous_revision_id
                 .ok_or_else(|| {
                     "group compensation cannot rewind an initial topology revision".to_string()
@@ -2696,19 +2798,21 @@ pub(crate) fn process_one(
                         .map_err(|error| error.to_string())
                 })
         } else {
-            storage
-                .finish_topology_apply(
-                    &payload.topology_id,
-                    &payload.revision_id,
-                    &job.operation_id,
-                    if degraded {
-                        TopologyApplyOutcome::Degraded
-                    } else {
-                        TopologyApplyOutcome::Failed
-                    },
-                    &now_marker(),
-                )
-                .map_err(|error| error.to_string())
+            previous_revision_id
+                .ok_or_else(|| {
+                    "an initial topology revision has no safe previous draft to restore".to_string()
+                })
+                .and_then(|previous_revision_id| {
+                    storage
+                        .complete_compensated_topology_abort(
+                            &payload.topology_id,
+                            &payload.revision_id,
+                            previous_revision_id,
+                            &job.operation_id,
+                            &now_marker(),
+                        )
+                        .map_err(|error| error.to_string())
+                })
         };
         let finish_error = finish.err();
         let needs_attention = degraded || finish_error.is_some();
@@ -4598,8 +4702,8 @@ mod ga_tests {
         PlanOperation, PlannedJob,
     };
     use orchestrator_legacy::{
-        OrchestratorStore, ServiceRelease, ServiceReleaseManifest, TopologyEndpointSpec,
-        TopologyLinkSpec, TopologyRevision, service_manifest_from_release,
+        ApiBindingDesiredState, OrchestratorStore, ServiceRelease, ServiceReleaseManifest,
+        TopologyEndpointSpec, TopologyLinkSpec, TopologyRevision, service_manifest_from_release,
     };
     use orchestrator_storage::{
         RuntimeManagementMode, SqliteOrchestratorStore, StoredNodeRuntimeFacts,
@@ -5141,8 +5245,8 @@ mod ga_tests {
             "op-projection-observation",
         );
         binding.state = ApiBindingState::Active;
-        binding.observed_state = "ACTIVE".to_string();
-        binding.health = "HEALTHY".to_string();
+        binding.observed_state = ApiBindingObservedState::Active;
+        binding.health = ApiBindingHealth::Healthy;
         store
             .replace_topology_api_bindings("primary", &[binding])
             .unwrap();
@@ -5297,9 +5401,9 @@ mod ga_tests {
             credential_ref: String::new(),
             credential_generation: 1,
             context_generation: 1,
-            desired_state: "ACTIVE".to_string(),
-            observed_state: "PENDING".to_string(),
-            health: "UNKNOWN".to_string(),
+            desired_state: ApiBindingDesiredState::Active,
+            observed_state: ApiBindingObservedState::Pending,
+            health: ApiBindingHealth::Unknown,
             drift: Vec::new(),
             last_operation_id: operation_id.to_string(),
             state: ApiBindingState::Pending,
@@ -5700,9 +5804,9 @@ mod ga_tests {
             credential_ref: String::new(),
             credential_generation: 1,
             context_generation: 1,
-            desired_state: "ACTIVE".to_string(),
-            observed_state: "ACTIVE".to_string(),
-            health: "HEALTHY".to_string(),
+            desired_state: ApiBindingDesiredState::Active,
+            observed_state: ApiBindingObservedState::Active,
+            health: ApiBindingHealth::Healthy,
             drift: Vec::new(),
             last_operation_id: "op-seed-runtime".to_string(),
             state: ApiBindingState::Active,
@@ -6820,7 +6924,7 @@ mod ga_tests {
     }
 
     #[test]
-    fn cancelling_a_queued_apply_releases_topology_ownership() {
+    fn cancelling_an_initial_apply_requires_attention_without_an_invalid_empty_draft() {
         let directory = tempfile::tempdir().unwrap();
         let store = initialize_store(&directory.path().join("orchestrator.db"));
         let first = store
@@ -6831,7 +6935,8 @@ mod ga_tests {
                 "initial".to_string(),
             )
             .unwrap();
-        let (provider, mocks) = provider_pair(vec![], vec![]);
+        let (provider, mocks) =
+            provider_pair(vec![mutation("delete", 200)], vec![mutation("delete", 200)]);
         let response = enqueue_revision(&store, &provider, first.revision_id(), "cancel-queued");
         let operation_id = response.body["data"]["operation_id"]
             .as_str()
@@ -6840,20 +6945,114 @@ mod ga_tests {
         {
             let mut operations = store.operation_store();
             let mut jobs = store.job_store();
-            let cancelled = OperationCoordinator::new(&mut operations, &mut jobs)
+            let cancelling = OperationCoordinator::new(&mut operations, &mut jobs)
                 .cancel(&operation_id, now_ms())
                 .unwrap();
-            assert_eq!(cancelled.status, DurableOperationStatus::Cancelled);
+            assert_eq!(cancelling.status, DurableOperationStatus::Cancelling);
+            assert!(
+                cancelling
+                    .job_bindings
+                    .iter()
+                    .any(|binding| binding.step_id.starts_with("topology-binding-abort-"))
+            );
         }
+        while process_one(&store, Some(&provider)).unwrap() {}
         recover_terminal_topology_applies(&store).unwrap();
         join_providers(mocks);
         let heads = store.topology_heads("primary").unwrap().unwrap();
         assert!(heads.applying_revision_id.is_none());
         assert!(heads.applied_revision_id.is_none());
+        assert_eq!(heads.draft_revision_id, first.revision_id());
         assert_eq!(
             store.topology_status("primary").unwrap().unwrap().state,
-            TopologyReconciliationState::Failed
+            TopologyReconciliationState::Degraded
         );
+        assert_eq!(
+            store
+                .operation_store()
+                .get(&operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            DurableOperationStatus::NeedsAttention
+        );
+    }
+
+    #[test]
+    fn cancelling_after_prepare_restores_previous_heads_and_preserves_revision_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = initialize_store(&directory.path().join("orchestrator.db"));
+        let (first, candidate) = seeded_second_revision(&store);
+        let (provider, mocks) = provider_pair(
+            vec![mutation("apply", 200), mutation("restore_previous", 200)],
+            vec![mutation("apply", 200), mutation("restore_previous", 200)],
+        );
+        let response = enqueue_revision(
+            &store,
+            &provider,
+            candidate.revision_id(),
+            "cancel-after-prepare",
+        );
+        let operation_id = response.body["data"]["operation_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert!(process_one(&store, Some(&provider)).unwrap());
+        let prepared = store.topology_heads("primary").unwrap().unwrap();
+        assert_eq!(
+            prepared.applying_revision_id.as_deref(),
+            Some(candidate.revision_id())
+        );
+        assert_eq!(
+            prepared.applied_revision_id.as_deref(),
+            Some(first.revision_id())
+        );
+        {
+            let mut operations = store.operation_store();
+            let mut jobs = store.job_store();
+            let cancelling = OperationCoordinator::new(&mut operations, &mut jobs)
+                .cancel(&operation_id, now_ms())
+                .unwrap();
+            assert_eq!(cancelling.status, DurableOperationStatus::Cancelling);
+        }
+        process_until_operation_terminal(&store, &provider, &operation_id);
+        join_providers(mocks);
+
+        let restored = store.topology_heads("primary").unwrap().unwrap();
+        assert_eq!(restored.draft_revision_id, first.revision_id());
+        assert_eq!(
+            restored.applied_revision_id.as_deref(),
+            Some(first.revision_id())
+        );
+        assert!(restored.applying_revision_id.is_none());
+        assert_eq!(
+            store
+                .operation_store()
+                .get(&operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            DurableOperationStatus::Cancelled
+        );
+        assert!(
+            store
+                .topology_revision("primary", candidate.revision_id())
+                .unwrap()
+                .is_some()
+        );
+        let next = store
+            .create_next_topology_revision(
+                "primary",
+                first.revision_id(),
+                topology_spec("after compensated abort"),
+                "unix-ms:5".to_string(),
+                "admin".to_string(),
+                "next after cancel".to_string(),
+            )
+            .unwrap();
+        assert_eq!(next.revision_number(), 3);
+        assert_eq!(next.parent_revision_id(), Some(first.revision_id()));
     }
 
     fn initialize_store(database_path: &Path) -> DurableStore {
@@ -7041,9 +7240,13 @@ mod ga_tests {
             credential_ref: String::new(),
             credential_generation: 2,
             context_generation: 2,
-            desired_state: desired_state.to_string(),
-            observed_state: "PENDING".to_string(),
-            health: "UNKNOWN".to_string(),
+            desired_state: match desired_state {
+                "ACTIVE" => ApiBindingDesiredState::Active,
+                "REVOKED" => ApiBindingDesiredState::Revoked,
+                other => panic!("invalid fixture desired state {other}"),
+            },
+            observed_state: ApiBindingObservedState::Pending,
+            health: ApiBindingHealth::Unknown,
             drift: Vec::new(),
             last_operation_id: operation_id.to_string(),
             state: ApiBindingState::Pending,

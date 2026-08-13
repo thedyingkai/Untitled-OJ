@@ -3,8 +3,10 @@
 mod local_agent;
 
 pub use local_agent::{
-    DesktopAgentHandle, DesktopAgentOptions, DesktopAgentPhase, DesktopAgentShutdown,
-    DesktopAgentStatus, start_desktop_agent,
+    DesktopAgentHandle, DesktopAgentPhase, DesktopAgentShutdown, DesktopAgentStatus,
+    DesktopHostPlatform, DesktopManagedExecutionCapability,
+    DesktopManagedExecutionUnavailableReason, desktop_managed_execution_capability,
+    desktop_managed_execution_capability_for, unavailable_desktop_agent,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -37,7 +39,7 @@ pub struct Cli {
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
 
-    /// Strict Agent registry credential JSON used only by the embedded runtime.
+    /// Compatibility flag; rejected while managed local execution is unavailable.
     #[arg(long, value_name = "PATH")]
     pub registry_credentials: Option<PathBuf>,
 
@@ -52,9 +54,7 @@ pub enum LaunchConfig {
         repo_root: Option<PathBuf>,
         web_root: Option<PathBuf>,
         data_dir: PathBuf,
-        registry_credentials_path: Option<PathBuf>,
         bootstrap_secret: String,
-        agent_secret: String,
     },
     External {
         url: Url,
@@ -62,8 +62,10 @@ pub enum LaunchConfig {
 }
 
 pub fn resolve_launch_config(cli: Cli) -> Result<LaunchConfig> {
-    if cli.daemon_url.is_some() && cli.registry_credentials.is_some() {
-        bail!("--registry-credentials is valid only with the embedded Desktop control plane");
+    if cli.registry_credentials.is_some() {
+        bail!(
+            "--registry-credentials is unavailable because Desktop does not run a managed local execution Agent; configure credentials on a standalone Agent"
+        );
     }
     if let Some(raw_url) = cli.daemon_url {
         return Ok(LaunchConfig::External {
@@ -72,18 +74,12 @@ pub fn resolve_launch_config(cli: Cli) -> Result<LaunchConfig> {
     }
 
     let bootstrap_secret = generate_session_secret()?;
-    let mut agent_secret = generate_session_secret()?;
-    while agent_secret == bootstrap_secret {
-        agent_secret = generate_session_secret()?;
-    }
     let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
     Ok(LaunchConfig::Embedded {
         repo_root: cli.repo_root,
         web_root: cli.web_root,
         data_dir,
-        registry_credentials_path: cli.registry_credentials,
         bootstrap_secret,
-        agent_secret,
     })
 }
 
@@ -627,29 +623,17 @@ mod tests {
     }
 
     #[test]
-    fn registry_credentials_are_explicit_and_embedded_only() {
-        let credentials = PathBuf::from("desktop-registry-credentials.json");
+    fn registry_credentials_are_rejected_without_a_managed_local_agent() {
         let mut args = cli();
-        args.registry_credentials = Some(credentials.clone());
-        let config = resolve_launch_config(args).unwrap();
-        match config {
-            LaunchConfig::Embedded {
-                registry_credentials_path,
-                ..
-            } => assert_eq!(registry_credentials_path, Some(credentials)),
-            LaunchConfig::External { .. } => panic!("expected embedded mode"),
-        }
-
-        let mut args = cli();
-        args.daemon_url = Some("https://orchestrator.example.test".to_string());
         args.registry_credentials = Some(PathBuf::from("unused-secret.json"));
         let error = resolve_launch_config(args).unwrap_err().to_string();
-        assert!(error.contains("valid only with the embedded Desktop control plane"));
+        assert!(error.contains("Desktop does not run a managed local execution Agent"));
+        assert!(error.contains("standalone Agent"));
         assert!(!error.contains("unused-secret.json"));
     }
 
     #[test]
-    fn embedded_mode_generates_distinct_strong_web_and_agent_secrets() {
+    fn embedded_mode_generates_a_strong_web_bootstrap_secret() {
         let generated = generate_session_secret().unwrap();
         assert_eq!(generated.len(), 64);
         assert!(
@@ -676,9 +660,7 @@ mod tests {
                 repo_root,
                 web_root: configured_web_root,
                 data_dir: _,
-                registry_credentials_path,
                 bootstrap_secret,
-                agent_secret,
             } => {
                 let paths = resolve_embedded_paths(
                     repo_root.as_deref(),
@@ -688,16 +670,12 @@ mod tests {
                 .unwrap();
                 assert_eq!(paths.repo_root, fs::canonicalize(root.path()).unwrap());
                 assert_eq!(paths.web_root, fs::canonicalize(web_root).unwrap());
-                for secret in [&bootstrap_secret, &agent_secret] {
-                    assert_eq!(secret.len(), 64);
-                    assert!(
-                        secret
-                            .chars()
-                            .all(|character| character.is_ascii_hexdigit())
-                    );
-                }
-                assert_ne!(bootstrap_secret, agent_secret);
-                assert!(registry_credentials_path.is_none());
+                assert_eq!(bootstrap_secret.len(), 64);
+                assert!(
+                    bootstrap_secret
+                        .chars()
+                        .all(|character| character.is_ascii_hexdigit())
+                );
             }
             LaunchConfig::External { .. } => panic!("expected embedded mode"),
         }

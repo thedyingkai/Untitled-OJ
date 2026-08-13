@@ -735,6 +735,8 @@ mod tests {
         };
         attach_runtime_observation_watermark(&JobKind::BindingContextApply, &mut context);
         assert!(context.result.get("runtime_observed_at_ms").is_none());
+        attach_runtime_observation_watermark(&JobKind::ResourcePurge, &mut context);
+        assert!(context.result.get("runtime_observed_at_ms").is_none());
     }
 
     #[tokio::test]

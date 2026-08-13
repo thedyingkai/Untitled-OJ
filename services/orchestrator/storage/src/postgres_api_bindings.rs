@@ -36,7 +36,7 @@ impl PostgresOrchestratorStore {
                     &binding.topology_id,
                     &binding.topology_revision_id,
                     &binding.api_id,
-                    &state(binding.state),
+                    &state(binding.derived_state()),
                     &payload,
                 ],
             )?;
@@ -70,7 +70,7 @@ impl PostgresOrchestratorStore {
                         &binding.topology_id,
                         &binding.topology_revision_id,
                         &binding.api_id,
-                        &state(binding.state),
+                        &state(binding.derived_state()),
                         &payload,
                     ],
                 )?;
@@ -105,7 +105,7 @@ impl PostgresOrchestratorStore {
                         &binding.topology_id,
                         &binding.topology_revision_id,
                         &binding.api_id,
-                        &state(binding.state),
+                        &state(binding.derived_state()),
                         &payload,
                     ],
                 )?;
@@ -119,10 +119,10 @@ impl PostgresOrchestratorStore {
         self.pool().with_client(|client| {
             client
                 .query_opt(
-                    "SELECT payload::text FROM orchestrator_api_bindings WHERE binding_id = $1",
+                    "SELECT binding_state, payload::text FROM orchestrator_api_bindings WHERE binding_id = $1",
                     &[&binding_id],
                 )?
-                .map(|row| decode(&row.get::<_, String>(0)))
+                .map(|row| decode(&row.get::<_, String>(0), &row.get::<_, String>(1)))
                 .transpose()
         })
     }
@@ -132,14 +132,14 @@ impl PostgresOrchestratorStore {
         deployment_id: &str,
     ) -> PostgresResult<Vec<ApiBinding>> {
         self.query_api_bindings(
-            "SELECT payload::text FROM orchestrator_api_bindings WHERE consumer_deployment_id = $1 ORDER BY binding_id",
+            "SELECT binding_state, payload::text FROM orchestrator_api_bindings WHERE consumer_deployment_id = $1 ORDER BY binding_id",
             deployment_id,
         )
     }
 
     pub fn api_bindings_for_topology(&self, topology_id: &str) -> PostgresResult<Vec<ApiBinding>> {
         self.query_api_bindings(
-            "SELECT payload::text FROM orchestrator_api_bindings WHERE topology_id = $1 ORDER BY consumer_deployment_id, binding_id",
+            "SELECT binding_state, payload::text FROM orchestrator_api_bindings WHERE topology_id = $1 ORDER BY consumer_deployment_id, binding_id",
             topology_id,
         )
     }
@@ -162,7 +162,7 @@ impl PostgresOrchestratorStore {
             client
                 .query(sql, &[&parameter])?
                 .into_iter()
-                .map(|row| decode(&row.get::<_, String>(0)))
+                .map(|row| decode(&row.get::<_, String>(0), &row.get::<_, String>(1)))
                 .collect()
         })
     }
@@ -232,9 +232,16 @@ fn validate_topology_set(topology_id: &str, bindings: &[ApiBinding]) -> Postgres
     Ok(())
 }
 
-fn decode(payload: &str) -> PostgresResult<ApiBinding> {
+fn decode(stored_state: &str, payload: &str) -> PostgresResult<ApiBinding> {
     let binding: ApiBinding = serde_json::from_str(payload)?;
     validate(&binding)?;
+    let derived = state(binding.derived_state());
+    if stored_state != derived {
+        return Err(PostgresError::Invariant(format!(
+            "API binding {} indexed state {stored_state} disagrees with derived state {derived}",
+            binding.binding_id
+        )));
+    }
     Ok(binding)
 }
 

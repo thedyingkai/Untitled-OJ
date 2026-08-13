@@ -10,18 +10,19 @@ use orchestrator_control_plane::{
     JobStore, NewJob, OperationRepository, OperationStoreError, ResolveExpiredSuccessRequest,
 };
 use orchestrator_legacy::{
-    ApiBindingState, NodeRecord, OrchestratorStore, ServiceReleaseContract, TopologyEndpointSpec,
-    TopologyRevision, TopologySpec, TopologyStatus, api_version_matches,
-    release_supports_link_probe_v1, validate_service_release,
+    ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState, ApiBindingState, NodeRecord,
+    OrchestratorStore, ServiceReleaseContract, TopologyEndpointSpec, TopologyRevision,
+    TopologySpec, TopologyStatus, api_version_matches, release_supports_link_probe_v1,
+    validate_service_release,
 };
 use orchestrator_storage::{
-    ApiBinding, AuditRecord, CertificateActivation, CertificateRotation,
-    ControlPlaneAnomalyCounters, EnrollmentLookup, EnrollmentRedemption, HistoryRetentionReport,
-    IdempotencyBegin, JobMetricsSnapshot, NewAuditRecord, NewNodeCertificate,
-    NodeCertificateRecord, NodeEnrollmentCode, PostgresError, PostgresJobStore,
-    PostgresOperationStore, PostgresOrchestratorStore, SqliteJobStore, SqliteOperationStore,
-    SqliteOrchestratorStore, StorageError, StoredIdempotentResponse, StoredNodeRuntimeFacts,
-    StoredRuntimeInstance, TopologyApplyOutcome, TopologyHeads,
+    ApiBinding, AuditRecord, CertificateActivation, CertificateRotation, ContributionRepository,
+    ContributionRepositoryResult, ControlPlaneAnomalyCounters, EnrollmentLookup,
+    EnrollmentRedemption, HistoryRetentionReport, IdempotencyBegin, JobMetricsSnapshot,
+    NewAuditRecord, NewNodeCertificate, NodeCertificateRecord, NodeEnrollmentCode, PostgresError,
+    PostgresJobStore, PostgresOperationStore, PostgresOrchestratorStore, SqliteJobStore,
+    SqliteOperationStore, SqliteOrchestratorStore, StorageError, StoredIdempotentResponse,
+    StoredNodeRuntimeFacts, StoredRuntimeInstance, TopologyApplyOutcome, TopologyHeads,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -603,9 +604,9 @@ impl DurableStore {
                     credential_ref: String::new(),
                     credential_generation: 1,
                     context_generation: 1,
-                    desired_state: "ACTIVE".to_string(),
-                    observed_state: "PENDING".to_string(),
-                    health: "UNKNOWN".to_string(),
+                    desired_state: ApiBindingDesiredState::Active,
+                    observed_state: ApiBindingObservedState::Pending,
+                    health: ApiBindingHealth::Unknown,
                     drift: Vec::new(),
                     last_operation_id: operation_id.to_string(),
                     state: ApiBindingState::Pending,
@@ -656,9 +657,9 @@ impl DurableStore {
             binding.topology_id = topology_id.to_string();
             binding.topology_revision_id = revision_id.to_string();
             binding.last_operation_id = operation_id.to_string();
-            binding.desired_state = "ACTIVE".to_string();
-            binding.observed_state = "PENDING".to_string();
-            binding.health = "UNKNOWN".to_string();
+            binding.desired_state = ApiBindingDesiredState::Active;
+            binding.observed_state = ApiBindingObservedState::Pending;
+            binding.health = ApiBindingHealth::Unknown;
             binding.state = ApiBindingState::Pending;
             binding.updated_at = now.clone();
         }
@@ -1095,6 +1096,36 @@ impl DurableStore {
         }
     }
 
+    pub(crate) fn complete_compensated_topology_abort(
+        &self,
+        topology_id: &str,
+        candidate_revision_id: &str,
+        previous_revision_id: &str,
+        operation_id: &str,
+        updated_at: &str,
+    ) -> Result<TopologyHeads, DurableError> {
+        match self {
+            Self::Sqlite(store) => store
+                .complete_compensated_topology_abort(
+                    topology_id,
+                    candidate_revision_id,
+                    previous_revision_id,
+                    operation_id,
+                    updated_at,
+                )
+                .map_err(Into::into),
+            Self::Postgres(store) => store
+                .complete_compensated_topology_abort(
+                    topology_id,
+                    candidate_revision_id,
+                    previous_revision_id,
+                    operation_id,
+                    updated_at,
+                )
+                .map_err(Into::into),
+        }
+    }
+
     pub(crate) fn topology_heads(
         &self,
         topology_id: &str,
@@ -1409,8 +1440,9 @@ impl DurableStore {
             }
         }
         if !unavailable.is_empty() {
-            binding.observed_state = "ERROR".to_string();
-            binding.health = "DEGRADED".to_string();
+            binding.observed_state = ApiBindingObservedState::Error;
+            binding.health = ApiBindingHealth::Degraded;
+            binding.state = ApiBindingState::Error;
             for reason in unavailable {
                 let reason = bounded_runtime_evidence(&reason);
                 if !binding.drift.contains(&reason) {
@@ -1522,6 +1554,209 @@ impl DurableStore {
         match self {
             Self::Sqlite(store) => store.delete_state(namespace, key).map_err(Into::into),
             Self::Postgres(store) => store.delete_state(namespace, key).map_err(Into::into),
+        }
+    }
+}
+
+impl ContributionRepository for DurableStore {
+    fn insert_contribution_revision(
+        &self,
+        revision: &orchestrator_legacy::ContributionRevisionV1,
+    ) -> ContributionRepositoryResult<()> {
+        match self {
+            Self::Sqlite(store) => store.insert_contribution_revision(revision),
+            Self::Postgres(store) => store.insert_contribution_revision(revision),
+        }
+    }
+
+    fn contribution_revision(
+        &self,
+        revision_id: &str,
+    ) -> ContributionRepositoryResult<Option<orchestrator_legacy::ContributionRevisionV1>> {
+        match self {
+            Self::Sqlite(store) => store.contribution_revision(revision_id),
+            Self::Postgres(store) => store.contribution_revision(revision_id),
+        }
+    }
+
+    fn contribution_revisions(
+        &self,
+        scope_id: &str,
+        service_id: Option<&str>,
+    ) -> ContributionRepositoryResult<Vec<orchestrator_legacy::ContributionRevisionV1>> {
+        match self {
+            Self::Sqlite(store) => store.contribution_revisions(scope_id, service_id),
+            Self::Postgres(store) => store.contribution_revisions(scope_id, service_id),
+        }
+    }
+
+    fn stage_contribution_bundle(
+        &self,
+        revision: &orchestrator_legacy::ContributionRevisionV1,
+        activation: &orchestrator_legacy::ContributionActivationV1,
+        receipts: &[orchestrator_legacy::ProjectionReceiptV1],
+    ) -> ContributionRepositoryResult<()> {
+        match self {
+            Self::Sqlite(store) => store.stage_contribution_bundle(revision, activation, receipts),
+            Self::Postgres(store) => {
+                store.stage_contribution_bundle(revision, activation, receipts)
+            }
+        }
+    }
+
+    fn transition_contribution_revision(
+        &self,
+        revision: &orchestrator_legacy::ContributionRevisionV1,
+    ) -> ContributionRepositoryResult<()> {
+        match self {
+            Self::Sqlite(store) => store.transition_contribution_revision(revision),
+            Self::Postgres(store) => store.transition_contribution_revision(revision),
+        }
+    }
+
+    fn contribution_head(
+        &self,
+        scope_id: &str,
+        service_id: &str,
+    ) -> ContributionRepositoryResult<Option<orchestrator_legacy::ContributionHeadV1>> {
+        match self {
+            Self::Sqlite(store) => store.contribution_head(scope_id, service_id),
+            Self::Postgres(store) => store.contribution_head(scope_id, service_id),
+        }
+    }
+
+    fn compare_and_swap_contribution_head(
+        &self,
+        expected_etag: Option<&str>,
+        active_revision: &orchestrator_legacy::ContributionRevisionV1,
+    ) -> ContributionRepositoryResult<orchestrator_legacy::ContributionHeadV1> {
+        match self {
+            Self::Sqlite(store) => {
+                store.compare_and_swap_contribution_head(expected_etag, active_revision)
+            }
+            Self::Postgres(store) => {
+                store.compare_and_swap_contribution_head(expected_etag, active_revision)
+            }
+        }
+    }
+
+    fn restore_contribution_head(
+        &self,
+        expected_candidate_etag: &str,
+        candidate_revision_id: &str,
+        previous_revision_id: &str,
+    ) -> ContributionRepositoryResult<orchestrator_legacy::ContributionHeadV1> {
+        match self {
+            Self::Sqlite(store) => store.restore_contribution_head(
+                expected_candidate_etag,
+                candidate_revision_id,
+                previous_revision_id,
+            ),
+            Self::Postgres(store) => store.restore_contribution_head(
+                expected_candidate_etag,
+                candidate_revision_id,
+                previous_revision_id,
+            ),
+        }
+    }
+
+    fn clear_initial_contribution_head(
+        &self,
+        expected_candidate_etag: &str,
+        candidate_revision_id: &str,
+    ) -> ContributionRepositoryResult<orchestrator_legacy::ContributionHeadV1> {
+        match self {
+            Self::Sqlite(store) => store
+                .clear_initial_contribution_head(expected_candidate_etag, candidate_revision_id),
+            Self::Postgres(store) => store
+                .clear_initial_contribution_head(expected_candidate_etag, candidate_revision_id),
+        }
+    }
+
+    fn put_contribution_activation_bundle(
+        &self,
+        activation: &orchestrator_legacy::ContributionActivationV1,
+        receipts: &[orchestrator_legacy::ProjectionReceiptV1],
+    ) -> ContributionRepositoryResult<()> {
+        match self {
+            Self::Sqlite(store) => store.put_contribution_activation_bundle(activation, receipts),
+            Self::Postgres(store) => store.put_contribution_activation_bundle(activation, receipts),
+        }
+    }
+
+    fn contribution_activation(
+        &self,
+        activation_id: &str,
+    ) -> ContributionRepositoryResult<Option<orchestrator_legacy::ContributionActivationV1>> {
+        match self {
+            Self::Sqlite(store) => store.contribution_activation(activation_id),
+            Self::Postgres(store) => store.contribution_activation(activation_id),
+        }
+    }
+
+    fn contribution_activations(
+        &self,
+        scope_id: &str,
+    ) -> ContributionRepositoryResult<Vec<orchestrator_legacy::ContributionActivationV1>> {
+        match self {
+            Self::Sqlite(store) => store.contribution_activations(scope_id),
+            Self::Postgres(store) => store.contribution_activations(scope_id),
+        }
+    }
+
+    fn contribution_projection_receipts(
+        &self,
+        activation_id: &str,
+    ) -> ContributionRepositoryResult<Vec<orchestrator_legacy::ProjectionReceiptV1>> {
+        match self {
+            Self::Sqlite(store) => store.contribution_projection_receipts(activation_id),
+            Self::Postgres(store) => store.contribution_projection_receipts(activation_id),
+        }
+    }
+
+    fn compare_and_swap_contribution_projection_receipt(
+        &self,
+        expected: &orchestrator_legacy::ProjectionReceiptV1,
+        observed: &orchestrator_legacy::ProjectionReceiptV1,
+    ) -> ContributionRepositoryResult<orchestrator_legacy::ProjectionReceiptV1> {
+        match self {
+            Self::Sqlite(store) => {
+                store.compare_and_swap_contribution_projection_receipt(expected, observed)
+            }
+            Self::Postgres(store) => {
+                store.compare_and_swap_contribution_projection_receipt(expected, observed)
+            }
+        }
+    }
+
+    fn insert_permission_assignment(
+        &self,
+        assignment: &orchestrator_legacy::PermissionAssignmentV1,
+    ) -> ContributionRepositoryResult<()> {
+        match self {
+            Self::Sqlite(store) => store.insert_permission_assignment(assignment),
+            Self::Postgres(store) => store.insert_permission_assignment(assignment),
+        }
+    }
+
+    fn delete_permission_assignment(
+        &self,
+        assignment_id: &str,
+    ) -> ContributionRepositoryResult<bool> {
+        match self {
+            Self::Sqlite(store) => store.delete_permission_assignment(assignment_id),
+            Self::Postgres(store) => store.delete_permission_assignment(assignment_id),
+        }
+    }
+
+    fn permission_assignments(
+        &self,
+        scope_id: &str,
+        permission_key: Option<&str>,
+    ) -> ContributionRepositoryResult<Vec<orchestrator_legacy::PermissionAssignmentV1>> {
+        match self {
+            Self::Sqlite(store) => store.permission_assignments(scope_id, permission_key),
+            Self::Postgres(store) => store.permission_assignments(scope_id, permission_key),
         }
     }
 }
@@ -1982,9 +2217,9 @@ fn stage_binding_generations(
             revoked.topology_revision_id = revision_id.to_string();
             revoked.credential_generation = generation;
             revoked.context_generation = generation;
-            revoked.desired_state = "REVOKED".to_string();
-            revoked.observed_state = "PENDING".to_string();
-            revoked.health = "UNKNOWN".to_string();
+            revoked.desired_state = ApiBindingDesiredState::Revoked;
+            revoked.observed_state = ApiBindingObservedState::Pending;
+            revoked.health = ApiBindingHealth::Unknown;
             revoked.drift.clear();
             revoked.last_operation_id = operation_id.to_string();
             revoked.state = ApiBindingState::Pending;
@@ -2079,9 +2314,9 @@ mod binding_generation_tests {
             credential_ref: String::new(),
             credential_generation: generation,
             context_generation: generation,
-            desired_state: "ACTIVE".to_string(),
-            observed_state: "ACTIVE".to_string(),
-            health: "HEALTHY".to_string(),
+            desired_state: ApiBindingDesiredState::Active,
+            observed_state: ApiBindingObservedState::Active,
+            health: ApiBindingHealth::Healthy,
             drift: Vec::new(),
             last_operation_id: "operation-1".to_string(),
             state: ApiBindingState::Active,
@@ -2104,7 +2339,7 @@ mod binding_generation_tests {
         desired[0].link_target_endpoint = desired[0].provider_endpoint.clone();
         for binding in &mut desired {
             binding.state = ApiBindingState::Resolved;
-            binding.observed_state = "RESOLVED".to_string();
+            binding.observed_state = ApiBindingObservedState::Resolved;
         }
         let staged =
             stage_binding_generations(desired, current, "revision-2", "operation-2", "unix-ms:2");

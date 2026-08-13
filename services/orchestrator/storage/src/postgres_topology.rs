@@ -70,9 +70,24 @@ impl PostgresOrchestratorStore {
                     "draft revision {expected_draft_revision_id} is missing"
                 ))
             })?;
-        let revision = current
+        let validated = current
             .next(spec, created_at, created_by, message)
             .map_err(domain_error)?;
+        let revision_number = next_persisted_revision_number(&mut transaction, topology_id)?;
+        let revision = if validated.revision_number() == revision_number {
+            validated
+        } else {
+            TopologyRevision::from_parts(
+                revision_number,
+                Some(current.revision_id().to_string()),
+                None,
+                validated.spec().clone(),
+                validated.created_at(),
+                validated.created_by(),
+                validated.message(),
+            )
+            .map_err(domain_error)?
+        };
         insert_revision(&mut transaction, &revision)?;
         let changed = transaction.execute(
             "UPDATE orchestrator_topology_heads SET draft_revision_id = $3, updated_at = clock_timestamp() WHERE topology_id = $1 AND draft_revision_id = $2 AND applying_revision_id IS NULL",
@@ -119,9 +134,24 @@ impl PostgresOrchestratorStore {
             load_revision(&mut transaction, topology_id, target_revision_id)?.ok_or_else(|| {
                 PostgresError::Invariant(format!("rollback target {target_revision_id} is missing"))
             })?;
-        let revision = current
+        let validated = current
             .rollback_to(&target, created_at, created_by, message)
             .map_err(domain_error)?;
+        let revision_number = next_persisted_revision_number(&mut transaction, topology_id)?;
+        let revision = if validated.revision_number() == revision_number {
+            validated
+        } else {
+            TopologyRevision::from_parts(
+                revision_number,
+                Some(current.revision_id().to_string()),
+                Some(target.revision_id().to_string()),
+                validated.spec().clone(),
+                validated.created_at(),
+                validated.created_by(),
+                validated.message(),
+            )
+            .map_err(domain_error)?
+        };
         insert_revision(&mut transaction, &revision)?;
         let changed = transaction.execute(
             "UPDATE orchestrator_topology_heads SET draft_revision_id = $3, updated_at = clock_timestamp() WHERE topology_id = $1 AND draft_revision_id = $2 AND applying_revision_id IS NULL",
@@ -352,13 +382,15 @@ impl PostgresOrchestratorStore {
     ) -> PostgresResult<TopologyHeads> {
         let mut connection = self.pool().connection()?;
         let mut transaction = connection.transaction()?;
-        if load_revision(&mut transaction, topology_id, previous_revision_id)?.is_none() {
-            return Err(PostgresError::Invariant(format!(
-                "previous topology revision {previous_revision_id} is missing"
-            )));
-        }
+        ensure_compensation_revisions(
+            &mut transaction,
+            topology_id,
+            revision_id,
+            previous_revision_id,
+            operation_id,
+        )?;
         let changed = transaction.execute(
-            "UPDATE orchestrator_topology_heads SET applied_revision_id = $3, last_operation_id = $4, updated_at = clock_timestamp() WHERE topology_id = $1 AND applied_revision_id = $2 AND applying_revision_id IS NULL AND last_operation_id = $4",
+            "UPDATE orchestrator_topology_heads SET draft_revision_id = $3, applied_revision_id = $3, applying_revision_id = NULL, applying_operation_id = NULL, last_operation_id = $4, updated_at = clock_timestamp() WHERE topology_id = $1 AND draft_revision_id = $2 AND applied_revision_id = $2 AND applying_revision_id IS NULL AND applying_operation_id IS NULL AND last_operation_id = $4",
             &[&topology_id, &revision_id, &previous_revision_id, &operation_id],
         )?;
         if changed != 1 {
@@ -366,20 +398,61 @@ impl PostgresOrchestratorStore {
                 "topology {topology_id} completed apply no longer belongs to operation {operation_id}"
             )));
         }
-        let status = TopologyStatus {
-            topology_id: topology_id.to_string(),
-            desired_revision_id: Some(revision_id.to_string()),
-            observed_revision_id: Some(previous_revision_id.to_string()),
-            state: TopologyReconciliationState::Failed,
-            deployments: Vec::new(),
-            endpoints: Vec::new(),
-            links: Vec::new(),
-            drift: Vec::new(),
-            last_operation_id: Some(operation_id.to_string()),
-            updated_at: updated_at.to_string(),
-        };
-        status.validate().map_err(domain_error)?;
-        upsert_status(&mut transaction, &status)?;
+        upsert_compensated_status(
+            &mut transaction,
+            topology_id,
+            previous_revision_id,
+            operation_id,
+            updated_at,
+        )?;
+        let completed = load_heads(&mut transaction, topology_id, false)?.ok_or_else(|| {
+            PostgresError::Invariant(format!("topology {topology_id} head disappeared"))
+        })?;
+        transaction.commit()?;
+        Ok(completed)
+    }
+
+    /// Atomically publishes a successful provider/binding ABORT while the
+    /// candidate still owns the apply lease. PostgreSQL locks the head and
+    /// refuses stale Operations or a concurrently advanced draft.
+    pub fn complete_compensated_topology_abort(
+        &self,
+        topology_id: &str,
+        candidate_revision_id: &str,
+        previous_revision_id: &str,
+        operation_id: &str,
+        updated_at: &str,
+    ) -> PostgresResult<TopologyHeads> {
+        let mut connection = self.pool().connection()?;
+        let mut transaction = connection.transaction()?;
+        ensure_compensation_revisions(
+            &mut transaction,
+            topology_id,
+            candidate_revision_id,
+            previous_revision_id,
+            operation_id,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE orchestrator_topology_heads SET draft_revision_id = $3, applied_revision_id = $3, applying_revision_id = NULL, applying_operation_id = NULL, last_operation_id = $4, updated_at = clock_timestamp() WHERE topology_id = $1 AND draft_revision_id = $2 AND applying_revision_id = $2 AND applying_operation_id = $4 AND applied_revision_id = $3",
+            &[
+                &topology_id,
+                &candidate_revision_id,
+                &previous_revision_id,
+                &operation_id,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(PostgresError::Conflict(format!(
+                "topology {topology_id} compensated abort no longer owns candidate {candidate_revision_id} for operation {operation_id}"
+            )));
+        }
+        upsert_compensated_status(
+            &mut transaction,
+            topology_id,
+            previous_revision_id,
+            operation_id,
+            updated_at,
+        )?;
         let completed = load_heads(&mut transaction, topology_id, false)?.ok_or_else(|| {
             PostgresError::Invariant(format!("topology {topology_id} head disappeared"))
         })?;
@@ -675,7 +748,7 @@ fn finish_topology_apply_group_transaction(
                     &binding.topology_id,
                     &binding.topology_revision_id,
                     &binding.api_id,
-                    &binding_state_label(binding.state),
+                    &binding_state_label(binding.derived_state()),
                     &payload,
                 ],
             )?;
@@ -760,6 +833,25 @@ fn insert_revision(
     Ok(())
 }
 
+fn next_persisted_revision_number(
+    client: &mut impl GenericClient,
+    topology_id: &str,
+) -> PostgresResult<u64> {
+    let maximum = client
+        .query_one(
+            "SELECT MAX(revision_number) FROM orchestrator_topology_revisions WHERE topology_id = $1",
+            &[&topology_id],
+        )?
+        .get::<_, Option<i64>>(0)
+        .ok_or_else(|| {
+            PostgresError::Invariant(format!("topology {topology_id} has no revision history"))
+        })?;
+    u64::try_from(maximum)
+        .map_err(|_| PostgresError::Invariant("negative topology revision number".to_string()))?
+        .checked_add(1)
+        .ok_or_else(|| PostgresError::Invariant("topology revision number overflow".to_string()))
+}
+
 fn load_revision(
     client: &mut impl GenericClient,
     topology_id: &str,
@@ -821,6 +913,60 @@ fn ensure_status_revision(
         )));
     }
     Ok(())
+}
+
+fn ensure_compensation_revisions(
+    client: &mut impl GenericClient,
+    topology_id: &str,
+    candidate_revision_id: &str,
+    previous_revision_id: &str,
+    operation_id: &str,
+) -> PostgresResult<()> {
+    if topology_id.trim().is_empty()
+        || candidate_revision_id.trim().is_empty()
+        || previous_revision_id.trim().is_empty()
+        || operation_id.trim().is_empty()
+        || candidate_revision_id == previous_revision_id
+    {
+        return Err(PostgresError::Invariant(
+            "compensated topology abort requires distinct non-empty candidate/previous revisions and a non-empty operation_id"
+                .to_string(),
+        ));
+    }
+    if load_revision(client, topology_id, candidate_revision_id)?.is_none() {
+        return Err(PostgresError::Invariant(format!(
+            "candidate topology revision {candidate_revision_id} is missing"
+        )));
+    }
+    if load_revision(client, topology_id, previous_revision_id)?.is_none() {
+        return Err(PostgresError::Invariant(format!(
+            "previous topology revision {previous_revision_id} is missing; an initial topology apply cannot be automatically rewound"
+        )));
+    }
+    Ok(())
+}
+
+fn upsert_compensated_status(
+    client: &mut impl GenericClient,
+    topology_id: &str,
+    previous_revision_id: &str,
+    operation_id: &str,
+    updated_at: &str,
+) -> PostgresResult<()> {
+    let status = TopologyStatus {
+        topology_id: topology_id.to_string(),
+        desired_revision_id: Some(previous_revision_id.to_string()),
+        observed_revision_id: Some(previous_revision_id.to_string()),
+        state: TopologyReconciliationState::InSync,
+        deployments: Vec::new(),
+        endpoints: Vec::new(),
+        links: Vec::new(),
+        drift: Vec::new(),
+        last_operation_id: Some(operation_id.to_string()),
+        updated_at: updated_at.to_string(),
+    };
+    status.validate().map_err(domain_error)?;
+    upsert_status(client, &status)
 }
 
 fn upsert_status(client: &mut impl GenericClient, status: &TopologyStatus) -> PostgresResult<()> {

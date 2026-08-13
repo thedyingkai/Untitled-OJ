@@ -839,6 +839,7 @@ const CAPABILITIES: &[&str] = &[
     "rollback",
     "health",
     "binding_context_apply",
+    "resource_purge",
 ];
 
 const CLAIM_PREFER: &str = "wait=25";
@@ -1163,6 +1164,7 @@ mod tests {
             JobKind::Rollback,
             JobKind::Health,
             JobKind::BindingContextApply,
+            JobKind::ResourcePurge,
         ]
         .iter()
         .map(|kind| {

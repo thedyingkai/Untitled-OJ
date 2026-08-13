@@ -63,6 +63,7 @@ pub const V1_ACTIONS: &[V1ActionDescriptor] = &[
     action("deployment.restart", "Deployment", V1Role::Operator, true),
     action("deployment.uninstall", "Deployment", V1Role::Admin, true),
     action("deployment.health", "Deployment", V1Role::Viewer, false),
+    action("resource.purge", "ResourceClaim", V1Role::Admin, true),
     action("topology.draft", "Topology", V1Role::Operator, false),
     action("topology.revision", "Topology", V1Role::Operator, false),
     action(

@@ -24,7 +24,8 @@ use orchestrator_runtime::{
     RuntimeObservedState, RuntimeProfile,
 };
 use orchestrator_storage::{
-    ApiBindingState, RuntimeManagementMode, StoredNodeRuntimeFacts, StoredRuntimeInstance,
+    ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState, ApiBindingState,
+    RuntimeManagementMode, StoredNodeRuntimeFacts, StoredRuntimeInstance,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -58,6 +59,7 @@ const REQUIRED_V1_AGENT_CAPABILITIES: &[&str] = &[
     "rollback",
     "health",
     "binding_context_apply",
+    "resource_purge",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -2337,8 +2339,10 @@ fn project_runtime_instance(
             )?;
         }
         orchestrator_control_plane::JobKind::Inventory
+        | orchestrator_control_plane::JobKind::ResourcePurge
         | orchestrator_control_plane::JobKind::ExternalHealth
         | orchestrator_control_plane::JobKind::TopologyApply
+        | orchestrator_control_plane::JobKind::ContributionProjection
         | orchestrator_control_plane::JobKind::NodeDrain
         | orchestrator_control_plane::JobKind::NodeRemove => {}
     }
@@ -2391,11 +2395,11 @@ fn activate_deployment_bindings(
             )
         {
             binding.state = ApiBindingState::Active;
-            binding.observed_state = "ACTIVE".to_string();
+            binding.observed_state = ApiBindingObservedState::Active;
             binding.health = if runtime_health.eq_ignore_ascii_case("HEALTHY") {
-                "HEALTHY".to_string()
+                ApiBindingHealth::Healthy
             } else {
-                "DEGRADED".to_string()
+                ApiBindingHealth::Degraded
             };
             binding.drift.clear();
             binding.last_operation_id = operation_id.to_string();
@@ -2421,9 +2425,9 @@ fn revoke_deployment_bindings(
     let now = format!("unix-ms:{}", now_ms());
     for binding in &mut bindings {
         binding.state = ApiBindingState::Revoked;
-        binding.desired_state = "REVOKED".to_string();
-        binding.observed_state = "REVOKED".to_string();
-        binding.health = "UNHEALTHY".to_string();
+        binding.desired_state = ApiBindingDesiredState::Revoked;
+        binding.observed_state = ApiBindingObservedState::Revoked;
+        binding.health = ApiBindingHealth::Unhealthy;
         binding.credential_generation = binding.credential_generation.saturating_add(1);
         binding.context_generation = binding.context_generation.saturating_add(1);
         binding.drift.clear();
@@ -2898,6 +2902,9 @@ mod tests {
         }
         assert!(!runtime_job_requires_observation_watermark(
             &JobKind::BindingContextApply
+        ));
+        assert!(!runtime_job_requires_observation_watermark(
+            &JobKind::ResourcePurge
         ));
     }
 

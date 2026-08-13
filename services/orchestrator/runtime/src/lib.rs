@@ -4,12 +4,13 @@
 //! directly.  No request field is interpolated into a shell command.
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bollard::Docker;
 use bollard::auth::DockerCredentials;
 use bollard::models::{
-    ContainerCreateBody, ContainerSummaryStateEnum, HostConfig, HostConfigCgroupnsModeEnum, Mount,
-    MountBindOptions, MountBindOptionsPropagationEnum, MountTmpfsOptions, MountType,
-    MountVolumeOptions, PortBinding, VolumeCreateRequest,
+    ContainerCreateBody, ContainerSummaryStateEnum, HostConfig, HostConfigCgroupnsModeEnum,
+    HostConfigLogConfig, Mount, MountBindOptions, MountBindOptionsPropagationEnum,
+    MountTmpfsOptions, MountType, MountVolumeOptions, PortBinding, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ImportImageOptionsBuilder,
@@ -43,6 +44,46 @@ pub const JUDGE_SANDBOX_V1_CANONICAL_JSON: &str = r#"{"cgroup":{"mount_access":"
 pub const JUDGE_SANDBOX_V1_MEMORY_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 pub const JUDGE_SANDBOX_V1_PIDS_LIMIT: i64 = 512;
 pub const JUDGE_SANDBOX_V1_TMPFS_BYTES: i64 = 256 * 1024 * 1024;
+pub const STANDARD_V3_PIDS_LIMIT: i64 = 512;
+pub const STANDARD_V3_MEMORY_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+pub const STANDARD_V3_TMPFS_BYTES: i64 = 64 * 1024 * 1024;
+pub const STANDARD_V3_USER: &str = "65532:65532";
+pub const STANDARD_WORKLOAD_UID: u32 = 65_532;
+pub const STANDARD_WORKLOAD_GID: u32 = 65_532;
+
+/// Agent-local ownership policy for files bind-mounted into a workload.
+///
+/// `CurrentProcess` is intentionally limited to tests and explicitly selected
+/// local development. Production Agents use [`Self::standard_v3`] so the
+/// owner of a `0700` service-context directory and its `0600` files is the
+/// same identity Docker applies to signed standard-v3 workloads. Keeping this
+/// typed prevents a future container-user change from silently diverging from
+/// the materialization policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkloadFileOwnership {
+    CurrentProcess,
+    Unix { uid: u32, gid: u32 },
+}
+
+impl WorkloadFileOwnership {
+    pub const fn current_process() -> Self {
+        Self::CurrentProcess
+    }
+
+    pub const fn standard_v3() -> Self {
+        Self::Unix {
+            uid: STANDARD_WORKLOAD_UID,
+            gid: STANDARD_WORKLOAD_GID,
+        }
+    }
+
+    pub const fn unix_ids(self) -> Option<(u32, u32)> {
+        match self {
+            Self::CurrentProcess => None,
+            Self::Unix { uid, gid } => Some((uid, gid)),
+        }
+    }
+}
 pub const JUDGE_SANDBOX_V1_HEALTH_TIMEOUT_MS: u64 = 120_000;
 pub const JUDGE_SANDBOX_V1_HEALTH_POLL_INTERVAL_MS: u64 = 2_000;
 pub const JUDGE_SANDBOX_V1_APPARMOR_PROFILE: &str = "unconfined";
@@ -53,13 +94,19 @@ const JUDGE_SANDBOX_V1_APPARMOR_SECURITY_OPT: &str = "apparmor=unconfined";
 const JUDGE_SANDBOX_V1_PRIVILEGED_LABEL_SECURITY_OPT: &str = "label=disable";
 pub const MANAGED_SERVICE_CONTEXT_TARGET: &str = "/run/ojos/service";
 pub const MANAGED_SERVICE_CONTEXT_FILE: &str = "/run/ojos/service/context.json";
+pub const MANAGED_WORKLOAD_PUBLIC_KEY_FILE: &str = "/run/ojos/service/workload-public-key.pem";
+const WORKLOAD_VERIFIER_ENV_SHA256_LABEL: &str = "ojos.workload_verifier_env_sha256";
+const MAX_WORKLOAD_PUBLIC_KEY_PEM_BYTES: usize = 16 * 1024;
 pub const MANAGED_SERVICE_CREDENTIAL_FILE: &str = "/run/ojos/service/token";
 pub const MANAGED_SERVICE_GATEWAY_CA_FILE: &str = "/run/ojos/service/ca.pem";
 pub const MANAGED_EVENT_CONTEXT_FILE: &str = "/run/ojos/service/events.json";
 pub const MANAGED_EVENT_CONNECTION_FILE: &str = "/run/ojos/service/event-redis.url";
 pub const MANAGED_EVENT_STREAM_V1: &str = "ojos:events:v1";
+pub const MANAGED_RESOURCE_SECRET_ROOT: &str = "/run/ojos/resources";
 pub const JUDGE_CACHE_VOLUME_LOGICAL_NAME: &str = "artifact-cache";
 pub const RELEASE_VOLUME_LIFECYCLE: &str = "release";
+pub const RETAIN_VOLUME_LIFECYCLE: &str = "retain";
+pub const SERVICE_CONTRACT_GENERATION_LABEL: &str = "ojos.service_contract_generation";
 const MANAGED_VOLUME_OWNER_LABEL: &str = "ojos.managed_by";
 const MANAGED_VOLUME_OWNER: &str = "orchestrator-agent";
 const MANAGED_VOLUME_DEPLOYMENT_LABEL: &str = "ojos.deployment_id";
@@ -68,6 +115,25 @@ const MANAGED_VOLUME_ARTIFACT_LABEL: &str = "ojos.artifact_digest";
 const MANAGED_VOLUME_PROFILE_LABEL: &str = "ojos.runtime_profile_sha256";
 const MANAGED_VOLUME_LOGICAL_NAME_LABEL: &str = "ojos.volume_logical_name";
 const MANAGED_VOLUME_LIFECYCLE_LABEL: &str = "ojos.volume_lifecycle";
+const MANAGED_VOLUME_OWNER_INSTANCE_LABEL: &str = "ojos.owner_instance_id";
+const MANAGED_VOLUME_TARGET_LABEL: &str = "ojos.volume_target";
+const RUNTIME_RETAINED_VOLUME_SHA256_LABEL: &str = "ojos.runtime_retained_volume_sha256";
+const RUNTIME_RETAINED_VOLUME_ACCESS_LABEL: &str = "ojos.runtime_retained_volume_access";
+const RUNTIME_RESOURCE_SECRET_MOUNTS_SHA256_LABEL: &str =
+    "ojos.runtime_resource_secret_mounts_sha256";
+pub const MIGRATION_RUNTIME_ROLE_LABEL: &str = "ojos.runtime_role";
+pub const MIGRATION_RUNTIME_ROLE: &str = "migration";
+pub const MIGRATION_MANAGED_BY_LABEL: &str = "ojos.migration_managed_by";
+pub const MIGRATION_MANAGED_BY: &str = "orchestrator-agent";
+pub const MIGRATION_JOB_ID_LABEL: &str = "ojos.migration_job_id";
+pub const MIGRATION_SERVICE_LABEL: &str = "ojos.migration_service";
+pub const MIGRATION_VERSION_LABEL: &str = "ojos.migration_version";
+pub const MIGRATION_CHECKSUM_LABEL: &str = "ojos.migration_checksum";
+pub const MIGRATION_IDENTITY_LABEL: &str = "ojos.migration_identity_sha256";
+pub const MIGRATION_RESOURCE_CLAIMS_LABEL: &str = "ojos.migration_resource_claims_sha256";
+const STANDARD_V3_NO_NEW_PRIVILEGES: &str = "no-new-privileges=true";
+const STANDARD_V3_LOG_MAX_SIZE: &str = "10m";
+const STANDARD_V3_LOG_MAX_FILES: &str = "3";
 const MAX_REGISTRY_CREDENTIALS_BYTES: u64 = 64 * 1024;
 const MAX_REGISTRY_CREDENTIALS: usize = 32;
 
@@ -224,27 +290,56 @@ pub struct ManagedVolumeSpec {
     pub runtime_contract: RuntimeContract,
     pub logical_name: String,
     pub lifecycle: String,
+    #[serde(default)]
+    pub owner_instance_id: String,
+    #[serde(default)]
+    pub target: String,
 }
 
 impl ManagedVolumeSpec {
     pub fn validate(&self) -> Result<(), RuntimeError> {
         self.runtime_contract.validate()?;
-        if self.runtime_contract.id != RuntimeProfile::JudgeSandboxV1
-            || self.service_id != "judge-worker"
-            || self.logical_name != JUDGE_CACHE_VOLUME_LOGICAL_NAME
-            || self.lifecycle != RELEASE_VOLUME_LIFECYCLE
-            || self.deployment_id.trim().is_empty()
-        {
-            return Err(RuntimeError::InvalidRuntimeContext(
-                "managed cache volume must be the fixed release-scoped judge-sandbox-v1 artifact-cache contract"
-                    .to_string(),
-            ));
-        }
-        let expected_prefix = "ojos-judge-cache-";
+        let expected_prefix = match self.runtime_contract.id {
+            RuntimeProfile::JudgeSandboxV1 => {
+                if self.service_id != "judge-worker"
+                    || self.logical_name != JUDGE_CACHE_VOLUME_LOGICAL_NAME
+                    || self.lifecycle != RELEASE_VOLUME_LIFECYCLE
+                    || self.deployment_id.trim().is_empty()
+                    || !self.owner_instance_id.is_empty()
+                    || (!self.target.is_empty() && self.target != "/var/lib/ojos-worker/cache")
+                {
+                    return Err(RuntimeError::InvalidRuntimeContext(
+                        "managed cache volume must be the fixed release-scoped judge-sandbox-v1 artifact-cache contract"
+                            .to_string(),
+                    ));
+                }
+                OciImageReference::parse(&self.artifact_digest)?;
+                "ojos-judge-cache-"
+            }
+            RuntimeProfile::StandardV1 => {
+                validate_retained_volume_identity(
+                    &self.owner_instance_id,
+                    &self.service_id,
+                    &self.logical_name,
+                    &self.target,
+                )?;
+                if self.lifecycle != RETAIN_VOLUME_LIFECYCLE
+                    || self.deployment_id.trim().is_empty()
+                    || self.artifact_digest.is_empty()
+                {
+                    return Err(RuntimeError::InvalidRuntimeContext(
+                        "standard managed volume must be an Agent-derived stable RETAIN attachment"
+                            .to_string(),
+                    ));
+                }
+                OciImageReference::parse(&self.artifact_digest)?;
+                "ojos-retain-"
+            }
+        };
         let component = self.name.strip_prefix(expected_prefix).ok_or_else(|| {
-            RuntimeError::InvalidRuntimeContext(
-                "managed cache volume name must start with ojos-judge-cache-".to_string(),
-            )
+            RuntimeError::InvalidRuntimeContext(format!(
+                "managed volume name must start with {expected_prefix}"
+            ))
         })?;
         if component.len() != 32
             || !component
@@ -252,17 +347,16 @@ impl ManagedVolumeSpec {
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             return Err(RuntimeError::InvalidRuntimeContext(
-                "managed cache volume name must end with the Agent-derived 128-bit deployment digest"
+                "managed volume name must end with the Agent-derived 128-bit identity digest"
                     .to_string(),
             ));
         }
-        OciImageReference::parse(&self.artifact_digest)?;
         Ok(())
     }
 
     pub fn ownership_labels(&self) -> Result<HashMap<String, String>, RuntimeError> {
         self.validate()?;
-        Ok(HashMap::from([
+        let mut labels = HashMap::from([
             (
                 MANAGED_VOLUME_OWNER_LABEL.to_string(),
                 MANAGED_VOLUME_OWNER.to_string(),
@@ -291,8 +385,86 @@ impl ManagedVolumeSpec {
                 MANAGED_VOLUME_LIFECYCLE_LABEL.to_string(),
                 self.lifecycle.clone(),
             ),
-        ]))
+        ]);
+        if self.runtime_contract.id == RuntimeProfile::StandardV1 {
+            labels.remove(MANAGED_VOLUME_DEPLOYMENT_LABEL);
+            labels.remove(MANAGED_VOLUME_ARTIFACT_LABEL);
+            labels.insert(
+                MANAGED_VOLUME_OWNER_INSTANCE_LABEL.to_string(),
+                self.owner_instance_id.clone(),
+            );
+            labels.insert(MANAGED_VOLUME_TARGET_LABEL.to_string(), self.target.clone());
+        }
+        Ok(labels)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedVolumeAttachmentV1 {
+    pub owner_instance_id: String,
+    pub logical_name: String,
+    pub target: String,
+    pub access: String,
+    pub lifecycle: String,
+}
+
+impl RetainedVolumeAttachmentV1 {
+    pub fn validate_for_service(&self, service_id: &str) -> Result<(), RuntimeError> {
+        validate_retained_volume_identity(
+            &self.owner_instance_id,
+            service_id,
+            &self.logical_name,
+            &self.target,
+        )?;
+        if self.access != "rw" || self.lifecycle != RETAIN_VOLUME_LIFECYCLE {
+            return Err(RuntimeError::InvalidRuntimeContext(
+                "retained volume attachment requires access=rw and lifecycle=retain".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn docker_name(&self, service_id: &str) -> Result<String, RuntimeError> {
+        self.validate_for_service(service_id)?;
+        let digest = Sha256::digest(
+            format!(
+                "{}\0{}\0{}",
+                self.owner_instance_id, service_id, self.logical_name
+            )
+            .as_bytes(),
+        );
+        Ok(format!("ojos-retain-{}", &format!("{digest:x}")[..32]))
+    }
+}
+
+fn validate_retained_volume_identity(
+    owner_instance_id: &str,
+    service_id: &str,
+    logical_name: &str,
+    target: &str,
+) -> Result<(), RuntimeError> {
+    let stable = Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$").expect("valid regex");
+    let logical = Regex::new(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$").expect("valid regex");
+    let reserved = target == "/"
+        || ["/run/ojos", "/proc", "/sys", "/dev"]
+            .iter()
+            .any(|prefix| target == *prefix || target.starts_with(&format!("{prefix}/")));
+    if !stable.is_match(owner_instance_id)
+        || !stable.is_match(service_id)
+        || !logical.is_match(logical_name)
+        || !target.starts_with('/')
+        || (target.len() > 1 && target.ends_with('/'))
+        || target.contains("//")
+        || target.contains('?')
+        || target.contains('#')
+        || reserved
+    {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "retained volume owner, service, logical name, or target is invalid".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Read-only capabilities reported by the local Docker Engine. These facts are
@@ -430,6 +602,116 @@ pub struct ManagedEventBinding {
     pub generation: u64,
 }
 
+/// Platform-owned verifier material for inbound workload JWTs. The public key
+/// may cross the control-plane boundary, but the issuer private key never does.
+/// The Agent writes the key to a dedicated file; it is not embedded in the
+/// application-facing `context.json` document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedWorkloadVerifierSpec {
+    pub public_key_pem: String,
+    pub key_id: String,
+    pub issuer: String,
+    pub audience: String,
+}
+
+impl ManagedWorkloadVerifierSpec {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        validate_ed25519_spki_pem(&self.public_key_pem)?;
+        validate_workload_token("workload verifier key_id", &self.key_id, 128, true)?;
+        validate_workload_token("workload verifier issuer", &self.issuer, 512, false)?;
+        validate_workload_token("workload verifier audience", &self.audience, 256, false)?;
+        Ok(())
+    }
+
+    fn environment_sha256(&self) -> Result<String, RuntimeError> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(&[
+            self.key_id.as_str(),
+            self.issuer.as_str(),
+            self.audience.as_str(),
+        ])
+        .map_err(|error| {
+            RuntimeError::InvalidRuntimeContext(format!(
+                "cannot encode workload verifier environment: {error}"
+            ))
+        })?;
+        Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+    }
+}
+
+fn validate_workload_token(
+    name: &str,
+    value: &str,
+    maximum: usize,
+    strict_identifier: bool,
+) -> Result<(), RuntimeError> {
+    let valid_identifier = !strict_identifier
+        || value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte));
+    if value.is_empty()
+        || value.len() > maximum
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+        || value.chars().any(char::is_whitespace)
+        || !valid_identifier
+    {
+        return Err(RuntimeError::InvalidRuntimeContext(format!(
+            "{name} is outside its closed text bounds"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_ed25519_spki_pem(pem: &str) -> Result<(), RuntimeError> {
+    let invalid = || {
+        RuntimeError::InvalidRuntimeContext(
+            "workload verifier public_key_pem must contain exactly one Ed25519 SubjectPublicKeyInfo PEM"
+                .to_string(),
+        )
+    };
+    if pem.is_empty()
+        || pem.len() > MAX_WORKLOAD_PUBLIC_KEY_PEM_BYTES
+        || !pem.is_ascii()
+        || pem
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\r' | '\n'))
+    {
+        return Err(invalid());
+    }
+    let normalized = pem.replace("\r\n", "\n");
+    let trimmed = normalized.trim_end_matches('\n');
+    let lines = trimmed.lines().collect::<Vec<_>>();
+    if lines.len() < 3
+        || lines.first() != Some(&"-----BEGIN PUBLIC KEY-----")
+        || lines.last() != Some(&"-----END PUBLIC KEY-----")
+        || lines[1..lines.len() - 1].iter().any(|line| {
+            line.is_empty()
+                || line.len() > 76
+                || !line
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        })
+    {
+        return Err(invalid());
+    }
+    let body = lines[1..lines.len() - 1].concat();
+    let der = BASE64_STANDARD.decode(body).map_err(|_| invalid())?;
+    const ED25519_SPKI_PREFIX: &[u8] = &[
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    if der.len() != ED25519_SPKI_PREFIX.len() + 32
+        || !der.starts_with(ED25519_SPKI_PREFIX)
+        || der[ED25519_SPKI_PREFIX.len()..]
+            .iter()
+            .all(|byte| *byte == 0)
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedServiceContextSpec {
@@ -442,6 +724,8 @@ pub struct ManagedServiceContextSpec {
     pub bindings: BTreeMap<String, ManagedApiBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events: Option<ManagedEventBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_verifier: Option<ManagedWorkloadVerifierSpec>,
 }
 
 /// Credential-free control-plane projection used to rebuild an exact Agent
@@ -599,6 +883,9 @@ impl ManagedServiceContextSpec {
                         .to_string(),
                 ));
             }
+        }
+        if let Some(verifier) = &self.workload_verifier {
+            verifier.validate()?;
         }
         Ok(())
     }
@@ -776,6 +1063,16 @@ pub struct ContainerSpec {
     /// control-plane wire representation.
     #[serde(skip)]
     pub runtime_context: Option<RuntimeContext>,
+    /// Agent-derived resource output files. Like `runtime_context`, this is an
+    /// in-memory execution detail and can never be requested by control-plane
+    /// JSON. The Agent may attach the same value to a migration or service
+    /// runtime `ContainerSpec`.
+    #[serde(skip)]
+    pub resource_secret_file_mounts: Vec<ResourceSecretFileMount>,
+    /// Signed Store projection of one stable platform-owned RETAIN volume.
+    /// The Agent derives the Docker name and rejects arbitrary host paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_volume: Option<RetainedVolumeAttachmentV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_service_context: Option<ManagedServiceContextSpec>,
     #[serde(default)]
@@ -788,13 +1085,163 @@ pub struct ContainerSpec {
     pub published_endpoint: Option<PublishedEndpoint>,
 }
 
+/// One Agent-owned secret output file exposed to a standard container at a
+/// deterministic, read-only path. `host_source_path` is deliberately absent
+/// from every serialized `ContainerSpec` representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceSecretFileMount {
+    pub resource_name: String,
+    pub host_source_path: String,
+}
+
+impl ResourceSecretFileMount {
+    pub fn container_destination(&self) -> Result<String, RuntimeError> {
+        validate_safe_resource_name(&self.resource_name)?;
+        Ok(format!(
+            "{MANAGED_RESOURCE_SECRET_ROOT}/{}/output",
+            self.resource_name
+        ))
+    }
+
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        self.container_destination()?;
+        let source = Path::new(&self.host_source_path);
+        if self.host_source_path.is_empty()
+            || self.host_source_path.len() > 4_096
+            || !source.is_absolute()
+            || self.host_source_path.ends_with('/')
+            || self.host_source_path.ends_with('\\')
+            || source.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err(RuntimeError::InvalidRuntimeContext(
+                "resource secret host_source_path must be an absolute normalized Agent-local path"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_safe_resource_name(resource_name: &str) -> Result<(), RuntimeError> {
+    let bytes = resource_name.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 63
+        || !bytes[0].is_ascii_lowercase()
+        || !bytes
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        || resource_name.contains("--")
+    {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "resource_name must be a safe lowercase DNS label".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Hashes only stable, non-sensitive ResourceClaim logical names. Host paths,
+/// DSNs and secret material cannot enter a migration label.
+pub fn migration_resource_claims_sha256(
+    resource_claims: &[String],
+) -> Result<String, RuntimeError> {
+    let mut names = resource_claims.to_vec();
+    names.sort();
+    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "migration ResourceClaim names must be unique".to_string(),
+        ));
+    }
+    for name in &names {
+        validate_safe_resource_name(name)?;
+    }
+    let canonical = serde_json::to_vec(&names).map_err(|error| {
+        RuntimeError::InvalidRuntimeContext(format!(
+            "cannot encode migration ResourceClaim identity: {error}"
+        ))
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
+}
+
+pub fn migration_identity_sha256(
+    service_name: &str,
+    version: &str,
+    checksum: &str,
+    image: &OciImageReference,
+    resource_claims_sha256: &str,
+) -> Result<String, RuntimeError> {
+    validate_migration_label_token("migration service_name", service_name, 63)?;
+    validate_migration_label_token("migration version", version, 128)?;
+    validate_sha256_text("migration checksum", checksum)?;
+    validate_sha256_text("migration resource_claims_sha256", resource_claims_sha256)?;
+    let image = image.to_string();
+    let mut digest = Sha256::new();
+    digest.update(b"ojos.migration.identity.v1\0");
+    for value in [
+        service_name,
+        version,
+        checksum,
+        image.as_str(),
+        resource_claims_sha256,
+    ] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn validate_migration_label_token(
+    field: &str,
+    value: &str,
+    max_len: usize,
+) -> Result<(), RuntimeError> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > max_len
+        || (!bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit())
+        || !bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b':' | b'+')
+        })
+    {
+        return Err(RuntimeError::InvalidRuntimeContext(format!(
+            "{field} must be a bounded lowercase label token"
+        )));
+    }
+    Ok(())
+}
+
 impl ContainerSpec {
     /// Expands the closed runtime profile into the only Docker named volume
     /// the Agent is allowed to own. Ordinary containers and unmaterialized
     /// wire payloads never request a volume.
     pub fn managed_volume_spec(&self) -> Result<Option<ManagedVolumeSpec>, RuntimeError> {
         if self.runtime_contract.id == RuntimeProfile::StandardV1 {
-            return Ok(None);
+            let Some(attachment) = self.retained_volume.as_ref() else {
+                return Ok(None);
+            };
+            attachment.validate_for_service(&self.service_id)?;
+            let spec = ManagedVolumeSpec {
+                name: attachment.docker_name(&self.service_id)?,
+                deployment_id: self.deployment_id.clone(),
+                service_id: self.service_id.clone(),
+                artifact_digest: self.image.to_string(),
+                runtime_contract: self.runtime_contract.clone(),
+                logical_name: attachment.logical_name.clone(),
+                lifecycle: attachment.lifecycle.clone(),
+                owner_instance_id: attachment.owner_instance_id.clone(),
+                target: attachment.target.clone(),
+            };
+            spec.validate()?;
+            return Ok(Some(spec));
         }
         let context = validate_judge_sandbox_spec(self)?;
         let spec = ManagedVolumeSpec {
@@ -805,6 +1252,8 @@ impl ContainerSpec {
             runtime_contract: self.runtime_contract.clone(),
             logical_name: JUDGE_CACHE_VOLUME_LOGICAL_NAME.to_string(),
             lifecycle: RELEASE_VOLUME_LIFECYCLE.to_string(),
+            owner_instance_id: String::new(),
+            target: "/var/lib/ojos-worker/cache".to_string(),
         };
         spec.validate()?;
         Ok(Some(spec))
@@ -887,6 +1336,92 @@ pub struct ManagedDeploymentInventoryV1 {
     pub deployments: Vec<DeploymentRuntimeObservationV1>,
 }
 
+/// Exact, credential-free identity carried by every one-shot migration
+/// container. The identity digest binds the immutable migration artifact and
+/// the names (never values or paths) of its ResourceClaims.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationContainerIdentityV1 {
+    pub job_id: String,
+    pub service_name: String,
+    pub version: String,
+    pub checksum: String,
+    pub image: String,
+    pub resource_claims_sha256: String,
+    pub identity_sha256: String,
+}
+
+impl MigrationContainerIdentityV1 {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        validate_migration_label_token("migration job_id", &self.job_id, 128)?;
+        validate_migration_label_token("migration service_name", &self.service_name, 63)?;
+        validate_migration_label_token("migration version", &self.version, 128)?;
+        validate_sha256_text("migration checksum", &self.checksum)?;
+        validate_sha256_text(
+            "migration resource_claims_sha256",
+            &self.resource_claims_sha256,
+        )?;
+        let image = OciImageReference::parse(&self.image).map_err(|_| {
+            RuntimeError::InvalidRuntimeContext(
+                "migration image label is not a canonical OCI digest reference".to_string(),
+            )
+        })?;
+        let expected = migration_identity_sha256(
+            &self.service_name,
+            &self.version,
+            &self.checksum,
+            &image,
+            &self.resource_claims_sha256,
+        )?;
+        if self.identity_sha256 != expected {
+            return Err(RuntimeError::InvalidRuntimeContext(
+                "migration identity digest does not match its immutable labels".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MigrationContainerStateV1 {
+    Created,
+    Running,
+    Paused,
+    Restarting,
+    Stopped,
+    Exited,
+    Unknown,
+}
+
+impl MigrationContainerStateV1 {
+    pub fn is_proven_inactive(self) -> bool {
+        matches!(self, Self::Created | Self::Stopped | Self::Exited)
+    }
+}
+
+/// A deliberately closed projection of migration labels. Arbitrary Docker
+/// labels are never returned to the Agent or control plane.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationContainerObservationV1 {
+    pub container_id: String,
+    pub observed_state: MigrationContainerStateV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<MigrationContainerIdentityV1>,
+    #[serde(default)]
+    pub validation_error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationContainerInventoryV1 {
+    pub inventory_complete: bool,
+    #[serde(default)]
+    pub inventory_error: String,
+    pub containers: Vec<MigrationContainerObservationV1>,
+}
+
 /// Shared wire payload for an ordinary managed install.  It deliberately
 /// lives beside the runtime contracts so the control plane and Agent decode
 /// one schema instead of maintaining look-alike private structs.
@@ -900,6 +1435,125 @@ pub struct RuntimeInstallPayload {
     pub health_gate: HealthGatePolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offline_oci_artifact: Option<ArtifactReference>,
+}
+
+pub const RESOURCE_PURGE_JOB_SCHEMA_VERSION: &str = "ojos.dev/resource-purge-job/v1";
+
+/// Credential-free wire contract for the separately authorized ResourceClaim
+/// purge job. Administrator connection details and resource output paths are
+/// deliberately absent: the Agent resolves both from node-local durable state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcePurgePayloadV1 {
+    pub schema_version: String,
+    pub node_id: String,
+    pub claim_id: String,
+    pub claim_digest: String,
+    pub generation: u64,
+    pub confirmation: String,
+    pub reason: String,
+    pub audit_intent: ResourcePurgeAuditIntentV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcePurgeAuditIntentV1 {
+    pub intent_id: String,
+    pub actor_id: String,
+    pub claim_digest: String,
+    pub generation: u64,
+}
+
+impl ResourcePurgePayloadV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != RESOURCE_PURGE_JOB_SCHEMA_VERSION {
+            return Err("resource purge payload schema_version is unsupported".to_string());
+        }
+        for (field, value) in [
+            ("node_id", self.node_id.as_str()),
+            ("claim_id", self.claim_id.as_str()),
+            (
+                "audit_intent.intent_id",
+                self.audit_intent.intent_id.as_str(),
+            ),
+        ] {
+            if !valid_resource_purge_identifier(value) {
+                return Err(format!(
+                    "resource purge {field} is not a canonical identifier"
+                ));
+            }
+        }
+        if self.audit_intent.actor_id.trim() != self.audit_intent.actor_id
+            || self.audit_intent.actor_id.is_empty()
+            || self.audit_intent.actor_id.len() > 256
+            || self.audit_intent.actor_id.chars().any(char::is_control)
+        {
+            return Err(
+                "resource purge actor_id must be an authenticated subject without whitespace padding or controls"
+                    .to_string(),
+            );
+        }
+        if !valid_sha256_digest(&self.claim_digest)
+            || self.audit_intent.claim_digest != self.claim_digest
+        {
+            return Err(
+                "resource purge claim digest is invalid or not bound to its audit intent"
+                    .to_string(),
+            );
+        }
+        if self.generation == 0 || self.audit_intent.generation != self.generation {
+            return Err(
+                "resource purge generation is invalid or not bound to its audit intent".to_string(),
+            );
+        }
+        let expected = format!(
+            "PURGE {} {} GENERATION {}",
+            self.claim_id, self.claim_digest, self.generation
+        );
+        if self.confirmation != expected {
+            return Err(
+                "resource purge confirmation does not exactly match the target identity"
+                    .to_string(),
+            );
+        }
+        if self.reason.trim() != self.reason
+            || !(8..=512).contains(&self.reason.chars().count())
+            || self.reason.chars().any(char::is_control)
+        {
+            return Err(
+                "resource purge reason must be 8..512 characters without surrounding whitespace or controls"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn valid_resource_purge_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 180
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value
+            .bytes()
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b':')
+        })
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1005,6 +1659,97 @@ pub struct RuntimeMaterializationStep {
     pub secret_refs: BTreeMap<String, String>,
     #[serde(default)]
     pub environment_templates: BTreeMap<String, String>,
+}
+
+/// Credential-free request for one Agent-local managed resource.  The
+/// control plane sends only stable identity and provider selection; provider
+/// administrator credentials and the resulting connection document never
+/// cross the Node boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceClaimStepV1 {
+    pub claim_id: String,
+    /// Stable installation/service-instance owner. Unlike deployment_id this
+    /// value must survive release upgrades and rollbacks.
+    pub owner_instance_id: String,
+    /// Runtime binding for this execution. It may change across releases and
+    /// is deliberately excluded from the durable resource identity.
+    pub deployment_id: String,
+    pub service_id: String,
+    pub resource_name: String,
+    pub resource_type: String,
+    #[serde(default = "default_resource_claim_generation")]
+    pub generation: u64,
+    pub provider_id: String,
+    /// Environment key receiving the Node-local output *file path*.  The file
+    /// contains the DSN and is shared by the migration and service runtime.
+    /// It never contains the DSN itself.
+    pub output_path_environment: String,
+}
+
+impl ResourceClaimStepV1 {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        for (name, value) in [
+            ("claim_id", self.claim_id.as_str()),
+            ("owner_instance_id", self.owner_instance_id.as_str()),
+            ("deployment_id", self.deployment_id.as_str()),
+            ("service_id", self.service_id.as_str()),
+            ("resource_name", self.resource_name.as_str()),
+            ("provider_id", self.provider_id.as_str()),
+        ] {
+            if value.is_empty()
+                || value.len() > 256
+                || !value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+                })
+            {
+                return Err(RuntimeError::InvalidRuntimeContext(format!(
+                    "resource claim {name} is not a bounded identifier"
+                )));
+            }
+        }
+        if self.resource_type != "postgresql.database/v1" || self.generation == 0 {
+            return Err(RuntimeError::InvalidRuntimeContext(
+                "resource claim must be postgresql.database/v1 with a positive generation"
+                    .to_string(),
+            ));
+        }
+        let environment = self.output_path_environment.as_bytes();
+        if environment.is_empty()
+            || environment.len() > 128
+            || !environment[0].is_ascii_alphabetic()
+            || !environment
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+        {
+            return Err(RuntimeError::InvalidRuntimeContext(
+                "resource output_path_environment must be a bounded uppercase environment key"
+                    .to_string(),
+            ));
+        }
+        let normalized_resource = self
+            .resource_name
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() {
+                    byte.to_ascii_uppercase() as char
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let expected_environment = format!("OJOS_RESOURCE_{normalized_resource}_OUTPUT_FILE");
+        if self.output_path_environment != expected_environment {
+            return Err(RuntimeError::InvalidRuntimeContext(format!(
+                "resource output_path_environment must be {expected_environment}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+const fn default_resource_claim_generation() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1116,15 +1861,78 @@ pub struct OciMigrationStep {
     pub command: Vec<String>,
     #[serde(default)]
     pub environment: Vec<String>,
+    /// Resource names whose Node-local output files must be made available to
+    /// this migration.  Old payloads omit this field and retain v1 behavior.
+    #[serde(default)]
+    pub resource_claims: Vec<String>,
     pub timeout_ms: u64,
     #[serde(default)]
     pub dry_run: bool,
+}
+
+#[cfg(test)]
+mod resource_claim_wire_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_release_pipeline_and_migration_payloads_default_resource_fields() {
+        let payload = serde_json::json!({
+            "install": {
+                "spec": {
+                    "deployment_id": "deployment-1",
+                    "service_id": "service-1",
+                    "generation": 1,
+                    "image": {"repository":"ghcr.io/acme/service", "digest":format!("sha256:{}", "a".repeat(64))},
+                    "command": [],
+                    "environment": [],
+                    "labels": {}
+                },
+                "start": true
+            },
+            "migrations": [{
+                "service_name": "service-1",
+                "version": "0001",
+                "checksum": format!("sha256:{}", "b".repeat(64)),
+                "image": {"repository":"ghcr.io/acme/migration", "digest":format!("sha256:{}", "c".repeat(64))},
+                "command": ["migrate"],
+                "environment": [],
+                "timeout_ms": 1000,
+                "dry_run": false
+            }]
+        });
+        let decoded: ReleasePipelinePayload = serde_json::from_value(payload).unwrap();
+        assert!(decoded.resource_claims.is_empty());
+        assert!(decoded.migrations[0].resource_claims.is_empty());
+    }
+
+    #[test]
+    fn resource_output_environment_is_derived_from_resource_name() {
+        let valid = ResourceClaimStepV1 {
+            claim_id: "claim-1".to_string(),
+            owner_instance_id: "service-instance-1".to_string(),
+            deployment_id: "deployment-1".to_string(),
+            service_id: "service-1".to_string(),
+            resource_name: "primary-db".to_string(),
+            resource_type: "postgresql.database/v1".to_string(),
+            generation: 1,
+            provider_id: "postgresql-local".to_string(),
+            output_path_environment: "OJOS_RESOURCE_PRIMARY_DB_OUTPUT_FILE".to_string(),
+        };
+        valid.validate().unwrap();
+        let mut invalid = valid;
+        invalid.output_path_environment = "DATABASE_URL".to_string();
+        assert!(invalid.validate().is_err());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReleasePipelinePayload {
     pub install: RuntimeInstallPayload,
+    /// Agent-side managed resource Ensures.  This additive default preserves
+    /// decoding of every legacy ReleasePipeline payload.
+    #[serde(default)]
+    pub resource_claims: Vec<ResourceClaimStepV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialization: Option<RuntimeMaterializationStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1266,6 +2074,10 @@ pub struct ReleaseReplacementPayload {
     pub offline_oci_artifact: Option<ArtifactReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialization: Option<RuntimeMaterializationStep>,
+    /// Existing stable ResourceClaims that the replacement must reuse. The
+    /// Agent rejects a set that differs from the old deployment's bindings.
+    #[serde(default)]
+    pub resource_claims: Vec<ResourceClaimStepV1>,
     #[serde(default)]
     pub migrations: Vec<OciMigrationStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1276,6 +2088,11 @@ pub struct ReleaseReplacementPayload {
     /// explicit Uninstall job in the same Operation.
     #[serde(default)]
     pub preserve_old_until_topology_cutover: bool,
+    /// Require a stop-before-start cutover when the old and new release attach
+    /// the same retained read-write volume. This deliberately trades a short
+    /// bounded outage for a hard single-writer invariant.
+    #[serde(default)]
+    pub exclusive_retained_volume_cutover: bool,
 }
 
 impl ReleaseReplacementPayload {
@@ -1300,7 +2117,34 @@ impl ReleaseReplacementPayload {
                 "start must be true because cutover is gated on new-instance health".to_string(),
             ));
         }
+        if self.new_spec.retained_volume.is_some() && !self.exclusive_retained_volume_cutover {
+            return Err(RuntimeError::InvalidReleaseReplacement(
+                "a replacement with a retained read-write volume requires exclusive_retained_volume_cutover=true"
+                    .to_string(),
+            ));
+        }
+        if self.exclusive_retained_volume_cutover && self.new_spec.retained_volume.is_none() {
+            return Err(RuntimeError::InvalidReleaseReplacement(
+                "exclusive_retained_volume_cutover is only valid for a replacement with a retained volume"
+                    .to_string(),
+            ));
+        }
         self.health_gate.validate()?;
+        let mut resource_names = BTreeMap::new();
+        for resource in &self.resource_claims {
+            resource.validate()?;
+            if resource.deployment_id != self.new_spec.deployment_id
+                || resource.service_id != self.new_spec.service_id
+                || resource_names
+                    .insert(resource.resource_name.as_str(), ())
+                    .is_some()
+            {
+                return Err(RuntimeError::InvalidReleaseReplacement(
+                    "replacement resource claims must be unique and match new_spec deployment/service"
+                        .to_string(),
+                ));
+            }
+        }
         let mut migration_versions = BTreeMap::new();
         for migration in &self.migrations {
             if migration.service_name != self.new_spec.service_id
@@ -1313,6 +2157,14 @@ impl ReleaseReplacementPayload {
                     "migration service_name must match new_spec.service_id and versions must be unique"
                         .to_string(),
                 ));
+            }
+            for resource_name in &migration.resource_claims {
+                if !resource_names.contains_key(resource_name.as_str()) {
+                    return Err(RuntimeError::InvalidReleaseReplacement(format!(
+                        "migration {} references unresolved replacement resource {resource_name}",
+                        migration.version
+                    )));
+                }
             }
         }
         if let Some(saga) = &self.provider_saga {
@@ -1611,6 +2463,12 @@ impl DockerEngineRuntime {
         for summary in summaries {
             let container_id = summary.id.clone().unwrap_or_default();
             let labels = summary.labels.as_ref();
+            if labels
+                .and_then(|labels| labels.get(MIGRATION_RUNTIME_ROLE_LABEL))
+                .is_some_and(|role| role == MIGRATION_RUNTIME_ROLE)
+            {
+                continue;
+            }
             let deployment_id = labels
                 .and_then(|labels| labels.get("ojos.deployment_id"))
                 .cloned()
@@ -1680,6 +2538,78 @@ impl DockerEngineRuntime {
         })
     }
 
+    /// Lists only containers explicitly marked as OJOS migration runtimes and
+    /// projects their closed identity contract. Invalid or partial labels are
+    /// reported as observations and are never silently skipped.
+    pub async fn migration_container_inventory(
+        &self,
+        max_containers: usize,
+    ) -> Result<MigrationContainerInventoryV1, RuntimeError> {
+        if max_containers == 0 {
+            return Err(RuntimeError::Engine(
+                "migration container inventory limit must be positive".to_string(),
+            ));
+        }
+        let filters = HashMap::from([(
+            "label".to_string(),
+            vec![format!(
+                "{MIGRATION_RUNTIME_ROLE_LABEL}={MIGRATION_RUNTIME_ROLE}"
+            )],
+        )]);
+        let options = ListContainersOptionsBuilder::default()
+            .all(true)
+            .filters(&filters)
+            .build();
+        let mut summaries = self
+            .docker
+            .list_containers(Some(options))
+            .await
+            .map_err(|error| RuntimeError::Engine(error.to_string()))?;
+        summaries.sort_by(|left, right| left.id.cmp(&right.id));
+        let truncated = summaries.len() > max_containers;
+        summaries.truncate(max_containers);
+        let mut observations = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            let container_id = summary.id.unwrap_or_default();
+            let labels = summary.labels.unwrap_or_default();
+            let identity = migration_identity_from_labels(&labels);
+            let (identity, validation_error) = match identity {
+                Ok(identity)
+                    if validate_migration_label_token(
+                        "migration container_id",
+                        &container_id,
+                        128,
+                    )
+                    .is_ok() =>
+                {
+                    (Some(identity), String::new())
+                }
+                Ok(_) => (
+                    None,
+                    "migration container has an invalid Docker container ID".to_string(),
+                ),
+                Err(error) => (None, bounded_drift_reason(&error.to_string())),
+            };
+            observations.push(MigrationContainerObservationV1 {
+                container_id,
+                observed_state: migration_summary_state(summary.state.as_ref()),
+                identity,
+                validation_error,
+            });
+        }
+        Ok(MigrationContainerInventoryV1 {
+            inventory_complete: !truncated,
+            inventory_error: if truncated {
+                format!(
+                    "migration container inventory exceeds the bounded limit of {max_containers}"
+                )
+            } else {
+                String::new()
+            },
+            containers: observations,
+        })
+    }
+
     async fn ensure_digest(&self, image: &OciImageReference) -> Result<(), RuntimeError> {
         let inspected = self
             .docker
@@ -1695,6 +2625,55 @@ impl DockerEngineRuntime {
                 actual,
             })
         }
+    }
+}
+
+fn migration_identity_from_labels(
+    labels: &HashMap<String, String>,
+) -> Result<MigrationContainerIdentityV1, RuntimeError> {
+    let required = |name: &str| {
+        labels
+            .get(name)
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .ok_or_else(|| {
+                RuntimeError::InvalidRuntimeContext(format!(
+                    "migration container is missing required label {name}"
+                ))
+            })
+    };
+    if required(MIGRATION_RUNTIME_ROLE_LABEL)? != MIGRATION_RUNTIME_ROLE {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "container runtime role is not migration".to_string(),
+        ));
+    }
+    if required(MIGRATION_MANAGED_BY_LABEL)? != MIGRATION_MANAGED_BY {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "migration container is not owned by orchestrator-agent".to_string(),
+        ));
+    }
+    let identity = MigrationContainerIdentityV1 {
+        job_id: required(MIGRATION_JOB_ID_LABEL)?,
+        service_name: required(MIGRATION_SERVICE_LABEL)?,
+        version: required(MIGRATION_VERSION_LABEL)?,
+        checksum: required(MIGRATION_CHECKSUM_LABEL)?,
+        image: required("ojos.artifact_digest")?,
+        resource_claims_sha256: required(MIGRATION_RESOURCE_CLAIMS_LABEL)?,
+        identity_sha256: required(MIGRATION_IDENTITY_LABEL)?,
+    };
+    identity.validate()?;
+    Ok(identity)
+}
+
+fn migration_summary_state(state: Option<&ContainerSummaryStateEnum>) -> MigrationContainerStateV1 {
+    match state.map(AsRef::as_ref) {
+        Some("created") => MigrationContainerStateV1::Created,
+        Some("running") => MigrationContainerStateV1::Running,
+        Some("paused") => MigrationContainerStateV1::Paused,
+        Some("restarting") => MigrationContainerStateV1::Restarting,
+        Some("exited") | Some("dead") => MigrationContainerStateV1::Exited,
+        Some("removing") => MigrationContainerStateV1::Stopped,
+        Some(_) | None => MigrationContainerStateV1::Unknown,
     }
 }
 
@@ -2100,6 +3079,14 @@ impl ContainerRuntime for DockerEngineRuntime {
             .and_then(|labels| labels.get("ojos.runtime_effective_sha256"))
             .cloned()
             .unwrap_or_default();
+        let resource_secret_mounts_sha256 = labels
+            .and_then(|labels| labels.get(RUNTIME_RESOURCE_SECRET_MOUNTS_SHA256_LABEL))
+            .map(String::as_str);
+        let require_v3_security = labels
+            .and_then(|labels| labels.get(SERVICE_CONTRACT_GENERATION_LABEL))
+            .is_some_and(|generation| generation == "3");
+        let (retained_volume, retained_volume_sha256) =
+            retained_volume_attachment_from_labels(labels, &service_id)?;
         if !runtime_policy_sha256.is_empty() {
             validate_sha256_text("runtime_policy_sha256", &runtime_policy_sha256)?;
         }
@@ -2128,9 +3115,25 @@ impl ContainerRuntime for DockerEngineRuntime {
             }
             attest_standard_managed_context_inspection(
                 &inspected,
-                &runtime_contract,
-                &runtime_policy_sha256,
-                &effective_runtime_sha256,
+                &StandardManagedContextAttestation {
+                    contract: &runtime_contract,
+                    runtime_policy_sha256: &runtime_policy_sha256,
+                    claimed_effective_sha256: &effective_runtime_sha256,
+                    claimed_resource_secret_mounts_sha256: resource_secret_mounts_sha256,
+                    retained_volume: retained_volume.as_ref(),
+                    claimed_retained_volume_sha256: retained_volume_sha256.as_deref(),
+                    service_id: &service_id,
+                    require_v3_security,
+                },
+            )?;
+        } else {
+            attest_standard_resource_secret_mounts(
+                &inspected,
+                resource_secret_mounts_sha256,
+                retained_volume.as_ref(),
+                retained_volume_sha256.as_deref(),
+                &service_id,
+                require_v3_security,
             )?;
         }
         if !artifact_digest.is_empty() {
@@ -2330,7 +3333,7 @@ fn validate_sha256_text(name: &str, value: &str) -> Result<(), RuntimeError> {
 
 fn effective_runtime_sha256(spec: &ContainerSpec) -> Result<String, RuntimeError> {
     spec.runtime_contract.validate()?;
-    let bytes = if let Some(context) = spec.runtime_context.as_ref() {
+    let context_bytes = if let Some(context) = spec.runtime_context.as_ref() {
         context.validate()?;
         if context.contract != spec.runtime_contract {
             return Err(RuntimeError::InvalidRuntimeContext(
@@ -2349,7 +3352,23 @@ fn effective_runtime_sha256(spec: &ContainerSpec) -> Result<String, RuntimeError
             "judge-sandbox-v1 requires an Agent-materialized runtime context".to_string(),
         ));
     };
-    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+    effective_runtime_sha256_from_bytes(&context_bytes, retained_volume_sha256(spec)?.as_deref())
+}
+
+fn effective_runtime_sha256_from_bytes(
+    context_bytes: &[u8],
+    retained_volume_sha256: Option<&str>,
+) -> Result<String, RuntimeError> {
+    let Some(retained_volume_sha256) = retained_volume_sha256 else {
+        return Ok(format!("sha256:{:x}", Sha256::digest(context_bytes)));
+    };
+    validate_sha256_text("retained_volume_sha256", retained_volume_sha256)?;
+    let mut hasher = Sha256::new();
+    hasher.update((context_bytes.len() as u64).to_be_bytes());
+    hasher.update(context_bytes);
+    hasher.update((retained_volume_sha256.len() as u64).to_be_bytes());
+    hasher.update(retained_volume_sha256.as_bytes());
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn validate_managed_runtime_context(spec: &ContainerSpec) -> Result<&RuntimeContext, RuntimeError> {
@@ -2426,6 +3445,227 @@ fn managed_service_context_mount(context: &RuntimeContext) -> Mount {
         }),
         ..Default::default()
     }
+}
+
+fn resource_secret_file_mount(resource: &ResourceSecretFileMount) -> Result<Mount, RuntimeError> {
+    resource.validate()?;
+    Ok(Mount {
+        target: Some(resource.container_destination()?),
+        source: Some(resource.host_source_path.clone()),
+        typ: Some(MountType::BIND),
+        read_only: Some(true),
+        bind_options: Some(MountBindOptions {
+            propagation: Some(MountBindOptionsPropagationEnum::RPRIVATE),
+            non_recursive: Some(true),
+            create_mountpoint: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
+fn standard_resource_secret_file_mounts(spec: &ContainerSpec) -> Result<Vec<Mount>, RuntimeError> {
+    if spec.resource_secret_file_mounts.is_empty() {
+        return Ok(Vec::new());
+    }
+    if spec.runtime_contract.id != RuntimeProfile::StandardV1 {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "resource secret file mounts are restricted to standard-container-v1".to_string(),
+        ));
+    }
+    let mut previous_name: Option<&str> = None;
+    let mut mounts = Vec::with_capacity(spec.resource_secret_file_mounts.len());
+    for resource in &spec.resource_secret_file_mounts {
+        resource.validate()?;
+        if previous_name.is_some_and(|previous| previous >= resource.resource_name.as_str()) {
+            return Err(RuntimeError::InvalidRuntimeContext(
+                "resource secret file mounts must have unique resource names in canonical order"
+                    .to_string(),
+            ));
+        }
+        previous_name = Some(resource.resource_name.as_str());
+        mounts.push(resource_secret_file_mount(resource)?);
+    }
+    Ok(mounts)
+}
+
+fn retained_volume_mount(spec: &ContainerSpec) -> Result<Option<Mount>, RuntimeError> {
+    let Some(attachment) = spec.retained_volume.as_ref() else {
+        return Ok(None);
+    };
+    if spec.runtime_contract.id != RuntimeProfile::StandardV1 {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "retained volumes are restricted to standard-container-v1".to_string(),
+        ));
+    }
+    attachment.validate_for_service(&spec.service_id)?;
+    Ok(Some(Mount {
+        target: Some(attachment.target.clone()),
+        source: Some(attachment.docker_name(&spec.service_id)?),
+        typ: Some(MountType::VOLUME),
+        read_only: Some(false),
+        // First attach copies the image-owned target directory into the empty
+        // volume, preserving the signed image's non-root uid/gid. Re-attaches
+        // do not copy because the volume is no longer empty.
+        volume_options: Some(MountVolumeOptions {
+            no_copy: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }))
+}
+
+fn retained_volume_sha256(spec: &ContainerSpec) -> Result<Option<String>, RuntimeError> {
+    let Some(attachment) = spec.retained_volume.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(retained_volume_attachment_sha256(
+        attachment,
+        &spec.service_id,
+    )?))
+}
+
+fn retained_volume_attachment_sha256(
+    attachment: &RetainedVolumeAttachmentV1,
+    service_id: &str,
+) -> Result<String, RuntimeError> {
+    attachment.validate_for_service(service_id)?;
+    let bytes = serde_json::to_vec(attachment).map_err(|error| {
+        RuntimeError::InvalidRuntimeContext(format!(
+            "cannot encode retained volume attachment: {error}"
+        ))
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn retained_volume_mount_has_exact_contract(
+    mount: &Mount,
+    attachment: &RetainedVolumeAttachmentV1,
+    service_id: &str,
+) -> Result<bool, RuntimeError> {
+    Ok(mount.target.as_deref() == Some(attachment.target.as_str())
+        && mount.source.as_deref() == Some(attachment.docker_name(service_id)?.as_str())
+        && mount.typ == Some(MountType::VOLUME)
+        && mount.read_only == Some(false)
+        && mount.consistency.is_none()
+        && mount.bind_options.is_none()
+        && mount.image_options.is_none()
+        && mount.tmpfs_options.is_none()
+        && mount.volume_options.as_ref().is_some_and(|options| {
+            options.no_copy == Some(false)
+                && options.labels.is_none()
+                && options.driver_config.is_none()
+                && options.subpath.is_none()
+        }))
+}
+
+fn standard_mounts_without_retained_volume<'a>(
+    mounts: &'a [Mount],
+    attachment: Option<&RetainedVolumeAttachmentV1>,
+    service_id: &str,
+    claimed_sha256: Option<&str>,
+) -> Result<&'a [Mount], RuntimeError> {
+    let Some(attachment) = attachment else {
+        if claimed_sha256.is_some() {
+            return Err(RuntimeError::InvalidRuntimeContext(
+                "standard container advertises a retained-volume digest without its typed identity"
+                    .to_string(),
+            ));
+        }
+        return Ok(mounts);
+    };
+    let expected_sha256 = retained_volume_attachment_sha256(attachment, service_id)?;
+    if claimed_sha256 != Some(expected_sha256.as_str()) {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "standard retained-volume identity digest drifted".to_string(),
+        ));
+    }
+    let (retained, ordinary) = mounts.split_last().ok_or_else(|| {
+        RuntimeError::InvalidRuntimeContext(
+            "standard retained-volume attachment has no Docker mount".to_string(),
+        )
+    })?;
+    if !retained_volume_mount_has_exact_contract(retained, attachment, service_id)? {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "standard retained-volume Docker mount drifted".to_string(),
+        ));
+    }
+    Ok(ordinary)
+}
+
+fn retained_volume_attachment_from_labels(
+    labels: Option<&HashMap<String, String>>,
+    service_id: &str,
+) -> Result<(Option<RetainedVolumeAttachmentV1>, Option<String>), RuntimeError> {
+    let read = |name: &str| labels.and_then(|labels| labels.get(name)).cloned();
+    let values = [
+        read(MANAGED_VOLUME_OWNER_INSTANCE_LABEL),
+        read(MANAGED_VOLUME_LOGICAL_NAME_LABEL),
+        read(MANAGED_VOLUME_TARGET_LABEL),
+        read(RUNTIME_RETAINED_VOLUME_ACCESS_LABEL),
+        read(MANAGED_VOLUME_LIFECYCLE_LABEL),
+        read(RUNTIME_RETAINED_VOLUME_SHA256_LABEL),
+    ];
+    if values.iter().all(Option::is_none) {
+        return Ok((None, None));
+    }
+    if values.iter().any(Option::is_none) {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "standard retained-volume container identity labels are incomplete".to_string(),
+        ));
+    }
+    let attachment = RetainedVolumeAttachmentV1 {
+        owner_instance_id: values[0].clone().unwrap_or_default(),
+        logical_name: values[1].clone().unwrap_or_default(),
+        target: values[2].clone().unwrap_or_default(),
+        access: values[3].clone().unwrap_or_default(),
+        lifecycle: values[4].clone().unwrap_or_default(),
+    };
+    attachment.validate_for_service(service_id)?;
+    let claimed = values[5].clone().unwrap_or_default();
+    validate_sha256_text("retained_volume_sha256", &claimed)?;
+    if retained_volume_attachment_sha256(&attachment, service_id)? != claimed {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "standard retained-volume container identity digest drifted".to_string(),
+        ));
+    }
+    Ok((Some(attachment), Some(claimed)))
+}
+
+fn resource_secret_mounts_sha256(
+    resource_secret_file_mounts: &[ResourceSecretFileMount],
+) -> Result<Option<String>, RuntimeError> {
+    if resource_secret_file_mounts.is_empty() {
+        return Ok(None);
+    }
+    let mut hasher = Sha256::new();
+    for resource in resource_secret_file_mounts {
+        resource.validate()?;
+        for value in [
+            resource.resource_name.as_bytes(),
+            resource.host_source_path.as_bytes(),
+        ] {
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value);
+        }
+    }
+    Ok(Some(format!("sha256:{:x}", hasher.finalize())))
+}
+
+fn resource_secret_mount_has_exact_contract(mount: &Mount) -> bool {
+    mount.typ == Some(MountType::BIND)
+        && mount.read_only == Some(true)
+        && mount.consistency.is_none()
+        && mount.volume_options.is_none()
+        && mount.image_options.is_none()
+        && mount.tmpfs_options.is_none()
+        && mount.bind_options.as_ref().is_some_and(|options| {
+            options.propagation == Some(MountBindOptionsPropagationEnum::RPRIVATE)
+                && options.non_recursive == Some(true)
+                && options.create_mountpoint == Some(false)
+                && options.read_only_non_recursive.is_none()
+                && options.read_only_force_recursive.is_none()
+        })
 }
 
 fn judge_sandbox_mounts(context: &RuntimeContext) -> Vec<Mount> {
@@ -2619,11 +3859,20 @@ fn attest_judge_sandbox_inspection(
     Ok(())
 }
 
+struct StandardManagedContextAttestation<'a> {
+    contract: &'a RuntimeContract,
+    runtime_policy_sha256: &'a str,
+    claimed_effective_sha256: &'a str,
+    claimed_resource_secret_mounts_sha256: Option<&'a str>,
+    retained_volume: Option<&'a RetainedVolumeAttachmentV1>,
+    claimed_retained_volume_sha256: Option<&'a str>,
+    service_id: &'a str,
+    require_v3_security: bool,
+}
+
 fn attest_standard_managed_context_inspection(
     inspected: &bollard::models::ContainerInspectResponse,
-    contract: &RuntimeContract,
-    runtime_policy_sha256: &str,
-    claimed_effective_sha256: &str,
+    expected: &StandardManagedContextAttestation<'_>,
 ) -> Result<(), RuntimeError> {
     attest_managed_context_environment(inspected)?;
     let host = inspected.host_config.as_ref().ok_or_else(|| {
@@ -2631,13 +3880,12 @@ fn attest_standard_managed_context_inspection(
             "managed standard container inspection has no HostConfig".to_string(),
         )
     })?;
+    if expected.require_v3_security {
+        attest_standard_v3_security(inspected, host)?;
+    }
     if host.privileged == Some(true)
         || host.cap_add.as_ref().is_some_and(|caps| !caps.is_empty())
         || host.cgroupns_mode == Some(HostConfigCgroupnsModeEnum::HOST)
-        || host
-            .security_opt
-            .as_ref()
-            .is_some_and(|options| !options.is_empty())
     {
         return Err(RuntimeError::InvalidRuntimeContext(
             "standard-container-v1 acquired runtime privileges outside its fixed contract"
@@ -2645,9 +3893,15 @@ fn attest_standard_managed_context_inspection(
         ));
     }
     let mounts = host.mounts.as_deref().unwrap_or_default();
-    if mounts.len() != 1 {
+    let mounts = standard_mounts_without_retained_volume(
+        mounts,
+        expected.retained_volume,
+        expected.service_id,
+        expected.claimed_retained_volume_sha256,
+    )?;
+    if mounts.is_empty() {
         return Err(RuntimeError::InvalidRuntimeContext(format!(
-            "managed standard-container-v1 requires exactly one service context mount, found {}",
+            "managed standard-container-v1 requires its service context mount, found {} mounts",
             mounts.len()
         )));
     }
@@ -2655,31 +3909,218 @@ fn attest_standard_managed_context_inspection(
     if service_context.target.as_deref() != Some(MANAGED_SERVICE_CONTEXT_TARGET)
         || service_context.typ != Some(MountType::BIND)
         || service_context.read_only != Some(true)
+        || !judge_sandbox_has_exact_bind_options(service_context)
+        || service_context.consistency.is_some()
+        || service_context.volume_options.is_some()
+        || service_context.image_options.is_some()
+        || service_context.tmpfs_options.is_some()
     {
         return Err(RuntimeError::InvalidRuntimeContext(
             "managed standard-container-v1 service context mount drifted".to_string(),
         ));
     }
+    let mut previous_resource_name: Option<&str> = None;
+    let mut inspected_resource_secret_mounts = Vec::with_capacity(mounts.len().saturating_sub(1));
+    for resource in &mounts[1..] {
+        let target = resource
+            .target
+            .as_deref()
+            .and_then(|target| target.strip_prefix(MANAGED_RESOURCE_SECRET_ROOT))
+            .and_then(|target| target.strip_prefix('/'))
+            .and_then(|target| target.strip_suffix("/output"))
+            .filter(|resource_name| !resource_name.contains('/'))
+            .ok_or_else(|| {
+                RuntimeError::InvalidRuntimeContext(
+                    "managed standard-container-v1 contains an untyped mount target".to_string(),
+                )
+            })?;
+        validate_safe_resource_name(target)?;
+        if previous_resource_name.is_some_and(|previous| previous >= target)
+            || resource.source.as_deref().is_none_or(|source| {
+                source.is_empty()
+                    || !Path::new(source).is_absolute()
+                    || source.ends_with('/')
+                    || source.ends_with('\\')
+                    || Path::new(source).components().any(|component| {
+                        matches!(
+                            component,
+                            std::path::Component::ParentDir | std::path::Component::CurDir
+                        )
+                    })
+            })
+            || !resource_secret_mount_has_exact_contract(resource)
+        {
+            return Err(RuntimeError::InvalidRuntimeContext(
+                "managed standard-container-v1 resource secret mount drifted".to_string(),
+            ));
+        }
+        previous_resource_name = Some(target);
+        inspected_resource_secret_mounts.push(ResourceSecretFileMount {
+            resource_name: target.to_string(),
+            host_source_path: resource.source.clone().unwrap_or_default(),
+        });
+    }
+    let actual_resource_secret_mounts_sha256 =
+        resource_secret_mounts_sha256(&inspected_resource_secret_mounts)?;
+    if expected.claimed_resource_secret_mounts_sha256
+        != actual_resource_secret_mounts_sha256.as_deref()
+    {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "managed standard-container-v1 resource secret mount attestation drifted".to_string(),
+        ));
+    }
     let context = RuntimeContext {
-        contract: contract.clone(),
-        runtime_policy_sha256: runtime_policy_sha256.to_string(),
+        contract: expected.contract.clone(),
+        runtime_policy_sha256: expected.runtime_policy_sha256.to_string(),
         scratch_directory: String::new(),
         cache_volume_name: String::new(),
         service_context_directory: service_context.source.clone().unwrap_or_default(),
     };
     context.validate()?;
-    let actual = format!(
-        "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&context).map_err(|error| {
-            RuntimeError::InvalidRuntimeContext(format!(
-                "cannot encode inspected runtime context: {error}"
-            ))
-        })?)
-    );
-    if claimed_effective_sha256 != actual {
+    let context_bytes = serde_json::to_vec(&context).map_err(|error| {
+        RuntimeError::InvalidRuntimeContext(format!(
+            "cannot encode inspected runtime context: {error}"
+        ))
+    })?;
+    let actual = effective_runtime_sha256_from_bytes(
+        &context_bytes,
+        expected.claimed_retained_volume_sha256,
+    )?;
+    if expected.claimed_effective_sha256 != actual {
         return Err(RuntimeError::InvalidRuntimeContext(format!(
-            "managed standard-container-v1 effective runtime digest drift: claimed {claimed_effective_sha256}, inspected {actual}"
+            "managed standard-container-v1 effective runtime digest drift: claimed {}, inspected {actual}",
+            expected.claimed_effective_sha256
         )));
+    }
+    Ok(())
+}
+
+fn attest_standard_resource_secret_mounts(
+    inspected: &bollard::models::ContainerInspectResponse,
+    claimed_resource_secret_mounts_sha256: Option<&str>,
+    retained_volume: Option<&RetainedVolumeAttachmentV1>,
+    claimed_retained_volume_sha256: Option<&str>,
+    service_id: &str,
+    require_v3_security: bool,
+) -> Result<(), RuntimeError> {
+    let host = inspected.host_config.as_ref().ok_or_else(|| {
+        RuntimeError::InvalidRuntimeContext(
+            "standard container inspection has no HostConfig".to_string(),
+        )
+    })?;
+    if require_v3_security {
+        attest_standard_v3_security(inspected, host)?;
+    }
+    let mounts = host.mounts.as_deref().unwrap_or_default();
+    let mounts = standard_mounts_without_retained_volume(
+        mounts,
+        retained_volume,
+        service_id,
+        claimed_retained_volume_sha256,
+    )?;
+    let mut previous_resource_name: Option<&str> = None;
+    let mut inspected_resource_secret_mounts = Vec::with_capacity(mounts.len());
+    for resource in mounts {
+        let target = resource
+            .target
+            .as_deref()
+            .and_then(|target| target.strip_prefix(MANAGED_RESOURCE_SECRET_ROOT))
+            .and_then(|target| target.strip_prefix('/'))
+            .and_then(|target| target.strip_suffix("/output"))
+            .filter(|resource_name| !resource_name.contains('/'))
+            .ok_or_else(|| {
+                RuntimeError::InvalidRuntimeContext(
+                    "unmanaged standard-container-v1 contains an untyped mount target".to_string(),
+                )
+            })?;
+        validate_safe_resource_name(target)?;
+        if previous_resource_name.is_some_and(|previous| previous >= target)
+            || resource.source.as_deref().is_none_or(|source| {
+                source.is_empty()
+                    || !Path::new(source).is_absolute()
+                    || source.ends_with('/')
+                    || source.ends_with('\\')
+                    || Path::new(source).components().any(|component| {
+                        matches!(
+                            component,
+                            std::path::Component::ParentDir | std::path::Component::CurDir
+                        )
+                    })
+            })
+            || !resource_secret_mount_has_exact_contract(resource)
+        {
+            return Err(RuntimeError::InvalidRuntimeContext(
+                "standard-container-v1 resource secret mount drifted".to_string(),
+            ));
+        }
+        previous_resource_name = Some(target);
+        inspected_resource_secret_mounts.push(ResourceSecretFileMount {
+            resource_name: target.to_string(),
+            host_source_path: resource.source.clone().unwrap_or_default(),
+        });
+    }
+    let actual_resource_secret_mounts_sha256 =
+        resource_secret_mounts_sha256(&inspected_resource_secret_mounts)?;
+    if claimed_resource_secret_mounts_sha256 != actual_resource_secret_mounts_sha256.as_deref() {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "standard-container-v1 resource secret mount attestation drifted".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn attest_standard_v3_security(
+    inspected: &bollard::models::ContainerInspectResponse,
+    host: &HostConfig,
+) -> Result<(), RuntimeError> {
+    let user = inspected
+        .config
+        .as_ref()
+        .and_then(|config| config.user.as_deref())
+        .unwrap_or_default();
+    let wrong_user = user != STANDARD_V3_USER;
+    if host.readonly_rootfs != Some(true)
+        || host.cap_drop.as_deref().is_none_or(|caps| caps != ["ALL"])
+        || host
+            .security_opt
+            .as_deref()
+            .is_none_or(|options| options != [STANDARD_V3_NO_NEW_PRIVILEGES])
+        || host.pids_limit != Some(STANDARD_V3_PIDS_LIMIT)
+        || host.memory != Some(STANDARD_V3_MEMORY_BYTES)
+        || host.memory_swap != Some(STANDARD_V3_MEMORY_BYTES)
+        || host.init != Some(true)
+        || wrong_user
+        || host.privileged == Some(true)
+        || host.cap_add.as_ref().is_some_and(|caps| !caps.is_empty())
+        || host.cgroupns_mode == Some(HostConfigCgroupnsModeEnum::HOST)
+        || host.network_mode.as_deref() == Some("host")
+        || host.pid_mode.as_deref() == Some("host")
+        || host.ipc_mode.as_deref() == Some("host")
+        || host.userns_mode.as_deref() == Some("host")
+        || host.binds.as_ref().is_some_and(|binds| !binds.is_empty())
+        || host
+            .devices
+            .as_ref()
+            .is_some_and(|devices| !devices.is_empty())
+        || host.log_config.as_ref().is_none_or(|logging| {
+            logging.typ.as_deref() != Some("local")
+                || logging.config.as_ref().is_none_or(|config| {
+                    config.len() != 2
+                        || config.get("max-size").map(String::as_str)
+                            != Some(STANDARD_V3_LOG_MAX_SIZE)
+                        || config.get("max-file").map(String::as_str)
+                            != Some(STANDARD_V3_LOG_MAX_FILES)
+                })
+        })
+        || host.tmpfs.as_ref().is_none_or(|tmpfs| {
+            tmpfs.len() != 1
+                || tmpfs.get("/tmp").map(String::as_str)
+                    != Some("rw,noexec,nosuid,nodev,size=67108864,mode=1777")
+        })
+    {
+        return Err(RuntimeError::InvalidRuntimeContext(
+            "standard-container-v1 signed workload Docker security baseline drifted".to_string(),
+        ));
     }
     Ok(())
 }
@@ -2707,20 +4148,104 @@ fn attest_managed_context_environment(
             )));
         }
     }
+    let managed_names = [
+        "OJOS_WORKLOAD_PUBLIC_KEY_FILE",
+        "OJOS_WORKLOAD_KEY_ID",
+        "OJOS_WORKLOAD_ISSUER",
+        "OJOS_WORKLOAD_AUDIENCE",
+    ];
+    let exact_values = managed_names
+        .iter()
+        .map(|name| {
+            environment
+                .iter()
+                .filter_map(|entry| entry.strip_prefix(&format!("{name}=")))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let claimed_verifier_environment_sha256 = inspected
+        .config
+        .as_ref()
+        .and_then(|config| config.labels.as_ref())
+        .and_then(|labels| labels.get(WORKLOAD_VERIFIER_ENV_SHA256_LABEL))
+        .map(String::as_str);
+    match claimed_verifier_environment_sha256 {
+        Some(claimed) => {
+            validate_sha256_text(WORKLOAD_VERIFIER_ENV_SHA256_LABEL, claimed)?;
+            if exact_values.iter().any(|values| values.len() != 1)
+                || exact_values[0][0] != MANAGED_WORKLOAD_PUBLIC_KEY_FILE
+            {
+                return Err(RuntimeError::InvalidRuntimeContext(
+                    "managed workload verifier environment is incomplete or duplicated".to_string(),
+                ));
+            }
+            let actual = format!(
+                "sha256:{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&[
+                        exact_values[1][0],
+                        exact_values[2][0],
+                        exact_values[3][0],
+                    ])
+                    .map_err(|error| RuntimeError::InvalidRuntimeContext(
+                        format!("cannot attest workload verifier environment: {error}")
+                    ))?
+                )
+            );
+            if actual != claimed {
+                return Err(RuntimeError::InvalidRuntimeContext(
+                    "managed workload verifier environment attestation drifted".to_string(),
+                ));
+            }
+        }
+        None if exact_values.iter().any(|values| !values.is_empty()) => {
+            return Err(RuntimeError::InvalidRuntimeContext(
+                "managed workload without a verifier retained workload verifier environment"
+                    .to_string(),
+            ));
+        }
+        None => {}
+    }
     Ok(())
 }
 
-fn force_managed_context_environment(environment: &mut Vec<String>) {
-    environment.retain(|value| !value.starts_with("OJOS_MANAGED_WORKLOAD="));
-    environment.push("OJOS_MANAGED_WORKLOAD=true".to_string());
-    environment.retain(|value| !value.starts_with("OJOS_SERVICE_CONTEXT_FILE="));
-    environment.push(format!(
-        "OJOS_SERVICE_CONTEXT_FILE={MANAGED_SERVICE_CONTEXT_FILE}"
-    ));
+fn force_managed_context_environment(
+    environment: &mut Vec<String>,
+    managed: &ManagedServiceContextSpec,
+) -> Result<Option<String>, RuntimeError> {
+    const MANAGED_NAMES: &[&str] = &[
+        "OJOS_MANAGED_WORKLOAD",
+        "OJOS_SERVICE_CONTEXT_FILE",
+        "OJOS_WORKLOAD_PUBLIC_KEY_FILE",
+        "OJOS_WORKLOAD_KEY_ID",
+        "OJOS_WORKLOAD_ISSUER",
+        "OJOS_WORKLOAD_AUDIENCE",
+    ];
+    environment.retain(|value| {
+        !MANAGED_NAMES
+            .iter()
+            .any(|name| value.starts_with(&format!("{name}=")))
+    });
+    environment.extend([
+        "OJOS_MANAGED_WORKLOAD=true".to_string(),
+        format!("OJOS_SERVICE_CONTEXT_FILE={MANAGED_SERVICE_CONTEXT_FILE}"),
+    ]);
+    let Some(verifier) = managed.workload_verifier.as_ref() else {
+        return Ok(None);
+    };
+    let digest = verifier.environment_sha256()?;
+    environment.extend([
+        format!("OJOS_WORKLOAD_PUBLIC_KEY_FILE={MANAGED_WORKLOAD_PUBLIC_KEY_FILE}"),
+        format!("OJOS_WORKLOAD_KEY_ID={}", verifier.key_id),
+        format!("OJOS_WORKLOAD_ISSUER={}", verifier.issuer),
+        format!("OJOS_WORKLOAD_AUDIENCE={}", verifier.audience),
+    ]);
+    Ok(Some(digest))
 }
 
 fn container_create_body(spec: &ContainerSpec) -> Result<ContainerCreateBody, RuntimeError> {
     spec.runtime_contract.validate()?;
+    let resource_secret_mounts = standard_resource_secret_file_mounts(spec)?;
     let effective_runtime_sha256 = effective_runtime_sha256(spec)?;
     let mut labels = spec.labels.clone();
     labels.insert("ojos.deployment_id".to_string(), spec.deployment_id.clone());
@@ -2739,6 +4264,41 @@ fn container_create_body(spec: &ContainerSpec) -> Result<ContainerCreateBody, Ru
         "ojos.runtime_effective_sha256".to_string(),
         effective_runtime_sha256,
     );
+    if let Some(attachment) = spec.retained_volume.as_ref() {
+        attachment.validate_for_service(&spec.service_id)?;
+        labels.insert(
+            MANAGED_VOLUME_OWNER_INSTANCE_LABEL.to_string(),
+            attachment.owner_instance_id.clone(),
+        );
+        labels.insert(
+            MANAGED_VOLUME_LOGICAL_NAME_LABEL.to_string(),
+            attachment.logical_name.clone(),
+        );
+        labels.insert(
+            MANAGED_VOLUME_TARGET_LABEL.to_string(),
+            attachment.target.clone(),
+        );
+        labels.insert(
+            RUNTIME_RETAINED_VOLUME_ACCESS_LABEL.to_string(),
+            attachment.access.clone(),
+        );
+        labels.insert(
+            MANAGED_VOLUME_LIFECYCLE_LABEL.to_string(),
+            attachment.lifecycle.clone(),
+        );
+        labels.insert(
+            RUNTIME_RETAINED_VOLUME_SHA256_LABEL.to_string(),
+            retained_volume_attachment_sha256(attachment, &spec.service_id)?,
+        );
+    }
+    if let Some(resource_secret_mounts_sha256) =
+        resource_secret_mounts_sha256(&spec.resource_secret_file_mounts)?
+    {
+        labels.insert(
+            RUNTIME_RESOURCE_SECRET_MOUNTS_SHA256_LABEL.to_string(),
+            resource_secret_mounts_sha256,
+        );
+    }
     if let Some(context) = spec.runtime_context.as_ref() {
         labels.insert(
             "ojos.runtime_policy_sha256".to_string(),
@@ -2768,18 +4328,36 @@ fn container_create_body(spec: &ContainerSpec) -> Result<ContainerCreateBody, Ru
         ..Default::default()
     });
     let mut environment = spec.environment.clone();
+    let retained_volume_mount = retained_volume_mount(spec)?;
     let user = match spec.runtime_contract.id {
         RuntimeProfile::StandardV1 => {
+            let signed_service_contract = spec
+                .labels
+                .get("ojos.catalog_signature_verified")
+                .is_some_and(|value| value == "true")
+                && spec
+                    .labels
+                    .get(SERVICE_CONTRACT_GENERATION_LABEL)
+                    .is_some_and(|generation| generation == "3");
             match (
                 spec.managed_service_context.as_ref(),
                 spec.runtime_context.as_ref(),
             ) {
                 (None, None) => {}
-                (Some(_), Some(_)) => {
+                (Some(managed), Some(_)) => {
                     let context = validate_managed_runtime_context(spec)?;
-                    force_managed_context_environment(&mut environment);
+                    if let Some(digest) =
+                        force_managed_context_environment(&mut environment, managed)?
+                    {
+                        labels.insert(WORKLOAD_VERIFIER_ENV_SHA256_LABEL.to_string(), digest);
+                    } else {
+                        labels.remove(WORKLOAD_VERIFIER_ENV_SHA256_LABEL);
+                    }
                     let config = host_config.get_or_insert_with(HostConfig::default);
-                    config.mounts = Some(vec![managed_service_context_mount(context)]);
+                    let mut mounts = vec![managed_service_context_mount(context)];
+                    mounts.extend(resource_secret_mounts.iter().cloned());
+                    mounts.extend(retained_volume_mount.iter().cloned());
+                    config.mounts = Some(mounts);
                 }
                 (Some(_), None) => {
                     return Err(RuntimeError::InvalidRuntimeContext(
@@ -2794,7 +4372,39 @@ fn container_create_body(spec: &ContainerSpec) -> Result<ContainerCreateBody, Ru
                     ));
                 }
             }
-            None
+            if spec.managed_service_context.is_none()
+                && (!resource_secret_mounts.is_empty() || retained_volume_mount.is_some())
+            {
+                let config = host_config.get_or_insert_with(HostConfig::default);
+                let mut mounts = resource_secret_mounts;
+                mounts.extend(retained_volume_mount);
+                config.mounts = Some(mounts);
+            }
+            if signed_service_contract {
+                let config = host_config.get_or_insert_with(HostConfig::default);
+                config.readonly_rootfs = Some(true);
+                config.cap_drop = Some(vec!["ALL".to_string()]);
+                config.security_opt = Some(vec![STANDARD_V3_NO_NEW_PRIVILEGES.to_string()]);
+                config.pids_limit = Some(STANDARD_V3_PIDS_LIMIT);
+                config.memory = Some(STANDARD_V3_MEMORY_BYTES);
+                config.memory_swap = Some(STANDARD_V3_MEMORY_BYTES);
+                config.init = Some(true);
+                config.log_config = Some(HostConfigLogConfig {
+                    typ: Some("local".to_string()),
+                    config: Some(HashMap::from([
+                        ("max-size".to_string(), STANDARD_V3_LOG_MAX_SIZE.to_string()),
+                        (
+                            "max-file".to_string(),
+                            STANDARD_V3_LOG_MAX_FILES.to_string(),
+                        ),
+                    ])),
+                });
+                config.tmpfs = Some(HashMap::from([(
+                    "/tmp".to_string(),
+                    "rw,noexec,nosuid,nodev,size=67108864,mode=1777".to_string(),
+                )]));
+            }
+            signed_service_contract.then(|| STANDARD_V3_USER.to_string())
         }
         RuntimeProfile::JudgeSandboxV1 => {
             let context = validate_judge_sandbox_spec(spec)?;
@@ -2804,7 +4414,16 @@ fn container_create_body(spec: &ContainerSpec) -> Result<ContainerCreateBody, Ru
             environment.push("OJOS_ALLOW_CGROUP_FALLBACK=false".to_string());
             environment.retain(|value| !value.starts_with("OJOS_NSJAIL_NO_PIVOTROOT="));
             environment.push("OJOS_NSJAIL_NO_PIVOTROOT=false".to_string());
-            force_managed_context_environment(&mut environment);
+            let managed = spec.managed_service_context.as_ref().ok_or_else(|| {
+                RuntimeError::InvalidRuntimeContext(
+                    "judge-sandbox-v1 requires managed_service_context".to_string(),
+                )
+            })?;
+            if let Some(digest) = force_managed_context_environment(&mut environment, managed)? {
+                labels.insert(WORKLOAD_VERIFIER_ENV_SHA256_LABEL.to_string(), digest);
+            } else {
+                labels.remove(WORKLOAD_VERIFIER_ENV_SHA256_LABEL);
+            }
             let config = host_config.get_or_insert_with(HostConfig::default);
             config.memory = Some(JUDGE_SANDBOX_V1_MEMORY_BYTES);
             config.memory_swap = Some(JUDGE_SANDBOX_V1_MEMORY_BYTES);
@@ -2878,6 +4497,75 @@ mod tests {
     use super::*;
 
     const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn standard_workload_file_identity_matches_enforced_container_user() {
+        assert_eq!(
+            WorkloadFileOwnership::standard_v3().unix_ids(),
+            Some((STANDARD_WORKLOAD_UID, STANDARD_WORKLOAD_GID))
+        );
+        assert_eq!(
+            STANDARD_V3_USER,
+            format!("{STANDARD_WORKLOAD_UID}:{STANDARD_WORKLOAD_GID}")
+        );
+        assert_eq!(WorkloadFileOwnership::current_process().unix_ids(), None);
+    }
+
+    #[test]
+    fn migration_identity_is_deterministic_and_contains_no_secret_material() {
+        let image =
+            OciImageReference::parse(&format!("ghcr.io/owner/migration@sha256:{DIGEST}")).unwrap();
+        let first =
+            migration_resource_claims_sha256(&["redis".to_string(), "database".to_string()])
+                .unwrap();
+        let second =
+            migration_resource_claims_sha256(&["database".to_string(), "redis".to_string()])
+                .unwrap();
+        assert_eq!(first, second);
+        let identity = migration_identity_sha256(
+            "contest-service",
+            "0001",
+            &format!("sha256:{}", "b".repeat(64)),
+            &image,
+            &first,
+        )
+        .unwrap();
+        assert_eq!(identity.len(), 71);
+        let labels = [first, identity].join(" ");
+        assert!(!labels.contains("postgres"));
+        assert!(!labels.contains("password"));
+        assert!(!labels.contains("/run/ojos"));
+    }
+
+    #[test]
+    fn migration_identity_rejects_secret_like_claim_values_and_digest_drift() {
+        assert!(
+            migration_resource_claims_sha256(&["postgres://user:password@db/contest".to_string()])
+                .is_err()
+        );
+        let image =
+            OciImageReference::parse(&format!("ghcr.io/owner/migration@sha256:{DIGEST}")).unwrap();
+        let claims = migration_resource_claims_sha256(&[]).unwrap();
+        let mut identity = MigrationContainerIdentityV1 {
+            job_id: "job-1".to_string(),
+            service_name: "contest-service".to_string(),
+            version: "0001".to_string(),
+            checksum: format!("sha256:{}", "b".repeat(64)),
+            image: image.to_string(),
+            resource_claims_sha256: claims.clone(),
+            identity_sha256: migration_identity_sha256(
+                "contest-service",
+                "0001",
+                &format!("sha256:{}", "b".repeat(64)),
+                &image,
+                &claims,
+            )
+            .unwrap(),
+        };
+        assert!(identity.validate().is_ok());
+        identity.version = "0002".to_string();
+        assert!(identity.validate().is_err());
+    }
 
     #[test]
     fn accepts_immutable_digest_reference() {
@@ -3001,6 +4689,8 @@ mod tests {
                 .unwrap(),
             runtime_contract: RuntimeContract::standard_v1(),
             runtime_context: None,
+            resource_secret_file_mounts: Vec::new(),
+            retained_volume: None,
             managed_service_context: None,
             command: Vec::new(),
             environment: Vec::new(),
@@ -3032,6 +4722,145 @@ mod tests {
         );
     }
 
+    fn retained_standard_spec() -> ContainerSpec {
+        ContainerSpec {
+            deployment_id: "problem-service-v1".to_string(),
+            service_id: "problem-service".to_string(),
+            generation: 1,
+            image: OciImageReference::parse(&format!(
+                "ghcr.io/acme/problem-service@sha256:{DIGEST}"
+            ))
+            .unwrap(),
+            runtime_contract: RuntimeContract::standard_v1(),
+            runtime_context: Some(RuntimeContext {
+                contract: RuntimeContract::standard_v1(),
+                runtime_policy_sha256: format!("sha256:{}", "b".repeat(64)),
+                scratch_directory: String::new(),
+                cache_volume_name: String::new(),
+                service_context_directory: if cfg!(windows) {
+                    r"C:\ojos\contexts\problem\service".to_string()
+                } else {
+                    "/var/lib/ojos/contexts/problem/service".to_string()
+                },
+            }),
+            resource_secret_file_mounts: Vec::new(),
+            retained_volume: Some(RetainedVolumeAttachmentV1 {
+                owner_instance_id: "service-instance-fixture".to_string(),
+                logical_name: "problem-packages".to_string(),
+                target: "/data/ojos/problems".to_string(),
+                access: "rw".to_string(),
+                lifecycle: RETAIN_VOLUME_LIFECYCLE.to_string(),
+            }),
+            managed_service_context: Some(ManagedServiceContextSpec {
+                generation: 1,
+                node_id: "node-1".to_string(),
+                gateway_origin: "http://127.0.0.1".to_string(),
+                gateway_ca_pem: None,
+                bindings: BTreeMap::new(),
+                events: None,
+                workload_verifier: None,
+            }),
+            command: Vec::new(),
+            environment: Vec::new(),
+            labels: HashMap::from([
+                (
+                    "ojos.catalog_signature_verified".to_string(),
+                    "true".to_string(),
+                ),
+                (
+                    SERVICE_CONTRACT_GENERATION_LABEL.to_string(),
+                    "3".to_string(),
+                ),
+            ]),
+            published_endpoint: None,
+        }
+    }
+
+    #[test]
+    fn retained_volume_is_stable_across_deployments_and_exactly_attested() {
+        let first = retained_standard_spec();
+        let mut replacement = first.clone();
+        replacement.deployment_id = "problem-service-v2".to_string();
+        replacement.generation = 2;
+        replacement.image =
+            OciImageReference::parse(&format!("ghcr.io/acme/problem-service-v2@sha256:{DIGEST}"))
+                .unwrap();
+        replacement
+            .runtime_context
+            .as_mut()
+            .unwrap()
+            .service_context_directory = if cfg!(windows) {
+            r"C:\ojos\contexts\problem-v2\service".to_string()
+        } else {
+            "/var/lib/ojos/contexts/problem-v2/service".to_string()
+        };
+
+        let first_volume = first.managed_volume_spec().unwrap().unwrap();
+        let replacement_volume = replacement.managed_volume_spec().unwrap().unwrap();
+        assert_eq!(first_volume.name, replacement_volume.name);
+        assert_eq!(
+            first_volume.ownership_labels().unwrap(),
+            replacement_volume.ownership_labels().unwrap()
+        );
+
+        let body = container_create_body(&first).unwrap();
+        let labels = body.labels.as_ref().unwrap();
+        let (attachment, claimed) =
+            retained_volume_attachment_from_labels(Some(labels), &first.service_id).unwrap();
+        let inspected = bollard::models::ContainerInspectResponse {
+            config: Some(bollard::models::ContainerConfig {
+                user: Some("65532:65532".to_string()),
+                env: body.env,
+                ..Default::default()
+            }),
+            host_config: body.host_config,
+            ..Default::default()
+        };
+        attest_standard_managed_context_inspection(
+            &inspected,
+            &StandardManagedContextAttestation {
+                contract: &first.runtime_contract,
+                runtime_policy_sha256: &first
+                    .runtime_context
+                    .as_ref()
+                    .unwrap()
+                    .runtime_policy_sha256,
+                claimed_effective_sha256: labels.get("ojos.runtime_effective_sha256").unwrap(),
+                claimed_resource_secret_mounts_sha256: None,
+                retained_volume: attachment.as_ref(),
+                claimed_retained_volume_sha256: claimed.as_deref(),
+                service_id: &first.service_id,
+                require_v3_security: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            inspected
+                .host_config
+                .as_ref()
+                .unwrap()
+                .mounts
+                .as_ref()
+                .unwrap()
+                .last()
+                .unwrap()
+                .target
+                .as_deref(),
+            Some("/data/ojos/problems")
+        );
+    }
+
+    #[test]
+    fn retained_volume_wire_rejects_host_paths_and_invalid_targets() {
+        let mut encoded = serde_json::to_value(retained_standard_spec()).unwrap();
+        encoded["retained_volume"]["host_path"] = serde_json::json!("/srv/secret");
+        assert!(serde_json::from_value::<ContainerSpec>(encoded).is_err());
+
+        let mut spec = retained_standard_spec();
+        spec.retained_volume.as_mut().unwrap().target = "/run/ojos/escape".to_string();
+        assert!(container_create_body(&spec).is_err());
+    }
+
     fn judge_test_context() -> RuntimeContext {
         let root = if cfg!(windows) {
             "C:\\ojos"
@@ -3056,6 +4885,8 @@ mod tests {
                 .unwrap(),
             runtime_contract: RuntimeContract::judge_sandbox_v1(),
             runtime_context: Some(judge_test_context()),
+            resource_secret_file_mounts: Vec::new(),
+            retained_volume: None,
             managed_service_context: Some(ManagedServiceContextSpec {
                 generation: 3,
                 node_id: "node-1".to_string(),
@@ -3073,6 +4904,7 @@ mod tests {
                     },
                 )]),
                 events: None,
+                workload_verifier: None,
             }),
             command: Vec::new(),
             environment: vec!["OJOS_ALLOW_CGROUP_FALLBACK=false".to_string()],
@@ -3707,6 +5539,213 @@ mod tests {
         assert_eq!(context_mount.read_only, Some(true));
     }
 
+    fn resource_secret_source(resource_name: &str) -> ResourceSecretFileMount {
+        ResourceSecretFileMount {
+            resource_name: resource_name.to_string(),
+            host_source_path: if cfg!(windows) {
+                format!(r"C:\ojos\resource-outputs\{resource_name}\dsn")
+            } else {
+                format!("/var/lib/ojos/resource-outputs/{resource_name}/dsn")
+            },
+        }
+    }
+
+    #[test]
+    fn container_spec_wire_cannot_supply_agent_resource_secret_mounts() {
+        let mut spec = judge_test_spec();
+        spec.service_id = "problem-service".to_string();
+        spec.runtime_contract = RuntimeContract::standard_v1();
+        spec.runtime_context = None;
+        spec.managed_service_context = None;
+        spec.resource_secret_file_mounts = vec![resource_secret_source("contests")];
+
+        let encoded = serde_json::to_value(&spec).unwrap();
+        assert!(encoded.get("resource_secret_file_mounts").is_none());
+        let decoded: ContainerSpec = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(decoded.resource_secret_file_mounts.is_empty());
+
+        let mut injected = encoded.as_object().unwrap().clone();
+        injected.insert(
+            "resource_secret_file_mounts".to_string(),
+            serde_json::json!([{
+                "resource_name": "contests",
+                "host_source_path": "/etc/shadow"
+            }]),
+        );
+        assert!(
+            serde_json::from_value::<ContainerSpec>(serde_json::Value::Object(injected)).is_err()
+        );
+    }
+
+    #[test]
+    fn standard_resource_secret_mount_is_deterministic_read_only_and_agent_sourced() {
+        let mut spec = judge_test_spec();
+        spec.service_id = "problem-service".to_string();
+        spec.runtime_contract = RuntimeContract::standard_v1();
+        spec.runtime_context = None;
+        spec.managed_service_context = None;
+        let expected_source = resource_secret_source("contests");
+        spec.resource_secret_file_mounts = vec![expected_source.clone()];
+
+        let body = container_create_body(&spec).unwrap();
+        let mounts = body.host_config.as_ref().unwrap().mounts.as_ref().unwrap();
+        assert_eq!(mounts.len(), 1);
+        let mount = &mounts[0];
+        assert_eq!(
+            mount.target.as_deref(),
+            Some("/run/ojos/resources/contests/output")
+        );
+        assert_eq!(
+            mount.source.as_deref(),
+            Some(expected_source.host_source_path.as_str())
+        );
+        assert!(resource_secret_mount_has_exact_contract(mount));
+        assert_eq!(
+            body.labels
+                .as_ref()
+                .unwrap()
+                .get(RUNTIME_RESOURCE_SECRET_MOUNTS_SHA256_LABEL),
+            resource_secret_mounts_sha256(&spec.resource_secret_file_mounts)
+                .unwrap()
+                .as_ref()
+        );
+    }
+
+    #[test]
+    fn resource_secret_mounts_append_after_managed_context_in_canonical_order() {
+        let mut spec = judge_test_spec();
+        spec.service_id = "problem-service".to_string();
+        spec.runtime_contract = RuntimeContract::standard_v1();
+        spec.runtime_context = Some(RuntimeContext {
+            contract: RuntimeContract::standard_v1(),
+            runtime_policy_sha256: format!("sha256:{}", "c".repeat(64)),
+            scratch_directory: String::new(),
+            cache_volume_name: String::new(),
+            service_context_directory: if cfg!(windows) {
+                r"C:\ojos\contexts\deployment-1\service".to_string()
+            } else {
+                "/var/lib/ojos/contexts/deployment-1/service".to_string()
+            },
+        });
+        spec.resource_secret_file_mounts = vec![
+            resource_secret_source("analytics"),
+            resource_secret_source("contests"),
+        ];
+
+        let body = container_create_body(&spec).unwrap();
+        let mounts = body.host_config.as_ref().unwrap().mounts.as_ref().unwrap();
+        assert_eq!(mounts.len(), 3);
+        assert_eq!(
+            mounts[0].target.as_deref(),
+            Some(MANAGED_SERVICE_CONTEXT_TARGET)
+        );
+        assert_eq!(
+            mounts[1].target.as_deref(),
+            Some("/run/ojos/resources/analytics/output")
+        );
+        assert_eq!(
+            mounts[2].target.as_deref(),
+            Some("/run/ojos/resources/contests/output")
+        );
+
+        let effective = effective_runtime_sha256(&spec).unwrap();
+        let resource_mounts_sha256 =
+            resource_secret_mounts_sha256(&spec.resource_secret_file_mounts).unwrap();
+        let mut inspected = bollard::models::ContainerInspectResponse {
+            config: Some(bollard::models::ContainerConfig {
+                env: body.env,
+                ..Default::default()
+            }),
+            host_config: body.host_config,
+            ..Default::default()
+        };
+        attest_standard_managed_context_inspection(
+            &inspected,
+            &StandardManagedContextAttestation {
+                contract: &spec.runtime_contract,
+                runtime_policy_sha256: &spec
+                    .runtime_context
+                    .as_ref()
+                    .unwrap()
+                    .runtime_policy_sha256,
+                claimed_effective_sha256: &effective,
+                claimed_resource_secret_mounts_sha256: resource_mounts_sha256.as_deref(),
+                retained_volume: None,
+                claimed_retained_volume_sha256: None,
+                service_id: &spec.service_id,
+                require_v3_security: false,
+            },
+        )
+        .unwrap();
+        inspected
+            .host_config
+            .as_mut()
+            .unwrap()
+            .mounts
+            .as_mut()
+            .unwrap()[1]
+            .read_only = Some(false);
+        assert!(
+            attest_standard_managed_context_inspection(
+                &inspected,
+                &StandardManagedContextAttestation {
+                    contract: &spec.runtime_contract,
+                    runtime_policy_sha256: &spec
+                        .runtime_context
+                        .as_ref()
+                        .unwrap()
+                        .runtime_policy_sha256,
+                    claimed_effective_sha256: &effective,
+                    claimed_resource_secret_mounts_sha256: resource_mounts_sha256.as_deref(),
+                    retained_volume: None,
+                    claimed_retained_volume_sha256: None,
+                    service_id: &spec.service_id,
+                    require_v3_security: false,
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn resource_secret_mount_rejects_unsafe_source_name_profile_and_order() {
+        let mut spec = judge_test_spec();
+        spec.service_id = "problem-service".to_string();
+        spec.runtime_contract = RuntimeContract::standard_v1();
+        spec.runtime_context = None;
+        spec.managed_service_context = None;
+
+        for invalid in [
+            ResourceSecretFileMount {
+                resource_name: "../contests".to_string(),
+                host_source_path: resource_secret_source("contests").host_source_path,
+            },
+            ResourceSecretFileMount {
+                resource_name: "contests".to_string(),
+                host_source_path: "relative/dsn".to_string(),
+            },
+        ] {
+            spec.resource_secret_file_mounts = vec![invalid];
+            assert!(matches!(
+                container_create_body(&spec),
+                Err(RuntimeError::InvalidRuntimeContext(_))
+            ));
+        }
+
+        spec.resource_secret_file_mounts = vec![
+            resource_secret_source("contests"),
+            resource_secret_source("analytics"),
+        ];
+        assert!(container_create_body(&spec).is_err());
+
+        let mut sandbox = judge_test_spec();
+        sandbox.resource_secret_file_mounts = vec![resource_secret_source("contests")];
+        assert!(matches!(
+            container_create_body(&sandbox),
+            Err(RuntimeError::InvalidRuntimeContext(_))
+        ));
+    }
+
     #[test]
     fn managed_service_context_rejects_loopback_prefix_spoofing() {
         let mut context = judge_test_spec().managed_service_context.unwrap();
@@ -3756,6 +5795,95 @@ mod tests {
         context.validate().unwrap();
         context.bindings.clear();
         context.validate().unwrap();
+    }
+
+    fn fixture_workload_verifier() -> ManagedWorkloadVerifierSpec {
+        ManagedWorkloadVerifierSpec {
+            public_key_pem: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAERERERERERERERERERERERERERERERERERERERERERE=\n-----END PUBLIC KEY-----\n".to_string(),
+            key_id: "workload-1".to_string(),
+            issuer: "ojos-auth/workload".to_string(),
+            audience: "ojos-gateway".to_string(),
+        }
+    }
+
+    #[test]
+    fn workload_verifier_requires_one_bounded_ed25519_spki() {
+        fixture_workload_verifier().validate().unwrap();
+        for public_key_pem in [
+            "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAERERERERERERERERERERERERERERERERERERERERERE=\n-----END PUBLIC KEY-----\n-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAERERERERERERERERERERERERERERERERERERERERERE=\n-----END PUBLIC KEY-----\n".to_string(),
+            "-----BEGIN PUBLIC KEY-----\nMAwwDQYJKoZIhvcNAQEBBQADCwAwCAIBAwIDAQAB\n-----END PUBLIC KEY-----\n".to_string(),
+            "A".repeat(MAX_WORKLOAD_PUBLIC_KEY_PEM_BYTES + 1),
+        ] {
+            let mut verifier = fixture_workload_verifier();
+            verifier.public_key_pem = public_key_pem;
+            assert!(verifier.validate().is_err());
+        }
+        let mut verifier = fixture_workload_verifier();
+        verifier.key_id = "bad key".to_string();
+        assert!(verifier.validate().is_err());
+    }
+
+    #[test]
+    fn runtime_overrides_and_attests_workload_verifier_environment() {
+        let mut spec = judge_test_spec();
+        spec.service_id = "storage-service".to_string();
+        spec.runtime_contract = RuntimeContract::standard_v1();
+        spec.runtime_context = Some(RuntimeContext {
+            contract: RuntimeContract::standard_v1(),
+            runtime_policy_sha256: format!("sha256:{}", "c".repeat(64)),
+            scratch_directory: String::new(),
+            cache_volume_name: String::new(),
+            service_context_directory: if cfg!(windows) {
+                r"C:\ojos\contexts\storage\service".to_string()
+            } else {
+                "/var/lib/ojos/contexts/storage/service".to_string()
+            },
+        });
+        spec.managed_service_context
+            .as_mut()
+            .unwrap()
+            .workload_verifier = Some(fixture_workload_verifier());
+        spec.environment = vec![
+            "OJOS_WORKLOAD_PUBLIC_KEY_FILE=/attacker/key".to_string(),
+            "OJOS_WORKLOAD_KEY_ID=attacker".to_string(),
+            "OJOS_WORKLOAD_ISSUER=attacker".to_string(),
+            "OJOS_WORKLOAD_AUDIENCE=attacker".to_string(),
+        ];
+        let body = container_create_body(&spec).unwrap();
+        let environment = body.env.clone().unwrap();
+        for expected in [
+            "OJOS_WORKLOAD_PUBLIC_KEY_FILE=/run/ojos/service/workload-public-key.pem",
+            "OJOS_WORKLOAD_KEY_ID=workload-1",
+            "OJOS_WORKLOAD_ISSUER=ojos-auth/workload",
+            "OJOS_WORKLOAD_AUDIENCE=ojos-gateway",
+        ] {
+            assert_eq!(
+                environment
+                    .iter()
+                    .filter(|value| value.as_str() == expected)
+                    .count(),
+                1
+            );
+        }
+        let inspected = bollard::models::ContainerInspectResponse {
+            config: Some(bollard::models::ContainerConfig {
+                env: body.env,
+                labels: body.labels,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        attest_managed_context_environment(&inspected).unwrap();
+        let mut drifted = inspected;
+        drifted
+            .config
+            .as_mut()
+            .unwrap()
+            .env
+            .as_mut()
+            .unwrap()
+            .push("OJOS_WORKLOAD_KEY_ID=attacker".to_string());
+        assert!(attest_managed_context_environment(&drifted).is_err());
     }
 
     #[test]
@@ -4001,6 +6129,7 @@ mod tests {
 
         assert!(payload.start);
         assert_eq!(payload.health_gate, HealthGatePolicy::default());
+        assert!(!payload.exclusive_retained_volume_cutover);
         assert!(payload.validate().is_ok());
         assert!(
             serde_json::from_value::<ReleaseReplacementPayload>(serde_json::json!({
@@ -4019,5 +6148,22 @@ mod tests {
             }))
             .is_err()
         );
+
+        let mut retained = payload.clone();
+        retained.new_spec.retained_volume = Some(RetainedVolumeAttachmentV1 {
+            owner_instance_id: "service-instance-problem".to_string(),
+            logical_name: "problem-packages".to_string(),
+            target: "/data/ojos/problems".to_string(),
+            access: "rw".to_string(),
+            lifecycle: RETAIN_VOLUME_LIFECYCLE.to_string(),
+        });
+        assert!(retained.validate().is_err());
+        retained.exclusive_retained_volume_cutover = true;
+        retained.preserve_old_until_topology_cutover = true;
+        assert!(retained.validate().is_ok());
+
+        let mut meaningless_exclusive = payload;
+        meaningless_exclusive.exclusive_retained_volume_cutover = true;
+        assert!(meaningless_exclusive.validate().is_err());
     }
 }

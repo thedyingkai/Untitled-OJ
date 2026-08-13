@@ -14,6 +14,82 @@ pub enum ApiBindingState {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ApiBindingDesiredState {
+    Active,
+    Revoked,
+}
+
+impl ApiBindingDesiredState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "ACTIVE",
+            Self::Revoked => "REVOKED",
+        }
+    }
+}
+
+impl PartialEq<&str> for ApiBindingDesiredState {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ApiBindingObservedState {
+    Pending,
+    Resolved,
+    Active,
+    Revoked,
+    Error,
+}
+
+impl ApiBindingObservedState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "PENDING",
+            Self::Resolved => "RESOLVED",
+            Self::Active => "ACTIVE",
+            Self::Revoked => "REVOKED",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+impl PartialEq<&str> for ApiBindingObservedState {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ApiBindingHealth {
+    Unknown,
+    Healthy,
+    Unhealthy,
+    Degraded,
+}
+
+impl ApiBindingHealth {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "UNKNOWN",
+            Self::Healthy => "HEALTHY",
+            Self::Unhealthy => "UNHEALTHY",
+            Self::Degraded => "DEGRADED",
+        }
+    }
+}
+
+impl PartialEq<&str> for ApiBindingHealth {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ApiBinding {
@@ -67,11 +143,11 @@ pub struct ApiBinding {
     #[serde(default = "default_generation")]
     pub context_generation: u64,
     #[serde(default = "default_desired_state")]
-    pub desired_state: String,
+    pub desired_state: ApiBindingDesiredState,
     #[serde(default = "default_observed_state")]
-    pub observed_state: String,
+    pub observed_state: ApiBindingObservedState,
     #[serde(default = "default_health")]
-    pub health: String,
+    pub health: ApiBindingHealth,
     #[serde(default)]
     pub drift: Vec<String>,
     #[serde(default)]
@@ -89,19 +165,52 @@ const fn default_generation() -> u64 {
     1
 }
 
-fn default_desired_state() -> String {
-    "ACTIVE".to_string()
+const fn default_desired_state() -> ApiBindingDesiredState {
+    ApiBindingDesiredState::Active
 }
 
-fn default_observed_state() -> String {
-    "PENDING".to_string()
+const fn default_observed_state() -> ApiBindingObservedState {
+    ApiBindingObservedState::Pending
 }
 
-fn default_health() -> String {
-    "UNKNOWN".to_string()
+const fn default_health() -> ApiBindingHealth {
+    ApiBindingHealth::Unknown
 }
 
 impl ApiBinding {
+    /// Returns the only lifecycle state compatible with the typed desired and
+    /// observed facts. Health is deliberately orthogonal: a transiently
+    /// unhealthy active binding remains ACTIVE and is handled by routing and
+    /// evidence gates instead of silently changing lifecycle ownership.
+    pub const fn derived_state(&self) -> ApiBindingState {
+        match (self.desired_state, self.observed_state) {
+            (ApiBindingDesiredState::Active, ApiBindingObservedState::Pending) => {
+                ApiBindingState::Pending
+            }
+            (ApiBindingDesiredState::Active, ApiBindingObservedState::Resolved) => {
+                ApiBindingState::Resolved
+            }
+            (ApiBindingDesiredState::Active, ApiBindingObservedState::Active) => {
+                ApiBindingState::Active
+            }
+            (ApiBindingDesiredState::Active, ApiBindingObservedState::Revoked) => {
+                if self.optional {
+                    ApiBindingState::Unbound
+                } else {
+                    ApiBindingState::Error
+                }
+            }
+            (ApiBindingDesiredState::Active, ApiBindingObservedState::Error)
+            | (ApiBindingDesiredState::Revoked, ApiBindingObservedState::Error) => {
+                ApiBindingState::Error
+            }
+            (ApiBindingDesiredState::Revoked, ApiBindingObservedState::Revoked) => {
+                ApiBindingState::Revoked
+            }
+            (ApiBindingDesiredState::Revoked, _) => ApiBindingState::Pending,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ApiBindingValidationError> {
         let stable = Regex::new(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$").expect("valid regex");
         for (name, value) in [
@@ -140,19 +249,12 @@ impl ApiBinding {
                     .to_string(),
             ));
         }
-        if !matches!(self.desired_state.as_str(), "ACTIVE" | "REVOKED")
-            || !matches!(
-                self.observed_state.as_str(),
-                "PENDING" | "RESOLVED" | "ACTIVE" | "REVOKED" | "ERROR"
-            )
-            || !matches!(
-                self.health.as_str(),
-                "UNKNOWN" | "HEALTHY" | "UNHEALTHY" | "DEGRADED"
-            )
-        {
-            return Err(ApiBindingValidationError::Invalid(
-                "API binding desired_state, observed_state, or health is invalid".to_string(),
-            ));
+        let derived_state = self.derived_state();
+        if self.state != derived_state {
+            return Err(ApiBindingValidationError::Invalid(format!(
+                "API binding compatibility state {:?} disagrees with derived state {:?}",
+                self.state, derived_state
+            )));
         }
         if matches!(
             self.state,
@@ -365,6 +467,65 @@ fn parse_api_semver(value: &str) -> Option<Version> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn binding() -> ApiBinding {
+        ApiBinding {
+            binding_id: "binding-1".to_string(),
+            requirement_name: "storage_get".to_string(),
+            api_id: "storage.object.get".to_string(),
+            api_version: "1.0.0".to_string(),
+            consumer_deployment_id: "consumer-1".to_string(),
+            consumer_service_id: "consumer".to_string(),
+            consumer_node_id: "node-a".to_string(),
+            consumer_endpoint: "127.0.0.1:9000:consumer".to_string(),
+            provider_deployment_id: "storage-1".to_string(),
+            provider_service_id: "storage".to_string(),
+            provider_node_id: "node-b".to_string(),
+            provider_endpoint: "127.0.0.1:9001:storage".to_string(),
+            provider_path: "/objects".to_string(),
+            virtual_endpoint: "/internal/apis/storage.object.get".to_string(),
+            protocol: "http".to_string(),
+            methods: vec!["GET".to_string()],
+            auth_mode: "workload".to_string(),
+            provider_auth_mode: "workload".to_string(),
+            permission: "storage.object.read".to_string(),
+            timeout_ms: Some(5_000),
+            topology_id: "main".to_string(),
+            topology_revision_id: "revision-1".to_string(),
+            link_source_endpoint: "source".to_string(),
+            link_target_endpoint: "target".to_string(),
+            credential_ref: String::new(),
+            credential_generation: 1,
+            context_generation: 1,
+            desired_state: ApiBindingDesiredState::Active,
+            observed_state: ApiBindingObservedState::Resolved,
+            health: ApiBindingHealth::Unknown,
+            drift: Vec::new(),
+            last_operation_id: String::new(),
+            state: ApiBindingState::Resolved,
+            optional: false,
+            reason: String::new(),
+            created_at: "unix-ms:1".to_string(),
+            updated_at: "unix-ms:1".to_string(),
+        }
+    }
+
+    #[test]
+    fn compatibility_state_is_derived_and_wire_values_remain_stable() {
+        let mut value = binding();
+        assert_eq!(value.derived_state(), ApiBindingState::Resolved);
+        let wire = serde_json::to_value(&value).unwrap();
+        assert_eq!(wire["desired_state"], "ACTIVE");
+        assert_eq!(wire["observed_state"], "RESOLVED");
+        assert_eq!(wire["health"], "UNKNOWN");
+
+        value.state = ApiBindingState::Active;
+        assert!(value.validate().is_err());
+        value.observed_state = ApiBindingObservedState::Active;
+        value.health = ApiBindingHealth::Degraded;
+        assert_eq!(value.derived_state(), ApiBindingState::Active);
+        value.validate().unwrap();
+    }
 
     fn candidate(id: &str, node: &str, version: &str) -> ApiProviderCandidate {
         ApiProviderCandidate {

@@ -341,6 +341,9 @@ CREATE UNIQUE INDEX idx_orchestrator_api_bindings_consumer_requirement
     ON orchestrator_api_bindings(consumer_deployment_id, requirement_name);
 "#;
 
+const CONTRIBUTION_CONTROLLER_SCHEMA: &str =
+    include_str!("../../migrations/000002_contribution_controller.up.sql");
+
 const MIGRATIONS: &[PostgresMigration] = &[
     PostgresMigration {
         version: 1,
@@ -402,6 +405,11 @@ const MIGRATIONS: &[PostgresMigration] = &[
         name: "api-binding-consumer-requirement-identity",
         sql: API_BINDING_REQUIREMENT_SCHEMA,
     },
+    PostgresMigration {
+        version: 13,
+        name: "deployment-scoped-contribution-controller",
+        sql: CONTRIBUTION_CONTROLLER_SCHEMA,
+    },
 ];
 
 const REQUIRED_TABLES: &[&str] = &[
@@ -427,6 +435,11 @@ const REQUIRED_TABLES: &[&str] = &[
     "orchestrator_job_status_counts",
     "orchestrator_api_bindings",
     "orchestrator_node_runtime_facts",
+    "orchestrator_contribution_revisions",
+    "orchestrator_contribution_heads",
+    "orchestrator_contribution_activations",
+    "orchestrator_contribution_projection_receipts",
+    "orchestrator_permission_assignments_v1",
 ];
 
 const REQUIRED_INDEXES: &[&str] = &[
@@ -437,9 +450,21 @@ const REQUIRED_INDEXES: &[&str] = &[
     "idx_orchestrator_api_bindings_topology",
     "idx_orchestrator_node_runtime_facts_received",
     "idx_orchestrator_api_bindings_consumer_requirement",
+    "idx_orchestrator_contribution_revisions_scope",
+    "idx_orchestrator_contribution_revisions_deployment",
+    "idx_orchestrator_contribution_heads_revision",
+    "idx_orchestrator_contribution_activations_state",
+    "idx_orchestrator_contribution_receipts_state",
+    "idx_orchestrator_permission_assignments_scope",
 ];
 
-const REQUIRED_TRIGGERS: &[&str] = &["orchestrator_audit_log_no_update_or_delete"];
+const REQUIRED_TRIGGERS: &[&str] = &[
+    "orchestrator_audit_log_no_update_or_delete",
+    "orchestrator_contribution_revision_immutable",
+    "orchestrator_contribution_activation_identity_immutable",
+    "orchestrator_contribution_receipt_identity_immutable",
+    "orchestrator_permission_assignment_immutable",
+];
 
 #[derive(Debug, Clone, Copy)]
 struct PostgresMigration {
@@ -949,7 +974,7 @@ fn verify_schema_objects(client: &mut impl GenericClient) -> PostgresResult<()> 
     for trigger in REQUIRED_TRIGGERS {
         let exists: bool = client
             .query_one(
-                "SELECT EXISTS(SELECT 1 FROM pg_trigger AS audit_trigger JOIN pg_class AS relation ON relation.oid = audit_trigger.tgrelid WHERE audit_trigger.tgname = $1 AND relation.relname = 'orchestrator_audit_log' AND NOT audit_trigger.tgisinternal)",
+                "SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname = $1 AND NOT tgisinternal)",
                 &[trigger],
             )?
             .get(0);
@@ -1086,8 +1111,8 @@ mod tests {
 
     #[test]
     fn migrations_are_expand_only_versioned_and_have_stable_checksums() {
-        assert_eq!(latest_schema_version(), 12);
-        assert_eq!(MIGRATIONS.len(), 12);
+        assert_eq!(latest_schema_version(), 13);
+        assert_eq!(MIGRATIONS.len(), 13);
         for (index, migration) in MIGRATIONS.iter().enumerate() {
             assert_eq!(migration.version, index as i32 + 1);
         }

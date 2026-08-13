@@ -15,13 +15,17 @@ base64 = "0.22"
 clap.workspace = true
 ojos-orchestrator-installer.workspace = true
 fs2 = "0.4"
+getrandom = "0.3"
 hmac = "0.12"
 orchestrator-control-plane.workspace = true
 orchestrator-runtime.workspace = true
+postgres = "0.19"
+postgres-protocol = "0.6"
 redis = { version = "0.32", features = ["tokio-comp", "tokio-rustls-comp"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+rustls-tokio-postgres = { version = "0.5", default-features = false, features = ["channel-binding", "platform-verifier", "ring", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
@@ -37,3 +41,6 @@ tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

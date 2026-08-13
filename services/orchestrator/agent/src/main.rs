@@ -1,12 +1,19 @@
 use clap::{Args, Parser, Subcommand};
-use orchestrator_agent::{
-    AgentLedger, AgentWorker, BuiltInReleasePipelineProvider, EnrollmentAttempt, EnrollmentClient,
-    HttpMtlsTransport, IdentityError, IdentityStore, JobExecutor, LocalRuntimeContextProvider,
-    NodeRuntimeFactsPublisher, RuntimeContextProvider, StoredNodeIdentity, WorkerConfig,
-    WorkloadCredentialSupervisor, event_connection_urls_from_env, generate_certificate_request,
-    recover_pending_runtime_contexts, validate_enrollment_bundle_fresh,
+use orchestrator_agent::resource_claim::{
+    FileResourceSecretStore, LivePostgreSqlExecutor, LocalResourceClaimManager,
+    PostgreSqlAdminConfigV1, PostgreSqlProviderDescriptorV1, PostgreSqlTlsModeV1,
+    PostgreSqlTlsTrustV1, SecretMaterial,
 };
-use orchestrator_runtime::DockerEngineRuntime;
+use orchestrator_agent::{
+    AgentLedger, AgentWorker, EnrollmentAttempt, EnrollmentClient, HttpMtlsTransport,
+    IdentityError, IdentityStore, JobExecutor, LocalRuntimeContextProvider,
+    NodeRuntimeFactsPublisher, PipelineBootstrapConfig, RuntimeContextProvider, StoredNodeIdentity,
+    WorkerConfig, WorkloadCredentialSupervisor, generate_certificate_request,
+    reconcile_migration_containers, recover_pending_runtime_contexts,
+    validate_agent_workload_file_ownership, validate_enrollment_bundle_fresh,
+};
+use orchestrator_runtime::{DockerEngineRuntime, WorkloadFileOwnership};
+use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -86,12 +93,30 @@ struct RunArgs {
     #[arg(long = "runtime-policy")]
     runtime_policy: Option<PathBuf>,
 
+    /// Dedicated workload-visible export root. Docker-in-Docker deployments
+    /// mount only this root into the daemon namespace, read-only. It must be
+    /// disjoint from identity, ledger, registry and provider state.
+    #[arg(long = "workload-export-dir")]
+    workload_export_dir: PathBuf,
+
     /// Enable the removed Node-side Auth/Gateway/API Registry providers for
     /// the old local Compose workflow. This is rejected unless
     /// OJOS_ENVIRONMENT=development; never use it on an enrolled production
     /// Node.
     #[arg(long = "legacy-release-providers", default_value_t = false)]
     legacy_release_providers: bool,
+
+    /// Strict JSON file containing the Agent-local PostgreSQL provider
+    /// descriptor and administrator connection URL. The administrator secret
+    /// is never accepted through a Job or control-plane API.
+    #[arg(long = "postgres-resource-provider")]
+    postgres_resource_provider: Option<PathBuf>,
+
+    /// Durable Agent-internal root for ResourceClaim provider credentials.
+    /// Workload DSN outputs are written below --workload-export-dir instead.
+    /// Required together with --postgres-resource-provider.
+    #[arg(long = "resource-secret-dir")]
+    resource_secret_dir: Option<PathBuf>,
 
     #[arg(long, default_value_t = 10_000)]
     heartbeat_ms: u64,
@@ -105,6 +130,147 @@ struct RunArgs {
     /// Delay before retrying a failed certificate renewal.
     #[arg(long, default_value_t = 60_000)]
     renewal_retry_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PostgreSqlResourceProviderDocument {
+    schema_version: u32,
+    provider_id: String,
+    host: String,
+    port: u16,
+    #[serde(default = "default_postgres_tls_mode")]
+    tls_mode: String,
+    admin_url_file: PathBuf,
+    #[serde(default)]
+    ca_file: Option<PathBuf>,
+}
+
+fn default_postgres_tls_mode() -> String {
+    "verify-full".to_string()
+}
+
+impl PostgreSqlResourceProviderDocument {
+    fn descriptor(&self) -> Result<PostgreSqlProviderDescriptorV1, Box<dyn std::error::Error>> {
+        if self.schema_version != 1 {
+            return Err("PostgreSQL resource provider schema_version must be 1".into());
+        }
+        let tls_mode = match self.tls_mode.as_str() {
+            "require" => PostgreSqlTlsModeV1::Require,
+            "verify-ca" => PostgreSqlTlsModeV1::VerifyCa,
+            "verify-full" => PostgreSqlTlsModeV1::VerifyFull,
+            _ => return Err(
+                "PostgreSQL resource provider tls_mode must be require, verify-ca, or verify-full"
+                    .into(),
+            ),
+        };
+        let descriptor = PostgreSqlProviderDescriptorV1 {
+            provider_id: self.provider_id.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            tls_mode,
+        };
+        descriptor.validate()?;
+        if matches!(
+            tls_mode,
+            PostgreSqlTlsModeV1::VerifyCa | PostgreSqlTlsModeV1::VerifyFull
+        ) && self.ca_file.is_none()
+        {
+            return Err("verify-ca/verify-full PostgreSQL provider requires ca_file".into());
+        }
+        Ok(descriptor)
+    }
+
+    fn tls_trust(&self) -> PostgreSqlTlsTrustV1 {
+        self.ca_file
+            .as_ref()
+            .map(|path| PostgreSqlTlsTrustV1::CaCertificate(path.clone()))
+            .unwrap_or(PostgreSqlTlsTrustV1::Platform)
+    }
+}
+
+fn read_postgres_resource_provider(
+    path: &std::path::Path,
+) -> Result<PostgreSqlResourceProviderDocument, Box<dyn std::error::Error>> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 64 * 1024 {
+        return Err("PostgreSQL resource provider configuration must be a non-empty regular file no larger than 64 KiB".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(
+                "PostgreSQL resource provider configuration must not be group/world accessible"
+                    .into(),
+            );
+        }
+    }
+    let document: PostgreSqlResourceProviderDocument = serde_json::from_slice(&fs::read(path)?)?;
+    let admin_metadata = fs::metadata(&document.admin_url_file)?;
+    if !admin_metadata.is_file() || admin_metadata.len() == 0 || admin_metadata.len() > 64 * 1024 {
+        return Err("PostgreSQL administrator URL file must be a non-empty regular file no larger than 64 KiB".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if admin_metadata.permissions().mode() & 0o077 != 0 {
+            return Err(
+                "PostgreSQL administrator URL file must not be group/world accessible".into(),
+            );
+        }
+    }
+    document.descriptor()?;
+    Ok(document)
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+
+    #[test]
+    fn postgres_resource_provider_requires_schema_one_and_private_indirect_secret() {
+        let directory = tempfile::tempdir().unwrap();
+        let admin = directory.path().join("admin.url");
+        let ca = directory.path().join("ca.crt");
+        let descriptor = directory.path().join("provider.json");
+        fs::write(
+            &admin,
+            "postgresql://admin:secret@postgres.internal:5432/postgres?sslmode=require",
+        )
+        .unwrap();
+        fs::write(&ca, "test-ca").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&admin, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let document = serde_json::json!({
+            "schema_version": 1,
+            "provider_id": "postgresql-capacity",
+            "host": "postgres.internal",
+            "port": 5432,
+            "tls_mode": "verify-full",
+            "admin_url_file": admin,
+            "ca_file": ca,
+        });
+        fs::write(&descriptor, serde_json::to_vec(&document).unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&descriptor, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let parsed = read_postgres_resource_provider(&descriptor).unwrap();
+        assert_eq!(
+            parsed.descriptor().unwrap().provider_id,
+            "postgresql-capacity"
+        );
+
+        let mut invalid = document;
+        invalid["schema_version"] = serde_json::json!(2);
+        fs::write(&descriptor, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(read_postgres_resource_provider(&descriptor).is_err());
+    }
 }
 
 #[tokio::main]
@@ -297,11 +463,41 @@ async fn run(arguments: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     if arguments.renewal_retry_ms == 0 {
         return Err("--renewal-retry-ms must be positive".into());
     }
+    #[cfg(unix)]
+    let workload_file_ownership = WorkloadFileOwnership::standard_v3();
+    // Windows relies on the Agent state root's service-account ACL. A
+    // numeric Unix owner cannot be represented, so retain exact inherited
+    // ACLs without widening access and never pretend UID enforcement ran.
+    #[cfg(not(unix))]
+    let workload_file_ownership = WorkloadFileOwnership::current_process();
+    validate_agent_workload_file_ownership(workload_file_ownership)?;
+    let pipeline_bootstrap = if arguments.legacy_release_providers {
+        PipelineBootstrapConfig::from_legacy_development_env()?
+    } else {
+        PipelineBootstrapConfig::from_remote_agent_env()?
+    };
     let identity_store = IdentityStore::new(&arguments.identity_dir);
     let ledger_path = arguments
         .ledger
         .clone()
         .unwrap_or_else(|| arguments.identity_dir.join("execution-ledger.sqlite3"));
+    let mut internal_state_roots = vec![
+        arguments.identity_dir.clone(),
+        parent_directory(&ledger_path, "ledger")?,
+    ];
+    if let Some(path) = arguments.registry_credentials.as_deref() {
+        internal_state_roots.push(parent_directory(path, "registry credentials")?);
+    }
+    if let Some(path) = arguments.runtime_policy.as_deref() {
+        internal_state_roots.push(parent_directory(path, "runtime policy")?);
+    }
+    if let Some(path) = arguments.postgres_resource_provider.as_deref() {
+        internal_state_roots.push(parent_directory(path, "PostgreSQL provider descriptor")?);
+    }
+    if let Some(path) = arguments.resource_secret_dir.as_deref() {
+        internal_state_roots.push(path.to_path_buf());
+    }
+    internal_state_roots.extend_from_slice(pipeline_bootstrap.internal_state_roots());
     let instance_id = arguments
         .instance_id
         .clone()
@@ -347,16 +543,36 @@ async fn run(arguments: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             runtime
         };
         runtime.ping().await?;
+        let migration_inventory = runtime.migration_container_inventory(4_096).await?;
+        let migration_reconciliation =
+            reconcile_migration_containers(&mut ledger, &runtime, migration_inventory).await?;
+        for warning in &migration_reconciliation.warnings {
+            eprintln!("migration reconciliation: {warning}");
+        }
+        if !migration_reconciliation.safe_to_start_worker {
+            return Err(format!(
+                "migration reconciliation did not produce complete, safe facts (inspected={}, tombstoned={}, removed={}); refusing to claim jobs",
+                migration_reconciliation.inspected,
+                migration_reconciliation.tombstoned,
+                migration_reconciliation.removed,
+            )
+            .into());
+        }
         let runtime_facts = runtime.runtime_facts().await?;
         let local_runtime_provider = if let Some(path) = arguments.runtime_policy.as_deref() {
             LocalRuntimeContextProvider::from_json_file(path, runtime_facts)?
         } else {
             LocalRuntimeContextProvider::standard_only(
                 runtime_facts,
-                ledger_path.with_file_name("runtime-contexts"),
+                arguments.workload_export_dir.join("runtime-contexts"),
             )
         }
-        .with_event_connections(event_connection_urls_from_env()?);
+        .with_workload_file_ownership(workload_file_ownership)?
+        .with_workload_export_boundary(
+            arguments.workload_export_dir.clone(),
+            internal_state_roots.clone(),
+        )?
+        .with_event_connections(pipeline_bootstrap.event_connection_urls().clone());
         let runtime_provider: std::sync::Arc<dyn RuntimeContextProvider> =
             std::sync::Arc::new(local_runtime_provider);
         recover_pending_runtime_contexts(&mut ledger, runtime_provider.as_ref(), &runtime).await?;
@@ -427,22 +643,72 @@ async fn run(arguments: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         });
         let provider_state_database = ledger_path.with_file_name("provider-state.sqlite3");
-        let pipeline_provider = if arguments.legacy_release_providers {
-            BuiltInReleasePipelineProvider::from_legacy_development_env_with_state_database(
-                provider_state_database,
-            )?
-        } else {
-            BuiltInReleasePipelineProvider::from_remote_agent_env_with_state_database(
-                provider_state_database,
-            )?
-        };
-        let executor = JobExecutor::new(runtime)
+        let pipeline_provider =
+            pipeline_bootstrap.build_release_provider(provider_state_database)?;
+        let mut executor = JobExecutor::new(runtime)
             .with_pipeline_provider(std::sync::Arc::new(pipeline_provider))
             .with_artifact_fetcher(std::sync::Arc::new(artifact_fetcher))
             .with_runtime_context(
                 std::sync::Arc::clone(&runtime_provider),
                 std::sync::Arc::clone(&credential_supervisor),
             );
+        if arguments.postgres_resource_provider.is_some() != arguments.resource_secret_dir.is_some()
+        {
+            return Err("--postgres-resource-provider and --resource-secret-dir must be configured together".into());
+        }
+        if let (Some(provider_file), Some(secret_root)) = (
+            arguments.postgres_resource_provider.as_ref(),
+            arguments.resource_secret_dir.as_ref(),
+        ) {
+            let provider_document = read_postgres_resource_provider(provider_file)?;
+            internal_state_roots.push(parent_directory(
+                &provider_document.admin_url_file,
+                "PostgreSQL administrator URL",
+            )?);
+            // Re-run the full boundary validation now that the strict provider
+            // document has revealed its indirect administrator secret path.
+            orchestrator_agent::validate_isolated_workload_roots(
+                &arguments.workload_export_dir,
+                &internal_state_roots,
+            )?;
+            let provider = provider_document.descriptor()?;
+            let mut admin_url_bytes = fs::read(&provider_document.admin_url_file)?;
+            while admin_url_bytes
+                .last()
+                .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+            {
+                admin_url_bytes.pop();
+            }
+            if admin_url_bytes
+                .iter()
+                .any(|byte| *byte == b'\n' || *byte == b'\r' || *byte == 0)
+            {
+                return Err(
+                    "PostgreSQL administrator URL file must contain exactly one bounded text value"
+                        .into(),
+                );
+            }
+            let admin_url = SecretMaterial::new(admin_url_bytes)?;
+            let receipts = ledger_path.with_file_name("resource-postgres-receipts.sqlite3");
+            let live = LivePostgreSqlExecutor::new(PostgreSqlAdminConfigV1 {
+                provider: provider.clone(),
+                admin_url,
+                tls_trust: provider_document.tls_trust(),
+                state_database: receipts,
+            })?;
+            let secret_store = FileResourceSecretStore::new_isolated_with_ownership(
+                secret_root,
+                arguments.workload_export_dir.join("resource-outputs"),
+                workload_file_ownership,
+            )?;
+            let manager = LocalResourceClaimManager::new(
+                provider,
+                live,
+                secret_store,
+                ledger_path.with_file_name("resource-claims.sqlite3"),
+            )?;
+            executor = executor.with_resource_claims(std::sync::Arc::new(manager));
+        }
         let config = WorkerConfig {
             node_id: identity.node_id.clone(),
             instance_id: instance_id.clone(),
@@ -522,6 +788,16 @@ async fn run(arguments: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+}
+
+fn parent_directory(
+    path: &std::path::Path,
+    name: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{name} path must have an absolute parent directory").into())
 }
 
 fn unix_ms() -> i64 {

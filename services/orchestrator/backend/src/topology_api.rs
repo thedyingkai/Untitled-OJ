@@ -651,6 +651,10 @@ fn enqueue_apply(
         })?;
     let affected_consumers = previous_bindings
         .iter()
+        .filter(|binding| {
+            binding.desired_state == "ACTIVE"
+                && binding.state == orchestrator_storage::ApiBindingState::Active
+        })
         .chain(staged_bindings.iter())
         .map(|binding| binding.consumer_deployment_id.clone())
         .filter(|deployment_id| !deployment_id.is_empty())
@@ -1159,9 +1163,12 @@ fn not_found(kind: &str, id: &str) -> TopologyApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::topology_provider::{HttpManagementProviderConfig, TopologyProviderConfig};
+    use orchestrator_control_plane::OperationRepository;
     use orchestrator_legacy::{
-        OrchestratorStore, ServiceRelease, ServiceReleaseManifest, TopologyEndpointSpec,
-        TopologyLinkSpec, service_manifest_from_release,
+        ApiBinding, ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState,
+        ApiBindingState, OrchestratorStore, ServiceRelease, ServiceReleaseManifest,
+        TopologyEndpointSpec, TopologyLinkSpec, service_manifest_from_release,
     };
     use orchestrator_runtime::{RuntimeDesiredState, RuntimeInstance, RuntimeObservedState};
     use orchestrator_storage::{
@@ -1452,5 +1459,136 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn public_apply_ignores_revoked_consumer_without_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut sqlite =
+            SqliteOrchestratorStore::open(directory.path().join("orchestrator.db")).unwrap();
+        register_release(&mut sqlite, &release_manifest("gateway", "1.0.0", false));
+        register_release(&mut sqlite, &release_manifest("worker", "1.0.0", false));
+        let durable = DurableStore::Sqlite(sqlite);
+        let first = durable
+            .create_initial_topology_revision(
+                topology_spec("revoked-history"),
+                "unix-ms:1".to_string(),
+                "admin".to_string(),
+                "initial".to_string(),
+            )
+            .unwrap();
+        durable
+            .begin_topology_apply(
+                "revoked-history",
+                first.revision_id(),
+                "seed-apply",
+                "unix-ms:1",
+            )
+            .unwrap();
+        durable
+            .finish_topology_apply(
+                "revoked-history",
+                first.revision_id(),
+                "seed-apply",
+                TopologyApplyOutcome::Succeeded,
+                "unix-ms:2",
+            )
+            .unwrap();
+        durable
+            .replace_topology_api_bindings(
+                "revoked-history",
+                &[ApiBinding {
+                    binding_id: "binding-revoked-history".to_string(),
+                    requirement_name: "historical.call".to_string(),
+                    api_id: "historical.call".to_string(),
+                    api_version: "1.0.0".to_string(),
+                    consumer_deployment_id: "deleted-consumer".to_string(),
+                    consumer_service_id: "worker".to_string(),
+                    consumer_node_id: "node-old".to_string(),
+                    consumer_endpoint: "127.0.0.1:9000:worker".to_string(),
+                    provider_deployment_id: "deleted-provider".to_string(),
+                    provider_service_id: "provider".to_string(),
+                    provider_node_id: "node-old".to_string(),
+                    provider_endpoint: "127.0.0.1:9001:provider".to_string(),
+                    provider_path: "/historical".to_string(),
+                    virtual_endpoint: "/internal/apis/historical.call".to_string(),
+                    protocol: "http".to_string(),
+                    methods: vec!["GET".to_string()],
+                    auth_mode: "workload".to_string(),
+                    provider_auth_mode: "workload".to_string(),
+                    permission: "historical.call".to_string(),
+                    timeout_ms: Some(5_000),
+                    topology_id: "revoked-history".to_string(),
+                    topology_revision_id: first.revision_id().to_string(),
+                    link_source_endpoint: "127.0.0.1:9000:worker".to_string(),
+                    link_target_endpoint: "127.0.0.1:9001:provider".to_string(),
+                    credential_ref: String::new(),
+                    credential_generation: 2,
+                    context_generation: 2,
+                    desired_state: ApiBindingDesiredState::Revoked,
+                    observed_state: ApiBindingObservedState::Revoked,
+                    health: ApiBindingHealth::Unknown,
+                    drift: Vec::new(),
+                    last_operation_id: "old-replacement".to_string(),
+                    state: ApiBindingState::Revoked,
+                    optional: false,
+                    reason: String::new(),
+                    created_at: "unix-ms:1".to_string(),
+                    updated_at: "unix-ms:2".to_string(),
+                }],
+            )
+            .unwrap();
+        let mut changed = topology_spec("revoked-history");
+        changed.endpoints[1].note = "new immutable draft".to_string();
+        changed.links.clear();
+        let second = durable
+            .create_next_topology_revision(
+                "revoked-history",
+                first.revision_id(),
+                changed,
+                "unix-ms:3".to_string(),
+                "admin".to_string(),
+                "draft".to_string(),
+            )
+            .unwrap();
+        let provider = TopologyProviderSaga::from_config(TopologyProviderConfig::new(
+            Some(HttpManagementProviderConfig::new("http://127.0.0.1:1").unwrap()),
+            Some(HttpManagementProviderConfig::new("http://127.0.0.1:2").unwrap()),
+        ))
+        .unwrap();
+        let response = route_with_store(
+            &durable,
+            Some(&provider),
+            &ApiRequest {
+                method: "POST".to_string(),
+                path: "/api/v1/topologies/revoked-history:apply".to_string(),
+                headers: [
+                    (
+                        "if-match".to_string(),
+                        format!("\"{}\"", second.revision_id()),
+                    ),
+                    (
+                        "idempotency-key".to_string(),
+                        "apply-after-replacement".to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                body: "{}".to_string(),
+            },
+            &["api", "v1", "topologies", "revoked-history:apply"],
+            "req-apply-revoked-history",
+        )
+        .unwrap();
+        assert_eq!(response.status, 202, "{}", response.body);
+        let operation_id = response.body["data"]["operation_id"].as_str().unwrap();
+        let operation = durable
+            .operation_store()
+            .get(operation_id)
+            .unwrap()
+            .unwrap();
+        assert!(operation.planned_jobs.iter().all(|job| {
+            job.kind != JobKind::BindingContextApply && !job.step_id.starts_with("binding-context-")
+        }));
     }
 }

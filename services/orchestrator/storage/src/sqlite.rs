@@ -350,6 +350,9 @@ CREATE UNIQUE INDEX idx_orchestrator_api_bindings_consumer_requirement
     ON orchestrator_api_bindings(consumer_deployment_id, requirement_name);
 "#;
 
+const CONTRIBUTION_CONTROLLER_SCHEMA: &str =
+    include_str!("../migrations/000013_contribution_controller.sqlite.sql");
+
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -411,6 +414,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "api-binding-consumer-requirement-identity",
         sql: API_BINDING_REQUIREMENT_SCHEMA,
     },
+    Migration {
+        version: 13,
+        name: "deployment-scoped-contribution-controller",
+        sql: CONTRIBUTION_CONTROLLER_SCHEMA,
+    },
 ];
 
 const REQUIRED_TABLES: &[&str] = &[
@@ -436,6 +444,11 @@ const REQUIRED_TABLES: &[&str] = &[
     "orchestrator_job_status_counts",
     "orchestrator_api_bindings",
     "orchestrator_node_runtime_facts",
+    "orchestrator_contribution_revisions",
+    "orchestrator_contribution_heads",
+    "orchestrator_contribution_activations",
+    "orchestrator_contribution_projection_receipts",
+    "orchestrator_permission_assignments_v1",
 ];
 
 const REQUIRED_INDEXES: &[&str] = &[
@@ -446,11 +459,21 @@ const REQUIRED_INDEXES: &[&str] = &[
     "idx_orchestrator_api_bindings_topology",
     "idx_orchestrator_node_runtime_facts_received",
     "idx_orchestrator_api_bindings_consumer_requirement",
+    "idx_orchestrator_contribution_revisions_scope",
+    "idx_orchestrator_contribution_revisions_deployment",
+    "idx_orchestrator_contribution_heads_revision",
+    "idx_orchestrator_contribution_activations_state",
+    "idx_orchestrator_contribution_receipts_state",
+    "idx_orchestrator_permission_assignments_scope",
 ];
 
 const REQUIRED_TRIGGERS: &[&str] = &[
     "orchestrator_audit_log_no_update",
     "orchestrator_audit_log_no_delete",
+    "orchestrator_contribution_revision_immutable",
+    "orchestrator_contribution_activation_identity_immutable",
+    "orchestrator_contribution_receipt_identity_immutable",
+    "orchestrator_permission_assignment_immutable",
 ];
 
 pub(crate) const SERVICES: &str = "services";
@@ -936,7 +959,7 @@ fn verify_schema_objects(connection: &Connection) -> StorageResult<()> {
     }
     for trigger in REQUIRED_TRIGGERS {
         let exists: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1 AND tbl_name = 'orchestrator_audit_log')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1)",
             [trigger],
             |row| row.get(0),
         )?;

@@ -67,7 +67,14 @@ pub enum JobKind {
     /// topology Binding generation changes. This is a remote Agent job, not a
     /// control-plane provider mutation.
     BindingContextApply,
+    /// Explicit, separately audited destruction of a RETAINED ResourceClaim.
+    /// A lost lease is never retried automatically because PostgreSQL may have
+    /// accepted only part of the destructive command sequence.
+    ResourcePurge,
     TopologyApply,
+    /// Internal, deterministic Contribution publication/observation step.
+    /// Every side effect is a durable CAS and can be reconciled on restart.
+    ContributionProjection,
     /// Control-plane health validation and projection for a non-managed endpoint.
     ExternalHealth,
     /// Internal control-plane job. It is never claimable by a remote Agent.
@@ -80,7 +87,10 @@ impl JobKind {
     /// Whether an unknown outcome after lease expiry can be repeated without
     /// risking a duplicate external side effect.
     pub fn is_retry_safe_after_lease_expiry(&self) -> bool {
-        matches!(self, Self::Health | Self::Inventory | Self::ExternalHealth)
+        matches!(
+            self,
+            Self::Health | Self::Inventory | Self::ExternalHealth | Self::ContributionProjection
+        )
     }
 }
 
@@ -1024,6 +1034,7 @@ mod tests {
             JobKind::Uninstall,
             JobKind::Rollback,
             JobKind::BindingContextApply,
+            JobKind::ResourcePurge,
             JobKind::TopologyApply,
             JobKind::NodeDrain,
             JobKind::NodeRemove,
@@ -1056,9 +1067,14 @@ mod tests {
 
     #[test]
     fn every_observation_kind_can_retry_an_expired_lease_within_budget() {
-        for (index, kind) in [JobKind::Health, JobKind::Inventory, JobKind::ExternalHealth]
-            .into_iter()
-            .enumerate()
+        for (index, kind) in [
+            JobKind::Health,
+            JobKind::Inventory,
+            JobKind::ExternalHealth,
+            JobKind::ContributionProjection,
+        ]
+        .into_iter()
+        .enumerate()
         {
             let mut store = MemoryJobStore::default();
             let mut job = new_job(&format!("observation-{index}"));
@@ -1071,6 +1087,21 @@ mod tests {
                 JobStatus::RetryWait
             );
         }
+    }
+
+    #[test]
+    fn resource_purge_unknown_lease_is_never_retried() {
+        let mut store = MemoryJobStore::default();
+        let mut job = new_job("resource-purge-unknown");
+        job.kind = JobKind::ResourcePurge;
+        job.max_attempts = 3;
+        store.enqueue(job, 0).unwrap();
+        claim(&mut store, "purge-lease", 0);
+
+        let recovered = store.recover_expired(30_000).unwrap();
+        assert_eq!(recovered[0].status, JobStatus::NeedsAttention);
+        assert_eq!(recovered[0].attempt, 1);
+        assert!(!JobKind::ResourcePurge.is_retry_safe_after_lease_expiry());
     }
 
     #[test]

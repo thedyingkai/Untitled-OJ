@@ -2815,7 +2815,35 @@ fn release_install_runtime_pipeline_installs_minimal_oj_stack_in_one_store() {
             .service_permission_records()
             .iter()
             .any(|permission| permission.service_name == "auth-service"
-                && permission.permission_key == "auth.admin")
+                && permission.permission_key == "auth.permission.check")
+    );
+    assert!(
+        !store.service_permission_records().iter().any(|permission| {
+            permission.service_name == "auth-service" && permission.permission_key == "auth.admin"
+        })
+    );
+    let auth_contract: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo_root().join("services/auth-service/gen/service.contract.json"))
+            .expect("read generated Auth v3 contract"),
+    )
+    .expect("parse generated Auth v3 contract");
+    let auth_owned_permissions = auth_contract
+        .get("permissions")
+        .and_then(serde_json::Value::as_array)
+        .expect("Auth v3 owned permissions");
+    assert!(auth_owned_permissions.iter().any(|permission| {
+        permission.get("key").and_then(serde_json::Value::as_str) == Some("auth.permission.check")
+    }));
+    assert!(!auth_owned_permissions.iter().any(|permission| {
+        permission.get("key").and_then(serde_json::Value::as_str) == Some("system.admin")
+    }));
+    assert_eq!(
+        auth_contract
+            .get("permissionReferences")
+            .and_then(serde_json::Value::as_array)
+            .expect("Auth v3 external permission references"),
+        &vec![serde_json::Value::String("system.admin".to_string())],
+        "system.admin must remain an external reference, not an Auth-owned permission"
     );
     assert!(
         store
@@ -8073,6 +8101,7 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
         "deploy/ops/alert-firing-drill.sh",
         "deploy/ops/basic-load-soak.sh",
         "deploy/ops/ci-policy.sh",
+        "deploy/ops/contest-service-real-vertical-e2e.sh",
         "deploy/capacity/fixture/http-handler.sh",
         "deploy/capacity/fixture/run.sh",
         "deploy/ops/fixtures/orchestrator-docker-agent-e2e/run.sh",
@@ -8089,6 +8118,7 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
         "deploy/ops/service-credential-drill.sh",
         "deploy/ops/staging-drill.sh",
         "deploy/ops/tests/orchestrator-backup-restore-drill.sh",
+        "deploy/ops/tests/full-stack-backup-restore-drill.sh",
         "deploy/ops/trace-e2e-drill.sh",
         "deploy/release/assert-orchestrator-v1-artifacts.sh",
         "deploy/release/pack-orchestrator-v1.sh",
@@ -8110,6 +8140,7 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
                 && !path.contains("/target/")
                 && !path.contains("/node_modules/")
                 && !allowed_ops_scripts.contains(&path.as_str())
+                && !is_service_contract_fixture_script(&root, path)
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -8117,6 +8148,55 @@ fn retired_entry_directories_and_empty_placeholders_are_absent() {
         Vec::<String>::new(),
         "unexpected script files should not be retained as product or acceptance surface"
     );
+}
+
+fn is_service_contract_fixture_script(root: &Path, path: &str) -> bool {
+    let Some(relative) = path.strip_prefix("services/") else {
+        return false;
+    };
+    let mut parts = relative.split('/');
+    let (Some(service_id), Some("scripts"), Some(script_name), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    !service_id.is_empty()
+        && matches!(
+            script_name,
+            "publish-fixture.test.ps1"
+                | "resolved-artifacts-fixture.ps1"
+                | "resolved-artifacts-fixture.test.ps1"
+        )
+        && root
+            .join("services")
+            .join(service_id)
+            .join("ojos.service.yaml")
+            .is_file()
+}
+
+#[test]
+fn service_contract_fixture_script_allowlist_is_exact_and_service_scoped() {
+    let root = repo_root();
+    assert!(is_service_contract_fixture_script(
+        &root,
+        "services/auth-service/scripts/publish-fixture.test.ps1"
+    ));
+    assert!(is_service_contract_fixture_script(
+        &root,
+        "services/contest-service/scripts/resolved-artifacts-fixture.ps1"
+    ));
+    assert!(!is_service_contract_fixture_script(
+        &root,
+        "services/auth-service/scripts/arbitrary.ps1"
+    ));
+    assert!(!is_service_contract_fixture_script(
+        &root,
+        "services/not-a-registered-service/scripts/publish-fixture.test.ps1"
+    ));
+    assert!(!is_service_contract_fixture_script(
+        &root,
+        "services/auth-service/scripts/nested/publish-fixture.test.ps1"
+    ));
 }
 
 #[test]
@@ -11194,19 +11274,23 @@ fn compose_separates_orchestrator_and_service_databases() {
         "compose must not use one centralized OJ database or migration job"
     );
 
-    for (database_service, database_name, password_env) in [
-        ("auth-db", "ojos_auth", "AUTH_POSTGRES_PASSWORD"),
-        ("problem-db", "ojos_problem", "PROBLEM_POSTGRES_PASSWORD"),
-        ("judge-db", "ojos_judge", "JUDGE_POSTGRES_PASSWORD"),
-        ("user-db", "ojos_user", "USER_POSTGRES_PASSWORD"),
+    for (database_service, database_env, password_env) in [
+        ("auth-db", "AUTH_POSTGRES_DB", "AUTH_POSTGRES_PASSWORD"),
+        (
+            "problem-db",
+            "PROBLEM_POSTGRES_DB",
+            "PROBLEM_POSTGRES_PASSWORD",
+        ),
+        ("judge-db", "JUDGE_POSTGRES_DB", "JUDGE_POSTGRES_PASSWORD"),
+        ("user-db", "USER_POSTGRES_DB", "USER_POSTGRES_PASSWORD"),
     ] {
         let service = services
             .get(serde_yaml::Value::String(database_service.to_string()))
             .unwrap_or_else(|| panic!("compose missing service {database_service}"));
         let text = yaml_text(service);
         assert!(
-            text.contains("POSTGRES_DB: ${") && text.contains(database_name),
-            "{database_service} must initialize its own service database {database_name}"
+            text.contains("POSTGRES_DB: ${") && text.contains(database_env),
+            "{database_service} must initialize its service-owned database through {database_env}"
         );
         assert!(
             text.contains(password_env),

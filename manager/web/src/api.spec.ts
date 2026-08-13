@@ -51,8 +51,11 @@ describe("bounded orchestrator API requests", () => {
     vi.useFakeTimers();
     vi.stubGlobal("fetch", vi.fn(abortablePendingFetch));
 
-    const pending = request("GET", "/api/v1/healthz/ready", undefined, { timeoutMs: 50 });
-    const rejected = expect(pending).rejects.toBeInstanceOf(RequestTimeoutError);
+    const pending = request("GET", "/api/v1/healthz/ready", undefined, {
+      timeoutMs: 50,
+    });
+    const rejected =
+      expect(pending).rejects.toBeInstanceOf(RequestTimeoutError);
     await vi.advanceTimersByTimeAsync(51);
     await rejected;
   });
@@ -103,10 +106,16 @@ describe("bounded orchestrator API requests", () => {
   it("adds memory CSRF and idempotency headers to mutations", async () => {
     window.__OJOS_CSRF_TOKEN__ = "csrf-memory-only";
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ data: {}, meta: { request_id: "req-1", api_version: "v1" } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
+      new Response(
+        JSON.stringify({
+          data: {},
+          meta: { request_id: "req-1", api_version: "v1" },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -118,10 +127,46 @@ describe("bounded orchestrator API requests", () => {
     expect(headers["Idempotency-Key"]).toBeTruthy();
   });
 
+  it("sends the exact credential-free ResourceClaim purge contract", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(v1Response({ operation_id: "op-purge" }, "req-purge", 202));
+    vi.stubGlobal("fetch", fetchMock);
+    const digest = `sha256:${"a".repeat(64)}`;
+    const confirmation = `PURGE claim-1 ${digest} GENERATION 3`;
+
+    await api.resourcePurge("claim-1", {
+      node_id: "node-1",
+      claim_digest: digest,
+      generation: 3,
+      confirmation,
+      reason: "retention period expired",
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/v1/resources/claim-1:purge",
+    );
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(init.headers).toMatchObject({
+      "Idempotency-Key": expect.any(String),
+    });
+    expect(JSON.parse(String(init.body))).toEqual({
+      node_id: "node-1",
+      claim_digest: digest,
+      generation: 3,
+      confirmation,
+      reason: "retention period expired",
+    });
+    expect(String(init.body)).not.toMatch(/password|secret|credential|actor/i);
+  });
+
   it("forwards a write-only Catalog bootstrap public key", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(v1Response({ source: { id: "bootstrap" } }, "req-catalog", 201));
+      .mockResolvedValue(
+        v1Response({ source: { id: "bootstrap" } }, "req-catalog", 201),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     await api.registerCatalog({
@@ -320,12 +365,12 @@ describe("bounded orchestrator API requests", () => {
           side_effects: {},
         }),
       )
-      .mockResolvedValueOnce(v1Response({ operation_id: "op-install" }, "req-install", 202));
+      .mockResolvedValueOnce(
+        v1Response({ operation_id: "op-install" }, "req-install", 202),
+      );
     vi.stubGlobal("fetch", fetchMock);
     const selection = {
-      bindings: [
-        { name: "judge_control", provider_deployment_id: "judge-a" },
-      ],
+      bindings: [{ name: "judge_control", provider_deployment_id: "judge-a" }],
       topology_id: "primary",
       topology_etag: '"revision-7"',
     };
@@ -355,8 +400,11 @@ describe("bounded orchestrator API requests", () => {
         ...selection,
         ...pipeline,
       });
-      expect(((call[1] as RequestInit).headers as Record<string, string>)["Idempotency-Key"])
-        .toBeTruthy();
+      expect(
+        ((call[1] as RequestInit).headers as Record<string, string>)[
+          "Idempotency-Key"
+        ],
+      ).toBeTruthy();
     }
   });
 
@@ -364,12 +412,16 @@ describe("bounded orchestrator API requests", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        v1Response({
-          code_id: "enroll-1",
-          node_id: "edge-1",
-          enrollment_code: "ojos_enroll_secret",
-          expires_at_ms: 1234,
-        }, "req-enroll", 201),
+        v1Response(
+          {
+            code_id: "enroll-1",
+            node_id: "edge-1",
+            enrollment_code: "ojos_enroll_secret",
+            expires_at_ms: 1234,
+          },
+          "req-enroll",
+          201,
+        ),
       )
       .mockResolvedValueOnce(
         v1Response({
@@ -388,7 +440,9 @@ describe("bounded orchestrator API requests", () => {
     await api.revokeNodeCertificates("edge-1", "node retired");
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/nodes/enrollment-codes");
-    expect(JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)).toMatchObject({
+    expect(
+      JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string),
+    ).toMatchObject({
       node_id: "edge-1",
       host_ip: "10.0.0.21",
     });
@@ -402,13 +456,15 @@ describe("bounded orchestrator API requests", () => {
   });
 
   it("installs a catalog release as Managed with start=true by default", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      v1Response(
-        { operation_id: "op-install", deployment_id: "deployment-1" },
-        "req-install",
-        202,
-      ),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        v1Response(
+          { operation_id: "op-install", deployment_id: "deployment-1" },
+          "req-install",
+          202,
+        ),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await api.storeInstall({
@@ -423,7 +479,9 @@ describe("bounded orchestrator API requests", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/store/releases:install");
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(init.method).toBe("POST");
-    expect(init.headers).toMatchObject({ "Idempotency-Key": expect.any(String) });
+    expect(init.headers).toMatchObject({
+      "Idempotency-Key": expect.any(String),
+    });
     expect(JSON.parse(String(init.body))).toEqual({
       mode: "MANAGED",
       start: true,
@@ -468,11 +526,17 @@ describe("bounded orchestrator API requests", () => {
 
     expect(result.valid).toBe(true);
     expect(result.side_effects.runtime_calls).toBe(0);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/store/releases:validate");
-    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject({
-      "Idempotency-Key": expect.any(String),
-    });
-    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toMatchObject({
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/v1/store/releases:validate",
+    );
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject(
+      {
+        "Idempotency-Key": expect.any(String),
+      },
+    );
+    expect(
+      JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)),
+    ).toMatchObject({
       start: true,
       migration_policy: "APPLY",
       config: {},
@@ -480,12 +544,122 @@ describe("bounded orchestrator API requests", () => {
     });
   });
 
+  it("normalizes and echoes per-node Composition inputs with immutable digests", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        v1Response({
+          valid: false,
+          target_platform: { os: "linux", arch: "x86_64" },
+          composition_plan: {
+            schemaVersion: "ojos.dev/composition-plan/v1",
+            rootServiceId: "contest-service",
+            planDigest: "sha256:plan",
+            releaseGraphDigest: "sha256:graph",
+            nodes: [
+              {
+                nodeId: "claim-node",
+                serviceId: "contest-service",
+                kind: "resource-claim",
+                name: "database",
+                resourceType: "postgresql.database",
+                lifecycle: "RETAIN",
+                provider: {
+                  capability: "postgresql.database",
+                  versionRequirement: "^1.0.0",
+                  policy: "explicit",
+                  candidates: [
+                    {
+                      providerId: "postgres-local",
+                      version: "1.0.0",
+                      kind: "MANAGED",
+                    },
+                    {
+                      providerId: "postgres-external",
+                      version: "1.0.0",
+                      kind: "EXTERNAL",
+                      serviceId: "postgres-service",
+                    },
+                  ],
+                },
+                unresolvedInputs: [
+                  {
+                    key: "providerId",
+                    valueType: "provider-id",
+                    required: true,
+                    sensitive: false,
+                    allowedValues: ["postgres-local"],
+                  },
+                ],
+              },
+            ],
+            edges: [],
+          },
+          composition_inputs_valid: false,
+          composition_input_error: "providerId is required",
+          bindings: [],
+          side_effects: {},
+        }),
+      )
+      .mockResolvedValueOnce(
+        v1Response({ operation_id: "op-composed" }, "req", 202),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const validation = await api.storeValidate({
+      service_id: "contest-service",
+      target_node_id: "node-1",
+      inputs: { "claim-node": { providerId: "postgres-local" } },
+    });
+    expect(validation.composition_plan).toMatchObject({
+      planDigest: "sha256:plan",
+      releaseGraphDigest: "sha256:graph",
+      nodes: [
+        {
+          nodeId: "claim-node",
+          resourceType: "postgresql.database",
+          provider: {
+            candidates: [
+              { providerId: "postgres-local", kind: "MANAGED" },
+              {
+                providerId: "postgres-external",
+                kind: "EXTERNAL",
+                serviceId: "postgres-service",
+              },
+            ],
+          },
+          unresolvedInputs: [{ allowedValues: ["postgres-local"] }],
+        },
+      ],
+    });
+    expect(validation.composition_input_error).toBe("providerId is required");
+
+    await api.storeInstall({
+      service_id: "contest-service",
+      target_node_id: "node-1",
+      plan_digest: validation.composition_plan!.planDigest,
+      release_graph_digest: validation.composition_plan!.releaseGraphDigest,
+      inputs: { "claim-node": { providerId: "postgres-local" } },
+    });
+    expect(
+      JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body)),
+    ).toMatchObject({
+      plan_digest: "sha256:plan",
+      release_graph_digest: "sha256:graph",
+      inputs: { "claim-node": { providerId: "postgres-local" } },
+    });
+  });
+
   it("imports and deletes Release metadata separately from replacement sagas", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(v1Response({ imported: [] }, "req-import", 201))
-      .mockResolvedValueOnce(v1Response({ operation_id: "op-upgrade" }, "req-upgrade", 202))
-      .mockResolvedValueOnce(v1Response({ operation_id: "op-rollback" }, "req-rollback", 202))
+      .mockResolvedValueOnce(
+        v1Response({ operation_id: "op-upgrade" }, "req-upgrade", 202),
+      )
+      .mockResolvedValueOnce(
+        v1Response({ operation_id: "op-rollback" }, "req-rollback", 202),
+      )
       .mockResolvedValueOnce(v1Response({ deleted: true }, "req-delete", 200));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -498,9 +672,7 @@ describe("bounded orchestrator API requests", () => {
     });
     await api.storeUpgrade({
       deployment_id: "deployment-1",
-      bindings: [
-        { name: "storage_get", provider_deployment_id: "storage-a" },
-      ],
+      bindings: [{ name: "storage_get", provider_deployment_id: "storage-a" }],
     });
     await api.storeRollback({ deployment_id: "deployment-2" });
     await api.deleteRelease("judge-api", "1.2.3");
@@ -511,22 +683,26 @@ describe("bounded orchestrator API requests", () => {
       "/api/v1/store/releases:rollback",
       "/api/v1/store/releases:delete",
     ]);
-    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+    expect(
+      JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)),
+    ).toEqual({
       service_id: "judge-api",
       version: "1.2.3",
       catalog_source_id: "official",
       channel: "stable",
       target_node_id: "node-1",
     });
-    expect(JSON.parse(String((fetchMock.mock.calls[3]?.[1] as RequestInit).body))).toEqual({
+    expect(
+      JSON.parse(String((fetchMock.mock.calls[3]?.[1] as RequestInit).body)),
+    ).toEqual({
       service_id: "judge-api",
       version: "1.2.3",
     });
-    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({
+    expect(
+      JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body)),
+    ).toEqual({
       deployment_id: "deployment-1",
-      bindings: [
-        { name: "storage_get", provider_deployment_id: "storage-a" },
-      ],
+      bindings: [{ name: "storage_get", provider_deployment_id: "storage-a" }],
     });
     for (const call of fetchMock.mock.calls) {
       expect((call[1] as RequestInit).headers).toMatchObject({
@@ -538,15 +714,38 @@ describe("bounded orchestrator API requests", () => {
   it("uses immutable topology revisions, If-Match, diff, apply, rollback and status", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(v1Response({ revision: { revision_id: "rev-2" } }, "req-r2", 201))
       .mockResolvedValueOnce(
-        v1Response({ valid: true, content_sha256: "sha256:spec" }, "req-validate"),
+        v1Response({ revision: { revision_id: "rev-2" } }, "req-r2", 201),
       )
       .mockResolvedValueOnce(
-        v1Response({ diff: { from_revision_id: "rev-1", to_revision_id: "rev-2", changes: [] } }),
+        v1Response(
+          { valid: true, content_sha256: "sha256:spec" },
+          "req-validate",
+        ),
       )
-      .mockResolvedValueOnce(v1Response({ operation_id: "op-apply", revision_id: "rev-2" }, "req-apply", 202))
-      .mockResolvedValueOnce(v1Response({ operation_id: "op-rollback", revision_id: "rev-3" }, "req-rollback", 202))
+      .mockResolvedValueOnce(
+        v1Response({
+          diff: {
+            from_revision_id: "rev-1",
+            to_revision_id: "rev-2",
+            changes: [],
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        v1Response(
+          { operation_id: "op-apply", revision_id: "rev-2" },
+          "req-apply",
+          202,
+        ),
+      )
+      .mockResolvedValueOnce(
+        v1Response(
+          { operation_id: "op-rollback", revision_id: "rev-3" },
+          "req-rollback",
+          202,
+        ),
+      )
       .mockResolvedValueOnce(
         v1Response({
           status: {
@@ -614,7 +813,9 @@ describe("bounded orchestrator API requests", () => {
     expect(revisionHeaders["If-Match"]).toBe('"rev-1"');
     expect(applyHeaders["If-Match"]).toBe('"rev-2"');
     expect(rollbackHeaders["If-Match"]).toBe('"rev-2"');
-    expect(JSON.parse(String((fetchMock.mock.calls[4]?.[1] as RequestInit).body))).toEqual({
+    expect(
+      JSON.parse(String((fetchMock.mock.calls[4]?.[1] as RequestInit).body)),
+    ).toEqual({
       revision_id: "rev-1",
     });
   });
@@ -683,8 +884,12 @@ describe("bounded orchestrator API requests", () => {
           ],
         }),
       )
-      .mockResolvedValueOnce(v1Response({ operation_id: "op-drain" }, "req-drain", 202))
-      .mockResolvedValueOnce(v1Response({ operation_id: "op-remove" }, "req-remove", 202));
+      .mockResolvedValueOnce(
+        v1Response({ operation_id: "op-drain" }, "req-drain", 202),
+      )
+      .mockResolvedValueOnce(
+        v1Response({ operation_id: "op-remove" }, "req-remove", 202),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     expect((await api.nodes())[0]?.status).toBe("READY");
@@ -721,13 +926,21 @@ describe("bounded orchestrator API requests", () => {
     ]);
     const put = fetchMock.mock.calls[1]?.[1] as RequestInit;
     expect(put.method).toBe("PUT");
-    expect(put.headers).toMatchObject({ "Idempotency-Key": expect.any(String) });
+    expect(put.headers).toMatchObject({
+      "Idempotency-Key": expect.any(String),
+    });
   });
 
   it("creates an honest current-topology diagnostic without overloading operation_id", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      v1Response({ action_result: { status: "SUCCEEDED" } }, "req-diagnostic", 201),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        v1Response(
+          { action_result: { status: "SUCCEEDED" } },
+          "req-diagnostic",
+          201,
+        ),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     await api.createDiagnostic();

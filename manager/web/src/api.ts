@@ -102,7 +102,10 @@ export function isAuthRequiredError(err: unknown): err is AuthRequiredError {
 }
 
 function idempotencyKey(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
     return crypto.randomUUID();
   }
   idempotencySequence += 1;
@@ -113,7 +116,10 @@ function isMutation(method: string): boolean {
   return !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
 }
 
-function waitForPromise<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+function waitForPromise<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise<T>((resolve, reject) => {
     const abort = () => reject(signal.reason);
@@ -166,7 +172,9 @@ function normalizeDeployment(value: unknown): DeploymentRow {
     unknown
   >;
   const instance =
-    row.instance && typeof row.instance === "object" && !Array.isArray(row.instance)
+    row.instance &&
+    typeof row.instance === "object" &&
+    !Array.isArray(row.instance)
       ? (row.instance as Record<string, unknown>)
       : row;
   const observedState = textOr(
@@ -240,7 +248,10 @@ function objectOrEmpty(value: unknown): Record<string, unknown> {
 function normalizeApiProviderCandidate(value: unknown): ApiProviderCandidate {
   const row = objectOrEmpty(value);
   return {
-    deployment_id: textOr(row.deployment_id, textOr(row.provider_deployment_id)),
+    deployment_id: textOr(
+      row.deployment_id,
+      textOr(row.provider_deployment_id),
+    ),
     service_id: textOr(row.service_id, textOr(row.provider_service_id)),
     node_id: textOr(row.node_id, textOr(row.provider_node_id)),
     endpoint: textOr(row.endpoint, textOr(row.provider_endpoint)),
@@ -251,7 +262,10 @@ function normalizeApiProviderCandidate(value: unknown): ApiProviderCandidate {
     methods: stringsOrEmpty(row.methods),
     auth_mode: textOr(row.auth_mode),
     permission: textOr(row.permission),
-    healthy: booleanOr(row.healthy, textOr(row.health).toUpperCase() === "HEALTHY"),
+    healthy: booleanOr(
+      row.healthy,
+      textOr(row.health).toUpperCase() === "HEALTHY",
+    ),
     recommended: booleanOr(row.recommended),
     reason: textOr(row.reason),
   };
@@ -284,7 +298,10 @@ export function normalizeApiBinding(value: unknown): ApiBinding {
         ? row.timeout_ms
         : null,
     topology_id: textOr(row.topology_id),
-    topology_revision_id: textOr(row.topology_revision_id, textOr(row.revision_id)),
+    topology_revision_id: textOr(
+      row.topology_revision_id,
+      textOr(row.revision_id),
+    ),
     link_source_endpoint: textOr(row.link_source_endpoint),
     link_target_endpoint: textOr(row.link_target_endpoint),
     credential_generation: numberOr(row.credential_generation),
@@ -336,8 +353,9 @@ function normalizeBindingRequirement(
     row.recommended_provider_deployment_id,
     textOr(row.recommended_deployment_id),
   );
-  const markedRecommendation = candidates.find((candidate) => candidate.recommended)
-    ?.deployment_id;
+  const markedRecommendation = candidates.find(
+    (candidate) => candidate.recommended,
+  )?.deployment_id;
   const recommended =
     explicitRecommendation ||
     markedRecommendation ||
@@ -357,13 +375,16 @@ function normalizeBindingRequirement(
     recommended_provider_deployment_id: recommended,
     ambiguous: booleanOr(
       row.ambiguous,
-      candidates.filter((candidate) => candidate.healthy).length > 1 && !recommended,
+      candidates.filter((candidate) => candidate.healthy).length > 1 &&
+        !recommended,
     ),
     reason: textOr(row.reason),
   };
 }
 
-function normalizeRuntimeValidation(value: unknown): NodeRuntimeValidation | null {
+function normalizeRuntimeValidation(
+  value: unknown,
+): NodeRuntimeValidation | null {
   const row = objectOrEmpty(value);
   if (!Object.keys(row).length) return null;
   const facts = Object.keys(objectOrEmpty(row.facts)).length
@@ -383,7 +404,10 @@ function normalizeRuntimeValidation(value: unknown): NodeRuntimeValidation | nul
   return {
     node_id: textOr(row.node_id),
     report_id: textOr(facts.report_id, textOr(row.report_id)),
-    observed_at_ms: numberOr(row.observed_at_ms, numberOr(facts.observed_at_ms)),
+    observed_at_ms: numberOr(
+      row.observed_at_ms,
+      numberOr(facts.observed_at_ms),
+    ),
     received_at_ms: numberOr(row.received_at_ms),
     stale_after_ms: numberOr(row.stale_after_ms, 60_000),
     agent_version: textOr(facts.agent_version, textOr(row.agent_version)),
@@ -399,10 +423,7 @@ function normalizeRuntimeValidation(value: unknown): NodeRuntimeValidation | nul
       facts.inventory_complete,
       booleanOr(row.inventory_complete),
     ),
-    inventory_error: textOr(
-      facts.inventory_error,
-      textOr(row.inventory_error),
-    ),
+    inventory_error: textOr(facts.inventory_error, textOr(row.inventory_error)),
     selected_contract: Object.keys(selectedRow).length
       ? {
           id: textOr(selectedRow.id),
@@ -429,7 +450,9 @@ function normalizeRuntimeValidation(value: unknown): NodeRuntimeValidation | nul
   };
 }
 
-export function normalizeStoreValidation(value: unknown): StoreValidationResult {
+export function normalizeStoreValidation(
+  value: unknown,
+): StoreValidationResult {
   const row = objectOrEmpty(value);
   const bindings = arrayOrEmpty<unknown>(row.bindings).map(normalizeApiBinding);
   const plan = objectOrEmpty(row.plan);
@@ -445,7 +468,9 @@ export function normalizeStoreValidation(value: unknown): StoreValidationResult 
   for (const binding of bindings) {
     if (
       binding.requirement_name &&
-      !requirements.some((requirement) => requirement.name === binding.requirement_name)
+      !requirements.some(
+        (requirement) => requirement.name === binding.requirement_name,
+      )
     ) {
       requirements.push(
         normalizeBindingRequirement(
@@ -464,6 +489,109 @@ export function normalizeStoreValidation(value: unknown): StoreValidationResult 
   const rawDiff = row.topology_diff ?? row.diff;
   const sideEffects = objectOrEmpty(row.side_effects);
   const targetPlatform = objectOrEmpty(row.target_platform);
+  const composition = objectOrEmpty(row.composition_plan);
+  const compositionNodes = arrayOrEmpty<unknown>(composition.nodes).map(
+    (value) => {
+      const node = objectOrEmpty(value);
+      const provider = objectOrEmpty(node.provider);
+      const providerCandidates = arrayOrEmpty<unknown>(provider.candidates).map(
+        (value) => {
+          const candidate = objectOrEmpty(value);
+          return {
+            providerId: textOr(
+              candidate.providerId,
+              textOr(candidate.provider_id),
+            ),
+            version: textOr(candidate.version),
+            kind: textOr(candidate.kind).toUpperCase(),
+            ...(textOr(candidate.serviceId, textOr(candidate.service_id))
+              ? {
+                  serviceId: textOr(
+                    candidate.serviceId,
+                    textOr(candidate.service_id),
+                  ),
+                }
+              : {}),
+          };
+        },
+      );
+      return {
+        nodeId: textOr(node.nodeId, textOr(node.node_id)),
+        serviceId: textOr(node.serviceId, textOr(node.service_id)),
+        kind: textOr(node.kind),
+        ...(textOr(node.name) ? { name: textOr(node.name) } : {}),
+        ...(textOr(node.resourceType, textOr(node.resource_type))
+          ? {
+              resourceType: textOr(
+                node.resourceType,
+                textOr(node.resource_type),
+              ),
+            }
+          : {}),
+        ...(textOr(node.versionRequirement, textOr(node.version_requirement))
+          ? {
+              versionRequirement: textOr(
+                node.versionRequirement,
+                textOr(node.version_requirement),
+              ),
+            }
+          : {}),
+        ...(typeof node.optional === "boolean"
+          ? { optional: node.optional }
+          : {}),
+        ...(textOr(node.lifecycle)
+          ? { lifecycle: textOr(node.lifecycle) }
+          : {}),
+        ...(typeof node.required === "boolean"
+          ? { required: node.required }
+          : {}),
+        ...(Object.keys(objectOrEmpty(node.schema)).length
+          ? { schema: objectOrEmpty(node.schema) }
+          : {}),
+        ...(Object.keys(provider).length
+          ? {
+              provider: {
+                capability: textOr(provider.capability),
+                versionRequirement: textOr(
+                  provider.versionRequirement,
+                  textOr(provider.version_requirement),
+                ),
+                policy: textOr(provider.policy),
+                candidates: providerCandidates,
+                ...(textOr(
+                  provider.selectedProviderId,
+                  textOr(provider.selected_provider_id),
+                )
+                  ? {
+                      selectedProviderId: textOr(
+                        provider.selectedProviderId,
+                        textOr(provider.selected_provider_id),
+                      ),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+        unresolvedInputs: arrayOrEmpty<unknown>(
+          node.unresolvedInputs ?? node.unresolved_inputs,
+        ).map((value) => {
+          const declaration = objectOrEmpty(value);
+          return {
+            key: textOr(declaration.key),
+            valueType: textOr(
+              declaration.valueType,
+              textOr(declaration.value_type),
+            ),
+            required: booleanOr(declaration.required),
+            sensitive: booleanOr(declaration.sensitive),
+            allowedValues: stringsOrEmpty(
+              declaration.allowedValues ?? declaration.allowed_values,
+            ),
+          };
+        }),
+      };
+    },
+  );
   return {
     valid: booleanOr(row.valid),
     catalog_source_id: textOr(row.catalog_source_id),
@@ -477,7 +605,37 @@ export function normalizeStoreValidation(value: unknown): StoreValidationResult 
     metadata: arrayOrEmpty<Record<string, unknown>>(row.metadata),
     bindings,
     requirements,
-    topology_confirmation_required: booleanOr(row.topology_confirmation_required),
+    composition_plan: Object.keys(composition).length
+      ? {
+          schemaVersion: textOr(
+            composition.schemaVersion,
+            textOr(composition.schema_version),
+          ),
+          mode: textOr(composition.mode),
+          rootServiceId: textOr(
+            composition.rootServiceId,
+            textOr(composition.root_service_id),
+          ),
+          planDigest: textOr(
+            composition.planDigest,
+            textOr(composition.plan_digest),
+          ),
+          releaseGraphDigest: textOr(
+            composition.releaseGraphDigest,
+            textOr(composition.release_graph_digest),
+          ),
+          nodes: compositionNodes,
+          edges: arrayOrEmpty<Record<string, unknown>>(composition.edges),
+        }
+      : null,
+    composition_inputs_valid: booleanOr(
+      row.composition_inputs_valid,
+      !textOr(row.composition_input_error),
+    ),
+    composition_input_error: textOr(row.composition_input_error),
+    topology_confirmation_required: booleanOr(
+      row.topology_confirmation_required,
+    ),
     runtime: normalizeRuntimeValidation(row.runtime ?? row.runtime_facts),
     topology: Object.keys(topology).length
       ? {
@@ -553,7 +711,10 @@ function normalizeOperation(value: unknown): OperationRow {
     result,
     error: textOr(row.error, textOr(row.error_message)),
     log_count: numberOr(row.log_count),
-    summary: textOr(row.summary, `${textOr(row.action, "operation")} ${target}`.trim()),
+    summary: textOr(
+      row.summary,
+      `${textOr(row.action, "operation")} ${target}`.trim(),
+    ),
     created_at: textOr(
       row.created_at,
       createdAtMs > 0 ? new Date(createdAtMs).toISOString() : "",
@@ -574,7 +735,10 @@ export function normalizeOperationLog(value: unknown): OperationLog {
   return {
     ...row,
     operation_id: textOr(row.operation_id),
-    step_id: textOr(row.step_id, textOr(row.job_id, textOr(row.event_type, "runtime"))),
+    step_id: textOr(
+      row.step_id,
+      textOr(row.job_id, textOr(row.event_type, "runtime")),
+    ),
     level: textOr(row.level, "info").toLowerCase(),
     message: textOr(row.message),
     created_at: textOr(
@@ -684,16 +848,22 @@ export async function request<T>(
 ): Promise<T> {
   const timeoutMs =
     options.timeoutMs ??
-    (isMutation(method) ? DEFAULT_MUTATION_TIMEOUT_MS : DEFAULT_READ_TIMEOUT_MS);
+    (isMutation(method)
+      ? DEFAULT_MUTATION_TIMEOUT_MS
+      : DEFAULT_READ_TIMEOUT_MS);
   const controller = new AbortController();
   let timedOut = false;
-  const timeout = window.setTimeout(() => {
-    timedOut = true;
-    controller.abort("timeout");
-  }, Math.max(1, timeoutMs));
+  const timeout = window.setTimeout(
+    () => {
+      timedOut = true;
+      controller.abort("timeout");
+    },
+    Math.max(1, timeoutMs),
+  );
   const abortFromCaller = () => controller.abort(options.signal?.reason);
   if (options.signal?.aborted) abortFromCaller();
-  else options.signal?.addEventListener("abort", abortFromCaller, { once: true });
+  else
+    options.signal?.addEventListener("abort", abortFromCaller, { once: true });
 
   const init: RequestInit = {
     method,
@@ -737,7 +907,10 @@ export async function request<T>(
       }
     }
     const requestId =
-      response.headers.get("x-request-id") || data?.meta?.request_id || data?.request_id || "";
+      response.headers.get("x-request-id") ||
+      data?.meta?.request_id ||
+      data?.request_id ||
+      "";
     if (response.status === 401) {
       markAuthRequired();
       throw new AuthRequiredError(
@@ -855,13 +1028,9 @@ async function collectCursorItems<T>(
     const next = textOr(data.next_cursor);
     if (!next) return { items, pages };
     if (seen.has(next)) {
-      throw new ApiError(
-        `集合游标重复：${path}`,
-        0,
-        "INVALID_CURSOR",
-        "",
-        { cursor: next },
-      );
+      throw new ApiError(`集合游标重复：${path}`, 0, "INVALID_CURSOR", "", {
+        cursor: next,
+      });
     }
     seen.add(next);
     cursor = next;
@@ -894,13 +1063,17 @@ export async function operationEventBatch(
   const timeoutMs = options.timeoutMs ?? DEFAULT_READ_TIMEOUT_MS;
   const controller = new AbortController();
   let timedOut = false;
-  const timeout = window.setTimeout(() => {
-    timedOut = true;
-    controller.abort("timeout");
-  }, Math.max(1, timeoutMs));
+  const timeout = window.setTimeout(
+    () => {
+      timedOut = true;
+      controller.abort("timeout");
+    },
+    Math.max(1, timeoutMs),
+  );
   const abortFromCaller = () => controller.abort(options.signal?.reason);
   if (options.signal?.aborted) abortFromCaller();
-  else options.signal?.addEventListener("abort", abortFromCaller, { once: true });
+  else
+    options.signal?.addEventListener("abort", abortFromCaller, { once: true });
   try {
     if (window.__OJOS_AUTH_READY__) {
       await waitForPromise(window.__OJOS_AUTH_READY__, controller.signal);
@@ -936,7 +1109,9 @@ export async function operationEventBatch(
         details,
       );
     }
-    if (!response.headers.get("content-type")?.startsWith("text/event-stream")) {
+    if (
+      !response.headers.get("content-type")?.startsWith("text/event-stream")
+    ) {
       throw new ApiError(
         "Operation events response is not text/event-stream",
         response.status,
@@ -1168,8 +1343,12 @@ export const api = {
     ).then((data): DeploymentBindings => ({
       deployment_id: textOr(data.deployment_id, deploymentId),
       service_id: textOr(data.service_id),
-      items: arrayOrEmpty<unknown>(data.items ?? data.bindings).map(normalizeApiBinding),
-      provider_items: arrayOrEmpty<unknown>(data.provider_items).map(normalizeApiBinding),
+      items: arrayOrEmpty<unknown>(data.items ?? data.bindings).map(
+        normalizeApiBinding,
+      ),
+      provider_items: arrayOrEmpty<unknown>(data.provider_items).map(
+        normalizeApiBinding,
+      ),
     })),
   deploymentAction: (
     deploymentId: string,
@@ -1180,6 +1359,23 @@ export const api = {
       "POST",
       `/api/v1/deployments/${encodeURIComponent(deploymentId)}:${action}`,
       {},
+      options,
+    ),
+  resourcePurge: (
+    claimId: string,
+    input: {
+      node_id: string;
+      claim_digest: string;
+      generation: number;
+      confirmation: string;
+      reason: string;
+    },
+    options?: ApiCallOptions,
+  ) =>
+    v1Request<AsyncOperationResult>(
+      "POST",
+      `/api/v1/resources/${encodeURIComponent(claimId)}:purge`,
+      input,
       options,
     ),
 
@@ -1196,10 +1392,7 @@ export const api = {
       undefined,
       options,
     ).then((data) => normalizeOperation(data.operation)),
-  operationPlan: (
-    plan: Record<string, unknown>,
-    options?: ApiCallOptions,
-  ) =>
+  operationPlan: (plan: Record<string, unknown>, options?: ApiCallOptions) =>
     v1Request<{ operation: unknown }>(
       "POST",
       "/api/v1/operations:plan",

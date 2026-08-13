@@ -8,6 +8,7 @@ pub struct StaticResponse {
     pub content_type: &'static str,
     pub cache_control: &'static str,
     pub body: Vec<u8>,
+    pub content_length: Option<usize>,
 }
 
 fn content_type_for(path: &Path) -> &'static str {
@@ -97,6 +98,7 @@ pub fn try_serve(web_root: &Path, method: &str, path: &str) -> Option<StaticResp
                 "no-cache"
             },
             body,
+            content_length: None,
         });
     }
     // SPA 回退：无扩展名的 GET 请求返回 index.html（哈希路由下仅根路径需要，
@@ -112,6 +114,7 @@ pub fn try_serve(web_root: &Path, method: &str, path: &str) -> Option<StaticResp
                 content_type: "text/html; charset=utf-8",
                 cache_control: "no-cache",
                 body,
+                content_length: None,
             });
         }
     }
@@ -137,5 +140,6 @@ code{background:#1f2937;padding:2px 6px;border-radius:4px}</style></head>
         content_type: "text/html; charset=utf-8",
         cache_control: "no-cache",
         body,
+        content_length: None,
     }
 }
