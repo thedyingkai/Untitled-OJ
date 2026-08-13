@@ -59,36 +59,36 @@ type ListServicesResp struct {
 
 type OrchestratorRouteItem struct {
 	RouteId              string   `json:"route_id"`
-	ApiId                string   `json:"api_id,omitempty"`
-	BindingId            string   `json:"binding_id,omitempty"`
-	ConsumerDeploymentId string   `json:"consumer_deployment_id,omitempty"`
-	CredentialGeneration uint64   `json:"credential_generation,omitempty"`
-	TimeoutMs            uint64   `json:"timeout_ms,omitempty"`
-	NodeId               string   `json:"node_id,omitempty"`
-	ProviderNodeId       string   `json:"provider_node_id,omitempty"`
-	ProviderHostIp       string   `json:"provider_host_ip,omitempty"`
-	ProviderService      string   `json:"provider_service_name,omitempty"`
-	ProviderEndpoint     string   `json:"provider_endpoint,omitempty"`
-	VisibilitySource     string   `json:"visibility_source,omitempty"`
-	Distance             int      `json:"distance,omitempty"`
+	ApiId                string   `json:"api_id,omitempty,optional"`
+	BindingId            string   `json:"binding_id,omitempty,optional"`
+	ConsumerDeploymentId string   `json:"consumer_deployment_id,omitempty,optional"`
+	CredentialGeneration uint64   `json:"credential_generation,omitempty,optional"`
+	TimeoutMs            uint64   `json:"timeout_ms,omitempty,optional"`
+	NodeId               string   `json:"node_id,omitempty,optional"`
+	ProviderNodeId       string   `json:"provider_node_id,omitempty,optional"`
+	ProviderHostIp       string   `json:"provider_host_ip,omitempty,optional"`
+	ProviderService      string   `json:"provider_service_name,omitempty,optional"`
+	ProviderEndpoint     string   `json:"provider_endpoint,omitempty,optional"`
+	VisibilitySource     string   `json:"visibility_source,omitempty,optional"`
+	Distance             int      `json:"distance,omitempty,optional"`
 	OwnerServiceId       string   `json:"owner_service_id"`
 	Prefix               string   `json:"prefix"`
 	ServiceId            string   `json:"service_id"`
 	TargetService        string   `json:"target_service"`
-	UpstreamBase         string   `json:"upstream_base,omitempty"`
+	UpstreamBase         string   `json:"upstream_base,omitempty,optional"`
 	AuthMode             string   `json:"auth_mode"`
-	RequiredPermission   string   `json:"required_permission,omitempty"`
+	RequiredPermission   string   `json:"required_permission,omitempty,optional"`
 	Methods              []string `json:"methods"`
 	Enabled              bool     `json:"enabled"`
 	ProxyEnabled         bool     `json:"proxy_enabled"`
 	Priority             int      `json:"priority"`
-	StripPrefix          string   `json:"strip_prefix,omitempty"`
-	RewritePrefix        string   `json:"rewrite_prefix,omitempty"`
-	HealthCheckId        string   `json:"health_check_id,omitempty"`
+	StripPrefix          string   `json:"strip_prefix,omitempty,optional"`
+	RewritePrefix        string   `json:"rewrite_prefix,omitempty,optional"`
+	HealthCheckId        string   `json:"health_check_id,omitempty,optional"`
 	CreatedFrom          string   `json:"created_from"`
 	Status               string   `json:"status"`
-	ServiceStatus        string   `json:"service_status,omitempty"`
-	ServiceHealth        string   `json:"service_health,omitempty"`
+	ServiceStatus        string   `json:"service_status,omitempty,optional"`
+	ServiceHealth        string   `json:"service_health,omitempty,optional"`
 	Conflicts            []string `json:"conflicts"`
 	Warnings             []string `json:"warnings"`
 	BlockedBy            []string `json:"blocked_by"`
