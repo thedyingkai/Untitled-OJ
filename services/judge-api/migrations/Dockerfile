@@ -1,4 +1,4 @@
-FROM golang:1.26.5 AS build
+FROM golang:1.26.6 AS build
 WORKDIR /src
 COPY platform/shared/go /platform/shared/go
 COPY services/judge-api/go.mod services/judge-api/go.sum ./

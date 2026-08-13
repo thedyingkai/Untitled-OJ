@@ -1,6 +1,6 @@
 module ojos-problem-service
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/jackc/pgx/v5 v5.9.2

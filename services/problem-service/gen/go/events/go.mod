@@ -1,6 +1,6 @@
 module ojos-problem-events
 
-go 1.26.5
+go 1.26.6
 
 require ojos-shared v0.0.0
 

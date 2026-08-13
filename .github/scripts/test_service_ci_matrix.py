@@ -135,7 +135,7 @@ class ServiceCiMatrixTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         write(
             root / ".github" / "toolchains.env",
-            "GO_VERSION=1.26.5\nRUST_VERSION=1.92.0\nNODE_VERSION=24.11.0\n"
+            "GO_VERSION=1.26.6\nRUST_VERSION=1.92.0\nNODE_VERSION=24.11.0\n"
             "TYPESCRIPT_VERSION=5.9.2\nGOVULNCHECK_VERSION=v1.1.4\n"
             "CARGO_AUDIT_VERSION=0.22.2\n",
         )
@@ -210,7 +210,7 @@ class ServiceCiMatrixTests(unittest.TestCase):
         root = self.fixture()
         values = MATRIX.validate_toolchains(root / ".github" / "toolchains.env")
         self.assertEqual(values["RUST_VERSION"], "1.92.0")
-        write(root / ".github" / "toolchains.env", "GO_VERSION=1.26.5\n")
+        write(root / ".github" / "toolchains.env", "GO_VERSION=1.26.6\n")
         with self.assertRaises(MATRIX.DiscoveryError):
             MATRIX.validate_toolchains(root / ".github" / "toolchains.env")
 
