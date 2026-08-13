@@ -56,6 +56,27 @@ func TestRuntimeImageSeedsRetainedVolumeTargetForNonRootUser(t *testing.T) {
 	}
 }
 
+func TestRuntimeImageCopiesLocalModuleMetadataBeforeDownloadingDependencies(t *testing.T) {
+	bytes, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(bytes)
+	localModuleCopy := "COPY services/problem-service/gen/go/events/go.mod services/problem-service/gen/go/events/go.sum ./problem-service/gen/go/events/"
+	download := "RUN go mod download"
+	copyIndex := strings.Index(dockerfile, localModuleCopy)
+	downloadIndex := strings.Index(dockerfile, download)
+	if copyIndex < 0 {
+		t.Fatalf("runtime image does not copy local events module metadata: missing %q", localModuleCopy)
+	}
+	if downloadIndex < 0 {
+		t.Fatalf("runtime image does not download Go dependencies: missing %q", download)
+	}
+	if copyIndex > downloadIndex {
+		t.Fatal("runtime image downloads dependencies before the local events module exists")
+	}
+}
+
 func TestManagedEnvironmentUsesAgentProblemsResourceOutput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dsn")
 	if err := os.WriteFile(path, []byte(`{"dsn":"postgres://problem:secret@database:5432/problems?sslmode=require"}`), 0o600); err != nil {

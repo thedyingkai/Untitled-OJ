@@ -13,6 +13,7 @@ ENV GOPROXY=${GOPROXY}
 WORKDIR /app
 
 COPY services/problem-service/go.mod services/problem-service/go.sum ./problem-service/
+COPY services/problem-service/gen/go/events/go.mod services/problem-service/gen/go/events/go.sum ./problem-service/gen/go/events/
 COPY platform/shared/go/go.mod platform/shared/go/go.sum /platform/shared/go/
 
 WORKDIR /app/problem-service
