@@ -73,6 +73,22 @@ class AuthAdminBootstrapPolicyTests(unittest.TestCase):
         )
         self.assertIn('owner) bootstrap_path="$wrong_owner_bootstrap_file"', policy)
         self.assertIn('mode) bootstrap_path="$wrong_mode_bootstrap_file"', policy)
+
+    def test_compose_policy_handles_false_omission_without_losing_source_evidence(self) -> None:
+        policy = self.read("deploy/ops/ci-policy.sh")
+        self.assertIn(
+            '"$rendered_json" "$repo_root/deploy/compose/docker-compose.yml"',
+            policy,
+        )
+        self.assertIn('"create_host_path: false" in source_mount', policy)
+        self.assertIn(
+            "normalized_create_host_path is None or normalized_create_host_path is False",
+            policy,
+        )
+        self.assertNotIn(
+            'get("bind", {}).get("create_host_path") is False',
+            policy,
+        )
         self.assertIn('case "$platform" in', policy)
         self.assertIn('MSYS_*|MINGW*|CYGWIN*)', policy)
 

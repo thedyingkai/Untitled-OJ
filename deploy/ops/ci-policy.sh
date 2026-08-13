@@ -366,12 +366,14 @@ grep -q 'OJOS_RUNNER_MODE: nsjail' "$legacy_rendered" || {
   echo "ops-ci: the compatibility Judge Worker must retain the nsjail runner" >&2
   exit 1
 }
-python3 - "$rendered_json" <<'PY'
+python3 - "$rendered_json" "$repo_root/deploy/compose/docker-compose.yml" <<'PY'
 import json
+import pathlib
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     services = json.load(stream)["services"]
+compose_source = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 
 visiting: list[str] = []
 visited: set[str] = set()
@@ -432,8 +434,19 @@ assert services["auth-service"]["environment"]["AUTH_ADMIN_BOOTSTRAP_SECRET_FILE
 assert len(admin_bootstrap_mounts) == 1, "platform Auth must receive exactly one admin bootstrap mount"
 assert admin_bootstrap_mounts[0].get("type") == "bind", "admin bootstrap secret must be a host bind mount"
 assert admin_bootstrap_mounts[0].get("read_only") is True, "admin bootstrap secret mount must be read-only"
-assert admin_bootstrap_mounts[0].get("bind", {}).get("create_host_path") is False, (
-    "admin bootstrap bind must fail closed instead of creating a missing host path"
+target_marker = f"target: {admin_bootstrap_target}"
+assert compose_source.count(target_marker) == 1, "admin bootstrap target must be unique in Compose source"
+source_mount = compose_source[compose_source.index(target_marker) : compose_source.index(target_marker) + 180]
+assert "read_only: true" in source_mount and "create_host_path: false" in source_mount, (
+    "admin bootstrap Compose source must explicitly use a read-only, fail-closed bind"
+)
+# Compose 2.38 uses an omitempty JSON tag for this boolean, so an explicit
+# source-level false may be absent from `config --format json`. A serialized
+# true is always unsafe; source_mount above remains the authoritative evidence
+# that an omitted value came from the required explicit false.
+normalized_create_host_path = admin_bootstrap_mounts[0].get("bind", {}).get("create_host_path")
+assert normalized_create_host_path is None or normalized_create_host_path is False, (
+    "admin bootstrap bind must never create a missing host path"
 )
 for name, service in services.items():
     if name != "auth-service":
