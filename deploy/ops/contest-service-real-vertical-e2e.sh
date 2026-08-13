@@ -256,15 +256,6 @@ if [[ "$scratch_root" != "$staged_repo_root/.runtime" \
   exit 1
 fi
 
-free_port() {
-  python3 - <<'PY'
-import socket
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
-PY
-}
-
 wait_http() {
   local url="$1"
   local expected="${2:-200}"
@@ -278,11 +269,41 @@ wait_http() {
   return 1
 }
 
-registry_port="$(free_port)"
-postgres_port="$(free_port)"
-artifact_port="$(free_port)"
-gateway_port="$(free_port)"
-gateway_tls_port="$(free_port)"
+port_allocation_file="$run_root/allocated-ports.txt"
+if ! python3 "$repo_root/deploy/ops/fixtures/contest-service-real-vertical/allocate_ports.py" \
+    5 >"$port_allocation_file"; then
+  echo "contest real vertical port allocator failed" >&2
+  exit 1
+fi
+mapfile -t allocated_ports <"$port_allocation_file"
+rm -f -- "$port_allocation_file"
+read -r ephemeral_port_low ephemeral_port_high \
+  < /proc/sys/net/ipv4/ip_local_port_range
+if [[ ! "$ephemeral_port_low" =~ ^[0-9]+$ \
+    || ! "$ephemeral_port_high" =~ ^[0-9]+$ \
+    || "$ephemeral_port_low" -lt 1024 \
+    || "$ephemeral_port_low" -gt "$ephemeral_port_high" \
+    || "$ephemeral_port_high" -gt 65535 \
+    || "${#allocated_ports[@]}" -ne 5 \
+    || "$(printf '%s\n' "${allocated_ports[@]}" | sort -u | wc -l)" -ne 5 ]]; then
+  echo "contest real vertical port allocator did not return five distinct ports" >&2
+  exit 1
+fi
+for allocated_port in "${allocated_ports[@]}"; do
+  if [[ ! "$allocated_port" =~ ^[0-9]+$ \
+      || "$allocated_port" -lt 1024 \
+      || "$allocated_port" -gt 65535 \
+      || ( "$allocated_port" -ge "$ephemeral_port_low" \
+        && "$allocated_port" -le "$ephemeral_port_high" ) ]]; then
+    echo "contest real vertical port allocator returned an unsafe port" >&2
+    exit 1
+  fi
+done
+registry_port="${allocated_ports[0]}"
+postgres_port="${allocated_ports[1]}"
+artifact_port="${allocated_ports[2]}"
+gateway_port="${allocated_ports[3]}"
+gateway_tls_port="${allocated_ports[4]}"
 bridge_gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
 if [[ ! "$bridge_gateway" =~ ^[0-9a-fA-F:.]+$ ]]; then
   echo "could not resolve the Docker bridge gateway" >&2

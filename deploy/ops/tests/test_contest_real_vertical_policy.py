@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import pathlib
 import unittest
 
@@ -19,9 +20,96 @@ RUST_DRIVER = RUST_DRIVER_PATH.read_text(encoding="utf-8")
 RUST_FIXTURES = (
     RUST_DRIVER_PATH.parent / "support" / "contest_real_vertical_fixtures.rs"
 ).read_text(encoding="utf-8")
+PORT_ALLOCATOR_PATH = (
+    ROOT
+    / "deploy"
+    / "ops"
+    / "fixtures"
+    / "contest-service-real-vertical"
+    / "allocate_ports.py"
+)
+PORT_ALLOCATOR_SPEC = importlib.util.spec_from_file_location(
+    "contest_vertical_port_allocator", PORT_ALLOCATOR_PATH
+)
+assert PORT_ALLOCATOR_SPEC is not None and PORT_ALLOCATOR_SPEC.loader is not None
+PORT_ALLOCATOR = importlib.util.module_from_spec(PORT_ALLOCATOR_SPEC)
+PORT_ALLOCATOR_SPEC.loader.exec_module(PORT_ALLOCATOR)
 
 
 class ContestRealVerticalPolicyTests(unittest.TestCase):
+    def test_ports_are_batch_allocated_outside_linux_ephemeral_range(self) -> None:
+        for marker in (
+            'port_allocation_file="$run_root/allocated-ports.txt"',
+            'if ! python3 "$repo_root/deploy/ops/fixtures/contest-service-real-vertical/allocate_ports.py"',
+            '5 >"$port_allocation_file"',
+            'mapfile -t allocated_ports <"$port_allocation_file"',
+            'rm -f -- "$port_allocation_file"',
+            '< /proc/sys/net/ipv4/ip_local_port_range',
+            '"$allocated_port" =~ ^[0-9]+$',
+            '"$allocated_port" -lt 1024',
+            '"$allocated_port" -gt 65535',
+            '"$allocated_port" -ge "$ephemeral_port_low"',
+            '"$allocated_port" -le "$ephemeral_port_high"',
+            '"${#allocated_ports[@]}" -ne 5',
+            'sort -u | wc -l)" -ne 5',
+            'gateway_port="${allocated_ports[3]}"',
+            'gateway_tls_port="${allocated_ports[4]}"',
+        ):
+            self.assertIn(marker, HARNESS)
+        self.assertNotIn("free_port()", HARNESS)
+        self.assertNotIn('sock.bind(("127.0.0.1", 0))', HARNESS)
+        self.assertEqual(
+            PORT_ALLOCATOR.EPHEMERAL_RANGE_PATH,
+            "/proc/sys/net/ipv4/ip_local_port_range",
+        )
+
+    def test_batch_allocator_holds_distinct_ports_until_selection_completes(self) -> None:
+        events: list[tuple[str, int]] = []
+        active: set[int] = set()
+
+        class FakeSocket:
+            def __init__(self, *_args: object) -> None:
+                self.port = 0
+
+            def bind(self, address: tuple[str, int]) -> None:
+                _, self.port = address
+                if self.port == 1024 or self.port in active:
+                    raise OSError("occupied")
+                active.add(self.port)
+                events.append(("bind", self.port))
+
+            def listen(self, _backlog: int) -> None:
+                events.append(("listen", self.port))
+
+            def close(self) -> None:
+                if self.port in active:
+                    active.remove(self.port)
+                    events.append(("close", self.port))
+
+        ports = PORT_ALLOCATOR.allocate_ports(
+            3,
+            ephemeral_range=(1026, 65533),
+            socket_factory=FakeSocket,
+        )
+
+        self.assertEqual(ports, [1025, 65534, 65535])
+        self.assertTrue(all(not 1026 <= port <= 65533 for port in ports))
+        successful_binds = [port for event, port in events if event == "bind"]
+        final_listen = max(
+            index for index, event in enumerate(events) if event[0] == "listen"
+        )
+        close_indices = [
+            index for index, event in enumerate(events) if event[0] == "close"
+        ]
+        self.assertEqual(successful_binds, ports)
+        self.assertEqual(len(close_indices), len(ports))
+        self.assertTrue(all(index > final_listen for index in close_indices))
+        self.assertEqual(active, set())
+
+    def test_batch_allocator_rejects_invalid_injected_ephemeral_range(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid ephemeral port range"):
+            PORT_ALLOCATOR.allocate_ports(1, ephemeral_range=(65535, 1024))
+
     def test_run_root_uses_trusted_tmp_and_stays_private_until_handoff(self) -> None:
         initialization_end = HARNESS.index('staged_repo_root="$run_root/staged-repo"')
         initialization = HARNESS[:initialization_end]
@@ -137,7 +225,7 @@ class ContestRealVerticalPolicyTests(unittest.TestCase):
             self.assertEqual(allowlist.count(f'  "{relative_input}"'), 1)
         self.assertEqual(allowlist.count('  "'), len(expected_inputs))
 
-        staging_end = HARNESS.index("free_port() {")
+        staging_end = HARNESS.index("wait_http() {")
         staging = HARNESS[allowlist_start:staging_end]
         for marker in (
             'staged_repo_root="$(realpath -e -- "$staged_repo_root")"',
