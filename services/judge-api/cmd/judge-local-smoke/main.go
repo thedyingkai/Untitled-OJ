@@ -1702,6 +1702,45 @@ func waitStorageObject(ctx context.Context, cfg smokeConfig, bucket string, key 
 	return last
 }
 
+func waitStorageObjectExact(ctx context.Context, cfg smokeConfig, bucket string, key string, want []byte) error {
+	headers := map[string]string{
+		"Authorization":         "Bearer " + cfg.serviceToken,
+		"X-OJOS-Caller-Service": judgeAPIService,
+		"X-OJOS-Node-Id":        childNodeID,
+	}
+	target := cfg.gateway.baseURL() + "/internal/apis/storage.object.get/" + bucket + "/" + key
+	deadline := time.Now().Add(20 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		matched, err := storageObjectMatchesExact(ctx, target, headers, bucket, key, want)
+		if matched {
+			return nil
+		}
+		last = err
+		if wait(ctx, 300*time.Millisecond) != nil {
+			return ctx.Err()
+		}
+	}
+	if last == nil {
+		last = fmt.Errorf("object %s/%s did not appear", bucket, key)
+	}
+	return last
+}
+
+func storageObjectMatchesExact(ctx context.Context, target string, headers map[string]string, bucket string, key string, want []byte) (bool, error) {
+	status, body, err := doStatus(ctx, http.MethodGet, target, nil, headers)
+	if err != nil {
+		return false, err
+	}
+	if status < 200 || status >= 300 {
+		return false, fmt.Errorf("object %s/%s unavailable: status=%d body=%s", bucket, key, status, strings.TrimSpace(string(body)))
+	}
+	if !bytes.Equal(body, want) {
+		return false, fmt.Errorf("object %s/%s content did not match sha256-derived key", bucket, key)
+	}
+	return true, nil
+}
+
 func verifyRealAuth(ctx context.Context, cfg smokeConfig) error {
 	allowed, status, err := permissionCheck(ctx, cfg.auth.baseURL(), cfg.serviceToken, judgeAPIService, "storage.object.put", "storage.object.write")
 	if err != nil {
@@ -2442,10 +2481,12 @@ func ensureComposeJudgeProblemFixture(ctx context.Context, cfg smokeConfig) (int
 	}
 	ok("compose problem-service created problem: problem_id=%d slug=%s", createResp.ProblemID, createResp.Slug)
 
+	testInput := "1 1\n"
+	testAnswer := "ok\n"
 	testBody := map[string]any{
 		"case_no": 1,
-		"input":   "1 1\n",
-		"answer":  "ok\n",
+		"input":   testInput,
+		"answer":  testAnswer,
 		"score":   100,
 		"sample":  true,
 	}
@@ -2459,26 +2500,77 @@ func ensureComposeJudgeProblemFixture(ctx context.Context, cfg smokeConfig) (int
 		return 0, fmt.Errorf("unexpected test case response: %#v", testResp)
 	}
 	ok("compose problem-service added test case: problem_id=%d case_no=%d", createResp.ProblemID, testResp.CaseNo)
+	if err := waitStorageObjectExact(
+		ctx,
+		cfg,
+		"problems",
+		problemContentObjectKey(createResp.ProblemID, []byte(testInput)),
+		[]byte(testInput),
+	); err != nil {
+		return 0, err
+	}
+	if err := waitStorageObjectExact(
+		ctx,
+		cfg,
+		"problems",
+		problemContentObjectKey(createResp.ProblemID, []byte(testAnswer)),
+		[]byte(testAnswer),
+	); err != nil {
+		return 0, err
+	}
 
-	if err := waitStorageObject(ctx, cfg, "problems", problemStorageObjectKey(createResp.ProblemID, "tests/001.in"), "1 1"); err != nil {
+	var casesResp struct {
+		Cases []composeProblemTestCase `json:"cases"`
+	}
+	if err := doJSONWithHeaders(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("%s/api/problem/problems/%d/test-cases", cfg.gateway.baseURL(), createResp.ProblemID),
+		nil,
+		composeUserHeaders(cfg),
+		&casesResp,
+	); err != nil {
 		return 0, err
 	}
-	if err := waitStorageObject(ctx, cfg, "problems", problemStorageObjectKey(createResp.ProblemID, "tests/001.ans"), "ok"); err != nil {
+	if err := validateComposeProblemTestCase(casesResp.Cases, composeProblemTestCase{
+		No:     1,
+		Input:  "001.in",
+		Answer: "001.ans",
+		Score:  100,
+		Sample: true,
+	}); err != nil {
 		return 0, err
 	}
-	ok("compose problem testdata stored through storage-service")
+	ok("compose problem testdata bytes and committed case metadata read back")
 
 	ok("compose problem snapshot queued for automatic judge projection: problem_id=%d", createResp.ProblemID)
 	return createResp.ProblemID, nil
 }
 
-func problemStorageObjectKey(problemID int64, logicalPath string) string {
-	logicalPath = strings.Trim(strings.ReplaceAll(strings.TrimSpace(logicalPath), "\\", "/"), "/")
-	if logicalPath == "" {
-		logicalPath = "file"
+func problemContentObjectKey(problemID int64, content []byte) string {
+	digest := sha256.Sum256(content)
+	return fmt.Sprintf("problem-%d-objects-sha256-%x", problemID, digest)
+}
+
+type composeProblemTestCase struct {
+	No     int    `json:"no"`
+	Input  string `json:"input"`
+	Answer string `json:"answer"`
+	Score  int    `json:"score"`
+	Sample bool   `json:"sample"`
+}
+
+func validateComposeProblemTestCase(cases []composeProblemTestCase, want composeProblemTestCase) error {
+	for _, candidate := range cases {
+		if candidate.No != want.No {
+			continue
+		}
+		if candidate != want {
+			return fmt.Errorf("problem testcase %d content mismatch: got %#v", want.No, candidate)
+		}
+		return nil
 	}
-	replacer := strings.NewReplacer("/", "__", " ", "_", ":", "_")
-	return fmt.Sprintf("problem-%d-%s", problemID, replacer.Replace(logicalPath))
+	return fmt.Errorf("problem testcase %d is missing from persisted readback", want.No)
 }
 
 func ensureComposeSmokeUser(ctx context.Context, cfg smokeConfig) (int64, string, error) {

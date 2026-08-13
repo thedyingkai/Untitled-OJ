@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -28,6 +30,106 @@ func TestComposeDefaultNetworkIPRejectsAmbiguousNetworks(t *testing.T) {
 	}`))
 	if err == nil {
 		t.Fatal("ambiguous network addresses were accepted")
+	}
+}
+
+func TestValidateComposeProblemTestCaseRequiresPersistedContent(t *testing.T) {
+	want := composeProblemTestCase{
+		No:     1,
+		Input:  "001.in",
+		Answer: "001.ans",
+		Score:  100,
+		Sample: true,
+	}
+	irrelevant := want
+	irrelevant.No = 2
+	if err := validateComposeProblemTestCase([]composeProblemTestCase{irrelevant, want}, want); err != nil {
+		t.Fatalf("validate persisted testcase: %v", err)
+	}
+
+	wrong := want
+	wrong.Answer = "wrong.ans"
+	if err := validateComposeProblemTestCase([]composeProblemTestCase{wrong}, want); err == nil {
+		t.Fatal("mismatched persisted testcase was accepted")
+	}
+	if err := validateComposeProblemTestCase(nil, want); err == nil {
+		t.Fatal("missing persisted testcase was accepted")
+	}
+}
+
+func TestProblemTestCaseResponseDecodesWithoutEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"cases":[{"no":1,"input":"001.in","answer":"001.ans","score":100,"sample":true}]}`))
+	}))
+	defer server.Close()
+
+	var response struct {
+		Cases []composeProblemTestCase `json:"cases"`
+	}
+	if err := doJSONWithHeaders(context.Background(), http.MethodGet, server.URL, nil, nil, &response); err != nil {
+		t.Fatalf("decode raw testcase response: %v", err)
+	}
+	want := composeProblemTestCase{No: 1, Input: "001.in", Answer: "001.ans", Score: 100, Sample: true}
+	if err := validateComposeProblemTestCase(response.Cases, want); err != nil {
+		t.Fatalf("validate decoded testcase response: %v", err)
+	}
+}
+
+func TestProblemContentObjectKeyMatchesProblemStorageContract(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "input",
+			content: "1 1\n",
+			want:    "problem-17-objects-sha256-3f11ad6bbc7ecca0b2416b713dee77f1a635c00aaeaa946e14cde1c2bfae56d5",
+		},
+		{
+			name:    "answer",
+			content: "ok\n",
+			want:    "problem-17-objects-sha256-dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := problemContentObjectKey(17, []byte(test.content)); got != test.want {
+				t.Fatalf("content object key = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestStorageObjectMatchesExactRejectsExtraBytes(t *testing.T) {
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		if r.Header.Get("Authorization") != "Bearer service-token" ||
+			r.Header.Get("X-OJOS-Caller-Service") != judgeAPIService {
+			t.Errorf("missing storage service identity headers: %#v", r.Header)
+		}
+		_, _ = w.Write([]byte("1 1\nextra"))
+	}))
+	defer server.Close()
+
+	headers := map[string]string{
+		"Authorization":         "Bearer service-token",
+		"X-OJOS-Caller-Service": judgeAPIService,
+	}
+	matched, err := storageObjectMatchesExact(
+		context.Background(),
+		server.URL+"/internal/apis/storage.object.get/problems/object-key",
+		headers,
+		"problems",
+		"object-key",
+		[]byte("1 1\n"),
+	)
+	if err == nil || matched {
+		t.Fatalf("extra object bytes were accepted: matched=%v err=%v", matched, err)
+	}
+	if requestPath != "/internal/apis/storage.object.get/problems/object-key" {
+		t.Fatalf("storage request path = %q", requestPath)
 	}
 }
 
