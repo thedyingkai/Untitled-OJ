@@ -44,6 +44,38 @@ type EventSubscription struct {
 	ConsumerGroup string `json:"consumer_group"`
 }
 
+// TransportConfig is an adapter-only view of the Agent materialized broker
+// binding. Domain publishers and handlers should depend on Codec/Enqueue and
+// never accept stream or consumer-group strings.
+type TransportConfig struct {
+	stream        string
+	consumerGroup string
+}
+
+func (value EventContext) PublisherTransport() TransportConfig {
+	return TransportConfig{stream: value.Stream}
+}
+
+func (value EventContext) SubscriberTransport(eventTypes ...string) (TransportConfig, error) {
+	group, err := value.ConsumerGroupFor(eventTypes...)
+	if err != nil {
+		return TransportConfig{}, err
+	}
+	return TransportConfig{stream: value.Stream, consumerGroup: group}, nil
+}
+
+// DevelopmentPublisherTransport is the unmanaged-development escape hatch.
+// Production adapters must use the Agent materialized EventContext.
+func DevelopmentPublisherTransport(stream string) TransportConfig {
+	return TransportConfig{stream: strings.TrimSpace(stream)}
+}
+
+// DevelopmentSubscriberTransport is the unmanaged-development/test escape
+// hatch. Broker names remain confined to bootstrap and transport tests.
+func DevelopmentSubscriberTransport(stream, consumerGroup string) TransportConfig {
+	return TransportConfig{stream: strings.TrimSpace(stream), consumerGroup: strings.TrimSpace(consumerGroup)}
+}
+
 // LoadEventContextForService loads the Agent-materialized Event Contract. It
 // returns nil only for an unmanaged development process. Production and any
 // process with a Service Context fail closed when events.json is missing.

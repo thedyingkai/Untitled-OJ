@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "tools/ojos-service",
     "platform/shared/rust/service-context",
     "services/orchestrator/core",
     "services/orchestrator/legacy",
@@ -37,6 +38,8 @@ regex = "1"
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_json_canonicalizer = "0.3"
+jsonschema = { version = "0.49", default-features = false }
 serde_yaml = "0.9"
 sha2 = "0.10"
 tempfile = "3"

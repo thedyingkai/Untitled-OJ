@@ -33,6 +33,7 @@ x-ojos-published-actions:
   - deployment.restart
   - deployment.uninstall
   - deployment.health
+  - resource.purge
   - topology.draft
   - topology.revision
   - topology.endpoint.edit
@@ -83,6 +84,7 @@ x-ojos-action-routes:
   - { action: deployment.restart, method: POST, openapi_path: "/deployments/{deploymentId}:{action}", probe_path: "/api/v1/deployments/deployment-1:restart" }
   - { action: deployment.uninstall, method: POST, openapi_path: "/deployments/{deploymentId}:{action}", probe_path: "/api/v1/deployments/deployment-1:uninstall" }
   - { action: deployment.health, method: GET, openapi_path: "/deployments/{deploymentId}/health", probe_path: /api/v1/deployments/deployment-1/health }
+  - { action: resource.purge, method: POST, openapi_path: "/resources/{claimId}:purge", probe_path: "/api/v1/resources/claim-1:purge" }
   - { action: topology.draft, method: POST, openapi_path: /topologies, probe_path: /api/v1/topologies }
   - { action: topology.revision, method: POST, openapi_path: "/topologies/{topologyId}/revisions", probe_path: /api/v1/topologies/primary/revisions }
   - { action: topology.endpoint.edit, method: PUT, openapi_path: "/topologies/{topologyId}/draft/endpoints/{endpointId}", probe_path: /api/v1/topologies/primary/draft/endpoints/endpoint-1 }
@@ -192,6 +194,37 @@ paths:
       operationId: listCapabilities
       responses:
         "200": { $ref: "#/components/responses/Success" }
+  /contributions/snapshot:
+    get:
+      operationId: getActiveContributionSnapshot
+      description: >-
+        Returns the deterministic deployment-scoped revision selected by each
+        ContributionHead. Gateway, Auth, the user Shell and the admin Shell
+        consume this same generation; permission assignments are intentionally
+        not part of the release-owned snapshot.
+      responses:
+        "200": { $ref: "#/components/responses/ContributionSnapshot" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /auth/permissions:check:
+    post:
+      operationId: checkCurrentSessionPermissions
+      description: >-
+        Evaluates contributed permission keys for the already-authenticated
+        browser session. The principal is derived only from the HttpOnly
+        Desktop or OIDC session and is never accepted in the request body.
+        Unknown permissions and unavailable Auth state are denied.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PermissionCheckRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/PermissionCheck" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
   /operations:plan:
     post:
       operationId: planOperation
@@ -560,6 +593,26 @@ paths:
         - { $ref: "#/components/parameters/IdempotencyKey" }
       responses:
         "202": { $ref: "#/components/responses/AsyncOperation" }
+  /resources/{claimId}:purge:
+    post:
+      operationId: purgeResourceClaim
+      description: Permanently delete a retained PostgreSQL ResourceClaim through a durable audited Operation.
+      parameters:
+        - name: claimId
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-z0-9][a-z0-9_.:-]{0,178}[a-z0-9]$' }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResourcePurgeRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/AsyncOperation" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
   /topologies:
     get:
       operationId: listTopologies
@@ -870,6 +923,19 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/StoreValidationEnvelope" }
+    ContributionSnapshot:
+      description: The active, content-addressed Contribution projection.
+      headers:
+        ETag:
+          schema: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ContributionSnapshotEnvelope" }
+    PermissionCheck:
+      description: Fail-closed decisions for the current browser session.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/PermissionCheckEnvelope" }
     Operation:
       description: Durable operation
       content:
@@ -886,6 +952,168 @@ components:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
   schemas:
+    ResourcePurgeRequest:
+      type: object
+      additionalProperties: false
+      required: [node_id, claim_digest, generation, confirmation, reason]
+      properties:
+        node_id: { type: string, pattern: '^[a-z0-9][a-z0-9_.:-]{0,178}[a-z0-9]$' }
+        claim_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        generation: { type: integer, minimum: 1 }
+        confirmation:
+          type: string
+          minLength: 96
+          maxLength: 512
+          description: Exact `PURGE {claim_id} {claim_digest} GENERATION {generation}` confirmation.
+        reason: { type: string, minLength: 8, maxLength: 512 }
+    PermissionCheckRequest:
+      type: object
+      additionalProperties: false
+      required: [permissions]
+      properties:
+        permissions:
+          type: array
+          minItems: 1
+          maxItems: 128
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 3
+            maxLength: 256
+            pattern: '^[a-z0-9][a-z0-9.-]*\.[a-z0-9.-]+$'
+    PermissionDecision:
+      type: object
+      additionalProperties: false
+      required: [permission, allowed]
+      properties:
+        permission: { type: string }
+        allowed: { type: boolean }
+    PermissionCheckEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [decisions]
+          properties:
+            decisions:
+              type: array
+              items: { $ref: "#/components/schemas/PermissionDecision" }
+        meta:
+          type: object
+          additionalProperties: false
+          required: [request_id, api_version]
+          properties:
+            request_id: { type: string }
+            api_version: { const: v1 }
+    ContributionSnapshotEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ContributionSnapshot" }
+        meta:
+          type: object
+          additionalProperties: false
+          required: [request_id, api_version]
+          properties:
+            request_id: { type: string }
+            api_version: { const: v1 }
+    ContributionSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - digest
+        - scope_id
+        - revisions
+        - api_surfaces
+        - gateway_routes
+        - permission_definitions
+        - user_frontend_modules
+        - admin_frontend_modules
+      properties:
+        schema_version: { const: ojos.dev/contribution-snapshot/v1 }
+        digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        scope_id: { type: string }
+        revisions:
+          type: array
+          items: { $ref: "#/components/schemas/ActiveContributionRevision" }
+        api_surfaces: { type: array, items: { type: object, additionalProperties: true } }
+        gateway_routes: { type: array, items: { $ref: "#/components/schemas/ContributionGatewayRoute" } }
+        permission_definitions: { type: array, items: { $ref: "#/components/schemas/ContributionPermissionDefinition" } }
+        user_frontend_modules: { type: array, items: { $ref: "#/components/schemas/ContributionFrontendSurface" } }
+        admin_frontend_modules: { type: array, items: { $ref: "#/components/schemas/ContributionFrontendSurface" } }
+    ActiveContributionRevision:
+      type: object
+      additionalProperties: false
+      required: [scope_id, service_id, deployment_id, revision_id, release_digest, contract_digest, generation, head_etag, runtime_ready]
+      properties:
+        scope_id: { type: string }
+        service_id: { type: string }
+        deployment_id: { type: string }
+        revision_id: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        release_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        contract_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        generation: { type: integer, minimum: 1 }
+        head_etag: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        runtime_ready: { type: boolean }
+    ContributionGatewayRoute:
+      type: object
+      additionalProperties: false
+      required: [service_id, deployment_id, revision_id, generation, audience, method, path, api_id, operation_id, provider_path, auth, enabled]
+      properties:
+        service_id: { type: string }
+        deployment_id: { type: string }
+        revision_id: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        generation: { type: integer, minimum: 1 }
+        audience: { enum: [INTERNAL, USER, PUBLIC, ADMIN] }
+        method: { enum: [GET, POST, PUT, PATCH, DELETE, HEAD] }
+        path: { type: string, pattern: '^/' }
+        api_id: { type: string }
+        operation_id: { type: string }
+        provider_path: { type: string, pattern: '^/' }
+        auth: { enum: [ANONYMOUS, OPTIONAL, REQUIRED] }
+        permission: { type: [string, "null"] }
+        upstream_base: { type: [string, "null"] }
+        enabled: { type: boolean }
+    ContributionPermissionDefinition:
+      type: object
+      additionalProperties: false
+      required: [service_id, revision_id, generation, key, title, description]
+      properties:
+        service_id: { type: string }
+        revision_id: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        generation: { type: integer, minimum: 1 }
+        key: { type: string }
+        title: { type: string }
+        description: { type: string }
+    ContributionFrontendSurface:
+      type: object
+      additionalProperties: false
+      required: [service_id, deployment_id, revision_id, generation, target, module_id, surface_id, route, menu_label, menu, order, artifact, host_api_range, manifest_digest, manifest_reference, bundle_digest, bundle_reference, enabled]
+      properties:
+        service_id: { type: string }
+        deployment_id: { type: string }
+        revision_id: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        generation: { type: integer, minimum: 1 }
+        target: { enum: [user-shell, admin-shell] }
+        module_id: { type: string }
+        surface_id: { type: string }
+        route: { type: string, pattern: '^/' }
+        menu_label: { type: string }
+        menu: { type: boolean }
+        order: { type: integer }
+        permission: { type: [string, "null"] }
+        artifact: { type: string }
+        host_api_range: { type: string }
+        manifest_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        manifest_reference: { type: string, format: uri }
+        bundle_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        bundle_reference: { type: string, format: uri }
+        enabled: { type: boolean }
     ReadyEnvelope:
       type: object
       additionalProperties: false
@@ -1130,6 +1358,9 @@ components:
           type: object
           default: {}
           additionalProperties: { type: string, minLength: 1 }
+        plan_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        release_graph_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        inputs: { $ref: "#/components/schemas/CompositionInstallInputs" }
         bindings:
           type: array
           default: []
@@ -1176,6 +1407,7 @@ components:
           type: object
           default: {}
           additionalProperties: { type: string, minLength: 1 }
+        inputs: { $ref: "#/components/schemas/CompositionInstallInputs" }
         bindings:
           type: array
           default: []
@@ -1209,6 +1441,9 @@ components:
         - metadata
         - bindings
         - requirements
+        - composition_plan
+        - composition_inputs_valid
+        - composition_input_error
         - topology_confirmation_required
         - runtime
         - topology
@@ -1237,6 +1472,12 @@ components:
         requirements:
           type: array
           items: { type: object, additionalProperties: true }
+        composition_plan:
+          type: object
+          additionalProperties: true
+          description: Immutable CompositionPlanV1. Install must echo both digests and node inputs.
+        composition_inputs_valid: { type: boolean }
+        composition_input_error: { type: [string, "null"] }
         topology_confirmation_required: { type: boolean }
         runtime: { type: object, additionalProperties: true }
         topology:
@@ -1266,6 +1507,16 @@ components:
       properties:
         topology_id: { type: string, minLength: 1 }
         topology_etag: { type: string, pattern: '^"[^"\s]+"$' }
+    CompositionInstallInputs:
+      type: object
+      default: {}
+      description: Values keyed by deterministic Composition node ID. Secrets are references only.
+      additionalProperties:
+        type: object
+        additionalProperties:
+          oneOf:
+            - { type: string, minLength: 1 }
+            - { type: object, additionalProperties: true }
     InstallApiBindingSelection:
       type: object
       additionalProperties: false
@@ -1492,7 +1743,9 @@ components:
         health: { enum: [UNKNOWN, HEALTHY, UNHEALTHY, DEGRADED] }
         drift: { type: array, items: { type: string } }
         last_operation_id: { type: string }
-        state: { enum: [PENDING, RESOLVED, ACTIVE, UNBOUND, REVOKED, ERROR] }
+        state:
+          description: Compatibility projection derived by the control plane from desired_state, observed_state and optional; clients must not treat it as an independent truth.
+          enum: [PENDING, RESOLVED, ACTIVE, UNBOUND, REVOKED, ERROR]
         optional: { type: boolean }
         reason: { type: string }
         created_at: { type: string }

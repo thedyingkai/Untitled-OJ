@@ -56,11 +56,11 @@ paths:
                 protocol_version: { const: v1 }
                 capabilities:
                   type: array
-                  minItems: 10
-                  maxItems: 10
+                  minItems: 11
+                  maxItems: 11
                   uniqueItems: true
                   items:
-                    enum: [install, release_pipeline, upgrade, start, stop, restart, uninstall, rollback, health, binding_context_apply]
+                    enum: [install, release_pipeline, upgrade, start, stop, restart, uninstall, rollback, health, binding_context_apply, resource_purge]
                 max_jobs: { type: integer, const: 1 }
       responses:
         "200":
@@ -306,7 +306,7 @@ components:
             properties:
               job_id: { type: string }
               kind:
-                enum: [install, release_pipeline, upgrade, start, stop, restart, uninstall, rollback, health, binding_context_apply]
+                enum: [install, release_pipeline, upgrade, start, stop, restart, uninstall, rollback, health, binding_context_apply, resource_purge]
               payload: { type: object, additionalProperties: true }
               payload_sha256: { type: string }
               lease_token: { type: string }

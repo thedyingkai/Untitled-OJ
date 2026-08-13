@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ojos.dev/schemas/orchestrator/service-source-v1.schema.json",
+  "title": "OJOS service authoring source v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "runtime"],
+  "properties": {
+    "apiVersion": {"const": "ojos.dev/v1"},
+    "kind": {"const": "Service"},
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "displayName"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"},
+        "version": {"type": "string", "minLength": 1},
+        "displayName": {"type": "string", "minLength": 1},
+        "permissionNamespace": {"$ref": "#/$defs/key"},
+        "permissionReferences": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/key"}
+        }
+      }
+    },
+    "runtime": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "artifact", "httpPort", "health"],
+      "properties": {
+        "profile": {"enum": ["standard-container-v1", "judge-sandbox-v1"]},
+        "artifact": {"$ref": "#/$defs/key"},
+        "httpPort": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "health": {"type": "object", "additionalProperties": false, "required": ["path"], "properties": {"path": {"type": "string", "pattern": "^/"}}},
+        "volumes": {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/runtimeVolume"}}
+      }
+    },
+    "provides": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"apis": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["document"], "properties": {"document": {"$ref": "#/$defs/localPath"}}}}}
+    },
+    "requires": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "apis": {"type": "array", "items": {"$ref": "#/$defs/apiRequirement"}},
+        "packages": {"type": "array", "items": {"$ref": "#/$defs/packageRequirement"}}
+      }
+    },
+    "resources": {"type": "array", "items": {"$ref": "#/$defs/resource"}},
+    "migrations": {"type": "array", "items": {"$ref": "#/$defs/migration"}},
+    "events": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "publishes": {"type": "array", "items": {"$ref": "#/$defs/event"}},
+        "subscribes": {"type": "array", "items": {"$ref": "#/$defs/event"}}
+      }
+    },
+    "permissions": {"type": "array", "items": {"$ref": "#/$defs/permission"}},
+    "exposures": {"type": "array", "items": {"$ref": "#/$defs/exposure"}},
+    "frontends": {"type": "array", "items": {"$ref": "#/$defs/frontend"}},
+    "configSchema": {"$ref": "#/$defs/localPath"}
+  },
+  "$defs": {
+    "key": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"},
+    "localPath": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*://).+$"},
+    "runtimeVolume": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "kind", "target", "access", "lifecycle"],
+      "properties": {
+        "name": {"$ref": "#/$defs/key"},
+        "kind": {"const": "managed-volume"},
+        "target": {"type": "string", "pattern": "^/(?!$)(?!run/ojos(?:/|$))(?!proc(?:/|$))(?!sys(?:/|$))(?!dev(?:/|$))(?!.*//)(?!.*[?#]).+$"},
+        "access": {"const": "rw"},
+        "lifecycle": {"const": "retain"}
+      }
+    },
+    "apiRequirement": {
+      "type": "object", "additionalProperties": false, "required": ["id", "version"],
+      "properties": {"id": {"$ref": "#/$defs/key"}, "version": {"type": "string", "minLength": 1}, "optional": {"type": "boolean", "default": false}, "selection": {"enum": ["unique-healthy", "explicit"], "default": "unique-healthy"}}
+    },
+    "packageRequirement": {
+      "type": "object", "additionalProperties": false, "required": ["id", "version"],
+      "properties": {"id": {"$ref": "#/$defs/key"}, "version": {"type": "string", "minLength": 1}, "development": {"type": "boolean", "default": false}}
+    },
+    "resource": {
+      "type": "object", "additionalProperties": false, "required": ["name", "type"],
+      "properties": {"name": {"$ref": "#/$defs/key"}, "type": {"const": "postgresql.database/v1"}, "lifecycle": {"const": "retain", "default": "retain"}}
+    },
+    "migration": {
+      "type": "object", "additionalProperties": false, "required": ["id", "artifact", "resource"],
+      "properties": {"id": {"$ref": "#/$defs/key"}, "artifact": {"$ref": "#/$defs/key"}, "resource": {"$ref": "#/$defs/key"}}
+    },
+    "event": {
+      "type": "object", "additionalProperties": false, "required": ["type", "version", "schema"],
+      "properties": {"type": {"$ref": "#/$defs/key"}, "version": {"type": "integer", "minimum": 1}, "schema": {"$ref": "#/$defs/localPath"}, "delivery": {"enum": ["durable", "signal"], "default": "durable"}}
+    },
+    "permission": {
+      "type": "object", "additionalProperties": false, "required": ["key", "title"],
+      "properties": {"key": {"$ref": "#/$defs/key"}, "title": {"type": "string", "minLength": 1}}
+    },
+    "exposure": {
+      "type": "object", "additionalProperties": false, "required": ["id", "api", "audience", "mount"],
+      "properties": {"id": {"$ref": "#/$defs/key"}, "api": {"$ref": "#/$defs/key"}, "audience": {"enum": ["user", "public", "admin"]}, "mount": {"type": "string", "pattern": "^/(?:[^/?#]+(?:/[^/?#]+)*)?$"}}
+    },
+    "frontend": {
+      "type": "object", "additionalProperties": false, "required": ["target", "manifest"],
+      "properties": {"target": {"enum": ["user-shell", "admin-shell"]}, "manifest": {"$ref": "#/$defs/localPath"}}
+    }
+  }
+}

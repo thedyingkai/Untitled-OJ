@@ -72,12 +72,12 @@ func TestGenericProducerAndConsumerUseOneContractSelectedStream(t *testing.T) {
 
 func TestEventContextDeclarationMismatchFailsClosed(t *testing.T) {
 	t.Setenv("OJOS_ENVIRONMENT", "")
-	path := writeEventContext(t, "problem-service", []string{ProblemDeletedV1, ProblemSnapshotV1}, nil)
+	path := writeEventContext(t, "fixture-producer", []string{"io.example.deleted.v1", "io.example.snapshot.v1"}, nil)
 	t.Setenv("OJOS_EVENT_CONTEXT_FILE", path)
-	if _, err := LoadEventContextForService("problem-service", []string{ProblemSnapshotV1}, nil); err == nil {
+	if _, err := LoadEventContextForService("fixture-producer", []string{"io.example.snapshot.v1"}, nil); err == nil {
 		t.Fatal("expected a materialized/Release declaration mismatch to fail")
 	}
-	if _, err := LoadEventContextForService("judge-api", []string{ProblemDeletedV1, ProblemSnapshotV1}, nil); err == nil {
+	if _, err := LoadEventContextForService("fixture-consumer", []string{"io.example.deleted.v1", "io.example.snapshot.v1"}, nil); err == nil {
 		t.Fatal("expected a deployment service mismatch to fail")
 	}
 }

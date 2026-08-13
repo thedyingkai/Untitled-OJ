@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ojos.dev/schemas/orchestrator/service-contract-v3.schema.json",
+  "title": "OJOS compiled Service Contract v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "compilerVersion", "serviceId", "serviceVersion", "displayName", "sourceDigest", "runtime", "apiSurfaces", "operations", "apiRequirements", "packageRequirements", "resourceClaims", "migrations", "events", "permissions", "exposures", "routes", "frontends"],
+  "properties": {
+    "schemaVersion": {"const": "ojos.dev/service-contract/v3"},
+    "compilerVersion": {"type": "string", "minLength": 1},
+    "serviceId": {"type": "string"},
+    "serviceVersion": {"type": "string"},
+    "displayName": {"type": "string"},
+    "sourceDigest": {"$ref": "#/$defs/digest"},
+    "runtime": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "artifact", "httpPort", "health", "volumes"],
+      "properties": {
+        "profile": {"enum": ["standard-container-v1", "judge-sandbox-v1"]},
+        "artifact": {"type": "string"},
+        "httpPort": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "health": {"type": "object"},
+        "volumes": {"type": "array", "maxItems": 1}
+      }
+    },
+    "apiSurfaces": {"type": "array"},
+    "operations": {"type": "array"},
+    "apiRequirements": {"type": "array"},
+    "packageRequirements": {"type": "array"},
+    "resourceClaims": {"type": "array"},
+    "migrations": {"type": "array"},
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publishes", "subscribes"],
+      "properties": {
+        "publishes": {"type": "array", "items": {"$ref": "#/$defs/event"}},
+        "subscribes": {"type": "array", "items": {"$ref": "#/$defs/event"}}
+      }
+    },
+    "permissions": {"type": "array"},
+    "permissionReferences": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"}
+    },
+    "exposures": {"type": "array"},
+    "routes": {"type": "array"},
+    "frontends": {"type": "array"},
+    "configSchema": {"$ref": "#/$defs/artifactFile"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "artifactFile": {
+      "type": "object", "additionalProperties": false, "required": ["path", "digest"],
+      "properties": {"path": {"type": "string"}, "digest": {"$ref": "#/$defs/digest"}}
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "version", "schema", "payloadSchema", "delivery"],
+      "properties": {
+        "type": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "schema": {"$ref": "#/$defs/artifactFile"},
+        "payloadSchema": {"$ref": "#/$defs/eventObjectSchema"},
+        "delivery": {"enum": ["durable", "signal"]}
+      }
+    },
+    "eventSchema": {
+      "type": "object",
+      "anyOf": [
+        {"$ref": "#/$defs/eventObjectSchema"},
+        {"$ref": "#/$defs/eventArraySchema"},
+        {"$ref": "#/$defs/eventScalarSchema"},
+        {"$ref": "#/$defs/eventEnumSchema"},
+        {"$ref": "#/$defs/eventConstSchema"}
+      ]
+    },
+    "eventObjectSchema": {
+      "type": "object",
+      "required": ["type", "properties", "additionalProperties"],
+      "properties": {
+        "type": {"const": "object"},
+        "properties": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/eventSchema"}
+        },
+        "required": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": {"const": false}
+      }
+    },
+    "eventArraySchema": {
+      "type": "object",
+      "required": ["type", "items"],
+      "properties": {
+        "type": {"const": "array"},
+        "items": {"$ref": "#/$defs/eventSchema"}
+      }
+    },
+    "eventScalarSchema": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {"enum": ["string", "integer", "number", "boolean"]}
+      }
+    },
+    "eventEnumSchema": {
+      "type": "object",
+      "required": ["enum"],
+      "properties": {
+        "enum": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "eventConstSchema": {
+      "type": "object",
+      "required": ["const"],
+      "properties": {"const": {"type": "string"}}
+    }
+  }
+}
