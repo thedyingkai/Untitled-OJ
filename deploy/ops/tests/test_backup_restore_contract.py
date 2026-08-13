@@ -9,6 +9,7 @@ RESTORE = ROOT / "deploy" / "ops" / "restore.sh"
 MANIFEST = ROOT / "deploy" / "ops" / "backup-manifest.py"
 DRILL = ROOT / "deploy" / "ops" / "tests" / "full-stack-backup-restore-drill.sh"
 STAGING_WORKFLOW = ROOT / ".github" / "workflows" / "staging-drill.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 
 
 class FullStackBackupRestoreContractTests(unittest.TestCase):
@@ -149,6 +150,41 @@ class FullStackBackupRestoreContractTests(unittest.TestCase):
         workflow = STAGING_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("full-stack-backup-restore-drill.sh", workflow)
         self.assertIn("OJOS_DRILL_SOURCE_REDIS_URL", workflow)
+
+    def test_container_evidence_is_runner_owned_and_upload_is_preflighted(self) -> None:
+        workflow = STAGING_WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(workflow.count('runner_uid="$(id -u)"'), 2)
+        self.assertEqual(workflow.count('runner_gid="$(id -g)"'), 2)
+        self.assertEqual(
+            workflow.count('--user "$runner_uid:$runner_gid"'),
+            2,
+        )
+        self.assertIn("- name: Validate recovery artifact suite", workflow)
+        self.assertIn('find "$root" -type d -print0', workflow)
+        self.assertIn('find "$root" -type f -print0', workflow)
+        self.assertIn('[[ -r "$path" && -x "$path" ]]', workflow)
+        self.assertIn('[[ -r "$path" ]]', workflow)
+        self.assertIn('tar -czf "$archive" "${evidence[@]}"', workflow)
+        self.assertIn("archive_bytes", workflow)
+        self.assertIn("FROM postgres:17", workflow)
+        self.assertIn('docker build --tag "$drill_image"', workflow)
+        upload = workflow.split("- name: Upload staging drill evidence", 1)[1]
+        self.assertIn("steps.recovery-artifact-suite.outcome == 'success'", upload)
+        self.assertIn("if-no-files-found: error", upload)
+        self.assertIn("include-hidden-files: true", upload)
+        self.assertNotIn("continue-on-error", workflow)
+
+    def test_release_recovery_evidence_uses_the_same_ownership_contract(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        drill = workflow.split(
+            "- name: Real PostgreSQL and artifact backup/restore drill", 1
+        )[1].split("- name: Rust, Web, TUI and operations contract gates", 1)[0]
+        self.assertIn('runner_uid="$(id -u)"', drill)
+        self.assertIn('runner_gid="$(id -g)"', drill)
+        self.assertIn('--user "$runner_uid:$runner_gid"', drill)
+        upload = workflow.split("- name: Upload recovery drill evidence", 1)[1]
+        self.assertIn("if-no-files-found: error", upload)
+        self.assertIn("include-hidden-files: true", upload)
 
 
 if __name__ == "__main__":

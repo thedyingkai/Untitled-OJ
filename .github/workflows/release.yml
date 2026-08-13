@@ -206,9 +206,12 @@ jobs:
           set -euo pipefail
           docker exec ojos-release-pg-tls \
             createdb -U postgres ojos_orchestrator_backup_restore_drill
-          docker run --rm --network host \
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          docker run --rm --network host --user "$runner_uid:$runner_gid" \
             -v "$PWD:/workspace" -w /workspace \
             -v "$RUNNER_TEMP/orchestrator-release-pg-tls:/certs:ro" \
+            -e HOME=/tmp \
             -e 'ORCHESTRATOR_DRILL_DATABASE_URL=postgresql://postgres:ojos-release-pg-ci@127.0.0.1:55434/ojos_orchestrator_backup_restore_drill?sslmode=verify-full&sslrootcert=/certs/ca.crt' \
             -e OJOS_EVIDENCE_DIR=artifacts/orchestrator-release-recovery \
             postgres:17 \
@@ -290,7 +293,8 @@ jobs:
         with:
           name: orchestrator-v1-candidate-recovery-evidence
           path: artifacts/orchestrator-release-recovery
-          if-no-files-found: warn
+          if-no-files-found: error
+          include-hidden-files: true
           retention-days: 90
 
   production-evidence:
