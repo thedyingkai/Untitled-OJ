@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ojos-shared/bootstrap"
+	sharedperm "ojos-shared/security/permission"
+	"ojos-shared/servicecontext"
 )
 
 func TestGeneratedContractCarriesReferenceCapabilities(t *testing.T) {
@@ -42,5 +47,59 @@ func TestGeneratedContractCarriesReferenceCapabilities(t *testing.T) {
 		if operation.Audience != "internal" && strings.TrimSpace(operation.Permission) == "" {
 			t.Fatalf("external operation %s lacks operation permission", operation.OperationID)
 		}
+	}
+}
+
+func TestManagedPermissionBootstrapUsesV3APIIDBinding(t *testing.T) {
+	root := t.TempDir()
+	credential := filepath.Join(root, "token")
+	if err := os.WriteFile(credential, []byte("workload-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contextFile := filepath.Join(root, "context.json")
+	document := servicecontext.ServiceContext{
+		SchemaVersion: 1,
+		Deployment: servicecontext.DeploymentIdentity{
+			ID: "contest-a", Service: "contest-service", Node: "node-a",
+		},
+		Gateway: servicecontext.GatewayContext{Origin: "http://127.0.0.1:8080"},
+		Bindings: map[string]servicecontext.APIBinding{
+			sharedperm.DefaultPermissionCheckApiID: {
+				BindingID: "binding-auth-permission",
+				APIID:     sharedperm.DefaultPermissionCheckApiID,
+				BasePath:  "/internal/apis/" + sharedperm.DefaultPermissionCheckApiID,
+				TimeoutMS: 5_000,
+			},
+		},
+		CredentialFile: credential,
+		Generation:     1,
+	}
+	bytes, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(contextFile, bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime, err := bootstrap.New(bootstrap.Manifest{
+		Service: "contest-service",
+		Components: []bootstrap.ComponentSpec{{
+			Name: "permissions", Kind: bootstrap.KindPermission,
+		}},
+	}, bootstrap.Options{Factories: map[bootstrap.Kind]bootstrap.Factory{
+		bootstrap.KindPermission: contestPermissionFactory(contextFile, true),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("v3 API-ID binding did not start: %v", err)
+	}
+	if _, ok := runtime.Lookup(bootstrap.ValuePermissionChecker); !ok {
+		t.Fatal("permission checker output was not published")
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }

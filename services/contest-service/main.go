@@ -69,10 +69,10 @@ func run(logger *slog.Logger) error {
 			ResourceOutputFile: runtimeConfig.DatabaseSecretFile,
 			ConnectTimeout:     5 * time.Second,
 		}),
-		bootstrap.KindPermission: bootstrap.NewPermissionFactory(bootstrap.PermissionOptions{
-			Service: "contest-service", ContextFile: runtimeConfig.ServiceContextFile,
-			Managed: runtimeConfig.Managed, BindingName: sharedperm.DefaultPermissionCheckBinding,
-		}),
+		bootstrap.KindPermission: contestPermissionFactory(
+			runtimeConfig.ServiceContextFile,
+			runtimeConfig.Managed,
+		),
 		bootstrap.KindEventRelay: bootstrap.NewEventRelayFactory(bootstrap.EventRelayOptions{
 			Service: "contest-service", PublishTypes: []string{contest.ContestCreatedEventType},
 			RelayID: "contest-service",
@@ -142,4 +142,13 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("contest service started", "address", runtimeConfig.ListenAddress, "registration_mode", runtimeConfig.RegistrationMode)
 	return platform.Wait(context.Background())
+}
+
+func contestPermissionFactory(contextFile string, managed bool) bootstrap.Factory {
+	return bootstrap.NewPermissionFactory(bootstrap.PermissionOptions{
+		Service:     "contest-service",
+		ContextFile: contextFile,
+		Managed:     managed,
+		BindingName: sharedperm.DefaultPermissionCheckApiID,
+	})
 }
