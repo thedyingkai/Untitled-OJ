@@ -534,9 +534,7 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         let mut operation = self.required(operation_id)?;
         if !matches!(
             operation.status,
-            DurableOperationStatus::Running
-                | DurableOperationStatus::Cancelling
-                | DurableOperationStatus::NeedsAttention
+            DurableOperationStatus::Running | DurableOperationStatus::Cancelling
         ) {
             return Ok(operation);
         }
@@ -552,7 +550,37 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
         {
             operation = self.materialize_pending(operation, now_ms)?;
         }
-        let (status, result, error_message) = self.derive_projection(&operation)?;
+        let (mut status, mut result, mut error_message) = self.derive_projection(&operation)?;
+        if operation.status == DurableOperationStatus::Cancelling {
+            // A worker can finish a compensation Job while the projection is
+            // being derived.  Never combine a stale BLOCKED projection with a
+            // second, newer "no active jobs" observation: that used to move a
+            // healthy cancellation to NEEDS_ATTENTION.  Once no active Job is
+            // observed, re-run materialization and derive from the resulting
+            // durable graph.  Terminal Job states are monotonic, so reaching
+            // the same fixed point proves that the graph is genuinely stuck.
+            loop {
+                if status != DurableOperationStatus::Cancelling
+                    || !has_blocked_pending_compensation(&operation, &result)
+                    || self.cancellation_has_active_jobs(&operation)?
+                {
+                    break;
+                }
+
+                let previous = operation.clone();
+                operation = self.materialize_pending(operation, now_ms)?;
+                let next = self.derive_projection(&operation)?;
+                if operation == previous && next == (status, result.clone(), error_message.clone())
+                {
+                    status = DurableOperationStatus::NeedsAttention;
+                    error_message =
+                        "applicable compensation cannot be materialized from the durable dependency graph"
+                            .to_string();
+                    break;
+                }
+                (status, result, error_message) = next;
+            }
+        }
         if operation.status == status
             && operation.result == result
             && operation.error_message == error_message
@@ -796,22 +824,7 @@ impl<'a, O: OperationRepository, J: JobStore> OperationCoordinator<'a, O, J> {
             ));
         }
         if operation.status == DurableOperationStatus::Cancelling {
-            let (status, result, error_message) = self.derive_cancelling_projection(operation)?;
-            if status == DurableOperationStatus::Cancelling
-                && operation.pending_step_ids.iter().any(|step_id| {
-                    compensation_step_ids(operation).contains(step_id)
-                        && result[step_id]["status"] == "BLOCKED"
-                })
-                && !self.cancellation_has_active_jobs(operation)?
-            {
-                return Ok((
-                    DurableOperationStatus::NeedsAttention,
-                    result,
-                    "applicable compensation cannot be materialized from the durable dependency graph"
-                        .to_string(),
-                ));
-            }
-            return Ok((status, result, error_message));
+            return self.derive_cancelling_projection(operation);
         }
         let mut jobs = Vec::with_capacity(operation.planned_jobs.len());
         let mut statuses = Vec::with_capacity(operation.planned_jobs.len());
@@ -1337,6 +1350,13 @@ fn compensation_step_ids(operation: &DurableOperation) -> BTreeSet<String> {
     }
 }
 
+fn has_blocked_pending_compensation(operation: &DurableOperation, result: &Value) -> bool {
+    let compensation_steps = compensation_step_ids(operation);
+    operation.pending_step_ids.iter().any(|step_id| {
+        compensation_steps.contains(step_id) && result[step_id]["status"] == "BLOCKED"
+    })
+}
+
 fn operation_from_plan(
     plan: PlanOperation,
     mode: DurableOperationMode,
@@ -1644,9 +1664,88 @@ fn job_kind_is_observation(kind: &JobKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ClaimRequest, CompleteRequest, CompletionStatus, MemoryJobStore};
+    use crate::{
+        ClaimRequest, CompleteRequest, CompletionStatus, HeartbeatRequest, JobEvent,
+        MemoryJobStore, ResolveExpiredSuccessRequest,
+    };
+    use std::cell::RefCell;
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    #[derive(Debug)]
+    struct CompleteJobOnGetStore {
+        inner: RefCell<MemoryJobStore>,
+        trigger_job_id: String,
+        completion: RefCell<Option<CompleteRequest>>,
+    }
+
+    impl CompleteJobOnGetStore {
+        fn new(inner: MemoryJobStore, trigger_job_id: String, completion: CompleteRequest) -> Self {
+            Self {
+                inner: RefCell::new(inner),
+                trigger_job_id,
+                completion: RefCell::new(Some(completion)),
+            }
+        }
+
+        fn into_inner(self) -> MemoryJobStore {
+            self.inner.into_inner()
+        }
+    }
+
+    impl JobStore for CompleteJobOnGetStore {
+        fn enqueue(&mut self, job: NewJob, now_ms: i64) -> Result<Job, JobError> {
+            self.inner.get_mut().enqueue(job, now_ms)
+        }
+
+        fn claim(&mut self, request: ClaimRequest) -> Result<Option<Job>, JobError> {
+            self.inner.get_mut().claim(request)
+        }
+
+        fn heartbeat(&mut self, request: HeartbeatRequest) -> Result<Job, JobError> {
+            self.inner.get_mut().heartbeat(request)
+        }
+
+        fn complete(&mut self, request: CompleteRequest) -> Result<Job, JobError> {
+            self.inner.get_mut().complete(request)
+        }
+
+        fn resolve_expired_success(
+            &mut self,
+            request: ResolveExpiredSuccessRequest,
+        ) -> Result<Job, JobError> {
+            self.inner.get_mut().resolve_expired_success(request)
+        }
+
+        fn request_cancel(&mut self, job_id: &str, now_ms: i64) -> Result<Job, JobError> {
+            self.inner.get_mut().request_cancel(job_id, now_ms)
+        }
+
+        fn expired_leases(&self, now_ms: i64) -> Result<Vec<Job>, JobError> {
+            self.inner.borrow().expired_leases(now_ms)
+        }
+
+        fn recover_expired(&mut self, now_ms: i64) -> Result<Vec<Job>, JobError> {
+            self.inner.get_mut().recover_expired(now_ms)
+        }
+
+        fn get(&self, job_id: &str) -> Result<Option<Job>, JobError> {
+            if job_id == self.trigger_job_id
+                && let Some(completion) = self.completion.borrow_mut().take()
+            {
+                self.inner.borrow_mut().complete(completion)?;
+            }
+            self.inner.borrow().get(job_id)
+        }
+
+        fn list(&self) -> Result<Vec<Job>, JobError> {
+            self.inner.borrow().list()
+        }
+
+        fn events(&self, job_id: &str, after_sequence: u64) -> Result<Vec<JobEvent>, JobError> {
+            self.inner.borrow().events(job_id, after_sequence)
+        }
+    }
 
     fn plan(operation_id: &str, count: usize) -> PlanOperation {
         PlanOperation {
@@ -2541,6 +2640,131 @@ mod tests {
             .unwrap();
         assert_eq!(cancelled.status, DurableOperationStatus::Cancelled);
         assert_eq!(cancelled.result["cleanup"]["status"], "SUCCEEDED");
+    }
+
+    #[test]
+    fn cancellation_rechecks_materialization_when_compensation_finishes_during_projection() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator
+                .plan(prepare_and_abort_plan("op-cancel-projection-race"), 0)
+                .unwrap();
+            coordinator.confirm("op-cancel-projection-race", 1).unwrap();
+            coordinator.enqueue("op-cancel-projection-race", 2).unwrap();
+        }
+        claim_and_complete(
+            &mut jobs,
+            "control-plane",
+            "prepare-token",
+            CompletionStatus::Succeeded,
+            10,
+        );
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-cancel-projection-race", 12)
+            .unwrap();
+        let apply = jobs
+            .claim(ClaimRequest {
+                node_id: "node-0".to_string(),
+                instance_id: "worker-node-0".to_string(),
+                lease_token: "apply-token".to_string(),
+                now_ms: 13,
+                lease_ms: 30_000,
+            })
+            .unwrap()
+            .unwrap();
+        OperationCoordinator::new(&mut operations, &mut jobs)
+            .cancel("op-cancel-projection-race", 14)
+            .unwrap();
+        jobs.complete(CompleteRequest {
+            job_id: apply.job_id,
+            lease_token: "apply-token".to_string(),
+            status: CompletionStatus::Succeeded,
+            result: json!({"installed": true}),
+            error_message: String::new(),
+            now_ms: 15,
+            events: vec![],
+        })
+        .unwrap();
+
+        let cancelling = OperationCoordinator::new(&mut operations, &mut jobs)
+            .recover(16)
+            .unwrap()
+            .remove(0);
+        assert_eq!(cancelling.result["abort"]["status"], "QUEUED");
+        let abort = jobs
+            .claim(ClaimRequest {
+                node_id: "control-plane".to_string(),
+                instance_id: "worker-control-plane".to_string(),
+                lease_token: "abort-token".to_string(),
+                now_ms: 17,
+                lease_ms: 30_000,
+            })
+            .unwrap()
+            .unwrap();
+        let cleanup = cancelling
+            .planned_jobs
+            .iter()
+            .find(|planned| planned.step_id == "cleanup")
+            .unwrap();
+        let cleanup_job_id = binding_for(&cancelling, cleanup).job_id;
+        let abort_completion = CompleteRequest {
+            job_id: abort.job_id,
+            lease_token: "abort-token".to_string(),
+            status: CompletionStatus::Succeeded,
+            result: json!({"aborted": true}),
+            error_message: String::new(),
+            now_ms: 18,
+            events: vec![],
+        };
+        let mut racing_jobs = CompleteJobOnGetStore::new(jobs, cleanup_job_id, abort_completion);
+
+        let reprojected = OperationCoordinator::new(&mut operations, &mut racing_jobs)
+            .project("op-cancel-projection-race", 19)
+            .unwrap();
+        assert_eq!(reprojected.status, DurableOperationStatus::Cancelling);
+        assert_eq!(reprojected.result["abort"]["status"], "SUCCEEDED");
+        assert_eq!(reprojected.result["cleanup"]["status"], "QUEUED");
+        assert!(reprojected.active_binding("cleanup").is_some());
+
+        let mut jobs = racing_jobs.into_inner();
+        claim_and_complete(
+            &mut jobs,
+            "node-0",
+            "cleanup-token",
+            CompletionStatus::Succeeded,
+            20,
+        );
+        let cancelled = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-cancel-projection-race", 22)
+            .unwrap();
+        assert_eq!(cancelled.status, DurableOperationStatus::Cancelled);
+        assert_eq!(cancelled.result["cleanup"]["status"], "SUCCEEDED");
+    }
+
+    #[test]
+    fn needs_attention_projection_is_terminal_and_idempotent() {
+        let mut operations = MemoryOperationStore::default();
+        let mut jobs = MemoryJobStore::default();
+        let terminal = {
+            let mut coordinator = OperationCoordinator::new(&mut operations, &mut jobs);
+            coordinator
+                .plan(prepare_and_abort_plan("op-terminal-attention"), 0)
+                .unwrap();
+            coordinator.confirm("op-terminal-attention", 1).unwrap();
+            coordinator.enqueue("op-terminal-attention", 2).unwrap();
+            let mut operation = coordinator.required("op-terminal-attention").unwrap();
+            operation.status = DurableOperationStatus::NeedsAttention;
+            operation.error_message = "durable graph requires reconciliation".to_string();
+            operation.finished_at_ms = Some(3);
+            coordinator.save(operation, 3).unwrap()
+        };
+
+        let replayed = OperationCoordinator::new(&mut operations, &mut jobs)
+            .project("op-terminal-attention", 2)
+            .unwrap();
+        assert_eq!(replayed, terminal);
     }
 
     #[test]
