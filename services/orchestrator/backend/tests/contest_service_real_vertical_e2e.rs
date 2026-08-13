@@ -424,6 +424,27 @@ async fn real_contest_runtime_resource_migration_binding_gateway_vertical() {
         .expect("real contest-service vertical gate failed");
 }
 
+#[test]
+fn live_contest_slug_is_stable_and_within_the_signed_contract() {
+    let first = live_contest_slug("deployment-with-an-arbitrarily-long-generated-identity");
+    let second = live_contest_slug("deployment-with-an-arbitrarily-long-generated-identity");
+    let different = live_contest_slug("another-deployment");
+
+    assert_eq!(first, second);
+    assert_ne!(first, different);
+    assert!(
+        first.len() <= 63,
+        "slug exceeded the signed schema: {first}"
+    );
+    assert!(
+        first
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
+        "slug contains a character outside the signed schema: {first}"
+    );
+    assert!(first.starts_with("real-vertical-") && !first.ends_with('-'));
+}
+
 async fn run_gate() -> Result<()> {
     let config = LiveConfig::from_env()?;
     ensure!(
@@ -616,14 +637,15 @@ async fn assert_gateway_permission_and_crud(
     );
 
     let marker = format!("real-vertical-{}", evidence.deployment_id);
+    let slug = live_contest_slug(&evidence.deployment_id);
     let created = json_response(
         client
             .post(format!("{}/api/contests", config.gateway_origin))
             .bearer_auth(&endpoints.allow_token)
             .header("idempotency-key", &marker)
             .json(&serde_json::json!({
-                "slug": marker,
-                "title": marker,
+                "slug": &slug,
+                "title": &marker,
                 "description": "real vertical contest",
                 "startsAt": "2026-08-13T00:00:00Z",
                 "endsAt": "2026-08-14T00:00:00Z"
@@ -684,8 +706,13 @@ async fn assert_gateway_permission_and_crud(
     );
     Ok(CreatedContestEvidence {
         id: contest_id,
-        slug: marker,
+        slug,
     })
+}
+
+fn live_contest_slug(deployment_id: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(deployment_id.as_bytes()));
+    format!("real-vertical-{}", &digest[..32])
 }
 
 fn assert_postgres_migration_and_outbox(
