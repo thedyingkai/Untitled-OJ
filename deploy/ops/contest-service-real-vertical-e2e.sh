@@ -269,14 +269,33 @@ gateway_tls_pid=$!
 
 cd "$repo_root"
 cargo_build_json="$run_root/contest-test-build.jsonl"
-cargo test -p ojos-orchestrator-daemon --test contest_service_real_vertical_e2e \
-  --no-run --message-format=json-render-diagnostics >"$cargo_build_json"
-test_binary="$(python3 - "$cargo_build_json" <<'PY'
+cargo_target_root="$(cargo metadata --no-deps --format-version=1 | python3 -c '
 import json
 import os
 import sys
 
+value = json.load(sys.stdin).get("target_directory")
+if not isinstance(value, str) or not os.path.isabs(value):
+    raise SystemExit("cargo metadata omitted an absolute target_directory")
+print(os.path.realpath(value))
+')"
+cargo_target_root="$(realpath -e -- "$cargo_target_root")"
+cargo test -p ojos-orchestrator-daemon --test contest_service_real_vertical_e2e \
+  --no-run --message-format=json-render-diagnostics >"$cargo_build_json"
+test_binary="$(python3 - "$cargo_build_json" "$cargo_target_root" "$repo_root" <<'PY'
+import json
+import os
+import re
+import sys
+
 executables = []
+target_root = os.path.realpath(sys.argv[2])
+expected_source = os.path.realpath(
+    os.path.join(
+        sys.argv[3],
+        "services/orchestrator/backend/tests/contest_service_real_vertical_e2e.rs",
+    )
+)
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     for line in handle:
         try:
@@ -289,9 +308,18 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
             value.get("reason") == "compiler-artifact"
             and target.get("name") == "contest_service_real_vertical_e2e"
             and "test" in target.get("kind", [])
+            and os.path.realpath(target.get("src_path", "")) == expected_source
             and isinstance(executable, str)
         ):
-            executables.append(os.path.realpath(executable))
+            resolved = os.path.realpath(executable)
+            if os.path.commonpath((target_root, resolved)) != target_root:
+                raise SystemExit(f"contest test executable escaped Cargo target: {resolved!r}")
+            if not re.fullmatch(
+                r"contest_service_real_vertical_e2e-[0-9a-f]{16,64}",
+                os.path.basename(resolved),
+            ):
+                raise SystemExit(f"unexpected contest test executable name: {resolved!r}")
+            executables.append(resolved)
 if len(set(executables)) != 1:
     raise SystemExit(f"expected one dedicated contest test binary, got {executables!r}")
 print(executables[0])
@@ -299,6 +327,20 @@ PY
 )"
 if [[ ! -x "$test_binary" ]]; then
   echo "dedicated contest vertical test binary is not executable: $test_binary" >&2
+  exit 1
+fi
+staged_test_binary="$run_root/contest-service-real-vertical-e2e"
+install -m 0555 -- "$test_binary" "$staged_test_binary"
+staged_test_binary="$(realpath -e -- "$staged_test_binary")"
+if [[ "$staged_test_binary" != "$run_root/contest-service-real-vertical-e2e" \
+    || ! -f "$staged_test_binary" || -L "$staged_test_binary" \
+    || "$(stat -c '%a' "$staged_test_binary")" != 555 \
+    || ! -x "$staged_test_binary" ]]; then
+  echo "staged contest vertical test binary violates the fixed execution contract" >&2
+  exit 1
+fi
+if ! cmp -s -- "$test_binary" "$staged_test_binary"; then
+  echo "staged contest vertical test binary differs from the Cargo artifact" >&2
   exit 1
 fi
 
@@ -330,7 +372,7 @@ sudo env -i \
     --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
     --no-new-privs \
     /bin/bash -c 'umask 0022; exec "$@"' contest-vertical \
-      "$test_binary" --nocapture --test-threads=1
+      "$staged_test_binary" --nocapture --test-threads=1
 
 if [[ ! -s "$evidence" ]]; then
   echo "real vertical driver did not create evidence: $evidence" >&2
