@@ -3662,9 +3662,12 @@ fn resource_secret_mount_has_exact_contract(mount: &Mount) -> bool {
         && mount.bind_options.as_ref().is_some_and(|options| {
             options.propagation == Some(MountBindOptionsPropagationEnum::RPRIVATE)
                 && options.non_recursive == Some(true)
-                && options.create_mountpoint == Some(false)
-                && options.read_only_non_recursive.is_none()
-                && options.read_only_force_recursive.is_none()
+                // Docker omits false-valued bind options from inspect output.
+                // Treat absent and explicit false as the same safe state while
+                // continuing to reject every option that weakens this mount.
+                && options.create_mountpoint != Some(true)
+                && options.read_only_non_recursive != Some(true)
+                && options.read_only_force_recursive != Some(true)
         })
 }
 
@@ -5609,6 +5612,38 @@ mod tests {
                 .unwrap()
                 .as_ref()
         );
+    }
+
+    #[test]
+    fn resource_secret_mount_attestation_normalizes_docker_false_defaults() {
+        let mut spec = judge_test_spec();
+        spec.service_id = "problem-service".to_string();
+        spec.runtime_contract = RuntimeContract::standard_v1();
+        spec.runtime_context = None;
+        spec.managed_service_context = None;
+        spec.resource_secret_file_mounts = vec![resource_secret_source("contests")];
+
+        let body = container_create_body(&spec).unwrap();
+        let created = body.host_config.as_ref().unwrap().mounts.as_ref().unwrap()[0].clone();
+        assert!(resource_secret_mount_has_exact_contract(&created));
+
+        let mut inspected = created.clone();
+        let options = inspected.bind_options.as_mut().unwrap();
+        options.create_mountpoint = None;
+        options.read_only_non_recursive = Some(false);
+        options.read_only_force_recursive = Some(false);
+        assert!(resource_secret_mount_has_exact_contract(&inspected));
+
+        let unsafe_mutations: [fn(&mut MountBindOptions); 3] = [
+            |options| options.create_mountpoint = Some(true),
+            |options| options.read_only_non_recursive = Some(true),
+            |options| options.read_only_force_recursive = Some(true),
+        ];
+        for mutate in unsafe_mutations {
+            let mut unsafe_mount = inspected.clone();
+            mutate(unsafe_mount.bind_options.as_mut().unwrap());
+            assert!(!resource_secret_mount_has_exact_contract(&unsafe_mount));
+        }
     }
 
     #[test]
