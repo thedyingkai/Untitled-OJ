@@ -5,53 +5,24 @@
 # Local trace/load drills opt into this override instead of weakening those
 # production checks or reviving the removed 0.2 Node push/bearer transport.
 services:
-  orchestrator:
-    command:
-      - ojos-orchestrator-daemon
-      - --ephemeral
-      - --repo-root
-      - /workspace
-      - --bind
-      - 0.0.0.0:8090
-      - --web-root
-      - /app/manager/web/dist
-      - --artifact-root
-      - /var/lib/ojos/orchestrator/artifacts
-    environment:
-      OJOS_ENVIRONMENT: development
-      # An empty Catalog variable is still considered configured by the daemon.
-      # Remove both keys entirely so ephemeral Desktop/integration startup uses
-      # the local dynamic Catalog registry instead of parsing empty JSON.
-      ORCHESTRATOR_CATALOG_TRUST_KEYS: null
-      ORCHESTRATOR_CATALOG_SOURCES: null
-      ORCHESTRATOR_GATEWAY_ADMIN_ORIGIN: null
-      ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: ""
-      ORCHESTRATOR_AUTH_ADMIN_ORIGIN: null
-      ORCHESTRATOR_AUTH_ADMIN_TOKEN: ""
-      ORCHESTRATOR_AUTH_WORKLOAD_ORIGIN: ""
-      ORCHESTRATOR_AUTH_WORKLOAD_TOKEN: ""
-      ORCHESTRATOR_GATEWAY_WORKLOAD_ORIGIN: ""
-      ORCHESTRATOR_GATEWAY_WORKLOAD_CA_FILE: ""
-      ORCHESTRATOR_OBSERVABILITY_TOKEN_FILE: ""
-      ORCHESTRATOR_GATEWAY_OBSERVABILITY_ORIGIN: ""
-      ORCHESTRATOR_DATABASE_URL: ""
-      ORCHESTRATOR_HEALTHCHECK_URL: http://127.0.0.1:8090/api/v1/healthz/live
-      ORCHESTRATOR_LEGACY_API_MODE: gone
-    networks:
-      - default
-      - platform-control
-
   gateway:
+    # Compatibility drills push an explicit route table through Gateway's
+    # current management API. They never revive the retired Orchestrator 0.2
+    # node/release endpoints or weaken the production daemon's storage fence.
+    depends_on: !override
+      auth-service:
+        condition: service_healthy
     environment:
       OJOS_ENVIRONMENT: development
       OJOS_PLATFORM_BOOTSTRAP: null
       REDIS_URL: ${REDIS_URL:-redis://:DEV_ONLY_redis_password_not_for_production@redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-ojos-local-jwt}
       AUTH_SERVICE_ENDPOINT: http://auth-service:8081
-      ORCHESTRATOR_ENDPOINT: http://orchestrator:8090
-      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:-ojos-local-internal}
+      ORCHESTRATOR_ENDPOINT: ""
+      ORCHESTRATOR_INTERNAL_TOKEN: ""
+      ORCHESTRATOR_NODE_ID: ""
       ORCHESTRATOR_GATEWAY_ADMIN_TOKEN: ""
-      CONTRIBUTION_ACK_TOKEN: ${ORCHESTRATOR_CONTRIBUTION_GATEWAY_ACK_TOKEN:-DEV_ONLY_gateway_contribution_ack_token}
+      CONTRIBUTION_ACK_TOKEN: ""
       OJOS_WORKLOAD_PUBLIC_KEY_FILE: ""
     networks:
       - default
@@ -68,9 +39,9 @@ services:
       # integration. Developers may opt in explicitly outside this overlay.
       AUTH_ADMIN_BOOTSTRAP_SECRET_FILE: ""
       ORCHESTRATOR_AUTH_ADMIN_TOKEN: ""
-      ORCHESTRATOR_ENDPOINT: http://orchestrator:8090
-      ORCHESTRATOR_INTERNAL_TOKEN: ${ORCHESTRATOR_INTERNAL_TOKEN:-ojos-local-internal}
-      CONTRIBUTION_ACK_TOKEN: ${ORCHESTRATOR_CONTRIBUTION_AUTH_ACK_TOKEN:-DEV_ONLY_auth_contribution_ack_token}
+      ORCHESTRATOR_ENDPOINT: ""
+      ORCHESTRATOR_INTERNAL_TOKEN: ""
+      CONTRIBUTION_ACK_TOKEN: ""
       OJOS_WORKLOAD_PRIVATE_KEY_FILE: ""
       OJOS_WORKLOAD_CONTROL_PLANE_TOKEN: ""
     volumes: !override

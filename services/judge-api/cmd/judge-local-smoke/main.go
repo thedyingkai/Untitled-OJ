@@ -641,7 +641,6 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 		{name: "compose auth-service health", url: cfg.auth.baseURL() + "/health"},
 		{name: "compose storage-service health", url: cfg.storage.baseURL() + "/health"},
 		{name: "compose judge-api health", url: cfg.judgeAPI.baseURL() + "/health"},
-		{name: "compose orchestrator health", url: cfg.orchestrator.baseURL() + "/health"},
 	}
 	for _, check := range healthChecks {
 		if err := waitHealth(ctx, check.url); err != nil {
@@ -657,10 +656,7 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 	cfg.storageProvider = endpoint{host: storageIP, port: 8085}
 	ok("compose storage provider endpoint: %s", storageProviderEndpoint(cfg).baseURL())
 
-	if err := seedRealNodeTree(ctx, cfg); err != nil {
-		return err
-	}
-	storageEndpointID, err := installStorageReleaseCompose(ctx, cfg)
+	serviceEndpoints, err := composeSmokeServiceEndpoints(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -668,13 +664,10 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 		return fail("compose judge-worker container prepared", err)
 	}
 	ok("compose judge-worker container prepared")
-	if err := installComposeCallerIdentities(ctx, cfg); err != nil {
+	if err := reloadGatewayFromComposeSmoke(ctx, cfg, serviceEndpoints); err != nil {
 		return err
 	}
-	if err := reloadGatewayFromComposeSmoke(ctx, cfg); err != nil {
-		return err
-	}
-	if err := waitGatewayRoute(ctx, cfg, "storage.object.put", storageEndpointID); err != nil {
+	if err := waitGatewayRoute(ctx, cfg, "storage.object.put", serviceEndpoints[storageService].providerEndpoint); err != nil {
 		return fail("compose gateway route reload completed", err)
 	}
 	ok("compose gateway route reload completed")
@@ -1259,17 +1252,218 @@ func releaseInstallDriverPID(ctx context.Context, cfg smokeConfig, operationID s
 	return 0, fmt.Errorf("driver pid log not found for %s", operationID)
 }
 
-func reloadGatewayFromComposeSmoke(ctx context.Context, cfg smokeConfig) error {
+type composeSmokeServiceEndpoint struct {
+	host             string
+	port             int
+	providerEndpoint string
+}
+
+type composeGatewayRoute struct {
+	RouteID            string   `json:"route_id"`
+	APIID              string   `json:"api_id,omitempty"`
+	NodeID             string   `json:"node_id,omitempty"`
+	ProviderNodeID     string   `json:"provider_node_id,omitempty"`
+	ProviderHostIP     string   `json:"provider_host_ip,omitempty"`
+	ProviderService    string   `json:"provider_service_name,omitempty"`
+	ProviderEndpoint   string   `json:"provider_endpoint,omitempty"`
+	TimeoutMS          uint64   `json:"timeout_ms,omitempty"`
+	OwnerServiceID     string   `json:"owner_service_id"`
+	Prefix             string   `json:"prefix"`
+	ServiceID          string   `json:"service_id"`
+	TargetService      string   `json:"target_service"`
+	UpstreamBase       string   `json:"upstream_base"`
+	AuthMode           string   `json:"auth_mode"`
+	RequiredPermission string   `json:"required_permission,omitempty"`
+	Methods            []string `json:"methods"`
+	Enabled            bool     `json:"enabled"`
+	ProxyEnabled       bool     `json:"proxy_enabled"`
+	Priority           int      `json:"priority"`
+	StripPrefix        string   `json:"strip_prefix,omitempty"`
+	RewritePrefix      string   `json:"rewrite_prefix,omitempty"`
+	CreatedFrom        string   `json:"created_from"`
+	Status             string   `json:"status"`
+	ServiceStatus      string   `json:"service_status"`
+	ServiceHealth      string   `json:"service_health"`
+	Conflicts          []string `json:"conflicts"`
+	Warnings           []string `json:"warnings"`
+	BlockedBy          []string `json:"blocked_by"`
+}
+
+type composeGatewayRoutesReloadRequest struct {
+	OperationID      string                `json:"operation_id"`
+	ServiceName      string                `json:"service_name"`
+	NodeID           string                `json:"node_id"`
+	Version          string                `json:"version"`
+	GeneratedAt      string                `json:"generated_at"`
+	PushedRouteTable bool                  `json:"pushed_route_table"`
+	Routes           []composeGatewayRoute `json:"routes"`
+	Warnings         []string              `json:"warnings"`
+	CanProxy         bool                  `json:"can_proxy"`
+}
+
+func composeSmokeServiceEndpoints(ctx context.Context, cfg smokeConfig) (map[string]composeSmokeServiceEndpoint, error) {
+	services := []struct {
+		name string
+		port int
+	}{
+		{name: storageService, port: 8085},
+		{name: problemService, port: 8083},
+		{name: judgeAPIService, port: 8082},
+	}
+	endpoints := make(map[string]composeSmokeServiceEndpoint, len(services))
+	for _, service := range services {
+		host := ""
+		if service.name == storageService {
+			host = strings.TrimSpace(storageProviderEndpoint(cfg).host)
+		}
+		if host == "" {
+			var err error
+			host, err = composeServiceIP(ctx, cfg, service.name)
+			if err != nil {
+				return nil, fail("compose "+service.name+" container endpoint", err)
+			}
+		}
+		endpoints[service.name] = composeSmokeServiceEndpoint{
+			host:             host,
+			port:             service.port,
+			providerEndpoint: fmt.Sprintf("%s:%d:%s", host, service.port, service.name),
+		}
+	}
+	return endpoints, nil
+}
+
+func composeSmokePushedRouteTable(endpoints map[string]composeSmokeServiceEndpoint, generatedAt time.Time) (composeGatewayRoutesReloadRequest, error) {
+	required := []string{storageService, problemService, judgeAPIService}
+	for _, service := range required {
+		endpoint, ok := endpoints[service]
+		if !ok || net.ParseIP(endpoint.host) == nil || endpoint.port <= 0 || strings.TrimSpace(endpoint.providerEndpoint) == "" {
+			return composeGatewayRoutesReloadRequest{}, fmt.Errorf("compose route endpoint for %s is incomplete", service)
+		}
+	}
+
+	routes := make([]composeGatewayRoute, 0, 6)
+	storage := endpoints[storageService]
+	for _, api := range []struct {
+		id         string
+		method     string
+		permission string
+	}{
+		{id: "storage.object.put", method: http.MethodPut, permission: "storage.object.write"},
+		{id: "storage.object.get", method: http.MethodGet, permission: "storage.object.read"},
+		{id: "storage.object.head", method: http.MethodHead, permission: "storage.object.read"},
+		{id: "storage.object.delete", method: http.MethodDelete, permission: "storage.object.delete"},
+	} {
+		routes = append(routes, composeSmokeRoute(
+			"compose-smoke:"+api.id,
+			api.id,
+			storageService,
+			storage,
+			rootNodeID,
+			"/api/storage/objects",
+			"service",
+			api.permission,
+			[]string{api.method},
+			"",
+			"",
+			300_000,
+		))
+	}
+
+	problem := endpoints[problemService]
+	routes = append(routes, composeSmokeRoute(
+		"compose-smoke:problem-service",
+		"",
+		problemService,
+		problem,
+		childNodeID,
+		"/api/problem",
+		"user",
+		"problem.view",
+		[]string{"ANY"},
+		"/api/problem",
+		"",
+		30_000,
+	))
+	judge := endpoints[judgeAPIService]
+	routes = append(routes, composeSmokeRoute(
+		"compose-smoke:judge-api",
+		"",
+		judgeAPIService,
+		judge,
+		childNodeID,
+		"/api/judge",
+		"user",
+		"submission.view.own",
+		[]string{"ANY"},
+		"/api/judge",
+		"/judge",
+		30_000,
+	))
+
+	return composeGatewayRoutesReloadRequest{
+		OperationID:      "compose-smoke-route-table",
+		ServiceName:      "judge-local-smoke",
+		NodeID:           childNodeID,
+		Version:          "compose-smoke-v1",
+		GeneratedAt:      generatedAt.UTC().Format(time.RFC3339Nano),
+		PushedRouteTable: true,
+		Routes:           routes,
+		Warnings:         []string{},
+		CanProxy:         true,
+	}, nil
+}
+
+func composeSmokeRoute(routeID string, apiID string, service string, endpoint composeSmokeServiceEndpoint, providerNodeID string, prefix string, authMode string, permission string, methods []string, stripPrefix string, rewritePrefix string, timeoutMS uint64) composeGatewayRoute {
+	return composeGatewayRoute{
+		RouteID:            routeID,
+		APIID:              apiID,
+		NodeID:             childNodeID,
+		ProviderNodeID:     providerNodeID,
+		ProviderHostIP:     endpoint.host,
+		ProviderService:    service,
+		ProviderEndpoint:   endpoint.providerEndpoint,
+		TimeoutMS:          timeoutMS,
+		OwnerServiceID:     service,
+		Prefix:             prefix,
+		ServiceID:          service,
+		TargetService:      service,
+		UpstreamBase:       fmt.Sprintf("http://%s:%d", endpoint.host, endpoint.port),
+		AuthMode:           authMode,
+		RequiredPermission: permission,
+		Methods:            methods,
+		Enabled:            true,
+		ProxyEnabled:       true,
+		Priority:           len(prefix),
+		StripPrefix:        stripPrefix,
+		RewritePrefix:      rewritePrefix,
+		CreatedFrom:        "compose_smoke_pushed_route_table",
+		Status:             "active",
+		ServiceStatus:      "RUNNING",
+		ServiceHealth:      "ok",
+		Conflicts:          []string{},
+		Warnings:           []string{},
+		BlockedBy:          []string{},
+	}
+}
+
+func reloadGatewayFromComposeSmoke(ctx context.Context, cfg smokeConfig, endpoints map[string]composeSmokeServiceEndpoint) error {
+	request, err := composeSmokePushedRouteTable(endpoints, time.Now())
+	if err != nil {
+		return fail("compose gateway pushed route table", err)
+	}
 	var resp struct {
 		Status     string `json:"status"`
 		RouteCount int    `json:"route_count"`
 	}
 	headers := map[string]string{"Authorization": "Bearer " + cfg.gatewayAdminJWT}
-	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.gateway.baseURL()+"/api/admin/orchestrator/routes/reload", map[string]any{}, headers, &resp); err != nil {
+	if err := doJSONWithHeaders(ctx, http.MethodPost, cfg.gateway.baseURL()+"/api/admin/orchestrator/routes/reload", request, headers, &resp); err != nil {
 		return fail("compose gateway reload smoke-driven", err)
 	}
 	if !strings.EqualFold(resp.Status, "reloaded") {
 		return fail("compose gateway reload smoke-driven", fmt.Errorf("unexpected status %q", resp.Status))
+	}
+	if resp.RouteCount != len(request.Routes) {
+		return fail("compose gateway reload smoke-driven", fmt.Errorf("unexpected route_count %d, want %d", resp.RouteCount, len(request.Routes)))
 	}
 	ok("compose gateway reload smoke-driven: routes=%d", resp.RouteCount)
 	return nil
@@ -2345,10 +2539,9 @@ func grantComposeUserRole(ctx context.Context, cfg smokeConfig, userID int64, ro
 }
 
 func composeCommand(parent context.Context, cfg smokeConfig, timeout time.Duration, args ...string) error {
-	composePath := filepath.Join(cfg.repoRoot, "deploy", "compose", "docker-compose.yml")
 	ctx, cancel := matrixContext(parent, timeout)
 	defer cancel()
-	commandArgs := append([]string{"compose", "-f", composePath}, args...)
+	commandArgs := composeDockerArgs(cfg.repoRoot, args...)
 	cmd := exec.CommandContext(ctx, "docker", commandArgs...)
 	cmd.Dir = cfg.repoRoot
 	cmd.Env = composeProcessEnv(cfg)
@@ -3279,12 +3472,32 @@ type composePSStatus struct {
 	Status  string `json:"Status"`
 }
 
+func composeDockerArgs(repoRoot string, args ...string) []string {
+	baseFile := filepath.Join(repoRoot, "deploy", "compose", "docker-compose.yml")
+	devFile := strings.TrimSpace(os.Getenv("OJOS_COMPOSE_DEV_OVERRIDE"))
+	if devFile == "" {
+		devFile = filepath.Join(repoRoot, "deploy", "compose", "docker-compose.dev.yml")
+	}
+	envFile := strings.TrimSpace(os.Getenv("OJOS_COMPOSE_ENV_FILE"))
+	if envFile == "" {
+		envFile = filepath.Join(repoRoot, ".env.example")
+	}
+	commandArgs := []string{
+		"compose",
+		"--profile", "legacy-development",
+		"--env-file", envFile,
+		"-f", baseFile,
+		"-f", devFile,
+	}
+	return append(commandArgs, args...)
+}
+
 func composeServiceStatuses(parent context.Context, cfg smokeConfig) (map[string]composePSStatus, error) {
-	composePath := filepath.Join(cfg.repoRoot, "deploy", "compose", "docker-compose.yml")
 	ctx, cancel := matrixContext(parent, 12*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "ps", "--format", "json")
+	cmd := exec.CommandContext(ctx, "docker", composeDockerArgs(cfg.repoRoot, "ps", "--format", "json")...)
 	cmd.Dir = cfg.repoRoot
+	cmd.Env = composeProcessEnv(cfg)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("docker compose ps failed: %s", oneLine(out, err))
@@ -3307,11 +3520,11 @@ func composeServiceStatuses(parent context.Context, cfg smokeConfig) (map[string
 }
 
 func composeServiceIP(parent context.Context, cfg smokeConfig, service string) (string, error) {
-	composePath := filepath.Join(cfg.repoRoot, "deploy", "compose", "docker-compose.yml")
 	ctx, cancel := matrixContext(parent, 20*time.Second)
 	defer cancel()
-	ps := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "ps", "-q", service)
+	ps := exec.CommandContext(ctx, "docker", composeDockerArgs(cfg.repoRoot, "ps", "-q", service)...)
 	ps.Dir = cfg.repoRoot
+	ps.Env = composeProcessEnv(cfg)
 	out, err := ps.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("docker compose ps -q %s failed: %s", service, oneLine(out, err))
@@ -3335,10 +3548,9 @@ func composeServiceIP(parent context.Context, cfg smokeConfig, service string) (
 }
 
 func composeRestartService(parent context.Context, cfg smokeConfig, service string) error {
-	composePath := filepath.Join(cfg.repoRoot, "deploy", "compose", "docker-compose.yml")
 	ctx, cancel := matrixContext(parent, 240*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d", "--force-recreate", service)
+	cmd := exec.CommandContext(ctx, "docker", composeDockerArgs(cfg.repoRoot, "up", "-d", "--force-recreate", service)...)
 	cmd.Dir = cfg.repoRoot
 	cmd.Env = composeProcessEnv(cfg)
 	out, err := cmd.CombinedOutput()

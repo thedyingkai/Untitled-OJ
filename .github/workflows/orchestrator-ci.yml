@@ -431,10 +431,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          promtool_fixture_dir="$(mktemp -d)"
+          promtool_token_file="$promtool_fixture_dir/orchestrator-observability-token"
+          cleanup_promtool_fixture() {
+            rm -f -- "$promtool_token_file"
+            rmdir -- "$promtool_fixture_dir"
+          }
+          trap cleanup_promtool_fixture EXIT
+          printf '%s\n' 'promtool-ci-observability-token-fixture-v1' >"$promtool_token_file"
+          chmod 0644 "$promtool_token_file"
+          test -s "$promtool_token_file"
           docker run --rm \
             -v "$PWD/deploy/ops/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
             -v "$PWD/deploy/ops/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            -v "$promtool_token_file:/etc/prometheus/secrets/orchestrator-observability-token:ro" \
             -v "/etc/ssl/certs/ca-certificates.crt:/etc/prometheus/tls/orchestrator-ca.crt:ro" \
+            -v "/etc/ssl/certs/ca-certificates.crt:/etc/prometheus/tls/gateway-ca.crt:ro" \
             --entrypoint /bin/promtool \
             prom/prometheus:v2.55.1 \
             check config /etc/prometheus/prometheus.yml

@@ -18,6 +18,9 @@ DOCKER_E2E_WORKFLOW_PATH = (
 DOCKER_E2E_WORKFLOW = DOCKER_E2E_WORKFLOW_PATH.read_text(encoding="utf-8")
 COMPOSE_PATH = ROOT / "deploy" / "compose" / "docker-compose.yml"
 COMPOSE = COMPOSE_PATH.read_text(encoding="utf-8")
+COMPOSE_DEV = (
+    ROOT / "deploy" / "compose" / "docker-compose.dev.yml"
+).read_text(encoding="utf-8")
 TRACE_DRILL = (ROOT / "deploy" / "ops" / "trace-e2e-drill.sh").read_text(
     encoding="utf-8"
 )
@@ -63,6 +66,37 @@ def assert_in_order(test: unittest.TestCase, body: str, *needles: str) -> None:
 
 
 class ReleaseWorkflowPolicyTests(unittest.TestCase):
+    def test_prometheus_validation_mounts_a_nonempty_read_only_token_fixture(self) -> None:
+        step = workflow_step(
+            "Validate Prometheus configuration and alert rules",
+            CI_WORKFLOW,
+        )
+        self.assertIn('promtool_fixture_dir="$(mktemp -d)"', step)
+        self.assertIn(
+            'promtool_token_file="$promtool_fixture_dir/orchestrator-observability-token"',
+            step,
+        )
+        self.assertIn(
+            "printf '%s\\n' 'promtool-ci-observability-token-fixture-v1' "
+            '>"$promtool_token_file"',
+            step,
+        )
+        self.assertIn('test -s "$promtool_token_file"', step)
+        self.assertIn(
+            '-v "$promtool_token_file:/etc/prometheus/secrets/'
+            'orchestrator-observability-token:ro"',
+            step,
+        )
+        for ca_name in ("orchestrator-ca.crt", "gateway-ca.crt"):
+            self.assertIn(
+                '-v "/etc/ssl/certs/ca-certificates.crt:'
+                f'/etc/prometheus/tls/{ca_name}:ro"',
+                step,
+            )
+        self.assertIn("check config /etc/prometheus/prometheus.yml", step)
+        self.assertIn("check rules /etc/ojos-monitoring/alerts.yml", step)
+        self.assertIn("test rules alert-tests.yml", step)
+
     def test_security_scans_are_required_and_kept_as_explicit_steps(self) -> None:
         opt_in = "if: ${{ vars.ORCHESTRATOR_RUN_SECURITY_GATES == 'true' }}"
         for name in (
@@ -154,6 +188,26 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn('"127.0.0.1:6379:6379"', COMPOSE)
         self.assertIn("${REDIS_HOST_PORT:-6379}/0", TRACE_DRILL)
         self.assertIn("${REDIS_HOST_PORT:-6379}/0", LOAD_DRILL)
+
+    def test_legacy_drills_capture_complete_compose_failures(self) -> None:
+        for drill in (TRACE_DRILL, LOAD_DRILL):
+            self.assertIn('docker_compose ps -a >"$evidence_dir/logs/compose-ps.txt"', drill)
+            self.assertIn("auth-service gateway problem-service storage-service", drill)
+            self.assertIn('compose_ps: "logs/compose-ps.txt"', drill)
+
+    def test_legacy_drills_use_current_gateway_projection_without_orchestrator(self) -> None:
+        gateway = COMPOSE_DEV.split("\n  gateway:\n", 1)[1].split("\n  auth-service:\n", 1)[0]
+        self.assertIn("depends_on: !override", gateway)
+        self.assertIn("auth-service:", gateway)
+        self.assertNotIn("condition: service_healthy\n      orchestrator:", gateway)
+        self.assertIn('ORCHESTRATOR_ENDPOINT: ""', gateway)
+        self.assertIn('ORCHESTRATOR_INTERNAL_TOKEN: ""', gateway)
+        self.assertIn('ORCHESTRATOR_NODE_ID: ""', gateway)
+        for drill in (TRACE_DRILL, LOAD_DRILL):
+            migration_block = drill.split("run_compose_migrations()", 1)[1].split("}\n", 1)[0]
+            startup_block = drill.split("compose_up_args+=(", 1)[1].split(")", 1)[0]
+            self.assertNotIn("orchestrator-migrations", migration_block)
+            self.assertNotIn("\n    orchestrator\n", startup_block)
 
     def test_workflow_is_manual_only_and_candidate_is_the_safe_default(self) -> None:
         trigger = WORKFLOW.split("\nrun-name:", 1)[0]

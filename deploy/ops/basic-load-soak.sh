@@ -96,7 +96,6 @@ docker_compose() {
 
 run_compose_migrations() {
   for migration_service in \
-    orchestrator-migrations \
     auth-service-migrations \
     problem-service-migrations \
     judge-api-migrations \
@@ -123,7 +122,11 @@ queue_status() {
 finish() {
   local rc=$?
   [[ $rc -eq 0 ]] && status="passed" || status="failed"
-  docker_compose logs --no-color gateway auth-service problem-service storage-service judge-api judge-worker redis >"$evidence_dir/logs/compose-services.log" 2>&1 || true
+  docker_compose ps -a >"$evidence_dir/logs/compose-ps.txt" 2>&1 || true
+  docker_compose logs --no-color \
+    auth-service gateway problem-service storage-service \
+    judge-api judge-worker jaeger redis minio \
+    >"$evidence_dir/logs/compose-services.log" 2>&1 || true
   if [[ "$bootstrap_compose" == "1" && "$cleanup_compose" == "1" ]]; then
     docker_compose down --remove-orphans >/dev/null 2>&1 || true
   fi
@@ -162,7 +165,8 @@ finish() {
         metrics: "responses/metrics.json",
         queue_before: "responses/queue-before.json",
         queue_after: "responses/queue-after.json",
-        compose_logs: "logs/compose-services.log"
+        compose_logs: "logs/compose-services.log",
+        compose_ps: "logs/compose-ps.txt"
       }
     }' >"$evidence_dir/manifest.json" || true
   if [[ $rc -eq 0 ]]; then
@@ -191,7 +195,6 @@ if [[ "$bootstrap_compose" == "1" ]]; then
     compose_up_args+=(--build)
   fi
   compose_up_args+=(
-    orchestrator
     auth-service
     storage-service
     gateway

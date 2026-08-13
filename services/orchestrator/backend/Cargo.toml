@@ -44,9 +44,7 @@ url = "2.5"
 async-trait = "0.1"
 ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
 ojos-service = { path = "../../../tools/ojos-service" }
-rand = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
-rsa = "0.9"
 tempfile.workspace = true
 serde_yaml.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -962,16 +962,12 @@ mod tests {
     use super::*;
     use crate::test_env::TestEnv;
     use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::engine::general_purpose::STANDARD;
     use jsonwebtoken::{EncodingKey, Header, encode};
-    use rand::rngs::OsRng;
     use rcgen::{
         BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
         KeyPair, KeyUsagePurpose,
     };
-    use rsa::RsaPrivateKey;
-    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
-    use rsa::traits::PublicKeyParts;
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
     use serde_json::json;
     use std::io::{Read, Write};
@@ -984,22 +980,34 @@ mod tests {
     #[derive(Clone)]
     struct TestKey {
         kid: String,
-        private_pem: String,
-        modulus: String,
-        exponent: String,
+        private_der: Vec<u8>,
+        modulus: &'static str,
+        exponent: &'static str,
     }
 
     impl TestKey {
         fn generate(kid: &str) -> Self {
-            let private = RsaPrivateKey::new(&mut OsRng, 2048).expect("generate RSA test key");
             Self {
                 kid: kid.to_string(),
-                private_pem: private
-                    .to_pkcs8_pem(LineEnding::LF)
-                    .expect("encode RSA private key")
-                    .to_string(),
-                modulus: URL_SAFE_NO_PAD.encode(private.n().to_bytes_be()),
-                exponent: URL_SAFE_NO_PAD.encode(private.e().to_bytes_be()),
+                // Fixed PKCS#1 DER fixtures keep the RS256/JWKS tests real
+                // without pulling the vulnerable rsa crate into dev builds.
+                // These keys are test-only and must never be used by runtime code.
+                private_der: STANDARD
+                    .decode(include_str!("testdata/oidc_rsa_primary.der.b64").trim())
+                    .expect("decode primary RSA test fixture"),
+                modulus: "rdx5Wpz9_SkaLmgisK9Sy_qGbXpC2BrmRCet8aO6_CsA-HA2LWaQzzW5AqISSK00PK3U6lcLKZRmlH5I2XSFEUl83MxNhtvhXgZ15pguZDfahfkfVw8I6EQrjocZplYpbHc6MNHj9ZppK4Vvp4QGoKEzDt58M5EZIL4fAOWChesJqA42MbFoHv8YRTtzckhFHmbh2aJyK358K_AjHms-O_RM-naSkX80poUp9w2MoOpk_bp15roS4gDWCM4wSH0SzClOp2eSQsLhvvSmRa_-ZusMk8_VkC5whUGQ9ufbKCMJwjo6rnOZNqUEbzv8xqMBol-1NHPF7c0-Lxx6DJYN6Q",
+                exponent: "AQAB",
+            }
+        }
+
+        fn rotated(kid: &str) -> Self {
+            Self {
+                kid: kid.to_string(),
+                private_der: STANDARD
+                    .decode(include_str!("testdata/oidc_rsa_secondary.der.b64").trim())
+                    .expect("decode secondary RSA test fixture"),
+                modulus: "wTVBxkQpxleLZfibIK6zx_TPbtEzYIdg1qltqEg7sKeTwguULfv22Hp5g5we8Wc2Sz_ZXShu9XO93iPmV1fto-uIvdUb9jlPPJ_2ak4vg_mq4ATEdxlMUEieA-mwzoCFxBLAuGRZ0iSczGtoXjBJkhXRH8ZjTwZBhBvHn_Gget7OFwCxrURhs45_t_P132ZL5SOxtB-VQAFKRnoJ682y_0reF56gVndOdDm-5p2jBL2KBPg8fO-elQOkFaJ2ebTl3EWOaaullRurMhKrirrBs1wwThV2Y-LV7AB3OTQxis13_G7w6PDjkPkFXiK_cUGTOjFBw9oyOjiYF_Y7XkMszQ",
+                exponent: "AQAB",
             }
         }
 
@@ -1021,8 +1029,7 @@ mod tests {
             encode(
                 &header,
                 claims,
-                &EncodingKey::from_rsa_pem(self.private_pem.as_bytes())
-                    .expect("parse RSA private key"),
+                &EncodingKey::from_rsa_der(&self.private_der),
             )
             .expect("sign test JWT")
         }
@@ -1399,7 +1406,7 @@ mod tests {
     #[test]
     fn invalid_signature_forces_same_kid_jwks_rotation_refresh() {
         let old_key = TestKey::generate("rotating-key");
-        let new_key = TestKey::generate("rotating-key");
+        let new_key = TestKey::rotated("rotating-key");
         let old_response_key = old_key.clone();
         let new_response_key = new_key.clone();
         let server = MockOidc::spawn(move |origin| {
