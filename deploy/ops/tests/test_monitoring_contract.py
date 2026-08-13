@@ -159,6 +159,30 @@ class MonitoringContractTest(unittest.TestCase):
         self.assertIn("test rules alert-tests.yml", drill)
         self.assertIn("write_drill_state 503 0 101 0 true", drill)
         self.assertIn('write_drill_state 200 1 0 "$(date -u +%s)" false', drill)
+        self.assertIn("alertmanager-observations.ndjson", drill)
+        self.assertIn("record_alertmanager_observation", drill)
+        self.assertIn("unique_by(.labels.alertname)", drill)
+        self.assertIn("all_webhook_alerts_observed firing", drill)
+        self.assertIn("all_webhook_alerts_observed resolved", drill)
+        self.assertNotIn("all_target_alerts_observed", drill)
+        self.assertIn('jq -e \'type == "array"\'', drill)
+        self.assertIn("tempfile.NamedTemporaryFile", drill)
+        self.assertIn(".replace(target)", drill)
+        self.assertNotIn(
+            'api/v2/alerts" >"$evidence_dir/alertmanager-alerts.json" || true',
+            drill,
+        )
+
+        workflow = (ROOT / ".github" / "workflows" / "ops-drills-nightly.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'OJOS_ALERT_DRILL_ALERTMANAGER_TIMEOUT_SECONDS: "180"', workflow
+        )
+        alert_step = workflow.split("- name: Alert firing drill", 1)[1].split(
+            "- name:", 1
+        )[0]
+        self.assertNotIn("continue-on-error", alert_step)
 
     def test_rule_tests_cover_firing_and_resolution(self):
         rule_tests = self.text("alert-tests.yml")

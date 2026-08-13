@@ -55,6 +55,59 @@ host_mount_path() {
   fi
 }
 
+alertmanager_observations="$evidence_dir/alertmanager-observations.ndjson"
+alertmanager_alerts="$evidence_dir/alertmanager-alerts.json"
+alertmanager_latest="$evidence_dir/alertmanager-latest.json"
+
+record_alertmanager_observation() {
+  local snapshot_file="$1"
+  local phase="$2"
+  local observed_at
+  local merged_file="$alertmanager_alerts.tmp"
+  observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  jq -c --arg observed_at "$observed_at" --arg phase "$phase" --argjson wanted "$target_alerts_json" \
+    '{
+      observed_at: $observed_at,
+      phase: $phase,
+      target_alert_names: [
+        .[]
+        | select(.labels.alertname as $name | $wanted | index($name))
+        | .labels.alertname
+      ] | unique,
+      alerts: .
+    }' "$snapshot_file" >>"$alertmanager_observations"
+
+  jq -s --argjson wanted "$target_alerts_json" \
+    'add
+    | map(select(.labels.alertname as $name | $wanted | index($name)))
+    | unique_by(.labels.alertname)' \
+    "$alertmanager_alerts" "$snapshot_file" >"$merged_file"
+  mv "$merged_file" "$alertmanager_alerts"
+}
+
+observe_alertmanager() {
+  local phase="$1"
+  local latest_tmp="$alertmanager_latest.tmp"
+  if curl -fsS "http://127.0.0.1:$am_port/api/v2/alerts" >"$latest_tmp"; then
+    if jq -e 'type == "array"' "$latest_tmp" >/dev/null 2>&1; then
+      mv "$latest_tmp" "$alertmanager_latest"
+      record_alertmanager_observation "$alertmanager_latest" "$phase"
+      return 0
+    fi
+    echo "[WARN] ignored a non-array Alertmanager $phase observation" >&2
+  fi
+  rm -f "$latest_tmp"
+}
+
+all_webhook_alerts_observed() {
+  local status="$1"
+  local alertname
+  for alertname in OJOSServiceDown OJOSJudgeWorkerOffline OJOSJudgeQueueBacklog OJOSHighHTTP5xxRate OJOSBackupStale; do
+    [[ -s "$evidence_dir/webhook/$status-$alertname.json" ]] || return 1
+  done
+}
+
 finish() {
   local rc=$?
   [[ $rc -eq 0 ]] && status="passed" || status="failed"
@@ -85,6 +138,8 @@ finish() {
         log: "logs/alert-firing-drill.log",
         prometheus_rules: "prometheus-rules.json",
         alertmanager_alerts: "alertmanager-alerts.json",
+        alertmanager_latest: "alertmanager-latest.json",
+        alertmanager_observations: "alertmanager-observations.ndjson",
         firing_webhook_bodies: "webhook/firing-*.json",
         resolved_webhook_bodies: "webhook/resolved-*.json"
       }
@@ -186,6 +241,7 @@ import http.server
 import pathlib
 import json
 import sys
+import tempfile
 
 target_dir = pathlib.Path(sys.argv[1])
 port = int(sys.argv[2])
@@ -205,7 +261,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "OJOSBackupStale",
             }:
                 status = alert.get("status", "unknown")
-                (target_dir / f"{status}-{alertname}.json").write_bytes(body)
+                target = target_dir / f"{status}-{alertname}.json"
+                with tempfile.NamedTemporaryFile(
+                    dir=target_dir,
+                    prefix=f".{target.name}.",
+                    delete=False,
+                ) as pending:
+                    pending.write(body)
+                pathlib.Path(pending.name).replace(target)
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
@@ -368,25 +431,26 @@ jq -e --argjson wanted "$target_alerts_json" \
 
 am_port="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "9093/tcp") 0).HostPort}}' "$alertmanager")"
 for _ in $(seq 1 60); do
-  curl -fsS "http://127.0.0.1:$am_port/api/v2/alerts" >"$evidence_dir/alertmanager-alerts.json" || true
-  if jq -e --argjson wanted "$target_alerts_json" \
-    '[.[] | select(.labels.alertname as $name | $wanted | index($name)) | .labels.alertname] | unique | length == ($wanted | length)' \
-    "$evidence_dir/alertmanager-alerts.json" >/dev/null; then
+  if curl -fsS "http://127.0.0.1:$am_port/-/ready" >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
-jq -e --argjson wanted "$target_alerts_json" \
-  '[.[] | select(.labels.alertname as $name | $wanted | index($name)) | .labels.alertname] | unique | length == ($wanted | length)' \
-  "$evidence_dir/alertmanager-alerts.json" >/dev/null
+curl -fsS "http://127.0.0.1:$am_port/-/ready" >/dev/null
+
+printf '[]\n' >"$alertmanager_alerts"
+: >"$alertmanager_observations"
+for _ in $(seq 1 "${OJOS_ALERT_DRILL_ALERTMANAGER_TIMEOUT_SECONDS:-180}"); do
+  # The API is a diagnostic current-state view. Alertmanager can dispatch a
+  # group between polls, so delivery is proven by the durable webhook files.
+  observe_alertmanager firing
+  if all_webhook_alerts_observed firing; then
+    break
+  fi
+  sleep 1
+done
 
 for alertname in OJOSServiceDown OJOSJudgeWorkerOffline OJOSJudgeQueueBacklog OJOSHighHTTP5xxRate OJOSBackupStale; do
-  for _ in $(seq 1 60); do
-    if [[ -s "$evidence_dir/webhook/firing-$alertname.json" ]]; then
-      break
-    fi
-    sleep 1
-  done
   test -s "$evidence_dir/webhook/firing-$alertname.json"
   jq -e --arg alertname "$alertname" \
     '.alerts[] | select(.labels.alertname == $alertname and .status == "firing")' \
@@ -407,13 +471,15 @@ jq -e --argjson wanted "$target_alerts_json" \
   '[.data.groups[].rules[] | select(.name as $name | $wanted | index($name)) | select(.state == "firing")] | length == 0' \
   "$evidence_dir/prometheus-rules.json" >/dev/null
 
+for _ in $(seq 1 "${OJOS_ALERT_DRILL_ALERTMANAGER_TIMEOUT_SECONDS:-180}"); do
+  observe_alertmanager resolved
+  if all_webhook_alerts_observed resolved; then
+    break
+  fi
+  sleep 1
+done
+
 for alertname in OJOSServiceDown OJOSJudgeWorkerOffline OJOSJudgeQueueBacklog OJOSHighHTTP5xxRate OJOSBackupStale; do
-  for _ in $(seq 1 60); do
-    if [[ -s "$evidence_dir/webhook/resolved-$alertname.json" ]]; then
-      break
-    fi
-    sleep 1
-  done
   test -s "$evidence_dir/webhook/resolved-$alertname.json"
   jq -e --arg alertname "$alertname" \
     '.alerts[] | select(.labels.alertname == $alertname and .status == "resolved")' \
