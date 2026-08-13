@@ -8,6 +8,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY services/orchestrator ./services/orchestrator
 COPY manager ./manager
 COPY platform ./platform
+COPY tools ./tools
 
 RUN OJOS_BUILD_COMMIT="$OJOS_BUILD_COMMIT" \
     cargo build --locked --release -p orchestrator-agent --bin ojos-orchestrator-agent
