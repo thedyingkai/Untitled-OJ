@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -71,6 +72,59 @@ def next_patch(value: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
+def rewrite_openapi_service_version(path: Path, version: str) -> None:
+    source = require_file(path, "OpenAPI document").read_text(encoding="utf-8")
+    lines = source.splitlines(keepends=True)
+    block_extension_lines = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\r\n") == "x-ojos-service:"
+    ]
+    inline_extension_lines = [
+        index
+        for index, line in enumerate(lines)
+        if re.fullmatch(r"x-ojos-service:\s*\{[^{}]+\}\r?\n?", line)
+    ]
+    if len(block_extension_lines) + len(inline_extension_lines) != 1:
+        raise PublishGateError(
+            f"OpenAPI document must have exactly one x-ojos-service block: {path}"
+        )
+    if inline_extension_lines:
+        index = inline_extension_lines[0]
+        matches = list(
+            re.finditer(r"(?<![A-Za-z0-9_-])version\s*:\s*([^,}\s]+)", lines[index])
+        )
+        if len(matches) != 1:
+            raise PublishGateError(
+                f"OpenAPI x-ojos-service block must have exactly one version: {path}"
+            )
+        match = matches[0]
+        lines[index] = lines[index][: match.start(1)] + version + lines[index][match.end(1) :]
+    else:
+        extension_index = block_extension_lines[0]
+        block_end = next(
+            (
+                index
+                for index in range(extension_index + 1, len(lines))
+                if lines[index].strip() and not lines[index].startswith((" ", "\t"))
+            ),
+            len(lines),
+        )
+        version_lines = [
+            index
+            for index in range(extension_index + 1, block_end)
+            if lines[index].startswith("  version:")
+        ]
+        if len(version_lines) != 1:
+            raise PublishGateError(
+                f"OpenAPI x-ojos-service block must have exactly one version: {path}"
+            )
+        index = version_lines[0]
+        newline = "\r\n" if lines[index].endswith("\r\n") else "\n"
+        lines[index] = f"  version: {version}{newline}"
+    path.write_text("".join(lines), encoding="utf-8", newline="")
+
+
 def copy_service_for_version(service_dir: Path, destination: Path, version: str) -> Path:
     shutil.copytree(
         service_dir,
@@ -97,6 +151,23 @@ def copy_service_for_version(service_dir: Path, destination: Path, version: str)
     newline = "\r\n" if lines[index].endswith("\r\n") else "\n"
     lines[index] = f"  version: {version}{newline}"
     manifest.write_text("".join(lines), encoding="utf-8", newline="")
+    document_references = [
+        line.split("document:", 1)[1].strip()
+        for line in lines
+        if line.lstrip().startswith("- document:")
+    ]
+    if not document_references:
+        raise PublishGateError("service manifest must declare at least one OpenAPI document")
+    for reference in document_references:
+        relative = Path(reference)
+        if (
+            not reference
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != reference.replace("\\", "/")
+        ):
+            raise PublishGateError(f"invalid OpenAPI document reference {reference!r}")
+        rewrite_openapi_service_version(destination / relative, version)
     return manifest
 
 

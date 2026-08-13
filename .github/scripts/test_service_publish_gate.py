@@ -72,6 +72,11 @@ class ServicePublishGateTests(unittest.TestCase):
         self.assertEqual(args, ["--previous-catalog", str(baseline), "--previous-trust", str(trust)])
         self.assertNotEqual(manifest.parent, paths["service"])
         self.assertIn("version: 0.1.1", manifest.read_text(encoding="utf-8"))
+        copied_openapi = manifest.parent / "api" / "openapi.yaml"
+        self.assertIn(
+            "x-ojos-service:\n  id: alpha\n  version: 0.1.1\n",
+            copied_openapi.read_text(encoding="utf-8"),
+        )
 
         current = json.loads((paths["service"] / "gen" / "service.contract.json").read_text())
         current["displayName"] = "tampered"
@@ -87,6 +92,37 @@ class ServicePublishGateTests(unittest.TestCase):
             GATE.compatibility_args(
                 paths["service"], (baseline, trust, build), root / "scratch-three"
             )
+
+    def test_version_copy_updates_block_and_inline_openapi_extensions(self) -> None:
+        root, paths = self.fixture()
+        service = paths["service"]
+        inline = service / "api" / "inline.yaml"
+        inline.write_text(
+            "openapi: 3.1.0\n"
+            "info: {title: Inline API, version: 1.0.0}\n"
+            "x-ojos-api-id: alpha.inline\n"
+            "x-ojos-service: {id: alpha, version: 0.1.0}\n"
+            "paths: {}\n",
+            encoding="utf-8",
+        )
+        manifest = service / "ojos.service.yaml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "    - document: api/inline.yaml\n",
+            encoding="utf-8",
+        )
+
+        copied = GATE.copy_service_for_version(service, root / "copied", "0.1.1")
+
+        self.assertIn("version: 0.1.1", copied.read_text(encoding="utf-8"))
+        self.assertIn(
+            "x-ojos-service: {id: alpha, version: 0.1.1}",
+            (copied.parent / "api" / "inline.yaml").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "x-ojos-service:\n  id: alpha\n  version: 0.1.1\n",
+            (copied.parent / "api" / "openapi.yaml").read_text(encoding="utf-8"),
+        )
 
     def test_generic_resolver_covers_every_role_with_immutable_references(self) -> None:
         document = GATE.resolved_artifact_fixture(
@@ -138,7 +174,24 @@ class ServicePublishGateTests(unittest.TestCase):
             "kind: Service\n"
             "metadata:\n"
             "  id: alpha\n"
-            "  version: 0.1.0\n",
+            "  version: 0.1.0\n"
+            "provides:\n"
+            "  apis:\n"
+            "    - document: api/openapi.yaml\n",
+            encoding="utf-8",
+        )
+        openapi = service / "api" / "openapi.yaml"
+        openapi.parent.mkdir(parents=True, exist_ok=True)
+        openapi.write_text(
+            "openapi: 3.1.0\n"
+            "info:\n"
+            "  title: Alpha API\n"
+            "  version: 1.0.0\n"
+            "x-ojos-api-id: alpha.api\n"
+            "x-ojos-service:\n"
+            "  id: alpha\n"
+            "  version: 0.1.0\n"
+            "paths: {}\n",
             encoding="utf-8",
         )
         contract = {
