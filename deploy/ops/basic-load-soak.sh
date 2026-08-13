@@ -29,7 +29,7 @@ min_success_rate="${OJOS_LOAD_MIN_SUCCESS_RATE:-0.95}"
 # this smoke into a capacity baseline.
 max_p95_ms="${OJOS_LOAD_MAX_P95_MS:-}"
 redis_password="${REDIS_PASSWORD:-DEV_ONLY_redis_password_not_for_production}"
-redis_url="${REDIS_URL:-redis://:$redis_password@127.0.0.1:6379/0}"
+redis_url="${OJOS_LOAD_DRILL_REDIS_URL:-${REDIS_URL:-redis://:$redis_password@127.0.0.1:${REDIS_HOST_PORT:-6379}/0}}"
 status="failed"
 start_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 submission_id="${OJOS_LOAD_SUBMISSION_ID:-}"

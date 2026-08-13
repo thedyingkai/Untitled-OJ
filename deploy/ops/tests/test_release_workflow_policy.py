@@ -16,6 +16,14 @@ DOCKER_E2E_WORKFLOW_PATH = (
     ROOT / ".github" / "workflows" / "orchestrator-docker-e2e.yml"
 )
 DOCKER_E2E_WORKFLOW = DOCKER_E2E_WORKFLOW_PATH.read_text(encoding="utf-8")
+COMPOSE_PATH = ROOT / "deploy" / "compose" / "docker-compose.yml"
+COMPOSE = COMPOSE_PATH.read_text(encoding="utf-8")
+TRACE_DRILL = (ROOT / "deploy" / "ops" / "trace-e2e-drill.sh").read_text(
+    encoding="utf-8"
+)
+LOAD_DRILL = (ROOT / "deploy" / "ops" / "basic-load-soak.sh").read_text(
+    encoding="utf-8"
+)
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "orchestrator-ci.yml"
 CI_WORKFLOW = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
 RELEASE_POLICY_PATH = ROOT / "docs" / "release" / "candidate-promotion.md"
@@ -98,6 +106,49 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
         self.assertIn("working-directory: manager/web", DOCKER_E2E_WORKFLOW[embedded_web:rust_checks])
         self.assertIn("npm ci --registry=https://registry.npmjs.org", DOCKER_E2E_WORKFLOW[embedded_web:rust_checks])
         self.assertIn("npm run build", DOCKER_E2E_WORKFLOW[embedded_web:rust_checks])
+
+    def test_docker_e2e_isolates_job_services_from_compose_drills(self) -> None:
+        job = workflow_job("docker-e2e", DOCKER_E2E_WORKFLOW)
+        self.assertIn(
+            "COMPOSE_PROJECT_NAME: ojos-docker-e2e-${{ github.run_id }}-${{ github.run_attempt }}",
+            job,
+        )
+        self.assertIn(
+            "OJOS_E2E_MINIO_CONTAINER: ojos-e2e-minio-${{ github.run_id }}-${{ github.run_attempt }}",
+            job,
+        )
+        self.assertIn("- 56379:6379", job)
+        self.assertIn(
+            "OJOS_REAL_REDIS_URL: redis://127.0.0.1:56379/0",
+            job,
+        )
+        self.assertNotIn("- 6379:6379", job)
+        self.assertIn("-p 19000:9000", job)
+        self.assertIn("-p 19001:9001", job)
+        self.assertIn("OJOS_REAL_MINIO_ENDPOINT: 127.0.0.1:19000", job)
+        self.assertNotIn("--name ojos-e2e-minio ", job)
+
+        trace_drill = workflow_step("Compose trace E2E drill", job)
+        self.assertNotIn("continue-on-error", trace_drill)
+        self.assertIn('REDIS_HOST_PORT: "16379"', trace_drill)
+        self.assertNotIn("\n          REDIS_URL:", trace_drill)
+        load_drill = workflow_step("Compose basic load/soak drill", job)
+        self.assertIn('REDIS_HOST_PORT: "16379"', load_drill)
+        self.assertNotIn("\n          REDIS_URL:", load_drill)
+        cleanup = workflow_step("Cleanup compose runtime drill", job)
+        self.assertIn("if: ${{ always()", cleanup)
+        self.assertIn('REDIS_HOST_PORT: "16379"', cleanup)
+        self.assertIn('docker rm -f "$OJOS_E2E_MINIO_CONTAINER"', cleanup)
+        self.assertIn('exit "$compose_status"', cleanup)
+
+    def test_compose_redis_host_port_defaults_to_6379_and_is_overridable(self) -> None:
+        self.assertIn(
+            '"127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"',
+            COMPOSE,
+        )
+        self.assertNotIn('"127.0.0.1:6379:6379"', COMPOSE)
+        self.assertIn("${REDIS_HOST_PORT:-6379}/0", TRACE_DRILL)
+        self.assertIn("${REDIS_HOST_PORT:-6379}/0", LOAD_DRILL)
 
     def test_workflow_is_manual_only_and_candidate_is_the_safe_default(self) -> None:
         trigger = WORKFLOW.split("\nrun-name:", 1)[0]

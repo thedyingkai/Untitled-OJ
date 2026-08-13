@@ -25,6 +25,9 @@ jobs:
   docker-e2e:
     name: Docker E2E production gate
     runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT_NAME: ojos-docker-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      OJOS_E2E_MINIO_CONTAINER: ojos-e2e-minio-${{ github.run_id }}-${{ github.run_attempt }}
     services:
       postgres:
         image: postgres:17
@@ -42,7 +45,9 @@ jobs:
       redis:
         image: redis:8.8.0
         ports:
-          - 6379:6379
+          # Keep the live Go-test Redis separate from the Compose drill Redis,
+          # which intentionally publishes its own loopback port 6379.
+          - 56379:6379
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s
@@ -188,26 +193,26 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d \
-            --name ojos-e2e-minio \
-            -p 9000:9000 \
-            -p 9001:9001 \
+            --name "$OJOS_E2E_MINIO_CONTAINER" \
+            -p 19000:9000 \
+            -p 19001:9001 \
             -e "MINIO_ROOT_USER=$MINIO_ROOT_USER" \
             -e "MINIO_ROOT_PASSWORD=$MINIO_ROOT_PASSWORD" \
             minio/minio:RELEASE.2025-09-07T16-13-09Z server /data --console-address ":9001"
           for attempt in {1..60}; do
-            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null; then
+            if curl -fsS http://127.0.0.1:19000/minio/health/live >/dev/null; then
               exit 0
             fi
             sleep 2
           done
-          docker logs ojos-e2e-minio >&2 || true
+          docker logs "$OJOS_E2E_MINIO_CONTAINER" >&2 || true
           exit 1
 
       - name: Go checks
         shell: bash
         env:
-          OJOS_REAL_REDIS_URL: redis://127.0.0.1:6379/0
-          OJOS_REAL_MINIO_ENDPOINT: 127.0.0.1:9000
+          OJOS_REAL_REDIS_URL: redis://127.0.0.1:56379/0
+          OJOS_REAL_MINIO_ENDPOINT: 127.0.0.1:19000
           OJOS_REAL_MINIO_ACCESS_KEY: ojosminioaccess
           OJOS_REAL_MINIO_SECRET_KEY: OjosMinioLive_0123456789abcdef
           OJOS_REAL_MINIO_USE_SSL: "false"
@@ -338,6 +343,7 @@ jobs:
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true') }}
         shell: bash
         env:
+          REDIS_HOST_PORT: "16379"
           OJOS_TRACE_DRILL_BOOTSTRAP_COMPOSE: "1"
           OJOS_TRACE_DRILL_BUILD_COMPOSE: "0"
           OJOS_TRACE_DRILL_CLEANUP_COMPOSE: "0"
@@ -347,6 +353,7 @@ jobs:
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true') }}
         shell: bash
         env:
+          REDIS_HOST_PORT: "16379"
           OJOS_LOAD_DRILL_BOOTSTRAP_COMPOSE: "0"
           OJOS_LOAD_DRILL_RUN_SMOKE: "1"
           OJOS_LOAD_CONCURRENCY: "20"
@@ -364,4 +371,10 @@ jobs:
       - name: Cleanup compose runtime drill
         if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_docker_build == 'true')) }}
         shell: bash
-        run: docker compose --env-file .env.example -f deploy/compose/docker-compose.yml down --remove-orphans
+        env:
+          REDIS_HOST_PORT: "16379"
+        run: |
+          compose_status=0
+          docker compose --env-file .env.example -f deploy/compose/docker-compose.yml down --remove-orphans || compose_status=$?
+          docker rm -f "$OJOS_E2E_MINIO_CONTAINER" >/dev/null 2>&1 || true
+          exit "$compose_status"
