@@ -35,6 +35,8 @@ const (
 	taskStream           = "ojos:judge:task"
 	resultStream         = "ojos:judge:result"
 	consumerGroup        = "judge-worker"
+	composeConsumerReady = 15 * time.Second
+	consumerPollInterval = 100 * time.Millisecond
 	childNodeID          = "child-node"
 	rootNodeID           = "root-node"
 	authService          = "auth-service"
@@ -705,16 +707,16 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 	cfg.composeProblemID = problemID
 	ok("compose problem-service testdata chain: problem_id=%d", problemID)
 
-	if err := composeRestartService(ctx, cfg, "judge-worker"); err != nil {
-		return fail("compose judge-worker restarted after stream reset", err)
-	}
-	ok("compose judge-worker restarted after stream reset")
-
-	submissionID, err := createSubmissionViaGateway(ctx, cfg)
+	submissionID, err := restartComposeWorkerAndCreateSubmission(
+		ctx,
+		cfg,
+		redisClient,
+		composeRestartService,
+		createSubmissionViaGateway,
+	)
 	if err != nil {
-		return fail("compose submission created through gateway", err)
+		return err
 	}
-	ok("compose submission created through gateway: %d", submissionID)
 
 	sourceKey := fmt.Sprintf("%d-source-main.cpp", submissionID)
 	if err := waitStorageObject(ctx, cfg, "submissions", sourceKey, submissionSourceCode); err != nil {
@@ -765,6 +767,130 @@ func runCompose(ctx context.Context, cfg smokeConfig) error {
 
 	fmt.Printf("[OK] compose smoke summary: submission_id=%d task_entry_id=%s result_entry_id=%s status=%s worker=compose runner=nsjail reload=smoke-driven\n", submissionID, taskID, resultID, status)
 	return nil
+}
+
+type redisConsumerNames map[string]struct{}
+type composeRestartFunc func(context.Context, smokeConfig, string) error
+type composeSubmissionCreateFunc func(context.Context, smokeConfig) (int64, error)
+
+func restartComposeWorkerAndCreateSubmission(
+	ctx context.Context,
+	cfg smokeConfig,
+	redisClient *redis.Client,
+	restart composeRestartFunc,
+	createSubmission composeSubmissionCreateFunc,
+) (int64, error) {
+	baseline, err := loadRedisConsumerNames(ctx, redisClient, cfg.taskStream, consumerGroup)
+	if err != nil {
+		return 0, fail("compose judge-worker Redis consumer baseline", err)
+	}
+	if err := restart(ctx, cfg, "judge-worker"); err != nil {
+		return 0, fail("compose judge-worker restarted after stream reset", err)
+	}
+	ok("compose judge-worker restarted after stream reset")
+
+	consumer, err := waitForNewRedisConsumer(ctx, redisClient, cfg.taskStream, consumerGroup, baseline)
+	if err != nil {
+		return 0, fail("compose judge-worker Redis consumer ready", err)
+	}
+	ok("compose judge-worker Redis consumer ready: %s", consumer)
+
+	submissionID, err := createSubmission(ctx, cfg)
+	if err != nil {
+		return 0, fail("compose submission created through gateway", err)
+	}
+	ok("compose submission created through gateway: %d", submissionID)
+	return submissionID, nil
+}
+
+func loadRedisConsumerNames(
+	ctx context.Context,
+	client *redis.Client,
+	stream string,
+	group string,
+) (redisConsumerNames, error) {
+	if client == nil {
+		return nil, errors.New("Redis client is not configured")
+	}
+	consumers, err := client.XInfoConsumers(ctx, stream, group).Result()
+	if err != nil {
+		return nil, err
+	}
+	names := make(redisConsumerNames, len(consumers))
+	for _, consumer := range consumers {
+		if name := strings.TrimSpace(consumer.Name); name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return names, nil
+}
+
+func waitForNewRedisConsumer(
+	ctx context.Context,
+	client *redis.Client,
+	stream string,
+	group string,
+	baseline redisConsumerNames,
+) (string, error) {
+	return waitForNewRedisConsumerWithTiming(
+		ctx,
+		client,
+		stream,
+		group,
+		baseline,
+		composeConsumerReady,
+		consumerPollInterval,
+	)
+}
+
+func waitForNewRedisConsumerWithTiming(
+	parent context.Context,
+	client *redis.Client,
+	stream string,
+	group string,
+	baseline redisConsumerNames,
+	timeout time.Duration,
+	pollInterval time.Duration,
+) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		current, err := loadRedisConsumerNames(ctx, client, stream, group)
+		if err == nil {
+			for name := range current {
+				if _, existed := baseline[name]; !existed {
+					return name, nil
+				}
+			}
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return "", fmt.Errorf(
+					"new Redis consumer for group %q on stream %q did not appear within %s (last query: %v): %w",
+					group,
+					stream,
+					timeout,
+					lastErr,
+					ctx.Err(),
+				)
+			}
+			return "", fmt.Errorf(
+				"new Redis consumer for group %q on stream %q did not appear within %s: %w",
+				group,
+				stream,
+				timeout,
+				ctx.Err(),
+			)
+		case <-ticker.C:
+		}
+	}
 }
 
 func startWorker(ctx context.Context, cfg smokeConfig) (*childProcess, error) {
@@ -2440,43 +2566,62 @@ func querySubmissionCasesViaGateway(ctx context.Context, cfg smokeConfig, submis
 	return nil
 }
 
+type composeQueueStatus struct {
+	TaskStream        string `json:"task_stream"`
+	ResultStream      string `json:"result_stream"`
+	Group             string `json:"group"`
+	PendingCount      int64  `json:"pending_count"`
+	ConsumerLag       int64  `json:"consumer_lag"`
+	Lag               int64  `json:"lag"`
+	ConsumerCount     int64  `json:"consumer_count"`
+	LastID            string `json:"last_id"`
+	ResultLastID      string `json:"result_last_id"`
+	PendingOldestIdle int64  `json:"pending_oldest_idle_ms"`
+	RedisStatus       string `json:"redis_status"`
+	Consumers         []struct {
+		Name       string `json:"name"`
+		Pending    int64  `json:"pending"`
+		IdleMs     int64  `json:"idle_ms"`
+		InactiveMs int64  `json:"inactive_ms"`
+	} `json:"consumers"`
+}
+
 func verifyQueueStatusAPIViaGateway(ctx context.Context, cfg smokeConfig) error {
-	var resp struct {
-		TaskStream        string `json:"task_stream"`
-		ResultStream      string `json:"result_stream"`
-		Group             string `json:"group"`
-		PendingCount      int64  `json:"pending_count"`
-		ConsumerLag       int64  `json:"consumer_lag"`
-		Lag               int64  `json:"lag"`
-		ConsumerCount     int64  `json:"consumer_count"`
-		LastID            string `json:"last_id"`
-		ResultLastID      string `json:"result_last_id"`
-		PendingOldestIdle int64  `json:"pending_oldest_idle_ms"`
-		RedisStatus       string `json:"redis_status"`
-		Consumers         []struct {
-			Name       string `json:"name"`
-			Pending    int64  `json:"pending"`
-			IdleMs     int64  `json:"idle_ms"`
-			InactiveMs int64  `json:"inactive_ms"`
-		} `json:"consumers"`
-	}
+	var resp composeQueueStatus
 	if err := doJSONWithHeaders(ctx, http.MethodGet, cfg.gateway.baseURL()+"/api/judge/admin/queue/status", nil, composeJudgeAdminHeaders(cfg), &resp); err != nil {
 		return fail("compose queue status API returned pending/lag", err)
 	}
-	if resp.TaskStream != cfg.taskStream || resp.ResultStream != cfg.resultStream || resp.Group != consumerGroup {
-		return fail("compose queue status API returned pending/lag", fmt.Errorf("unexpected stream identity: %#v", resp))
-	}
-	if resp.PendingCount != 0 {
-		return fail("compose queue status API returned pending/lag", fmt.Errorf("expected zero pending after ack, got %d", resp.PendingCount))
-	}
-	if resp.ConsumerCount == 0 || len(resp.Consumers) == 0 {
-		return fail("compose queue status API returned pending/lag", fmt.Errorf("expected at least one consumer: %#v", resp))
+	if err := validateComposeQueueStatus(resp, cfg); err != nil {
+		return fail("compose queue status API returned pending/lag", err)
 	}
 	lag := resp.Lag
 	if lag < 0 {
 		lag = resp.ConsumerLag
 	}
 	ok("compose queue status API returned pending=%d lag=%d consumers=%d", resp.PendingCount, lag, len(resp.Consumers))
+	return nil
+}
+
+func validateComposeQueueStatus(resp composeQueueStatus, cfg smokeConfig) error {
+	if resp.TaskStream != cfg.taskStream || resp.ResultStream != cfg.resultStream || resp.Group != consumerGroup {
+		return fmt.Errorf("unexpected stream identity: %#v", resp)
+	}
+	if resp.PendingCount != 0 {
+		return fmt.Errorf("expected zero pending after ack, got %d", resp.PendingCount)
+	}
+	if resp.RedisStatus != "ok" && resp.RedisStatus != "partial" {
+		return fmt.Errorf("unexpected redis_status %q", resp.RedisStatus)
+	}
+	if resp.ConsumerCount == 0 || len(resp.Consumers) == 0 {
+		return fmt.Errorf("expected at least one consumer: %#v", resp)
+	}
+	lag := resp.Lag
+	if lag < 0 {
+		lag = resp.ConsumerLag
+	}
+	if lag != 0 {
+		return fmt.Errorf("expected zero consumer lag after Redis event ack, got %d: %#v", lag, resp)
+	}
 	return nil
 }
 

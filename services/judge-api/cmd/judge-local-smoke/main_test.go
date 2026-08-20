@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,147 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 )
+
+func TestWaitForNewRedisConsumerIgnoresBaselineAndReturnsNewName(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	ctx := context.Background()
+	const stream = "test:judge:task"
+	registerTestRedisConsumer(t, client, stream, "old-worker")
+	baseline, err := loadRedisConsumerNames(ctx, client, stream, consumerGroup)
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	registerTestRedisConsumer(t, client, stream, "new-worker")
+
+	name, err := waitForNewRedisConsumerWithTiming(
+		ctx,
+		client,
+		stream,
+		consumerGroup,
+		baseline,
+		100*time.Millisecond,
+		time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("wait for new consumer: %v", err)
+	}
+	if name != "new-worker" {
+		t.Fatalf("new consumer = %q, want new-worker", name)
+	}
+}
+
+func TestWaitForNewRedisConsumerTimesOutWhenOnlyBaselineRemains(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	ctx := context.Background()
+	const stream = "test:judge:task"
+	registerTestRedisConsumer(t, client, stream, "old-worker")
+	baseline, err := loadRedisConsumerNames(ctx, client, stream, consumerGroup)
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+
+	_, err = waitForNewRedisConsumerWithTiming(
+		ctx,
+		client,
+		stream,
+		consumerGroup,
+		baseline,
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("wait error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestRestartComposeWorkerCapturesBaselineBeforeRestartAndCreatesAfterNewConsumer(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	const stream = "test:judge:task"
+	registerTestRedisConsumer(t, client, stream, "old-worker")
+	var calls []string
+
+	submissionID, err := restartComposeWorkerAndCreateSubmission(
+		context.Background(),
+		smokeConfig{taskStream: stream},
+		client,
+		func(_ context.Context, _ smokeConfig, service string) error {
+			calls = append(calls, "restart:"+service)
+			registerTestRedisConsumer(t, client, stream, "new-worker")
+			return nil
+		},
+		func(_ context.Context, _ smokeConfig) (int64, error) {
+			calls = append(calls, "create")
+			return 42, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("restart worker and create submission: %v", err)
+	}
+	if submissionID != 42 {
+		t.Fatalf("submission ID = %d, want 42", submissionID)
+	}
+	if want := []string{"restart:judge-worker", "create"}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+}
+
+func registerTestRedisConsumer(t *testing.T, client *redis.Client, stream, consumer string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := client.XGroupCreateMkStream(ctx, stream, consumerGroup, "0").Err(); err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
+		t.Fatalf("create consumer group: %v", err)
+	}
+	if err := client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"consumer": consumer}}).Err(); err != nil {
+		t.Fatalf("add consumer event: %v", err)
+	}
+	if _, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group: consumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 1,
+	}).Result(); err != nil {
+		t.Fatalf("register consumer %s: %v", consumer, err)
+	}
+}
+
+func TestValidateComposeQueueStatusRequiresConsumedRedisBoundary(t *testing.T) {
+	cfg := smokeConfig{taskStream: taskStream, resultStream: resultStream}
+	valid := composeQueueStatus{
+		TaskStream: taskStream, ResultStream: resultStream, Group: consumerGroup,
+		RedisStatus: "ok", ConsumerCount: 1, Lag: 0,
+	}
+	valid.Consumers = append(valid.Consumers, struct {
+		Name       string `json:"name"`
+		Pending    int64  `json:"pending"`
+		IdleMs     int64  `json:"idle_ms"`
+		InactiveMs int64  `json:"inactive_ms"`
+	}{Name: "worker-a"})
+	if err := validateComposeQueueStatus(valid, cfg); err != nil {
+		t.Fatalf("valid queue status rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*composeQueueStatus){
+		"lag":      func(status *composeQueueStatus) { status.Lag = 1 },
+		"pending":  func(status *composeQueueStatus) { status.PendingCount = 1 },
+		"consumer": func(status *composeQueueStatus) { status.ConsumerCount = 0 },
+		"redis":    func(status *composeQueueStatus) { status.RedisStatus = "unavailable" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			status := valid
+			mutate(&status)
+			if err := validateComposeQueueStatus(status, cfg); err == nil {
+				t.Fatalf("invalid %s status accepted: %#v", name, status)
+			}
+		})
+	}
+}
 
 func TestEnsureComposeSmokeAdminUsesPersistedAdminIdentity(t *testing.T) {
 	const (

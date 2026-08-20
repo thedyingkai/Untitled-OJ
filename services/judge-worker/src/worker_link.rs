@@ -299,7 +299,18 @@ pub async fn run_worker_link(
             continue;
         }
 
-        let mut tasks = match claim_tasks(&client, &config, available, &pending_task_events).await {
+        let claimer = JudgeApiTaskClaimer {
+            client: &client,
+            config: &config,
+        };
+        let tasks = match claim_task_cycle(
+            &mut stream_wakeup,
+            &claimer,
+            available,
+            &mut pending_task_events,
+        )
+        .await
+        {
             Ok(tasks) => tasks,
             Err(error) => {
                 health.mark_disconnected();
@@ -308,21 +319,7 @@ pub async fn run_worker_link(
                 continue;
             }
         };
-        let traceparents = traceparents_by_task_id(&pending_task_events);
-        for task in &mut tasks {
-            if task.traceparent.is_none() {
-                task.traceparent = traceparents.get(&task.task_id).cloned();
-            }
-        }
-        if !pending_task_events.is_empty()
-            && stream_wakeup
-                .ack_task_events(&stream_event_ids(&pending_task_events))
-                .await
-        {
-            pending_task_events.clear();
-        }
         if tasks.is_empty() {
-            pending_task_events.extend(stream_wakeup.wait_for_task_event().await);
             continue;
         }
 
@@ -335,10 +332,8 @@ pub async fn run_worker_link(
             if config.smoke_once {
                 let _permit = permit;
                 execute_task(client.clone(), config.clone(), languages.clone(), task).await?;
-                if !pending_task_events.is_empty()
-                    && !stream_wakeup
-                        .ack_task_events(&stream_event_ids(&pending_task_events))
-                        .await
+                if !acknowledge_pending_task_events(&mut stream_wakeup, &mut pending_task_events)
+                    .await
                 {
                     warn!("worker smoke-once task completed but redis ack failed");
                 }
@@ -760,6 +755,97 @@ enum RedisTaskWakeup {
     Sleep(Duration),
 }
 
+trait TaskEventWakeup {
+    fn database_claim_uses_long_poll(&self) -> bool;
+
+    async fn wait_for_task_event(&mut self) -> Vec<RedisTaskEvent>;
+
+    async fn ack_task_events(&mut self, entry_ids: &[String]) -> bool;
+
+    async fn backoff_after_ack_failure(&mut self);
+}
+
+trait TaskClaimer {
+    async fn claim_tasks(
+        &self,
+        available_slots: usize,
+        pending_task_events: &[RedisTaskEvent],
+        long_poll: bool,
+    ) -> Result<Vec<WorkerTaskLease>>;
+}
+
+struct JudgeApiTaskClaimer<'a> {
+    client: &'a Client,
+    config: &'a WorkerLinkConfig,
+}
+
+impl TaskClaimer for JudgeApiTaskClaimer<'_> {
+    async fn claim_tasks(
+        &self,
+        available_slots: usize,
+        pending_task_events: &[RedisTaskEvent],
+        long_poll: bool,
+    ) -> Result<Vec<WorkerTaskLease>> {
+        claim_tasks(
+            self.client,
+            self.config,
+            available_slots,
+            pending_task_events,
+            long_poll,
+        )
+        .await
+    }
+}
+
+async fn claim_task_cycle<W, C>(
+    wakeup: &mut W,
+    claimer: &C,
+    available_slots: usize,
+    pending_task_events: &mut Vec<RedisTaskEvent>,
+) -> Result<Vec<WorkerTaskLease>>
+where
+    W: TaskEventWakeup,
+    C: TaskClaimer,
+{
+    let long_poll = wakeup.database_claim_uses_long_poll();
+    if !long_poll && pending_task_events.is_empty() {
+        pending_task_events.extend(wakeup.wait_for_task_event().await);
+    }
+
+    let mut tasks = claimer
+        .claim_tasks(available_slots, pending_task_events, long_poll)
+        .await?;
+    let traceparents = traceparents_by_task_id(pending_task_events);
+    for task in &mut tasks {
+        if task.traceparent.is_none() {
+            task.traceparent = traceparents.get(&task.task_id).cloned();
+        }
+    }
+    acknowledge_pending_task_events(wakeup, pending_task_events).await;
+    Ok(tasks)
+}
+
+async fn acknowledge_pending_task_events<W>(
+    wakeup: &mut W,
+    pending_task_events: &mut Vec<RedisTaskEvent>,
+) -> bool
+where
+    W: TaskEventWakeup,
+{
+    if pending_task_events.is_empty() {
+        return true;
+    }
+    if !wakeup
+        .ack_task_events(&stream_event_ids(pending_task_events))
+        .await
+    {
+        wakeup.backoff_after_ack_failure().await;
+        return false;
+    }
+    pending_task_events.clear();
+    true
+}
+
 impl RedisTaskWakeup {
     async fn from_config(config: &WorkerLinkConfig) -> Self {
         let Some(redis_url) = config.redis_url.as_ref() else {
@@ -801,10 +887,19 @@ impl RedisTaskWakeup {
         {
             return Err(err).context("create redis task stream consumer group failed");
         }
+        let created: i64 = redis::cmd("XGROUP")
+            .arg("CREATECONSUMER")
+            .arg(stream)
+            .arg(group)
+            .arg(consumer)
+            .query_async(&mut connection)
+            .await
+            .context("create redis task stream consumer failed")?;
         info!(
             stream = %stream,
             group = %group,
             consumer = %consumer,
+            created,
             "redis task stream wakeup enabled"
         );
         Ok(Self::Stream {
@@ -813,6 +908,25 @@ impl RedisTaskWakeup {
             group: group.to_string(),
             consumer: consumer.to_string(),
         })
+    }
+
+    #[cfg(test)]
+    fn stream_identity(&self) -> Option<(&str, &str, &str)> {
+        match self {
+            Self::Stream {
+                stream,
+                group,
+                consumer,
+                ..
+            } => Some((stream, group, consumer)),
+            Self::Sleep(_) => None,
+        }
+    }
+}
+
+impl TaskEventWakeup for RedisTaskWakeup {
+    fn database_claim_uses_long_poll(&self) -> bool {
+        matches!(self, Self::Sleep(_))
     }
 
     async fn wait_for_task_event(&mut self) -> Vec<RedisTaskEvent> {
@@ -902,6 +1016,10 @@ impl RedisTaskWakeup {
                 }
             }
         }
+    }
+
+    async fn backoff_after_ack_failure(&mut self) {
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -1006,6 +1124,7 @@ async fn claim_tasks(
     config: &WorkerLinkConfig,
     available_slots: usize,
     pending_task_events: &[RedisTaskEvent],
+    long_poll: bool,
 ) -> Result<Vec<WorkerTaskLease>> {
     let req = WorkerClaimTasksReq {
         worker_id: config.worker_id.clone(),
@@ -1014,8 +1133,16 @@ async fn claim_tasks(
         available_slots: available_slots as i32,
         task_ids: stream_task_ids(pending_task_events),
     };
-    let resp: WorkerClaimTasksResp =
-        post_json(client, config, "/judge/worker/tasks/claim", &req).await?;
+    let resp: WorkerClaimTasksResp = post_json_with_trace_and_idempotency(
+        client,
+        config,
+        "/judge/worker/tasks/claim",
+        &req,
+        None,
+        None,
+        long_poll,
+    )
+    .await?;
     Ok(resp.tasks)
 }
 
@@ -1288,6 +1415,7 @@ async fn submit_result(
             &req,
             task.traceparent.as_deref(),
             Some(&idempotency_key),
+            false,
         )
         .await;
         let error = match response {
@@ -1337,6 +1465,7 @@ async fn fail_task_once(
         &req,
         task.traceparent.as_deref(),
         Some(idempotency_key),
+        false,
     )
     .await?;
     if !resp.accepted {
@@ -1618,7 +1747,7 @@ where
     T: Serialize + ?Sized,
     R: for<'de> Deserialize<'de>,
 {
-    post_json_with_trace_and_idempotency(client, config, path, body, traceparent, None).await
+    post_json_with_trace_and_idempotency(client, config, path, body, traceparent, None, false).await
 }
 
 async fn post_json_with_trace_and_idempotency<T, R>(
@@ -1628,6 +1757,7 @@ async fn post_json_with_trace_and_idempotency<T, R>(
     body: &T,
     traceparent: Option<&str>,
     idempotency_key: Option<&str>,
+    prefer_wait: bool,
 ) -> Result<R>
 where
     T: Serialize + ?Sized,
@@ -1645,7 +1775,7 @@ where
         None => client.post(absolute_url(config, path)).json(body),
     };
     let mut request = with_traceparent(request, traceparent);
-    if path.ends_with("/tasks/claim") {
+    if prefer_wait {
         request = request.header("Prefer", "wait=25");
     }
     if let Some(idempotency_key) = idempotency_key {
@@ -2129,6 +2259,368 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct FakeTaskWakeup {
+        long_poll: bool,
+        events: Vec<RedisTaskEvent>,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        ack_succeeds: bool,
+        acked_entry_ids: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl TaskEventWakeup for FakeTaskWakeup {
+        fn database_claim_uses_long_poll(&self) -> bool {
+            self.long_poll
+        }
+
+        async fn wait_for_task_event(&mut self) -> Vec<RedisTaskEvent> {
+            self.calls.lock().expect("wakeup calls").push("wait");
+            std::mem::take(&mut self.events)
+        }
+
+        async fn ack_task_events(&mut self, entry_ids: &[String]) -> bool {
+            self.calls.lock().expect("wakeup calls").push("ack");
+            self.acked_entry_ids
+                .lock()
+                .expect("acked entry IDs")
+                .push(entry_ids.to_vec());
+            self.ack_succeeds
+        }
+
+        async fn backoff_after_ack_failure(&mut self) {
+            self.calls.lock().expect("wakeup calls").push("backoff");
+        }
+    }
+
+    struct FakeTaskClaimer {
+        tasks: Vec<WorkerTaskLease>,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        long_poll: Arc<Mutex<Vec<bool>>>,
+        task_ids: Arc<Mutex<Vec<Vec<String>>>>,
+        error: Option<String>,
+    }
+
+    impl TaskClaimer for FakeTaskClaimer {
+        async fn claim_tasks(
+            &self,
+            _available_slots: usize,
+            pending_task_events: &[RedisTaskEvent],
+            long_poll: bool,
+        ) -> Result<Vec<WorkerTaskLease>> {
+            self.calls.lock().expect("claimer calls").push("claim");
+            self.long_poll
+                .lock()
+                .expect("claim long poll")
+                .push(long_poll);
+            self.task_ids
+                .lock()
+                .expect("claim task ids")
+                .push(stream_task_ids(pending_task_events));
+            if let Some(error) = &self.error {
+                return Err(anyhow!(error.clone()));
+            }
+            Ok(self.tasks.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_claim_cycle_waits_before_claim_and_propagates_trace() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let traceparent = "00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01";
+        let mut wakeup = FakeTaskWakeup {
+            long_poll: false,
+            events: vec![RedisTaskEvent {
+                entry_id: "1720000000000-0".to_string(),
+                task_id: Some("sub-1".to_string()),
+                submission_id: Some(1),
+                traceparent: Some(traceparent.to_string()),
+            }],
+            calls: calls.clone(),
+            ack_succeeds: true,
+            acked_entry_ids: Arc::new(Mutex::new(Vec::new())),
+        };
+        let long_poll = Arc::new(Mutex::new(Vec::new()));
+        let task_ids = Arc::new(Mutex::new(Vec::new()));
+        let claimer = FakeTaskClaimer {
+            tasks: vec![test_task_lease("sub-1", 1)],
+            calls: calls.clone(),
+            long_poll: long_poll.clone(),
+            task_ids: task_ids.clone(),
+            error: None,
+        };
+        let mut pending = Vec::new();
+
+        let tasks = claim_task_cycle(&mut wakeup, &claimer, 1, &mut pending)
+            .await
+            .expect("stream claim cycle");
+
+        assert_eq!(*calls.lock().expect("calls"), vec!["wait", "claim", "ack"]);
+        assert_eq!(*long_poll.lock().expect("long poll"), vec![false]);
+        assert_eq!(
+            *task_ids.lock().expect("task ids"),
+            vec![vec!["sub-1".to_string()]]
+        );
+        assert_eq!(tasks[0].traceparent.as_deref(), Some(traceparent));
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sleep_claim_cycle_skips_redis_wait_and_keeps_long_poll() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut wakeup = FakeTaskWakeup {
+            long_poll: true,
+            calls: calls.clone(),
+            ack_succeeds: true,
+            ..FakeTaskWakeup::default()
+        };
+        let long_poll = Arc::new(Mutex::new(Vec::new()));
+        let claimer = FakeTaskClaimer {
+            tasks: Vec::new(),
+            calls: calls.clone(),
+            long_poll: long_poll.clone(),
+            task_ids: Arc::new(Mutex::new(Vec::new())),
+            error: None,
+        };
+        let mut pending = Vec::new();
+
+        let tasks = claim_task_cycle(&mut wakeup, &claimer, 1, &mut pending)
+            .await
+            .expect("sleep claim cycle");
+
+        assert!(tasks.is_empty());
+        assert_eq!(*calls.lock().expect("calls"), vec!["claim"]);
+        assert_eq!(*long_poll.lock().expect("long poll"), vec![true]);
+    }
+
+    #[tokio::test]
+    async fn empty_stream_read_still_falls_back_to_non_long_poll_database_claim() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut wakeup = FakeTaskWakeup {
+            long_poll: false,
+            calls: calls.clone(),
+            ack_succeeds: true,
+            ..FakeTaskWakeup::default()
+        };
+        let long_poll = Arc::new(Mutex::new(Vec::new()));
+        let claimer = FakeTaskClaimer {
+            tasks: vec![test_task_lease("sub-db-only", 1)],
+            calls: calls.clone(),
+            long_poll: long_poll.clone(),
+            task_ids: Arc::new(Mutex::new(Vec::new())),
+            error: None,
+        };
+        let mut pending = Vec::new();
+
+        let tasks = claim_task_cycle(&mut wakeup, &claimer, 1, &mut pending)
+            .await
+            .expect("empty stream fallback");
+
+        assert_eq!(*calls.lock().expect("calls"), vec!["wait", "claim"]);
+        assert_eq!(*long_poll.lock().expect("long poll"), vec![false]);
+        assert_eq!(tasks[0].task_id, "sub-db-only");
+    }
+
+    #[tokio::test]
+    async fn claim_error_does_not_ack_or_discard_pending_event() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let event = RedisTaskEvent {
+            entry_id: "1720000000000-0".to_string(),
+            task_id: Some("sub-1".to_string()),
+            submission_id: Some(1),
+            traceparent: None,
+        };
+        let mut wakeup = FakeTaskWakeup {
+            long_poll: false,
+            events: vec![event.clone()],
+            calls: calls.clone(),
+            ack_succeeds: true,
+            ..FakeTaskWakeup::default()
+        };
+        let claimer = FakeTaskClaimer {
+            tasks: Vec::new(),
+            calls: calls.clone(),
+            long_poll: Arc::new(Mutex::new(Vec::new())),
+            task_ids: Arc::new(Mutex::new(Vec::new())),
+            error: Some("claim unavailable".to_string()),
+        };
+        let mut pending = Vec::new();
+
+        let error = claim_task_cycle(&mut wakeup, &claimer, 1, &mut pending)
+            .await
+            .expect_err("claim failure");
+
+        assert!(error.to_string().contains("claim unavailable"));
+        assert_eq!(*calls.lock().expect("calls"), vec!["wait", "claim"]);
+        assert_eq!(pending, vec![event]);
+    }
+
+    #[tokio::test]
+    async fn stale_event_with_empty_claim_is_acked_by_exact_entry_id() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let acked_entry_ids = Arc::new(Mutex::new(Vec::new()));
+        let mut wakeup = FakeTaskWakeup {
+            long_poll: false,
+            events: vec![RedisTaskEvent {
+                entry_id: "1720000000000-7".to_string(),
+                task_id: Some("sub-stale".to_string()),
+                submission_id: Some(9),
+                traceparent: None,
+            }],
+            calls: calls.clone(),
+            ack_succeeds: true,
+            acked_entry_ids: acked_entry_ids.clone(),
+        };
+        let claimer = FakeTaskClaimer {
+            tasks: Vec::new(),
+            calls: calls.clone(),
+            long_poll: Arc::new(Mutex::new(Vec::new())),
+            task_ids: Arc::new(Mutex::new(Vec::new())),
+            error: None,
+        };
+        let mut pending = Vec::new();
+
+        let tasks = claim_task_cycle(&mut wakeup, &claimer, 1, &mut pending)
+            .await
+            .expect("stale event claim");
+
+        assert!(tasks.is_empty());
+        assert_eq!(*calls.lock().expect("calls"), vec!["wait", "claim", "ack"]);
+        assert_eq!(
+            *acked_entry_ids.lock().expect("acked entry IDs"),
+            vec![vec!["1720000000000-7".to_string()]]
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_http_prefer_header_matches_wakeup_mode() {
+        for (long_poll, expected_prefer) in [(false, None), (true, Some("wait=25"))] {
+            let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+            let endpoint = start_claim_http_contract_server(captured.clone());
+            let mut config = test_worker_config("nsjail");
+            config.judge_api_url = endpoint;
+            let client = Client::builder()
+                .timeout(Duration::from_secs(2))
+                .no_proxy()
+                .build()
+                .expect("worker client");
+
+            let tasks = claim_tasks(&client, &config, 1, &[], long_poll)
+                .await
+                .expect("claim request");
+
+            assert!(tasks.is_empty());
+            let requests = captured.lock().expect("captured claim requests");
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].header("prefer"), expected_prefer);
+        }
+    }
+
+    #[tokio::test]
+    async fn redis_connect_explicitly_registers_consumer_when_live_redis_is_configured() {
+        let Ok(redis_url) = std::env::var("OJOS_REAL_REDIS_URL") else {
+            return;
+        };
+        if redis_url.trim().is_empty() {
+            return;
+        }
+        let stream = format!("ojos:test:judge:task:{}", Uuid::new_v4());
+        let group = "judge-worker-test";
+        let consumer = "worker-connect-test";
+
+        let wakeup = RedisTaskWakeup::connect(&redis_url, &stream, group, consumer)
+            .await
+            .expect("connect live Redis wakeup");
+        assert_eq!(
+            wakeup.stream_identity(),
+            Some((stream.as_str(), group, consumer))
+        );
+        let client = redis::Client::open(redis_url).expect("open live Redis client");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("connect live Redis");
+        let consumers: redis::RedisResult<redis::Value> = redis::cmd("XINFO")
+            .arg("CONSUMERS")
+            .arg(&stream)
+            .arg(group)
+            .query_async(&mut connection)
+            .await;
+        let consumers = match consumers {
+            Ok(redis::Value::Array(consumers)) => consumers,
+            other => panic!("XINFO CONSUMERS failed: {other:?}"),
+        };
+        assert!(
+            consumers
+                .iter()
+                .any(|value| redis_value_contains(value, consumer)),
+            "CREATECONSUMER must make {consumer} visible: {consumers:?}"
+        );
+
+        let _: redis::RedisResult<i64> = redis::cmd("DEL")
+            .arg(&stream)
+            .query_async(&mut connection)
+            .await;
+    }
+
+    fn redis_value_contains(value: &redis::Value, want: &str) -> bool {
+        match value {
+            redis::Value::Array(values) => {
+                values.iter().any(|value| redis_value_contains(value, want))
+            }
+            redis::Value::BulkString(bytes) => bytes == want.as_bytes(),
+            redis::Value::SimpleString(value) => value == want,
+            _ => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_stream_ack_remains_pending_for_smoke_once_retry() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let event = RedisTaskEvent {
+            entry_id: "1720000000000-0".to_string(),
+            task_id: Some("sub-1".to_string()),
+            submission_id: Some(1),
+            traceparent: None,
+        };
+        let mut wakeup = FakeTaskWakeup {
+            long_poll: false,
+            events: vec![event.clone()],
+            calls: calls.clone(),
+            ack_succeeds: false,
+            acked_entry_ids: Arc::new(Mutex::new(Vec::new())),
+        };
+        let claimer = FakeTaskClaimer {
+            tasks: vec![test_task_lease("sub-1", 1)],
+            calls,
+            long_poll: Arc::new(Mutex::new(Vec::new())),
+            task_ids: Arc::new(Mutex::new(Vec::new())),
+            error: None,
+        };
+        let mut pending = Vec::new();
+
+        claim_task_cycle(&mut wakeup, &claimer, 1, &mut pending)
+            .await
+            .expect("claim cycle");
+
+        assert_eq!(pending, vec![event]);
+        assert_eq!(
+            *wakeup.calls.lock().expect("wakeup calls"),
+            vec!["wait", "claim", "ack", "backoff"]
+        );
+
+        wakeup.ack_succeeds = true;
+        assert!(acknowledge_pending_task_events(&mut wakeup, &mut pending).await);
+        assert!(pending.is_empty());
+        assert_eq!(
+            *wakeup.acked_entry_ids.lock().expect("acked entry IDs"),
+            vec![
+                vec!["1720000000000-0".to_string()],
+                vec!["1720000000000-0".to_string()],
+            ]
+        );
+    }
+
     #[test]
     fn runner_policy_rejects_non_nsjail_mode() {
         let config = test_worker_config("process");
@@ -2245,6 +2737,7 @@ mod tests {
                     "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01".to_string(),
                 ),
             }],
+            false,
         )
         .await
         .expect("claim tasks");
@@ -3174,6 +3667,27 @@ mod tests {
             }
         });
         format!("http://{}", addr)
+    }
+
+    fn start_claim_http_contract_server(captured: Arc<Mutex<Vec<CapturedRequest>>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind claim contract server");
+        let addr = listener.local_addr().expect("claim contract addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept claim request");
+            let request = read_http_request(&mut stream);
+            captured
+                .lock()
+                .expect("captured claim request")
+                .push(request);
+            stream
+                .write_all(&http_response(
+                    "200 OK",
+                    "application/json",
+                    br#"{"tasks":[]}"#,
+                ))
+                .expect("write claim response");
+        });
+        format!("http://{addr}")
     }
 
     fn start_gateway_artifact_server(
