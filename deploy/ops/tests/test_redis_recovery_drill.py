@@ -15,6 +15,16 @@ FIXTURE = ROOT / "deploy" / "ops" / "fixtures" / "redis_recovery_permission_fixt
 
 
 class RedisRecoveryDrillContractTests(unittest.TestCase):
+    def test_postgres_readiness_rejects_temporary_initdb_server(self) -> None:
+        drill = DRILL.read_text(encoding="utf-8")
+        self.assertIn('test "$(cat /proc/1/comm)" = postgres', drill)
+        self.assertIn("-c 'SELECT 1' | grep -qx 1", drill)
+        self.assertIn("if postgres_ready >/dev/null 2>&1; then", drill)
+        self.assertNotIn(
+            'docker_exec "$pg_container" pg_isready -U "$pg_user" -d "$pg_db"',
+            drill,
+        )
+
     def test_drill_uses_remote_permission_checker_without_auth_schema(self) -> None:
         drill = DRILL.read_text(encoding="utf-8")
         self.assertIn("redis_recovery_permission_fixture.py", drill)

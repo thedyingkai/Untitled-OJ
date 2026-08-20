@@ -127,13 +127,20 @@ docker run -d \
   -e "POSTGRES_PASSWORD=$pg_password" \
   -e "POSTGRES_DB=$pg_db" \
   "$postgres_image" >/dev/null
+
+postgres_ready() {
+  docker_exec "$pg_container" sh -ec 'test "$(cat /proc/1/comm)" = postgres' >/dev/null 2>&1 &&
+    docker_exec -e "PGPASSWORD=$pg_password" "$pg_container" \
+      psql -XAt -v ON_ERROR_STOP=1 -U "$pg_user" -d "$pg_db" -c 'SELECT 1' | grep -qx 1
+}
+
 for _ in $(seq 1 60); do
-  if docker_exec "$pg_container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null 2>&1; then
+  if postgres_ready >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
-docker_exec "$pg_container" pg_isready -U "$pg_user" -d "$pg_db" >/dev/null
+postgres_ready
 pg_port="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$pg_container")"
 database_url="postgres://$pg_user:$pg_password@127.0.0.1:$pg_port/$pg_db?sslmode=disable"
 
