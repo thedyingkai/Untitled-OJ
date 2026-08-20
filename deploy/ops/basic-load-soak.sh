@@ -39,6 +39,7 @@ queue_pending_max="0"
 success_rate="0"
 p95_ms="0"
 error_count="0"
+queue_admin_token="${OJOS_LOAD_QUEUE_ADMIN_TOKEN:-}"
 
 env_blocked() {
   local component="$1"
@@ -109,14 +110,34 @@ redis_xlen() {
   docker_compose exec -T redis redis-cli -a "$redis_password" XLEN ojos:judge:result | tr -d '\r[:space:]'
 }
 
+login_queue_admin() {
+  local response token
+  response="$(curl -fsS \
+    -H 'Content-Type: application/json' \
+    --data-binary @- \
+    'http://127.0.0.1:8081/auth/login' <<'OJOS_QUEUE_ADMIN_LOGIN'
+{"username":"compose-smoke-admin","password":"compose-smoke-admin-password"}
+OJOS_QUEUE_ADMIN_LOGIN
+)"
+  token="$(jq -er '.data.token | select(type == "string" and length > 0)' <<<"$response")"
+  printf '%s\n' "$token"
+}
+
+validate_queue_admin_token() {
+  local token="$1"
+  if [[ ! "$token" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+    echo "compose queue administrator login returned an invalid JWT" >&2
+    return 1
+  fi
+}
+
 queue_status() {
   local out="$1"
-  curl -fsS \
-    -H 'X-Auth-Verified: true' \
-    -H 'X-User-Id: 1' \
-    -H 'X-Username: load-drill-admin' \
-    -H 'X-Roles: admin' \
-    'http://127.0.0.1:8082/judge/admin/queue/status' >"$out"
+  curl -fsS --config - >"$out" <<OJOS_QUEUE_STATUS_CURL
+url = "http://127.0.0.1:8080/api/judge/admin/queue/status"
+header = "Authorization: Bearer $queue_admin_token"
+header = "X-OJOS-Node-Id: child-node"
+OJOS_QUEUE_STATUS_CURL
 }
 
 validate_load_gate() {
@@ -238,6 +259,11 @@ if [[ -z "$submission_id" || -z "$problem_id" ]]; then
   echo "submission_id and problem_id are required; run smoke or set OJOS_LOAD_SUBMISSION_ID/OJOS_LOAD_PROBLEM_ID" >&2
   exit 1
 fi
+
+if [[ -z "$queue_admin_token" ]]; then
+  queue_admin_token="$(login_queue_admin)"
+fi
+validate_queue_admin_token "$queue_admin_token"
 
 queue_status "$evidence_dir/responses/queue-before.json"
 result_len_before="$(redis_xlen)"

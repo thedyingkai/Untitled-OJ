@@ -137,6 +137,88 @@ validate_load_gate "$fixture_dir/metrics.json" "$fixture_dir/queue-after.json" 0
                 result = self.run_gate(final_pending_count=value)
                 self.assertNotEqual(result.returncode, 0)
 
+    def test_queue_status_uses_persisted_admin_bearer_through_gateway(self) -> None:
+        login = shell_function("login_queue_admin")
+        validate_token = shell_function("validate_queue_admin_token")
+        queue_status = shell_function("queue_status")
+        script = f"""\
+set -Eeuo pipefail
+{login}
+{validate_token}
+{queue_status}
+curl() {{
+  local input
+  input="$(cat)"
+  case "$*" in
+    *'/auth/login'*)
+      test "$input" = '{{"username":"compose-smoke-admin","password":"compose-smoke-admin-password"}}'
+      printf '%s\\n' '{{"data":{{"token":"header.payload.signature"}}}}'
+      ;;
+    *'--config -'*)
+      [[ "$*" != *'header.payload.signature'* ]]
+      grep -Fq 'url = "http://127.0.0.1:8080/api/judge/admin/queue/status"' <<<"$input"
+      grep -Fq 'header = "Authorization: Bearer header.payload.signature"' <<<"$input"
+      grep -Fq 'header = "X-OJOS-Node-Id: child-node"' <<<"$input"
+      ! grep -Eq 'X-Auth-Verified|X-User-Id|X-Roles' <<<"$input"
+      printf '%s\\n' '{{"pending_count":0}}'
+      ;;
+    *) return 99 ;;
+  esac
+}}
+queue_admin_token="$(login_queue_admin)"
+validate_queue_admin_token "$queue_admin_token"
+test "$queue_admin_token" = 'header.payload.signature'
+queue_file="$(mktemp)"
+trap 'rm -f "$queue_file"' EXIT
+queue_status "$queue_file"
+jq -e '.pending_count == 0' "$queue_file" >/dev/null
+"""
+        env = os.environ.copy()
+        bash_dir = str(pathlib.Path(self.bash).parent)
+        env["PATH"] = bash_dir + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(
+            [self.bash, "-c", script],
+            cwd=ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("compose-smoke-admin-password", result.stdout)
+        self.assertNotIn("compose-smoke-admin-password", result.stderr)
+        self.assertNotIn("header.payload.signature", result.stdout)
+        self.assertNotIn("header.payload.signature", result.stderr)
+        self.assertNotIn("X-Auth-Verified", result.stderr)
+        self.assertNotIn("X-User-Id", result.stderr)
+        self.assertNotIn("X-Roles", result.stderr)
+
+    def test_queue_admin_token_rejects_curl_config_injection(self) -> None:
+        validate_token = shell_function("validate_queue_admin_token")
+        for token in (
+            "header.payload.signature.extra",
+            "header.payload.signature=",
+            'header.payload.sig"nature',
+            "header.payload.sig\nnature",
+        ):
+            with self.subTest(token=token):
+                result = subprocess.run(
+                    [
+                        self.bash,
+                        "-c",
+                        f"set -Eeuo pipefail\n{validate_token}\n"
+                        'validate_queue_admin_token "$TOKEN"',
+                    ],
+                    cwd=ROOT,
+                    env={**os.environ, "TOKEN": token},
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(token, result.stdout)
+                self.assertNotIn(token, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
