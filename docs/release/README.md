@@ -6,12 +6,14 @@
 
 | 流水线 | 触发 | 输出 |
 | --- | --- | --- |
-| Product build | `main` 推送、PR、手动 | 编译 Go 服务和 SDK、Rust 控制面和 Worker、Web 产品。 |
+| Product build | 产品相关 `main` 推送、PR、手动；纯 Markdown 修改跳过 | 编译 Go 服务和 SDK、Rust 控制面和 Worker、Web 产品；从受跟踪 Dockerfile 构建运行时和迁移 OCI 镜像，不推送镜像。 |
 | Orchestrator native portable | 相关 `main` 推送、手动 | Windows/Linux unsigned portable 包及 SHA-256。 |
 | Orchestrator product images | 在 `main` 手动运行 | 以源码 SHA 标记的控制面和 Agent OCI 镜像、构建 provenance 与 SBOM。 |
 | Sync Docs To Wiki | 文档更新、手动 | 产品文档镜像。 |
 
 原生打包保留文件布局、平台和内容摘要校验；这些是安装器的产品完整性职责，不是测试场景。流水线不安装测试框架，不启动测试服务器，不运行单元测试、e2e 或演练。
+
+普通服务的 OCI 构建是产品构建职责，和外部验证分开。新增 `services/**/Dockerfile` 会进入构建矩阵，矩阵不维护第二份服务名称清单。CI 构建不发布到 registry；控制面/Agent 的手动镜像发布仍由独立 workflow 承担。
 
 ## 外部验证与正式发布
 

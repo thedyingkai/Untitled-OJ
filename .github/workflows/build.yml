@@ -3,7 +3,9 @@ name: Product build
 on:
   push:
     branches: [main]
+    paths-ignore: ['**/*.md']
   pull_request:
+    paths-ignore: ['**/*.md']
   workflow_dispatch:
 
 permissions:
@@ -50,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           while IFS= read -r manifest; do
-            cargo build --manifest-path "$manifest"
+            cargo build --locked --manifest-path "$manifest"
           done < <(git ls-files 'services/*/gen/rust/Cargo.toml')
 
   web:
@@ -73,3 +75,59 @@ jobs:
         working-directory: ${{ matrix.directory }}
       - run: npm run build
         working-directory: ${{ matrix.directory }}
+
+  image-matrix:
+    name: Discover product image recipes
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.recipes.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Read tracked product Dockerfiles
+        id: recipes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          paths = subprocess.check_output(
+              ["git", "ls-files", "-z", "--", "services/**/Dockerfile"]
+          ).decode().split("\0")
+          recipes = [{
+              "dockerfile": path,
+              "name": path.removeprefix("services/").removesuffix("/Dockerfile").replace("/", "-"),
+          } for path in sorted(filter(None, paths))]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("matrix=" + json.dumps({"include": recipes}) + "\n")
+          PY
+
+  images:
+    name: Product OCI (${{ matrix.name }})
+    needs: image-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.image-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - name: Build runtime or migration image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          tags: ojos-build/${{ matrix.name }}:sha-${{ github.sha }}
+          build-args: |
+            GITHUB_SHA=${{ github.sha }}
+            OJOS_BUILD_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=product-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=product-${{ matrix.name }}
