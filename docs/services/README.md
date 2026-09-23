@@ -1,6 +1,6 @@
 # Service 文档
 
-每个正式 Service 在 `services/<name>/` 下提供相邻的 `service.yaml` 和 `release.yaml`：
+现有 v2/兼容 Service 在 `services/<name>/` 下提供相邻的 `service.yaml` 和 `release.yaml`。v3 编译器服务以 `ojos.service.yaml` 为源入口；两条路径的关系、生成所有权和打包限制见[服务契约与生成关系](../architecture/service-authoring.md)。本页以下描述现存 v2 模板，不能作为所有新服务的统一生成指南：
 
 - `service.yaml` 定义身份、Endpoint 声明、依赖、能力、权限、安全边界和健康检查。
 - `release.yaml` 使用 Service Contract v2 定义来源、运行时、`provides/requires` API、events、runtime contract、迁移、路由、资源注册与可观测性。

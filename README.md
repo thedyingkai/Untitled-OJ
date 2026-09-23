@@ -70,7 +70,7 @@ npm --prefix manager/web ci
 npm --prefix manager/web run typecheck
 npm --prefix manager/web run build
 
-# 默认图形入口：持久 SQLite + embedded backend/Agent + WebView。
+# 默认图形入口：持久 SQLite + embedded backend + WebView；执行交给独立 Agent。
 cargo run -p ojos-orchestrator-desktop
 ```
 
@@ -105,7 +105,7 @@ Topology 编辑 Endpoint/Link 时创建 draft revision。validate/diff 不产生
 
 ## 数据与兼容边界
 
-- Desktop 默认使用应用数据目录中的 SQLite、Agent ledger 和 artifact；SQLite 失败时不回退内存。
+- Desktop 默认使用应用数据目录中的 SQLite 和 artifact；SQLite 失败时不回退内存。Agent ledger 归独立 Node Agent 所有。
 - 远程生产使用带证书校验 TLS 和连接池的 PostgreSQL，并通过专用 advisory-lock 连接维持单主动所有权。
 - 0.2 normalized 数据可 expand-only 导入：旧 topology 成为未应用 draft，旧 runtime 只标记 `External/Unknown`。
 - `0.2.0` 兼容构建保留带弃用头的旧路由；`1.0.0` 对旧 mutation 返回 `410 Gone`。旧 Node push/shared-bearer 路径不属于 v1。
@@ -122,6 +122,8 @@ GitHub Actions 只进行产品编译、portable 打包、手动产品镜像发�
 
 - [文档索引](docs/README.md)
 - [架构总览](docs/architecture/README.md)
+- [架构重构计划](docs/architecture/refactoring-plan.md)
+- [服务契约与生成关系](docs/architecture/service-authoring.md)
 - [产品需求](docs/orchestrator/requirements.md)
 - [模块边界](docs/orchestrator/boundary.md)
 - [Action 模型](docs/orchestrator/action-model.md)

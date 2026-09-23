@@ -4,6 +4,8 @@ OJOS Orchestrator 采用控制面与数据面分离的 service-release-first 架
 
 ## 模块
 
+下图是职责概览，不代表这些边界已经完全由依赖关系保证。当前后端仍有较大的 Store/Topology 用例实现，`orchestrator-manager` 仍包含旧 Console 应用逻辑，正式链路仍通过 `orchestrator-legacy` 使用部分领域类型和基础能力。正在按[重构计划](refactoring-plan.md)逐项收敛，不能把规划当作现状。
+
 ```text
 Desktop / Web / TUI
         │  /api/v1 + SSE
@@ -25,9 +27,9 @@ orchestrator-backend
 - `orchestrator-storage` 是持久状态真值，不维护写后全表重载的内存镜像。
 - `orchestrator-control-plane` 协调至少一次投递、lease、重试、恢复和 saga 补偿；不能证明副作用结果时进入 `NEEDS_ATTENTION`。
 - `orchestrator-runtime` 只提供固定 Docker Engine/受控运行时操作，不拼接 shell。
-- `orchestrator-manager` 把 Catalog、Release、Store 和类型化 provider 组合成产品用例。
+- `orchestrator-manager` 当前同时包含 Catalog/Release v2 模型与旧 Store Console 应用逻辑；正式 v1 安装、校验和替换用例仍主要位于 backend，尚未完成应用层归属调整。
 - `orchestrator-agent` 只执行分配给本 Node 的 Job，并用本地 ledger 决定幂等重放；它还根据 Deployment assignment 原子物化只读 ServiceContext 和短期 workload credential。
-- `orchestrator-legacy` 隔离 0.2 Console、旧仓储、旧路由和本地/Compose 适配，不能作为 v1 生产依赖方向的反向入口。
+- `orchestrator-legacy` 当前容纳 0.2 Console、仓储接口、适配器及领域类型重导出。正式 v1 仍有依赖；目标是迁出正式能力，让它只承担兼容转换，尚不能声称已隔离。
 
 ## 状态所有权
 
@@ -72,7 +74,7 @@ Problem→Judge 使用 transactional outbox、Redis Stream relay、Judge inbox �
 
 | 变更类型 | 首先阅读 | 边界 |
 | --- | --- | --- |
-| HTTP/API 行为 | `services/orchestrator/backend/src/*_api.rs` | 解析请求、认证、调用用例、映射响应；领域规则不放在路由里。 |
+| HTTP/API 行为 | `services/orchestrator/backend/src/*_api.rs` | 当前 Store API 仍混有用例规则；新增代码应按重构计划分离接入与用例，不继续扩大该混合边界。 |
 | 领域约束与计划 | `services/orchestrator/core/src` | 不引入数据库、网络或运行时依赖。 |
 | 持久化与恢复 | `services/orchestrator/storage/src`、`control-plane/src` | 状态以持久记录为准；明确事务和幂等边界。 |
 | 服务契约与 SDK | `tools/ojos-service/src/codegen` | `mod.rs` 编排生成、校验与落盘；各语言模块只负责生成产品 SDK。 |
@@ -84,3 +86,5 @@ Auth 必须连接 PostgreSQL，不保留内存冒烟认证或临时授权投影�
 软件测试、夹具和演练与产品源码物理分离。验证在仓库外的临时源码副本中运行，不能把测试模块复制回工作树。OJ 题目测试数据、判题、健康探针和签名校验属于产品职责，仍在本仓库。
 
 更细的取舍见 [耦合决策](coupling-decisions.md)，持久化见 [编排器数据库](../orchestrator/database.md)，交付方式见 [构建与交付](../release/README.md)。
+
+目录中两个 `manager` 含义不同：顶层 `manager/` 放客户端与原生安装器，`services/orchestrator/manager` 是 Rust Catalog/旧 Store 代码。当前不做全仓路径改名，先完成职责拆分，再在计划最后阶段处理命名。

@@ -5,6 +5,8 @@
 ## 首先阅读
 
 - [架构与阅读路径](architecture/README.md)：模块职责、依赖方向与修改入口。
+- [架构重构计划](architecture/refactoring-plan.md)：分批范围、不变量和验收状态；目标设计不代表已经实现。
+- [服务契约与生成关系](architecture/service-authoring.md)：v3 源输入、生成产物、v2 兼容入口和当前打包边界。
 - [构建与交付](release/README.md)：产品构建、打包、外部验证和正式发布的边界。
 - [Orchestrator v1.0 运维手册](orchestrator/operations-v1.md)：生产预检、Node Agent、健康/指标和备份恢复。
 - [贡献约束](../AGENTS.md)：项目本体与仓库外验证代码的边界。

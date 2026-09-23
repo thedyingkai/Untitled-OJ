@@ -1,5 +1,7 @@
 # Service Contract v2 SDK
 
+本文描述现有 v2 context SDK 接入。新增 v3 服务请先阅读[服务契约与生成关系](../../docs/architecture/service-authoring.md)，从 `ojos.service.yaml` 与它引用的 OpenAPI 开始；不要把 v2 模板和 v3 编译产物混作同一份人工维护输入。
+
 新 Service 不拼接 Gateway URL，不读取全局管理 token，也不直连远端数据库或中间件。它声明 Release v2 requirement，并使用共享 SDK 从 Agent 物化的 `/run/ojos/service/context.json` 中按 requirement 名调用 provider。
 
 ## 实现位置

@@ -1,6 +1,6 @@
 # Orchestrator v1.0 耦合决策
 
-本文记录当前 v1 模块边界。0.2 时代把仓储、Console、下载、进程和 provider 放在同一执行链中的设计已经迁入 `orchestrator-legacy`，不再代表正式架构。
+本文记录 v1 的设计约束。它不是对每一条约束均已实现的声明：旧 Console、仓储接口和部分适配仍参与正式链路，当前差距和迁移顺序见[重构计划](refactoring-plan.md)。
 
 ## 1. Core 只保留纯领域规则
 
@@ -12,7 +12,7 @@
 - 确定性 dependency plan、Topology diff 和补偿描述；
 - 与具体存储无关的错误和结果契约。
 
-Core 不得读取文件或环境变量，不得连接数据库/HTTP/Docker，不得启动进程，也不得持有进程级可变单例。`core/tests/pure_boundary.rs` 对 crate 源码和依赖方向做边界检查。
+Core 不得读取文件或环境变量，不得连接数据库/HTTP/Docker，不得启动进程，也不得持有进程级可变单例。相关边界检查已迁至仓库外，不在产品工作树或 workflow 中运行。
 
 这一边界使 Memory、SQLite、PostgreSQL 和 Web/TUI fixture 可以复用相同状态机，而不会把某个适配器行为误当成产品语义。
 
