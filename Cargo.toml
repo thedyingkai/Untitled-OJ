@@ -3,6 +3,7 @@ members = [
     "tools/ojos-service",
     "platform/shared/rust/service-context",
     "services/orchestrator/core",
+    "services/orchestrator/protocol",
     "services/orchestrator/legacy",
     "services/orchestrator/control-plane",
     "services/orchestrator/storage",
@@ -27,6 +28,7 @@ version = "1.0.0"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 orchestrator-core = { path = "services/orchestrator/core" }
+orchestrator-protocol = { path = "services/orchestrator/protocol" }
 orchestrator-legacy = { path = "services/orchestrator/legacy" }
 orchestrator-control-plane = { path = "services/orchestrator/control-plane" }
 orchestrator-storage = { path = "services/orchestrator/storage" }

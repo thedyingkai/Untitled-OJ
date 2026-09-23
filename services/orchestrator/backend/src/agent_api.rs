@@ -12,12 +12,12 @@ use crate::workload_credentials::{
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use getrandom::fill as random_fill;
-use orchestrator_agent::NodeRuntimeFactsV1;
 use orchestrator_control_plane::{
     ClaimRequest, CompleteRequest, CompletionStatus, DEFAULT_LEASE_MS, DEFAULT_LONG_POLL_MS,
     HeartbeatRequest, JobError, JobStatus, JobStore, NewJobEvent, OperationCoordinator,
     OperationError,
 };
+use orchestrator_protocol::NodeRuntimeFactsV1;
 use orchestrator_runtime::{
     ArtifactReference, BindingContextApplyPayload, ManagedServiceContextProjection,
     ManagedServiceContextSpec, OciImageReference, RuntimeDesiredState, RuntimeInstance,

@@ -11,7 +11,6 @@ use crate::contribution_controller::{
 use crate::durable::{DurableError, DurableStore};
 use crate::http::{ApiRequest, ApiResponse, query_value};
 use crate::{market_api, routes::status_for_error};
-use orchestrator_agent::NodeRuntimeFactsV1;
 use orchestrator_control_plane::{
     DurableOperation, DurableOperationStatus, JobKind, JobStore, OperationCoordinator,
     OperationRepository, PlanOperation, PlannedJob, PlannedJobCondition,
@@ -34,6 +33,7 @@ use orchestrator_legacy::{
 };
 use orchestrator_manager::MigrationPolicyV2;
 use orchestrator_manager::catalog_v2::{ReleaseChannel, TargetPlatform};
+use orchestrator_protocol::NodeRuntimeFactsV1;
 use orchestrator_runtime::{
     ArtifactReference, AuthPipelineStep, AuthServiceIdentitySpec, BindingContextApplyPayload,
     ContainerSpec, GatewayPipelineStep, GatewayRouteSpec, HealthGatePolicy,

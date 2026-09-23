@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use orchestrator_runtime::{
-    ContainerRuntime, ContainerSpec, DeploymentRuntimeObservationV1, DockerRuntimeFacts,
-    JUDGE_SANDBOX_V1_PROFILE_SHA256, MANAGED_EVENT_CONNECTION_FILE,
-    MANAGED_SERVICE_CREDENTIAL_FILE, MANAGED_SERVICE_GATEWAY_CA_FILE, ManagedApiBinding,
-    ManagedEventBinding, ManagedEventSubscription, ManagedServiceContextSpec, OciImageReference,
-    RuntimeContext, RuntimeContract, RuntimeProfile, WorkloadCredential, WorkloadFileOwnership,
+    ContainerRuntime, ContainerSpec, DockerRuntimeFacts, JUDGE_SANDBOX_V1_PROFILE_SHA256,
+    MANAGED_EVENT_CONNECTION_FILE, MANAGED_SERVICE_CREDENTIAL_FILE,
+    MANAGED_SERVICE_GATEWAY_CA_FILE, ManagedApiBinding, ManagedEventBinding,
+    ManagedEventSubscription, ManagedServiceContextSpec, OciImageReference, RuntimeContext,
+    RuntimeContract, RuntimeProfile, WorkloadCredential, WorkloadFileOwnership,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -62,39 +62,8 @@ struct JudgeSandboxLocalPolicy {
     allowed_images: BTreeSet<String>,
 }
 
-/// The exact capability report a future control-plane endpoint must accept.
-/// It deliberately advertises only closed runtime contracts already accepted
-/// by both local policy and observed Docker facts.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct NodeRuntimeFactsV1 {
-    pub schema_version: u32,
-    #[serde(default)]
-    pub report_id: String,
-    /// Agent-clock lower bound for this inventory snapshot. It is captured
-    /// before Docker enumeration starts, so a lifecycle completion carrying a
-    /// watermark at or after this value is causally newer and cannot be
-    /// overwritten by this report when its container is absent.
-    pub observed_at_ms: i64,
-    pub agent_version: String,
-    pub runtime_policy_sha256: String,
-    pub allowed_contracts: Vec<RuntimeContract>,
-    #[serde(default)]
-    pub judge_sandbox_allowed_images: Vec<String>,
-    /// Agent-local Redis connection identifiers safe to publish. URLs and
-    /// credentials remain only in the protected Agent configuration.
-    #[serde(default)]
-    pub redis_connection_ids: Vec<String>,
-    pub docker: DockerRuntimeFacts,
-    #[serde(default)]
-    pub inventory_complete: bool,
-    #[serde(default)]
-    pub inventory_error: String,
-    #[serde(default)]
-    pub deployment_observations: Vec<DeploymentRuntimeObservationV1>,
-    #[serde(default)]
-    pub credential_statuses: Vec<CredentialRefreshStatus>,
-}
+// Compatibility exports; the wire contract is owned by the shared protocol crate.
+pub use orchestrator_protocol::{CredentialRefreshStatus, NodeRuntimeFactsV1};
 
 /// mTLS transport contract for replacing the authenticated Node's latest
 /// runtime facts. The Agent publishes at startup and every 30 seconds; these
@@ -131,15 +100,6 @@ impl std::fmt::Debug for WorkloadCredentialExchangeRequest<'_> {
             .field("lease_token", &self.lease_token.map(|_| "[REDACTED]"))
             .finish()
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CredentialRefreshStatus {
-    pub deployment_id: String,
-    pub expires_at_ms: i64,
-    pub last_success_at_ms: i64,
-    pub last_error: String,
 }
 
 #[derive(Clone)]

@@ -14,6 +14,7 @@ orchestrator-backend
         │
         ├─ orchestrator-manager       Catalog / Store use cases
         ├─ orchestrator-control-plane Operation / Job / lease / recovery
+        ├─ orchestrator-protocol      shared runtime reports / closed profiles
         ├─ orchestrator-storage       Memory / SQLite / PostgreSQL
         ├─ orchestrator-runtime       Docker Engine + typed runtime contracts
         └─ orchestrator-core          pure model / validation / plan / diff
@@ -24,6 +25,7 @@ orchestrator-backend
 ```
 
 - `orchestrator-core` 不访问文件、数据库、网络、进程、环境变量或 Docker；它只定义可测试的领域规则。
+- `orchestrator-protocol` 定义控制面与 Agent 共享的运行时报告、实例观测、profile 和 health policy，仅依赖 serde/错误类型派生。daemon 不再依赖 Agent crate；runtime 和 Agent 暂时保留原类型路径的兼容导出。其余执行 payload 仍在 runtime，不能据此声称整个执行层已解耦。
 - `orchestrator-storage` 是持久状态真值，不维护写后全表重载的内存镜像。
 - `orchestrator-control-plane` 协调至少一次投递、lease、重试、恢复和 saga 补偿；不能证明副作用结果时进入 `NEEDS_ATTENTION`。
 - `orchestrator-runtime` 只提供固定 Docker Engine/受控运行时操作，不拼接 shell。

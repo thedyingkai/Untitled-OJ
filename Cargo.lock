@@ -3301,10 +3301,10 @@ dependencies = [
  "jsonschema",
  "jsonwebtoken",
  "ojos-orchestrator-installer",
- "orchestrator-agent",
  "orchestrator-control-plane",
  "orchestrator-legacy",
  "orchestrator-manager",
+ "orchestrator-protocol",
  "orchestrator-runtime",
  "orchestrator-storage",
  "rcgen",
@@ -3462,6 +3462,7 @@ dependencies = [
  "libc",
  "ojos-orchestrator-installer",
  "orchestrator-control-plane",
+ "orchestrator-protocol",
  "orchestrator-runtime",
  "postgres",
  "postgres-protocol",
@@ -3547,6 +3548,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestrator-protocol"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "orchestrator-runtime"
 version = "1.0.0"
 dependencies = [
@@ -3555,11 +3564,11 @@ dependencies = [
  "bollard",
  "bytes",
  "futures-util",
+ "orchestrator-protocol",
  "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "url",
