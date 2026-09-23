@@ -1,3 +1,4 @@
+use crate::adapters::catalog::{CatalogRegistryReader, InstalledServicesReader};
 use crate::artifact_store::{ArtifactRetentionPolicy, ArtifactStore, MAX_ARTIFACT_BYTES};
 use crate::catalog_registry::{
     CatalogRegistry, CatalogRegistryError, CatalogSourceRegistration, PackageQuery,
@@ -32,6 +33,7 @@ use orchestrator_legacy::{
     resolve_api_binding_candidate, validate_endpoint_id, validate_service_release,
 };
 use orchestrator_manager::MigrationPolicyV2;
+use orchestrator_manager::catalog_query::{self, CatalogQueryError, CatalogReadPort};
 use orchestrator_manager::catalog_v2::{ReleaseChannel, TargetPlatform};
 use orchestrator_protocol::NodeRuntimeFactsV1;
 use orchestrator_runtime::{
@@ -280,8 +282,8 @@ fn catalog_sources(
             })
         })
         .transpose()?;
-    let page = registry
-        .source_page(storage, cursor.as_deref(), limit)
+    let page = CatalogRegistryReader::new(registry, storage)
+        .source_page(cursor.as_deref(), limit)
         .map_err(catalog_registry_error)?;
     Ok(success(
         200,
@@ -340,19 +342,16 @@ fn list_catalog_packages(
 ) -> Result<ApiResponse, StoreApiError> {
     let (storage, registry) = require_catalog_registry(storage, registry)?;
     let query = package_query(request)?;
-    let page = registry
-        .packages(storage, &query)
-        .map_err(catalog_registry_error)?;
-    let installed = market_api::installed_services(console).map_err(manager_error)?;
-    Ok(success(
-        200,
-        json!({
-            "items": page.items,
-            "installed": installed,
-            "next_cursor": page.next_cursor,
-        }),
-        request_id,
-    ))
+    let result = catalog_query::list_packages(
+        &CatalogRegistryReader::new(registry, storage),
+        &InstalledServicesReader::new(console),
+        &query,
+    )
+    .map_err(|error| match error {
+        CatalogQueryError::Catalog(error) => catalog_registry_error(error),
+        CatalogQueryError::Installations(error) => manager_error(error),
+    })?;
+    Ok(success(200, json!(result), request_id))
 }
 
 fn require_catalog_registry<'a>(

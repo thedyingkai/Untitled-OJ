@@ -3,6 +3,7 @@
 //! daemon CLI 与桌面管理器共用这一入口：CLI 可以持续运行，桌面管理器则持有
 //! [`EmbeddedServerHandle`] 并在窗口关闭时显式停止服务。
 
+mod adapters;
 mod agent_api;
 mod api_v1;
 mod artifact_store;

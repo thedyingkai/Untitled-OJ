@@ -3,6 +3,7 @@
 //! 这里集中 Store 索引、GitHub Release、安装策略和“已部署”投影；HTTP 与终端层只
 //! 负责输入输出，不再各自复制一套业务规则。
 
+pub mod catalog_query;
 pub mod catalog_v2;
 pub mod release_v2;
 

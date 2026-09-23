@@ -8,6 +8,9 @@ use crate::durable::{DurableError, DurableStore};
 use orchestrator_legacy::{
     external_release_import_from_yaml, release_supports_link_probe_v1, resolve_outbound_redirect,
 };
+pub(crate) use orchestrator_manager::catalog_query::{
+    CatalogPackageItem, CatalogSource, CatalogSourcePage, PackagePage, PackageQuery,
+};
 use orchestrator_manager::catalog_v2::{
     CatalogResolveRequest, CatalogTrustStore, CatalogV2, CatalogV2Error, InstallPlanV2,
     OciImageReference as CatalogOciImageReference, ReleaseChannel, ResolvedReleaseV2,
@@ -42,22 +45,6 @@ const MAX_REDIRECTS: u8 = 5;
 const DEFAULT_PAGE_LIMIT: usize = 50;
 const MAX_PAGE_LIMIT: usize = 200;
 const USER_AGENT: &str = "ojos-orchestrator-catalog-v2";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct CatalogSource {
-    pub id: String,
-    pub url: String,
-    pub required_key_id: String,
-    #[serde(default)]
-    pub auth_secret_ref: String,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-    /// Optional verified OCI image-layout mirrors. The key is the exact
-    /// repository@digest reference and the value is a repository-local path.
-    #[serde(default)]
-    pub offline_oci_layouts: BTreeMap<String, String>,
-}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -104,45 +91,6 @@ impl CatalogSourceRegistration {
 
 fn default_enabled() -> bool {
     true
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PackageQuery {
-    pub search: Option<String>,
-    pub channel: Option<ReleaseChannel>,
-    pub platform: Option<TargetPlatform>,
-    pub cursor: Option<String>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct CatalogPackageItem {
-    pub source_id: String,
-    pub catalog_id: String,
-    pub module_id: String,
-    pub name: String,
-    pub description: String,
-    pub kind: String,
-    pub tags: Vec<String>,
-    pub version: Version,
-    pub channel: ReleaseChannel,
-    pub platforms: Vec<TargetPlatform>,
-    pub min_orchestrator_version: Version,
-    pub runtime_capabilities: Vec<RuntimeCapabilityV2>,
-    pub metadata_sha256: String,
-    pub oci_image: String,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct PackagePage {
-    pub items: Vec<CatalogPackageItem>,
-    pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct CatalogSourcePage {
-    pub items: Vec<CatalogSource>,
-    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
