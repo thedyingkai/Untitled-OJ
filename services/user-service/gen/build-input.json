@@ -3,7 +3,7 @@
   "serviceId": "user-service",
   "serviceVersion": "0.1.0",
   "contractDigest": "sha256:ebf87a2199d3cf3e0a7d9c7621ac2f161537b8485acedcfd3abb5e1b8b23a986",
-  "generatedFiles": 19,
+  "generatedFiles": 15,
   "artifactRequirements": [
     {
       "role": "config-schema",

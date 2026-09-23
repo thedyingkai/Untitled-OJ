@@ -3,7 +3,7 @@
   "serviceId": "judge-api",
   "serviceVersion": "0.1.0",
   "contractDigest": "sha256:43a0018463b3eb01812970c84493f943f5a033118c98be0a95dc85cc60f40fa2",
-  "generatedFiles": 19,
+  "generatedFiles": 15,
   "artifactRequirements": [
     {
       "role": "config-schema",

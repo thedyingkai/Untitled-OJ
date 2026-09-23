@@ -17,6 +17,3 @@ thiserror.workspace = true
 url.workspace = true
 tokio = { version = "1", features = ["fs"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

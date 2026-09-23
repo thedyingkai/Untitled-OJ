@@ -3,7 +3,7 @@
   "serviceId": "problem-service",
   "serviceVersion": "0.1.0",
   "contractDigest": "sha256:91067d68f758d267b8186e318924b72f51ca7b6e3d95426b8aa50d6db3c46965",
-  "generatedFiles": 19,
+  "generatedFiles": 15,
   "artifactRequirements": [
     {
       "role": "config-schema",

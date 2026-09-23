@@ -8,7 +8,6 @@ on:
     paths:
       - "docs/**"
       - "README.md"
-      - "deploy/cross-machine/README.md"
       - "deploy/worker/README.md"
       - "sdk/service-sdk/README.md"
       - ".github/scripts/**"
@@ -34,7 +33,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
           python3 .github/scripts/build_wiki.py \
             --root . \
             --output .wiki-src \

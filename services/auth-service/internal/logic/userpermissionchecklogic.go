@@ -50,20 +50,7 @@ func (l *UserPermissionCheckLogic) UserPermissionCheck(req *types.PermissionChec
 			return nil, errors.New("caller_service is required")
 		}
 		credentialToken, _ := middleware.TokenFromContext(l.ctx)
-		if l.svcCtx.SmokeAuth != nil {
-			return &types.PermissionCheckResp{
-				Code: 0,
-				Msg:  "success",
-				Data: types.PermissionCheckData{
-					Allowed: l.svcCtx.SmokeAuth.ServiceCallerCanUsePermission(
-						callerService,
-						strings.TrimSpace(req.Permission),
-						strings.TrimSpace(req.ApiId),
-						credentialToken,
-					),
-				},
-			}, nil
-		}
+
 		if l.svcCtx.AdminRepo == nil {
 			return nil, errors.New("admin repository is unavailable")
 		}

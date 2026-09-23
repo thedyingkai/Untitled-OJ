@@ -6,14 +6,8 @@
 
 常用命令：
 
-```bash
-npm ci
-npm run build
-npm run test:e2e
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 Playwright E2E 需要先安装 Chromium：
 
-```bash
-npm run test:e2e:install
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。

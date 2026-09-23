@@ -159,19 +159,3 @@ pub const EVENTS: &[EventIdentity] = &[
     IO_OJOS_PROBLEM_DELETED_V1V1.identity,
     IO_OJOS_PROBLEM_SNAPSHOT_V1V1.identity,
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn typed_codec_accepts_valid_payload_and_rejects_tampering() {
-        let encoded = "{\"descriptor\":{\"delivery\":\"durable\",\"schemaDigest\":\"sha256:a462d8e67aa85c9d44b3233f465a8a88d6532afbb0159a7db3b2a6a611d900eb\",\"type\":\"io.ojos.problem.deleted.v1\",\"version\":1},\"payload\":{\"aggregate_version\":1,\"problem_id\":1}}".as_bytes();
-        assert!(IO_OJOS_PROBLEM_DELETED_V1V1.decode(encoded).is_ok());
-        let mut descriptor_tampered: serde_json::Value = serde_json::from_slice(encoded).unwrap();
-        descriptor_tampered["descriptor"]["schemaDigest"] = serde_json::json!("sha256:tampered");
-        assert!(IO_OJOS_PROBLEM_DELETED_V1V1.decode(&serde_json::to_vec(&descriptor_tampered).unwrap()).is_err());
-        let mut payload_tampered: serde_json::Value = serde_json::from_slice(encoded).unwrap();
-        payload_tampered["payload"]["__unknown"] = serde_json::json!(true);
-        assert!(IO_OJOS_PROBLEM_DELETED_V1V1.decode(&serde_json::to_vec(&payload_tampered).unwrap()).is_err());
-    }
-}

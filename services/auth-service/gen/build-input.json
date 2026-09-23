@@ -3,7 +3,7 @@
   "serviceId": "auth-service",
   "serviceVersion": "0.1.0",
   "contractDigest": "sha256:10e76b71630427ffca9b89683d0c396983d38ae00caf6f415d689e29997c0d64",
-  "generatedFiles": 19,
+  "generatedFiles": 15,
   "artifactRequirements": [
     {
       "role": "migration:auth-schema-v1",

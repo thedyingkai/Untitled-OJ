@@ -790,20 +790,3 @@ fn job_database_error(error: r2d2_postgres::postgres::Error) -> JobError {
 fn job_json_error(error: serde_json::Error) -> JobError {
     JobError::Persistence(error.to_string())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_projection_matches_protocol_spelling() {
-        assert_eq!(status_text(&JobStatus::Queued), "QUEUED");
-        assert_eq!(status_text(&JobStatus::RetryWait), "RETRY_WAIT");
-        assert_eq!(status_text(&JobStatus::NeedsAttention), "NEEDS_ATTENTION");
-    }
-
-    #[test]
-    fn rejects_sequences_that_postgres_cannot_represent() {
-        assert!(i64::try_from(u64::MAX).is_err());
-    }
-}

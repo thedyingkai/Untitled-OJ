@@ -3,7 +3,7 @@
   "serviceId": "gateway",
   "serviceVersion": "0.1.0",
   "contractDigest": "sha256:35fd35288c474d24d2b90b6e41679de7f3869b872bb82ff0bd9d0693e2b8299e",
-  "generatedFiles": 19,
+  "generatedFiles": 15,
   "artifactRequirements": [
     {
       "role": "config-schema",

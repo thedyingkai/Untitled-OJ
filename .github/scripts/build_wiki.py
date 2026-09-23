@@ -22,7 +22,6 @@ FULL_COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 EXTERNAL_PAGES = (
-    (PurePosixPath("deploy/cross-machine/README.md"), "Deployment-Cross-machine-v2"),
     (PurePosixPath("deploy/worker/README.md"), "Deployment-Judge-worker"),
     (PurePosixPath("sdk/service-sdk/README.md"), "SDK-Service-context"),
 )

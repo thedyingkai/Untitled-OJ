@@ -290,7 +290,7 @@ gh workflow run orchestrator-capacity.yml \
 
 `CANDIDATE_IMAGE_RUN_ID` 必须是当前 `main` SHA 对应的
 `orchestrator-candidate-images.yml` 成功首次运行；不得使用其他 commit、rerun 或手工拼出的镜像。完整的 run 身份复核、GitHub Environment 和 runner service 配置命令见
-[`deploy/capacity/README.md`](../../deploy/capacity/README.md)。
+`deploy/capacity/README.md`（已迁至仓库外的验证资料）。
 
 报告会记录实际 checkout 的 `GITHUB_SHA`、经 Actions API 验证的派发时间、runner systemd 服务基线/逐样本/最终连续性证据、请求/实际 soak 秒数、采样数、规模、延迟以及 RSS/线程基线。`release.yml` 只查找同一 `github.sha` 的成功 production artifact，并重新验证 100 Nodes、2,000 Deployments、10,000 Endpoint+Link、50 并发 Operations、24 小时持续时间和全部阈值；找不到有效证据时 `ga-build` 不会开始。
 

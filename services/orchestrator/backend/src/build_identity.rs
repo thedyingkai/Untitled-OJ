@@ -1,9 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 
-#[cfg(test)]
-const DEVELOPMENT_COMMIT: &str = "development";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum RuntimeProfile {
@@ -48,54 +45,4 @@ fn is_canonical_commit(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn identity(profile: RuntimeProfile, commit_sha: &'static str) -> BuildIdentity {
-        BuildIdentity {
-            version: "1.0.0",
-            commit_sha,
-            profile,
-            target: "x86_64-unknown-linux-gnu",
-        }
-    }
-
-    #[test]
-    fn production_requires_a_canonical_full_commit() {
-        assert!(
-            identity(
-                RuntimeProfile::Production,
-                "0123456789abcdef0123456789abcdef01234567"
-            )
-            .require_production_commit()
-            .is_ok()
-        );
-        for invalid in [
-            DEVELOPMENT_COMMIT,
-            "0123456789abcdef0123456789abcdef0123456",
-            "0123456789abcdef0123456789abcdef0123456g",
-            "0123456789ABCDEF0123456789ABCDEF01234567",
-        ] {
-            assert!(
-                identity(RuntimeProfile::Production, invalid)
-                    .require_production_commit()
-                    .is_err(),
-                "production unexpectedly accepted {invalid}"
-            );
-        }
-    }
-
-    #[test]
-    fn development_identity_is_allowed_only_outside_production() {
-        for profile in [RuntimeProfile::Desktop, RuntimeProfile::Ephemeral] {
-            assert!(
-                identity(profile, DEVELOPMENT_COMMIT)
-                    .require_production_commit()
-                    .is_ok()
-            );
-        }
-    }
 }

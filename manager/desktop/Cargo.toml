@@ -29,6 +29,3 @@ url = "2.5"
 ico = "0.5"
 png = "0.17"
 tauri-build = "2"
-
-[dev-dependencies]
-tempfile.workspace = true

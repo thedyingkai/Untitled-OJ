@@ -46,18 +46,9 @@ PostgreSQL, while Redis remains the topology projection's platform dependency.
 
 From the repository root:
 
-```powershell
-cargo run -p ojos-service -- service generate services/gateway/ojos.service.yaml
-cargo run -p ojos-service -- service check services/gateway/ojos.service.yaml --generated
-go test -race ./...
-go vet ./...
-go build ./...
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 Run the Go commands from `services/gateway`. The publish fixture uses an
 ephemeral Ed25519 seed and deletes its scratch Catalog:
 
-```powershell
-& services/gateway/scripts/resolved-artifacts-fixture.test.ps1
-& services/gateway/scripts/publish-fixture.test.ps1
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。

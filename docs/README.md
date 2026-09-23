@@ -1,14 +1,13 @@
 # OJOS Orchestrator 文档索引
 
-当前源码版本是 Orchestrator `1.0.0`。唯一功能状态源是[项目状态总结](completeness-summary.md)；其他文档只定义契约、操作方式或额外证据要求，不独立宣布 GO。历史 alpha、0.2 兼容记录和 `docs/evidence/*.json` 不代表当前实现。
+当前源码版本是 Orchestrator `1.0.0`。本目录定义产品架构、契约和使用方式；软件验证代码与报告位于仓库外。历史 alpha 和 0.2 兼容记录不代表当前实现，构建成功不等于生产验收通过。
 
 ## 首先阅读
 
-- [项目状态总结](completeness-summary.md)：当前已实现能力与按需执行的规模/签名证据。
-- [交付判定](release-candidate.md)：本地功能结论、原生 CLI 安装和额外发布证据边界。
-- [Orchestrator v1.0 运维手册](orchestrator/operations-v1.md)：生产预检、Node Agent、健康/指标、备份恢复、容量和 24 小时门禁。
-- [生产就绪证据](production-readiness.md)：需要声明生产规模或签名分发时使用的证据账本。
-- [可选的上线证据](unfinished/README.md)：需要对应声明时才从外部环境取得的两类 artifact。
+- [架构与阅读路径](architecture/README.md)：模块职责、依赖方向与修改入口。
+- [构建与交付](release/README.md)：产品构建、打包、外部验证和正式发布的边界。
+- [Orchestrator v1.0 运维手册](orchestrator/operations-v1.md)：生产预检、Node Agent、健康/指标和备份恢复。
+- [贡献约束](../AGENTS.md)：项目本体与仓库外验证代码的边界。
 
 ## 架构与契约
 
@@ -37,13 +36,9 @@
 ## 运维、发布与证据
 
 - [v1 运维手册](orchestrator/operations-v1.md)：远程生产唯一正式运维入口。
-- [生产运维脚本](../deploy/ops/README.md)：preflight、备份恢复、Docker Agent E2E 和 capacity/soak runner。
-- [A/B 跨机完整门禁](../deploy/cross-machine/README.md)：单机双 Engine 的 production-equivalent 业务闭环及证据边界。
+- [生产运维脚本](../deploy/ops/README.md)：preflight、备份恢复和监控配置。
 - [Judge Worker 生产部署](../deploy/worker/README.md)：B 节点 Agent、runtime policy、Catalog Release 和网络边界。
-- [可核对证据索引](release/evidence.md)：实现、测试和 workflow 入口。
-- [发布文档说明](release/README.md)：当前与历史发布记录的边界。
-- [Staging 演练历史记录](evidence/staging-drill.md)：旧整栈演练范围，仅供历史核对，不是 v1 GA 证据。
-- [机器可读历史快照](evidence/)：`production-readiness.json`、`release-candidate.json`，不得作为当前候选结论。
+- [发布文档说明](release/README.md)：unsigned portable 与外部正式发布验收的边界。
 
 `ops/deployment-checklist.md`、`ops/ops-runbook.md`、旧 staging/rollback drill 面向历史 beta/整套 OJ 部署；Orchestrator v1 生产部署应使用 `orchestrator/operations-v1.md`。
 
@@ -56,7 +51,6 @@
 
 ## 历史文档
 
-- [2026-07 重构记录](release/refactor-2026-07.md)：冻结当时实现与缺口；其中进程内 TUI、共享 token Node push、NoTls/无连接池、全局 console 锁和 Deferred provider 等表述均不代表 v1 当前状态。
 - [v0.1.0 Alpha 快速上手](alpha-quickstart.md)：历史下载与使用说明，仍使用旧原生 GUI。
 
-历史文档保留是为了迁移和考古。若历史表述与 v1 文档冲突，以当前 v1 源码、OpenAPI/action 契约和本页“首先阅读”中的状态文档为准。
+历史文档保留是为了迁移和考古。若历史表述与 v1 文档冲突，以当前 v1 源码和 OpenAPI/action 契约为准。迁出的演练与历史验收记录在独立验证目录中保留。

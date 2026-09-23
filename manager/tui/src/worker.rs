@@ -156,13 +156,6 @@ impl ManagerWorker {
         Some(event)
     }
 
-    #[cfg(test)]
-    pub fn recv(&mut self) -> Option<ManagerEvent> {
-        let event = self.receiver.recv().ok()?;
-        self.pending = self.pending.saturating_sub(1);
-        Some(event)
-    }
-
     pub fn is_busy(&self) -> bool {
         self.pending > 0
     }

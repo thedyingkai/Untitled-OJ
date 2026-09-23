@@ -171,20 +171,3 @@ fn now_ms() -> i64 {
         .try_into()
         .unwrap_or(i64::MAX)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn readiness_requires_preflight_registration_and_fresh_heartbeat() {
-        let state = HealthState::default();
-        assert!(!state.ready());
-        state.mark_preflight_ok(Duration::from_secs(10));
-        assert!(!state.ready());
-        state.mark_registered();
-        assert!(state.ready());
-        state.mark_disconnected();
-        assert!(!state.ready());
-    }
-}

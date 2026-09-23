@@ -208,39 +208,3 @@ fn percent_encode(value: &str) -> String {
     }
     output
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Arc, RwLock};
-
-    #[test]
-    fn provider_and_credentials_are_read_per_request() {
-        let snapshot = Arc::new(RwLock::new(ContextSnapshot { generation: 1, base_url: "https://one.example".into(), token: "old".into() }));
-        let source = snapshot.clone();
-        let provider = move || Ok(source.read().unwrap().clone());
-        let client = Client::new(Arc::new(provider));
-        let operation = Operation { id: "fixture.get", method: "GET", path: "/resources/{id}", audience: "user", permission: None, header_parameters: &[], request_content_types: &[], request_body_required: false };
-        let mut parameters = BTreeMap::new(); parameters.insert("id".to_owned(), "7".to_owned());
-        let first = client.request(operation, &parameters, Vec::new()).unwrap();
-        *snapshot.write().unwrap() = ContextSnapshot { generation: 2, base_url: "https://two.example".into(), token: "new".into() };
-        let second = client.request_with_options(operation, &parameters, Vec::new(), CallOptions { timeout: Duration::from_millis(25), idempotency_key: Some("idem-1".into()), ..CallOptions::default() }).unwrap();
-        assert!(first.url.starts_with("https://one.example")); assert_eq!(first.headers["Authorization"], "Bearer old");
-        assert!(second.url.starts_with("https://two.example")); assert_eq!(second.headers["Authorization"], "Bearer new"); assert_eq!(second.headers["Idempotency-Key"], "idem-1"); assert_eq!(second.timeout, Duration::from_millis(25));
-        assert!(matches!(Client::map_status(409), Some(ClientError::Http { kind: ErrorKind::Conflict, .. })));
-        assert!(matches!(Client::timeout_error("deadline"), ClientError::Http { kind: ErrorKind::Timeout, .. }));
-    }
-
-    #[test]
-    fn binary_body_declared_headers_and_protected_overrides() {
-        let provider = || Ok(ContextSnapshot { generation: 1, base_url: "https://storage.example".into(), token: "trusted".into() });
-        let client = Client::new(Arc::new(provider));
-        let operation = Operation { id: "fixture.put", method: "PUT", path: "/resources/{id}", audience: "internal", permission: None, header_parameters: &[HeaderParameter { name: "X-OJOS-Content-Sha256", required: true }], request_content_types: &["application/octet-stream"], request_body_required: true };
-        let mut parameters = BTreeMap::new(); parameters.insert("id".to_owned(), "1".to_owned());
-        let mut headers = BTreeMap::new(); headers.insert("X-OJOS-Content-Sha256".to_owned(), "digest".to_owned());
-        let request = client.request_with_options(operation, &parameters, Vec::new(), CallOptions { raw_body: Some(vec![0, 1, 2, 255]), headers: headers.clone(), ..CallOptions::default() }).unwrap();
-        assert_eq!(request.body, vec![0, 1, 2, 255]); assert_eq!(request.headers["Content-Type"], "application/octet-stream");
-        headers.insert("Authorization".to_owned(), "attacker".to_owned());
-        assert!(matches!(client.request_with_options(operation, &parameters, Vec::new(), CallOptions { raw_body: Some(vec![1]), headers, ..CallOptions::default() }), Err(ClientError::InvalidRequest(_))));
-    }
-}

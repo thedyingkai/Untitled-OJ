@@ -1,0 +1,75 @@
+name: Product build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: product-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go products and SDKs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: platform/shared/go/go.mod
+          cache-dependency-path: '**/go.sum'
+      - name: Compile Go modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r manifest; do
+            (cd "$(dirname "$manifest")" && go build -mod=readonly ./...)
+          done < <(git ls-files '*/go.mod')
+
+  rust:
+    name: Rust products and SDKs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile control plane, CLI and shared libraries
+        run: cargo build --locked --workspace --exclude ojos-orchestrator-desktop
+      - name: Compile judge worker
+        run: cargo build --locked --manifest-path services/judge-worker/Cargo.toml
+      - name: Compile generated Rust SDKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r manifest; do
+            cargo build --manifest-path "$manifest"
+          done < <(git ls-files 'services/*/gen/rust/Cargo.toml')
+
+  web:
+    name: Web products
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        directory: [manager/web, services/gateway/frontend]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ${{ matrix.directory }}/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: ${{ matrix.directory }}
+      - run: npm run build
+        working-directory: ${{ matrix.directory }}

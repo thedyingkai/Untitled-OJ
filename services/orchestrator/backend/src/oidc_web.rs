@@ -88,18 +88,6 @@ impl OidcBrowserConfig {
             ),
         })
     }
-
-    #[cfg(test)]
-    fn for_test() -> Self {
-        Self {
-            issuer: "https://issuer.example".to_string(),
-            audience: "orchestrator-api".to_string(),
-            client_id: "orchestrator-web".to_string(),
-            scopes: vec!["openid".to_string(), "profile".to_string()],
-            authorization_endpoint: "https://issuer.example/authorize".to_string(),
-            redirect_uri: "https://orchestrator.example/api/v1/auth/oidc/callback".to_string(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -398,13 +386,13 @@ fn validate_public_base_url(
         ));
     }
     let secure = uri.scheme_str() == Some("https");
-    let test_loopback = allow_insecure_loopback
+    let local_loopback = allow_insecure_loopback
         && uri.scheme_str() == Some("http")
         && authority
             .host()
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback());
-    if !secure && !test_loopback {
+    if !secure && !local_loopback {
         return Err(OidcWebError::Configuration(
             "ORCHESTRATOR_PUBLIC_BASE_URL must use HTTPS".to_string(),
         ));
@@ -477,132 +465,4 @@ fn cookie_value<'a>(header: Option<&'a str>, name: &str) -> Option<&'a str> {
         let (key, value) = part.trim().split_once('=')?;
         (key == name && !value.is_empty()).then_some(value)
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::auth::PrincipalSource;
-    use orchestrator_legacy::V1Role;
-
-    fn state_parameter(location: &str) -> String {
-        location
-            .split_once('?')
-            .unwrap()
-            .1
-            .split('&')
-            .find_map(|part| part.strip_prefix("state="))
-            .unwrap()
-            .to_string()
-    }
-
-    #[test]
-    fn authorization_start_uses_nonce_state_and_pkce_s256_without_exposing_verifier() {
-        let manager = OidcWebSessionManager::new(OidcBrowserConfig::for_test());
-        let start = manager.begin(Some("/#/nodes")).unwrap();
-        assert!(
-            start
-                .location
-                .starts_with("https://issuer.example/authorize?")
-        );
-        assert!(start.location.contains("response_type=code"));
-        assert!(start.location.contains("nonce="));
-        assert!(start.location.contains("state="));
-        assert!(start.location.contains("code_challenge="));
-        assert!(start.location.contains("code_challenge_method=S256"));
-        assert!(!start.location.contains("code_verifier"));
-        assert!(!start.location.contains("%2F%2Fattacker"));
-    }
-
-    #[test]
-    fn authorization_state_is_bounded_expiring_and_single_use() {
-        let manager = OidcWebSessionManager::with_ttls(
-            OidcBrowserConfig::for_test(),
-            Duration::from_secs(60),
-            Duration::from_secs(60),
-        );
-        let start = manager.begin(Some("/")).unwrap();
-        let state = state_parameter(&start.location);
-        let pending = manager.consume_pending(&state).unwrap();
-        assert_eq!(pending.return_to, "/");
-        assert!(matches!(
-            manager.consume_pending(&state),
-            Err(OidcWebError::InvalidState)
-        ));
-        assert!(matches!(
-            manager.consume_pending("wrong"),
-            Err(OidcWebError::InvalidState)
-        ));
-
-        let expired = OidcWebSessionManager::with_ttls(
-            OidcBrowserConfig::for_test(),
-            Duration::ZERO,
-            Duration::from_secs(60),
-        );
-        let start = expired.begin(None).unwrap();
-        assert!(matches!(
-            expired.consume_pending(&state_parameter(&start.location)),
-            Err(OidcWebError::InvalidState)
-        ));
-    }
-
-    #[test]
-    fn session_is_http_only_and_requires_csrf() {
-        let manager = OidcWebSessionManager::new(OidcBrowserConfig::for_test());
-        let principal = Principal::verified("user-1", V1Role::Admin, PrincipalSource::Oidc);
-        let completion = manager
-            .issue_session(principal, "/".to_string(), Duration::from_secs(60))
-            .unwrap();
-        let cookie = session_cookie(&completion.session_id, completion.max_age_seconds);
-        assert!(cookie.contains("HttpOnly"));
-        assert!(cookie.contains("Secure"));
-        assert!(cookie.contains("SameSite=Lax"));
-        let request_cookie = format!("{OIDC_SESSION_COOKIE_NAME}={}", completion.session_id);
-        assert!(
-            manager
-                .authorize(Some(&request_cookie), None, false)
-                .unwrap()
-                .is_some()
-        );
-        let csrf_token = manager
-            .authorize(Some(&request_cookie), None, false)
-            .unwrap()
-            .unwrap()
-            .csrf_token;
-        assert!(matches!(
-            manager.authorize(Some(&request_cookie), None, true),
-            Err(OidcWebError::InvalidCsrf)
-        ));
-        assert!(
-            manager
-                .authorize(Some(&request_cookie), Some(&csrf_token), true)
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn issued_session_expires_server_side() {
-        let manager = OidcWebSessionManager::new(OidcBrowserConfig::for_test());
-        let principal = Principal::verified("user-1", V1Role::Viewer, PrincipalSource::Oidc);
-        let completion = manager
-            .issue_session(principal, "/".to_string(), Duration::from_millis(1))
-            .unwrap();
-        let request_cookie = format!("{OIDC_SESSION_COOKIE_NAME}={}", completion.session_id);
-        std::thread::sleep(Duration::from_millis(10));
-
-        assert!(matches!(
-            manager.authorize(Some(&request_cookie), None, false),
-            Err(OidcWebError::InvalidSession)
-        ));
-    }
-
-    #[test]
-    fn external_return_targets_and_incomplete_scope_config_are_rejected() {
-        let manager = OidcWebSessionManager::new(OidcBrowserConfig::for_test());
-        assert!(manager.begin(Some("https://attacker.invalid")).is_err());
-        assert!(manager.begin(Some("//attacker.invalid")).is_err());
-        assert!(validate_scopes("profile email").is_err());
-        assert!(validate_public_base_url("http://orchestrator.example", false).is_err());
-    }
 }

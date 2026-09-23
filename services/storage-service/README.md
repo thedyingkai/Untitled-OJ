@@ -57,20 +57,7 @@ Agent 将配置展开为 `OJOS_CONFIG_*`，将 secret 展开为 `OJOS_SECRET_*`�
 未托管本地开发可使用 `local` backend 和写目录；这条路径不会被 Catalog 的生产
 配置模式接受。
 
-```powershell
-Workload verifier trust is a platform projection, not an install input. Store
-loads the public Ed25519 key and trust tuple, the Agent atomically writes
-`/run/ojos/service/workload-public-key.pem`, and Runtime force-injects the fixed
-file path, key ID, issuer, and audience. A service author cannot replace this
-material through image configuration or submitted secrets.
-
-cargo run -p ojos-service -- service build services/storage-service/ojos.service.yaml
-cargo run -p ojos-service -- service check services/storage-service/ojos.service.yaml --generated
-go test -race ./...
-go vet ./...
-pwsh services/storage-service/scripts/resolved-artifacts-fixture.test.ps1
-pwsh services/storage-service/scripts/publish-fixture.test.ps1
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 容器以非 root 用户运行。MinIO 上传先写入 provider 内部的随机临时 object，完成
 SHA-256/size 校验后，再以带条件头的单次流式 PUT 原子发布，并在所有返回路径清理

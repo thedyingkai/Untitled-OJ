@@ -38,27 +38,7 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 	}
 	authToken, _ := middleware.TokenFromContext(l.ctx)
 	credentialToken := credentialTokenFromRegistration(req, authToken)
-	if l.svcCtx.SmokeAuth != nil {
-		permissions := make([]svc.SmokePermission, 0, len(req.Permissions))
-		for _, item := range req.Permissions {
-			permissions = append(permissions, svc.SmokePermission{
-				Code:        item.Code,
-				Name:        item.Name,
-				Description: item.Description,
-			})
-		}
-		identity := smokeIdentityFromRequest(req, credentialToken)
-		registered := l.svcCtx.SmokeAuth.RegisterServicePermissions(serviceCode, permissions, identity)
-		return &types.ServicePermissionsResp{
-			Code: 0,
-			Msg:  "success",
-			Data: types.ServicePermissionsData{
-				ServiceCode: serviceCode,
-				Registered:  len(registered),
-				Permissions: registered,
-			},
-		}, nil
-	}
+
 	permissions := make([]repository.ServicePermissionInput, 0, len(req.Permissions))
 	for _, item := range req.Permissions {
 		permissions = append(permissions, repository.ServicePermissionInput{
@@ -91,31 +71,6 @@ func (l *ServicePermissionsLogic) Register(req *types.RegisterServicePermissions
 			Permissions: registered,
 		},
 	}, nil
-}
-
-func smokeIdentityFromRequest(req *types.RegisterServicePermissionsReq, credentialToken string) *svc.SmokeServiceIdentity {
-	if req == nil {
-		return nil
-	}
-	if strings.TrimSpace(req.ServiceIdentity.ServiceName) == "" &&
-		len(req.ServiceIdentity.AllowedApis) == 0 &&
-		len(req.ServiceIdentity.Grants) == 0 &&
-		strings.TrimSpace(req.ServiceIdentity.CredentialToken) == "" {
-		return nil
-	}
-	grants := make([]svc.SmokeServiceIdentityGrant, 0, len(req.ServiceIdentity.Grants))
-	for _, grant := range req.ServiceIdentity.Grants {
-		grants = append(grants, svc.SmokeServiceIdentityGrant{
-			APIID:          grant.ApiId,
-			PermissionCode: grant.Permission,
-		})
-	}
-	return &svc.SmokeServiceIdentity{
-		ServiceCode:     req.ServiceIdentity.ServiceName,
-		AllowedAPIs:     req.ServiceIdentity.AllowedApis,
-		Grants:          grants,
-		CredentialToken: credentialToken,
-	}
 }
 
 func repositoryIdentityFromRequest(req *types.RegisterServicePermissionsReq, credentialToken string) (*repository.ServiceIdentityInput, error) {
@@ -154,18 +109,7 @@ func (l *ServicePermissionsLogic) Delete(req *types.DeleteServicePermissionsReq)
 		return nil, err
 	}
 	serviceCode := strings.TrimSpace(req.ServiceCode)
-	if l.svcCtx.SmokeAuth != nil {
-		deleted := l.svcCtx.SmokeAuth.DeleteServicePermissions(serviceCode)
-		return &types.ServicePermissionsResp{
-			Code: 0,
-			Msg:  "success",
-			Data: types.ServicePermissionsData{
-				ServiceCode: serviceCode,
-				Deleted:     deleted,
-				Permissions: []string{},
-			},
-		}, nil
-	}
+
 	deleted, err := l.svcCtx.AdminRepo.DeleteServicePermissions(l.ctx, actorID, serviceCode)
 	if err != nil {
 		return nil, err
@@ -185,9 +129,7 @@ func (l *ServicePermissionsLogic) GetServiceIdentity(req *types.DeleteServicePer
 	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
 		return nil, err
 	}
-	if l.svcCtx.SmokeAuth != nil {
-		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "service identity details are unavailable in smoke auth")
-	}
+
 	details, err := l.svcCtx.AdminRepo.ListServiceIdentity(l.ctx, strings.TrimSpace(req.ServiceCode))
 	if err != nil {
 		return nil, err
@@ -204,9 +146,7 @@ func (l *ServicePermissionsLogic) AddServiceCredential(req *types.ServiceCredent
 	if err != nil {
 		return nil, err
 	}
-	if l.svcCtx.SmokeAuth != nil {
-		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "service credential lifecycle is unavailable in smoke auth")
-	}
+
 	expiresAt, err := parseOptionalRFC3339(req.ExpiresAt)
 	if err != nil {
 		return nil, err
@@ -230,9 +170,7 @@ func (l *ServicePermissionsLogic) RevokeServiceCredential(req *types.RevokeServi
 	if err != nil {
 		return nil, err
 	}
-	if l.svcCtx.SmokeAuth != nil {
-		return nil, apperror.BadRequest(apperror.CodeInvalidRequest, "service credential lifecycle is unavailable in smoke auth")
-	}
+
 	if err := l.svcCtx.AdminRepo.RevokeServiceCredential(l.ctx, actorID, strings.TrimSpace(req.ServiceCode), req.Token, req.TokenHash, req.Reason); err != nil {
 		return nil, err
 	}

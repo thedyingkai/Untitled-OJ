@@ -20,6 +20,18 @@
 .vscode
 .codex
 .smoke
+.tmp
+.tmp-*
+.cargo-target-*
+.orchestrator-release-cache
+artifacts
+**/tests
+**/__tests__
+**/fixtures
+**/e2e
+**/*_test.go
+**/*.test.*
+**/*.spec.*
 
 storage
 tmp

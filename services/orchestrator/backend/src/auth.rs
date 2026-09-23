@@ -1,4 +1,4 @@
-//! 控制面门禁：编排器内部令牌、节点安装令牌与 smoke 模式开关。
+//! 控制面门禁：编排器内部令牌与节点安装令牌。
 
 use crate::http::{ApiRequest, StatusError};
 use anyhow::Result;
@@ -190,7 +190,7 @@ pub fn configured_internal_token() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[cfg(any(feature = "legacy-0_2", test))]
+#[cfg(feature = "legacy-0_2")]
 pub(crate) fn require_node_token(request: &ApiRequest) -> Result<()> {
     let token = std::env::var("ORCHESTRATOR_NODE_TOKEN")
         .ok()
@@ -215,7 +215,7 @@ pub(crate) fn require_node_token(request: &ApiRequest) -> Result<()> {
 /// 节点一旦允许真实运行驱动，安装入口就不能继续沿用开发环境的 fail-open 规则。
 /// 此时节点令牌和控制面令牌必须同时配置，并且请求必须同时匹配两者。驱动总开关
 /// 关闭时仍保留原来的 metadata-only 兼容行为。
-#[cfg(any(feature = "legacy-0_2", test))]
+#[cfg(feature = "legacy-0_2")]
 pub(crate) fn require_node_install_credentials(
     request: &ApiRequest,
     expected_internal_token: Option<&str>,
@@ -272,7 +272,7 @@ pub(crate) fn require_node_install_credentials(
     Ok(())
 }
 
-#[cfg(any(feature = "legacy-0_2", test))]
+#[cfg(feature = "legacy-0_2")]
 fn node_driver_execution_enabled() -> bool {
     std::env::var("ORCHESTRATOR_NODE_EXECUTE_SERVICE_DRIVER")
         .ok()
@@ -282,207 +282,4 @@ fn node_driver_execution_enabled() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-}
-
-pub(crate) fn smoke_mode_enabled() -> bool {
-    std::env::var("OJOS_SMOKE_MODE")
-        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-        .unwrap_or(false)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    fn request(headers: impl IntoIterator<Item = (&'static str, &'static str)>) -> ApiRequest {
-        ApiRequest {
-            method: "GET".to_string(),
-            path: "/api/v1/capabilities".to_string(),
-            headers: headers
-                .into_iter()
-                .map(|(name, value)| (name.to_string(), value.to_string()))
-                .collect::<BTreeMap<_, _>>(),
-            body: String::new(),
-        }
-    }
-
-    struct TestOidcVerifier;
-
-    impl OidcPrincipalVerifier for TestOidcVerifier {
-        fn verify_bearer(
-            &self,
-            authorization_header: Option<&str>,
-        ) -> std::result::Result<Option<Principal>, PrincipalVerificationError> {
-            Ok((authorization_header == Some("Bearer verified-oidc"))
-                .then(|| Principal::verified("oidc-viewer", V1Role::Viewer, PrincipalSource::Oidc)))
-        }
-    }
-
-    #[test]
-    fn principal_resolution_ignores_all_caller_identity_and_role_headers() {
-        let spoofed = request([
-            ("x-actor-id", "forged-admin"),
-            ("x-user-id", "forged-user"),
-            ("x-role", "admin"),
-            ("x-user-role", "admin"),
-        ]);
-        assert_eq!(
-            resolve_principal(&spoofed, None, Some("expected"), false, None).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn principal_resolution_accepts_only_verified_server_contexts() {
-        let internal = request([(ORCHESTRATOR_INTERNAL_TOKEN_HEADER, "expected")]);
-        assert_eq!(
-            resolve_principal(&internal, None, Some("expected"), false, None)
-                .unwrap()
-                .unwrap(),
-            Principal::internal_admin()
-        );
-
-        let oidc = request([("authorization", "Bearer verified-oidc")]);
-        let oidc_principal = resolve_principal(&oidc, None, None, false, Some(&TestOidcVerifier))
-            .unwrap()
-            .unwrap();
-        assert_eq!(oidc_principal.id(), "oidc-viewer");
-        assert_eq!(oidc_principal.role(), V1Role::Viewer);
-
-        let desktop = Principal::desktop_admin();
-        assert_eq!(
-            resolve_principal(&request([]), Some(&desktop), None, false, None)
-                .unwrap()
-                .unwrap(),
-            desktop
-        );
-        assert_eq!(
-            resolve_principal(&request([]), None, None, true, None)
-                .unwrap()
-                .unwrap(),
-            Principal::ephemeral_dev()
-        );
-    }
-
-    #[test]
-    fn internal_token_check_is_fail_open_when_unconfigured() {
-        // No token configured (dev and the ops drills run the daemon without a token):
-        // every route is permitted so nothing regresses.
-        assert!(internal_token_check("POST", &["endpoints"], None, None).is_ok());
-        assert!(
-            internal_token_check("GET", &["internal", "orchestrator", "snapshot"], None, None)
-                .is_ok()
-        );
-        // Whitespace-only token counts as unconfigured.
-        assert!(internal_token_check("POST", &["endpoints"], None, Some("   ")).is_ok());
-    }
-
-    #[test]
-    fn internal_token_check_guards_mutations_and_internal_reads() {
-        let expected = Some("orch-secret");
-        // Mutations require a matching token.
-        assert!(internal_token_check("POST", &["endpoints"], None, expected).is_err());
-        assert!(internal_token_check("POST", &["endpoints"], Some("wrong"), expected).is_err());
-        assert!(
-            internal_token_check("POST", &["endpoints"], Some("orch-secret"), expected).is_ok()
-        );
-        assert!(
-            internal_token_check(
-                "DELETE",
-                &["releases", "judge-api"],
-                Some("orch-secret"),
-                expected
-            )
-            .is_ok()
-        );
-        // Internal snapshot/route reads require the token (the gateway already sends it).
-        assert!(
-            internal_token_check(
-                "GET",
-                &["internal", "orchestrator", "snapshot"],
-                None,
-                expected
-            )
-            .is_err()
-        );
-        assert!(
-            internal_token_check(
-                "GET",
-                &["internal", "orchestrator", "snapshot"],
-                Some("orch-secret"),
-                expected
-            )
-            .is_ok()
-        );
-        // The per-node effective route table read is guarded too.
-        assert!(
-            internal_token_check("GET", &["nodes", "node-1", "routes"], None, expected).is_err()
-        );
-        assert!(
-            internal_token_check(
-                "GET",
-                &["nodes", "node-1", "routes"],
-                Some("orch-secret"),
-                expected
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn internal_token_check_leaves_only_health_open() {
-        let expected = Some("orch-secret");
-        // Health must stay open: Prometheus scrape and the compose healthcheck send no token.
-        assert!(internal_token_check("GET", &["health"], None, expected).is_ok());
-        // Every other read is guarded once a token is configured: the topology, node and
-        // endpoint listings are control-plane data too.
-        assert!(internal_token_check("GET", &["services"], None, expected).is_err());
-        assert!(internal_token_check("GET", &["nodes"], None, expected).is_err());
-        assert!(internal_token_check("GET", &["nodes", "node-1"], None, expected).is_err());
-        assert!(internal_token_check("GET", &["releases"], None, expected).is_err());
-        assert!(internal_token_check("GET", &["topology"], None, expected).is_err());
-        // ...and they pass once the token is presented.
-        assert!(internal_token_check("GET", &["services"], Some("orch-secret"), expected).is_ok());
-        assert!(internal_token_check("GET", &["topology"], Some("orch-secret"), expected).is_ok());
-    }
-
-    #[test]
-    fn internal_token_check_trims_surrounding_whitespace() {
-        let expected = Some(" orch-secret ");
-        assert!(
-            internal_token_check("POST", &["endpoints"], Some(" orch-secret "), expected).is_ok()
-        );
-    }
-
-    #[test]
-    fn internal_token_check_reports_unauthorized_status() {
-        let err = internal_token_check("POST", &["endpoints"], None, Some("orch-secret"))
-            .expect_err("missing token must fail");
-        assert_eq!(
-            err.downcast_ref::<StatusError>().map(|status| status.0),
-            Some(401)
-        );
-        assert!(err.to_string().contains("unauthorized"));
-    }
-
-    #[test]
-    fn requires_internal_token_classifies_routes() {
-        assert!(requires_internal_token("POST", &["endpoints"]));
-        assert!(requires_internal_token("PATCH", &["links", "a", "b"]));
-        assert!(requires_internal_token(
-            "GET",
-            &["internal", "orchestrator", "routes"]
-        ));
-        assert!(requires_internal_token(
-            "GET",
-            &["nodes", "node-1", "routes"]
-        ));
-        // Read-only control-plane GETs are guarded as well now.
-        assert!(requires_internal_token("GET", &["services"]));
-        assert!(requires_internal_token("GET", &["nodes", "node-1"]));
-        assert!(requires_internal_token("GET", &["ui", "layout"]));
-        // Only the health probe stays open.
-        assert!(!requires_internal_token("GET", &["health"]));
-    }
 }

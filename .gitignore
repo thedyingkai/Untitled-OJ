@@ -1,5 +1,19 @@
 # OJOS workspace ignores
 
+# Software verification lives outside this repository (see AGENTS.md).
+# Judge problem test data is product data and is intentionally not matched.
+**/tests/
+**/__tests__/
+**/fixtures/
+**/e2e/
+**/*_test.go
+**/test_*.py
+**/*.test.*
+**/*.spec.*
+**/vitest.config.*
+**/playwright.config.*
+**/src/test/
+
 # OS and editors
 .DS_Store
 Thumbs.db

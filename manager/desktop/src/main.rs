@@ -3,10 +3,9 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use ojos_orchestrator_desktop::{
-    Cli, DESKTOP_SMOKE_FAILURE_PATH, DESKTOP_SMOKE_SUCCESS_PATH, DesktopAgentHandle, LaunchConfig,
-    desktop_smoke_duration_ms, desktop_smoke_mode, desktop_smoke_script_for,
-    discover_external_authorization_origin, initialization_script, navigation_allowed,
-    resolve_embedded_paths, resolve_launch_config, same_origin, unavailable_desktop_agent,
+    Cli, DesktopAgentHandle, LaunchConfig, discover_external_authorization_origin,
+    initialization_script, navigation_allowed, resolve_embedded_paths, resolve_launch_config,
+    same_origin, unavailable_desktop_agent,
 };
 use orchestrator_backend::{
     EmbeddedServerHandle, EmbeddedServerOptions, EmbeddedStorage, start_embedded_server,
@@ -106,8 +105,6 @@ fn start_launch_target(config: LaunchConfig, resource_dir: &Path) -> Result<Laun
 }
 
 fn run_tauri(config: LaunchConfig) -> Result<()> {
-    let smoke_mode = desktop_smoke_mode();
-    let smoke_duration_ms = desktop_smoke_duration_ms()?;
     let startup_signal = Arc::new(Mutex::new(startup_signal_from_environment()?));
 
     let app = tauri::Builder::default()
@@ -123,15 +120,9 @@ fn run_tauri(config: LaunchConfig) -> Result<()> {
             let mut target = start_launch_target(config, &resource_dir)?;
             let target_url = target.url.clone();
             let allowed_origin = target_url.clone();
-            let smoke_origin = target_url.clone();
+            let readiness_origin = target_url.clone();
             let startup_signal = Arc::clone(&startup_signal);
             let embedded = target.server.is_some();
-            if smoke_mode && !embedded {
-                return Err(anyhow!(
-                    "OJOS_DESKTOP_SMOKE validates the embedded Desktop control plane only"
-                )
-                .into());
-            }
             let authorization_origin = if embedded {
                 None
             } else {
@@ -156,7 +147,7 @@ fn run_tauri(config: LaunchConfig) -> Result<()> {
             .on_new_window(|_url, _features| NewWindowResponse::Deny)
             .on_page_load(move |window, payload| {
                 if payload.event() != PageLoadEvent::Finished
-                    || !same_origin(payload.url(), &smoke_origin)
+                    || !same_origin(payload.url(), &readiness_origin)
                 {
                     return;
                 }
@@ -175,36 +166,6 @@ fn run_tauri(config: LaunchConfig) -> Result<()> {
                         eprintln!("Desktop could not acknowledge startup readiness: {error}");
                         window.app_handle().exit(1);
                         return;
-                    }
-                }
-                if !smoke_mode {
-                    return;
-                }
-                match payload.url().path() {
-                    DESKTOP_SMOKE_SUCCESS_PATH => {
-                        window.app_handle().exit(0);
-                    }
-                    DESKTOP_SMOKE_FAILURE_PATH => {
-                        let detail = payload
-                            .url()
-                            .query_pairs()
-                            .find_map(|(key, value)| {
-                                (key == "detail").then_some(value.into_owned())
-                            })
-                            .unwrap_or_else(|| "unknown browser-side failure".to_string());
-                        eprintln!("Desktop startup smoke failed: {detail}");
-                        window.app_handle().exit(1);
-                    }
-                    "/" => {
-                        if let Err(error) = window.eval(desktop_smoke_script_for(smoke_duration_ms))
-                        {
-                            eprintln!("Desktop startup smoke could not run: {error}");
-                            window.app_handle().exit(1);
-                        }
-                    }
-                    path => {
-                        eprintln!("Desktop startup smoke reached an unexpected path: {path}");
-                        window.app_handle().exit(1);
                     }
                 }
             })
@@ -272,22 +233,4 @@ fn publish_startup_ready(signal: &StartupSignal) -> Result<()> {
     fs::rename(&temporary, &signal.path)
         .with_context(|| format!("publish Desktop readiness file {}", signal.path.display()))?;
     Ok(())
-}
-
-#[cfg(test)]
-mod startup_signal_tests {
-    use super::*;
-
-    #[test]
-    fn startup_readiness_is_published_atomically_with_the_exact_token() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("ready");
-        let signal = StartupSignal {
-            path: path.clone(),
-            token: "launch-token".to_string(),
-        };
-        publish_startup_ready(&signal).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "launch-token\n");
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
-    }
 }

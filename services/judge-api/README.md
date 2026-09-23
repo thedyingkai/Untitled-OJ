@@ -26,15 +26,4 @@ Database lifecycle defaults to `RETAIN`. Uninstall removes bindings and the runt
 
 From the repository root:
 
-```powershell
-cargo run -p ojos-service -- service generate services/judge-api/ojos.service.yaml
-cargo run -p ojos-service -- service check services/judge-api/ojos.service.yaml --generated
-Push-Location services/judge-api
-go test -race ./...
-go vet ./...
-go build ./...
-node frontend/bundle_test.mjs
-& scripts/resolved-artifacts-fixture.test.ps1
-& scripts/publish-fixture.test.ps1
-Pop-Location
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。

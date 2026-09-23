@@ -213,17 +213,3 @@ fn validate_input(scope: &str, key: &str, request_sha256: &str) -> PostgresResul
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn input_validation_matches_sqlite_contract() {
-        let digest = format!("sha256:{}", "a".repeat(64));
-        assert!(validate_input("scope", "request-1", &digest).is_ok());
-        assert!(validate_input("", "request-1", &digest).is_err());
-        assert!(validate_input("scope", "short", &digest).is_err());
-        assert!(validate_input("scope", "request-1", "sha256:ABC").is_err());
-    }
-}

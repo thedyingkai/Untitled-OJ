@@ -66,20 +66,3 @@ fn otlp_endpoint() -> Option<String> {
         Some(format!("http://{raw}"))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn otlp_endpoint_adds_scheme_for_compose_jaeger_endpoint() {
-        unsafe {
-            std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
-            std::env::set_var("JAEGER_ENDPOINT", "jaeger:4317");
-        }
-        assert_eq!(otlp_endpoint().as_deref(), Some("http://jaeger:4317"));
-        unsafe {
-            std::env::remove_var("JAEGER_ENDPOINT");
-        }
-    }
-}

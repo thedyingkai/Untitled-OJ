@@ -60,4 +60,4 @@ v1 第一次打开包含旧 normalized 表的 PostgreSQL 数据库时执行 expa
 - `orchestrator_legacy_imports` 记录一次性结果，重启不会创建第二份 revision/runtime；
 - 原旧表不由 v1 破坏性删除，便于备份验证和失败恢复。
 
-真实升级的证据要求见 [生产就绪证据](../production-readiness.md)，备份/恢复步骤见 [v1 运维手册](operations-v1.md)。
+真实升级的证据要求见 生产就绪证据（已迁至仓库外的验证资料），备份/恢复步骤见 [v1 运维手册](operations-v1.md)。

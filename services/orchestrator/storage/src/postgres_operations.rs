@@ -466,22 +466,3 @@ fn database_error(error: r2d2_postgres::postgres::Error) -> OperationStoreError 
 fn json_error(error: serde_json::Error) -> OperationStoreError {
     OperationStoreError::Persistence(error.to_string())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn anomaly_counter_rows_fail_closed_when_missing_or_negative() {
-        let missing =
-            parse_anomaly_counter_rows([(EXPIRED_LEASE_COUNTER.to_string(), 0)]).unwrap_err();
-        assert!(missing.to_string().contains("row is missing"));
-
-        let negative = parse_anomaly_counter_rows([
-            (EXPIRED_LEASE_COUNTER.to_string(), -1),
-            (LONG_OPERATION_COUNTER.to_string(), 0),
-        ])
-        .unwrap_err();
-        assert!(negative.to_string().contains("is negative"));
-    }
-}

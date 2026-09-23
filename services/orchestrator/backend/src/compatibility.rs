@@ -12,9 +12,7 @@ impl LegacyApiMode {
     pub(crate) fn configured() -> anyhow::Result<Self> {
         match std::env::var("ORCHESTRATOR_LEGACY_API_MODE") {
             Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-                "0.2" | "deprecated" if cfg!(any(feature = "legacy-0_2", test)) => {
-                    Ok(Self::Deprecated02)
-                }
+                "0.2" | "deprecated" if cfg!(feature = "legacy-0_2") => Ok(Self::Deprecated02),
                 "0.2" | "deprecated" => {
                     anyhow::bail!("this 1.0 build does not contain the 0.2 compatibility routes")
                 }
@@ -26,10 +24,6 @@ impl LegacyApiMode {
             Err(std::env::VarError::NotPresent) if cfg!(feature = "legacy-0_2") => {
                 Ok(Self::Deprecated02)
             }
-            // The historical route tests remain golden fixtures for the 0.2
-            // compatibility build. Production binaries do not compile with
-            // `cfg(test)` and therefore default to the 1.0 Gone behavior.
-            Err(std::env::VarError::NotPresent) if cfg!(test) => Ok(Self::Deprecated02),
             Err(std::env::VarError::NotPresent) => Ok(Self::Gone10),
             Err(error) => Err(error.into()),
         }
@@ -111,47 +105,5 @@ fn successor_path(path: &str) -> &'static str {
         "diagnostics" => "/api/v1/diagnostics",
         "ui" => "/api/v1/ui/layout",
         _ => "/api/v1/capabilities",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn only_unversioned_control_plane_paths_are_legacy() {
-        assert!(is_legacy_api_path("/store/index"));
-        assert!(is_legacy_api_path("/api/node/services/install"));
-        assert!(is_legacy_api_path("/operations/op-1/apply"));
-        assert!(is_legacy_api_path("/ui/layout"));
-        assert!(!is_legacy_api_path("/api/v1/operations/op-1:apply"));
-        assert!(!is_legacy_api_path("/api/v1/ui/layout"));
-        assert!(!is_legacy_api_path("/assets/app.js"));
-        assert!(!is_legacy_api_path("/"));
-    }
-
-    #[test]
-    fn compatibility_build_decorates_every_legacy_response() {
-        let response = LegacyApiMode::Deprecated02.decorate(ApiResponse::ok(json!({})));
-        assert_eq!(
-            response.headers.get("Deprecation").map(String::as_str),
-            Some("true")
-        );
-        assert!(response.headers.contains_key("Sunset"));
-        assert!(response.headers["Link"].contains("successor-version"));
-    }
-
-    #[test]
-    fn ga_returns_problem_410_with_a_specific_successor() {
-        let response = gone_response("/api/node/services/install", "req-gone");
-        assert_eq!(response.status, 410);
-        assert_eq!(response.body["code"], "LEGACY_API_GONE");
-        assert!(
-            response.body["detail"]
-                .as_str()
-                .unwrap()
-                .contains("/api/v1/store/releases:install")
-        );
     }
 }

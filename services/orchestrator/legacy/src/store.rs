@@ -35,13 +35,6 @@ use tar::Archive;
 use ureq::Agent;
 use zip::ZipArchive;
 
-#[cfg(test)]
-thread_local! {
-    #[allow(clippy::missing_const_for_thread_local)]
-    static TEST_CONFIGURED_GATEWAY_PUBLISHER: std::cell::RefCell<Option<HttpGatewayRoutePublisher>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 pub trait OrchestratorStore {
     fn list_services(&self) -> Result<Vec<ServiceManifest>>;
     fn get_service(&self, service_id: &str) -> Result<Option<ServiceManifest>>;
@@ -1578,31 +1571,6 @@ pub struct HttpGatewayRoutePublisher {
     endpoint: String,
     token: Option<String>,
     timeout: Duration,
-}
-
-#[cfg(test)]
-pub(crate) struct TestConfiguredGatewayPublisherGuard {
-    previous: Option<HttpGatewayRoutePublisher>,
-}
-
-#[cfg(test)]
-impl Drop for TestConfiguredGatewayPublisherGuard {
-    fn drop(&mut self) {
-        TEST_CONFIGURED_GATEWAY_PUBLISHER.with(|publisher| {
-            publisher.replace(self.previous.take());
-        });
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn configure_gateway_publisher_for_current_test(
-    endpoint: impl Into<String>,
-    token: impl Into<String>,
-) -> TestConfiguredGatewayPublisherGuard {
-    let publisher = HttpGatewayRoutePublisher::new(endpoint).with_token(token);
-    let previous =
-        TEST_CONFIGURED_GATEWAY_PUBLISHER.with(|configured| configured.replace(Some(publisher)));
-    TestConfiguredGatewayPublisherGuard { previous }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -3281,15 +3249,6 @@ impl GatewayRoutePublisher for DeferredGatewayRoutePublisher {
 
 impl ConfiguredGatewayRoutePublisher {
     pub fn from_env() -> Self {
-        #[cfg(test)]
-        if let Some(http) =
-            TEST_CONFIGURED_GATEWAY_PUBLISHER.with(|publisher| publisher.borrow().clone())
-        {
-            return Self {
-                publish_enabled: true,
-                http: Some(http),
-            };
-        }
         let publish_enabled = env_flag("ORCHESTRATOR_GATEWAY_ROUTE_PUBLISH");
         let http = if publish_enabled {
             HttpGatewayRoutePublisher::from_env()
@@ -10093,172 +10052,4 @@ fn changed_object(object_type: &str, id: &str) -> serde_json::Value {
 
 fn link_target_id(link: &Link) -> String {
     format!("{} -> {}", link.source_endpoint, link.target_endpoint)
-}
-
-#[cfg(test)]
-mod outbound_url_tests {
-    use super::*;
-
-    /// 用例一律走 `validate_outbound_url_with_policy`，策略显式传入：
-    /// 既不读进程环境变量（避免和并行跑的其它用例互相干扰），
-    /// 也只用 IP 字面量（沙箱 / 离线 CI 没有 DNS，用域名会挂）。
-    fn allow(url: &str) {
-        assert!(
-            validate_outbound_url_with_policy(url, false).is_ok(),
-            "expected {url} to be allowed"
-        );
-    }
-
-    fn block(url: &str) {
-        assert!(
-            validate_outbound_url_with_policy(url, false).is_err(),
-            "expected {url} to be blocked"
-        );
-    }
-
-    #[test]
-    fn public_literal_addresses_are_allowed() {
-        allow("https://8.8.8.8/store/index.json");
-        allow("https://1.1.1.1:8443/packages/demo.zip");
-        allow("http://93.184.216.34/release.yaml");
-        allow("https://[2606:4700:4700::1111]/release.yaml");
-        // /10 之外的 100.x 不是 CGNAT，属于正常公网。
-        allow("https://100.128.0.1/release.yaml");
-        // 172.32/16 在 RFC 1918 的 172.16/12 之外。
-        allow("https://172.32.0.1/release.yaml");
-    }
-
-    #[test]
-    fn loopback_is_blocked() {
-        block("http://127.0.0.1:8080/release.yaml");
-        block("http://127.1.2.3/release.yaml");
-        block("https://[::1]/release.yaml");
-        block("https://[::ffff:127.0.0.1]/release.yaml");
-    }
-
-    #[test]
-    fn private_ranges_are_blocked() {
-        block("http://10.0.0.5/release.yaml");
-        block("http://172.16.0.1/release.yaml");
-        block("http://172.31.255.255/release.yaml");
-        block("http://192.168.1.1/release.yaml");
-        block("https://[fc00::1]/release.yaml");
-        block("https://[fd12:3456:789a::1]/release.yaml");
-    }
-
-    #[test]
-    fn link_local_and_metadata_are_blocked_even_with_the_escape_hatch() {
-        block("http://169.254.169.254/latest/meta-data/");
-        block("https://[fe80::1]/release.yaml");
-        assert!(
-            validate_outbound_url_with_policy("http://169.254.169.254/latest/meta-data/", true)
-                .is_err(),
-            "cloud metadata must stay blocked even when private sources are allowed"
-        );
-        assert!(
-            validate_outbound_url_with_policy("https://[fe80::1]/release.yaml", true).is_err(),
-            "ipv6 link-local must stay blocked even when private sources are allowed"
-        );
-    }
-
-    #[test]
-    fn carrier_grade_nat_is_blocked() {
-        block("http://100.64.0.1/release.yaml");
-        block("http://100.100.100.100/release.yaml");
-        block("http://100.127.255.255/release.yaml");
-    }
-
-    #[test]
-    fn unspecified_multicast_and_broadcast_are_blocked() {
-        block("http://0.0.0.0/release.yaml");
-        block("http://255.255.255.255/release.yaml");
-        block("http://239.1.2.3/release.yaml");
-        block("https://[::]/release.yaml");
-        assert!(
-            validate_outbound_url_with_policy("http://0.0.0.0/release.yaml", true).is_err(),
-            "unspecified address must stay blocked even when private sources are allowed"
-        );
-    }
-
-    #[test]
-    fn userinfo_cannot_disguise_an_internal_host() {
-        block("https://github.com@127.0.0.1/release.yaml");
-        block("https://github.com:token@10.0.0.5/release.yaml");
-    }
-
-    #[test]
-    fn non_http_schemes_and_garbage_are_blocked() {
-        block("ftp://8.8.8.8/release.yaml");
-        block("file:///etc/passwd");
-        block("gopher://8.8.8.8:70/x");
-        block("8.8.8.8/release.yaml");
-        block("");
-        block("https://");
-    }
-
-    #[test]
-    fn escape_hatch_allows_private_mirrors_only() {
-        assert!(
-            validate_outbound_url_with_policy("http://10.0.0.5:8080/release.yaml", true).is_ok(),
-            "private mirror should be reachable with the escape hatch"
-        );
-        assert!(
-            validate_outbound_url_with_policy("http://127.0.0.1:9000/release.yaml", true).is_ok(),
-            "loopback mirror should be reachable with the escape hatch"
-        );
-        assert!(
-            validate_outbound_url_with_policy("https://[fd00::1]/release.yaml", true).is_ok(),
-            "ipv6 unique local mirror should be reachable with the escape hatch"
-        );
-        // 逃生阀不改变公网地址的判定。
-        assert!(validate_outbound_url_with_policy("https://8.8.8.8/x", true).is_ok());
-    }
-
-    #[test]
-    fn default_ports_follow_the_scheme() {
-        let http = parse_outbound_url("http://8.8.8.8/release.yaml").expect("parse http url");
-        assert_eq!(http.port, 80);
-        assert_eq!(http.path, "/release.yaml");
-        let https = parse_outbound_url("https://8.8.8.8?a=1").expect("parse https url");
-        assert_eq!(https.port, 443);
-        assert_eq!(https.path, "/");
-        let explicit = parse_outbound_url("https://8.8.8.8:8443/a/b").expect("parse explicit port");
-        assert_eq!(explicit.port, 8443);
-        let bracketed =
-            parse_outbound_url("https://[2606:4700::1111]:8443/a").expect("parse ipv6 port");
-        assert_eq!(bracketed.port, 8443);
-        assert_eq!(bracketed.host, "2606:4700::1111");
-    }
-
-    #[test]
-    fn redirect_targets_are_resolved_against_the_base() {
-        assert_eq!(
-            resolve_outbound_redirect("https://example.com/a/b", "/c/d").expect("absolute path"),
-            "https://example.com/c/d"
-        );
-        assert_eq!(
-            resolve_outbound_redirect("https://example.com/a/b?x=1", "c").expect("relative path"),
-            "https://example.com/a/c"
-        );
-        assert_eq!(
-            resolve_outbound_redirect("https://example.com/a", "//cdn.example.net/z")
-                .expect("protocol relative"),
-            "https://cdn.example.net/z"
-        );
-        assert_eq!(
-            resolve_outbound_redirect("https://example.com:8443/a/b", "/c").expect("keeps port"),
-            "https://example.com:8443/c"
-        );
-        assert_eq!(
-            resolve_outbound_redirect("https://user:pass@example.com/a", "/c")
-                .expect("drops userinfo"),
-            "https://example.com/c"
-        );
-        // 绝对 URL 原样返回；是否放行由调用方再跑一次 validate_outbound_url 决定。
-        let hostile = resolve_outbound_redirect("https://example.com/a", "http://127.0.0.1/x")
-            .expect("absolute redirect");
-        assert_eq!(hostile, "http://127.0.0.1/x");
-        assert!(validate_outbound_url_with_policy(&hostile, false).is_err());
-        assert!(resolve_outbound_redirect("https://example.com/a", "").is_err());
-    }
 }

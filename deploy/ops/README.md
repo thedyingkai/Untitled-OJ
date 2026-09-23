@@ -109,35 +109,13 @@ clean target。
 `OJOS_BACKUP_DIR` 必须预先创建；正式恢复中 `OJOS_RESTORE_WORK_ROOT`、`OJOS_RESTORE_EVIDENCE_DIR` 与各存储
 target 的父目录也必须预先创建为彼此不重叠的真实目录。脚本拒绝符号链接和祖先/子目录重叠。
 
-## 功能与容量门禁
+## 验证与产品运维的边界
 
-- `orchestrator-docker-agent-e2e.sh`：真实 registry、Docker Engine、Node Agent 与 Store Job
-  install/start/stop/restart/uninstall 生命周期；
-- GA `release.yml` 升级门禁：由提取的 0.2 `PgOrchestratorStore` 向真实旧表写入 snapshot/runtime，
-  再由 v1 CA 验证 TLS 仓储执行一次性导入；必须得到未应用 draft、`External/Unknown`
-  runtime，且重开不得重复创建 revision 或 runtime；
-- `orchestrator-backup-restore-drill.sh`：使用与服务端相同大版本的 PostgreSQL 客户端，真实验证
-  数据库与 artifact 的联合备份、篡改后恢复、checksum、必需表和恢复前 artifact 保留；
-- `orchestrator-capacity-gate.py`：100 Nodes、2,000 Deployments、10,000 Endpoint+Link、
-  50 并发 Operation、重启恢复和 24 小时 soak；
-- `validate-orchestrator-ga-evidence.py`：验证报告 commit、profile、规模、时长和阈值，拒绝手填或
-  其他 commit 的证据；
-- Web Playwright 与 TUI contract tests：正式 action、错误、默认值、cursor、ETag、SSE 和
-  Idempotency-Key 等价；
-- `trace-e2e-drill.sh`、`basic-load-soak.sh`：整套 OJ 的短时 trace/load 演练，默认显式叠加
-  local dev Compose override，不构成 Orchestrator GA 容量证据。
+备份、恢复、部署预检和生产监控仍在本目录。故障演练、e2e、容量与持续负载工具、测试夹具和历史发布门禁均已迁到仓库外的独立验证目录，不由仓库 workflow 执行。
 
-`manager-smoke.sh`、`staging-drill.sh` 和 `rollback-drill.sh` 仍服务于旧整栈/0.2 兼容路径，
-不得被用作 Orchestrator v1 GA 门禁。v1 rollback 通过正式 Store/Topology/Operation API 和
-Node pull Job 执行，不接受旧 driver 授权变量。
+本机外置路径为 `D:\Untitled-OJ-external-tests`。生产发布仍需要绑定精确源码版本的外部验收，构建通过不代表容量、恢复或安全验收通过。v1 rollback 继续使用正式 Store/Topology/Operation API 和 Node pull Job，不依赖旧测试造数接口。
 
-## 其他整栈演练
-
-- `service-credential-drill.sh`：服务凭据 allow/deny/revoke/expire；
-- `redis-recovery-drill.sh`：Redis Stream pending claim/recovery 与 AOF 重启；
-- `alert-firing-drill.sh`：Prometheus 规则和 Alertmanager webhook；
-- `trace-e2e-drill.sh`：提交判题任务并核对跨服务 trace；
-- `basic-load-soak.sh`：登录、题目、对象存储、判题和结果查询的短时冒烟。
+## 生产监控
 
 监控栈可用真实生产 env 启动：
 

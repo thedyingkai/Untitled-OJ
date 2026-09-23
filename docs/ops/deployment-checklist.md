@@ -87,7 +87,7 @@ Compose 启动 A 机控制面和业务服务，但不会启动 Judge Worker。B 
 节点，确认 `judge_control` 与 `storage_get` Binding，再由 Agent 按固定 profile 创建并健康验证 Worker。
 `judge-worker` Compose 服务只在显式 `--profile legacy-development` 时存在，禁止作为生产部署步骤。
 完整注册、网络边界、Catalog 和门禁流程见 [Judge Worker 生产部署](../../deploy/worker/README.md)与
-[A/B 跨机门禁](../../deploy/cross-machine/README.md)。
+A/B 跨机门禁（已迁至仓库外的验证资料）。
 
 ## 迁移步骤
 
@@ -123,14 +123,7 @@ curl -fsS http://127.0.0.1:8085/health
 
 进行 operation 回滚：
 
-```bash
-OJOS_ENV_FILE=/etc/ojos/production.env \
-ORCHESTRATOR_URL=https://orchestrator.example.com \
-OJOS_ROLLBACK_OPERATION_ID=op-release-install-YYYYMMDD \
-OJOS_CONFIRM_ROLLBACK=rollback-op-release-install-YYYYMMDD \
-OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1 \
-deploy/ops/rollback-drill.sh
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 `OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1` 会让脚本再次传入 `execute_service_driver=true`，授权固定的
 本地进程或 Compose 回滚动作。只回滚 store 记录时不要设置它。schema、Redis、对象存储和 auth-service
@@ -200,10 +193,7 @@ docker compose --env-file /etc/ojos/production.env -f deploy/ops/monitoring/dock
 
 验证：
 
-```bash
-deploy/ops/alert-firing-drill.sh
-deploy/ops/trace-e2e-drill.sh
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 ## 常见排障
 

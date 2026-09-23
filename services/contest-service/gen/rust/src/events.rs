@@ -82,19 +82,3 @@ pub const CONTEST_SERVICE_CONTEST_CREATEDV1: EventDescriptor<ContestServiceConte
 pub const EVENTS: &[EventIdentity] = &[
     CONTEST_SERVICE_CONTEST_CREATEDV1.identity,
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn typed_codec_accepts_valid_payload_and_rejects_tampering() {
-        let encoded = "{\"descriptor\":{\"delivery\":\"durable\",\"schemaDigest\":\"sha256:e4b5dfee89b1e4140126bd259236d0edbec39dc409247798093850b2c7d8fd6d\",\"type\":\"contest-service.contest-created\",\"version\":1},\"payload\":{\"contestId\":1,\"endsAt\":\"generated\",\"slug\":\"generated\",\"startsAt\":\"generated\",\"title\":\"generated\"}}".as_bytes();
-        assert!(CONTEST_SERVICE_CONTEST_CREATEDV1.decode(encoded).is_ok());
-        let mut descriptor_tampered: serde_json::Value = serde_json::from_slice(encoded).unwrap();
-        descriptor_tampered["descriptor"]["schemaDigest"] = serde_json::json!("sha256:tampered");
-        assert!(CONTEST_SERVICE_CONTEST_CREATEDV1.decode(&serde_json::to_vec(&descriptor_tampered).unwrap()).is_err());
-        let mut payload_tampered: serde_json::Value = serde_json::from_slice(encoded).unwrap();
-        payload_tampered["payload"]["__unknown"] = serde_json::json!(true);
-        assert!(CONTEST_SERVICE_CONTEST_CREATEDV1.decode(&serde_json::to_vec(&payload_tampered).unwrap()).is_err());
-    }
-}

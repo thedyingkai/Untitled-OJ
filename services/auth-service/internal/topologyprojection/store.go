@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 
 	shared "ojos-shared/topologyprojection"
 
@@ -14,25 +13,16 @@ import (
 )
 
 type Store struct {
-	db     *pgxpool.Pool
-	mu     sync.RWMutex
-	memory map[string]shared.Document
+	db *pgxpool.Pool
 }
 
 func NewStore(db *pgxpool.Pool) *Store {
-	return &Store{db: db, memory: make(map[string]shared.Document)}
+	return &Store{db: db}
 }
 
 func (s *Store) Get(ctx context.Context, topologyID string) (*shared.Document, error) {
-	if s.db == nil {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		document, ok := s.memory[topologyID]
-		if !ok {
-			return nil, nil
-		}
-		copy := document
-		return &copy, nil
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("Auth topology projection requires PostgreSQL")
 	}
 	var payload []byte
 	err := s.db.QueryRow(ctx, `SELECT payload FROM auth_topology_projections WHERE topology_id = $1`, topologyID).Scan(&payload)
@@ -51,36 +41,8 @@ func (s *Store) Get(ctx context.Context, topologyID string) (*shared.Document, e
 
 func (s *Store) Apply(ctx context.Context, request shared.Request) error {
 	document := request.Document()
-	if s.db == nil {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		var current *shared.Document
-		if persisted, ok := s.memory[request.TopologyID]; ok {
-			persistedCopy := persisted
-			current = &persistedCopy
-		}
-		write, err := shared.PlanApply(current, request)
-		if err != nil {
-			return err
-		}
-		if !write {
-			return nil
-		}
-		// The same uniqueness invariant as production is enforced in smoke mode.
-		for topologyID, current := range s.memory {
-			if topologyID == request.TopologyID {
-				continue
-			}
-			for _, existing := range current.Grants {
-				for _, grant := range document.Grants {
-					if existing.ConsumerDeploymentID == grant.ConsumerDeploymentID && existing.RequirementName == grant.RequirementName {
-						return fmt.Errorf("consumer %s requirement %s is already projected by topology %s", grant.ConsumerDeploymentID, grant.RequirementName, topologyID)
-					}
-				}
-			}
-		}
-		s.memory[request.TopologyID] = document
-		return nil
+	if s == nil || s.db == nil {
+		return fmt.Errorf("Auth topology projection requires PostgreSQL")
 	}
 	payload, err := json.Marshal(document)
 	if err != nil {
@@ -147,11 +109,8 @@ func (s *Store) Apply(ctx context.Context, request shared.Request) error {
 }
 
 func (s *Store) Delete(ctx context.Context, topologyID string) error {
-	if s.db == nil {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		delete(s.memory, topologyID)
-		return nil
+	if s == nil || s.db == nil {
+		return fmt.Errorf("Auth topology projection requires PostgreSQL")
 	}
 	if _, err := s.db.Exec(ctx, `DELETE FROM auth_topology_projections WHERE topology_id = $1`, topologyID); err != nil {
 		return fmt.Errorf("delete Auth topology projection: %w", err)
@@ -180,22 +139,8 @@ func (s *Store) AuthorizeWorkload(
 	if deploymentID == "" || serviceID == "" || nodeID == "" || credentialGeneration == 0 || apiID == "" || permissionCode == "" {
 		return false, nil
 	}
-	if s.db == nil {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		for _, document := range s.memory {
-			for _, grant := range document.Grants {
-				if grant.ConsumerDeploymentID == deploymentID &&
-					grant.ConsumerServiceID == serviceID &&
-					grant.ConsumerNodeID == nodeID &&
-					grant.CredentialGeneration == credentialGeneration &&
-					grant.APIID == apiID &&
-					grant.Permission == permissionCode {
-					return true, nil
-				}
-			}
-		}
-		return false, nil
+	if s == nil || s.db == nil {
+		return false, fmt.Errorf("Auth topology projection requires PostgreSQL")
 	}
 	var allowed bool
 	err := s.db.QueryRow(ctx, `

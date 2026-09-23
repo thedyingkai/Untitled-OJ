@@ -9,19 +9,9 @@
       "size": 43901
     },
     {
-      "path": "go/client_test.go",
-      "digest": "sha256:ab368c457bde18142d1acffcad062a27da2d705586f30e83190cc00ded6379b3",
-      "size": 5020
-    },
-    {
       "path": "go/events.go",
       "digest": "sha256:b641471b429b9aa277b3f77f25831b3dcb8943b743becf01d02c8323a8297a98",
       "size": 496
-    },
-    {
-      "path": "go/events_test.go",
-      "digest": "sha256:48031deb5700cddba90dd324a26a1c604a90d23d0141fb6f9bffee529b6b3796",
-      "size": 69
     },
     {
       "path": "go/go.mod",
@@ -45,8 +35,8 @@
     },
     {
       "path": "rust/src/client.rs",
-      "digest": "sha256:0cb64af9cb4939ae55ad65d41706d4beb73d44b59bfa5bdfa0cf4cdd9f0ec725",
-      "size": 25297
+      "digest": "sha256:435b58a3141f3b412183a3a7c4ebe3bf6c844e17ea18addff3085b15b3cc50b5",
+      "size": 22117
     },
     {
       "path": "rust/src/events.rs",
@@ -69,19 +59,9 @@
       "size": 234
     },
     {
-      "path": "ts/src/client.test.ts",
-      "digest": "sha256:be96c5d6bf141c6ddc6382b6c2936cec16c5ed4d65bd45bf07f9c34fd8fd245f",
-      "size": 3952
-    },
-    {
       "path": "ts/src/client.ts",
       "digest": "sha256:328bf0eaa125df0d6c5120f6148f2e79a99bd0d73c369bba1116c57ba1b62705",
       "size": 25480
-    },
-    {
-      "path": "ts/src/events.test.ts",
-      "digest": "sha256:afdfd092bc101ea76947334d457d26d927847566945de7e96aa2b158a81fd442",
-      "size": 59
     },
     {
       "path": "ts/src/events.ts",

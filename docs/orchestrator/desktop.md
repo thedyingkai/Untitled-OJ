@@ -41,13 +41,7 @@ Desktop 目前没有可证明的宿主文件到容器 UID/ACL 私密性契约，
 
 开发环境先生成 Web UI，再从仓库根目录启动：
 
-```bash
-npm --prefix manager/web ci
-npm --prefix manager/web run typecheck
-npm --prefix manager/web test
-npm --prefix manager/web run build
-cargo run -p ojos-orchestrator-desktop
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 `--repo-root` 与 `--web-root` 只用于开发或诊断覆盖。MSI、DEB 与 AppImage 会从 Tauri 的安装资源目录读取 schema、service/release manifest、sets、Store index 和 Web build；portable ZIP/tar 会从 Desktop 可执行文件旁的包根目录发现同一布局。因此发行包不依赖当前工作目录，也不需要传 `--repo-root`：
 

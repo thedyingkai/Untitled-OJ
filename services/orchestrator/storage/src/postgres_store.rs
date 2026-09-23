@@ -1035,14 +1035,3 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         self.list_records(DIAGNOSTICS)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn composite_keys_are_stable_and_unambiguous() {
-        assert_eq!(key(&["a", "b"]), "[\"a\",\"b\"]");
-        assert_ne!(key(&["a,b"]), key(&["a", "b"]));
-    }
-}

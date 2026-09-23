@@ -13,9 +13,3 @@ serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
-
-[dev-dependencies]
-rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "pem", "ring"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

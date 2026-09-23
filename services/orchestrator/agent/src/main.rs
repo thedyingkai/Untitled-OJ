@@ -224,55 +224,6 @@ fn read_postgres_resource_provider(
     Ok(document)
 }
 
-#[cfg(test)]
-mod configuration_tests {
-    use super::*;
-
-    #[test]
-    fn postgres_resource_provider_requires_schema_one_and_private_indirect_secret() {
-        let directory = tempfile::tempdir().unwrap();
-        let admin = directory.path().join("admin.url");
-        let ca = directory.path().join("ca.crt");
-        let descriptor = directory.path().join("provider.json");
-        fs::write(
-            &admin,
-            "postgresql://admin:secret@postgres.internal:5432/postgres?sslmode=require",
-        )
-        .unwrap();
-        fs::write(&ca, "test-ca").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&admin, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        let document = serde_json::json!({
-            "schema_version": 1,
-            "provider_id": "postgresql-capacity",
-            "host": "postgres.internal",
-            "port": 5432,
-            "tls_mode": "verify-full",
-            "admin_url_file": admin,
-            "ca_file": ca,
-        });
-        fs::write(&descriptor, serde_json::to_vec(&document).unwrap()).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&descriptor, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        let parsed = read_postgres_resource_provider(&descriptor).unwrap();
-        assert_eq!(
-            parsed.descriptor().unwrap().provider_id,
-            "postgresql-capacity"
-        );
-
-        let mut invalid = document;
-        invalid["schema_version"] = serde_json::json!(2);
-        fs::write(&descriptor, serde_json::to_vec(&invalid).unwrap()).unwrap();
-        assert!(read_postgres_resource_provider(&descriptor).is_err());
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _install_guard = ojos_orchestrator_installer::acquire_runtime_install_guard()?;

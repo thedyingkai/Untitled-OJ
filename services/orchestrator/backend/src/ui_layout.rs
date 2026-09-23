@@ -2,8 +2,6 @@
 
 use crate::durable::DurableStore;
 use anyhow::{Result, anyhow};
-#[cfg(test)]
-use orchestrator_storage::SqliteOrchestratorStore;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -92,21 +90,6 @@ pub fn put_layout(repo_root: &Path, body: &str) -> Result<Value> {
     Ok(json!({ "layout": layout, "saved": true }))
 }
 
-#[cfg(test)]
-pub fn get_persistent_layout(
-    store: &SqliteOrchestratorStore,
-    repo_root: &Path,
-    user_id: &str,
-    topology_id: &str,
-) -> Result<Value> {
-    get_durable_layout(
-        &DurableStore::Sqlite(store.clone()),
-        Some(repo_root),
-        user_id,
-        topology_id,
-    )
-}
-
 pub(crate) fn get_durable_layout(
     store: &DurableStore,
     legacy_repo_root: Option<&Path>,
@@ -141,21 +124,6 @@ pub(crate) fn get_durable_layout(
         .put_state(UI_LAYOUT_IMPORT_NAMESPACE, &key, &true)
         .map_err(|error| anyhow!("persist UI layout import marker failed: {error}"))?;
     Ok(json!({"layout": layout, "legacy_imported": !imported}))
-}
-
-#[cfg(test)]
-pub fn put_persistent_layout(
-    store: &SqliteOrchestratorStore,
-    user_id: &str,
-    topology_id: &str,
-    body: &str,
-) -> Result<Value> {
-    put_durable_layout(
-        &DurableStore::Sqlite(store.clone()),
-        user_id,
-        topology_id,
-        body,
-    )
 }
 
 pub(crate) fn put_durable_layout(
@@ -195,61 +163,4 @@ fn persistent_key(user_id: &str, topology_id: &str) -> Result<String> {
         return Err(anyhow!("user_id and topology_id are invalid"));
     }
     Ok(serde_json::to_string(&(user_id, topology_id))?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn put_layout_commits_atomically_and_leaves_no_temp_file() {
-        let root = std::env::temp_dir().join(format!(
-            "ojos-ui-layout-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("layout test root");
-
-        let saved = put_layout(&root, r#"{"nodes":{"a":{"x":1,"y":2}}}"#).expect("put layout");
-        assert_eq!(saved["saved"], json!(true));
-        let path = layout_path(&root);
-        assert!(path.is_file());
-        assert!(!path.with_extension("json.tmp").exists());
-
-        let loaded = get_layout(&root).expect("get layout");
-        assert_eq!(loaded["layout"]["nodes"]["a"]["x"], json!(1));
-
-        // 坏文件降级成空布局而不是报错。
-        fs::write(&path, "{ this is not json").expect("corrupt layout");
-        let degraded = get_layout(&root).expect("degraded layout");
-        assert_eq!(degraded["layout"], json!({}));
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn put_layout_rejects_non_object_and_oversized_bodies() {
-        let root =
-            std::env::temp_dir().join(format!("ojos-ui-layout-reject-{}", std::process::id()));
-        assert!(put_layout(&root, "[]").is_err());
-        assert!(put_layout(&root, "not json").is_err());
-        let oversized = format!("{{\"pad\":\"{}\"}}", "x".repeat(MAX_LAYOUT_BYTES));
-        assert!(put_layout(&root, &oversized).is_err());
-    }
-
-    #[test]
-    fn sqlite_layout_is_per_user_and_imports_legacy_only_once() {
-        let root = tempfile::tempdir().unwrap();
-        put_layout(root.path(), r#"{"nodes":{"legacy":{"x":1}}}"#).unwrap();
-        let store = SqliteOrchestratorStore::open(root.path().join("state.db")).unwrap();
-        let imported = get_persistent_layout(&store, root.path(), "alice", "primary").unwrap();
-        assert_eq!(imported["layout"]["nodes"]["legacy"]["x"], json!(1));
-        put_persistent_layout(&store, "alice", "primary", r#"{"nodes":{"new":{"x":2}}}"#).unwrap();
-        put_layout(root.path(), r#"{"nodes":{"legacy":{"x":9}}}"#).unwrap();
-        let persisted = get_persistent_layout(&store, root.path(), "alice", "primary").unwrap();
-        assert_eq!(persisted["layout"]["nodes"]["new"]["x"], json!(2));
-        let bob = get_persistent_layout(&store, root.path(), "bob", "primary").unwrap();
-        assert_eq!(bob["layout"]["nodes"]["legacy"]["x"], json!(9));
-    }
 }

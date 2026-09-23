@@ -6,11 +6,11 @@
 
 Node 版本需满足 `^22.18.0 || >=24.11.0`，npm 至少为 10。CI 和 Docker 使用 Node 24.11。
 
+在 `manager/web` 目录构建产品：
+
 ```bash
 npm ci
 npm run typecheck
-npm test
-npm run test:e2e
 npm run build
 ```
 
@@ -34,18 +34,9 @@ npm run dev
 
 Vite 监听 `127.0.0.1:5174`，将控制面路径代理到 `127.0.0.1:8090`。开发服务器只负责前端热更新，daemon 仍需单独运行。
 
-## 浏览器上线门禁
+## 外部验证
 
-`npm run test:e2e` 会先构建生产 Web bundle，再用 Chromium 加载真实 DOM，并连接状态化的本地 v1 控制面夹具。覆盖 Store 安装/补偿、Topology revision/apply/rollback、RBAC 拒绝、Operation SSE/重试/取消，以及布局持久化失败。夹具只用于浏览器契约测试，不会替代 daemon 的 Rust 集成测试。
-
-持续运行用例由 `OJOS_E2E_SOAK_MS` 控制；普通 CI 默认 5 秒，GA 门禁固定 30 分钟：
-
-```powershell
-$env:OJOS_E2E_SOAK_MS = "1800000"
-npm run test:e2e:soak
-```
-
-该用例持续检查页面事件循环响应、轮询并发上限和路由可操作性。Operation 测试还会在关闭日志面板后确认 SSE 轮询停止。
+单元测试、浏览器场景及其控制面夹具均在仓库外的独立验证目录维护。本产品 package 不包含测试脚本和测试依赖。外部验证复制当前 Web 源码，在独立工作目录中安装自己的验证依赖；不要将夹具或测试文件放回 `src`、workflow 或 Git 工作树。
 
 ## 会话和 API 契约
 

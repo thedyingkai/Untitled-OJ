@@ -3,7 +3,7 @@
   "serviceId": "contest-service",
   "serviceVersion": "0.1.0",
   "contractDigest": "sha256:7fabac49be415585e5bcc75990a5829a8850009d90af037d508fefe00846058c",
-  "generatedFiles": 19,
+  "generatedFiles": 15,
   "artifactRequirements": [
     {
       "role": "config-schema",

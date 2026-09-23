@@ -116,12 +116,6 @@ impl DockerComposeDriver {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_docker_binary_for_test(mut self, binary: impl Into<String>) -> Self {
-        self.docker_binary = binary.into();
-        self
-    }
-
     pub fn command_for(&self, action: &str, service_id: &str) -> Result<Vec<String>> {
         let subcommand = match action {
             "release.install" | "service.enable" => "up",
@@ -527,7 +521,7 @@ fn local_process_runtime(request: &DriverRequest) -> Result<&ReleaseRuntimeDecl>
         Ok(runtime)
     } else {
         Err(OrchestratorError::Blocked(format!(
-            "[DEFERRED] runtime kind {} not supported in local smoke",
+            "[DEFERRED] runtime kind {} not supported by the legacy local executor",
             runtime.kind
         )))
     }

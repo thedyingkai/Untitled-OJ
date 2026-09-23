@@ -89,4 +89,4 @@ TUI 不再直接链接 Console 完成 mutation。Web 和 TUI 的差别只在交�
 
 单主动控制面、显式节点放置、Docker Engine 和最多 100 Nodes 是 v1 产品边界，不是待拆耦问题。active-active、自动 failover、自动扩缩容、Kubernetes、多租户和任意命令执行均不在本版本范围。
 
-当前实现与证据边界只以[项目状态总结](../completeness-summary.md)为准；额外容量和签名要求见[可选上线证据](../unfinished/README.md)。
+当前实现与证据边界只以项目状态总结（已迁至仓库外的验证资料）为准；额外容量和签名要求见[可选上线证据](../unfinished/README.md)。

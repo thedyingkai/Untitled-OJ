@@ -67,6 +67,6 @@ path locally, opt in with `--profile legacy-development` and the development
 override; this is not a B-machine deployment procedure.
 
 Current implementation and evidence status is maintained only in
-[`docs/completeness-summary.md`](../../docs/completeness-summary.md). In
+`docs/completeness-summary.md`（已迁至仓库外的验证资料）. In
 particular, a local dual-Engine run is not evidence of two physical hosts or a
 final commit-bound release.

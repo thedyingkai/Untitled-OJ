@@ -8,14 +8,7 @@ Web UI 是 Desktop WebView 与远程 daemon 共用的图形控制面。Desktop �
 
 Node.js 需满足 `^22.18.0 || >=24.11.0`；CI、Docker 和 release 使用 24.11。
 
-```bash
-cd manager/web
-npm ci
-npm run typecheck
-npm test
-npm run build
-npm run test:e2e
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 构建产物位于 `manager/web/dist`。开发模式可运行 `npm run dev`；Vite 监听 `127.0.0.1:5174`，并把控制面请求代理到 `127.0.0.1:8090`。正式 Desktop 从 bundle 内定位 Web 产物；生产 daemon 缺少 `index.html` 时在绑定端口前失败。
 
@@ -99,4 +92,4 @@ manager/web/src/
     DiagnosticsView.vue
 ```
 
-生产环境变量、provider 配置、备份恢复和发布门禁见 [运维手册](operations-v1.md)；当前功能状态只以[项目状态总结](../completeness-summary.md)为准。
+生产环境变量、provider 配置、备份恢复和发布门禁见 [运维手册](operations-v1.md)；当前功能状态只以项目状态总结（已迁至仓库外的验证资料）为准。

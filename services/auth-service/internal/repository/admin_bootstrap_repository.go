@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -64,6 +65,33 @@ func (r *AdminBootstrapRepository) BootstrapAdmin(
 		return 0, errors.New("admin bootstrap repository is unavailable")
 	}
 
+	// PostgreSQL can reject the waiting serializable transaction after another
+	// request consumes the locked marker. Retry the entire transaction with a
+	// fresh snapshot so the loser observes the durable consumed state.
+	const maxAttempts = 4
+	for attempt := 0; ; attempt++ {
+		userID, err := r.bootstrapAdminAttempt(ctx, username, email, passwordHash)
+		var pgErr *pgconn.PgError
+		if attempt+1 >= maxAttempts || !errors.As(err, &pgErr) ||
+			(pgErr.Code != "40001" && pgErr.Code != "40P01") {
+			return userID, err
+		}
+		delay := time.NewTimer(time.Duration(1<<attempt) * 10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			delay.Stop()
+			return 0, ctx.Err()
+		case <-delay.C:
+		}
+	}
+}
+
+func (r *AdminBootstrapRepository) bootstrapAdminAttempt(
+	ctx context.Context,
+	username string,
+	email string,
+	passwordHash string,
+) (int64, error) {
 	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return 0, err

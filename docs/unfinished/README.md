@@ -1,6 +1,6 @@
 # Orchestrator v1.0 可选的上线证据
 
-本页只列出未来作特定生产规模或签名发行声明时需要的额外证据，不维护功能完成状态。当前实现、Service Contract v2 的本地双 Engine 结果及其限制只以[项目状态总结](../completeness-summary.md)为准。
+本页只列出未来作特定生产规模或签名发行声明时需要的额外证据，不维护功能完成状态。当前实现、Service Contract v2 的本地双 Engine 结果及其限制只以项目状态总结（已迁至仓库外的验证资料）为准。
 
 下列两项不再阻塞本地功能完成、unsigned portable 构建或命令行安装。
 
@@ -48,4 +48,4 @@
 - 真实 0.2 → v1 持久升级由历史仓储 writer、TLS PostgreSQL 17 和 v1 导入契约验证，
   数据库/artifact 联合备份恢复另有真实 drill；`release.yml` 会在每个候选 commit 上自动重跑。
 
-实现状态摘要见 [项目状态总结](../completeness-summary.md)，发布判定见 [发布候选判定](../release-candidate.md)。
+实现状态摘要见 项目状态总结（已迁至仓库外的验证资料），发布判定见 发布候选判定（已迁至仓库外的验证资料）。

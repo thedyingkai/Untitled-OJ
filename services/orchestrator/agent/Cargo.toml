@@ -35,10 +35,6 @@ time = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 x509-parser = "0.18"
 
-[dev-dependencies]
-serde_yaml.workspace = true
-tempfile.workspace = true
-
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
 

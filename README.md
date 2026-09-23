@@ -2,7 +2,7 @@
 
 OJOS Orchestrator 是 OJOS 的服务控制面。它负责可信 Catalog/Release、显式节点放置、Deployment 生命周期、版本化 Topology、持久 Operation/Job、观测和诊断；题目、提交、判题、用户、比赛等业务仍由各 Service 实现。
 
-当前源码版本为 `1.0.0`。本地功能与 portable 交付按仓库自动化判定；生产规模证明和代码签名只在需要对应容量声明或公开受信任分发时执行，不再阻塞本地功能完成。
+当前源码版本为 `1.0.0`。本仓库只维护项目本体、构建打包、部署资产与产品文档。软件测试、夹具、演练、容量工具和验证报告独立保存在仓库外；版本号和构建成功不代表通过生产验收。
 
 ## v1 架构
 
@@ -35,7 +35,7 @@ Store 负责安装和节点放置；Topology 只连接已经注册或部署的�
 
 ## 正式入口
 
-- **Desktop**（`manager/desktop`）：默认入口。在 Tauri 原生 WebView 中加载同源 Web UI，并启动随机 loopback backend 与 loopback Agent；默认使用 OS 应用数据目录中的 SQLite，不打开外部浏览器。
+- **Desktop**（`manager/desktop`）：默认入口。在 Tauri 原生 WebView 中加载同源 Web UI，并启动随机 loopback backend；默认使用 OS 应用数据目录中的 SQLite，不打开外部浏览器。容器执行交给独立 Node Agent，本机 managed execution 显示为不可用。
 - **远程 Web**（`manager/web`）：由生产 daemon 托管，使用 OIDC Authorization Code + PKCE 和 HttpOnly 会话。
 - **TUI**（`manager/tui`）：远程 `/api/v1` 客户端，使用 OIDC Device Authorization Grant，不在进程内执行 mutation。
 - **daemon**（`services/orchestrator/backend`）：单一 REST/SSE 控制面。生产必须使用 PostgreSQL、TLS、OIDC、Node CA、可信 Catalog 和 durable artifact 目录。
@@ -68,7 +68,6 @@ Node.js 需要 `^22.18.0` 或 `>=24.11.0`：
 ```bash
 npm --prefix manager/web ci
 npm --prefix manager/web run typecheck
-npm --prefix manager/web test
 npm --prefix manager/web run build
 
 # 默认图形入口：持久 SQLite + embedded backend/Agent + WebView。
@@ -113,11 +112,11 @@ Topology 编辑 Endpoint/Link 时创建 draft revision。validate/diff 不产生
 
 ## 交付状态
 
-功能状态只以[项目状态总结](docs/completeness-summary.md)为准。该页区分当前工作树实现、本地 pre-commit 双 Engine 证据、最终 commit 证据，以及尚未执行的容量、签名 GA 和安全验收；本 README 不单独作 GO 判定。
+GitHub Actions 只进行产品编译、portable 打包、手动产品镜像发布和文档同步，不运行测试或演练。参见[构建与交付边界](docs/release/README.md)。
 
 普通交付使用 unsigned portable ZIP/tar 和 `ojos-orchestrator install`，不依赖 MSI、Azure、专用 runner 或主机群。
 
-仓库仍保留 100 Node/24 小时容量工具和 signed-GA workflow，供未来需要声明该生产规模或面向受签名策略约束的公开分发时使用。它们是可选的额外证据，不代表 Store、Topology、Desktop 或 CLI 功能未完成。
+所有软件验证代码位于独立目录；本机位置为 `D:\Untitled-OJ-external-tests`，其中保留原始文件、迁移清单和基于当前产品源码的隔离验证入口。不能用历史验证结果为新的提交背书。原有 signed-GA 验收与晋级流程已随验证工具外移，仓库不会绕过安全验收自动创建正式 Release。
 
 ## 文档
 
@@ -131,14 +130,12 @@ Topology 编辑 Endpoint/Link 时创建 draft revision。validate/diff 不产生
 - [Topology 模型](docs/orchestrator/topology-model.md)
 - [Service Contract v2](docs/orchestrator/service-contract-v2.md)
 - [工作负载凭据边界](docs/orchestrator/credential-boundary-v2.md)
-- [A/B 跨机完整门禁](deploy/cross-machine/README.md)
 - [Judge Worker 生产部署](deploy/worker/README.md)
 - [Service SDK](sdk/service-sdk/README.md)
 - [Desktop](docs/orchestrator/desktop.md)
 - [Web/TUI 能力一致性](docs/orchestrator/gui-tui-parity.md)
 - [v1 运维手册](docs/orchestrator/operations-v1.md)
-- [当前状态总结](docs/completeness-summary.md)
-- [生产就绪证据](docs/production-readiness.md)
-- [发布候选判定](docs/release-candidate.md)
+- [构建与交付边界](docs/release/README.md)
+- [贡献约束](AGENTS.md)
 
 `v0.1.0-alpha` 是 2026-07-03 的历史版本，仍使用旧原生 GUI，不包含当前 v1 Desktop、Store、Topology 或 Agent。

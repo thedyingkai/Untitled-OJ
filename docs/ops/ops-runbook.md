@@ -106,9 +106,7 @@ option；修复节点或发布新的签名 runtime profile。
 
 参考演练：
 
-```bash
-deploy/ops/redis-recovery-drill.sh
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 ## 吊销 workload 调用权
 
@@ -123,14 +121,7 @@ Node 身份泄露时还要在 Orchestrator 吊销该 Node 证书、drain 节点�
 
 进行 operation 回滚：
 
-```bash
-OJOS_ENV_FILE=/etc/ojos/production.env \
-ORCHESTRATOR_URL="$ORCHESTRATOR_URL" \
-OJOS_ROLLBACK_OPERATION_ID="$OPERATION_ID" \
-OJOS_CONFIRM_ROLLBACK="rollback-$OPERATION_ID" \
-OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1 \
-deploy/ops/rollback-drill.sh
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 `OJOS_ROLLBACK_EXECUTE_SERVICE_DRIVER=1` 会授权执行固定的本地进程或 Compose 回滚动作。仅回滚 store 记录时
 不要设置它。运行前先确认当前真实进程状态和运行资产齐全；运行后检查 HostService、Endpoint、
@@ -216,9 +207,7 @@ artifact reference 一起恢复并对账。每次运行必须重新创建脚本�
 
 运行 trace 演练：
 
-```bash
-deploy/ops/trace-e2e-drill.sh
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 查询 Jaeger：
 
@@ -234,9 +223,7 @@ Gateway；Redis Stream relay/consumer span 属于 A 机 Problem/Judge API 的 ou
 
 运行：
 
-```bash
-deploy/ops/alert-firing-drill.sh
-```
+验证命令和场景已迁至仓库外的独立验证目录；不在产品工作树内运行。
 
 在产物 manifest 中确认 Prometheus 规则触发和 Alertmanager webhook 投递。
 

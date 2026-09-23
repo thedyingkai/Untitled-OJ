@@ -68,4 +68,19 @@ Problem→Judge 使用 transactional outbox、Redis Stream relay、Judge inbox �
 - 外部副作用是类型化 pipeline 步骤。API surface 与 ApiBinding 由控制面事务持久化，不依赖外部 API Registry；计划所需 provider、健康实例或 Binding 缺失时 fail fast，不生成 Deferred 或假成功。
 - v1 不提供 active-active、通用调度器、自动扩缩容、Kubernetes runtime、任意 shell 或多租户计费。
 
-更细的取舍见 [耦合决策](coupling-decisions.md)，持久化见 [编排器数据库](../orchestrator/database.md)，发布状态见 [项目状态总结](../completeness-summary.md)。
+## 阅读与修改路径
+
+| 变更类型 | 首先阅读 | 边界 |
+| --- | --- | --- |
+| HTTP/API 行为 | `services/orchestrator/backend/src/*_api.rs` | 解析请求、认证、调用用例、映射响应；领域规则不放在路由里。 |
+| 领域约束与计划 | `services/orchestrator/core/src` | 不引入数据库、网络或运行时依赖。 |
+| 持久化与恢复 | `services/orchestrator/storage/src`、`control-plane/src` | 状态以持久记录为准；明确事务和幂等边界。 |
+| 服务契约与 SDK | `tools/ojos-service/src/codegen` | `mod.rs` 编排生成、校验与落盘；各语言模块只负责生成产品 SDK。 |
+| Auth 启动 | `services/auth-service/internal/svc` | `servicecontext.go` 组装与生命周期，`environment.go` 环境配置，`workload_identity.go` 身份与授权。 |
+| UI 展示 | `manager/web/src` | API client、store 与视图分工；服务端是权限与状态真值。 |
+
+Auth 必须连接 PostgreSQL，不保留内存冒烟认证或临时授权投影。构造失败会关闭已创建的连接池和追踪资源；管理员初始化密钥在构造退出时清零。Desktop 不内嵌浏览器测试脚本，控制面不提供测试造数接口。
+
+软件测试、夹具和演练与产品源码物理分离。验证在仓库外的临时源码副本中运行，不能把测试模块复制回工作树。OJ 题目测试数据、判题、健康探针和签名校验属于产品职责，仍在本仓库。
+
+更细的取舍见 [耦合决策](coupling-decisions.md)，持久化见 [编排器数据库](../orchestrator/database.md)，交付方式见 [构建与交付](../release/README.md)。

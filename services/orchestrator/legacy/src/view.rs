@@ -1534,27 +1534,3 @@ pub fn ensure_view_is_loaded(view: &OrchestratorView) -> Result<()> {
 fn io_error(error: std::io::Error) -> OrchestratorError {
     OrchestratorError::Dependency(format!("view repository I/O failed: {}", error.kind()))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn catalog_error_row_never_advertises_rollback() {
-        let invalid_schemas = SharedSchemas {
-            actions: Vec::new(),
-            form_actions: Vec::new(),
-            forms: Vec::new(),
-            plan_states: Vec::new(),
-            plan_required_fields: Vec::new(),
-            result_object_types: Vec::new(),
-            result_required_fields: Vec::new(),
-            error_required_fields: Vec::new(),
-            error_redactions: Vec::new(),
-        };
-        let rows = operation_rows(&invalid_schemas, &[], &[], &[], &[], None);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].action, "action.catalog.invalid");
-        assert!(!rows[0].rollback_available);
-    }
-}
