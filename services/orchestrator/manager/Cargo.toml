@@ -7,9 +7,11 @@ edition.workspace = true
 anyhow.workspace = true
 base64 = "0.22"
 clap.workspace = true
+jsonschema.workspace = true
 ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
 orchestrator-legacy.workspace = true
 orchestrator-core.workspace = true
+orchestrator-protocol.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -29,7 +29,7 @@ orchestrator-backend
 - `orchestrator-storage` 是持久状态真值，不维护写后全表重载的内存镜像。
 - `orchestrator-control-plane` 协调至少一次投递、lease、重试、恢复和 saga 补偿；不能证明副作用结果时进入 `NEEDS_ATTENTION`。
 - `orchestrator-runtime` 只提供固定 Docker Engine/受控运行时操作，不拼接 shell。
-- `orchestrator-manager` 的 `catalog_query` 已通过只读端口组合 Catalog 分页和已部署视图，不依赖 HTTP、Console 或数据库实现。整个 crate 仍同时包含 Catalog/Release v2 模型与旧 Store Console 应用逻辑；正式 v1 安装、校验和替换用例仍主要位于 backend，尚未完成应用层归属调整。
+- `orchestrator-manager` 的 `catalog_query` 已通过只读端口组合 Catalog 分页和已部署视图；`store/config`、`store/composition` 承载纯配置与组合规则，`store/validation` 通过只读端口编排 Release 校验。这些模块不依赖 HTTP、Console 或数据库实现。整个 crate 仍包含旧 Store Console 应用逻辑，安装和替换用例仍在 backend，继续按计划迁移。
 - `orchestrator-agent` 只执行分配给本 Node 的 Job，并用本地 ledger 决定幂等重放；它还根据 Deployment assignment 原子物化只读 ServiceContext 和短期 workload credential。
 - `orchestrator-legacy` 当前容纳 0.2 Console、仓储接口、适配器及领域类型重导出。正式 v1 仍有依赖；目标是迁出正式能力，让它只承担兼容转换，尚不能声称已隔离。
 
@@ -78,6 +78,7 @@ Problem→Judge 使用 transactional outbox、Redis Stream relay、Judge inbox �
 | --- | --- | --- |
 | HTTP/API 行为 | `services/orchestrator/backend/src/*_api.rs` | 当前 Store API 仍混有用例规则；新增代码应按重构计划分离接入与用例，不继续扩大该混合边界。 |
 | Catalog 只读查询 | `services/orchestrator/manager/src/catalog_query.rs` | 用例只通过读端口获取数据；`backend/src/adapters/catalog.rs` 对接既有可信源注册表和 Console 投影。查询失败顺序、分页和响应字段保持不变，注册与信任修改不属于读端口。 |
+| Release 规则与只读校验 | `services/orchestrator/manager/src/store` | 配置与组合规则只处理显式输入；校验用例没有发布或执行能力；`backend/src/adapters/store_validation.rs` 提供事实读取和运行时规划。 |
 | 领域约束与计划 | `services/orchestrator/core/src` | 不引入数据库、网络或运行时依赖。 |
 | 持久化与恢复 | `services/orchestrator/storage/src`、`control-plane/src` | 状态以持久记录为准；明确事务和幂等边界。 |
 | 服务契约与 SDK | `tools/ojos-service/src/codegen` | `mod.rs` 编排生成、校验与落盘；各语言模块只负责生成产品 SDK。 |

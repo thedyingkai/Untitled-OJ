@@ -1,4 +1,5 @@
 use crate::adapters::catalog::{CatalogRegistryReader, InstalledServicesReader};
+use crate::adapters::store_validation::StoreValidationReader;
 use crate::artifact_store::{ArtifactRetentionPolicy, ArtifactStore, MAX_ARTIFACT_BYTES};
 use crate::catalog_registry::{
     CatalogRegistry, CatalogRegistryError, CatalogSourceRegistration, PackageQuery,
@@ -17,24 +18,34 @@ use orchestrator_control_plane::{
     OperationRepository, PlanOperation, PlannedJob, PlannedJobCondition,
 };
 use orchestrator_legacy::composition::{
-    ApiRequirementV1 as CompositionApiRequirementV1, CompositionModeV1, CompositionNodeSpecV1,
-    CompositionPlanBindingV1, CompositionPlanV1, CompositionReleaseV1, ConfigRequirementV1,
-    INSTALL_INPUTS_SCHEMA_VERSION, InstallInputsV1, PackageDependencyV1, ProvidedApiV1,
-    ProviderCandidateV1, ProviderKindV1, ProviderPolicyV1, ReleaseGraphV1, ResourceLifecycleV1,
-    ResourceRequirementV1, SecretRequirementV1, ValidatedInstallInputsV1, build_composition_plan,
-    validate_install_inputs,
+    CompositionPlanV1, ProviderCandidateV1, ProviderKindV1, ValidatedInstallInputsV1,
 };
 use orchestrator_legacy::{
     ActionRequest, ApiBinding, ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState,
     ApiBindingResolutionRequest, ApiBindingState, ApiProviderCandidate, ContributionRevisionV1,
     NodeRecord, OrchestratorActionConsole, ServiceRelease, ServiceReleaseContract,
     ServiceReleaseManifest, TopologyApiBindingSpec, TopologyEndpointSpec, TopologyLinkSpec,
-    TopologySpec, api_version_matches, diff_topology_specs, parse_endpoint_id,
-    resolve_api_binding_candidate, validate_endpoint_id, validate_service_release,
+    TopologySpec, api_version_matches, parse_endpoint_id, resolve_api_binding_candidate,
+    validate_endpoint_id, validate_service_release,
 };
 use orchestrator_manager::MigrationPolicyV2;
 use orchestrator_manager::catalog_query::{self, CatalogQueryError, CatalogReadPort};
 use orchestrator_manager::catalog_v2::{ReleaseChannel, TargetPlatform};
+use orchestrator_manager::store::deployment_id;
+pub(crate) use orchestrator_manager::store::validation::InstallTopologySelection;
+use orchestrator_manager::store::validation::{
+    InstallBindingSelection, ReleaseValidationError, ValidateRelease, validate_release,
+};
+use orchestrator_manager::store::{
+    StoreRuleError, StoreRuleErrorKind,
+    composition::{
+        composition_inputs_for_service, legacy_composition_inputs, normalize_composition_version,
+        plan_composition, release_contract_from_document, release_graph,
+        validate_store_composition_inputs,
+    },
+    config::{ValidatedReleaseConfig, validate_release_config},
+    stable_service_instance_id,
+};
 use orchestrator_protocol::NodeRuntimeFactsV1;
 use orchestrator_runtime::{
     ArtifactReference, AuthPipelineStep, AuthServiceIdentitySpec, BindingContextApplyPayload,
@@ -572,248 +583,47 @@ fn validate_release_catalog(
     request: &ApiRequest,
     request_id: &str,
 ) -> Result<ApiResponse, StoreApiError> {
-    let mut input: ValidateReleaseRequest = parse_body(request)?;
-    input.topology = normalize_store_topology_selection(
+    let input: ValidateReleaseRequest = parse_body(request)?;
+    let topology = normalize_store_topology_selection(
         &input.topology_id,
         &input.topology_etag,
         input.topology.as_ref(),
     )?;
-    let service_id = required_text(&input.service_id, "service_id")?;
-    let node_id = required_text(&input.target_node_id, "target_node_id")?;
-    let node = storage
-        .get_node(node_id)
-        .map_err(storage_error)?
-        .ok_or_else(|| {
-            StoreApiError::new(
-                404,
-                "STORE_TARGET_NODE_NOT_FOUND",
-                format!("target Node {node_id} was not found"),
-            )
-        })?;
-    ensure_ready_docker_node(storage, &node)?;
-    let platform = target_platform(storage, &node)?;
-    let resolved = registry
-        .resolve_install_plan(
-            storage,
-            non_empty(&input.catalog_source_id),
-            service_id,
-            non_empty(&input.version),
-            parse_release_channel(&input.channel)?,
-            platform.clone(),
-        )
-        .map_err(catalog_registry_error)?;
-    let documents = registry
-        .fetch_release_documents(storage, &resolved)
-        .map_err(catalog_registry_error)?;
-    let root_document = documents
-        .iter()
-        .find(|document| {
-            document.selection.module_id == service_id
-                && document.selection.release.version == resolved.plan.root.version
-        })
-        .ok_or_else(|| {
-            StoreApiError::new(
-                500,
-                "CATALOG_PLAN_INVALID",
-                "resolved validation plan does not contain its requested root metadata",
-            )
-        })?;
-    let composition_plan = build_store_composition_plan(storage, &documents, service_id, &node)?;
-    let contract = release_contract_from_document(root_document)?;
-    let composition_validation = validate_store_composition_inputs(
-        &composition_plan,
-        &composition_plan.plan_digest,
-        &composition_plan.release_graph_digest,
-        &input.inputs,
-        (!input.config.is_null()).then(|| input.config.clone()),
-        input.secret_refs.clone(),
-    );
-    let composition_validation = if contract.platform.is_none() {
-        legacy_composition_inputs(&composition_plan, &input.config, &input.secret_refs)
-    } else {
-        composition_validation
+    let command = ValidateRelease {
+        service_id: required_text(&input.service_id, "service_id")?.to_string(),
+        target_node_id: required_text(&input.target_node_id, "target_node_id")?.to_string(),
+        catalog_source_id: input.catalog_source_id,
+        version: input.version,
+        channel: input.channel,
+        endpoint: input.endpoint,
+        bindings: input.bindings,
+        topology,
+        start: input.start,
+        migration_policy: input.migration_policy,
+        gateway_node_id: input.gateway_node_id,
+        config: input.config,
+        secret_refs: input.secret_refs,
+        inputs: input.inputs,
+        validation_id: format!("store-validate-{request_id}"),
     };
-    let composition_error_detail = composition_validation
-        .as_ref()
-        .err()
-        .map(|error| error.detail.clone());
-    let runtime_contract = ensure_release_runtime_supported(
-        storage,
-        &node,
-        &contract,
-        root_document.selection.release.oci_image.as_str(),
-    )?;
-    let runtime_facts = node_runtime_facts(storage, &node.node_id)?;
-    let planned_deployment_id =
-        deployment_id(service_id, &resolved.plan.root.version, &node.node_id);
-    let effective_endpoint = effective_managed_endpoint(&input.endpoint, &node, &contract.release)?;
-    let (bindings_resolvable, requirements) = preview_install_api_bindings(
-        console,
-        storage,
-        &contract,
-        &node.node_id,
-        &effective_endpoint,
-        &input.bindings,
-        input.topology.as_ref(),
-    )?;
-    let topology_confirmation_required =
-        !contract.requirements().is_empty() && input.topology.is_none();
-    let bindings_valid = bindings_resolvable && !topology_confirmation_required;
-    let binding_plan = if bindings_valid {
-        resolve_install_api_bindings(
+    let result = validate_release(
+        &StoreValidationReader {
             console,
             storage,
-            &contract,
-            &planned_deployment_id,
-            &node.node_id,
-            &effective_endpoint,
-            &input.bindings,
-            input.topology.as_ref(),
-            false,
-        )?
-    } else {
-        Vec::new()
-    };
-    if contract.contract_version >= 2
-        && (contract.platform.is_none() || composition_validation.is_ok())
-    {
-        let image = OciImageReference::parse(root_document.selection.release.oci_image.as_str())
-            .map_err(|error| {
-                StoreApiError::new(
-                    422,
-                    "STORE_IMMUTABLE_IMAGE_REQUIRED",
-                    format!("validation release image is not immutable: {error}"),
-                )
-            })?;
-        let mut preview_spec = container_spec(
-            &planned_deployment_id,
-            service_id,
-            &resolved.plan.root.version,
-            &root_document.checksum,
-            &node,
-            image,
-            runtime_contract.clone(),
-            &contract.release,
-            managed_published_endpoint(&effective_endpoint, service_id, &node, &contract.release)?,
-        );
-        preview_spec.labels.insert(
-            "ojos.service_contract_version".to_string(),
-            contract.contract_version.to_string(),
-        );
-        attach_release_runtime_volume(&mut preview_spec, &contract)?;
-        if bindings_valid
-            && (!contract.requirements().is_empty()
-                || !contract.events.publishes.is_empty()
-                || !contract.events.subscribes.is_empty()
-                || contract_has_retained_runtime_volume(&contract))
-        {
-            preview_spec.managed_service_context = managed_service_context_spec(
-                storage,
-                &contract,
-                &node.node_id,
-                &binding_plan,
-                true,
-            )?;
-        }
-        let preview_health_gate =
-            HealthGatePolicy::for_runtime_contract(&preview_spec.runtime_contract);
-        let preview_install = RuntimeInstallPayload {
-            spec: preview_spec,
-            start: input.start,
-            health_gate: preview_health_gate,
-            offline_oci_artifact: None,
-        };
-        let (validated_config, validated_secret_refs) = composition_validation
-            .as_ref()
-            .ok()
-            .map(|validated| {
-                composition_inputs_for_service(&composition_plan, validated, service_id)
-            })
-            .unwrap_or_else(|| (input.config.clone(), input.secret_refs.clone()));
-        let _validated_pipeline = release_pipeline_payload(
-            &contract.release,
-            &contract,
-            &preview_install,
-            &binding_plan,
-            &node,
-            &format!("store-validate-{request_id}"),
-            &input.migration_policy,
-            &input.gateway_node_id,
-            &validated_config,
-            &validated_secret_refs,
-        )?;
-    }
-    let topology_diff = if bindings_valid {
-        input
-            .topology
-            .as_ref()
-            .map(|selection| {
-                let (current, _) = selected_topology_spec(storage, selection)?;
-                let proposed = preview_store_install_topology_spec(
-                    current.clone(),
-                    &contract,
-                    &planned_deployment_id,
-                    &node.node_id,
-                    &effective_endpoint,
-                    &binding_plan,
-                )?;
-                diff_topology_specs(Some(&current), &proposed).map_err(core_error)
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    let metadata = documents
-        .iter()
-        .map(|document| {
-            json!({
-                "module_id": document.selection.module_id,
-                "version": document.selection.release.version,
-                "metadata_url": document.source_url,
-                "metadata_sha256": document.checksum,
-                "oci_image": document.selection.release.oci_image,
-                "offline_oci_layout_verified": document
-                    .offline_oci_layout
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(success(
-        200,
-        json!({
-            "valid": bindings_valid && (contract.platform.is_none() || composition_validation.is_ok()),
-            "catalog_source_id": resolved.source_id,
-            "catalog_id": resolved.catalog_id,
-            "verified_key_ids": resolved.verified_key_ids,
-            "target_platform": platform,
-            "plan": resolved.plan,
-            "metadata": metadata,
-            "bindings": binding_plan,
-            "requirements": requirements,
-            "composition_plan": composition_plan,
-            "composition_inputs_valid": composition_validation.is_ok(),
-            "composition_input_error": composition_error_detail,
-            "topology_confirmation_required": topology_confirmation_required,
-            "runtime": {
-                "node_id": node.node_id,
-                "contract": runtime_contract,
-                "facts": runtime_facts,
-            },
-            "topology": input.topology.as_ref().map(|selection| json!({
-                "topology_id": selection.topology_id,
-                "revision_id": selection.revision_id,
-            })),
-            "topology_diff": topology_diff,
-            "side_effects": {
-                "release_imports": 0,
-                "operations": 0,
-                "jobs": 0,
-                "runtime_calls": 0,
-            }
-        }),
-        request_id,
-    ))
+            registry,
+        },
+        &command,
+    )
+    .map_err(|error| match error {
+        ReleaseValidationError::Read(error) => error,
+        ReleaseValidationError::Rule(error) => error.into(),
+        ReleaseValidationError::MissingRootMetadata => StoreApiError::new(
+            500,
+            "CATALOG_PLAN_INVALID",
+            "resolved validation plan does not contain its requested root metadata",
+        ),
+    })?;
+    Ok(success(200, result, request_id))
 }
 
 #[derive(Debug, Deserialize)]
@@ -863,21 +673,6 @@ struct InstallReleaseRequest {
     topology_etag: String,
     #[serde(default)]
     topology: Option<InstallTopologySelection>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct InstallBindingSelection {
-    name: String,
-    provider_deployment_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct InstallTopologySelection {
-    pub(crate) topology_id: String,
-    #[serde(default)]
-    pub(crate) revision_id: String,
 }
 
 fn normalize_store_topology_selection(
@@ -3927,191 +3722,19 @@ fn select_catalog_document_release(
     Ok(selected)
 }
 
-fn release_contract_from_document(
-    document: &VerifiedReleaseDocument,
-) -> Result<ServiceReleaseContract, StoreApiError> {
-    let text = std::str::from_utf8(&document.bytes).map_err(|error| {
-        StoreApiError::new(
-            422,
-            "STORE_RELEASE_INVALID",
-            format!(
-                "release {}@{} metadata is not UTF-8: {error}",
-                document.selection.module_id, document.selection.release.version
-            ),
-        )
-    })?;
-    let contract = ServiceReleaseContract::from_yaml_str(text).map_err(|error| {
-        StoreApiError::new(
-            422,
-            "STORE_RELEASE_INVALID",
-            format!(
-                "release {}@{} has an invalid Service Contract: {error}",
-                document.selection.module_id, document.selection.release.version
-            ),
-        )
-    })?;
-    if contract.release.service_name != document.selection.module_id
-        || contract.release.version != document.selection.release.version.to_string()
-    {
-        return Err(StoreApiError::new(
-            409,
-            "STORE_RELEASE_IDENTITY_MISMATCH",
-            format!(
-                "catalog release {}@{} does not match Service Contract {}@{}",
-                document.selection.module_id,
-                document.selection.release.version,
-                contract.release.service_name,
-                contract.release.version
-            ),
-        ));
-    }
-    Ok(contract)
-}
-
 fn build_store_composition_plan(
     storage: &DurableStore,
     documents: &[VerifiedReleaseDocument],
     root_service_id: &str,
     node: &NodeRecord,
 ) -> Result<CompositionPlanV1, StoreApiError> {
-    let mut releases = Vec::with_capacity(documents.len());
-    for document in documents {
-        let contract = release_contract_from_document(document)?;
-        let platform = contract.platform.as_ref();
-        let mut package_dependencies = document
-            .selection
-            .release
-            .dependencies
-            .iter()
-            .map(|dependency| PackageDependencyV1 {
-                service_id: dependency.module_id.clone(),
-                version_requirement: dependency.requirement.to_string(),
-                development: false,
-            })
-            .collect::<Vec<_>>();
-        if let Some(platform) = platform {
-            package_dependencies.extend(platform.package_requirements.iter().map(|requirement| {
-                PackageDependencyV1 {
-                    service_id: requirement.service_id.clone(),
-                    version_requirement: requirement.version_requirement.clone(),
-                    development: requirement.development,
-                }
-            }));
-        }
-        package_dependencies.sort_by(|left, right| left.service_id.cmp(&right.service_id));
-        package_dependencies.dedup_by(|left, right| left.service_id == right.service_id);
-
-        let release_digest = contract
-            .platform
-            .as_ref()
-            .map(|platform| platform.release_lock_digest.clone())
-            .unwrap_or_else(|| document.checksum.clone());
-        let owner_instance_id = stable_service_instance_id(&contract.release.service_name);
-        let provided_apis = contract
-            .provides
-            .apis
-            .iter()
-            .map(|provided| {
-                let version = contract
-                    .release
-                    .apis
-                    .iter()
-                    .find(|api| api.api_id == provided.api_id())
-                    .and_then(|api| normalize_composition_version(&api.version))
-                    .unwrap_or_else(|| document.selection.release.version.clone());
-                ProvidedApiV1 {
-                    api_id: provided.api_id().to_string(),
-                    version,
-                }
-            })
-            .collect();
-        let required_apis = contract
-            .requirements()
-            .iter()
-            .map(|requirement| CompositionApiRequirementV1 {
-                name: requirement.binding_name().to_string(),
-                api_id: requirement.api_id().to_string(),
-                version_requirement: normalize_composition_requirement(
-                    requirement.version_requirement(),
-                ),
-                optional: requirement.optional(),
-                provider_policy: if requirement.selection() == "explicit" {
-                    ProviderPolicyV1::Explicit
-                } else {
-                    ProviderPolicyV1::UniqueHealthy
-                },
-            })
-            .collect();
-        let resource_claims = platform
-            .into_iter()
-            .flat_map(|platform| platform.resource_claims.iter())
-            .map(|resource| ResourceRequirementV1 {
-                name: resource.name.clone(),
-                resource_type: normalize_resource_capability(&resource.resource_type),
-                version_requirement: "^1.0.0".to_string(),
-                optional: false,
-                provider_policy: ProviderPolicyV1::UniqueHealthy,
-                lifecycle: ResourceLifecycleV1::Retain,
-            })
-            .collect();
-        let config = platform
-            .and_then(|platform| platform.config_schema.as_ref())
-            .map(|config| ConfigRequirementV1 {
-                schema: config.schema.clone(),
-                required: true,
-            });
-        let mut secrets = contract
-            .release
-            .secrets
-            .iter()
-            .map(|name| SecretRequirementV1 {
-                name: name.clone(),
-                required: true,
-            })
-            .collect::<Vec<_>>();
-        if let Some(config) = platform.and_then(|platform| platform.config_schema.as_ref()) {
-            let mut schema_secrets = BTreeSet::new();
-            collect_config_secret_paths(&config.schema, "", &mut schema_secrets)?;
-            secrets.extend(schema_secrets.into_iter().map(|name| SecretRequirementV1 {
-                // JSON Schema conditionals decide whether this secret is
-                // required for the submitted config. Marking it optional here
-                // lets validate return the whole input surface without forcing
-                // mutually-exclusive conditional secrets.
-                name,
-                required: false,
-            }));
-        }
-        secrets.sort_by(|left, right| left.name.cmp(&right.name));
-        secrets.dedup_by(|left, right| left.name == right.name);
-        releases.push(CompositionReleaseV1 {
-            service_id: contract.release.service_name.clone(),
-            owner_instance_id,
-            version: document.selection.release.version.clone(),
-            release_digest,
-            package_dependencies,
-            provided_apis,
-            required_apis,
-            resource_claims,
-            config,
-            secrets,
-        });
-    }
-    releases.sort_by(|left, right| left.service_id.cmp(&right.service_id));
+    // Preserve failure order: signed metadata is validated before provider I/O.
+    let graph = release_graph(documents, root_service_id)?;
     let providers = store_composition_providers(storage, documents, node)?;
-    build_composition_plan(
-        ReleaseGraphV1 {
-            schema_version: orchestrator_legacy::composition::RELEASE_GRAPH_SCHEMA_VERSION
-                .to_string(),
-            root_service_id: root_service_id.to_string(),
-            releases,
-        },
-        &providers,
-        CompositionModeV1::Production,
-    )
-    .map_err(composition_error)
+    plan_composition(graph, &providers).map_err(Into::into)
 }
 
-fn store_composition_providers(
+pub(crate) fn store_composition_providers(
     storage: &DurableStore,
     documents: &[VerifiedReleaseDocument],
     node: &NodeRecord,
@@ -4235,136 +3858,6 @@ fn store_composition_providers(
     Ok(providers)
 }
 
-fn validate_store_composition_inputs(
-    plan: &CompositionPlanV1,
-    plan_digest: &str,
-    release_graph_digest: &str,
-    inputs: &BTreeMap<String, BTreeMap<String, Value>>,
-    config: Option<Value>,
-    secret_refs: BTreeMap<String, String>,
-) -> Result<ValidatedInstallInputsV1, StoreApiError> {
-    validate_install_inputs(
-        plan,
-        &InstallInputsV1 {
-            schema_version: INSTALL_INPUTS_SCHEMA_VERSION.to_string(),
-            plan_digest: plan_digest.to_string(),
-            release_graph_digest: release_graph_digest.to_string(),
-            inputs: inputs.clone(),
-            config,
-            secret_refs,
-        },
-        &CompositionPlanBindingV1::from(plan),
-    )
-    .map_err(composition_error)
-}
-
-fn legacy_composition_inputs(
-    plan: &CompositionPlanV1,
-    config: &Value,
-    secret_refs: &BTreeMap<String, String>,
-) -> Result<ValidatedInstallInputsV1, StoreApiError> {
-    let mut inputs = BTreeMap::new();
-    if !config.is_null() || !secret_refs.is_empty() {
-        // v1/v2 releases predate Composition nodes. Preserve their root
-        // aliases in a synthetic private node so downstream Store code can
-        // continue forwarding the exact signed release inputs while the
-        // public plan remains truthful about having no v3 config contract.
-        let mut values = BTreeMap::new();
-        if !config.is_null() {
-            values.insert("config".to_string(), config.clone());
-        }
-        for (name, reference) in secret_refs {
-            values.insert(
-                format!("secretRef.{name}"),
-                Value::String(reference.clone()),
-            );
-        }
-        inputs.insert("legacy-root-inputs".to_string(), values);
-    }
-    Ok(ValidatedInstallInputsV1 {
-        schema_version: INSTALL_INPUTS_SCHEMA_VERSION.to_string(),
-        plan_digest: plan.plan_digest.clone(),
-        release_graph_digest: plan.release_graph_digest.clone(),
-        inputs,
-        normalized_legacy_aliases: !config.is_null() || !secret_refs.is_empty(),
-    })
-}
-
-fn composition_inputs_for_service(
-    plan: &CompositionPlanV1,
-    validated: &ValidatedInstallInputsV1,
-    service_id: &str,
-) -> (Value, BTreeMap<String, String>) {
-    let mut config = Value::Null;
-    let mut secrets = BTreeMap::new();
-    if service_id == plan.root_service_id
-        && let Some(values) = validated.inputs.get("legacy-root-inputs")
-    {
-        if let Some(value) = values.get("config") {
-            config = value.clone();
-        }
-        for (key, value) in values {
-            if let Some(name) = key.strip_prefix("secretRef.")
-                && let Some(reference) = value.as_str()
-            {
-                secrets.insert(name.to_string(), reference.to_string());
-            }
-        }
-    }
-    for node in plan
-        .nodes
-        .iter()
-        .filter(|node| node.service_id == service_id)
-    {
-        let Some(values) = validated.inputs.get(&node.node_id) else {
-            continue;
-        };
-        match &node.spec {
-            CompositionNodeSpecV1::Config { .. } => {
-                if let Some(value) = values.get("config") {
-                    config = value.clone();
-                }
-            }
-            CompositionNodeSpecV1::Secret { name, .. } => {
-                if let Some(reference) = values.get("secretRef").and_then(Value::as_str) {
-                    secrets.insert(name.clone(), reference.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    (config, secrets)
-}
-
-fn normalize_composition_requirement(value: &str) -> String {
-    let value = value.trim();
-    if semver::VersionReq::parse(value).is_ok() {
-        value.to_string()
-    } else if let Some(version) = normalize_composition_version(value) {
-        format!("={version}")
-    } else {
-        "*".to_string()
-    }
-}
-
-fn normalize_composition_version(value: &str) -> Option<semver::Version> {
-    let value = value.trim().strip_prefix('v').unwrap_or(value.trim());
-    semver::Version::parse(value).ok().or_else(|| {
-        value
-            .parse::<u64>()
-            .ok()
-            .map(|major| semver::Version::new(major, 0, 0))
-    })
-}
-
-fn normalize_resource_capability(value: &str) -> String {
-    value.strip_suffix("/v1").unwrap_or(value).to_string()
-}
-
-fn composition_error(error: impl std::fmt::Display) -> StoreApiError {
-    StoreApiError::new(422, "STORE_COMPOSITION_INVALID", error.to_string())
-}
-
 #[derive(Debug, Clone)]
 struct TopologyBindingContext {
     topology_id: String,
@@ -4395,7 +3888,7 @@ fn topology_contains_provider_candidate(
     })
 }
 
-fn preview_install_api_bindings(
+pub(crate) fn preview_install_api_bindings(
     console: &OrchestratorActionConsole,
     storage: &DurableStore,
     contract: &ServiceReleaseContract,
@@ -4593,7 +4086,7 @@ fn preview_install_api_bindings(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_install_api_bindings(
+pub(crate) fn resolve_install_api_bindings(
     console: &OrchestratorActionConsole,
     storage: &DurableStore,
     contract: &ServiceReleaseContract,
@@ -6290,7 +5783,7 @@ struct StoreConsumerBindingMergeContext<'a> {
 /// Builds the exact immutable Topology shape that a Store install would
 /// propose, without creating a revision or touching apply ownership.  The
 /// validate endpoint uses this to return a truthful prospective diff.
-fn preview_store_install_topology_spec(
+pub(crate) fn preview_store_install_topology_spec(
     mut spec: TopologySpec,
     contract: &ServiceReleaseContract,
     consumer_deployment_id: &str,
@@ -6705,7 +6198,7 @@ fn ensure_release_checksum(record: &ServiceRelease) -> Result<(), StoreApiError>
 }
 
 #[allow(clippy::too_many_arguments)]
-fn release_pipeline_payload(
+pub(crate) fn release_pipeline_payload(
     release: &ServiceReleaseManifest,
     contract: &ServiceReleaseContract,
     install: &RuntimeInstallPayload,
@@ -7241,14 +6734,6 @@ fn stable_resource_claim_id(service_id: &str, resource_name: &str) -> String {
 }
 
 /// Store v1 has one installation slot for each service in the default scope.
-/// This identity deliberately excludes release, deployment, and Node so a
-/// retained resource survives upgrades, rollbacks, and rescheduling. Explicit
-/// multi-instance support must add a persisted slot id instead of changing this
-/// derivation implicitly.
-fn stable_service_instance_id(service_id: &str) -> String {
-    let digest = Sha256::digest(format!("default\0{service_id}").as_bytes());
-    format!("service-instance-{digest:x}")
-}
 
 fn resource_output_environment(resource_name: &str) -> String {
     let token = resource_name
@@ -7270,7 +6755,11 @@ fn build_runtime_materialization(
     requested_config: &Value,
     requested_secret_refs: &BTreeMap<String, String>,
 ) -> Result<Option<RuntimeMaterializationStep>, StoreApiError> {
-    let (config, schema_secrets, schema_controls_requiredness) = validate_release_config(
+    let ValidatedReleaseConfig {
+        values: config,
+        secret_paths: schema_secrets,
+        schema_controls_requiredness,
+    } = validate_release_config(
         &release.config_schema,
         requested_config,
         requested_secret_refs,
@@ -7393,460 +6882,6 @@ fn environment_token(value: &str) -> String {
             }
         })
         .collect()
-}
-
-type ValidatedReleaseConfig = (BTreeMap<String, String>, BTreeSet<String>, bool);
-
-fn validate_release_config(
-    schema: &Value,
-    requested: &Value,
-    requested_secret_refs: &BTreeMap<String, String>,
-) -> Result<ValidatedReleaseConfig, StoreApiError> {
-    if schema.get("$schema").is_some() {
-        let (config, secrets) =
-            validate_json_schema_config(schema, requested, requested_secret_refs)?;
-        return Ok((config, secrets, true));
-    }
-    let requested = match requested {
-        Value::Null => serde_json::Map::new(),
-        Value::Object(values) => values.clone(),
-        _ => {
-            return Err(StoreApiError::new(
-                422,
-                "STORE_CONFIG_INVALID",
-                "config must be a JSON object",
-            ));
-        }
-    };
-    let Some(schema) = schema.as_object() else {
-        if schema.is_null() {
-            if requested.is_empty() {
-                return Ok((BTreeMap::new(), BTreeSet::new(), false));
-            }
-            return Err(StoreApiError::new(
-                422,
-                "STORE_CONFIG_UNKNOWN",
-                "release declares no configurable fields",
-            ));
-        }
-        return Err(StoreApiError::new(
-            422,
-            "STORE_CONFIG_SCHEMA_INVALID",
-            "signed config_schema must be an object",
-        ));
-    };
-    let (properties, required, allow_extra) = if schema.contains_key("properties") {
-        let properties = schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                StoreApiError::new(
-                    422,
-                    "STORE_CONFIG_SCHEMA_INVALID",
-                    "config_schema.properties must be an object",
-                )
-            })?;
-        let required = schema
-            .get("required")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
-        let allow_extra = schema
-            .get("additionalProperties")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        (properties, required, allow_extra)
-    } else {
-        (schema, BTreeSet::new(), false)
-    };
-    let unknown = requested
-        .keys()
-        .filter(|key| !properties.contains_key(*key))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !allow_extra && !unknown.is_empty() {
-        return Err(StoreApiError::new(
-            422,
-            "STORE_CONFIG_UNKNOWN",
-            format!(
-                "config contains undeclared field(s): {}",
-                unknown.join(", ")
-            ),
-        ));
-    }
-    let mut output = BTreeMap::new();
-    let mut secrets = BTreeSet::new();
-    for (name, declaration) in properties {
-        let declaration = declaration.as_object().ok_or_else(|| {
-            StoreApiError::new(
-                422,
-                "STORE_CONFIG_SCHEMA_INVALID",
-                format!("config declaration {name} must be an object"),
-            )
-        })?;
-        let kind = declaration
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("string");
-        if kind == "secret" {
-            secrets.insert(name.clone());
-            if requested.contains_key(name) {
-                return Err(StoreApiError::new(
-                    422,
-                    "STORE_SECRET_VALUE_FORBIDDEN",
-                    format!("config field {name} is secret; submit only secret_refs.{name}"),
-                ));
-            }
-            continue;
-        }
-        let value = requested
-            .get(name)
-            .cloned()
-            .or_else(|| declaration.get("default").cloned());
-        let required =
-            required.contains(name) || declaration.get("required") == Some(&Value::Bool(true));
-        let Some(value) = value else {
-            if required {
-                return Err(StoreApiError::new(
-                    422,
-                    "STORE_CONFIG_REQUIRED",
-                    format!("config field {name} is required"),
-                ));
-            }
-            continue;
-        };
-        validate_config_value(name, kind, declaration, &value)?;
-        output.insert(name.clone(), scalar_config_value(name, &value)?);
-    }
-    if allow_extra {
-        for (name, value) in requested {
-            if !properties.contains_key(&name) {
-                output.insert(name.clone(), scalar_config_value(&name, &value)?);
-            }
-        }
-    }
-    Ok((output, secrets, false))
-}
-
-fn validate_json_schema_config(
-    schema: &Value,
-    requested: &Value,
-    requested_secret_refs: &BTreeMap<String, String>,
-) -> Result<(BTreeMap<String, String>, BTreeSet<String>), StoreApiError> {
-    let requested = match requested {
-        Value::Null => serde_json::Map::new(),
-        Value::Object(requested) => requested.clone(),
-        _ => {
-            return Err(StoreApiError::new(
-                422,
-                "STORE_CONFIG_INVALID",
-                "config must be a JSON object",
-            ));
-        }
-    };
-    reject_unsupported_config_schema_keywords(schema)?;
-    let mut secret_paths = BTreeSet::new();
-    collect_config_secret_paths(schema, "", &mut secret_paths)?;
-
-    for path in &secret_paths {
-        if json_path(&requested, path).is_some() {
-            return Err(StoreApiError::new(
-                422,
-                "STORE_SECRET_VALUE_FORBIDDEN",
-                format!("config field {path} is secret; submit only secret_refs.{path}"),
-            ));
-        }
-    }
-
-    // Secret references participate in conditional validation as opaque
-    // placeholders. The reference itself is never placed in the config map or
-    // exposed to schema expressions.
-    let unknown_secret_refs = requested_secret_refs
-        .keys()
-        .filter(|path| !secret_paths.contains(*path))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !unknown_secret_refs.is_empty() {
-        return Err(StoreApiError::new(
-            422,
-            "STORE_SECRET_REFS_INVALID",
-            format!(
-                "secret_refs contains undeclared JSON Schema field(s): {}",
-                unknown_secret_refs.join(", ")
-            ),
-        ));
-    }
-    let mut instance = Value::Object(requested.clone());
-    for path in requested_secret_refs.keys() {
-        insert_json_path(&mut instance, path, Value::String("opaque".to_string()))?;
-    }
-    let mut validation_schema = schema.clone();
-    relax_config_secret_value_constraints(&mut validation_schema);
-    let validator = jsonschema::options()
-        .with_draft(jsonschema::Draft::Draft202012)
-        .should_validate_formats(true)
-        .build(&validation_schema)
-        .map_err(|error| {
-            StoreApiError::new(
-                422,
-                "STORE_CONFIG_SCHEMA_INVALID",
-                format!("compile signed JSON Schema 2020-12: {error}"),
-            )
-        })?;
-    let errors = validator
-        .iter_errors(&instance)
-        .take(8)
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
-    if !errors.is_empty() {
-        return Err(StoreApiError::new(
-            422,
-            "STORE_CONFIG_INVALID",
-            format!(
-                "config does not satisfy signed JSON Schema: {}",
-                errors.join("; ")
-            ),
-        ));
-    }
-
-    let mut output = BTreeMap::new();
-    flatten_config_scalars("", &Value::Object(requested), &mut output)?;
-    Ok((output, secret_paths))
-}
-
-fn relax_config_secret_value_constraints(schema: &mut Value) {
-    match schema {
-        Value::Object(object) => {
-            let secret = object.get("writeOnly").and_then(Value::as_bool) == Some(true)
-                && object.get("x-ojos-secret").and_then(Value::as_bool) == Some(true);
-            if secret {
-                object.retain(|key, _| {
-                    matches!(
-                        key.as_str(),
-                        "type" | "writeOnly" | "x-ojos-secret" | "title" | "description"
-                    )
-                });
-                object.insert("type".to_string(), Value::String("string".to_string()));
-                return;
-            }
-            for child in object.values_mut() {
-                relax_config_secret_value_constraints(child);
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                relax_config_secret_value_constraints(value);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn reject_unsupported_config_schema_keywords(schema: &Value) -> Result<(), StoreApiError> {
-    fn visit(value: &Value) -> Result<(), StoreApiError> {
-        match value {
-            Value::Object(object) => {
-                for (key, child) in object {
-                    if matches!(
-                        key.as_str(),
-                        "unevaluatedProperties"
-                            | "patternProperties"
-                            | "propertyNames"
-                            | "contains"
-                            | "prefixItems"
-                    ) {
-                        return Err(StoreApiError::new(
-                            422,
-                            "STORE_CONFIG_SCHEMA_INVALID",
-                            format!(
-                                "JSON Schema keyword {key} is outside the supported configuration subset"
-                            ),
-                        ));
-                    }
-                    if key == "$ref"
-                        && !child.as_str().is_some_and(|reference| {
-                            reference.starts_with("#/") || reference.starts_with("sha256:")
-                        })
-                    {
-                        return Err(StoreApiError::new(
-                            422,
-                            "STORE_CONFIG_SCHEMA_INVALID",
-                            "JSON Schema $ref must be local or digest-pinned",
-                        ));
-                    }
-                    visit(child)?;
-                }
-            }
-            Value::Array(values) => {
-                for value in values {
-                    visit(value)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-    visit(schema)
-}
-
-fn collect_config_secret_paths(
-    schema: &Value,
-    prefix: &str,
-    output: &mut BTreeSet<String>,
-) -> Result<(), StoreApiError> {
-    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        for (name, declaration) in properties {
-            let path = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}.{name}")
-            };
-            let secret = declaration.get("writeOnly").and_then(Value::as_bool) == Some(true)
-                && declaration.get("x-ojos-secret").and_then(Value::as_bool) == Some(true);
-            if secret {
-                output.insert(path);
-            } else {
-                collect_config_secret_paths(declaration, &path, output)?;
-            }
-        }
-    }
-    for keyword in ["allOf", "anyOf", "oneOf"] {
-        if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
-            for branch in branches {
-                collect_config_secret_paths(branch, prefix, output)?;
-            }
-        }
-    }
-    for keyword in ["if", "then", "else", "not"] {
-        if let Some(branch) = schema.get(keyword) {
-            collect_config_secret_paths(branch, prefix, output)?;
-        }
-    }
-    Ok(())
-}
-
-fn json_path<'a>(root: &'a serde_json::Map<String, Value>, path: &str) -> Option<&'a Value> {
-    let mut value = root.get(path.split('.').next()?)?;
-    for segment in path.split('.').skip(1) {
-        value = value.as_object()?.get(segment)?;
-    }
-    Some(value)
-}
-
-fn insert_json_path(root: &mut Value, path: &str, value: Value) -> Result<(), StoreApiError> {
-    let mut segments = path.split('.').peekable();
-    let mut current = root;
-    while let Some(segment) = segments.next() {
-        if segments.peek().is_none() {
-            current
-                .as_object_mut()
-                .ok_or_else(|| {
-                    StoreApiError::new(
-                        422,
-                        "STORE_CONFIG_INVALID",
-                        format!("config parent for secret {path} must be an object"),
-                    )
-                })?
-                .entry(segment.to_string())
-                .or_insert(value.clone());
-            return Ok(());
-        }
-        let Some(object) = current.as_object_mut() else {
-            return Err(StoreApiError::new(
-                422,
-                "STORE_CONFIG_INVALID",
-                format!("config parent for secret {path} must be an object"),
-            ));
-        };
-        current = object
-            .entry(segment.to_string())
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    }
-    Ok(())
-}
-
-fn flatten_config_scalars(
-    prefix: &str,
-    value: &Value,
-    output: &mut BTreeMap<String, String>,
-) -> Result<(), StoreApiError> {
-    match value {
-        Value::Object(object) => {
-            for (name, value) in object {
-                let path = if prefix.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{prefix}.{name}")
-                };
-                flatten_config_scalars(&path, value, output)?;
-            }
-            Ok(())
-        }
-        Value::String(_) | Value::Bool(_) | Value::Number(_) => {
-            output.insert(prefix.to_string(), scalar_config_value(prefix, value)?);
-            Ok(())
-        }
-        Value::Null => Ok(()),
-        _ => Err(StoreApiError::new(
-            422,
-            "STORE_CONFIG_TYPE_INVALID",
-            format!("config field {prefix} must be a scalar or nested object"),
-        )),
-    }
-}
-
-fn validate_config_value(
-    name: &str,
-    kind: &str,
-    declaration: &serde_json::Map<String, Value>,
-    value: &Value,
-) -> Result<(), StoreApiError> {
-    let valid = match kind {
-        "string" => value.is_string(),
-        "boolean" | "bool" => value.is_boolean(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-        "number" => value.is_number(),
-        "enum" => declaration
-            .get("values")
-            .or_else(|| declaration.get("enum"))
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.contains(value)),
-        other => {
-            return Err(StoreApiError::new(
-                422,
-                "STORE_CONFIG_SCHEMA_INVALID",
-                format!("config field {name} has unsupported type {other}"),
-            ));
-        }
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(StoreApiError::new(
-            422,
-            "STORE_CONFIG_TYPE_INVALID",
-            format!("config field {name} does not satisfy type {kind}"),
-        ))
-    }
-}
-
-fn scalar_config_value(name: &str, value: &Value) -> Result<String, StoreApiError> {
-    match value {
-        Value::String(value) => Ok(value.clone()),
-        Value::Bool(value) => Ok(value.to_string()),
-        Value::Number(value) => Ok(value.to_string()),
-        _ => Err(StoreApiError::new(
-            422,
-            "STORE_CONFIG_TYPE_INVALID",
-            format!("config field {name} must be a scalar"),
-        )),
-    }
 }
 
 fn provider_token(value: &str) -> String {
@@ -8129,7 +7164,7 @@ fn checked_layout_size(path: &Path) -> Result<u64, StoreApiError> {
     Ok(total)
 }
 
-fn parse_release_channel(value: &str) -> Result<ReleaseChannel, StoreApiError> {
+pub(crate) fn parse_release_channel(value: &str) -> Result<ReleaseChannel, StoreApiError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "stable" | "" => Ok(ReleaseChannel::Stable),
         "beta" => Ok(ReleaseChannel::Beta),
@@ -8142,7 +7177,7 @@ fn parse_release_channel(value: &str) -> Result<ReleaseChannel, StoreApiError> {
     }
 }
 
-fn ensure_ready_docker_node(
+pub(crate) fn ensure_ready_docker_node(
     storage: &DurableStore,
     node: &NodeRecord,
 ) -> Result<(), StoreApiError> {
@@ -8170,7 +7205,7 @@ fn ensure_ready_docker_node(
     Ok(())
 }
 
-fn target_platform(
+pub(crate) fn target_platform(
     storage: &DurableStore,
     node: &NodeRecord,
 ) -> Result<TargetPlatform, StoreApiError> {
@@ -8190,7 +7225,7 @@ fn target_platform(
     Ok(TargetPlatform::new(normalize_os(os), normalize_arch(arch)))
 }
 
-fn node_runtime_facts(
+pub(crate) fn node_runtime_facts(
     storage: &DurableStore,
     node_id: &str,
 ) -> Result<NodeRuntimeFactsV1, StoreApiError> {
@@ -8255,7 +7290,7 @@ fn release_runtime_contract(
     Ok(selected)
 }
 
-fn ensure_release_runtime_supported(
+pub(crate) fn ensure_release_runtime_supported(
     storage: &DurableStore,
     node: &NodeRecord,
     contract: &ServiceReleaseContract,
@@ -8302,7 +7337,7 @@ fn host_platform() -> TargetPlatform {
     )
 }
 
-fn managed_service_context_spec(
+pub(crate) fn managed_service_context_spec(
     storage: &DurableStore,
     contract: &ServiceReleaseContract,
     node_id: &str,
@@ -8508,14 +7543,14 @@ fn required_workload_verifier_env(name: &str) -> Result<String, StoreApiError> {
         })
 }
 
-fn contract_has_retained_runtime_volume(contract: &ServiceReleaseContract) -> bool {
+pub(crate) fn contract_has_retained_runtime_volume(contract: &ServiceReleaseContract) -> bool {
     contract
         .platform
         .as_ref()
         .is_some_and(|platform| !platform.runtime_volumes.is_empty())
 }
 
-fn attach_release_runtime_volume(
+pub(crate) fn attach_release_runtime_volume(
     spec: &mut ContainerSpec,
     contract: &ServiceReleaseContract,
 ) -> Result<(), StoreApiError> {
@@ -8628,7 +7663,7 @@ fn managed_event_binding(
 // These values are the complete signed release/runtime binding and keeping
 // them explicit makes it difficult for a caller to omit one accidentally.
 #[allow(clippy::too_many_arguments)]
-fn container_spec(
+pub(crate) fn container_spec(
     deployment_id: &str,
     service_id: &str,
     version: &semver::Version,
@@ -8676,7 +7711,7 @@ fn container_spec(
     }
 }
 
-fn managed_published_endpoint(
+pub(crate) fn managed_published_endpoint(
     endpoint: &str,
     service_id: &str,
     node: &NodeRecord,
@@ -8770,7 +7805,7 @@ fn managed_published_endpoint(
     Ok(Some(published))
 }
 
-fn effective_managed_endpoint(
+pub(crate) fn effective_managed_endpoint(
     requested: &str,
     node: &NodeRecord,
     release: &ServiceReleaseManifest,
@@ -9002,11 +8037,6 @@ fn store_plan_guard() -> Result<std::sync::MutexGuard<'static, ()>, StoreApiErro
     })
 }
 
-fn deployment_id(service_id: &str, version: &semver::Version, node_id: &str) -> String {
-    let digest = Sha256::digest(format!("{service_id}\0{version}\0{node_id}").as_bytes());
-    format!("deployment-{service_id}-{:x}", digest)[..56].to_string()
-}
-
 fn operation_id(
     prefix: &str,
     target_id: &str,
@@ -9060,7 +8090,7 @@ fn required_text<'a>(value: &'a str, field: &str) -> Result<&'a str, StoreApiErr
     })
 }
 
-fn non_empty(value: &str) -> Option<&str> {
+pub(crate) fn non_empty(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()).then_some(value)
 }
@@ -9131,13 +8161,23 @@ pub(crate) struct StoreApiError {
 }
 
 impl StoreApiError {
-    fn new(status: u16, code: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(status: u16, code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             status,
             code,
             detail: detail.into(),
             operation_id: None,
         }
+    }
+}
+
+impl From<StoreRuleError> for StoreApiError {
+    fn from(error: StoreRuleError) -> Self {
+        let status = match error.kind {
+            StoreRuleErrorKind::InvalidInput => 422,
+            StoreRuleErrorKind::Conflict => 409,
+        };
+        Self::new(status, error.code, error.detail)
     }
 }
 
@@ -9149,11 +8189,11 @@ fn manager_error(error: anyhow::Error) -> StoreApiError {
     )
 }
 
-fn catalog_registry_error(error: CatalogRegistryError) -> StoreApiError {
+pub(crate) fn catalog_registry_error(error: CatalogRegistryError) -> StoreApiError {
     StoreApiError::new(error.status(), error.code(), error.detail())
 }
 
-fn storage_error(error: DurableError) -> StoreApiError {
+pub(crate) fn storage_error(error: DurableError) -> StoreApiError {
     let status = match &error {
         DurableError::Conflict(_) => 409,
         DurableError::Invariant(_) | DurableError::Domain(_) => 422,
@@ -9195,7 +8235,7 @@ fn contribution_controller_error(
     StoreApiError::new(status, error.code(), error.to_string())
 }
 
-fn core_error(error: orchestrator_legacy::OrchestratorError) -> StoreApiError {
+pub(crate) fn core_error(error: orchestrator_legacy::OrchestratorError) -> StoreApiError {
     StoreApiError::new(422, "STORE_RELEASE_INVALID", error.to_string())
 }
 

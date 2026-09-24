@@ -12,9 +12,9 @@ pub(crate) use orchestrator_manager::catalog_query::{
     CatalogPackageItem, CatalogSource, CatalogSourcePage, PackagePage, PackageQuery,
 };
 use orchestrator_manager::catalog_v2::{
-    CatalogResolveRequest, CatalogTrustStore, CatalogV2, CatalogV2Error, InstallPlanV2,
-    OciImageReference as CatalogOciImageReference, ReleaseChannel, ResolvedReleaseV2,
-    RuntimeCapabilityV2, TargetPlatform,
+    CatalogResolveRequest, CatalogTrustStore, CatalogV2, CatalogV2Error,
+    OciImageReference as CatalogOciImageReference, ReleaseChannel, RuntimeCapabilityV2,
+    TargetPlatform,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -93,22 +93,7 @@ fn default_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct ResolvedCatalogPlan {
-    pub source_id: String,
-    pub catalog_id: String,
-    pub verified_key_ids: Vec<String>,
-    pub plan: InstallPlanV2,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct VerifiedReleaseDocument {
-    pub selection: ResolvedReleaseV2,
-    pub source_url: String,
-    pub checksum: String,
-    pub bytes: Vec<u8>,
-    pub offline_oci_layout: Option<PathBuf>,
-}
+pub(crate) use orchestrator_manager::store::{ResolvedCatalogPlan, VerifiedReleaseDocument};
 
 #[derive(Debug, Clone)]
 pub(crate) struct CatalogRegistry {

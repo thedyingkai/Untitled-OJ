@@ -6,6 +6,7 @@
 pub mod catalog_query;
 pub mod catalog_v2;
 pub mod release_v2;
+pub mod store;
 
 pub use release_v2::{InstallModeV2, MigrationPolicyV2, ReleaseStateV2, RuntimeDesiredStateV2};
 
