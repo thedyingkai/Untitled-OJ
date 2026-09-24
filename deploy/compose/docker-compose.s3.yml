@@ -1,0 +1,62 @@
+# Explicit opt-in for NEW self-hosted object storage. See ../object-store/README.md.
+# This never mounts, upgrades, deletes or migrates the old minio-data volume.
+services:
+  object-store:
+    image: ojos-object-store:seaweedfs-4.47
+    build:
+      context: ../..
+      dockerfile: deploy/object-store/Dockerfile
+    env_file: ${OJOS_OBJECT_STORE_ENV_FILE:?Set a private credential env file outside the repository}
+    environment:
+      S3_ENDPOINT: 127.0.0.1:8334
+      S3_USE_SSL: "false"
+      S3_REGION: us-east-1
+      OJOS_STORAGE_BUCKETS: problems,submissions,judge-artifacts,avatars
+    # Fixed server arguments are owned by the image, not duplicated here.
+    expose: ["8333"]
+    ports: ["127.0.0.1:8333:8333"]
+    volumes: ["s3-data:/data"]
+    tmpfs: ["/tmp:mode=1777"]
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "ojos-object-store", "ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    restart: unless-stopped
+
+  object-store-init:
+    image: ojos-object-store:seaweedfs-4.47
+    env_file: ${OJOS_OBJECT_STORE_ENV_FILE:?Set a private credential env file outside the repository}
+    environment:
+      S3_ENDPOINT: object-store:8333
+      S3_USE_SSL: "false"
+      S3_REGION: us-east-1
+      OJOS_STORAGE_BUCKETS: problems,submissions,judge-artifacts,avatars
+    entrypoint: ["ojos-object-store", "provision"]
+    depends_on:
+      object-store:
+        condition: service_healthy
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+
+  storage-service:
+    depends_on:
+      object-store-init:
+        condition: service_completed_successfully
+    environment:
+      STORAGE_BACKEND: s3
+      S3_ENDPOINT: object-store:8333
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?Set the application key, not the provisioner key}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?Set the application secret, not the provisioner secret}
+      S3_USE_SSL: "false"
+      S3_REGION: us-east-1
+
+volumes:
+  s3-data:

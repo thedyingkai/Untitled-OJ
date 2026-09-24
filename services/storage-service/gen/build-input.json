@@ -2,19 +2,19 @@
   "schemaVersion": "ojos.dev/build-input/v1",
   "serviceId": "storage-service",
   "serviceVersion": "0.1.0",
-  "contractDigest": "sha256:25af6fba97d7961ec83c8e4ad3dfa266b04056146d73135ab1884335e4435b63",
+  "contractDigest": "sha256:2bab3bc784e3de56f65826a0ddf801473f5e7a647062991674a09381f8abfba8",
   "generatedFiles": 15,
   "artifactRequirements": [
     {
       "role": "config-schema",
       "slot": "config.schema",
-      "expectedDigest": "sha256:4f26f66c34655deabc7698cfc049343184e20d8f97fd1adeed4eea12e23169ef",
+      "expectedDigest": "sha256:42bcb2dc45ef13140838535e3166ff436cbb418cc8c63b9720d01e9329ffe7ce",
       "expectedSize": null
     },
     {
       "role": "contract",
       "slot": "contract",
-      "expectedDigest": "sha256:25af6fba97d7961ec83c8e4ad3dfa266b04056146d73135ab1884335e4435b63",
+      "expectedDigest": "sha256:2bab3bc784e3de56f65826a0ddf801473f5e7a647062991674a09381f8abfba8",
       "expectedSize": 7362
     },
     {

@@ -8,7 +8,7 @@
 - Docker Compose v2。
 - 每个生产数据库使用 PostgreSQL 17 兼容服务。
 - Redis 8.8 兼容服务，启用密码认证和持久化。
-- MinIO `RELEASE.2025-09-07T16-13-09Z` 或兼容的 S3 端点。
+- S3 兼容端点；新自托管部署使用固定摘要的 SeaweedFS 4.47，见[部署与迁移说明](../../deploy/object-store/README.md)。已有 MinIO 需显式保留或迁移，不能复用其旧数据卷启动新 provider。
 - B 节点由已注册的 Orchestrator Agent 运行 Judge Worker；镜像提供 `nsjail`，节点必须支持 cgroup v2，并在本地策略中允许签名的 `judge-sandbox-v1` profile/digest。
 - 运维脚本工具链：`bash`、`curl`、`jq`、`docker`、`pg_dump`、`pg_restore`、`redis-cli`、`mc`、`sha256sum`。
 - 从源码构建 Web UI 时使用 Node.js 24.11；CI 和 Dockerfile 采用同一版本。
@@ -33,9 +33,9 @@
 - `AUTH_POSTGRES_PASSWORD`、`PROBLEM_POSTGRES_PASSWORD`、`JUDGE_POSTGRES_PASSWORD`、`USER_POSTGRES_PASSWORD`、`ORCHESTRATOR_POSTGRES_PASSWORD`：至少 20 字符。
 - `AUTH_DATABASE_URL`、`PROBLEM_DATABASE_URL`、`JUDGE_DATABASE_URL`、`USER_DATABASE_URL`、`ORCHESTRATOR_DATABASE_URL`：密码认证的 PostgreSQL URL，不使用默认 `postgres` 用户。预检无法识别其它被授予 `rolsuper` 的角色，上线前还要查询 `pg_roles` 核对。
 - `REDIS_PASSWORD` 和 `REDIS_URL`：密码认证的 Redis URL。
-- `MINIO_ROOT_USER`、`MINIO_ROOT_PASSWORD`、`MINIO_ACCESS_KEY`、`MINIO_SECRET_KEY`。
+- `S3_ACCESS_KEY`、`S3_SECRET_KEY`；对象存储管理凭据单独保存，不下发业务服务。旧 MinIO 部署继续使用原 `MINIO_*` 配置。
 - 标准 preflight 会检查仓库内默认监控 Compose，因此要求 `OJOS_ALERT_WEBHOOK_URL` 和 `GRAFANA_ADMIN_PASSWORD`。明确不部署监控时，设置 `OJOS_SKIP_MONITORING_CHECKS=1`；否则自定义监控 Compose 路径缺失会直接失败，避免路径拼错后悄悄跳过检查。
-- 可选的传输安全强制：设置 `OJOS_SECRET_CHECK_REQUIRE_TLS=1` 时，`REDIS_URL` 必须为 `rediss://`，`MINIO_USE_SSL` 必须为 `true`（默认关闭，取决于 PKI/证书决策）。
+- 可选的传输安全强制：设置 `OJOS_SECRET_CHECK_REQUIRE_TLS=1` 时，`REDIS_URL` 必须为 `rediss://`，`S3_USE_SSL`（旧配置为 `MINIO_USE_SSL`）必须为 `true`。
 
 不要把 `AUTH_INTERNAL_TOKEN` 当作 workload 或业务服务凭据。Service Contract v2 的调用权限来自已应用
 ApiBinding，Agent 用 Node mTLS 兑换每 Deployment 独立的 15 分钟 JWT；容器只读取只读 service context 与

@@ -69,15 +69,20 @@ type Options struct {
 	Backend string
 	Root    string
 	Buckets []string
+	S3      S3Options
 	MinIO   MinIOOptions
 }
 
-type MinIOOptions struct {
+type S3Options struct {
 	Endpoint  string
 	AccessKey string
 	SecretKey string
 	UseSSL    bool
+	Region    string
 }
+
+// MinIOOptions preserves the legacy configuration API. New deployments use S3.
+type MinIOOptions = S3Options
 
 func NewObjectStorage(options Options) (ObjectStorage, error) {
 	switch strings.ToLower(strings.TrimSpace(options.Backend)) {
@@ -85,6 +90,8 @@ func NewObjectStorage(options Options) (ObjectStorage, error) {
 		return NewObjectStore(options.Root, options.Buckets)
 	case "minio":
 		return NewMinIOObjectStore(options.MinIO, options.Buckets)
+	case "s3":
+		return NewS3ObjectStore(options.S3, options.Buckets)
 	default:
 		return nil, fmt.Errorf("unsupported storage backend %q", options.Backend)
 	}

@@ -19,7 +19,7 @@ judge-worker
 postgresql
 redis
 storage-service
-minio
+minio (旧部署兼容元数据)
 jaeger
 orchestrator
 ```
@@ -32,7 +32,7 @@ orchestrator
 - user-service 管用户资料、头像、偏好和统计信息。
 - problem-service 构建确定性内容寻址题包，并通过 transactional outbox 发布 snapshot/tombstone；judge-api 用 inbox/projection 自动同步题目，不允许手工写 Judge 数据库。
 - judge-api 接收提交、管理队列和结果状态；Store 部署的 judge-worker 通过 Gateway 长轮询、校验下载源码/题包、在本机沙箱执行并上报结果。Worker 不直连 A 机 PostgreSQL、Redis、MinIO 或 Judge API 私有端口。
-- PostgreSQL、Redis、storage-service、MinIO 和 Jaeger 即使由外部系统提供，也要以 Service 和 Endpoint 的形式进入 Topology。
+- PostgreSQL、Redis、storage-service、S3 对象存储和 Jaeger 即使由外部系统提供，也要以 Service 和 Endpoint 的形式进入 Topology。新自托管 S3 使用 [SeaweedFS](../../deploy/object-store/README.md)；旧 MinIO 描述只保留历史兼容。
 - orchestrator manifest 只声明控制面自身，不扩大 core 对象集合。
 
 Service 不能自行写全局 Topology，也不能绕过 Orchestrator 创建 Link/ApiBinding。secret 只写引用名；生产 workload 身份由 Agent 物化的短期 Deployment JWT 提供，不使用共享 service/worker token。

@@ -197,11 +197,11 @@ Problem RETAIN volume；设置 `OJOS_RESTORE_PROBLEM_RETAINED_VOLUME_OWNER_INSTA
 运行预检、逐服务冒烟和业务对象读回，旧环境和备份在验收期结束前不得清理。
 
 季度恢复演练必须使用全新五数据库、Redis 和对象存储命名空间，记录 manifest digest、组件探针、RPO/RTO
-以及切流/回切结果。`OJOS_RESTORE_FAILPOINT` 只可在隔离演练中验证 `after-databases`、`after-redis`、
-`after-storage`、`after-retained-volume`、`after-components` 边界。`deploy/ops/tests/full-stack-backup-restore-drill.sh` 提供本地存储
-profile 的 clean-target 基准演练；它还把 Problem live tree、未决 mutation journal、数据库 outbox 与 immutable
-artifact reference 一起恢复并对账。每次运行必须重新创建脚本要求的专用 target 数据库。MinIO profile 仍须在
-独立命名空间执行同样的 manifest inventory 与对象读回验收。
+以及切流/回切结果。软件故障注入与演练驱动仅存在于仓库外的独立验证目录，产品恢复脚本
+不提供测试用中断开关。验收还需把 Problem live tree、未决 mutation journal、数据库 outbox 与 immutable
+artifact reference 一起恢复并对账。每次运行必须重新创建专用 target 数据库；S3 存储也须在独立
+命名空间执行 manifest inventory、对象内容与元数据读回验收。跨 provider 切换另见
+[S3 迁移说明](../../deploy/object-store/README.md)，不能用本地文件镜像替代完整元数据迁移。
 
 ## Trace
 

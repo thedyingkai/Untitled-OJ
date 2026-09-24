@@ -5,6 +5,9 @@
 
 ## Orchestrator v1 上线前检查
 
+新自托管对象存储及旧 MinIO 数据切换见[自托管 S3](../object-store/README.md)。基础
+Compose 不再自动拉取旧 MinIO/MC 镜像；S3 配方需要显式叠加，现有卷不会自动替换。
+
 从仓库根目录的 `.env.production.example` 准备真实环境文件，然后运行：
 
 ```bash

@@ -46,6 +46,13 @@ func BuildServiceContext(c config.Config) (result *ServiceContext, startupErr er
 		Backend: c.Storage.Backend,
 		Root:    c.Storage.Root,
 		Buckets: c.Storage.Buckets,
+		S3: store.S3Options{
+			Endpoint:  c.Storage.S3.Endpoint,
+			AccessKey: c.Storage.S3.AccessKey,
+			SecretKey: c.Storage.S3.SecretKey,
+			UseSSL:    c.Storage.S3.UseSSL,
+			Region:    c.Storage.S3.Region,
+		},
 		MinIO: store.MinIOOptions{
 			Endpoint:  c.Storage.MinIO.Endpoint,
 			AccessKey: c.Storage.MinIO.AccessKey,

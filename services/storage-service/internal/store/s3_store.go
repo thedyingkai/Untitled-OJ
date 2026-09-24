@@ -23,34 +23,48 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-type MinIOObjectStore struct {
+type S3ObjectStore struct {
 	client  *minio.Client
+	backend string
 	buckets map[string]struct{}
 	now     func() time.Time
 	mu      sync.Mutex
 }
 
+// MinIOObjectStore is a source-compatible alias for the legacy constructor.
+type MinIOObjectStore = S3ObjectStore
+
 func NewMinIOObjectStore(options MinIOOptions, buckets []string) (*MinIOObjectStore, error) {
+	return newS3ObjectStore(options, buckets, "minio")
+}
+
+func NewS3ObjectStore(options S3Options, buckets []string) (*S3ObjectStore, error) {
+	return newS3ObjectStore(options, buckets, "s3")
+}
+
+func newS3ObjectStore(options S3Options, buckets []string, backend string) (*S3ObjectStore, error) {
 	endpoint := strings.TrimSpace(options.Endpoint)
 	if endpoint == "" {
-		return nil, fmt.Errorf("minio endpoint is required")
+		return nil, fmt.Errorf("s3 endpoint is required")
 	}
 	accessKey := strings.TrimSpace(options.AccessKey)
 	secretKey := strings.TrimSpace(options.SecretKey)
 	if accessKey == "" || secretKey == "" {
-		return nil, fmt.Errorf("minio access key and secret key are required")
+		return nil, fmt.Errorf("s3 access key and secret key are required")
 	}
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:        credentials.NewStaticV4(accessKey, secretKey, ""),
 		Secure:       options.UseSSL,
+		Region:       strings.TrimSpace(options.Region),
 		BucketLookup: minio.BucketLookupPath,
 		MaxRetries:   1,
 	})
 	if err != nil {
 		return nil, err
 	}
-	store := &MinIOObjectStore{
+	store := &S3ObjectStore{
 		client:  client,
+		backend: backend,
 		buckets: bucketSet(buckets),
 		now:     time.Now,
 	}
@@ -60,27 +74,27 @@ func NewMinIOObjectStore(options MinIOOptions, buckets []string) (*MinIOObjectSt
 	return store, nil
 }
 
-func (s *MinIOObjectStore) Backend() string {
-	return "minio"
+func (s *S3ObjectStore) Backend() string {
+	return s.backend
 }
 
-func (s *MinIOObjectStore) Ready(ctx context.Context) error {
+func (s *S3ObjectStore) Ready(ctx context.Context) error {
 	if s == nil || s.client == nil {
-		return errors.New("minio client is unavailable")
+		return errors.New("s3 client is unavailable")
 	}
 	for _, bucket := range s.BucketNames() {
 		exists, err := s.client.BucketExists(ctx, bucket)
 		if err != nil {
-			return fmt.Errorf("minio bucket %s readiness: %w", bucket, err)
+			return fmt.Errorf("s3 bucket %s readiness: %w", bucket, err)
 		}
 		if !exists {
-			return fmt.Errorf("minio bucket %s is unavailable", bucket)
+			return fmt.Errorf("s3 bucket %s is unavailable", bucket)
 		}
 	}
 	return nil
 }
 
-func (s *MinIOObjectStore) BucketNames() []string {
+func (s *S3ObjectStore) BucketNames() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -92,7 +106,7 @@ func (s *MinIOObjectStore) BucketNames() []string {
 	return names
 }
 
-func (s *MinIOObjectStore) EnsureBucket(bucket string) (bool, error) {
+func (s *S3ObjectStore) EnsureBucket(bucket string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -103,7 +117,7 @@ func (s *MinIOObjectStore) EnsureBucket(bucket string) (bool, error) {
 	return created, nil
 }
 
-func (s *MinIOObjectStore) Put(ctx context.Context, bucket, key string, options PutOptions, body io.Reader) (types.ObjectMetadata, error) {
+func (s *S3ObjectStore) Put(ctx context.Context, bucket, key string, options PutOptions, body io.Reader) (types.ObjectMetadata, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -201,7 +215,7 @@ func (s *MinIOObjectStore) Put(ctx context.Context, bucket, key string, options 
 	return meta, nil
 }
 
-func (s *MinIOObjectStore) List(ctx context.Context, bucket, prefix, cursor string, limit int) (ObjectPage, error) {
+func (s *S3ObjectStore) List(ctx context.Context, bucket, prefix, cursor string, limit int) (ObjectPage, error) {
 	if err := s.ensureConfiguredBucket(bucket); err != nil {
 		return ObjectPage{}, err
 	}
@@ -246,7 +260,7 @@ func (s *MinIOObjectStore) List(ctx context.Context, bucket, prefix, cursor stri
 	return page, nil
 }
 
-func (s *MinIOObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket, key string) error {
+func (s *S3ObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket, key string) error {
 	key, err := cleanObjectKey(key)
 	if err != nil {
 		return err
@@ -279,15 +293,15 @@ func (s *MinIOObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket,
 	defer object.Close()
 	written, err := io.CopyN(w, object, meta.SizeBytes)
 	if err != nil {
-		return fmt.Errorf("stream MinIO object %s/%s after %d of %d bytes: %w", bucket, key, written, meta.SizeBytes, err)
+		return fmt.Errorf("stream S3 object %s/%s after %d of %d bytes: %w", bucket, key, written, meta.SizeBytes, err)
 	}
 	if written != meta.SizeBytes {
-		return fmt.Errorf("stream MinIO object %s/%s: wrote %d of %d bytes", bucket, key, written, meta.SizeBytes)
+		return fmt.Errorf("stream S3 object %s/%s: wrote %d of %d bytes", bucket, key, written, meta.SizeBytes)
 	}
 	return nil
 }
 
-func (s *MinIOObjectStore) Delete(bucket, key string) error {
+func (s *S3ObjectStore) Delete(bucket, key string) error {
 	key, err := cleanObjectKey(key)
 	if err != nil {
 		return err
@@ -298,7 +312,7 @@ func (s *MinIOObjectStore) Delete(bucket, key string) error {
 	return s.client.RemoveObject(context.Background(), bucket, key, minio.RemoveObjectOptions{})
 }
 
-func (s *MinIOObjectStore) DeleteIfMatches(ctx context.Context, bucket, key, expectedSHA256 string, expectedSize int64) error {
+func (s *S3ObjectStore) DeleteIfMatches(ctx context.Context, bucket, key, expectedSHA256 string, expectedSize int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -317,22 +331,22 @@ func (s *MinIOObjectStore) DeleteIfMatches(ctx context.Context, bucket, key, exp
 		return ErrPreconditionFailed
 	}
 	// All writes through this provider share mu. The key is content-addressed,
-	// and MinIO access is not exposed to consumers, so the stat/remove pair is
+	// and S3 access is not exposed to consumers, so the stat/remove pair is
 	// the provider's atomic conditional-delete boundary.
 	return s.client.RemoveObject(ctx, bucket, key, minio.RemoveObjectOptions{})
 }
 
-func (s *MinIOObjectStore) Metadata(bucket, key string) (types.ObjectMetadata, error) {
+func (s *S3ObjectStore) Metadata(bucket, key string) (types.ObjectMetadata, error) {
 	return s.metadata(context.Background(), bucket, key)
 }
 
-func (s *MinIOObjectStore) metadata(ctx context.Context, bucket, key string) (types.ObjectMetadata, error) {
+func (s *S3ObjectStore) metadata(ctx context.Context, bucket, key string) (types.ObjectMetadata, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.metadataLocked(ctx, bucket, key)
 }
 
-func (s *MinIOObjectStore) metadataLocked(ctx context.Context, bucket, key string) (types.ObjectMetadata, error) {
+func (s *S3ObjectStore) metadataLocked(ctx context.Context, bucket, key string) (types.ObjectMetadata, error) {
 	key, err := cleanObjectKey(key)
 	if err != nil {
 		return types.ObjectMetadata{}, err
@@ -360,7 +374,7 @@ func (s *MinIOObjectStore) metadataLocked(ctx context.Context, bucket, key strin
 	return meta, nil
 }
 
-func (s *MinIOObjectStore) ensureBuckets(ctx context.Context) error {
+func (s *S3ObjectStore) ensureBuckets(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -372,7 +386,7 @@ func (s *MinIOObjectStore) ensureBuckets(ctx context.Context) error {
 	return nil
 }
 
-func (s *MinIOObjectStore) ensureBucketLocked(ctx context.Context, bucket string) (bool, error) {
+func (s *S3ObjectStore) ensureBucketLocked(ctx context.Context, bucket string) (bool, error) {
 	if err := validateBucket(bucket); err != nil {
 		return false, err
 	}
@@ -390,13 +404,13 @@ func (s *MinIOObjectStore) ensureBucketLocked(ctx context.Context, bucket string
 	return !configured || !existed, nil
 }
 
-func (s *MinIOObjectStore) ensureConfiguredBucket(bucket string) error {
+func (s *S3ObjectStore) ensureConfiguredBucket(bucket string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ensureConfiguredBucketLocked(bucket)
 }
 
-func (s *MinIOObjectStore) ensureConfiguredBucketLocked(bucket string) error {
+func (s *S3ObjectStore) ensureConfiguredBucketLocked(bucket string) error {
 	if err := validateBucket(bucket); err != nil {
 		return err
 	}

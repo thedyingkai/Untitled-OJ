@@ -98,4 +98,8 @@ Auth 必须连接 PostgreSQL，不保留内存冒烟认证或临时授权投影�
 
 更细的取舍见 [耦合决策](coupling-decisions.md)，持久化见 [编排器数据库](../orchestrator/database.md)，交付方式见 [构建与交付](../release/README.md)。
 
+对象存储以 S3 协议为边界，Storage 的运行适配器与供应端账号/桶初始化分别归属
+`internal/store` 和 `internal/objectstoredeploy`。新自托管使用 SeaweedFS，旧 MinIO
+配置和数据保留兼容；部署配方与安全切换见[自托管 S3](../../deploy/object-store/README.md)。
+
 目录中两个 `manager` 含义不同：顶层 `manager/` 放客户端与原生安装器，`services/orchestrator/manager` 是 Rust Catalog/Store 应用与旧 Console 适配。本轮保留已被构建、安装器和发布路径引用的目录名；通过模块入口和明确依赖区分职责，不为统一字面命名扩大部署变更。前端已把实现迁到所属功能目录，旧文件名只作为兼容导出保留。

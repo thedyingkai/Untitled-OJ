@@ -230,10 +230,15 @@ require_secret ORCHESTRATOR_GATEWAY_ADMIN_TOKEN 32
 require_secret ORCHESTRATOR_AUTH_ADMIN_TOKEN 32
 require_enabled_flag ORCHESTRATOR_REQUIRE_RELEASE_CHECKSUM
 require_secret REDIS_PASSWORD 20
-require_secret MINIO_ROOT_USER 8
-require_secret MINIO_ROOT_PASSWORD 32
-require_secret MINIO_ACCESS_KEY 8
-require_secret MINIO_SECRET_KEY 32
+if [[ "$(value_for STORAGE_BACKEND)" == s3 || -n "$(value_for S3_ENDPOINT)" ]]; then
+  require_secret S3_ACCESS_KEY 16
+  require_secret S3_SECRET_KEY 32
+else
+  require_secret MINIO_ROOT_USER 8
+  require_secret MINIO_ROOT_PASSWORD 32
+  require_secret MINIO_ACCESS_KEY 8
+  require_secret MINIO_SECRET_KEY 32
+fi
 require_secret AUTH_POSTGRES_PASSWORD 20
 require_secret ORCHESTRATOR_POSTGRES_PASSWORD 20
 
@@ -377,8 +382,12 @@ fi
 if [[ "${OJOS_SECRET_CHECK_REQUIRE_TLS:-0}" == "1" ]]; then
   redis_url="$(value_for REDIS_URL)"
   [[ "$redis_url" =~ ^rediss:// ]] || die "OJOS_SECRET_CHECK_REQUIRE_TLS=1 requires REDIS_URL to use the rediss:// (TLS) scheme"
-  minio_ssl="$(printf '%s' "$(value_for MINIO_USE_SSL)" | tr '[:upper:]' '[:lower:]')"
-  [[ "$minio_ssl" == "true" ]] || die "OJOS_SECRET_CHECK_REQUIRE_TLS=1 requires MINIO_USE_SSL=true"
+  storage_tls_variable=MINIO_USE_SSL
+  if [[ "$(value_for STORAGE_BACKEND)" == s3 || -n "$(value_for S3_ENDPOINT)" ]]; then
+    storage_tls_variable=S3_USE_SSL
+  fi
+  storage_ssl="$(printf '%s' "$(value_for "$storage_tls_variable")" | tr '[:upper:]' '[:lower:]')"
+  [[ "$storage_ssl" == "true" ]] || die "OJOS_SECRET_CHECK_REQUIRE_TLS=1 requires $storage_tls_variable=true"
 fi
 
 echo "secret-check: production secret policy passed"

@@ -29,15 +29,19 @@ type StorageConfig struct {
 	Backend string
 	Root    string
 	Buckets []string
-	MinIO   MinIOConfig
+	S3      S3Config    `json:",optional"`
+	MinIO   MinIOConfig `json:",optional"`
 }
 
-type MinIOConfig struct {
+type S3Config struct {
 	Endpoint  string
 	AccessKey string
 	SecretKey string
 	UseSSL    bool
+	Region    string `json:",optional"`
 }
+
+type MinIOConfig = S3Config
 
 type WorkloadIdentityConfig struct {
 	PublicKeyPEM  string `json:",optional"`
@@ -70,7 +74,9 @@ func ApplyEnvironment(c *Config) error {
 	if ManagedEnvironment() {
 		return applyManagedEnvironment(c)
 	}
-	applyDevelopmentEnvironment(c)
+	if err := applyDevelopmentEnvironment(c); err != nil {
+		return err
+	}
 	return validateRuntimeMode(c, ProductionEnvironment())
 }
 
@@ -78,6 +84,7 @@ func applyManagedEnvironment(c *Config) error {
 	for _, name := range []string{
 		"STORAGE_BACKEND", "OJOS_STORAGE_BACKEND", "OJOS_STORAGE_ROOT", "OJOS_STORAGE_BUCKETS",
 		"MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_USE_SSL",
+		"S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_USE_SSL", "S3_REGION",
 	} {
 		if strings.TrimSpace(os.Getenv(name)) != "" {
 			return fmt.Errorf("managed storage rejects legacy configuration variable %s", name)
@@ -102,6 +109,17 @@ func applyManagedEnvironment(c *Config) error {
 	}
 	c.Storage.MinIO.AccessKey = env("OJOS_SECRET_MINIOACCESSKEY")
 	c.Storage.MinIO.SecretKey = env("OJOS_SECRET_MINIOSECRETKEY")
+	c.Storage.S3.Endpoint = env("OJOS_CONFIG_S3ENDPOINT")
+	c.Storage.S3.Region = env("OJOS_CONFIG_S3REGION")
+	c.Storage.S3.AccessKey = env("OJOS_SECRET_S3ACCESSKEY")
+	c.Storage.S3.SecretKey = env("OJOS_SECRET_S3SECRETKEY")
+	if value := env("OJOS_CONFIG_S3USESSL"); value != "" {
+		parsed, err := parseStrictBool(value)
+		if err != nil {
+			return fmt.Errorf("OJOS_CONFIG_S3USESSL: %w", err)
+		}
+		c.Storage.S3.UseSSL = parsed
+	}
 	c.WorkloadIdentity.PublicKeyFile = env("OJOS_WORKLOAD_PUBLIC_KEY_FILE")
 	c.WorkloadIdentity.KeyID = env("OJOS_WORKLOAD_KEY_ID")
 	c.WorkloadIdentity.Issuer = env("OJOS_WORKLOAD_ISSUER")
@@ -112,7 +130,7 @@ func applyManagedEnvironment(c *Config) error {
 	return validateRuntimeMode(c, true)
 }
 
-func applyDevelopmentEnvironment(c *Config) {
+func applyDevelopmentEnvironment(c *Config) error {
 	if value := firstEnv("STORAGE_BACKEND", "OJOS_STORAGE_BACKEND"); value != "" {
 		c.Storage.Backend = value
 	}
@@ -136,6 +154,23 @@ func applyDevelopmentEnvironment(c *Config) {
 			c.Storage.MinIO.UseSSL = parsed
 		}
 	}
+	for name, target := range map[string]*string{
+		"S3_ENDPOINT":   &c.Storage.S3.Endpoint,
+		"S3_ACCESS_KEY": &c.Storage.S3.AccessKey,
+		"S3_SECRET_KEY": &c.Storage.S3.SecretKey,
+		"S3_REGION":     &c.Storage.S3.Region,
+	} {
+		if value := env(name); value != "" {
+			*target = value
+		}
+	}
+	if value := env("S3_USE_SSL"); value != "" {
+		parsed, err := parseStrictBool(value)
+		if err != nil {
+			return fmt.Errorf("S3_USE_SSL: %w", err)
+		}
+		c.Storage.S3.UseSSL = parsed
+	}
 	if value := env("JAEGER_ENDPOINT"); value != "" {
 		c.Jaeger.Endpoint = value
 	}
@@ -154,6 +189,7 @@ func applyDevelopmentEnvironment(c *Config) {
 	if value := env("OJOS_WORKLOAD_AUDIENCE"); value != "" {
 		c.WorkloadIdentity.Audience = value
 	}
+	return nil
 }
 
 func validateRuntimeMode(c *Config, managed bool) error {
@@ -165,14 +201,20 @@ func validateRuntimeMode(c *Config, managed bool) error {
 	if len(c.Storage.Buckets) == 0 {
 		return fmt.Errorf("at least one storage bucket is required")
 	}
-	if managed && backend != "minio" {
-		return fmt.Errorf("managed production storage requires the minio backend")
+	if managed && backend != "minio" && backend != "s3" {
+		return fmt.Errorf("managed production storage requires the s3 backend (minio is a compatibility alias)")
 	}
 	if managed && (strings.TrimSpace(c.WorkloadIdentity.PublicKeyFile) == "" || strings.TrimSpace(c.WorkloadIdentity.KeyID) == "" || strings.TrimSpace(c.WorkloadIdentity.Issuer) == "" || strings.TrimSpace(c.WorkloadIdentity.Audience) == "") {
 		return fmt.Errorf("managed production storage requires the platform workload verifier file and trust tuple")
 	}
 	if backend == "minio" && (strings.TrimSpace(c.Storage.MinIO.Endpoint) == "" || strings.TrimSpace(c.Storage.MinIO.AccessKey) == "" || strings.TrimSpace(c.Storage.MinIO.SecretKey) == "") {
 		return fmt.Errorf("minio endpoint, access key, and secret key are required")
+	}
+	if backend == "s3" && (strings.TrimSpace(c.Storage.S3.Endpoint) == "" || strings.TrimSpace(c.Storage.S3.AccessKey) == "" || strings.TrimSpace(c.Storage.S3.SecretKey) == "") {
+		return fmt.Errorf("s3 endpoint, access key, and secret key are required")
+	}
+	if backend != "local" && backend != "minio" && backend != "s3" {
+		return fmt.Errorf("unsupported storage backend %q", c.Storage.Backend)
 	}
 	return nil
 }

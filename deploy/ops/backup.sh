@@ -56,6 +56,8 @@ normalize_bucket_list() {
 }
 
 load_env_file
+source "$script_dir/s3-environment.sh"
+normalize_s3_environment
 for command_name in cmp cp date find jq pg_dump pg_restore python3 sha256sum sort tar; do need_cmd "$command_name"; done
 
 environment="${OJOS_ENVIRONMENT:-production}"

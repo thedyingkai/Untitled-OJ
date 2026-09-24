@@ -11,7 +11,7 @@
     },
     "backend": {
       "type": "string",
-      "enum": ["local", "minio"]
+      "enum": ["local", "s3", "minio"]
     },
     "buckets": {
       "type": "string",
@@ -20,6 +20,29 @@
     "localRoot": {
       "type": "string",
       "minLength": 1
+    },
+    "s3Endpoint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "s3UseSSL": {
+      "type": "boolean"
+    },
+    "s3Region": {
+      "type": "string",
+      "minLength": 1
+    },
+    "s3AccessKey": {
+      "type": "string",
+      "minLength": 1,
+      "writeOnly": true,
+      "x-ojos-secret": true
+    },
+    "s3SecretKey": {
+      "type": "string",
+      "minLength": 8,
+      "writeOnly": true,
+      "x-ojos-secret": true
     },
     "minioEndpoint": {
       "type": "string",
@@ -52,7 +75,9 @@
       "not": {
         "anyOf": [
           {"required": ["minioAccessKey"]},
-          {"required": ["minioSecretKey"]}
+          {"required": ["minioSecretKey"]},
+          {"required": ["s3AccessKey"]},
+          {"required": ["s3SecretKey"]}
         ]
       }
     },
@@ -66,7 +91,27 @@
         "minioUseSSL",
         "minioAccessKey",
         "minioSecretKey"
-      ]
+      ],
+      "not": {"anyOf": [
+        {"required": ["s3Endpoint"]},
+        {"required": ["s3UseSSL"]},
+        {"required": ["s3Region"]},
+        {"required": ["s3AccessKey"]},
+        {"required": ["s3SecretKey"]}
+      ]}
+    },
+    {
+      "properties": {
+        "mode": {"const": "production"},
+        "backend": {"const": "s3"}
+      },
+      "required": ["s3Endpoint", "s3UseSSL", "s3AccessKey", "s3SecretKey"],
+      "not": {"anyOf": [
+        {"required": ["minioEndpoint"]},
+        {"required": ["minioUseSSL"]},
+        {"required": ["minioAccessKey"]},
+        {"required": ["minioSecretKey"]}
+      ]}
     }
   ]
 }

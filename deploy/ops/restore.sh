@@ -47,6 +47,8 @@ validate_shell_command() {
 directory_is_empty() { [[ -d "$1" ]] && [[ -z "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit)" ]]; }
 
 load_env_file
+source "$script_dir/s3-environment.sh"
+normalize_s3_environment
 for command_name in chown cmp cp find jq pg_restore psql python3 sha256sum stat tar; do need_cmd "$command_name"; done
 restore_dir="${OJOS_RESTORE_DIR:-${1:-}}"
 [[ -n "$restore_dir" && -d "$restore_dir" ]] || die "set OJOS_RESTORE_DIR or pass a backup directory"
@@ -109,10 +111,6 @@ for command_variable in OJOS_RESTORE_CUTOVER_COMMAND OJOS_RESTORE_ROLLBACK_COMMA
   OJOS_RESTORE_FAILED_TARGET_CLEANUP_COMMAND; do
   [[ -z "${!command_variable:-}" ]] || validate_shell_command "${!command_variable}" "$command_variable"
 done
-case "${OJOS_RESTORE_FAILPOINT:-}" in
-  ""|after-databases|after-redis|after-storage|after-retained-volume|after-components) ;;
-  *) die "unsupported OJOS_RESTORE_FAILPOINT" ;;
-esac
 
 work_root="${OJOS_RESTORE_WORK_ROOT:-$(dirname "$restore_dir")/.ojos-restore-work}"
 safe_directory "$work_root" "OJOS_RESTORE_WORK_ROOT"
@@ -286,7 +284,6 @@ for spec in "${db_specs[@]}"; do
     die "$name restore is missing required table $required_table"
 done
 
-[[ "${OJOS_RESTORE_FAILPOINT:-}" != "after-databases" ]] || die "injected failure after databases"
 
 redis_included="$(jq -r '.components.redis.included' "$restore_dir/manifest.json")"
 if [[ "$redis_included" == "true" ]]; then
@@ -317,7 +314,6 @@ if [[ "$redis_included" == "true" ]]; then
   mv "$redis_stage" "$redis_rdb_path"
   [[ "$(stat -c '%a' "$redis_rdb_path")" == "600" ]] || die "restored Redis RDB mode is not 0600"
 fi
-[[ "${OJOS_RESTORE_FAILPOINT:-}" != "after-redis" ]] || die "injected failure after Redis"
 
 local_included="$(jq -r '.components.storage.local.included' "$restore_dir/manifest.json")"
 if [[ "$local_included" == "true" ]]; then
@@ -348,7 +344,6 @@ if [[ "$local_included" == "true" ]]; then
   chmod 0700 "$storage_stage"
   mv "$storage_stage" "$storage_root"
 fi
-[[ "${OJOS_RESTORE_FAILPOINT:-}" != "after-storage" ]] || die "injected failure after local storage"
 
 # Re-prove the clean target immediately before the first retained-volume write;
 # database/local restore time must not allow a writer or foreign remount in.
@@ -389,8 +384,6 @@ cmp -s "$retained_target_identity" "$retained_identity_after" || \
 python3 "$script_dir/backup-manifest.py" verify-inventory \
   --root "$retained_root" --inventory "$retained_inventory" >/dev/null
 verify_target_fence
-[[ "${OJOS_RESTORE_FAILPOINT:-}" != "after-retained-volume" ]] || \
-  die "injected failure after Problem retained volume"
 
 minio_included="$(jq -r '.components.storage.minio.included' "$restore_dir/manifest.json")"
 if [[ "$minio_included" == "true" ]]; then
@@ -452,7 +445,6 @@ cmp -s "$retained_target_identity" "$retained_identity_final" || \
 python3 "$script_dir/backup-manifest.py" verify-inventory \
   --root "$retained_root" --inventory "$retained_inventory" >/dev/null
 
-[[ "${OJOS_RESTORE_FAILPOINT:-}" != "after-components" ]] || die "injected failure after component verification"
 # Verify that no writer entered while the target was being restored. This is
 # deliberately before any optional traffic cutover.
 verify_target_fence

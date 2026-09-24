@@ -95,7 +95,7 @@ jobs:
           import subprocess
 
           paths = subprocess.check_output(
-              ["git", "ls-files", "-z", "--", "services/**/Dockerfile"]
+              ["git", "ls-files", "-z", "--", "services/**/Dockerfile", "deploy/object-store/Dockerfile"]
           ).decode().split("\0")
           recipes = [{
               "dockerfile": path,
