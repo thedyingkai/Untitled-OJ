@@ -273,6 +273,7 @@ export const useOrchestrator = defineStore("orchestrator", {
 
     async saveLayout() {
       const runtime = runtimeFor(this);
+      const generation = runtime.layoutGeneration;
       runtime.layoutSaveController?.abort("superseded");
       const controller = new AbortController();
       runtime.layoutSaveController = controller;
@@ -291,12 +292,19 @@ export const useOrchestrator = defineStore("orchestrator", {
         await layoutApi.putLayout(topologyId, snapshot, {
           signal: controller.signal,
         });
-        if (runtime.layoutSaveController !== controller) return;
+        if (
+          runtime.layoutSaveController !== controller ||
+          generation !== runtime.layoutGeneration ||
+          topologyId !== this.activeTopologyId
+        )
+          return;
         this.layoutStatus = "ready";
         this.layoutError = "";
       } catch (err) {
         if (
           runtime.layoutSaveController !== controller ||
+          generation !== runtime.layoutGeneration ||
+          topologyId !== this.activeTopologyId ||
           isRequestCancelled(err)
         )
           return;
@@ -310,6 +318,7 @@ export const useOrchestrator = defineStore("orchestrator", {
     },
 
     async selectTopology(topologyId: string) {
+      const runtime = runtimeFor(this);
       const selected = topologyId.trim();
       if (
         selected &&
@@ -319,12 +328,24 @@ export const useOrchestrator = defineStore("orchestrator", {
         return;
       }
       if (selected === this.activeTopologyId) return;
+      // Capture the pending layout and its original topology before switching.
+      // A delayed callback must not save the next topology's empty layout.
+      if (runtime.layoutTimer) {
+        clearTimeout(runtime.layoutTimer);
+        runtime.layoutTimer = null;
+        void this.saveLayout();
+      }
+      runtime.layoutLoadController?.abort("topology changed");
+      runtime.layoutLoadController = null;
+      runtime.layoutGeneration += 1;
       this.activeTopologyId = selected;
       this.topology = null;
       this.endpoints = [];
       this.links = [];
       this.layout = {};
       this.layoutLoaded = false;
+      this.layoutStatus = "idle";
+      this.layoutError = "";
       await this.refreshCore(true);
       await this.loadLayout();
     },

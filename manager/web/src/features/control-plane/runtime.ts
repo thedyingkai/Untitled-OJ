@@ -10,6 +10,7 @@ class OrchestratorRuntime {
   storeRefreshController: AbortController | null = null;
   layoutLoadController: AbortController | null = null;
   layoutSaveController: AbortController | null = null;
+  layoutGeneration = 0;
   toastTimers = new Map<number, ReturnType<typeof setTimeout>>();
   toastSeq = 1;
 }

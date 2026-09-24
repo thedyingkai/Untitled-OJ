@@ -37,7 +37,7 @@ manager/web/src/
 - 同一 Store 的普通轮询请求合并；强制刷新递增代次并取消旧请求。不同 Store 不共用刷新 Promise、AbortController、轮询或 toast 定时器。
 - `dispose()` 只关闭本实例资源。请求即使忽略取消、最终仍返回，也要先核对所有权，再写入状态。
 - `projection.ts` 只从 Node、Deployment 和 Topology 参数生成展示行，不请求网络、不更改输入，也不通过同名服务猜测 Deployment 身份。
-- 画布布局仍按 Topology 保存，不进入业务 revision。旧布局响应在赋值前被丢弃。
+- 画布布局仍按 Topology 保存，不进入业务 revision。切换前把待保存快照提交给原 Topology，取消旧布局读取；旧请求的内容和保存状态不能覆盖新 Topology。
 
 ## 安装校验与确认
 
