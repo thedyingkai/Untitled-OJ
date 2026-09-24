@@ -83,6 +83,8 @@ TUI 不再直接链接 Console 完成 mutation。Web 和 TUI 的差别只在交�
 
 允许的依赖方向是 v1 组合根显式调用必要的兼容导入适配；`orchestrator-core` 不能依赖 legacy，正式 API/clients 也不能从 legacy action 推断 capabilities。
 
+backend 已改为从 core 直接导入纯领域模型、动作/RBAC 契约和确定性规则，不再通过 legacy 的重导出取得这些能力。保留的 legacy 引用仍需区分：Console、旧仓储接口、网络探测和 Release 导入适配尚未全部迁出，不能把 import 整理当作整个兼容层已隔离。旧公开重导出暂时保留，避免破坏现有源码调用路径和数据导入。
+
 旧 normalized PostgreSQL 数据只做一次 expand-only 导入：Topology snapshot 成为未应用 draft，HostService 成为 `External/Unknown` 投影。导入不伪造运行时事实，也不破坏旧表。
 
 ## 8. 已接受的 v1 约束

@@ -4,7 +4,7 @@ OJOS Orchestrator 采用控制面与数据面分离的 service-release-first 架
 
 ## 模块
 
-下图是职责概览，不代表这些边界已经完全由依赖关系保证。当前后端仍有较大的 Store/Topology 用例实现，`orchestrator-manager` 仍包含旧 Console 应用逻辑，正式链路仍通过 `orchestrator-legacy` 使用部分领域类型和基础能力。正在按[重构计划](refactoring-plan.md)逐项收敛，不能把规划当作现状。
+下图是职责概览，不代表所有旧依赖已经消除。Store/Topology 的宿主用例已分出职责，backend 的纯领域类型和规则直接依赖 `orchestrator-core`；旧 Console、部分仓储接口和基础适配仍参与正式链路。当前改造与保留的限制见[重构计划](refactoring-plan.md)。
 
 ```text
 Desktop / Web / TUI
@@ -35,6 +35,7 @@ orchestrator-backend
 - backend 的 Store HTTP 入口只承担请求与响应映射；宿主用例在 `backend/src/store`，统一通过 `StoreAdmission` 持锁提交任务并撤销失败的拓扑占用。Deployment 生命周期在独立的 `backend/src/deployment.rs`；它和 Release 元数据删除保持不同语义。详情见 [Store 与 Deployment](store.md)。
 - `orchestrator-agent` 只执行分配给本 Node 的 Job，并用本地 ledger 决定幂等重放；它还根据 Deployment assignment 原子物化只读 ServiceContext 和短期 workload credential。
 - `orchestrator-legacy` 当前容纳 0.2 Console、仓储接口、适配器及领域类型重导出。正式 v1 仍有依赖；目标是迁出正式能力，让它只承担兼容转换，尚不能声称已隔离。
+- Web 的 API、状态与表单按功能归属，传输实现位于 `shared/api`。实例请求状态和纯展示投影分开；正式调用方不再引用根目录兼容入口。详见 [Web 客户端](web-client.md)。
 
 ## 状态所有权
 
@@ -87,7 +88,8 @@ Problem→Judge 使用 transactional outbox、Redis Stream relay、Judge inbox �
 | 持久化与恢复 | `services/orchestrator/storage/src`、`control-plane/src` | 状态以持久记录为准；明确事务和幂等边界。 |
 | 服务契约与 SDK | `tools/ojos-service/src/codegen` | `mod.rs` 编排生成、校验与落盘；各语言模块只负责生成产品 SDK。 |
 | Auth 启动 | `services/auth-service/internal/svc` | `servicecontext.go` 组装与生命周期，`environment.go` 环境配置，`workload_identity.go` 身份与授权。 |
-| UI 展示 | `manager/web/src` | API client、store 与视图分工；服务端是权限与状态真值。 |
+| UI 展示与交互 | `manager/web/src/features`、`views` | 视图组装功能表单；API client 不读取 Store；`control-plane/projection` 只转换显式事实；服务端是权限与状态真值。 |
+| 新服务启动 | `services/contest-service/internal/app`、`platform/shared/go/bootstrap` | 进程入口负责配置与信号，应用组装接收显式输入，共享 bootstrap 负责组件生命周期；既有 GoZero 服务仍逐服务保留原适配。 |
 
 Auth 必须连接 PostgreSQL，不保留内存冒烟认证或临时授权投影。构造失败会关闭已创建的连接池和追踪资源；管理员初始化密钥在构造退出时清零。Desktop 不内嵌浏览器测试脚本，控制面不提供测试造数接口。
 
@@ -95,4 +97,4 @@ Auth 必须连接 PostgreSQL，不保留内存冒烟认证或临时授权投影�
 
 更细的取舍见 [耦合决策](coupling-decisions.md)，持久化见 [编排器数据库](../orchestrator/database.md)，交付方式见 [构建与交付](../release/README.md)。
 
-目录中两个 `manager` 含义不同：顶层 `manager/` 放客户端与原生安装器，`services/orchestrator/manager` 是 Rust Catalog/旧 Store 代码。当前不做全仓路径改名，先完成职责拆分，再在计划最后阶段处理命名。
+目录中两个 `manager` 含义不同：顶层 `manager/` 放客户端与原生安装器，`services/orchestrator/manager` 是 Rust Catalog/Store 应用与旧 Console 适配。本轮保留已被构建、安装器和发布路径引用的目录名；通过模块入口和明确依赖区分职责，不为统一字面命名扩大部署变更。前端已把实现迁到所属功能目录，旧文件名只作为兼容导出保留。
