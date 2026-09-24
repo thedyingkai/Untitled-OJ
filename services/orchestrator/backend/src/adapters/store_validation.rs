@@ -24,11 +24,10 @@ use crate::store::service_context::attach_release_runtime_volume;
 use crate::store::service_context::contract_has_retained_runtime_volume;
 use crate::store::service_context::managed_service_context_spec;
 use crate::store::topology::preview_store_install_topology_spec;
-use orchestrator_legacy::composition::ProviderCandidateV1;
-use orchestrator_legacy::topology_v1::TopologyDiff;
-use orchestrator_legacy::{
-    ApiBinding, NodeRecord, OrchestratorActionConsole, ServiceReleaseContract, diff_topology_specs,
-};
+use orchestrator_core::composition::ProviderCandidateV1;
+use orchestrator_core::topology_v1::TopologyDiff;
+use orchestrator_core::{ApiBinding, NodeRecord, ServiceReleaseContract, diff_topology_specs};
+use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_manager::catalog_v2::TargetPlatform;
 use orchestrator_manager::store::validation::{
     ReleaseValidationReadPort, ValidateRelease, ValidationContext, ValidationTarget,

@@ -39,10 +39,10 @@ use anyhow::{Context, Result, anyhow};
 use orchestrator_control_plane::{
     DurableOperationStatus, Job, JobStore, OperationCoordinator, OperationRepository,
 };
-use orchestrator_legacy::{
-    NodeRecord, OrchestratorActionConsole, OrchestratorStore, TopologyDrift, TopologyDriftKind,
-    TopologyReconciliationState, TopologyResourceKind,
+use orchestrator_core::{
+    NodeRecord, TopologyDrift, TopologyDriftKind, TopologyReconciliationState, TopologyResourceKind,
 };
+use orchestrator_legacy::{OrchestratorActionConsole, OrchestratorStore};
 use orchestrator_runtime::ArtifactReference;
 use orchestrator_storage::{
     AdvisoryLockGuard, JobMetricsSnapshot, PostgresOptions, PostgresOrchestratorStore,

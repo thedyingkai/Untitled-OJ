@@ -6,7 +6,7 @@
 //! revision never requires five independent writers to agree on ordering.
 
 use crate::durable::DurableStore;
-use orchestrator_legacy::{
+use orchestrator_core::{
     ContributionActivationStateV1, ContributionRevisionStatusV1, ContributionRevisionV1,
     parse_endpoint_id,
 };

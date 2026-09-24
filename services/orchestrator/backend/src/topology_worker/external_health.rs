@@ -3,7 +3,7 @@ use crate::durable::DurableStore;
 use crate::topology_worker::context::{now_marker, now_ms};
 use crate::topology_worker::payload::ExternalHealthPayload;
 use orchestrator_control_plane::CompletionStatus;
-use orchestrator_legacy::Endpoint;
+use orchestrator_core::Endpoint;
 use orchestrator_legacy::EndpointProbe;
 use orchestrator_legacy::TcpEndpointProbe;
 use orchestrator_runtime::RuntimeDesiredState;

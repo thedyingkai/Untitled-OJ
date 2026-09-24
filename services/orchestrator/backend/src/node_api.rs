@@ -139,7 +139,7 @@ fn create_enrollment_code(
     let code_id = crate::node_identity::random_secret("enroll-")
         .map_err(|error| internal(error.to_string()))?;
     let expires_at_ms = now.saturating_add((body.ttl_seconds as i64).saturating_mul(1_000));
-    let node = orchestrator_legacy::NodeRecord {
+    let node = orchestrator_core::NodeRecord {
         node_id: body.node_id.clone(),
         host_ip: body.host_ip,
         parent_node_id: body.parent_node_id,

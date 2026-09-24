@@ -8,7 +8,7 @@
 use crate::durable::DurableStore;
 use crate::http::ApiRequest;
 use anyhow::{Context, Result, anyhow};
-use orchestrator_legacy::{
+use orchestrator_core::{
     ContributionRevisionStatusV1, ContributionRevisionV1, endpoint_socket_addr, parse_endpoint_id,
 };
 use orchestrator_runtime::{RuntimeDesiredState, RuntimeObservedState};

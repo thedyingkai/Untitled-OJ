@@ -2,7 +2,7 @@
 
 use crate::http::{ApiRequest, StatusError};
 use anyhow::Result;
-use orchestrator_legacy::V1Role;
+use orchestrator_core::V1Role;
 use std::fmt;
 
 pub(crate) const ORCHESTRATOR_INTERNAL_TOKEN_HEADER: &str = "x-ojos-orchestrator-token";

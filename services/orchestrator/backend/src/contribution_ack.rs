@@ -11,7 +11,7 @@ use crate::contribution_snapshot::{
 };
 use crate::durable::DurableStore;
 use crate::http::{ApiRequest, ApiResponse};
-use orchestrator_legacy::{
+use orchestrator_core::{
     ContributionActivationStateV1, ProjectionReceiptStateV1, ProjectionTargetV1,
 };
 use orchestrator_storage::ContributionRepository;

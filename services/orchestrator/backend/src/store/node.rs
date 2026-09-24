@@ -2,8 +2,8 @@
 use crate::durable::DurableStore;
 use crate::store::context::now_ms;
 use crate::store::error::{StoreError, storage_error};
-use orchestrator_legacy::NodeRecord;
-use orchestrator_legacy::ServiceReleaseContract;
+use orchestrator_core::NodeRecord;
+use orchestrator_core::ServiceReleaseContract;
 use orchestrator_manager::catalog_v2::TargetPlatform;
 use orchestrator_protocol::NodeRuntimeFactsV1;
 use orchestrator_runtime::RuntimeContract;

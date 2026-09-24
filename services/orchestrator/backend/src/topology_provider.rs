@@ -1,4 +1,4 @@
-use orchestrator_legacy::{
+use orchestrator_core::{
     ApiBinding, ApiBindingState, TopologyEndpointStatus, TopologyLinkStatus, TopologySpec,
     parse_endpoint_id, validate_endpoint_id,
 };

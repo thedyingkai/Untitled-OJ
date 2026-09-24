@@ -7,12 +7,13 @@ use crate::auth::require_node_install_credentials;
 use crate::auth::{ORCHESTRATOR_INTERNAL_TOKEN_HEADER, internal_token_check};
 use crate::http::{ApiRequest, ApiResponse, StatusError, path_segments, query_bool, query_value};
 use anyhow::Result;
+use orchestrator_core::{
+    ActionRequest, EffectiveApiRoute, Endpoint, NodeRecord, OrchestratorError, ServiceRoute,
+    parse_endpoint_id, validate_endpoint_id,
+};
 #[cfg(feature = "legacy-0_2")]
 use orchestrator_legacy::NodeServiceDispatchRequest;
-use orchestrator_legacy::{
-    ActionRequest, EffectiveApiRoute, Endpoint, NodeRecord, OrchestratorActionConsole,
-    OrchestratorError, ServiceRoute, parse_endpoint_id, validate_endpoint_id,
-};
+use orchestrator_legacy::OrchestratorActionConsole;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 

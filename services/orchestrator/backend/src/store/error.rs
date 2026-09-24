@@ -79,7 +79,7 @@ pub(crate) fn contribution_controller_error(
     StoreError::new(status, error.code(), error.to_string())
 }
 
-pub(crate) fn core_error(error: orchestrator_legacy::OrchestratorError) -> StoreError {
+pub(crate) fn core_error(error: orchestrator_core::OrchestratorError) -> StoreError {
     StoreError::new(422, "STORE_RELEASE_INVALID", error.to_string())
 }
 

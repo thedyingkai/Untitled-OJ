@@ -5,13 +5,13 @@ use crate::store::error::StoreError;
 use crate::store::node::{
     node_provider_label, provider_identifier, require_node_provider, storage_provider_selection,
 };
-use orchestrator_legacy::ApiBinding;
-use orchestrator_legacy::ApiBindingState;
-use orchestrator_legacy::NodeRecord;
-use orchestrator_legacy::ServiceReleaseContract;
-use orchestrator_legacy::ServiceReleaseManifest;
-use orchestrator_legacy::parse_endpoint_id;
-use orchestrator_legacy::validate_endpoint_id;
+use orchestrator_core::ApiBinding;
+use orchestrator_core::ApiBindingState;
+use orchestrator_core::NodeRecord;
+use orchestrator_core::ServiceReleaseContract;
+use orchestrator_core::ServiceReleaseManifest;
+use orchestrator_core::parse_endpoint_id;
+use orchestrator_core::validate_endpoint_id;
 use orchestrator_manager::MigrationPolicyV2;
 use orchestrator_manager::store::config::ValidatedReleaseConfig;
 use orchestrator_manager::store::config::validate_release_config;
@@ -538,7 +538,7 @@ pub(crate) fn build_resource_claim_steps(
 }
 
 pub(crate) fn migration_resource_claims(
-    migration: &orchestrator_legacy::ReleaseMigrationDecl,
+    migration: &orchestrator_core::ReleaseMigrationDecl,
     claims: &[ResourceClaimStepV1],
 ) -> Result<Vec<String>, StoreError> {
     let requested = migration

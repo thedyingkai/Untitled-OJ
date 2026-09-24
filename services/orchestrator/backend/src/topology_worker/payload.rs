@@ -1,5 +1,5 @@
 //! Background payload responsibilities.
-use orchestrator_legacy::ApiBinding;
+use orchestrator_core::ApiBinding;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]

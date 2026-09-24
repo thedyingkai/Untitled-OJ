@@ -4,7 +4,7 @@ use orchestrator_control_plane::{
     DurableOperation, JobKind, JobStore, OperationCoordinator, OperationError, OperationRepository,
     PlanOperation, PlannedJob,
 };
-use orchestrator_legacy::v1_action;
+use orchestrator_core::v1_action;
 use orchestrator_runtime::ReleaseReplacementPayload;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};

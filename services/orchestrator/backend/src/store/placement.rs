@@ -2,10 +2,10 @@
 use crate::durable::DurableStore;
 use crate::store::error::{StoreError, storage_error};
 use orchestrator_control_plane::OperationRepository;
-use orchestrator_legacy::NodeRecord;
-use orchestrator_legacy::ServiceReleaseManifest;
-use orchestrator_legacy::parse_endpoint_id;
-use orchestrator_legacy::validate_endpoint_id;
+use orchestrator_core::NodeRecord;
+use orchestrator_core::ServiceReleaseManifest;
+use orchestrator_core::parse_endpoint_id;
+use orchestrator_core::validate_endpoint_id;
 use orchestrator_runtime::ContainerSpec;
 use orchestrator_runtime::OciImageReference;
 use orchestrator_runtime::PublishedEndpoint;

@@ -5,9 +5,8 @@
 //! plan and exact metadata bytes whose SHA-256 has been checked again.
 
 use crate::durable::{DurableError, DurableStore};
-use orchestrator_legacy::{
-    external_release_import_from_yaml, release_supports_link_probe_v1, resolve_outbound_redirect,
-};
+use orchestrator_core::release_supports_link_probe_v1;
+use orchestrator_legacy::{external_release_import_from_yaml, resolve_outbound_redirect};
 pub(crate) use orchestrator_manager::catalog_query::{
     CatalogPackageItem, CatalogSource, CatalogSourcePage, PackagePage, PackageQuery,
 };

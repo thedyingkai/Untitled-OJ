@@ -10,10 +10,10 @@ use orchestrator_control_plane::JobStore;
 use orchestrator_control_plane::OperationCoordinator;
 use orchestrator_control_plane::OperationRepository;
 use orchestrator_control_plane::ResolveExpiredSuccessRequest;
-use orchestrator_legacy::TopologyDrift;
-use orchestrator_legacy::TopologyDriftKind;
-use orchestrator_legacy::TopologyReconciliationState;
-use orchestrator_legacy::TopologyResourceKind;
+use orchestrator_core::TopologyDrift;
+use orchestrator_core::TopologyDriftKind;
+use orchestrator_core::TopologyReconciliationState;
+use orchestrator_core::TopologyResourceKind;
 use orchestrator_storage::TopologyApplyOutcome;
 use serde_json::Value;
 

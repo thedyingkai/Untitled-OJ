@@ -1781,7 +1781,7 @@ fn artifact_error(error: ArtifactStoreError) -> AgentApiError {
 fn required_node(
     storage: &DurableStore,
     node_id: &str,
-) -> Result<orchestrator_legacy::NodeRecord, AgentApiError> {
+) -> Result<orchestrator_core::NodeRecord, AgentApiError> {
     storage
         .get_node(node_id)
         .map_err(|error| AgentApiError {
@@ -1798,7 +1798,7 @@ fn required_node(
 
 fn touch_node(
     storage: &DurableStore,
-    mut node: orchestrator_legacy::NodeRecord,
+    mut node: orchestrator_core::NodeRecord,
 ) -> Result<(), AgentApiError> {
     node.updated_at = format!("unix-ms:{}", now_ms());
     storage.upsert_node(node).map_err(|error| AgentApiError {

@@ -8,7 +8,7 @@ use crate::auth::{OidcPrincipalVerifier, Principal, PrincipalSource, PrincipalVe
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::jwk::{AlgorithmParameters, Jwk, JwkSet, KeyOperations, PublicKeyUse};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-use orchestrator_legacy::V1Role;
+use orchestrator_core::V1Role;
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs::File;

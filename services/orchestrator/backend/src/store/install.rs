@@ -42,11 +42,11 @@ use orchestrator_control_plane::JobKind;
 use orchestrator_control_plane::PlanOperation;
 use orchestrator_control_plane::PlannedJob;
 use orchestrator_control_plane::PlannedJobCondition;
-use orchestrator_legacy::ApiBindingState;
-use orchestrator_legacy::NodeRecord;
+use orchestrator_core::ApiBindingState;
+use orchestrator_core::NodeRecord;
+use orchestrator_core::composition::CompositionPlanV1;
+use orchestrator_core::composition::ValidatedInstallInputsV1;
 use orchestrator_legacy::OrchestratorActionConsole;
-use orchestrator_legacy::composition::CompositionPlanV1;
-use orchestrator_legacy::composition::ValidatedInstallInputsV1;
 use orchestrator_manager::catalog_v2::TargetPlatform;
 use orchestrator_manager::store::composition::composition_inputs_for_service;
 use orchestrator_manager::store::composition::legacy_composition_inputs;
@@ -1144,5 +1144,5 @@ pub(crate) fn validate_external_install_endpoint(
         }
         return Ok(());
     }
-    orchestrator_legacy::validate_endpoint_service_name(endpoint, service_id).map_err(core_error)
+    orchestrator_core::validate_endpoint_service_name(endpoint, service_id).map_err(core_error)
 }

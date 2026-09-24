@@ -12,7 +12,7 @@ use orchestrator_control_plane::{
     Job, JobKind, JobStatus, JobStore, OperationRepository, PlannedJob, PlannedJobCondition,
     canonical_payload_sha256,
 };
-use orchestrator_legacy::{
+use orchestrator_core::{
     ContributionActivationStateV1, ContributionActivationV1, ContributionApiSurfaceV1,
     ContributionFrontendModuleV1, ContributionHeadV1, ContributionOperationRouteV1,
     ContributionPermissionDefinitionV1, ContributionRevisionStatusV1, ContributionRevisionV1,

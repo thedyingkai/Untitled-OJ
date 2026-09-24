@@ -1,7 +1,7 @@
 //! Background binding health responsibilities.
 use crate::durable::DurableStore;
 use crate::topology_worker::context::now_ms;
-use orchestrator_legacy::ApiBinding;
+use orchestrator_core::ApiBinding;
 use orchestrator_runtime::RuntimeDesiredState;
 use orchestrator_runtime::RuntimeObservedState;
 use orchestrator_storage::RuntimeManagementMode;

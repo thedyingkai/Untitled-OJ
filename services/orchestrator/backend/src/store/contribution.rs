@@ -5,8 +5,8 @@ use crate::contribution_controller::stage_signed_contribution_successor;
 use crate::durable::DurableStore;
 use crate::store::error::{StoreError, contribution_controller_error, contribution_storage_error};
 use orchestrator_control_plane::PlannedJob;
-use orchestrator_legacy::ContributionRevisionV1;
-use orchestrator_legacy::ServiceReleaseContract;
+use orchestrator_core::ContributionRevisionV1;
+use orchestrator_core::ServiceReleaseContract;
 use orchestrator_storage::ContributionRepository;
 
 pub(crate) fn stage_release_contribution(

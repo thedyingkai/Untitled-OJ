@@ -8,7 +8,7 @@ use crate::topology_provider::TopologyProviderSaga;
 use orchestrator_control_plane::{
     JobKind, OperationCoordinator, PlanOperation, PlannedJob, PlannedJobCondition,
 };
-use orchestrator_legacy::{
+use orchestrator_core::{
     TopologyEndpointSpec, TopologyLinkSpec, TopologySpec, diff_topology_revisions,
 };
 use orchestrator_storage::TopologyApplyOutcome;
@@ -588,7 +588,7 @@ fn persist_draft_edit(
     spec: TopologySpec,
     request: &ApiRequest,
     fallback_message: &str,
-) -> Result<orchestrator_legacy::TopologyRevision, TopologyApiError> {
+) -> Result<orchestrator_core::TopologyRevision, TopologyApiError> {
     validate_registered_services(store, &spec)?;
     store
         .create_next_topology_revision(
@@ -1128,7 +1128,7 @@ fn operation_error(error: orchestrator_control_plane::OperationError) -> Topolog
     }
 }
 
-fn domain_error(error: orchestrator_legacy::OrchestratorError) -> TopologyApiError {
+fn domain_error(error: orchestrator_core::OrchestratorError) -> TopologyApiError {
     TopologyApiError {
         status: 422,
         code: "TOPOLOGY_INVALID",

@@ -2,9 +2,9 @@
 use crate::durable::DurableStore;
 use crate::store::error::{StoreError, storage_error};
 use crate::store::node::{node_runtime_facts, provider_identifier};
-use orchestrator_legacy::ApiBinding;
-use orchestrator_legacy::ApiBindingState;
-use orchestrator_legacy::ServiceReleaseContract;
+use orchestrator_core::ApiBinding;
+use orchestrator_core::ApiBindingState;
+use orchestrator_core::ServiceReleaseContract;
 use orchestrator_manager::store::stable_service_instance_id;
 use orchestrator_runtime::ContainerSpec;
 use orchestrator_runtime::MANAGED_EVENT_STREAM_V1;

@@ -10,12 +10,12 @@ use orchestrator_control_plane::{
     JobStore, NewJob, OperationRepository, OperationStoreError, ResolveExpiredSuccessRequest,
 };
 use orchestrator_core::binding_projection::stage_binding_generations;
-use orchestrator_legacy::{
+use orchestrator_core::{
     ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState, ApiBindingState, NodeRecord,
-    OrchestratorStore, ServiceReleaseContract, TopologyEndpointSpec, TopologyRevision,
-    TopologySpec, TopologyStatus, api_version_matches, release_supports_link_probe_v1,
-    validate_service_release,
+    ServiceReleaseContract, TopologyEndpointSpec, TopologyRevision, TopologySpec, TopologyStatus,
+    api_version_matches, release_supports_link_probe_v1, validate_service_release,
 };
+use orchestrator_legacy::OrchestratorStore;
 use orchestrator_storage::{
     ApiBinding, AuditRecord, CertificateActivation, CertificateRotation, ContributionRepository,
     ContributionRepositoryResult, ControlPlaneAnomalyCounters, EnrollmentLookup,
@@ -1519,7 +1519,7 @@ impl DurableStore {
 impl ContributionRepository for DurableStore {
     fn insert_contribution_revision(
         &self,
-        revision: &orchestrator_legacy::ContributionRevisionV1,
+        revision: &orchestrator_core::ContributionRevisionV1,
     ) -> ContributionRepositoryResult<()> {
         match self {
             Self::Sqlite(store) => store.insert_contribution_revision(revision),
@@ -1530,7 +1530,7 @@ impl ContributionRepository for DurableStore {
     fn contribution_revision(
         &self,
         revision_id: &str,
-    ) -> ContributionRepositoryResult<Option<orchestrator_legacy::ContributionRevisionV1>> {
+    ) -> ContributionRepositoryResult<Option<orchestrator_core::ContributionRevisionV1>> {
         match self {
             Self::Sqlite(store) => store.contribution_revision(revision_id),
             Self::Postgres(store) => store.contribution_revision(revision_id),
@@ -1541,7 +1541,7 @@ impl ContributionRepository for DurableStore {
         &self,
         scope_id: &str,
         service_id: Option<&str>,
-    ) -> ContributionRepositoryResult<Vec<orchestrator_legacy::ContributionRevisionV1>> {
+    ) -> ContributionRepositoryResult<Vec<orchestrator_core::ContributionRevisionV1>> {
         match self {
             Self::Sqlite(store) => store.contribution_revisions(scope_id, service_id),
             Self::Postgres(store) => store.contribution_revisions(scope_id, service_id),
@@ -1550,9 +1550,9 @@ impl ContributionRepository for DurableStore {
 
     fn stage_contribution_bundle(
         &self,
-        revision: &orchestrator_legacy::ContributionRevisionV1,
-        activation: &orchestrator_legacy::ContributionActivationV1,
-        receipts: &[orchestrator_legacy::ProjectionReceiptV1],
+        revision: &orchestrator_core::ContributionRevisionV1,
+        activation: &orchestrator_core::ContributionActivationV1,
+        receipts: &[orchestrator_core::ProjectionReceiptV1],
     ) -> ContributionRepositoryResult<()> {
         match self {
             Self::Sqlite(store) => store.stage_contribution_bundle(revision, activation, receipts),
@@ -1564,7 +1564,7 @@ impl ContributionRepository for DurableStore {
 
     fn transition_contribution_revision(
         &self,
-        revision: &orchestrator_legacy::ContributionRevisionV1,
+        revision: &orchestrator_core::ContributionRevisionV1,
     ) -> ContributionRepositoryResult<()> {
         match self {
             Self::Sqlite(store) => store.transition_contribution_revision(revision),
@@ -1576,7 +1576,7 @@ impl ContributionRepository for DurableStore {
         &self,
         scope_id: &str,
         service_id: &str,
-    ) -> ContributionRepositoryResult<Option<orchestrator_legacy::ContributionHeadV1>> {
+    ) -> ContributionRepositoryResult<Option<orchestrator_core::ContributionHeadV1>> {
         match self {
             Self::Sqlite(store) => store.contribution_head(scope_id, service_id),
             Self::Postgres(store) => store.contribution_head(scope_id, service_id),
@@ -1586,8 +1586,8 @@ impl ContributionRepository for DurableStore {
     fn compare_and_swap_contribution_head(
         &self,
         expected_etag: Option<&str>,
-        active_revision: &orchestrator_legacy::ContributionRevisionV1,
-    ) -> ContributionRepositoryResult<orchestrator_legacy::ContributionHeadV1> {
+        active_revision: &orchestrator_core::ContributionRevisionV1,
+    ) -> ContributionRepositoryResult<orchestrator_core::ContributionHeadV1> {
         match self {
             Self::Sqlite(store) => {
                 store.compare_and_swap_contribution_head(expected_etag, active_revision)
@@ -1603,7 +1603,7 @@ impl ContributionRepository for DurableStore {
         expected_candidate_etag: &str,
         candidate_revision_id: &str,
         previous_revision_id: &str,
-    ) -> ContributionRepositoryResult<orchestrator_legacy::ContributionHeadV1> {
+    ) -> ContributionRepositoryResult<orchestrator_core::ContributionHeadV1> {
         match self {
             Self::Sqlite(store) => store.restore_contribution_head(
                 expected_candidate_etag,
@@ -1622,7 +1622,7 @@ impl ContributionRepository for DurableStore {
         &self,
         expected_candidate_etag: &str,
         candidate_revision_id: &str,
-    ) -> ContributionRepositoryResult<orchestrator_legacy::ContributionHeadV1> {
+    ) -> ContributionRepositoryResult<orchestrator_core::ContributionHeadV1> {
         match self {
             Self::Sqlite(store) => store
                 .clear_initial_contribution_head(expected_candidate_etag, candidate_revision_id),
@@ -1633,8 +1633,8 @@ impl ContributionRepository for DurableStore {
 
     fn put_contribution_activation_bundle(
         &self,
-        activation: &orchestrator_legacy::ContributionActivationV1,
-        receipts: &[orchestrator_legacy::ProjectionReceiptV1],
+        activation: &orchestrator_core::ContributionActivationV1,
+        receipts: &[orchestrator_core::ProjectionReceiptV1],
     ) -> ContributionRepositoryResult<()> {
         match self {
             Self::Sqlite(store) => store.put_contribution_activation_bundle(activation, receipts),
@@ -1645,7 +1645,7 @@ impl ContributionRepository for DurableStore {
     fn contribution_activation(
         &self,
         activation_id: &str,
-    ) -> ContributionRepositoryResult<Option<orchestrator_legacy::ContributionActivationV1>> {
+    ) -> ContributionRepositoryResult<Option<orchestrator_core::ContributionActivationV1>> {
         match self {
             Self::Sqlite(store) => store.contribution_activation(activation_id),
             Self::Postgres(store) => store.contribution_activation(activation_id),
@@ -1655,7 +1655,7 @@ impl ContributionRepository for DurableStore {
     fn contribution_activations(
         &self,
         scope_id: &str,
-    ) -> ContributionRepositoryResult<Vec<orchestrator_legacy::ContributionActivationV1>> {
+    ) -> ContributionRepositoryResult<Vec<orchestrator_core::ContributionActivationV1>> {
         match self {
             Self::Sqlite(store) => store.contribution_activations(scope_id),
             Self::Postgres(store) => store.contribution_activations(scope_id),
@@ -1665,7 +1665,7 @@ impl ContributionRepository for DurableStore {
     fn contribution_projection_receipts(
         &self,
         activation_id: &str,
-    ) -> ContributionRepositoryResult<Vec<orchestrator_legacy::ProjectionReceiptV1>> {
+    ) -> ContributionRepositoryResult<Vec<orchestrator_core::ProjectionReceiptV1>> {
         match self {
             Self::Sqlite(store) => store.contribution_projection_receipts(activation_id),
             Self::Postgres(store) => store.contribution_projection_receipts(activation_id),
@@ -1674,9 +1674,9 @@ impl ContributionRepository for DurableStore {
 
     fn compare_and_swap_contribution_projection_receipt(
         &self,
-        expected: &orchestrator_legacy::ProjectionReceiptV1,
-        observed: &orchestrator_legacy::ProjectionReceiptV1,
-    ) -> ContributionRepositoryResult<orchestrator_legacy::ProjectionReceiptV1> {
+        expected: &orchestrator_core::ProjectionReceiptV1,
+        observed: &orchestrator_core::ProjectionReceiptV1,
+    ) -> ContributionRepositoryResult<orchestrator_core::ProjectionReceiptV1> {
         match self {
             Self::Sqlite(store) => {
                 store.compare_and_swap_contribution_projection_receipt(expected, observed)
@@ -1689,7 +1689,7 @@ impl ContributionRepository for DurableStore {
 
     fn insert_permission_assignment(
         &self,
-        assignment: &orchestrator_legacy::PermissionAssignmentV1,
+        assignment: &orchestrator_core::PermissionAssignmentV1,
     ) -> ContributionRepositoryResult<()> {
         match self {
             Self::Sqlite(store) => store.insert_permission_assignment(assignment),
@@ -1711,7 +1711,7 @@ impl ContributionRepository for DurableStore {
         &self,
         scope_id: &str,
         permission_key: Option<&str>,
-    ) -> ContributionRepositoryResult<Vec<orchestrator_legacy::PermissionAssignmentV1>> {
+    ) -> ContributionRepositoryResult<Vec<orchestrator_core::PermissionAssignmentV1>> {
         match self {
             Self::Sqlite(store) => store.permission_assignments(scope_id, permission_key),
             Self::Postgres(store) => store.permission_assignments(scope_id, permission_key),
