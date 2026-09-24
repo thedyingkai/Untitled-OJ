@@ -2,15 +2,28 @@
 //! No import, enqueue, transaction commit or container execution is exposed by this adapter.
 use crate::catalog_registry::{CatalogRegistry, ResolvedCatalogPlan, VerifiedReleaseDocument};
 use crate::durable::DurableStore;
-use crate::store_v1_api::{
-    StoreApiError, attach_release_runtime_volume, catalog_registry_error, container_spec,
-    contract_has_retained_runtime_volume, core_error, effective_managed_endpoint,
-    ensure_ready_docker_node, ensure_release_runtime_supported, managed_published_endpoint,
-    managed_service_context_spec, node_runtime_facts, non_empty, parse_release_channel,
-    preview_install_api_bindings, preview_store_install_topology_spec, release_pipeline_payload,
-    resolve_install_api_bindings, selected_topology_spec, storage_error,
-    store_composition_providers, target_platform,
-};
+use crate::store::bindings::preview_install_api_bindings;
+use crate::store::bindings::resolve_install_api_bindings;
+use crate::store::bindings::selected_topology_spec;
+use crate::store::commands::non_empty;
+use crate::store::commands::parse_release_channel;
+use crate::store::composition::store_composition_providers;
+use crate::store::error::StoreError;
+use crate::store::error::catalog_registry_error;
+use crate::store::error::core_error;
+use crate::store::error::storage_error;
+use crate::store::node::ensure_ready_docker_node;
+use crate::store::node::ensure_release_runtime_supported;
+use crate::store::node::node_runtime_facts;
+use crate::store::node::target_platform;
+use crate::store::placement::container_spec;
+use crate::store::placement::effective_managed_endpoint;
+use crate::store::placement::managed_published_endpoint;
+use crate::store::runtime_plan::release_pipeline_payload;
+use crate::store::service_context::attach_release_runtime_volume;
+use crate::store::service_context::contract_has_retained_runtime_volume;
+use crate::store::service_context::managed_service_context_spec;
+use crate::store::topology::preview_store_install_topology_spec;
 use orchestrator_legacy::composition::ProviderCandidateV1;
 use orchestrator_legacy::topology_v1::TopologyDiff;
 use orchestrator_legacy::{
@@ -32,7 +45,7 @@ pub(crate) struct StoreValidationReader<'a> {
 }
 
 impl ReleaseValidationReadPort for StoreValidationReader<'_> {
-    type Error = StoreApiError;
+    type Error = StoreError;
 
     fn target(&self, node_id: &str) -> Result<ValidationTarget, Self::Error> {
         let node = self
@@ -40,7 +53,7 @@ impl ReleaseValidationReadPort for StoreValidationReader<'_> {
             .get_node(node_id)
             .map_err(storage_error)?
             .ok_or_else(|| {
-                StoreApiError::new(
+                StoreError::new(
                     404,
                     "STORE_TARGET_NODE_NOT_FOUND",
                     format!("target Node {node_id} was not found"),
@@ -154,7 +167,7 @@ impl ReleaseValidationReadPort for StoreValidationReader<'_> {
         let storage = self.storage;
         let image = OciImageReference::parse(root_document.selection.release.oci_image.as_str())
             .map_err(|error| {
-                StoreApiError::new(
+                StoreError::new(
                     422,
                     "STORE_IMMUTABLE_IMAGE_REQUIRED",
                     format!("validation release image is not immutable: {error}"),

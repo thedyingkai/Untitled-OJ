@@ -17,7 +17,7 @@
 | A：可信基线 | 当前/目标边界、契约所有权、文档矛盾、普通服务 OCI 构建 | 开发者能定位源输入、生成产物和兼容入口；产品构建不混入测试 | 已完成 |
 | B：共享协议 | 从 Agent/runtime 提取双方使用的纯协议类型，保留兼容导出 | 协议不依赖 HTTP、Docker、存储或 Agent；daemon 不再依赖 Agent crate；线上格式不变 | 已完成 |
 | C1：Catalog 只读切片 | 查询用例、读端口、HTTP 适配和已部署视图 | 用例不依赖 HTTP/Console/数据库实现；错误和分页行为保持一致 | 已完成 |
-| C2：Release 校验与 Store mutation | 先校验，再安装、升级回滚和卸载，逐用例迁移 | 保留签名、plan digest、ETag、事务与任务发布边界；无副作用校验仍无副作用 | 进行中：C2a/b 已实现，正在验收；继续 C2c/d |
+| C2：Release 校验与 Store mutation | 先校验，再安装、升级回滚和卸载，逐用例迁移 | 保留签名、plan digest、ETag、事务与任务发布边界；无副作用校验仍无副作用 | C2a/b 已验收；C2c/d 已实现，正在验收 |
 | D：后台协调和存储 | 拓扑协调、租约恢复、探测和投影分别归属；收敛仓储接口 | 领域转换与 I/O 分离；SQLite/PostgreSQL 保持相同业务语义 | 待开始 |
 | E：客户端与服务开发 | 前端按功能分区，统一服务启动约定，理清 v2/v3 适配 | 状态、表单和接口位于对应功能；新服务不再猜测应编辑哪个契约 | 待开始 |
 | F：目录和兼容层收尾 | 按已形成的职责改名、收缩导出、移除失效过渡层 | 文档和实际依赖图一致；旧数据的必要导入能力仍可用 | 待开始 |
@@ -32,7 +32,7 @@ Catalog 的第一条纵向切片保留底层可信源校验和已部署视图的
 
 ## 下一批：C2 按用例推进
 
-`backend/src/store_v1_api.rs` 的 `validate_release_catalog` 仍共同使用配置校验、组合规划、Node 能力、API Binding、Topology 和运行时 pipeline 规则。下一批按以下顺序拆解，每一步单独验收，不直接迁走整个文件：
+Release 校验、安装和替换共同使用配置、组合规划、Node 能力、API Binding、Topology 和运行时 pipeline 规则。C2 按以下顺序拆解，每一步分别验收：
 
 | 顺序 | 工作与归属 | 必须保留的行为 |
 | --- | --- | --- |
@@ -43,7 +43,9 @@ Catalog 的第一条纵向切片保留底层可信源校验和已部署视图的
 
 这里的模块名和接口需由每条用例的实际输入决定，不先建一套空目录或通用框架。C2 完成后，Store HTTP 入口应能直接读出请求分派与契约映射，而不再承载配置计算、部署规划和事务编排。届时再收缩 `orchestrator-manager`/`orchestrator-legacy` 的导出；全仓路径改名仍留到 F。
 
-当前 C2a/b 的实现入口是 `manager/src/store/config.rs`、`composition.rs` 和 `validation.rs`：纯规则返回语义错误，HTTP 层负责状态映射；Release 校验通过只读端口取得事实与规划能力，不获得导入、提交事务、发布任务或执行容器的接口。`backend/src/adapters/store_validation.rs` 暂时复用旧 Store 文件中的基础能力，后续 C2c/d 同时调整这些能力的归属，不把这处过渡依赖当成最终结构。
+当前 C2a/b 的实现入口是 `manager/src/store/config.rs`、`composition.rs` 和 `validation.rs`：纯规则返回语义错误，HTTP 层负责状态映射；Release 校验通过只读端口取得事实与规划能力，不获得导入、提交事务、发布任务或执行容器的接口。C2c/d 已把宿主侧规划与 mutation 编排迁至 `backend/src/store`，校验适配器不再反向引用 HTTP 文件。`StoreAdmission` 统一协调锁、拓扑占用与失败撤销；Deployment 的真实卸载用例位于 `backend/src/deployment.rs`，Release 元数据删除仍是独立用例。具体边界与保留的限制见 [Store 与 Deployment](store.md)。
+
+安装与替换仍是较复杂的宿主用例，暂时使用 Console 与 DurableStore，不宣称整个 manager/legacy 已解耦。D 优先继续提取后台协调和持久化适配器里的确定性 Binding 转换，再分别处理租约、探测和投影的归属。
 
 ## 每批交付规则
 

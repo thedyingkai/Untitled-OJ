@@ -1,6 +1,6 @@
 use crate::durable::{DurableError, DurableStore, LinkProbeBindingError, TopologyApiBindingError};
 use crate::http::{ApiRequest, ApiResponse, path_segments, query_value};
-use crate::store_v1_api::{
+use crate::store::{
     InstallTopologySelection, StoreTopologyApplyPlan, align_group_binding_generations,
     binding_context_transition_plans, propose_generation_sibling_topology, selected_topology_spec,
 };
@@ -1000,7 +1000,7 @@ fn strong_etag_value(value: &str) -> Result<String, TopologyApiError> {
     Ok(value.to_string())
 }
 
-fn store_topology_error(error: crate::store_v1_api::StoreApiError) -> TopologyApiError {
+fn store_topology_error(error: crate::store::error::StoreError) -> TopologyApiError {
     TopologyApiError {
         status: error.status,
         code: error.code,
