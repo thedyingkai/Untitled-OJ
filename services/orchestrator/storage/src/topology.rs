@@ -1,7 +1,7 @@
 use crate::{SqliteOrchestratorStore, StorageError, StorageResult};
 use orchestrator_control_plane::{Job, JobError, JobStatus, ResolveExpiredSuccessRequest};
 pub use orchestrator_core::binding_projection::TopologyApplyGroupMember;
-use orchestrator_legacy::{
+use orchestrator_core::{
     ApiBindingState, TopologyReconciliationState, TopologyRevision, TopologySpec, TopologyStatus,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -991,7 +991,7 @@ fn upsert_status(transaction: &Transaction<'_>, status: &TopologyStatus) -> Stor
     Ok(())
 }
 
-fn domain_error(error: orchestrator_legacy::OrchestratorError) -> StorageError {
+fn domain_error(error: orchestrator_core::OrchestratorError) -> StorageError {
     StorageError::Domain(error.to_string())
 }
 

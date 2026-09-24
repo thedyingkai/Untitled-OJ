@@ -1,5 +1,5 @@
 use crate::{PostgresError, PostgresOrchestratorStore, PostgresResult};
-use orchestrator_legacy::{ApiBinding, ApiBindingState};
+use orchestrator_core::{ApiBinding, ApiBindingState};
 use r2d2_postgres::postgres::Transaction;
 use std::collections::BTreeSet;
 

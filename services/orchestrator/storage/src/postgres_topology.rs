@@ -3,7 +3,7 @@ use crate::{
     TopologyApplyOutcome, TopologyHeads, postgres_api_bindings::lock_api_binding_mutations,
 };
 use orchestrator_control_plane::{Job, JobError, JobStatus, ResolveExpiredSuccessRequest};
-use orchestrator_legacy::{
+use orchestrator_core::{
     ApiBindingState, TopologyReconciliationState, TopologyRevision, TopologySpec, TopologyStatus,
 };
 use r2d2_postgres::postgres::{GenericClient, Transaction};
@@ -983,7 +983,7 @@ fn upsert_status(client: &mut impl GenericClient, status: &TopologyStatus) -> Po
     Ok(())
 }
 
-fn domain_error(error: orchestrator_legacy::OrchestratorError) -> PostgresError {
+fn domain_error(error: orchestrator_core::OrchestratorError) -> PostgresError {
     PostgresError::Domain(error.to_string())
 }
 

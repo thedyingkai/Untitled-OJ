@@ -3,7 +3,7 @@ use crate::{
     SqliteOrchestratorStore, StorageError, StorageResult, StoredRuntimeInstance,
     sqlite::{ENDPOINTS, HOST_SERVICES, NODES, TOPOLOGY_SNAPSHOTS},
 };
-use orchestrator_legacy::{
+use orchestrator_core::{
     Endpoint, HostService, NodeRecord, TopologyEndpointSpec, TopologyLinkSpec, TopologyRevision,
     TopologySnapshot, TopologySpec, TopologyStatus, parse_endpoint_id,
 };

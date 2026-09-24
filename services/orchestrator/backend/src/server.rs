@@ -42,8 +42,9 @@ use orchestrator_control_plane::{
 use orchestrator_core::{
     NodeRecord, TopologyDrift, TopologyDriftKind, TopologyReconciliationState, TopologyResourceKind,
 };
-use orchestrator_legacy::{OrchestratorActionConsole, OrchestratorStore};
+use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_protocol::ArtifactReference;
+use orchestrator_storage::OrchestratorStore;
 use orchestrator_storage::{
     AdvisoryLockGuard, JobMetricsSnapshot, PostgresOptions, PostgresOrchestratorStore,
     PostgresTlsTrust, SqliteOrchestratorStore,

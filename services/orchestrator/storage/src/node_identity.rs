@@ -1,7 +1,7 @@
 use crate::{
     PostgresError, PostgresOrchestratorStore, SqliteOrchestratorStore, StorageError, sqlite::NODES,
 };
-use orchestrator_legacy::{NodeRecord, validate_node_record};
+use orchestrator_core::{NodeRecord, validate_node_record};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 

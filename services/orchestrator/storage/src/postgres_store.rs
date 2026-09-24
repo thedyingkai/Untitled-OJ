@@ -1,3 +1,4 @@
+use crate::OrchestratorStore;
 use crate::{
     PostgresError, PostgresOptions, PostgresPool, PostgresReadinessReport,
     sqlite::{
@@ -7,23 +8,22 @@ use crate::{
         TOPOLOGY_SNAPSHOTS,
     },
 };
-use orchestrator_legacy::{
+pub(crate) use orchestrator_core::validate_node_tree;
+use orchestrator_core::{
     DeployedServiceApi, DiagnosticReport, Endpoint, HostService, Link, LogView, NodeRecord,
     Operation, OperationLock, OperationLogRecord, OperationStatus, OrchestratorError,
-    OrchestratorStore, RenderedServiceConfig, ServiceApiSurface, ServiceFrontendEntry,
-    ServiceManifest, ServiceMigrationRecord, ServicePermissionRecord, ServiceRedisResource,
-    ServiceRelease, ServiceRoute, ServiceStorageResource, Topology, TopologySnapshot,
-    build_topology, validate_deployed_service_api, validate_endpoint, validate_endpoint_id,
-    validate_host_service, validate_link, validate_log_view, validate_node_record,
-    validate_rendered_service_config, validate_service_api_surface,
-    validate_service_frontend_entry, validate_service_manifest, validate_service_migration_record,
-    validate_service_permission_record, validate_service_redis_resource,
-    validate_service_release_record, validate_service_route, validate_service_storage_resource,
-    validate_topology,
+    RenderedServiceConfig, ServiceApiSurface, ServiceFrontendEntry, ServiceManifest,
+    ServiceMigrationRecord, ServicePermissionRecord, ServiceRedisResource, ServiceRelease,
+    ServiceRoute, ServiceStorageResource, Topology, TopologySnapshot, build_topology,
+    validate_deployed_service_api, validate_endpoint, validate_endpoint_id, validate_host_service,
+    validate_link, validate_log_view, validate_node_record, validate_rendered_service_config,
+    validate_service_api_surface, validate_service_frontend_entry, validate_service_manifest,
+    validate_service_migration_record, validate_service_permission_record,
+    validate_service_redis_resource, validate_service_release_record, validate_service_route,
+    validate_service_storage_resource, validate_topology,
 };
 use r2d2_postgres::postgres::Transaction;
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::{BTreeMap, BTreeSet};
 
 /// Pool-backed PostgreSQL implementation of the current domain repository.
 ///
@@ -98,7 +98,7 @@ impl PostgresOrchestratorStore {
         })
     }
 
-    fn list_records<T: DeserializeOwned>(&self, kind: &str) -> orchestrator_legacy::Result<Vec<T>> {
+    fn list_records<T: DeserializeOwned>(&self, kind: &str) -> orchestrator_core::Result<Vec<T>> {
         self.pool
             .with_client(|client| {
                 client
@@ -117,7 +117,7 @@ impl PostgresOrchestratorStore {
         &self,
         kind: &str,
         key: &str,
-    ) -> orchestrator_legacy::Result<Option<T>> {
+    ) -> orchestrator_core::Result<Option<T>> {
         self.pool
             .with_client(|client| {
                 client
@@ -137,7 +137,7 @@ impl PostgresOrchestratorStore {
         key: &str,
         scope: &str,
         value: &T,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         let payload = serde_json::to_string(value)?;
         self.pool
             .with_client(|client| {
@@ -150,7 +150,7 @@ impl PostgresOrchestratorStore {
             .map_err(core_postgres_error)
     }
 
-    fn delete_record(&self, kind: &str, key: &str) -> orchestrator_legacy::Result<bool> {
+    fn delete_record(&self, kind: &str, key: &str) -> orchestrator_core::Result<bool> {
         self.pool
             .with_client(|client| {
                 Ok(client.execute(
@@ -161,7 +161,7 @@ impl PostgresOrchestratorStore {
             .map_err(core_postgres_error)
     }
 
-    fn delete_scope(&self, kind: &str, scope: &str) -> orchestrator_legacy::Result<()> {
+    fn delete_scope(&self, kind: &str, scope: &str) -> orchestrator_core::Result<()> {
         self.pool
             .with_client(|client| {
                 client.execute(
@@ -173,12 +173,7 @@ impl PostgresOrchestratorStore {
             .map_err(core_postgres_error)
     }
 
-    fn update_record<T, F>(
-        &self,
-        kind: &str,
-        key: &str,
-        update: F,
-    ) -> orchestrator_legacy::Result<()>
+    fn update_record<T, F>(&self, kind: &str, key: &str, update: F) -> orchestrator_core::Result<()>
     where
         T: Serialize + DeserializeOwned,
         F: FnOnce(&mut T),
@@ -216,60 +211,6 @@ fn core_postgres_error(error: PostgresError) -> OrchestratorError {
     OrchestratorError::Dependency(format!("orchestrator postgres storage: {error}"))
 }
 
-pub(crate) fn validate_node_tree(
-    mut nodes: Vec<NodeRecord>,
-    candidate: &NodeRecord,
-) -> orchestrator_legacy::Result<()> {
-    if nodes
-        .iter()
-        .any(|node| node.node_id != candidate.node_id && node.host_ip == candidate.host_ip)
-    {
-        return Err(OrchestratorError::InvalidManifest(format!(
-            "node host_ip {} is already registered",
-            candidate.host_ip
-        )));
-    }
-    match candidate.role.as_str() {
-        "root" | "standalone" if !candidate.parent_node_id.trim().is_empty() => {
-            return Err(OrchestratorError::InvalidManifest(format!(
-                "{} node must not have parent_node_id",
-                candidate.role
-            )));
-        }
-        "node" if candidate.parent_node_id.trim().is_empty() => {
-            return Err(OrchestratorError::InvalidManifest(
-                "node parent_node_id is required".to_string(),
-            ));
-        }
-        _ => {}
-    }
-    nodes.retain(|node| node.node_id != candidate.node_id);
-    nodes.push(candidate.clone());
-    let by_id = nodes
-        .into_iter()
-        .map(|node| (node.node_id.clone(), node))
-        .collect::<BTreeMap<_, _>>();
-    for node in by_id.values() {
-        let mut current = node;
-        let mut seen = BTreeSet::new();
-        while !current.parent_node_id.trim().is_empty() {
-            if !seen.insert(current.node_id.clone()) {
-                return Err(OrchestratorError::InvalidManifest(format!(
-                    "node tree contains cycle at {}",
-                    current.node_id
-                )));
-            }
-            current = by_id.get(&current.parent_node_id).ok_or_else(|| {
-                OrchestratorError::Dependency(format!(
-                    "parent node {} not found",
-                    current.parent_node_id
-                ))
-            })?;
-        }
-    }
-    Ok(())
-}
-
 fn operation_exists(
     transaction: &mut Transaction<'_>,
     operation_id: &str,
@@ -283,23 +224,20 @@ fn operation_exists(
 }
 
 impl OrchestratorStore for PostgresOrchestratorStore {
-    fn list_services(&self) -> orchestrator_legacy::Result<Vec<ServiceManifest>> {
+    fn list_services(&self) -> orchestrator_core::Result<Vec<ServiceManifest>> {
         self.list_records(SERVICES)
     }
 
-    fn get_service(
-        &self,
-        service_id: &str,
-    ) -> orchestrator_legacy::Result<Option<ServiceManifest>> {
+    fn get_service(&self, service_id: &str) -> orchestrator_core::Result<Option<ServiceManifest>> {
         self.get_record(SERVICES, service_id)
     }
 
-    fn upsert_service(&mut self, value: ServiceManifest) -> orchestrator_legacy::Result<()> {
+    fn upsert_service(&mut self, value: ServiceManifest) -> orchestrator_core::Result<()> {
         validate_service_manifest(&value)?;
         self.upsert_record(SERVICES, &value.id, &value.id, &value)
     }
 
-    fn delete_service(&mut self, service_id: &str) -> orchestrator_legacy::Result<()> {
+    fn delete_service(&mut self, service_id: &str) -> orchestrator_core::Result<()> {
         let endpoint_ids = self
             .list_endpoints()?
             .into_iter()
@@ -327,7 +265,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
             .map_err(core_postgres_error)
     }
 
-    fn list_host_services(&self) -> orchestrator_legacy::Result<Vec<HostService>> {
+    fn list_host_services(&self) -> orchestrator_core::Result<Vec<HostService>> {
         self.list_records(HOST_SERVICES)
     }
 
@@ -335,11 +273,11 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         &self,
         host_ip: &str,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<Option<HostService>> {
+    ) -> orchestrator_core::Result<Option<HostService>> {
         self.get_record(HOST_SERVICES, &key(&[host_ip, service_name]))
     }
 
-    fn upsert_host_service(&mut self, value: HostService) -> orchestrator_legacy::Result<()> {
+    fn upsert_host_service(&mut self, value: HostService) -> orchestrator_core::Result<()> {
         validate_host_service(&value)?;
         self.upsert_record(
             HOST_SERVICES,
@@ -353,7 +291,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         &mut self,
         host_ip: &str,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_record(HOST_SERVICES, &key(&[host_ip, service_name]))
             .map(|_| ())
     }
@@ -361,11 +299,11 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn delete_host_services_for_service(
         &mut self,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_scope(HOST_SERVICES, service_name)
     }
 
-    fn list_service_releases(&self) -> orchestrator_legacy::Result<Vec<ServiceRelease>> {
+    fn list_service_releases(&self) -> orchestrator_core::Result<Vec<ServiceRelease>> {
         self.list_records(RELEASES)
     }
 
@@ -373,11 +311,11 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         &self,
         service_name: &str,
         version: &str,
-    ) -> orchestrator_legacy::Result<Option<ServiceRelease>> {
+    ) -> orchestrator_core::Result<Option<ServiceRelease>> {
         self.get_record(RELEASES, &key(&[service_name, version]))
     }
 
-    fn upsert_service_release(&mut self, value: ServiceRelease) -> orchestrator_legacy::Result<()> {
+    fn upsert_service_release(&mut self, value: ServiceRelease) -> orchestrator_core::Result<()> {
         validate_service_release_record(&value)?;
         self.upsert_record(
             RELEASES,
@@ -391,7 +329,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         &mut self,
         service_name: &str,
         version: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_record(RELEASES, &key(&[service_name, version]))
             .map(|_| ())
     }
@@ -400,7 +338,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         &mut self,
         service: ServiceManifest,
         release: ServiceRelease,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_service_manifest(&service)?;
         validate_service_release_record(&release)?;
         if service.id != release.service_name || service.version != release.version {
@@ -426,11 +364,11 @@ impl OrchestratorStore for PostgresOrchestratorStore {
             .map_err(core_postgres_error)
     }
 
-    fn list_service_routes(&self) -> orchestrator_legacy::Result<Vec<ServiceRoute>> {
+    fn list_service_routes(&self) -> orchestrator_core::Result<Vec<ServiceRoute>> {
         self.list_records(ROUTES)
     }
 
-    fn upsert_service_route(&mut self, value: ServiceRoute) -> orchestrator_legacy::Result<()> {
+    fn upsert_service_route(&mut self, value: ServiceRoute) -> orchestrator_core::Result<()> {
         validate_service_route(&value)?;
         self.upsert_record(
             ROUTES,
@@ -443,20 +381,20 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn delete_service_routes_for_service(
         &mut self,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_scope(ROUTES, service_name)
     }
 
     fn list_service_migration_records(
         &self,
-    ) -> orchestrator_legacy::Result<Vec<ServiceMigrationRecord>> {
+    ) -> orchestrator_core::Result<Vec<ServiceMigrationRecord>> {
         self.list_records(MIGRATION_RECORDS)
     }
 
     fn upsert_service_migration_record(
         &mut self,
         value: ServiceMigrationRecord,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_service_migration_record(&value)?;
         self.upsert_record(
             MIGRATION_RECORDS,
@@ -469,20 +407,20 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn delete_service_migration_records_for_service(
         &mut self,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_scope(MIGRATION_RECORDS, service_name)
     }
 
     fn list_service_permission_records(
         &self,
-    ) -> orchestrator_legacy::Result<Vec<ServicePermissionRecord>> {
+    ) -> orchestrator_core::Result<Vec<ServicePermissionRecord>> {
         self.list_records(PERMISSION_RECORDS)
     }
 
     fn upsert_service_permission_record(
         &mut self,
         value: ServicePermissionRecord,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_service_permission_record(&value)?;
         self.upsert_record(
             PERMISSION_RECORDS,
@@ -495,20 +433,20 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn delete_service_permission_records_for_service(
         &mut self,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_scope(PERMISSION_RECORDS, service_name)
     }
 
     fn list_service_frontend_entries(
         &self,
-    ) -> orchestrator_legacy::Result<Vec<ServiceFrontendEntry>> {
+    ) -> orchestrator_core::Result<Vec<ServiceFrontendEntry>> {
         self.list_records(FRONTENDS)
     }
 
     fn upsert_service_frontend_entry(
         &mut self,
         value: ServiceFrontendEntry,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_service_frontend_entry(&value)?;
         self.upsert_record(FRONTENDS, &value.service_name, &value.service_name, &value)
     }
@@ -516,20 +454,18 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn delete_service_frontend_entry(
         &mut self,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_record(FRONTENDS, service_name).map(|_| ())
     }
 
-    fn list_service_redis_resources(
-        &self,
-    ) -> orchestrator_legacy::Result<Vec<ServiceRedisResource>> {
+    fn list_service_redis_resources(&self) -> orchestrator_core::Result<Vec<ServiceRedisResource>> {
         self.list_records(REDIS_RESOURCES)
     }
 
     fn upsert_service_redis_resource(
         &mut self,
         value: ServiceRedisResource,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_service_redis_resource(&value)?;
         self.upsert_record(
             REDIS_RESOURCES,
@@ -542,20 +478,20 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn delete_service_redis_resources_for_service(
         &mut self,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_scope(REDIS_RESOURCES, service_name)
     }
 
     fn list_service_storage_resources(
         &self,
-    ) -> orchestrator_legacy::Result<Vec<ServiceStorageResource>> {
+    ) -> orchestrator_core::Result<Vec<ServiceStorageResource>> {
         self.list_records(STORAGE_RESOURCES)
     }
 
     fn upsert_service_storage_resource(
         &mut self,
         value: ServiceStorageResource,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_service_storage_resource(&value)?;
         self.upsert_record(
             STORAGE_RESOURCES,
@@ -568,20 +504,20 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn delete_service_storage_resources_for_service(
         &mut self,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_scope(STORAGE_RESOURCES, service_name)
     }
 
     fn list_rendered_service_configs(
         &self,
-    ) -> orchestrator_legacy::Result<Vec<RenderedServiceConfig>> {
+    ) -> orchestrator_core::Result<Vec<RenderedServiceConfig>> {
         self.list_records(RENDERED_CONFIGS)
     }
 
     fn upsert_rendered_service_config(
         &mut self,
         value: RenderedServiceConfig,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_rendered_service_config(&value)?;
         self.upsert_record(
             RENDERED_CONFIGS,
@@ -594,25 +530,25 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn delete_rendered_service_configs_for_service(
         &mut self,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_scope(RENDERED_CONFIGS, service_name)
     }
 
-    fn list_nodes(&self) -> orchestrator_legacy::Result<Vec<NodeRecord>> {
+    fn list_nodes(&self) -> orchestrator_core::Result<Vec<NodeRecord>> {
         self.list_records(NODES)
     }
 
-    fn get_node(&self, node_id: &str) -> orchestrator_legacy::Result<Option<NodeRecord>> {
+    fn get_node(&self, node_id: &str) -> orchestrator_core::Result<Option<NodeRecord>> {
         self.get_record(NODES, node_id)
     }
 
-    fn upsert_node(&mut self, value: NodeRecord) -> orchestrator_legacy::Result<()> {
+    fn upsert_node(&mut self, value: NodeRecord) -> orchestrator_core::Result<()> {
         validate_node_record(&value)?;
         validate_node_tree(self.list_nodes()?, &value)?;
         self.upsert_record(NODES, &value.node_id, &value.parent_node_id, &value)
     }
 
-    fn delete_node(&mut self, node_id: &str) -> orchestrator_legacy::Result<()> {
+    fn delete_node(&mut self, node_id: &str) -> orchestrator_core::Result<()> {
         if self
             .list_nodes()?
             .iter()
@@ -625,14 +561,14 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         self.delete_record(NODES, node_id).map(|_| ())
     }
 
-    fn list_service_api_surfaces(&self) -> orchestrator_legacy::Result<Vec<ServiceApiSurface>> {
+    fn list_service_api_surfaces(&self) -> orchestrator_core::Result<Vec<ServiceApiSurface>> {
         self.list_records(API_SURFACES)
     }
 
     fn upsert_service_api_surface(
         &mut self,
         value: ServiceApiSurface,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_service_api_surface(&value)?;
         self.upsert_record(
             API_SURFACES,
@@ -645,18 +581,18 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn delete_service_api_surfaces_for_service(
         &mut self,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_scope(API_SURFACES, service_name)
     }
 
-    fn list_deployed_service_apis(&self) -> orchestrator_legacy::Result<Vec<DeployedServiceApi>> {
+    fn list_deployed_service_apis(&self) -> orchestrator_core::Result<Vec<DeployedServiceApi>> {
         self.list_records(DEPLOYED_APIS)
     }
 
     fn upsert_deployed_service_api(
         &mut self,
         value: DeployedServiceApi,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_deployed_service_api(&value)?;
         if !self
             .list_nodes()?
@@ -700,19 +636,19 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn delete_deployed_service_apis_for_service(
         &mut self,
         service_name: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.delete_scope(DEPLOYED_APIS, service_name)
     }
 
-    fn list_endpoints(&self) -> orchestrator_legacy::Result<Vec<Endpoint>> {
+    fn list_endpoints(&self) -> orchestrator_core::Result<Vec<Endpoint>> {
         self.list_records(ENDPOINTS)
     }
 
-    fn get_endpoint(&self, endpoint: &str) -> orchestrator_legacy::Result<Option<Endpoint>> {
+    fn get_endpoint(&self, endpoint: &str) -> orchestrator_core::Result<Option<Endpoint>> {
         self.get_record(ENDPOINTS, endpoint)
     }
 
-    fn upsert_endpoint(&mut self, value: Endpoint) -> orchestrator_legacy::Result<()> {
+    fn upsert_endpoint(&mut self, value: Endpoint) -> orchestrator_core::Result<()> {
         validate_endpoint(&value)?;
         if self.get_service(&value.service_id)?.is_none() {
             return Err(OrchestratorError::Dependency(format!(
@@ -723,7 +659,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         self.upsert_record(ENDPOINTS, &value.endpoint, &value.service_id, &value)
     }
 
-    fn delete_endpoint(&mut self, endpoint: &str) -> orchestrator_legacy::Result<()> {
+    fn delete_endpoint(&mut self, endpoint: &str) -> orchestrator_core::Result<()> {
         validate_endpoint_id(endpoint)?;
         self.pool
             .with_transaction(|transaction| {
@@ -741,7 +677,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         endpoint: &str,
         health: String,
         reachable: bool,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_endpoint_id(endpoint)?;
         self.update_record::<Endpoint, _>(ENDPOINTS, endpoint, |value| {
             value.health = health;
@@ -749,7 +685,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         })
     }
 
-    fn list_links(&self) -> orchestrator_legacy::Result<Vec<Link>> {
+    fn list_links(&self) -> orchestrator_core::Result<Vec<Link>> {
         self.list_records(LINKS)
     }
 
@@ -757,11 +693,11 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         &self,
         source_endpoint: &str,
         target_endpoint: &str,
-    ) -> orchestrator_legacy::Result<Option<Link>> {
+    ) -> orchestrator_core::Result<Option<Link>> {
         self.get_record(LINKS, &key(&[source_endpoint, target_endpoint]))
     }
 
-    fn upsert_link(&mut self, value: Link) -> orchestrator_legacy::Result<()> {
+    fn upsert_link(&mut self, value: Link) -> orchestrator_core::Result<()> {
         validate_link(&value, &self.list_endpoints()?)?;
         self.upsert_record(
             LINKS,
@@ -775,7 +711,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         &mut self,
         source_endpoint: &str,
         target_endpoint: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_endpoint_id(source_endpoint)?;
         validate_endpoint_id(target_endpoint)?;
         if !self.delete_record(LINKS, &key(&[source_endpoint, target_endpoint]))? {
@@ -792,7 +728,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         target_endpoint: &str,
         health: String,
         latency_ms: Option<u32>,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         validate_endpoint_id(source_endpoint)?;
         validate_endpoint_id(target_endpoint)?;
         self.update_record::<Link, _>(LINKS, &key(&[source_endpoint, target_endpoint]), |value| {
@@ -801,19 +737,19 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         })
     }
 
-    fn create_operation(&mut self, value: Operation) -> orchestrator_legacy::Result<()> {
+    fn create_operation(&mut self, value: Operation) -> orchestrator_core::Result<()> {
         self.upsert_record(OPERATIONS, &value.operation_id, &value.target_id, &value)
     }
 
-    fn get_operation(&self, operation_id: &str) -> orchestrator_legacy::Result<Option<Operation>> {
+    fn get_operation(&self, operation_id: &str) -> orchestrator_core::Result<Option<Operation>> {
         self.get_record(OPERATIONS, operation_id)
     }
 
-    fn list_operations(&self) -> orchestrator_legacy::Result<Vec<Operation>> {
+    fn list_operations(&self) -> orchestrator_core::Result<Vec<Operation>> {
         self.list_records(OPERATIONS)
     }
 
-    fn update_operation(&mut self, value: Operation) -> orchestrator_legacy::Result<()> {
+    fn update_operation(&mut self, value: Operation) -> orchestrator_core::Result<()> {
         self.upsert_record(OPERATIONS, &value.operation_id, &value.target_id, &value)
     }
 
@@ -822,7 +758,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         operation_id: &str,
         status: OperationStatus,
         error_message: String,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.update_record::<Operation, _>(OPERATIONS, operation_id, |value| {
             value.status = status;
             value.error_message = error_message;
@@ -833,14 +769,14 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         &mut self,
         operation_id: &str,
         result: serde_json::Value,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.update_record::<Operation, _>(OPERATIONS, operation_id, |value| value.result = result)
     }
 
     fn append_operation_log(
         &mut self,
         mut value: OperationLogRecord,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.pool
             .with_transaction(|transaction| {
                 if !operation_exists(transaction, &value.operation_id)? {
@@ -877,7 +813,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
     fn list_operation_logs(
         &self,
         operation_id: &str,
-    ) -> orchestrator_legacy::Result<Vec<OperationLogRecord>> {
+    ) -> orchestrator_core::Result<Vec<OperationLogRecord>> {
         self.pool
             .with_client(|client| {
                 client
@@ -895,10 +831,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
             .map_err(core_postgres_error)
     }
 
-    fn acquire_operation_lock(
-        &mut self,
-        value: OperationLock,
-    ) -> orchestrator_legacy::Result<bool> {
+    fn acquire_operation_lock(&mut self, value: OperationLock) -> orchestrator_core::Result<bool> {
         self.pool
             .with_transaction(|transaction| {
                 if !operation_exists(transaction, &value.operation_id)? {
@@ -920,7 +853,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         &mut self,
         lock_key: &str,
         operation_id: &str,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.pool
             .with_client(|client| {
                 client.execute(
@@ -932,10 +865,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
             .map_err(core_postgres_error)
     }
 
-    fn save_topology_snapshot(
-        &mut self,
-        value: TopologySnapshot,
-    ) -> orchestrator_legacy::Result<()> {
+    fn save_topology_snapshot(&mut self, value: TopologySnapshot) -> orchestrator_core::Result<()> {
         validate_topology(&value.topology)?;
         self.upsert_record(
             TOPOLOGY_SNAPSHOTS,
@@ -945,9 +875,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         )
     }
 
-    fn get_latest_topology_snapshot(
-        &self,
-    ) -> orchestrator_legacy::Result<Option<TopologySnapshot>> {
+    fn get_latest_topology_snapshot(&self) -> orchestrator_core::Result<Option<TopologySnapshot>> {
         self.pool
             .with_client(|client| {
                 client
@@ -964,7 +892,7 @@ impl OrchestratorStore for PostgresOrchestratorStore {
             .map_err(core_postgres_error)
     }
 
-    fn build_topology_view(&self) -> orchestrator_legacy::Result<Topology> {
+    fn build_topology_view(&self) -> orchestrator_core::Result<Topology> {
         let endpoints = self.list_endpoints()?;
         if endpoints.is_empty() {
             return self
@@ -994,15 +922,15 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         )
     }
 
-    fn delete_topology(&mut self, root_endpoint: &str) -> orchestrator_legacy::Result<()> {
+    fn delete_topology(&mut self, root_endpoint: &str) -> orchestrator_core::Result<()> {
         self.delete_scope(TOPOLOGY_SNAPSHOTS, root_endpoint)
     }
 
-    fn list_log_sources(&self) -> orchestrator_legacy::Result<Vec<LogView>> {
+    fn list_log_sources(&self) -> orchestrator_core::Result<Vec<LogView>> {
         self.list_records(LOG_SOURCES)
     }
 
-    fn upsert_log_source(&mut self, value: LogView) -> orchestrator_legacy::Result<()> {
+    fn upsert_log_source(&mut self, value: LogView) -> orchestrator_core::Result<()> {
         validate_log_view(&value)?;
         if self.get_endpoint(&value.endpoint)?.is_none() {
             return Err(OrchestratorError::Dependency(format!(
@@ -1013,25 +941,25 @@ impl OrchestratorStore for PostgresOrchestratorStore {
         self.upsert_record(LOG_SOURCES, &value.source_id, &value.endpoint, &value)
     }
 
-    fn delete_log_source(&mut self, source_id: &str) -> orchestrator_legacy::Result<()> {
+    fn delete_log_source(&mut self, source_id: &str) -> orchestrator_core::Result<()> {
         self.delete_record(LOG_SOURCES, source_id).map(|_| ())
     }
 
     fn create_diagnostic_report(
         &mut self,
         value: DiagnosticReport,
-    ) -> orchestrator_legacy::Result<()> {
+    ) -> orchestrator_core::Result<()> {
         self.upsert_record(DIAGNOSTICS, &value.report_id, &value.target_id, &value)
     }
 
     fn get_diagnostic_report(
         &self,
         report_id: &str,
-    ) -> orchestrator_legacy::Result<Option<DiagnosticReport>> {
+    ) -> orchestrator_core::Result<Option<DiagnosticReport>> {
         self.get_record(DIAGNOSTICS, report_id)
     }
 
-    fn list_diagnostic_reports(&self) -> orchestrator_legacy::Result<Vec<DiagnosticReport>> {
+    fn list_diagnostic_reports(&self) -> orchestrator_core::Result<Vec<DiagnosticReport>> {
         self.list_records(DIAGNOSTICS)
     }
 }

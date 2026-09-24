@@ -44,7 +44,7 @@ pub use market::{
 };
 pub use observability::{
     DiagnosticExport, LogQuery, LogQueryResult, build_diagnostic_report, export_diagnostic_report,
-    query_logs, validate_log_view,
+    query_logs,
 };
 pub use reconciler::{
     ReconcileLoopConfig, ReconcileLoopResult, ReconcileTickResult, run_reconcile_loop,
@@ -66,15 +66,14 @@ pub use store::{
     DeferredStorageResourceProvisioner, FetchedReleaseSource, GatewayRoutePublishRequest,
     GatewayRoutePublishResult, GatewayRoutePublisher, HttpAuthPermissionRegistrar,
     HttpGatewayRoutePublisher, HttpNodeServiceDispatcher, HttpStorageResourceProvisioner,
-    LocalReleasePackageLoader, LocalSqlMigrationRunner, MemoryOrchestratorStore,
-    MigrationExecutionRecord, MigrationExecutionRequest, MigrationExecutionResult, MigrationRunner,
+    LocalReleasePackageLoader, LocalSqlMigrationRunner, MigrationExecutionRecord,
+    MigrationExecutionRequest, MigrationExecutionResult, MigrationRunner,
     NodeServiceDispatchRequest, NodeServiceDispatchResult, NodeServiceDispatcher,
-    OperationExecutor, OrchestratorStore, RedisProvisionRequest, RedisProvisionResult,
-    RedisProvisionedResource, RedisResourceProvisioner, ReleasePackageLoadRequest,
-    ReleasePackageLoadResult, ReleasePackageLoader, SharedOrchestratorStore,
-    StorageProvisionRequest, StorageProvisionResult, StorageProvisionedResource,
-    StorageResourceProvisioner, TcpRedisResourceProvisioner, resolve_outbound_redirect,
-    validate_outbound_url,
+    OperationExecutor, RedisProvisionRequest, RedisProvisionResult, RedisProvisionedResource,
+    RedisResourceProvisioner, ReleasePackageLoadRequest, ReleasePackageLoadResult,
+    ReleasePackageLoader, StorageProvisionRequest, StorageProvisionResult,
+    StorageProvisionedResource, StorageResourceProvisioner, TcpRedisResourceProvisioner,
+    resolve_outbound_redirect, validate_outbound_url,
 };
 pub use view::{
     DeploymentViewRow, DiagnosticViewRow, EndpointViewRow, LinkViewRow, LogViewRow,
@@ -92,4 +91,9 @@ pub use workbench::{
     new_operation_workbench_session, rollback_operation_workbench_session,
     run_operation_workbench_flow, update_operation_workbench_field,
     update_operation_workbench_field_with_releases,
+};
+
+// Public compatibility paths; storage owns the repository implementation.
+pub use orchestrator_storage::{
+    MemoryOrchestratorStore, OrchestratorStore, SharedOrchestratorStore,
 };

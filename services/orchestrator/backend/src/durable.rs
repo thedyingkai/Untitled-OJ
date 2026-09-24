@@ -15,7 +15,7 @@ use orchestrator_core::{
     ServiceReleaseContract, TopologyEndpointSpec, TopologyRevision, TopologySpec, TopologyStatus,
     api_version_matches, release_supports_link_probe_v1, validate_service_release,
 };
-use orchestrator_legacy::OrchestratorStore;
+use orchestrator_storage::OrchestratorStore;
 use orchestrator_storage::{
     ApiBinding, AuditRecord, CertificateActivation, CertificateRotation, ContributionRepository,
     ContributionRepositoryResult, ControlPlaneAnomalyCounters, EnrollmentLookup,

@@ -7,7 +7,6 @@ edition.workspace = true
 fs2 = "0.4"
 orchestrator-core.workspace = true
 orchestrator-control-plane.workspace = true
-orchestrator-legacy.workspace = true
 orchestrator-protocol.workspace = true
 r2d2_postgres = "0.18"
 rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }

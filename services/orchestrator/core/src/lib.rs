@@ -11,7 +11,14 @@ pub mod binding_projection;
 pub mod composition;
 mod contract_v1;
 mod contribution;
+mod log_source;
 mod model;
+pub use log_source::validate_log_view;
+mod node_registry;
+pub use node_registry::{
+    ancestors_of_from_nodes, descendants_of_from_nodes, effective_api_routes_from_registry,
+    ensure_node_tree_acyclic, validate_node_tree, validate_node_tree_upsert,
+};
 mod planner;
 mod schema;
 mod service;

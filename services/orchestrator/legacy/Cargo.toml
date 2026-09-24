@@ -8,6 +8,7 @@ default = []
 legacy-0_2 = []
 
 [dependencies]
+orchestrator-storage.workspace = true
 anyhow.workspace = true
 flate2 = "1"
 orchestrator-domain = { package = "orchestrator-core", path = "../core" }

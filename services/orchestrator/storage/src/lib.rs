@@ -23,7 +23,9 @@ mod postgres_runtime_facts;
 mod postgres_runtime_instances;
 mod postgres_store;
 mod postgres_topology;
+mod repository;
 mod retention;
+pub use repository::{MemoryOrchestratorStore, OrchestratorStore, SharedOrchestratorStore};
 mod runtime_facts;
 mod runtime_instances;
 mod sqlite;
@@ -44,7 +46,7 @@ pub use node_identity::{
     NewNodeCertificate, NodeCertificateRecord, NodeEnrollmentCode, classify_enrollment_replay,
 };
 pub use operations::{ControlPlaneAnomalyCounters, SqliteOperationStore};
-pub use orchestrator_legacy::{
+pub use orchestrator_core::{
     ApiBinding, ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState, ApiBindingState,
 };
 pub use postgres::{

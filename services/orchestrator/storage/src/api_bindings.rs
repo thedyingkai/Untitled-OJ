@@ -1,5 +1,5 @@
 use crate::{SqliteOrchestratorStore, StorageError, StorageResult};
-use orchestrator_legacy::{ApiBinding, ApiBindingState};
+use orchestrator_core::{ApiBinding, ApiBindingState};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::collections::BTreeSet;
 

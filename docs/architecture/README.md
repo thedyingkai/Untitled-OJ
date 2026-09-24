@@ -4,7 +4,7 @@ OJOS Orchestrator 采用控制面与数据面分离的 service-release-first 架
 
 ## 模块
 
-下图是职责概览，不代表所有旧依赖已经消除。Store/Topology 的宿主用例已分出职责，backend 的纯领域类型和规则直接依赖 `orchestrator-core`；旧 Console、部分仓储接口和基础适配仍参与正式链路。当前改造与保留的限制见[重构计划](refactoring-plan.md)。
+下图是职责概览，不代表所有旧依赖已经消除。Store/Topology 的宿主用例已分出职责，backend 的纯领域类型和规则直接依赖 `orchestrator-core`；仓储接口已归入 storage，旧 Console 和部分基础适配仍参与正式链路。当前改造与保留的限制见[重构计划](refactoring-plan.md)。
 
 ```text
 Desktop / Web / TUI
@@ -26,14 +26,14 @@ orchestrator-backend
 - `orchestrator-core` 不访问文件、数据库、网络、进程、环境变量或 Docker；它只定义可测试的领域规则。
 - `core/binding_projection` 拥有 Binding generation、激活/撤销和投影增减规则。后台协调与 DurableStore 都调用这一确定性实现；storage 保留 Topology 组提交 DTO 的兼容导出。
 - `orchestrator-protocol` 定义共享报告、实例观测、profile、任务载荷和确定性校验，不依赖 Docker 客户端、Agent、数据库或网络传输。backend/storage 直接使用这些契约；Agent 使用 runtime 调用 Docker。旧 runtime 类型路径保留兼容导出，字段与序列化保持一致。详见[执行契约与 Docker 驱动](execution-contracts.md)。
-- `orchestrator-storage` 是持久状态真值，不维护写后全表重载的内存镜像。
+- `orchestrator-storage` 拥有仓储接口及 Memory/Shared/SQLite/PostgreSQL 实现，不依赖 legacy 或 runtime。持久状态以数据库为真值，不维护写后全表重载的内存镜像；节点图与日志声明的纯规则属于 core。详见[仓储边界与历史兼容](repository-boundary.md)。
 - `orchestrator-control-plane` 协调至少一次投递、lease、重试、恢复和 saga 补偿；不能证明副作用结果时进入 `NEEDS_ATTENTION`。
 - backend 的后台入口只启动和停止循环；`topology_worker/` 内按租约、恢复、网络探测、运行时投影、状态协调和 Job 应用分工，保留原有 CAS/fencing。具体边界见[后台协调](background-coordination.md)。
 - `orchestrator-runtime` 只提供固定 Docker Engine/受控运行时操作，不拼接 shell。
 - `orchestrator-manager` 的 `catalog_query` 已通过只读端口组合 Catalog 分页和已部署视图；`store/config`、`store/composition` 承载纯配置与组合规则，`store/validation` 通过只读端口编排 Release 校验。这些模块不依赖 HTTP、Console 或数据库实现。整个 crate 仍包含旧 Store Console 应用逻辑，安装和替换用例仍在 backend，继续按计划迁移。
 - backend 的 Store HTTP 入口只承担请求与响应映射；宿主用例在 `backend/src/store`，统一通过 `StoreAdmission` 持锁提交任务并撤销失败的拓扑占用。Deployment 生命周期在独立的 `backend/src/deployment.rs`；它和 Release 元数据删除保持不同语义。详情见 [Store 与 Deployment](store.md)。
 - `orchestrator-agent` 只执行分配给本 Node 的 Job，并用本地 ledger 决定幂等重放；它还根据 Deployment assignment 原子物化只读 ServiceContext 和短期 workload credential。
-- `orchestrator-legacy` 当前容纳 0.2 Console、仓储接口、适配器及领域类型重导出。正式 v1 仍有依赖；目标是迁出正式能力，让它只承担兼容转换，尚不能声称已隔离。
+- `orchestrator-legacy` 当前容纳 0.2 Console、旧适配器及领域/仓储类型重导出；它使用 storage 的仓储接口。正式 v1 仍有应用调用依赖；目标是迁出正式能力，让它只承担兼容转换，尚不能声称已隔离。
 - Web 的 API、状态与表单按功能归属，传输实现位于 `shared/api`。实例请求状态和纯展示投影分开；正式调用方不再引用根目录兼容入口。详见 [Web 客户端](web-client.md)。
 
 ## 状态所有权
