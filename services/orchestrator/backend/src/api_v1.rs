@@ -1,7 +1,7 @@
 //! Versioned public HTTP contract.
 //!
-//! During the compatibility release this adapter delegates object semantics to
-//! the existing handlers while enforcing the v1 envelope and mutation rules.
+//! Enforces the v1 envelope, authorization and mutation rules, then routes to
+//! typed application handlers. The historical action router is not a fallback.
 
 use crate::artifact_store::ArtifactStore;
 use crate::audit::{MutationAudit, operation_id as audited_operation_id};
@@ -12,17 +12,17 @@ use crate::catalog_registry::CatalogRegistry;
 use crate::contribution_ack;
 use crate::contribution_snapshot::active_contribution_snapshot;
 use crate::deployment_api;
+use crate::diagnostics_api::handle_registry_request;
 use crate::durable::{DurableError, DurableStore};
 use crate::http::{ApiRequest, ApiResponse};
 use crate::node_api;
 use crate::operation_api;
+use crate::registry::RegistryContext;
 use crate::resource_api;
-use crate::routes::handle_api_request_with_internal_token;
 use crate::topology_api;
 use crate::topology_provider::TopologyProviderSaga;
 use crate::{market_api, store_v1_api, ui_layout};
 use orchestrator_core::{V1_ACTIONS, v1_action};
-use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_storage::{IdempotencyBegin, StoredIdempotentResponse};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -104,7 +104,7 @@ pub(crate) fn lock_free_response(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_with_permission_checker(
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     durable_store: Option<&DurableStore>,
     topology_provider: Option<&TopologyProviderSaga>,
     catalog_registry: Option<&CatalogRegistry>,
@@ -323,7 +323,7 @@ pub(crate) fn handle_with_permission_checker(
     };
 
     let response = dispatch_authenticated(
-        console,
+        registry_context,
         durable_store,
         topology_provider,
         catalog_registry,
@@ -385,7 +385,7 @@ pub(crate) fn handle_with_permission_checker(
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_authenticated(
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     durable_store: Option<&DurableStore>,
     topology_provider: Option<&TopologyProviderSaga>,
     catalog_registry: Option<&CatalogRegistry>,
@@ -453,7 +453,8 @@ fn dispatch_authenticated(
     if let Some(response) = resource_api::route(durable_store, &request, &request_id) {
         return response;
     }
-    if let Some(response) = node_api::route(console, durable_store, &request, &request_id) {
+    if let Some(response) = node_api::route(registry_context, durable_store, &request, &request_id)
+    {
         return response;
     }
     if let Some(response) =
@@ -463,7 +464,7 @@ fn dispatch_authenticated(
     }
     if let Some(response) = store_v1_api::route(
         store_state,
-        console,
+        registry_context,
         durable_store,
         catalog_registry,
         artifact_store,
@@ -527,7 +528,7 @@ fn dispatch_authenticated(
         ..request
     };
     let response =
-        handle_api_request_with_internal_token(console, legacy_request, expected_internal_token);
+        handle_registry_request(registry_context, legacy_request, expected_internal_token);
     if response.status >= 400 {
         let detail = response
             .body
@@ -966,7 +967,7 @@ fn supported_v1_actions(
     catalog_has_sources: bool,
     catalog_ready: bool,
 ) -> std::collections::BTreeSet<&'static str> {
-    // Read-only diagnostics are backed by the console projection. Every other
+    // Read-only diagnostics are backed by the registry_context projection. Every other
     // public action below needs durable state and is omitted when its provider
     // is unavailable; `/capabilities` must never advertise a request that can
     // only fail with `*_UNAVAILABLE`.

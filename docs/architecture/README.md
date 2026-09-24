@@ -4,7 +4,7 @@ OJOS Orchestrator 采用控制面与数据面分离的 service-release-first 架
 
 ## 模块
 
-下图是职责概览，不代表所有旧依赖已经消除。Store/Topology 的宿主用例已分出职责，backend 的纯领域类型和规则直接依赖 `orchestrator-core`；仓储接口已归入 storage，旧 Console 和部分基础适配仍参与正式链路。当前改造与保留的限制见[重构计划](refactoring-plan.md)。
+下图是职责概览，不代表所有旧依赖已经消除。Store/Topology 的宿主用例已分出职责，backend 的纯领域类型和规则直接依赖 `orchestrator-core`；仓储接口归入 storage，正式 Store/诊断使用仓储上下文，历史格式仍通过显式适配复用。当前改造与保留的限制见[重构计划](refactoring-plan.md)。
 
 ```text
 Desktop / Web / TUI
@@ -33,7 +33,7 @@ orchestrator-backend
 - `orchestrator-manager` 的 `catalog_query` 已通过只读端口组合 Catalog 分页和已部署视图；`store/config`、`store/composition` 承载纯配置与组合规则，`store/validation` 通过只读端口编排 Release 校验。这些模块不依赖 HTTP、Console 或数据库实现。整个 crate 仍包含旧 Store Console 应用逻辑，安装和替换用例仍在 backend，继续按计划迁移。
 - backend 的 Store HTTP 入口只承担请求与响应映射；宿主用例在 `backend/src/store`，统一通过 `StoreAdmission` 持锁提交任务并撤销失败的拓扑占用。Deployment 生命周期在独立的 `backend/src/deployment.rs`；它和 Release 元数据删除保持不同语义。详情见 [Store 与 Deployment](store.md)。
 - `orchestrator-agent` 只执行分配给本 Node 的 Job，并用本地 ledger 决定幂等重放；它还根据 Deployment assignment 原子物化只读 ServiceContext 和短期 workload credential。
-- `orchestrator-legacy` 当前容纳 0.2 Console、旧适配器及领域/仓储类型重导出；它使用 storage 的仓储接口。正式 v1 仍有应用调用依赖；目标是迁出正式能力，让它只承担兼容转换，尚不能声称已隔离。
+- `orchestrator-legacy` 当前容纳 0.2 Console、历史格式适配及领域/仓储类型重导出；它使用 storage 的仓储接口。正式 v1 不再调用旧动作调度，仍通过 `registry_compat` 使用文件加载、投影和诊断格式；显式旧路由与嵌入宿主兼容由 `legacy_console` 单独承接。
 - Web 的 API、状态与表单按功能归属，传输实现位于 `shared/api`。实例请求状态和纯展示投影分开；正式调用方不再引用根目录兼容入口。详见 [Web 客户端](web-client.md)。
 
 ## 状态所有权
@@ -81,7 +81,7 @@ Problem→Judge 使用 transactional outbox、Redis Stream relay、Judge inbox �
 | --- | --- | --- |
 | HTTP/API 行为 | `services/orchestrator/backend/src/*_api.rs` | Store mutation 与 Deployment 生命周期已抽离应用编排；其他路由仍需按重构计划逐项收敛，不继续扩大混合边界。 |
 | Store 安装、替换与提交 | `services/orchestrator/backend/src/store` | 命令不接收 HTTP 请求；规划、冲突检查、占用与发布保持既有顺序。锁与补偿由 admission 集中负责。 |
-| Catalog 只读查询 | `services/orchestrator/manager/src/catalog_query.rs` | 用例只通过读端口获取数据；`backend/src/adapters/catalog.rs` 对接既有可信源注册表和 Console 投影。查询失败顺序、分页和响应字段保持不变，注册与信任修改不属于读端口。 |
+| Catalog 只读查询 | `services/orchestrator/manager/src/catalog_query.rs` | 用例只通过读端口获取数据；`backend/src/adapters/catalog.rs` 对接可信源注册表和仓储投影。查询失败顺序、分页和响应字段保持不变，注册与信任修改不属于读端口。 |
 | Release 规则与只读校验 | `services/orchestrator/manager/src/store` | 配置与组合规则只处理显式输入；校验用例没有发布或执行能力；`backend/src/adapters/store_validation.rs` 提供事实读取和运行时规划。 |
 | 领域约束与计划 | `services/orchestrator/core/src` | 不引入数据库、网络或运行时依赖。 |
 | 持久化与恢复 | `services/orchestrator/storage/src`、`control-plane/src` | 状态以持久记录为准；明确事务和幂等边界。 |

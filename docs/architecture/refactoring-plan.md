@@ -47,7 +47,7 @@ Release 校验、安装和替换共同使用配置、组合规划、Node 能力�
 
 当前 C2a/b 的实现入口是 `manager/src/store/config.rs`、`composition.rs` 和 `validation.rs`：纯规则返回语义错误，HTTP 层负责状态映射；Release 校验通过只读端口取得事实与规划能力，不获得导入、提交事务、发布任务或执行容器的接口。C2c/d 已把宿主侧规划与 mutation 编排迁至 `backend/src/store`，校验适配器不再反向引用 HTTP 文件。`StoreAdmission` 统一协调锁、拓扑占用与失败撤销；Deployment 的真实卸载用例位于 `backend/src/deployment.rs`，Release 元数据删除仍是独立用例。具体边界与保留的限制见 [Store 与 Deployment](store.md)。
 
-安装与替换仍是较复杂的宿主用例，暂时使用 Console 与 DurableStore，不宣称整个 manager/legacy 已解耦。D 已把后台协调和持久化适配器里的确定性 Binding 转换提取至 `core/src/binding_projection.rs`，并分开租约、恢复、探测、投影和 Job 应用。现有 SQLite/PostgreSQL 事务适配不变，规则由同一 core 实现提供；真实 PostgreSQL 集成验收仍需外部数据库。详见[后台协调](background-coordination.md)。
+安装与替换仍是较复杂的宿主用例，H2 已把正式调用方改为仓储上下文与 DurableStore；历史格式仍由显式适配器提供，不宣称整个 manager/legacy crate 已解耦。D 已把后台协调和持久化适配器里的确定性 Binding 转换提取至 `core/src/binding_projection.rs`，并分开租约、恢复、探测、投影和 Job 应用。现有 SQLite/PostgreSQL 事务适配不变，规则由同一 core 实现提供；H1/H2 的真实数据库检查范围在后续批次中列明。详见[后台协调](background-coordination.md)。
 
 ## E/F：客户端、服务入口与兼容引用
 
@@ -67,7 +67,7 @@ Release 校验、安装和替换共同使用配置、组合规划、Node 能力�
 | 批次 | 范围 | 验收重点 | 状态 |
 | --- | --- | --- | --- |
 | G：执行契约 | 将任务载荷、容器描述与确定性校验归入 protocol；运行时只拥有驱动和本地凭据能力 | 字段、serde 属性、默认值与规则不变；backend/storage 不再直接依赖 Docker runtime | 已完成：`271250a` 编译、118 项迁移核对、549 项仓库外回归及远端产品/原生包构建通过 |
-| H：正式应用与旧 Console | 将正式使用的仓储边界和应用能力迁出旧执行控制台，保留显式历史导入 | 不引入第二份状态真值；生产链路不调用旧动作调度与 Deferred provider | H1：18 项实现核对、549 项既有回归、18 项 SQLite 契约、5 项新增边界检查及 3 项真实 TLS PostgreSQL 场景通过，等待远端构建。H2 应用调用尚未迁出 |
+| H：正式应用与旧 Console | 将正式使用的仓储边界和应用能力迁出旧执行控制台，保留显式历史导入 | 不引入第二份状态真值；正式 v1 不调用旧动作调度与 Deferred provider | H1 `d8e7609` 的 575 项回归和远端产品/原生包/文档构建通过。H2 已迁出正式 Store/Catalog/诊断调用：596 项仓库外回归（含 3 项真实 TLS PostgreSQL、16 项 v1 API、5 项新旧行为对比）、3 项响应类型保真和 27 文件依赖核对通过，待对应远端构建 |
 | I：Go 服务生命周期 | 对既有 GoZero 服务逐一分离进程入口、应用组装、失败清理和关闭 | 启动失败释放已创建资源；HTTP 与后台任务按既有语义停止；健康探针继续可用 | 待实施 |
 | J：真实服务验收 | 在仓库外建立隔离的数据库与容器环境，运行当前源码相关集成 | 记录服务版本、源码身份、实际执行和未满足的场景；不访问或重置业务数据 | 隔离 Docker 29.6.1 与 TLS PostgreSQL 17.10 已建立；仓储/历史记录导入/Contribution 场景已实际通过，Agent 执行与 Gateway/Auth/OIDC 尚未验收 |
 

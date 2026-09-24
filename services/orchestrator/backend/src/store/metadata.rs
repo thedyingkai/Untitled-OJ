@@ -2,6 +2,7 @@
 use crate::catalog_registry::CatalogRegistry;
 use crate::catalog_registry::VerifiedReleaseDocument;
 use crate::durable::DurableStore;
+use crate::registry::RegistryContext;
 use crate::store::artifacts::is_sha256;
 use crate::store::commands::{
     ImportReleaseRequest, ReleaseDeleteRequest, non_empty, parse_release_channel, required_text,
@@ -10,19 +11,16 @@ use crate::store::context::{MutationContext, operation_id};
 use crate::store::error::{StoreError, catalog_registry_error, core_error, storage_error};
 use crate::store::history::release_history;
 use crate::store::node::target_platform;
-use orchestrator_core::ActionRequest;
 use orchestrator_core::ServiceRelease;
 use orchestrator_core::ServiceReleaseContract;
 use orchestrator_core::ServiceReleaseManifest;
 use orchestrator_core::validate_service_release;
-use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_manager::store::composition::release_contract_from_document;
 use serde_json::Value;
 use serde_json::json;
-use std::collections::BTreeMap;
 
 pub(crate) fn import_release(
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     storage: &DurableStore,
     registry: &CatalogRegistry,
     input: ImportReleaseRequest,
@@ -59,7 +57,7 @@ pub(crate) fn import_release(
     let mut imported = Vec::with_capacity(documents.len());
     for document in &documents {
         imported.push(
-            console
+            registry_context
                 .register_external_release_document(
                     &document.bytes,
                     &document.source_url,
@@ -83,14 +81,14 @@ pub(crate) fn import_release(
 }
 
 pub(crate) fn delete_release_metadata(
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     storage: &DurableStore,
     input: ReleaseDeleteRequest,
     request: &MutationContext,
 ) -> Result<Value, StoreError> {
     let service_id = required_text(&input.service_id, "service_id")?;
     let version = required_text(&input.version, "version")?;
-    let selected = select_release(console, service_id, Some(version))?;
+    let selected = select_release(registry_context, service_id, Some(version))?;
 
     // RuntimeInstance does not duplicate mutable version labels. The trusted
     // successful Store Operation is the proof tying a deployment to its
@@ -130,16 +128,8 @@ pub(crate) fn delete_release_metadata(
 
     let target = format!("{service_id}@{}", selected.version);
     let operation_id = operation_id("release-delete", &target, request)?;
-    let result = console
-        .dispatch(ActionRequest::new(
-            operation_id,
-            "release.delete",
-            BTreeMap::from([
-                ("service_id".to_string(), service_id.to_string()),
-                ("version".to_string(), selected.version.to_string()),
-                ("confirm".to_string(), "true".to_string()),
-            ]),
-        ))
+    let result = registry_context
+        .delete_release(operation_id, service_id, &selected.version.to_string())
         .map_err(core_error)?;
     if !result.status.eq_ignore_ascii_case("SUCCEEDED") {
         return Err(StoreError::new(
@@ -164,7 +154,7 @@ pub(crate) struct SelectedRelease {
 }
 
 pub(crate) fn select_release(
-    console: &OrchestratorActionConsole,
+    registry_context: &RegistryContext,
     service_id: &str,
     requested_version: Option<&str>,
 ) -> Result<SelectedRelease, StoreError> {
@@ -179,7 +169,7 @@ pub(crate) fn select_release(
             )
         })?;
     let mut candidates = Vec::new();
-    for record in console.service_releases().map_err(core_error)? {
+    for record in registry_context.service_releases().map_err(core_error)? {
         if record.service_name != service_id {
             continue;
         }
@@ -251,7 +241,7 @@ pub(crate) fn select_release(
 /// the current Catalog's signed runtime, event, Auth, or Gateway semantics.
 
 pub(crate) fn select_catalog_document_release(
-    console: &OrchestratorActionConsole,
+    registry_context: &RegistryContext,
     documents: &[VerifiedReleaseDocument],
     service_id: &str,
     version: &semver::Version,
@@ -271,7 +261,7 @@ pub(crate) fn select_catalog_document_release(
                 ),
             )
         })?;
-    let mut selected = select_release(console, service_id, Some(&version.to_string()))?;
+    let mut selected = select_release(registry_context, service_id, Some(&version.to_string()))?;
     let contract = release_contract_from_document(document)?;
     if contract.release.service_name != service_id
         || contract.release.version != version.to_string()

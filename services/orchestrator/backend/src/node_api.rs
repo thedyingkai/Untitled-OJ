@@ -1,10 +1,10 @@
 use crate::durable::{DurableError, DurableStore};
 use crate::http::{ApiRequest, ApiResponse, query_value};
+use crate::registry::RegistryContext;
 use orchestrator_control_plane::{
     JobError, JobKind, OperationCoordinator, OperationError, OperationRepository, PlanOperation,
     PlannedJob,
 };
-use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_storage::NodeEnrollmentCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn route(
-    _console: &mut OrchestratorActionConsole,
+    _console: &mut RegistryContext,
     durable_store: Option<&DurableStore>,
     request: &ApiRequest,
     request_id: &str,

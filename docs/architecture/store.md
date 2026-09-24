@@ -10,12 +10,12 @@ Store 处理可信 Release 的校验、导入、安装和替换。Deployment 处
 | Release 配置、secret 引用、组合输入和计划摘要 | `manager/src/store/config.rs`、`composition.rs` | core 与显式传入的契约，不读取环境、文件、数据库或 HTTP。 |
 | 无副作用的 Release 校验 | `manager/src/store/validation.rs` | 只读端口；不提供导入、任务发布或运行时执行能力。 |
 | 校验用例的事实读取与运行时预览 | `backend/src/adapters/store_validation.rs` | Catalog、Node、Binding、运行时规划适配器，不引用 HTTP 路由。 |
-| Release 导入和元数据删除 | `backend/src/store/metadata.rs` | 可信注册表、Console 兼容入口与历史证明。 |
+| Release 导入和元数据删除 | `backend/src/store/metadata.rs` | 可信注册表、仓储上下文与历史证明。 |
 | 安装与升级/回滚编排 | `backend/src/store/install.rs`、`replacement.rs` | 明确的规划能力与统一提交入口，保留现有持久化顺序。 |
 | 提交协调与失败撤销 | `backend/src/store/admission.rs` | 持有 Store 协调锁；调用持久存储和 OperationCoordinator。 |
 | 运行实例生命周期 | `backend/src/deployment.rs` | 活跃 Binding 约束、Contribution 卸载补偿与 OperationCoordinator。 |
 
-`backend/src/store` 是宿主侧应用编排，并非整个目录都是纯领域层。`StoreError` 暂时保留既有状态码以维持 API 契约；纯规则使用 manager 的 `StoreRuleError`。安装/替换仍需要 Console、持久存储与运行时契约。将这些依赖伪装成通用 Repository 不会使边界更清楚。
+`backend/src/store` 是宿主侧应用编排，并非整个目录都是纯领域层。`StoreError` 暂时保留既有状态码以维持 API 契约；纯规则使用 manager 的 `StoreRuleError`。安装/替换显式依赖仓储上下文、持久事务与运行时契约，不持有旧 Console。元数据删除与诊断通过 `registry` 的两个专用入口执行；相关兼容边界见[仓储边界](repository-boundary.md)。
 
 ## 如何定位规划代码
 

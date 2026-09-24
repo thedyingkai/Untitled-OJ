@@ -11,11 +11,11 @@ use crate::http::ApiRequest;
 use crate::http::ApiResponse;
 use crate::http::query_value;
 use crate::market_api;
+use crate::registry::RegistryContext;
 use crate::routes::status_for_error;
 use crate::store::commands::{normalize_store_topology_selection, required_text};
 use crate::store::context::MutationContext;
 use crate::store::error::catalog_registry_error;
-use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_manager::catalog_query;
 use orchestrator_manager::catalog_query::CatalogQueryError;
 use orchestrator_manager::catalog_query::CatalogReadPort;
@@ -37,7 +37,7 @@ use crate::store::replacement::ReplacementAction;
 
 pub(crate) fn route(
     _state: &market_api::StoreState,
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     storage: Option<&DurableStore>,
     catalog_registry: Option<&CatalogRegistry>,
     artifact_store: Option<&ArtifactStore>,
@@ -55,9 +55,13 @@ pub(crate) fn route(
         ("DELETE", _) if path.starts_with("/api/v1/store/catalogs/") => {
             delete_catalog_source(storage, catalog_registry, path, request_id)
         }
-        ("GET", "/api/v1/store/packages") => {
-            list_catalog_packages(console, storage, catalog_registry, request, request_id)
-        }
+        ("GET", "/api/v1/store/packages") => list_catalog_packages(
+            registry_context,
+            storage,
+            catalog_registry,
+            request,
+            request_id,
+        ),
         ("POST", "/api/v1/store/releases:import") => {
             let Some(storage) = storage else {
                 return Some(problem(
@@ -77,7 +81,13 @@ pub(crate) fn route(
                     None,
                 ));
             };
-            import_release(console, storage, catalog_registry, request, request_id)
+            import_release(
+                registry_context,
+                storage,
+                catalog_registry,
+                request,
+                request_id,
+            )
         }
         ("POST", "/api/v1/store/releases:validate") => {
             let Some(storage) = storage else {
@@ -98,7 +108,13 @@ pub(crate) fn route(
                     None,
                 ));
             };
-            validate_release_catalog(console, storage, catalog_registry, request, request_id)
+            validate_release_catalog(
+                registry_context,
+                storage,
+                catalog_registry,
+                request,
+                request_id,
+            )
         }
         ("POST", "/api/v1/store/releases:install") => {
             let Some(storage) = storage else {
@@ -120,7 +136,7 @@ pub(crate) fn route(
                 ));
             };
             install_release(
-                console,
+                registry_context,
                 storage,
                 catalog_registry,
                 artifact_store,
@@ -138,7 +154,7 @@ pub(crate) fn route(
                     None,
                 ));
             };
-            delete_release_metadata(console, storage, request, request_id)
+            delete_release_metadata(registry_context, storage, request, request_id)
         }
         ("POST", "/api/v1/store/releases:upgrade") => {
             let Some(storage) = storage else {
@@ -160,7 +176,7 @@ pub(crate) fn route(
                 ));
             };
             replace_release(
-                console,
+                registry_context,
                 storage,
                 catalog_registry,
                 artifact_store,
@@ -189,7 +205,7 @@ pub(crate) fn route(
                 ));
             };
             replace_release(
-                console,
+                registry_context,
                 storage,
                 catalog_registry,
                 artifact_store,
@@ -306,7 +322,7 @@ fn delete_catalog_source(
 }
 
 fn list_catalog_packages(
-    console: &OrchestratorActionConsole,
+    registry_context: &RegistryContext,
     storage: Option<&DurableStore>,
     registry: Option<&CatalogRegistry>,
     request: &ApiRequest,
@@ -316,7 +332,7 @@ fn list_catalog_packages(
     let query = package_query(request)?;
     let result = catalog_query::list_packages(
         &CatalogRegistryReader::new(registry, storage),
-        &InstalledServicesReader::new(console),
+        &InstalledServicesReader::new(registry_context),
         &query,
     )
     .map_err(|error| match error {
@@ -458,7 +474,7 @@ struct ValidateReleaseRequest {
 }
 
 fn validate_release_catalog(
-    console: &OrchestratorActionConsole,
+    registry_context: &RegistryContext,
     storage: &DurableStore,
     registry: &CatalogRegistry,
     request: &ApiRequest,
@@ -489,7 +505,7 @@ fn validate_release_catalog(
     };
     let result = validate_release(
         &StoreValidationReader {
-            console,
+            registry_context,
             storage,
             registry,
         },
@@ -557,19 +573,20 @@ fn problem(
 }
 
 fn import_release(
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     storage: &DurableStore,
     registry: &CatalogRegistry,
     request: &ApiRequest,
     request_id: &str,
 ) -> Result<ApiResponse, StoreApiError> {
     let input = parse_body(request)?;
-    let result = crate::store::metadata::import_release(console, storage, registry, input)?;
+    let result =
+        crate::store::metadata::import_release(registry_context, storage, registry, input)?;
     Ok(success(201, result, request_id))
 }
 
 fn install_release(
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     storage: &DurableStore,
     registry: &CatalogRegistry,
     artifacts: Option<&ArtifactStore>,
@@ -579,13 +596,18 @@ fn install_release(
     let input = parse_body(request)?;
     let context = mutation_context(request);
     let result = crate::store::install::install_release(
-        console, storage, registry, artifacts, input, &context,
+        registry_context,
+        storage,
+        registry,
+        artifacts,
+        input,
+        &context,
     )?;
     Ok(success(202, result, request_id))
 }
 
 fn replace_release(
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     storage: &DurableStore,
     registry: &CatalogRegistry,
     artifacts: Option<&ArtifactStore>,
@@ -596,21 +618,31 @@ fn replace_release(
     let input = parse_body(request)?;
     let context = mutation_context(request);
     let result = crate::store::replacement::replace_release(
-        console, storage, registry, artifacts, input, &context, action,
+        registry_context,
+        storage,
+        registry,
+        artifacts,
+        input,
+        &context,
+        action,
     )?;
     Ok(success(202, result, request_id))
 }
 
 fn delete_release_metadata(
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     storage: &DurableStore,
     request: &ApiRequest,
     request_id: &str,
 ) -> Result<ApiResponse, StoreApiError> {
     let input = parse_body(request)?;
     let context = mutation_context(request);
-    let result =
-        crate::store::metadata::delete_release_metadata(console, storage, input, &context)?;
+    let result = crate::store::metadata::delete_release_metadata(
+        registry_context,
+        storage,
+        input,
+        &context,
+    )?;
     Ok(success(200, result, request_id))
 }
 

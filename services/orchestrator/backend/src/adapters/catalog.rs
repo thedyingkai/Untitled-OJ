@@ -1,9 +1,9 @@
 //! Catalog read ports backed by the trusted registry and the existing deployment projection.
-//! The Console dependency is transitional and deliberately hidden from query use cases.
+//! Queries receive a repository-only application context, never an action console.
 
 use crate::catalog_registry::{CatalogRegistry, CatalogRegistryError};
 use crate::durable::DurableStore;
-use orchestrator_legacy::OrchestratorActionConsole;
+use crate::registry::RegistryContext;
 use orchestrator_manager::InstalledServiceView;
 use orchestrator_manager::catalog_query::{
     CatalogReadPort, CatalogSourcePage, InstalledServicesReadPort, PackagePage, PackageQuery,
@@ -38,12 +38,12 @@ impl CatalogReadPort for CatalogRegistryReader<'_> {
 }
 
 pub(crate) struct InstalledServicesReader<'a> {
-    console: &'a OrchestratorActionConsole,
+    registry_context: &'a RegistryContext,
 }
 
 impl<'a> InstalledServicesReader<'a> {
-    pub(crate) fn new(console: &'a OrchestratorActionConsole) -> Self {
-        Self { console }
+    pub(crate) fn new(registry_context: &'a RegistryContext) -> Self {
+        Self { registry_context }
     }
 }
 
@@ -51,6 +51,6 @@ impl InstalledServicesReadPort for InstalledServicesReader<'_> {
     type Error = anyhow::Error;
 
     fn installed_services(&self) -> Result<BTreeMap<String, InstalledServiceView>, Self::Error> {
-        orchestrator_manager::installed_services(self.console)
+        self.registry_context.installed_services()
     }
 }

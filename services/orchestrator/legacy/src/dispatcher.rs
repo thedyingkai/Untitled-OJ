@@ -1,3 +1,4 @@
+use crate::{ActionCapabilityStatus, ActionDispatchResult};
 use crate::{
     ActionRequest, DiagnosticExport, DiagnosticReport, DriverResult, EndpointHealthResult,
     EndpointProbe, MemoryOrchestratorStore, NodeServiceDispatchRequest, NodeServiceDispatchResult,
@@ -22,28 +23,6 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ActionCapabilityStatus {
-    Real,
-    RuntimePipeline,
-    StoreBacked,
-    Unsupported,
-    Readonly,
-}
-
-impl ActionCapabilityStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Real => "REAL",
-            Self::RuntimePipeline => "RUNTIME_PIPELINE",
-            Self::StoreBacked => "STORE_BACKED",
-            Self::Unsupported => "UNSUPPORTED",
-            Self::Readonly => "READONLY",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActionMatrixEntry {
     pub action_id: String,
@@ -55,20 +34,6 @@ pub struct ActionMatrixEntry {
     pub requires_confirmation: bool,
     pub calls_executor: bool,
     pub capability_status: ActionCapabilityStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ActionDispatchResult {
-    pub action_id: String,
-    pub status: String,
-    pub message: String,
-    pub operation_id: String,
-    pub result: Value,
-    pub error: String,
-    pub warnings: Vec<String>,
-    pub changed_objects: Vec<String>,
-    pub capability_status: ActionCapabilityStatus,
-    pub logs: Vec<OperationLogRecord>,
 }
 
 pub struct OrchestratorActionDispatcher<
@@ -533,6 +498,42 @@ enum ConsoleStoreMode {
 }
 
 impl OrchestratorActionConsole {
+    /// Transfers the existing repository to a host without retaining a Console.
+    pub fn into_registry(self) -> Result<crate::RegistryBootstrap> {
+        let store = if let Some(store) = self.external_store {
+            store
+        } else {
+            match self.store_mode {
+                ConsoleStoreMode::Persistent { database_url } => SharedOrchestratorStore::new(
+                    "postgres",
+                    PgOrchestratorStore::new(database_url).map_err(persistent_store_unavailable)?,
+                ),
+                _ => SharedOrchestratorStore::new("memory", self.memory_store),
+            }
+        };
+        Ok(crate::RegistryBootstrap {
+            schemas: self.schemas,
+            store,
+            warnings: self.warnings,
+        })
+    }
+
+    /// Explicit 0.2 adapter over the same repository, never a memory mirror.
+    pub fn from_registry(registry: crate::RegistryBootstrap) -> Self {
+        let kind = registry.store.kind().to_string();
+        Self {
+            schemas: registry.schemas,
+            memory_store: MemoryOrchestratorStore::new(),
+            external_store: Some(registry.store),
+            store_mode: if kind == "memory" {
+                ConsoleStoreMode::Memory
+            } else {
+                ConsoleStoreMode::Injected { kind }
+            },
+            warnings: registry.warnings,
+        }
+    }
+
     pub fn load(repo_root: impl Into<PathBuf>) -> Result<Self> {
         let repo_root = repo_root.into();
         let context = load_operation_workbench_context(&repo_root)?;
@@ -1381,7 +1382,7 @@ fn readonly_result_for_action<S: OrchestratorStore>(
     }
 }
 
-fn memory_store_from_context(
+pub(crate) fn memory_store_from_context(
     context: &OperationWorkbenchContext,
 ) -> Result<MemoryOrchestratorStore> {
     let mut store = MemoryOrchestratorStore::new();

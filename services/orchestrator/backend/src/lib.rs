@@ -53,3 +53,6 @@ pub use server::{
     EmbeddedServerHandle, EmbeddedServerOptions, EmbeddedServerShutdown, EmbeddedStorage,
     start_embedded_server, start_embedded_server_with_console,
 };
+
+mod diagnostics_api;
+mod registry;

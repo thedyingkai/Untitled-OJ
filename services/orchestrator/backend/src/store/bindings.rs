@@ -1,5 +1,6 @@
 //! Store bindings responsibilities.
 use crate::durable::DurableStore;
+use crate::registry::RegistryContext;
 use crate::store::commands::required_text;
 use crate::store::context::{now_marker, now_ms};
 use crate::store::error::{StoreError, core_error, storage_error};
@@ -16,7 +17,6 @@ use orchestrator_core::api_version_matches;
 use orchestrator_core::parse_endpoint_id;
 use orchestrator_core::resolve_api_binding_candidate;
 use orchestrator_core::validate_endpoint_id;
-use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_manager::store::validation::InstallBindingSelection;
 use orchestrator_manager::store::validation::InstallTopologySelection;
 use orchestrator_protocol::RuntimeObservedState;
@@ -58,7 +58,7 @@ pub(crate) fn topology_contains_provider_candidate(
 }
 
 pub(crate) fn preview_install_api_bindings(
-    console: &OrchestratorActionConsole,
+    registry_context: &RegistryContext,
     storage: &DurableStore,
     contract: &ServiceReleaseContract,
     consumer_node_id: &str,
@@ -105,7 +105,7 @@ pub(crate) fn preview_install_api_bindings(
         .map(|spec| topology_binding_contexts(spec, &topology_revision_id, &consumer_endpoint))
         .transpose()?
         .unwrap_or_default();
-    let all_candidates = provider_candidates(console, storage)?;
+    let all_candidates = provider_candidates(registry_context, storage)?;
     let mut requirements = Vec::with_capacity(contract.requirements().len());
     let mut valid = true;
     let mut used_selections = BTreeSet::new();
@@ -256,7 +256,7 @@ pub(crate) fn preview_install_api_bindings(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_install_api_bindings(
-    console: &OrchestratorActionConsole,
+    registry_context: &RegistryContext,
     storage: &DurableStore,
     contract: &ServiceReleaseContract,
     consumer_deployment_id: &str,
@@ -305,7 +305,7 @@ pub(crate) fn resolve_install_api_bindings(
         .map(|spec| topology_binding_contexts(spec, &topology_revision_id, &consumer_endpoint))
         .transpose()?
         .unwrap_or_default();
-    let candidates = provider_candidates(console, storage)?;
+    let candidates = provider_candidates(registry_context, storage)?;
     let mut resolved = Vec::with_capacity(contract.requirements().len());
     let mut used_selections = BTreeSet::new();
     let mut used_topology_bindings = BTreeSet::new();
@@ -817,11 +817,11 @@ pub(crate) fn topology_binding_contexts(
 }
 
 pub(crate) fn provider_candidates(
-    console: &OrchestratorActionConsole,
+    registry_context: &RegistryContext,
     storage: &DurableStore,
 ) -> Result<Vec<ApiProviderCandidate>, StoreError> {
     let mut contracts = BTreeMap::new();
-    for record in console.service_releases().map_err(core_error)? {
+    for record in registry_context.service_releases().map_err(core_error)? {
         let Ok(contract) = ServiceReleaseContract::from_json_value(record.manifest.clone()) else {
             continue;
         };

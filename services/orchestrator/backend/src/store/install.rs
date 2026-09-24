@@ -6,6 +6,7 @@ use crate::catalog_registry::VerifiedReleaseDocument;
 use crate::contribution_controller::append_contribution_job_fragment;
 use crate::contribution_controller::contribution_job_steps;
 use crate::durable::DurableStore;
+use crate::registry::RegistryContext;
 use crate::store::admission::{StoreAdmission, TopologyReservation};
 use crate::store::artifacts::{
     artifact_matches, image_digest, missing_resolved_dependencies, offline_artifact_for_release,
@@ -46,7 +47,6 @@ use orchestrator_core::ApiBindingState;
 use orchestrator_core::NodeRecord;
 use orchestrator_core::composition::CompositionPlanV1;
 use orchestrator_core::composition::ValidatedInstallInputsV1;
-use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_manager::catalog_v2::TargetPlatform;
 use orchestrator_manager::store::composition::composition_inputs_for_service;
 use orchestrator_manager::store::composition::legacy_composition_inputs;
@@ -64,7 +64,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 pub(crate) fn install_release(
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     storage: &DurableStore,
     catalog_registry: &CatalogRegistry,
     artifact_store: Option<&ArtifactStore>,
@@ -252,7 +252,7 @@ pub(crate) fn install_release(
         input.endpoint = effective_managed_endpoint(&input.endpoint, node, &contract.release)?;
         let deployment_id = deployment_id(&service_id, &resolved.plan.root.version, &node.node_id);
         let bindings = resolve_install_api_bindings(
-            console,
+            registry_context,
             storage,
             &contract,
             &deployment_id,
@@ -272,7 +272,7 @@ pub(crate) fn install_release(
     let mut imported = Vec::with_capacity(documents.len());
     for document in &documents {
         imported.push(
-            console
+            registry_context
                 .register_external_release_document(
                     &document.bytes,
                     &document.source_url,
@@ -282,7 +282,7 @@ pub(crate) fn install_release(
         );
     }
     let selected = select_catalog_document_release(
-        console,
+        registry_context,
         &documents,
         &service_id,
         &resolved.plan.root.version,
@@ -318,7 +318,7 @@ pub(crate) fn install_release(
             &selected.manifest.backend.protocol,
         )?;
         return enqueue_external_install(
-            console,
+            registry_context,
             storage,
             request,
             &input,
@@ -430,7 +430,7 @@ pub(crate) fn install_release(
     let mut root_spec = None;
     for selection in &missing {
         let release = select_catalog_document_release(
-            console,
+            registry_context,
             &documents,
             &selection.module_id,
             &selection.release.version,
@@ -806,7 +806,7 @@ pub(crate) fn append_install_topology_jobs(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enqueue_external_install(
-    console: &OrchestratorActionConsole,
+    registry_context: &RegistryContext,
     storage: &DurableStore,
     request: &MutationContext,
     input: &InstallReleaseRequest,
@@ -848,7 +848,7 @@ pub(crate) fn enqueue_external_install(
     );
     let consumer_node_id = node.map(|node| node.node_id.as_str()).unwrap_or("external");
     let binding_plan = resolve_install_api_bindings(
-        console,
+        registry_context,
         storage,
         &selected.contract,
         &root_external_deployment_id,
@@ -895,7 +895,7 @@ pub(crate) fn enqueue_external_install(
         let node = node.expect("missing External dependencies require a validated Node");
         for selection in missing_dependencies {
             let release = select_catalog_document_release(
-                console,
+                registry_context,
                 documents,
                 &selection.module_id,
                 &selection.release.version,

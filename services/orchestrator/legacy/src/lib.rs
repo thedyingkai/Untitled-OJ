@@ -27,8 +27,8 @@ pub use database::{
     inspect_database_access, inspect_orchestrator_schema, plan_database_writes,
 };
 pub use dispatcher::{
-    ActionCapabilityStatus, ActionDispatchResult, ActionMatrixEntry, OrchestratorActionConsole,
-    OrchestratorActionDispatcher, action_matrix, capability_for_action, default_console_request,
+    ActionMatrixEntry, OrchestratorActionConsole, OrchestratorActionDispatcher, action_matrix,
+    capability_for_action, default_console_request,
 };
 pub use executor::{
     DockerComposeDriver, DriverRequest, DriverResult, ExecutionDriver, ExternalEndpointDriver,
@@ -97,3 +97,11 @@ pub use workbench::{
 pub use orchestrator_storage::{
     MemoryOrchestratorStore, OrchestratorStore, SharedOrchestratorStore,
 };
+
+mod registry;
+pub use registry::{RegistryBootstrap, load_durable_registry, load_ephemeral_registry};
+
+/// Preserves the historical release projection for explicit compatibility adapters.
+pub fn project_release_manifest(value: serde_json::Value) -> Result<ServiceReleaseManifest> {
+    service_io::legacy_release_manifest_from_json_value(value)
+}

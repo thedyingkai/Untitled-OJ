@@ -169,3 +169,6 @@ pub fn sanitize_path_for_error(path: &std::path::Path) -> String {
         .unwrap_or("path")
         .to_string()
 }
+
+mod action_result;
+pub use action_result::{ActionCapabilityStatus, ActionDispatchResult};

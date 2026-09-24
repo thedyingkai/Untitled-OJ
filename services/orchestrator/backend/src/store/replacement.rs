@@ -4,6 +4,7 @@ use crate::catalog_registry::CatalogRegistry;
 use crate::contribution_controller::ContributionReplacementDagV1;
 use crate::contribution_controller::append_contribution_replacement_job_fragment;
 use crate::durable::DurableStore;
+use crate::registry::RegistryContext;
 use crate::store::admission::{StoreAdmission, TopologyReservation};
 use crate::store::artifacts::{
     artifact_matches, missing_resolved_dependencies, offline_artifact_for_release,
@@ -49,7 +50,6 @@ use orchestrator_control_plane::PlannedJob;
 use orchestrator_control_plane::PlannedJobCondition;
 use orchestrator_core::ApiBinding;
 use orchestrator_core::ApiBindingState;
-use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_manager::catalog_v2::ReleaseChannel;
 use orchestrator_manager::store::composition::release_contract_from_document;
 use orchestrator_manager::store::deployment_id;
@@ -104,7 +104,7 @@ impl ReplacementAction {
 }
 
 pub(crate) fn replace_release(
-    console: &mut OrchestratorActionConsole,
+    registry_context: &mut RegistryContext,
     storage: &DurableStore,
     catalog_registry: &CatalogRegistry,
     artifact_store: Option<&ArtifactStore>,
@@ -340,7 +340,7 @@ pub(crate) fn replace_release(
     let mut imported = Vec::with_capacity(documents.len());
     for document in &documents {
         imported.push(
-            console
+            registry_context
                 .register_external_release_document(
                     &document.bytes,
                     &document.source_url,
@@ -350,7 +350,7 @@ pub(crate) fn replace_release(
         );
     }
     let selected = select_catalog_document_release(
-        console,
+        registry_context,
         &documents,
         &current.instance.service_id,
         &root_release.release.version,
@@ -473,7 +473,7 @@ pub(crate) fn replace_release(
                 })
                 .collect::<Vec<_>>();
             replacement_bindings = resolve_install_api_bindings(
-                console,
+                registry_context,
                 storage,
                 &selected.contract,
                 &new_deployment_id,
@@ -724,7 +724,7 @@ pub(crate) fn replace_release(
     let empty_secret_refs = BTreeMap::new();
     for dependency in &missing_dependencies {
         let release = select_catalog_document_release(
-            console,
+            registry_context,
             &documents,
             &dependency.module_id,
             &dependency.release.version,

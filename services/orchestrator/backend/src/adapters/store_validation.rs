@@ -2,6 +2,7 @@
 //! No import, enqueue, transaction commit or container execution is exposed by this adapter.
 use crate::catalog_registry::{CatalogRegistry, ResolvedCatalogPlan, VerifiedReleaseDocument};
 use crate::durable::DurableStore;
+use crate::registry::RegistryContext;
 use crate::store::bindings::preview_install_api_bindings;
 use crate::store::bindings::resolve_install_api_bindings;
 use crate::store::bindings::selected_topology_spec;
@@ -27,7 +28,6 @@ use crate::store::topology::preview_store_install_topology_spec;
 use orchestrator_core::composition::ProviderCandidateV1;
 use orchestrator_core::topology_v1::TopologyDiff;
 use orchestrator_core::{ApiBinding, NodeRecord, ServiceReleaseContract, diff_topology_specs};
-use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_manager::catalog_v2::TargetPlatform;
 use orchestrator_manager::store::validation::{
     ReleaseValidationReadPort, ValidateRelease, ValidationContext, ValidationTarget,
@@ -38,7 +38,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub(crate) struct StoreValidationReader<'a> {
-    pub(crate) console: &'a OrchestratorActionConsole,
+    pub(crate) registry_context: &'a RegistryContext,
     pub(crate) storage: &'a DurableStore,
     pub(crate) registry: &'a CatalogRegistry,
 }
@@ -120,7 +120,7 @@ impl ReleaseValidationReadPort for StoreValidationReader<'_> {
         context: &ValidationContext<'_>,
     ) -> Result<(bool, Vec<Value>), Self::Error> {
         preview_install_api_bindings(
-            self.console,
+            self.registry_context,
             self.storage,
             context.contract,
             &context.node.node_id,
@@ -135,7 +135,7 @@ impl ReleaseValidationReadPort for StoreValidationReader<'_> {
         context: &ValidationContext<'_>,
     ) -> Result<Vec<ApiBinding>, Self::Error> {
         resolve_install_api_bindings(
-            self.console,
+            self.registry_context,
             self.storage,
             context.contract,
             context.deployment_id,

@@ -1,5 +1,6 @@
 //! 连接层：TCP 监听、固定大小工作线程池、请求分发与静态资源写出。
 
+use crate::adapters::legacy_console::{from_legacy_console, legacy_console};
 use crate::artifact_store::{ArtifactRetentionPolicy, ArtifactStore};
 use crate::auth::{
     ORCHESTRATOR_INTERNAL_TOKEN_HEADER, Principal, internal_token_check, resolve_principal,
@@ -29,6 +30,7 @@ use crate::oidc_web::{
     CSRF_HEADER as OIDC_CSRF_HEADER, OidcBrowserConfig, OidcWebError, OidcWebSessionManager,
     expired_session_cookie, session_cookie as oidc_session_cookie,
 };
+use crate::registry::RegistryContext;
 use crate::routes::{handle_api_request_with_internal_token, status_for_error};
 use crate::topology_provider::{
     HttpManagementProviderConfig, TopologyProviderConfig, TopologyProviderSaga,
@@ -71,7 +73,7 @@ const CONNECTION_QUEUE_CAPACITY: usize = 64;
 const DESKTOP_AGENT_BOOTSTRAP_HEADER: &str = "x-ojos-agent-bootstrap";
 
 struct ServerContext {
-    console: ConsoleState,
+    registry_context: RegistryState,
     store_state: market_api::StoreState,
     repo_root: PathBuf,
     web_root: PathBuf,
@@ -140,29 +142,27 @@ impl HistoryRetentionPolicy {
     }
 }
 
-enum ConsoleState {
-    /// Durable consoles are request-local coordinators over transactional
-    /// repositories. Cloning does not copy database state and requires no
-    /// process-wide console lock.
-    Durable(OrchestratorActionConsole),
-    /// The in-memory console exists only for explicit ephemeral development
-    /// and tests, where the console itself owns the mutable state.
-    Ephemeral(Mutex<OrchestratorActionConsole>),
+enum RegistryState {
+    /// Each request receives a coordinator over the same transactional repository.
+    /// Cloning never copies persisted state or requires a process-wide lock.
+    Durable(RegistryContext),
+    /// Ephemeral development serializes each request's compound mutations.
+    Ephemeral(Mutex<RegistryContext>),
 }
 
 impl ServerContext {
-    fn with_console<R>(
+    fn with_registry<R>(
         &self,
-        callback: impl FnOnce(&mut OrchestratorActionConsole) -> R,
+        callback: impl FnOnce(&mut RegistryContext) -> R,
     ) -> std::result::Result<R, ()> {
-        match &self.console {
-            ConsoleState::Durable(template) => {
-                let mut console = template.clone();
-                Ok(callback(&mut console))
+        match &self.registry_context {
+            RegistryState::Durable(template) => {
+                let mut registry_context = template.clone();
+                Ok(callback(&mut registry_context))
             }
-            ConsoleState::Ephemeral(console) => {
-                let mut console = console.lock().map_err(|_| ())?;
-                Ok(callback(&mut console))
+            RegistryState::Ephemeral(registry_context) => {
+                let mut registry_context = registry_context.lock().map_err(|_| ())?;
+                Ok(callback(&mut registry_context))
             }
         }
     }
@@ -282,8 +282,7 @@ pub enum EmbeddedStorage {
     Ephemeral,
     /// Desktop's durable local database.
     Sqlite { database_path: PathBuf },
-    /// Transitional PostgreSQL path; the storage crate owns the pooled v1
-    /// implementation and will replace the legacy console adapter.
+    /// Pooled v1 repository owned by the storage crate.
     Postgres { database_url: String },
 }
 
@@ -551,9 +550,9 @@ fn recover_control_plane(store: Option<&DurableStore>) -> Result<Option<Mutex<Du
 /// 从仓库状态加载控制台并在后台线程启动服务。
 pub fn start_embedded_server(options: EmbeddedServerOptions) -> Result<EmbeddedServerHandle> {
     validate_storage_exposure(&options)?;
-    let (console, durable_store, active_lock) = match &options.storage {
+    let (registry_context, durable_store, active_lock) = match &options.storage {
         EmbeddedStorage::Ephemeral => (
-            OrchestratorActionConsole::load_with_database_url(options.repo_root.clone(), None)?,
+            RegistryContext::load_ephemeral(options.repo_root.clone())?,
             None,
             None,
         ),
@@ -581,12 +580,12 @@ pub fn start_embedded_server(options: EmbeddedServerOptions) -> Result<EmbeddedS
                     })?;
                 }
             }
-            let console = OrchestratorActionConsole::load_with_store(
+            let registry_context = RegistryContext::load_with_store(
                 options.repo_root.clone(),
                 "sqlite",
                 store.clone(),
             )?;
-            (console, Some(DurableStore::Sqlite(store)), None)
+            (registry_context, Some(DurableStore::Sqlite(store)), None)
         }
         EmbeddedStorage::Postgres { database_url } => {
             let mut postgres_options = PostgresOptions::default();
@@ -599,19 +598,19 @@ pub fn start_embedded_server(options: EmbeddedServerOptions) -> Result<EmbeddedS
                 .pool()
                 .acquire_single_active()
                 .context("acquire single-active control-plane lock")?;
-            let console = OrchestratorActionConsole::load_with_store(
+            let registry_context = RegistryContext::load_with_store(
                 options.repo_root.clone(),
                 "postgres",
                 store.clone(),
             )?;
             (
-                console,
+                registry_context,
                 Some(DurableStore::Postgres(store)),
                 Some(active_lock),
             )
         }
     };
-    start_embedded_server_with_components(options, console, durable_store, active_lock)
+    start_embedded_server_with_components(options, registry_context, durable_store, active_lock)
 }
 
 /// 使用已经构造的控制台启动服务；测试和需要精确数据库配置的宿主可使用此入口。
@@ -620,7 +619,7 @@ pub fn start_embedded_server_with_console(
     console: OrchestratorActionConsole,
 ) -> Result<EmbeddedServerHandle> {
     validate_storage_exposure(&options)?;
-    start_embedded_server_with_components(options, console, None, None)
+    start_embedded_server_with_components(options, from_legacy_console(console)?, None, None)
 }
 
 fn validate_storage_exposure(options: &EmbeddedServerOptions) -> Result<()> {
@@ -636,7 +635,7 @@ fn validate_storage_exposure(options: &EmbeddedServerOptions) -> Result<()> {
 
 fn start_embedded_server_with_components(
     options: EmbeddedServerOptions,
-    console: OrchestratorActionConsole,
+    registry_context: RegistryContext,
     durable_store: Option<DurableStore>,
     active_lock: Option<AdvisoryLockGuard>,
 ) -> Result<EmbeddedServerHandle> {
@@ -756,7 +755,7 @@ fn start_embedded_server_with_components(
         .spawn(move || {
             run_server(
                 listener,
-                console,
+                registry_context,
                 durable_store,
                 active_lock,
                 options,
@@ -814,7 +813,7 @@ fn job_artifact_reference(job: &Job) -> Option<ArtifactReference> {
 #[allow(clippy::too_many_arguments)]
 fn run_server(
     listener: TcpListener,
-    console: OrchestratorActionConsole,
+    registry_context: RegistryContext,
     durable_store: Option<DurableStore>,
     _active_lock: Option<AdvisoryLockGuard>,
     options: EmbeddedServerOptions,
@@ -853,9 +852,9 @@ fn run_server(
             options.web_root.display()
         );
     }
-    let persistent_store = console.uses_persistent_store();
-    let store_kind = console.store_kind().to_string();
-    let startup_warnings = console.warnings().to_vec();
+    let persistent_store = registry_context.uses_persistent_store();
+    let store_kind = registry_context.store_kind().to_string();
+    let startup_warnings = registry_context.warnings().to_vec();
     let internal_token = options
         .internal_token
         .map(|token| token.trim().to_string())
@@ -870,10 +869,10 @@ fn run_server(
         && desktop_agent_secret.is_none()
         && internal_token.is_none();
     let context = Arc::new(ServerContext {
-        console: if persistent_store {
-            ConsoleState::Durable(console)
+        registry_context: if persistent_store {
+            RegistryState::Durable(registry_context)
         } else {
-            ConsoleState::Ephemeral(Mutex::new(console))
+            RegistryState::Ephemeral(Mutex::new(registry_context))
         },
         store_state: market_api::StoreState::new(),
         repo_root: options.repo_root,
@@ -1761,9 +1760,9 @@ fn dispatch_request(
                 );
             }
         };
-        let response = match context.with_console(|console| {
+        let response = match context.with_registry(|registry_context| {
             api_v1::handle_with_permission_checker(
-                console,
+                registry_context,
                 context.durable_store.as_ref(),
                 context.topology_provider.as_ref(),
                 context.catalog_registry.as_ref(),
@@ -1879,7 +1878,9 @@ fn dispatch_request(
             let response = match payload {
                 Ok((index_url, cached, index)) => {
                     let installed = context
-                        .with_console(|console| market_api::installed_services(console))
+                        .with_registry(|registry_context| {
+                            market_api::installed_services(&legacy_console(registry_context))
+                        })
                         .unwrap_or_else(|()| {
                             Err(anyhow!("orchestrator console coordinator is unavailable"))
                         });
@@ -1897,10 +1898,10 @@ fn dispatch_request(
             };
             return write_http_response(stream, legacy_compat_response(context, &path, response));
         }
-        let routed = context.with_console(|console| {
+        let routed = context.with_registry(|registry_context| {
             market_api::route_store_request(
                 &context.store_state,
-                console,
+                &mut legacy_console(registry_context),
                 &context.repo_root,
                 &request,
                 &path,
@@ -1922,9 +1923,9 @@ fn dispatch_request(
     // 既有控制面 API。
     if is_api_path(&path) {
         let response = context
-            .with_console(|console| {
+            .with_registry(|registry_context| {
                 handle_api_request_with_internal_token(
-                    console,
+                    &mut legacy_console(registry_context),
                     request,
                     context.internal_token.as_deref(),
                 )
@@ -1948,9 +1949,9 @@ fn dispatch_request(
 
     // 其余交回既有路由（顶级诊断导出等），未知路径由其返回 404。
     let response = context
-        .with_console(|console| {
+        .with_registry(|registry_context| {
             handle_api_request_with_internal_token(
-                console,
+                &mut legacy_console(registry_context),
                 request,
                 context.internal_token.as_deref(),
             )
