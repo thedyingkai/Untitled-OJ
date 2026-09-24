@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, getCurrentScope, onScopeDispose, ref } from "vue";
 import type { InstallApiBindingSelection, NodeRow, StoreMigrationPolicy, StoreModule, StorePipelineOptions, StoreValidationResult, TopologyHeads } from "../../types";
 import type { CompositionFormState } from "../../composition-form";
 import { compositionFormErrors, initializeCompositionState, serializeCompositionInputs } from "../../composition-form";
@@ -9,6 +9,14 @@ import type { ControlPlaneContext } from "../control-plane/context";
 import type { ComputedRef } from "vue";
 
 export function useReleaseInstall(store: ControlPlaneContext, readyNodes: ComputedRef<NodeRow[]>) {
+  let validationGeneration = 0;
+  let topologyGeneration = 0;
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      validationGeneration += 1;
+      topologyGeneration += 1;
+    });
+  }
   /* ---------- 安装抽屉 ---------- */
 
   const installOpen = ref(false);
@@ -54,6 +62,8 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
   );
 
   function openInstall(module: StoreModule) {
+    validationGeneration += 1;
+    validating.value = false;
     installTarget.value = module;
     installResult.value = null;
     validationResult.value = null;
@@ -192,11 +202,14 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
     }
   });
 
-  function currentValidationFingerprint(): string {
-    const compositionPlan = validationResult.value?.composition_plan;
+  function currentValidationFingerprint(
+    compositionPlan = validationResult.value?.composition_plan,
+  ): string {
     return JSON.stringify({
       service: installTarget.value?.id ?? "",
       version: installTarget.value?.version ?? "",
+      catalog_source_id: installTarget.value?.source_id ?? "",
+      channel: installTarget.value?.channel ?? "",
       node: targetNodeId.value,
       topology: selectedTopology(),
       bindings: selectedBindings(),
@@ -239,6 +252,8 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
 
   const installReady = computed(
     () =>
+      !validating.value &&
+      !installing.value &&
       !!validationResult.value?.valid &&
       topologySatisfied.value &&
       ((validationResult.value?.requirements.length ?? 0) === 0 ||
@@ -251,27 +266,32 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
   );
 
   async function loadTopologyOptions() {
+    const generation = ++topologyGeneration;
     if (!store.supportsAction("topology.export")) {
       topologyHeads.value = [];
       topologyId.value = "";
       topologyRevisionId.value = "";
+      topologyLoading.value = false;
       return;
     }
     topologyLoading.value = true;
     try {
-      topologyHeads.value = await topologyApi.topologyList();
+      const heads = await topologyApi.topologyList();
+      if (generation !== topologyGeneration) return;
+      topologyHeads.value = heads;
       // Binding authority is a user decision. A new consumer often does not yet
       // exist in the applied Topology, so guessing "primary" would turn a valid
       // explicit binding plan into a misleading revision conflict.
       topologyId.value = "";
       topologyRevisionId.value = "";
     } catch (err) {
+      if (generation !== topologyGeneration) return;
       topologyHeads.value = [];
       topologyId.value = "";
       topologyRevisionId.value = "";
       store.toast("err", `Topology 选择加载失败：${(err as Error).message}`);
     } finally {
-      topologyLoading.value = false;
+      if (generation === topologyGeneration) topologyLoading.value = false;
     }
   }
 
@@ -287,13 +307,16 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
       store.toast("err", "必须选择受信任 Catalog Release 和 READY Node");
       return;
     }
+    const generation = ++validationGeneration;
     try {
       // Snapshot the current plan-scoped values before clearing the previous
       // response for loading. Node IDs only exist in that previous plan.
       const submittedCompositionPlan = validationResult.value?.composition_plan;
+      const submittedFingerprint = currentValidationFingerprint(submittedCompositionPlan);
       const pipelineOptions = selectedPipelineOptions();
       validating.value = true;
       validationResult.value = null;
+      validatedFingerprint.value = "";
       validationConfirmationFingerprint.value = "";
       const result = await storeApi.storeValidate({
         service_id: module.id,
@@ -305,6 +328,13 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
         bindings: selectedBindings(),
         ...(selectedTopology() ?? {}),
       });
+      if (generation !== validationGeneration) return;
+      // Compare against the submitted plan before applying server defaults.
+      // A response must never certify inputs edited while it was in flight.
+      if (submittedFingerprint !== currentValidationFingerprint(submittedCompositionPlan)) {
+        store.toast("info", "安装参数在校验期间已变化，请重新校验");
+        return;
+      }
       validationResult.value = result;
       initializeCompositionInputs(result);
       for (const requirement of result.requirements) {
@@ -340,10 +370,16 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
           "CompositionPlan 已加载；请填写按服务输入并重新校验后再安装",
         );
       } else {
-        validatedFingerprint.value = currentValidationFingerprint();
-        validationConfirmationFingerprint.value = await sha256Fingerprint(
-          JSON.parse(validatedFingerprint.value),
+        const fingerprint = currentValidationFingerprint();
+        const confirmation = await sha256Fingerprint(
+          JSON.parse(fingerprint),
         );
+        if (
+          generation !== validationGeneration ||
+          fingerprint !== currentValidationFingerprint()
+        ) return;
+        validatedFingerprint.value = fingerprint;
+        validationConfirmationFingerprint.value = confirmation;
       }
       if (compositionPlanChanged) {
         // The discovery toast above is the actionable next step.
@@ -361,9 +397,10 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
         store.toast("info", "请选择所有必需 API 的 Provider，然后重新校验");
       }
     } catch (err) {
+      if (generation !== validationGeneration) return;
       store.toast("err", `Release 校验失败：${(err as Error).message}`);
     } finally {
-      validating.value = false;
+      if (generation === validationGeneration) validating.value = false;
     }
   }
 
