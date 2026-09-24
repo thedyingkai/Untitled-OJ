@@ -7,27 +7,27 @@ import { arrayOrEmpty, textOr } from "../../shared/api/values";
 import { normalizeApiBinding } from "../topology/bindings";
 
 export const deploymentsApi = {
-deployments: (options?: ApiCallOptions) =>
+  deployments: (options?: ApiCallOptions) =>
     collectCursorItems<unknown>(
       "/api/v1/deployments",
       (data) => data.items,
       options,
     ).then(({ items }) => items.map(normalizeDeployment)),
-deployment: (deploymentId: string, options?: ApiCallOptions) =>
+  deployment: (deploymentId: string, options?: ApiCallOptions) =>
     v1Request<{ deployment?: unknown }>(
       "GET",
       `/api/v1/deployments/${encodeURIComponent(deploymentId)}`,
       undefined,
       options,
     ).then((data) => normalizeDeployment(data.deployment)),
-deploymentHealth: (deploymentId: string, options?: ApiCallOptions) =>
+  deploymentHealth: (deploymentId: string, options?: ApiCallOptions) =>
     v1Request<Record<string, unknown>>(
       "GET",
       `/api/v1/deployments/${encodeURIComponent(deploymentId)}/health`,
       undefined,
       options,
     ),
-deploymentBindings: (deploymentId: string, options?: ApiCallOptions) =>
+  deploymentBindings: (deploymentId: string, options?: ApiCallOptions) =>
     v1Request<Record<string, unknown>>(
       "GET",
       `/api/v1/deployments/${encodeURIComponent(deploymentId)}/bindings`,
@@ -43,7 +43,7 @@ deploymentBindings: (deploymentId: string, options?: ApiCallOptions) =>
         normalizeApiBinding,
       ),
     })),
-deploymentAction: (
+  deploymentAction: (
     deploymentId: string,
     action: "start" | "stop" | "restart" | "uninstall",
     options?: ApiCallOptions,
@@ -54,7 +54,7 @@ deploymentAction: (
       {},
       options,
     ),
-resourcePurge: (
+  resourcePurge: (
     claimId: string,
     input: {
       node_id: string;

@@ -1,5 +1,10 @@
 import type { OperationLog, OperationRow } from "../../types";
-import { arrayOrEmpty, booleanOr, numberOr, textOr } from "../../shared/api/values";
+import {
+  arrayOrEmpty,
+  booleanOr,
+  numberOr,
+  textOr,
+} from "../../shared/api/values";
 
 export const MAX_OPERATION_LOGS = 500;
 

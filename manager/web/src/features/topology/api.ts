@@ -1,10 +1,18 @@
 import type { ApiCallOptions } from "../../shared/api/transport";
 import { ApiError, v1Request } from "../../shared/api/transport";
-import type { AsyncOperationResult, TopologyDetail, TopologyDiff, TopologyHeads, TopologyRevision, TopologySpec, TopologyStatus } from "../../types";
+import type {
+  AsyncOperationResult,
+  TopologyDetail,
+  TopologyDiff,
+  TopologyHeads,
+  TopologyRevision,
+  TopologySpec,
+  TopologyStatus,
+} from "../../types";
 import { collectCursorItems } from "../../shared/api/pagination";
 
 export const topologyApi = {
-topology: async (topologyId: string, options?: ApiCallOptions) => {
+  topology: async (topologyId: string, options?: ApiCallOptions) => {
     try {
       return await v1Request<TopologyDetail>(
         "GET",
@@ -17,33 +25,33 @@ topology: async (topologyId: string, options?: ApiCallOptions) => {
       throw error;
     }
   },
-topologyList: (options?: ApiCallOptions) =>
+  topologyList: (options?: ApiCallOptions) =>
     collectCursorItems<TopologyHeads>(
       "/api/v1/topologies",
       (data) => data.items,
       options,
     ).then(({ items }) => items),
-topologyRevisions: (topologyId: string, options?: ApiCallOptions) =>
+  topologyRevisions: (topologyId: string, options?: ApiCallOptions) =>
     collectCursorItems<TopologyRevision>(
       `/api/v1/topologies/${encodeURIComponent(topologyId)}/revisions`,
       (data) => data.items,
       options,
     ).then(({ items }) => items),
-topologyStatus: (topologyId: string, options?: ApiCallOptions) =>
+  topologyStatus: (topologyId: string, options?: ApiCallOptions) =>
     v1Request<{ status: TopologyStatus }>(
       "GET",
       `/api/v1/topologies/${encodeURIComponent(topologyId)}/status`,
       undefined,
       options,
     ).then((data) => data.status),
-topologyCreate: (spec: TopologySpec, options?: ApiCallOptions) =>
+  topologyCreate: (spec: TopologySpec, options?: ApiCallOptions) =>
     v1Request<{ revision: TopologyRevision }>(
       "POST",
       "/api/v1/topologies",
       spec,
       options,
     ).then((data) => data.revision),
-topologyCreateRevision: (
+  topologyCreateRevision: (
     topologyId: string,
     spec: TopologySpec,
     expectedRevisionId: string,
@@ -55,7 +63,7 @@ topologyCreateRevision: (
       spec,
       { ...options, ifMatch: expectedRevisionId },
     ).then((data) => data.revision),
-topologyPutEndpoint: (
+  topologyPutEndpoint: (
     topologyId: string,
     endpointId: string,
     endpoint: TopologySpec["endpoints"][number],
@@ -68,7 +76,7 @@ topologyPutEndpoint: (
       endpoint,
       { ...options, ifMatch: expectedRevisionId },
     ),
-topologyDeleteEndpoint: (
+  topologyDeleteEndpoint: (
     topologyId: string,
     endpointId: string,
     expectedRevisionId: string,
@@ -80,7 +88,7 @@ topologyDeleteEndpoint: (
       {},
       { ...options, ifMatch: expectedRevisionId },
     ),
-topologyPutLink: (
+  topologyPutLink: (
     topologyId: string,
     sourceEndpoint: string,
     targetEndpoint: string,
@@ -94,7 +102,7 @@ topologyPutLink: (
       link,
       { ...options, ifMatch: expectedRevisionId },
     ),
-topologyDeleteLink: (
+  topologyDeleteLink: (
     topologyId: string,
     sourceEndpoint: string,
     targetEndpoint: string,
@@ -107,7 +115,7 @@ topologyDeleteLink: (
       {},
       { ...options, ifMatch: expectedRevisionId },
     ),
-topologyValidate: (
+  topologyValidate: (
     topologyId: string,
     spec: TopologySpec,
     options?: ApiCallOptions,
@@ -118,7 +126,7 @@ topologyValidate: (
       spec,
       options,
     ),
-topologyDiff: (
+  topologyDiff: (
     topologyId: string,
     revisions: { from_revision_id?: string; to_revision_id?: string } = {},
     options?: ApiCallOptions,
@@ -129,7 +137,7 @@ topologyDiff: (
       revisions,
       options,
     ).then((data) => data.diff),
-topologyApply: (
+  topologyApply: (
     topologyId: string,
     revisionId: string,
     options: ApiCallOptions = {},
@@ -140,7 +148,7 @@ topologyApply: (
       {},
       { ...options, ifMatch: revisionId },
     ),
-topologyRollback: (
+  topologyRollback: (
     topologyId: string,
     expectedRevisionId: string,
     revisionId: string,

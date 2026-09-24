@@ -1,10 +1,14 @@
 import { ref } from "vue";
-import type { DeploymentRow, InstallApiBindingSelection, StoreModule } from "../../types";
+import type {
+  DeploymentRow,
+  InstallApiBindingSelection,
+  StoreModule,
+} from "../../types";
 import { deploymentsApi } from "../deployments/api";
 import { topologyApi } from "../topology/api";
 import { sha256Fingerprint } from "./confirmation";
 import { storeApi } from "./api";
-import { deploymentMutationMessage } from "../../deployment-errors";
+import { deploymentMutationMessage } from "../deployments/errors";
 import type { ControlPlaneContext } from "../control-plane/context";
 
 export function useReleaseLifecycle(store: ControlPlaneContext) {
@@ -27,13 +31,16 @@ export function useReleaseLifecycle(store: ControlPlaneContext) {
       action === "upgrade" ? "升级到最新兼容版本" : "回滚到最近一次已证明版本";
     replacing.value = `${action}:${deployment.deployment_id}`;
     try {
-      const bindingRoles = await deploymentsApi.deploymentBindings(deployment.deployment_id);
+      const bindingRoles = await deploymentsApi.deploymentBindings(
+        deployment.deployment_id,
+      );
       const affectedTopologyIds = Array.from(
         new Set(
           [...bindingRoles.items, ...bindingRoles.provider_items]
             .filter(
               (binding) =>
-                binding.desired_state === "ACTIVE" && binding.state === "ACTIVE",
+                binding.desired_state === "ACTIVE" &&
+                binding.state === "ACTIVE",
             )
             .map((binding) => binding.topology_id)
             .filter(Boolean),
@@ -82,7 +89,9 @@ export function useReleaseLifecycle(store: ControlPlaneContext) {
       const fingerprint = await sha256Fingerprint(replacementPayload);
       const bindingSummary = replacementPayload.bindings?.length
         ? replacementPayload.bindings
-            .map((binding) => `${binding.name}=${binding.provider_deployment_id}`)
+            .map(
+              (binding) => `${binding.name}=${binding.provider_deployment_id}`,
+            )
             .join(", ")
         : "无 consumer Binding";
       const topologySummary = replacementPayload.topologies
@@ -117,7 +126,9 @@ export function useReleaseLifecycle(store: ControlPlaneContext) {
   async function uninstall(deployment: DeploymentRow) {
     if (!store.ensureAction("deployment.uninstall")) return;
     if (
-      !window.confirm(`卸载 ${deployment.deployment_id}？Release 元数据会保留。`)
+      !window.confirm(
+        `卸载 ${deployment.deployment_id}？Release 元数据会保留。`,
+      )
     )
       return;
     uninstalling.value = deployment.deployment_id;

@@ -1,10 +1,11 @@
 <script setup lang="ts">
+import { diagnosticsApi } from "../features/diagnostics/api";
 import { computed, onMounted, ref } from "vue";
 import Modal from "../components/Modal.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusChip from "../components/StatusChip.vue";
-import { api } from "../api";
-import { useOrchestrator } from "../store";
+
+import { useOrchestrator } from "../features/control-plane/state";
 
 type DiagnosticRow = Record<string, unknown>;
 
@@ -38,7 +39,7 @@ async function loadDiagnostics() {
   if (!store.ensureAction("diagnostic.list")) return;
   loading.value = true;
   try {
-    diagnostics.value = (await api.diagnostics()).map(unwrapReport);
+    diagnostics.value = (await diagnosticsApi.diagnostics()).map(unwrapReport);
   } catch (error) {
     store.toast("err", `诊断列表加载失败：${(error as Error).message}`);
   } finally {
@@ -50,7 +51,7 @@ async function createDiagnostic() {
   if (!store.ensureAction("diagnostic.create")) return;
   creating.value = true;
   try {
-    await api.createDiagnostic();
+    await diagnosticsApi.createDiagnostic();
     await loadDiagnostics();
     store.toast("ok", "已创建当前 Topology 的诊断报告");
   } catch (error) {
@@ -66,7 +67,7 @@ async function openDiagnostic(row: DiagnosticRow) {
   if (!id) return;
   opening.value = id;
   try {
-    selected.value = unwrapReport(await api.diagnostic(id));
+    selected.value = unwrapReport(await diagnosticsApi.diagnostic(id));
   } catch (error) {
     store.toast("err", `读取诊断失败：${(error as Error).message}`);
   } finally {
@@ -80,7 +81,7 @@ async function exportDiagnostic(row: DiagnosticRow, format: "json" | "md") {
   if (!id) return;
   exporting.value = `${id}:${format}`;
   try {
-    const result = await api.exportDiagnostic(id, format);
+    const result = await diagnosticsApi.exportDiagnostic(id, format);
     const rawContent = result.content;
     const content =
       typeof rawContent === "string"

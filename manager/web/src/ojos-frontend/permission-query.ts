@@ -1,6 +1,7 @@
+import { v1Request } from "../shared/api/transport";
 import { watch, type WatchStopHandle } from "vue";
 import { authenticated, principalId, principalRole } from "../auth";
-import { v1Request } from "../api";
+
 import type { Disposable } from "./loader";
 
 const CONTRIBUTION_SNAPSHOT_SCHEMA_V1 = "ojos.dev/contribution-snapshot/v1";

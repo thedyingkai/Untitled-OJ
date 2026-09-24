@@ -1,4 +1,11 @@
-import type { DeploymentRow, EndpointRow, LinkRow, NodeRow, ServiceRow, TopologyDetail } from "../../types";
+import type {
+  DeploymentRow,
+  EndpointRow,
+  LinkRow,
+  NodeRow,
+  ServiceRow,
+  TopologyDetail,
+} from "../../types";
 
 export interface ControlPlaneProjection {
   services: ServiceRow[];
@@ -55,9 +62,8 @@ export function projectControlPlane(
       enabled: link.enabled ? "enabled" : "disabled",
       source: "topology-draft",
       health:
-        linkStatuses.get(
-          `${link.source_endpoint}\0${link.target_endpoint}`,
-        )?.health ?? "UNKNOWN",
+        linkStatuses.get(`${link.source_endpoint}\0${link.target_endpoint}`)
+          ?.health ?? "UNKNOWN",
     })) ?? [];
   const nodeById = new Map(nodes.map((node) => [node.node_id, node]));
   const enrichedDeployments = deployments.map((deployment) => {
@@ -70,15 +76,13 @@ export function projectControlPlane(
     const primaryEndpoint = matchingEndpoints[0];
     return {
       ...deployment,
-      host_ip:
-        nodeById.get(deployment.node_id)?.host_ip || deployment.node_id,
+      host_ip: nodeById.get(deployment.node_id)?.host_ip || deployment.node_id,
       endpoint: primaryEndpoint?.endpoint ?? deployment.endpoint,
       protocol: primaryEndpoint?.protocol ?? deployment.protocol,
       health_path: primaryEndpoint?.health_path ?? deployment.health_path,
       endpoint_health: primaryEndpoint?.health ?? deployment.endpoint_health,
       reachable: primaryEndpoint?.reachable ?? deployment.reachable,
-      endpoint_count:
-        matchingEndpoints.length || deployment.endpoint_count,
+      endpoint_count: matchingEndpoints.length || deployment.endpoint_count,
       endpoints: matchingEndpoints.length
         ? matchingEndpoints.map((endpoint) => endpoint.endpoint)
         : deployment.endpoints,
@@ -99,5 +103,10 @@ export function projectControlPlane(
       ui: "",
       health: deployment.endpoint_health,
     }));
-  return { services: serviceRows, deployments: enrichedDeployments, endpoints: endpointRows, links: linkRows };
+  return {
+    services: serviceRows,
+    deployments: enrichedDeployments,
+    endpoints: endpointRows,
+    links: linkRows,
+  };
 }

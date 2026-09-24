@@ -1,5 +1,3 @@
-
-
 export interface CatalogSourceRow {
   id: string;
   url: string;

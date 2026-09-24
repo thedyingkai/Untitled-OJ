@@ -1,5 +1,13 @@
 import type { ApiCallOptions } from "../../shared/api/transport";
-import { ApiError, AuthRequiredError, DEFAULT_READ_TIMEOUT_MS, RequestCancelledError, RequestTimeoutError, responseMessage, waitForPromise } from "../../shared/api/transport";
+import {
+  ApiError,
+  AuthRequiredError,
+  DEFAULT_READ_TIMEOUT_MS,
+  RequestCancelledError,
+  RequestTimeoutError,
+  responseMessage,
+  waitForPromise,
+} from "../../shared/api/transport";
 import { markAuthRequired } from "../../auth";
 
 export interface OperationStreamEvent {

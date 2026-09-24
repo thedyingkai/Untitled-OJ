@@ -1,11 +1,9 @@
 <script setup lang="ts">
+import { isRequestCancelled } from "../shared/api/transport";
+import { MAX_OPERATION_LOGS, normalizeOperationLog } from "../features/operations/model";
+import { operationsApi } from "../features/operations/api";
 import { onMounted, onUnmounted, ref, watch } from "vue";
-import {
-  api,
-  isRequestCancelled,
-  MAX_OPERATION_LOGS,
-  normalizeOperationLog,
-} from "../api";
+
 import type { OperationLog } from "../types";
 
 const props = defineProps<{ operationId: string; live?: boolean }>();
@@ -28,7 +26,7 @@ async function load(currentGeneration: number) {
   loading.value = true;
   try {
     if (props.live) {
-      const batch = await api.operationEvents(props.operationId, lastEventId, {
+      const batch = await operationsApi.operationEvents(props.operationId, lastEventId, {
         signal: requestController.signal,
       });
       if (currentGeneration !== generation) return;
@@ -53,7 +51,7 @@ async function load(currentGeneration: number) {
         seenEvents.delete(oldest);
       }
     } else {
-      const next = await api.operationLogs(props.operationId, {
+      const next = await operationsApi.operationLogs(props.operationId, {
         signal: requestController.signal,
       });
       if (currentGeneration !== generation) return;

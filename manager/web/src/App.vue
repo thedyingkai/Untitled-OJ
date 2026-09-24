@@ -10,7 +10,7 @@ import {
   beginOidcLogin,
   logoutBrowserSession,
 } from "./auth";
-import { useOrchestrator } from "./store";
+import { useOrchestrator } from "./features/control-plane/state";
 import { adminFrontendContributions } from "./ojos-frontend/shell-host";
 
 const store = useOrchestrator();

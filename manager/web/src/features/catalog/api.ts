@@ -3,13 +3,13 @@ import { collectCursorItems } from "../../shared/api/pagination";
 import { v1Request } from "../../shared/api/transport";
 
 export const catalogApi = {
-catalogs: (options?: ApiCallOptions) =>
+  catalogs: (options?: ApiCallOptions) =>
     collectCursorItems<Record<string, unknown>>(
       "/api/v1/store/catalogs",
       (data) => data.items,
       options,
     ).then(({ items }) => items),
-registerCatalog: (
+  registerCatalog: (
     source: {
       id: string;
       url: string;
@@ -25,7 +25,7 @@ registerCatalog: (
       source,
       options,
     ),
-removeCatalog: (sourceId: string, options?: ApiCallOptions) =>
+  removeCatalog: (sourceId: string, options?: ApiCallOptions) =>
     v1Request<Record<string, unknown>>(
       "DELETE",
       `/api/v1/store/catalogs/${encodeURIComponent(sourceId)}`,

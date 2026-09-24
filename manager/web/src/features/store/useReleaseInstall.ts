@@ -1,14 +1,29 @@
 import { computed, getCurrentScope, onScopeDispose, ref } from "vue";
-import type { InstallApiBindingSelection, NodeRow, StoreMigrationPolicy, StoreModule, StorePipelineOptions, StoreValidationResult, TopologyHeads } from "../../types";
-import type { CompositionFormState } from "../../composition-form";
-import { compositionFormErrors, initializeCompositionState, serializeCompositionInputs } from "../../composition-form";
+import type {
+  InstallApiBindingSelection,
+  NodeRow,
+  StoreMigrationPolicy,
+  StoreModule,
+  StorePipelineOptions,
+  StoreValidationResult,
+  TopologyHeads,
+} from "../../types";
+import type { CompositionFormState } from "./composition-form";
+import {
+  compositionFormErrors,
+  initializeCompositionState,
+  serializeCompositionInputs,
+} from "./composition-form";
 import { topologyApi } from "../topology/api";
 import { storeApi } from "./api";
 import { sha256Fingerprint } from "./confirmation";
 import type { ControlPlaneContext } from "../control-plane/context";
 import type { ComputedRef } from "vue";
 
-export function useReleaseInstall(store: ControlPlaneContext, readyNodes: ComputedRef<NodeRow[]>) {
+export function useReleaseInstall(
+  store: ControlPlaneContext,
+  readyNodes: ComputedRef<NodeRow[]>,
+) {
   let validationGeneration = 0;
   let topologyGeneration = 0;
   if (getCurrentScope()) {
@@ -120,7 +135,10 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
   function selectedBindings(): InstallApiBindingSelection[] {
     return Object.entries(bindingSelections.value)
       .filter(([, provider]) => provider.trim())
-      .map(([name, provider_deployment_id]) => ({ name, provider_deployment_id }))
+      .map(([name, provider_deployment_id]) => ({
+        name,
+        provider_deployment_id,
+      }))
       .sort((left, right) => left.name.localeCompare(right.name));
   }
 
@@ -170,7 +188,10 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
     return { ...common, config, secret_refs };
   }
 
-  function selectedCompositionInputs(): Record<string, Record<string, unknown>> {
+  function selectedCompositionInputs(): Record<
+    string,
+    Record<string, unknown>
+  > {
     const plan = validationResult.value?.composition_plan;
     if (!plan) return {};
     return serializeCompositionInputs(plan, compositionInputs.value);
@@ -312,7 +333,9 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
       // Snapshot the current plan-scoped values before clearing the previous
       // response for loading. Node IDs only exist in that previous plan.
       const submittedCompositionPlan = validationResult.value?.composition_plan;
-      const submittedFingerprint = currentValidationFingerprint(submittedCompositionPlan);
+      const submittedFingerprint = currentValidationFingerprint(
+        submittedCompositionPlan,
+      );
       const pipelineOptions = selectedPipelineOptions();
       validating.value = true;
       validationResult.value = null;
@@ -331,7 +354,10 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
       if (generation !== validationGeneration) return;
       // Compare against the submitted plan before applying server defaults.
       // A response must never certify inputs edited while it was in flight.
-      if (submittedFingerprint !== currentValidationFingerprint(submittedCompositionPlan)) {
+      if (
+        submittedFingerprint !==
+        currentValidationFingerprint(submittedCompositionPlan)
+      ) {
         store.toast("info", "安装参数在校验期间已变化，请重新校验");
         return;
       }
@@ -371,13 +397,12 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
         );
       } else {
         const fingerprint = currentValidationFingerprint();
-        const confirmation = await sha256Fingerprint(
-          JSON.parse(fingerprint),
-        );
+        const confirmation = await sha256Fingerprint(JSON.parse(fingerprint));
         if (
           generation !== validationGeneration ||
           fingerprint !== currentValidationFingerprint()
-        ) return;
+        )
+          return;
         validatedFingerprint.value = fingerprint;
         validationConfirmationFingerprint.value = confirmation;
       }
@@ -388,7 +413,10 @@ export function useReleaseInstall(store: ControlPlaneContext, readyNodes: Comput
           "info",
           "该 Release 是 API consumer；请选择 applied Topology 后重新校验",
         );
-      } else if (result.valid && unresolvedRequiredBindings.value.length === 0) {
+      } else if (
+        result.valid &&
+        unresolvedRequiredBindings.value.length === 0
+      ) {
         store.toast(
           "ok",
           "Release、节点事实、Runtime Profile 和 API Binding 校验通过",

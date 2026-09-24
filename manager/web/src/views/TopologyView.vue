@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { topologyApi } from "../features/topology/api";
+import { deploymentsApi } from "../features/deployments/api";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import PageHeader from "../components/PageHeader.vue";
 import Modal from "../components/Modal.vue";
@@ -6,9 +8,9 @@ import StatusChip from "../components/StatusChip.vue";
 import FlowCanvas from "../components/FlowCanvas.vue";
 import type { FlowEdge, FlowNode } from "../flow-types";
 import EndpointNode from "../components/EndpointNode.vue";
-import { api } from "../api";
+
 import { parseEndpointId } from "../endpoint";
-import { useOrchestrator } from "../store";
+import { useOrchestrator } from "../features/control-plane/state";
 import type {
   ApiBinding,
   EndpointRow,
@@ -43,7 +45,7 @@ async function refreshHistory() {
     history.value = [];
     return;
   }
-  history.value = await api.topologyRevisions(topologyId.value);
+  history.value = await topologyApi.topologyRevisions(topologyId.value);
   if (!rollbackRevisionId.value) {
     rollbackRevisionId.value =
       store.topology.heads.applied_revision_id ?? history.value[0]?.revision_id ?? "";
@@ -64,14 +66,14 @@ function cloneSpec(): TopologySpec | null {
 async function saveSpec(spec: TopologySpec, message: string) {
   if (!store.ensureAction(editCapability.value)) return;
   if (store.topology) {
-    await api.topologyCreateRevision(
+    await topologyApi.topologyCreateRevision(
       topologyId.value,
       spec,
       store.topology.draft.revision_id,
       { changeMessage: message },
     );
   } else {
-    await api.topologyCreate(spec, { changeMessage: message });
+    await topologyApi.topologyCreate(spec, { changeMessage: message });
   }
   await store.refreshCore(true);
   await refreshHistory();
@@ -399,7 +401,7 @@ async function refreshSelectedBindingEvidence() {
   if (!deploymentId || !store.supportsAction("deployment.get")) return;
   bindingEvidenceLoading.value = true;
   try {
-    const result = await api.deploymentBindings(deploymentId);
+    const result = await deploymentsApi.deploymentBindings(deploymentId);
     const requirementNames = new Set(
       (selectedSpecLink.value?.api_bindings ?? []).map(
         (binding) => binding.requirement,
@@ -643,7 +645,7 @@ async function validateDraft() {
   if (!spec || !store.ensureAction("topology.validate")) return;
   busy.value = true;
   try {
-    const result = await api.topologyValidate(topologyId.value, spec);
+    const result = await topologyApi.topologyValidate(topologyId.value, spec);
     validationHash.value = result.content_sha256;
     store.toast("ok", `Spec 校验通过：${result.content_sha256}`);
   } catch (err) {
@@ -657,7 +659,7 @@ async function diffDraft() {
   if (!store.topology || !store.ensureAction("topology.diff")) return;
   busy.value = true;
   try {
-    diffResult.value = await api.topologyDiff(topologyId.value, {
+    diffResult.value = await topologyApi.topologyDiff(topologyId.value, {
       from_revision_id: store.topology.heads.applied_revision_id ?? undefined,
       to_revision_id: store.topology.draft.revision_id,
     });
@@ -672,7 +674,7 @@ async function applyDraft() {
   if (!store.topology || !store.ensureAction("topology.apply")) return;
   busy.value = true;
   try {
-    const result = await api.topologyApply(
+    const result = await topologyApi.topologyApply(
       topologyId.value,
       store.topology.draft.revision_id,
     );
@@ -694,7 +696,7 @@ async function rollbackTopology() {
   ) return;
   busy.value = true;
   try {
-    const result = await api.topologyRollback(
+    const result = await topologyApi.topologyRollback(
       topologyId.value,
       store.topology.draft.revision_id,
       rollbackRevisionId.value,

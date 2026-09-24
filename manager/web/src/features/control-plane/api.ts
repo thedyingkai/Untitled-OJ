@@ -5,14 +5,14 @@ import { normalizeHealth } from "./normalizers";
 import { arrayOrEmpty } from "../../shared/api/values";
 
 export const controlPlaneApi = {
-health: (options?: ApiCallOptions) =>
+  health: (options?: ApiCallOptions) =>
     v1Request<HealthInfo>(
       "GET",
       "/api/v1/healthz/ready",
       undefined,
       options,
     ).then(normalizeHealth),
-capabilities: (options?: ApiCallOptions) =>
+  capabilities: (options?: ApiCallOptions) =>
     v1Request<{ actions?: CapabilityRow[] }>(
       "GET",
       "/api/v1/capabilities",

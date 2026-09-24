@@ -1,7 +1,15 @@
 import type { ApiBinding, ApiProviderCandidate } from "../../types";
-import { booleanOr, numberOr, objectOrEmpty, stringsOrEmpty, textOr } from "../../shared/api/values";
+import {
+  booleanOr,
+  numberOr,
+  objectOrEmpty,
+  stringsOrEmpty,
+  textOr,
+} from "../../shared/api/values";
 
-export function normalizeApiProviderCandidate(value: unknown): ApiProviderCandidate {
+export function normalizeApiProviderCandidate(
+  value: unknown,
+): ApiProviderCandidate {
   const row = objectOrEmpty(value);
   return {
     deployment_id: textOr(

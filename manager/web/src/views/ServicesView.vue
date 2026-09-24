@@ -1,11 +1,12 @@
 <script setup lang="ts">
+import { deploymentsApi } from "../features/deployments/api";
 import { ref } from "vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusChip from "../components/StatusChip.vue";
 import Modal from "../components/Modal.vue";
-import { api } from "../api";
-import { deploymentMutationMessage } from "../deployment-errors";
-import { useOrchestrator } from "../store";
+
+import { deploymentMutationMessage } from "../features/deployments/errors";
+import { useOrchestrator } from "../features/control-plane/state";
 import type { DeploymentBindings, DeploymentRow } from "../types";
 
 const store = useOrchestrator();
@@ -31,9 +32,9 @@ async function showDetails(deployment: DeploymentRow) {
   healthEvidence.value = null;
   try {
     const [detail, bindings, health] = await Promise.allSettled([
-      api.deployment(deployment.deployment_id),
-      api.deploymentBindings(deployment.deployment_id),
-      api.deploymentHealth(deployment.deployment_id),
+      deploymentsApi.deployment(deployment.deployment_id),
+      deploymentsApi.deploymentBindings(deployment.deployment_id),
+      deploymentsApi.deploymentHealth(deployment.deployment_id),
     ]);
     if (detail.status === "fulfilled") detailDeployment.value = detail.value;
     if (bindings.status === "fulfilled") detailBindings.value = bindings.value;
@@ -60,7 +61,7 @@ async function lifecycle(action: DeploymentAction, deployment: DeploymentRow) {
   ) return;
   busy.value = `${action}:${deployment.deployment_id}`;
   try {
-    const result = await api.deploymentAction(deployment.deployment_id, action);
+    const result = await deploymentsApi.deploymentAction(deployment.deployment_id, action);
     store.toast("ok", `操作已提交：${result.operation_id}`);
     await store.refreshCore(true);
   } catch (err) {

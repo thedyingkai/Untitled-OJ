@@ -1,7 +1,8 @@
+import { request, v1Request } from "../shared/api/transport";
 import { shallowRef, watch } from "vue";
 import type { Router } from "vue-router";
 import { authenticated } from "../auth";
-import { request, v1Request } from "../api";
+
 import {
   FrontendContributionHost,
   type FrontendContributionStatusV1,

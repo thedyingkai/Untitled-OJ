@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import { nodesApi } from "../features/nodes/api";
 import { ref } from "vue";
-import { api } from "../api";
+
 import PageHeader from "../components/PageHeader.vue";
 import StatusChip from "../components/StatusChip.vue";
-import { useOrchestrator } from "../store";
+import { useOrchestrator } from "../features/control-plane/state";
 import type { NodeRow } from "../types";
 
 const store = useOrchestrator();
@@ -28,7 +29,7 @@ async function createEnrollment() {
   busy.value = "enroll";
   issuedEnrollment.value = null;
   try {
-    issuedEnrollment.value = await api.createNodeEnrollment({
+    issuedEnrollment.value = await nodesApi.createNodeEnrollment({
       node_id: enrollment.value.node_id.trim(),
       host_ip: enrollment.value.host_ip.trim(),
       role: enrollment.value.role.trim() || "standalone",
@@ -57,7 +58,7 @@ async function revokeCertificates(node: NodeRow) {
   if (!reason?.trim()) return;
   busy.value = `revoke:${node.node_id}`;
   try {
-    const result = await api.revokeNodeCertificates(node.node_id, reason.trim());
+    const result = await nodesApi.revokeNodeCertificates(node.node_id, reason.trim());
     store.toast("ok", `已吊销 ${result.revoked_certificates} 张证书`);
     await store.refreshCore(true);
   } catch (error) {
@@ -71,7 +72,7 @@ async function inspectHealth(node: NodeRow) {
   if (!store.ensureAction("node.health")) return;
   busy.value = `health:${node.node_id}`;
   try {
-    health.value = await api.nodeHealth(node.node_id);
+    health.value = await nodesApi.nodeHealth(node.node_id);
   } catch (error) {
     store.toast("err", `Node 健康查询失败：${(error as Error).message}`);
   } finally {
@@ -84,7 +85,7 @@ async function drain(node: NodeRow) {
   if (!window.confirm(`Drain Node ${node.node_id}？它将停止接收新任务。`)) return;
   busy.value = `drain:${node.node_id}`;
   try {
-    const result = await api.nodeDrain(node.node_id);
+    const result = await nodesApi.nodeDrain(node.node_id);
     store.toast("ok", `Drain Operation 已提交：${result.operation_id}`);
     await store.refreshCore(true);
   } catch (error) {
@@ -99,7 +100,7 @@ async function remove(node: NodeRow) {
   if (!window.confirm(`移除已排空 Node ${node.node_id}？`)) return;
   busy.value = `remove:${node.node_id}`;
   try {
-    const result = await api.nodeRemove(node.node_id);
+    const result = await nodesApi.nodeRemove(node.node_id);
     store.toast("ok", `Remove Operation 已提交：${result.operation_id}`);
     await store.refreshCore(true);
   } catch (error) {

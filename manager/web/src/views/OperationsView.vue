@@ -1,11 +1,12 @@
 <script setup lang="ts">
+import { operationsApi } from "../features/operations/api";
 import { computed, ref } from "vue";
 import PageHeader from "../components/PageHeader.vue";
 import Modal from "../components/Modal.vue";
 import StatusChip from "../components/StatusChip.vue";
 import OperationLogs from "../components/OperationLogs.vue";
-import { api } from "../api";
-import { useOrchestrator } from "../store";
+
+import { useOrchestrator } from "../features/control-plane/state";
 import type { OperationRow } from "../types";
 
 const store = useOrchestrator();
@@ -100,17 +101,17 @@ async function operationAction(
   }
   busy.value = true;
   try {
-    if (kind === "confirm") await api.operationConfirm(operation.operation_id);
-    if (kind === "cancel") await api.operationCancel(operation.operation_id);
-    if (kind === "retry") await api.operationRetry(operation.operation_id);
+    if (kind === "confirm") await operationsApi.operationConfirm(operation.operation_id);
+    if (kind === "cancel") await operationsApi.operationCancel(operation.operation_id);
+    if (kind === "retry") await operationsApi.operationRetry(operation.operation_id);
     if (kind === "apply") {
-      await api.operationApply(
+      await operationsApi.operationApply(
         operation.operation_id,
         executeDriver.value ? { execute_service_driver: "true" } : {},
       );
     }
     if (kind === "rollback") {
-      await api.operationRollback(
+      await operationsApi.operationRollback(
         operation.operation_id,
         executeDriver.value ? { execute_service_driver: "true" } : {},
       );
@@ -156,7 +157,7 @@ async function createPlan() {
   }
   planning.value = true;
   try {
-    const operation = await api.operationPlan(document as Record<string, unknown>);
+    const operation = await operationsApi.operationPlan(document as Record<string, unknown>);
     planOpen.value = false;
     await store.refreshCore(true);
     selected.value =

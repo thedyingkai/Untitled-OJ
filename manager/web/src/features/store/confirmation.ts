@@ -1,5 +1,3 @@
-
-
 export async function sha256Fingerprint(value: unknown): Promise<string> {
   const encoded = new TextEncoder().encode(JSON.stringify(value));
   const digest = await crypto.subtle.digest("SHA-256", encoded);

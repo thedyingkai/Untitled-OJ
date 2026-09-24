@@ -1,6 +1,24 @@
-import type { ApiBinding, ApiBindingRequirementPlan, NodeRuntimeValidation, StoreIndexResponse, StoreModule, StoreValidationResult, TopologyDiff } from "../../types";
-import { arrayOrEmpty, booleanOr, numberOr, objectOrEmpty, stringsOrEmpty, textOr } from "../../shared/api/values";
-import { normalizeApiBinding, normalizeApiProviderCandidate } from "../topology/bindings";
+import type {
+  ApiBinding,
+  ApiBindingRequirementPlan,
+  NodeRuntimeValidation,
+  StoreIndexResponse,
+  StoreModule,
+  StoreValidationResult,
+  TopologyDiff,
+} from "../../types";
+import {
+  arrayOrEmpty,
+  booleanOr,
+  numberOr,
+  objectOrEmpty,
+  stringsOrEmpty,
+  textOr,
+} from "../../shared/api/values";
+import {
+  normalizeApiBinding,
+  normalizeApiProviderCandidate,
+} from "../topology/bindings";
 
 function normalizeBindingRequirement(
   value: unknown,

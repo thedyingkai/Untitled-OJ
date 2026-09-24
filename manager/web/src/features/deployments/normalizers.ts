@@ -1,5 +1,10 @@
 import type { DeploymentRow } from "../../types";
-import { booleanOr, numberOr, stringsOrEmpty, textOr } from "../../shared/api/values";
+import {
+  booleanOr,
+  numberOr,
+  stringsOrEmpty,
+  textOr,
+} from "../../shared/api/values";
 
 export function normalizeDeployment(value: unknown): DeploymentRow {
   const row = (value && typeof value === "object" ? value : {}) as Record<

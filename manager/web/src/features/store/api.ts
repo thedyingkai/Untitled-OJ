@@ -2,10 +2,16 @@ import type { ApiCallOptions } from "../../shared/api/transport";
 import { collectCursorItems } from "../../shared/api/pagination";
 import { normalizeStoreIndex, normalizeStoreValidation } from "./normalizers";
 import { v1Request } from "../../shared/api/transport";
-import type { AsyncOperationResult, InstallApiBindingSelection, InstallTopologySelection, ReplacementTopologyCas, StorePipelineOptions } from "../../types";
+import type {
+  AsyncOperationResult,
+  InstallApiBindingSelection,
+  InstallTopologySelection,
+  ReplacementTopologyCas,
+  StorePipelineOptions,
+} from "../../types";
 
 export const storeApi = {
-storeIndex: (_refresh = false, options?: ApiCallOptions) =>
+  storeIndex: (_refresh = false, options?: ApiCallOptions) =>
     collectCursorItems<unknown>(
       "/api/v1/store/packages",
       (data) => data.items,
@@ -19,7 +25,7 @@ storeIndex: (_refresh = false, options?: ApiCallOptions) =>
       }
       return normalizeStoreIndex({ items, installed });
     }),
-storeImport: (
+  storeImport: (
     payload: {
       service_id: string;
       target_node_id: string;
@@ -35,7 +41,7 @@ storeImport: (
       payload,
       options,
     ),
-storeValidate: (
+  storeValidate: (
     payload: {
       service_id: string;
       target_node_id: string;
@@ -63,7 +69,7 @@ storeValidate: (
       },
       options,
     ).then(normalizeStoreValidation),
-storeInstall: (
+  storeInstall: (
     payload: {
       service_id: string;
       version?: string;
@@ -93,7 +99,7 @@ storeInstall: (
       },
       options,
     ),
-deleteRelease: (
+  deleteRelease: (
     serviceId: string,
     version: string,
     options?: ApiCallOptions,
@@ -104,7 +110,7 @@ deleteRelease: (
       { service_id: serviceId, version },
       options,
     ),
-storeUpgrade: (
+  storeUpgrade: (
     payload: {
       deployment_id: string;
       version?: string;
@@ -122,7 +128,7 @@ storeUpgrade: (
       payload,
       options,
     ),
-storeRollback: (
+  storeRollback: (
     payload: {
       deployment_id: string;
       version?: string;

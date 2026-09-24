@@ -8,7 +8,11 @@ export function moduleKey(module: StoreModule): string {
   return `${module.source_id}\u0000${module.id}\u0000${module.version}`;
 }
 
-export function useReleaseImport(store: ControlPlaneContext, modules: ComputedRef<StoreModule[]>, readyNodes: ComputedRef<NodeRow[]>) {
+export function useReleaseImport(
+  store: ControlPlaneContext,
+  modules: ComputedRef<StoreModule[]>,
+  readyNodes: ComputedRef<NodeRow[]>,
+) {
   /* ---------- 仅导入 ---------- */
 
   const importOpen = ref(false);
