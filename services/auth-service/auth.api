@@ -582,9 +582,6 @@ service auth {
 	@handler revokeServiceCredential
 	post /admin/services/:service_code/credentials/revoke (RevokeServiceCredentialReq) returns (AdminActionResp)
 
-	@handler userEffectivePermissions
-	get /admin/users/:user_id/effective-permissions (UserEffectivePermissionsReq) returns (UserEffectivePermissionsResp)
-
 	@handler userPermissionCheck
 	post /permission-check (PermissionCheckReq) returns (PermissionCheckResp)
 
@@ -599,4 +596,13 @@ service auth {
 
 	@handler listAuditLogs
 	get /admin/audit-logs (ListQueryReq) returns (ListAuditLogsResp)
+}
+
+@server (
+	prefix:     /auth
+	middleware: PermissionReadMiddleware
+)
+service auth {
+	@handler userEffectivePermissions
+	get /admin/users/:user_id/effective-permissions (UserEffectivePermissionsReq) returns (UserEffectivePermissionsResp)
 }

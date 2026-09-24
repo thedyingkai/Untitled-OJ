@@ -102,7 +102,7 @@ impl AuthPermissionChecker {
 
     fn load_user(&self, user_id: i64) -> Result<BTreeSet<String>> {
         let url = format!(
-            "{}{EFFECTIVE_PATH_PREFIX}{user_id}?scope_type=system",
+            "{}{EFFECTIVE_PATH_PREFIX}{user_id}/effective-permissions?scope_type=system",
             self.url
         );
         let response = self

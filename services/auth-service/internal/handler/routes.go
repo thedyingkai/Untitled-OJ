@@ -25,6 +25,22 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 		)
 	}
 
+	permissionRead := serverCtx.PermissionReadMiddleware
+	if permissionRead == nil {
+		permissionRead = serverCtx.AuthMiddleware
+	}
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{permissionRead},
+			[]rest.Route{{
+				Method:  http.MethodGet,
+				Path:    "/admin/users/:user_id/effective-permissions",
+				Handler: userEffectivePermissionsHandler(serverCtx),
+			}}...,
+		),
+		rest.WithPrefix("/auth"),
+	)
+
 	server.AddRoutes(
 		[]rest.Route{
 			{Method: http.MethodGet, Path: "/api/v1/topologies/:id", Handler: topologyProjectionHandler(serverCtx)},
@@ -231,11 +247,6 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 					Method:  http.MethodDelete,
 					Path:    "/admin/services/:service_code/permissions",
 					Handler: deleteServicePermissionsHandler(serverCtx),
-				},
-				{
-					Method:  http.MethodGet,
-					Path:    "/admin/users/:user_id/effective-permissions",
-					Handler: userEffectivePermissionsHandler(serverCtx),
 				},
 				{
 					Method:  http.MethodGet,

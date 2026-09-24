@@ -190,7 +190,11 @@ func NewServiceContext(c config.Config) (result *ServiceContext, startupErr erro
 		AuthService:    authService,
 		AdminBootstrap: adminBootstrap,
 
-		AuthMiddleware:                authMiddleware.Handle,
+		AuthMiddleware: authMiddleware.Handle,
+		PermissionReadMiddleware: authmw.NewPermissionReadMiddleware(
+			c.Orchestrator.ManagementToken,
+			authMiddleware.Handle,
+		).Handle,
 		DelegatedPermissionMiddleware: authMiddleware.HandleDelegated,
 		WorkloadControlPlaneMiddleware: authmw.NewAuthMiddleware(
 			c.Jwt.Secret,

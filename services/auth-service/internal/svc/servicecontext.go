@@ -30,6 +30,7 @@ type ServiceContext struct {
 	AdminBootstrap *service.AdminBootstrapService
 
 	AuthMiddleware                 rest.Middleware
+	PermissionReadMiddleware       rest.Middleware
 	DelegatedPermissionMiddleware  rest.Middleware
 	WorkloadControlPlaneMiddleware rest.Middleware
 	WorkloadIssuer                 *workload.Issuer

@@ -178,8 +178,10 @@ func (l *ServicePermissionsLogic) RevokeServiceCredential(req *types.RevokeServi
 }
 
 func (l *ServicePermissionsLogic) UserEffective(req *types.UserEffectivePermissionsReq) (*types.UserEffectivePermissionsResp, error) {
-	if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
-		return nil, err
+	if !middleware.ControlPlanePermissionRead(l.ctx) {
+		if _, err := requireAdmin(l.ctx, l.svcCtx); err != nil {
+			return nil, err
+		}
 	}
 	scopeType := strings.TrimSpace(req.ScopeType)
 	if scopeType == "" {

@@ -61,6 +61,8 @@ Store 安装负责服务放置，Topology 不隐式安装服务。Endpoint/Link 
 
 Web/TUI 只根据 published capabilities 显示操作。HTTP `202` 只表示异步 Operation 已接受，最终成功必须读取持久 Operation/Status。
 
+OIDC 控制面身份与 OJ 业务权限之间的查询适配、管理凭据的只读用途，以及保留的身份映射约束见[控制面与 Auth 权限边界](control-plane-auth.md)。
+
 ## 跨节点业务数据面
 
 A/B 跨机部署不让 Worker 直连远端数据库或中间件：A 机控制面根据签名 Release v2 和已应用 Topology 生成 ApiBinding；B 机 Agent 通过 mTLS 领取部署任务并物化 context；Worker 使用 Deployment JWT 经 A 的 HTTPS Gateway 按 requirement 名调用 provider。Gateway 从 JWT 推导 consumer 身份并实时检查 Binding、revision 与 credential generation，不信任客户端提交的 caller header。
