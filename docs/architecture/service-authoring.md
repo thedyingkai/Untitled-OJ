@@ -29,6 +29,23 @@ ojos.service.yaml + 引用的 OpenAPI/schema/frontend manifest
 
 软件验证及演练在独立验证目录中运行，不属于上述产品生成输入，不得由生成器输出到产品工作树。
 
+## 服务启动与业务代码边界
+
+`contest-service` 是新服务的启动参考。它的进程入口不再同时组装数据库、权限、事件与 HTTP：
+
+| 入口 | 职责 |
+| --- | --- |
+| `main.go` | 处理产品健康检查命令、加载配置、建立进程信号上下文、选择退出码。 |
+| `internal/config` | 将环境与 Agent 物化文件位置转换为配置；托管模式约束在这里明确。 |
+| `internal/app` | 接收显式上下文、配置和 logger，组装组件依赖图与适配器；不重新读取进程信号或环境。 |
+| `internal/httpapi` | 请求解析、权限调用、业务调用与 HTTP 响应。 |
+| `internal/contest` | 比赛规则、仓储接口与当前持久化实现；HTTP 类型不进入规则。 |
+| `platform/shared/go/bootstrap` | 稳定的依赖启动顺序、失败回滚、readiness、后台失败传播及逆序关闭。 |
+
+参考服务的启动依赖仍为 logging → database/permissions → events → domain → HTTP；事件依赖 database，domain 同时依赖 database、permissions、events。关闭时保留整体 15 秒期限，不把一次 Start 成功当作持续 ready。进程退出与应用关闭由同一上下文衔接，组件构造不得自行退出进程。
+
+新增服务沿用这些职责约定，不复制一套新的生命周期管理器。已有 GoZero 服务目前仍由各自的 `internal/svc` 组装，其路由、中间件和关闭方式没有在本轮被统一替换；迁移它们需要逐服务确认后台任务、连接池和关闭顺序。这里统一的是可执行的参考路径和启动约定，不宣称所有服务都已接入 bootstrap。
+
 ## 当前过渡边界
 
 - `manager/installer` 的 runtime resource 发现仍读取 `service.yaml` / `release.yaml`，不能据此断言它已自动识别全部 v3 参考服务。
