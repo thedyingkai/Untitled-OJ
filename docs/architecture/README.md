@@ -25,9 +25,11 @@ orchestrator-backend
 ```
 
 - `orchestrator-core` 不访问文件、数据库、网络、进程、环境变量或 Docker；它只定义可测试的领域规则。
+- `core/binding_projection` 拥有 Binding generation、激活/撤销和投影增减规则。后台协调与 DurableStore 都调用这一确定性实现；storage 保留 Topology 组提交 DTO 的兼容导出。
 - `orchestrator-protocol` 定义控制面与 Agent 共享的运行时报告、实例观测、profile 和 health policy，仅依赖 serde/错误类型派生。daemon 不再依赖 Agent crate；runtime 和 Agent 暂时保留原类型路径的兼容导出。其余执行 payload 仍在 runtime，不能据此声称整个执行层已解耦。
 - `orchestrator-storage` 是持久状态真值，不维护写后全表重载的内存镜像。
 - `orchestrator-control-plane` 协调至少一次投递、lease、重试、恢复和 saga 补偿；不能证明副作用结果时进入 `NEEDS_ATTENTION`。
+- backend 的后台入口只启动和停止循环；`topology_worker/` 内按租约、恢复、网络探测、运行时投影、状态协调和 Job 应用分工，保留原有 CAS/fencing。具体边界见[后台协调](background-coordination.md)。
 - `orchestrator-runtime` 只提供固定 Docker Engine/受控运行时操作，不拼接 shell。
 - `orchestrator-manager` 的 `catalog_query` 已通过只读端口组合 Catalog 分页和已部署视图；`store/config`、`store/composition` 承载纯配置与组合规则，`store/validation` 通过只读端口编排 Release 校验。这些模块不依赖 HTTP、Console 或数据库实现。整个 crate 仍包含旧 Store Console 应用逻辑，安装和替换用例仍在 backend，继续按计划迁移。
 - backend 的 Store HTTP 入口只承担请求与响应映射；宿主用例在 `backend/src/store`，统一通过 `StoreAdmission` 持锁提交任务并撤销失败的拓扑占用。Deployment 生命周期在独立的 `backend/src/deployment.rs`；它和 Release 元数据删除保持不同语义。详情见 [Store 与 Deployment](store.md)。

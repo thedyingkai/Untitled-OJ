@@ -9,6 +9,7 @@ use orchestrator_control_plane::{
     ClaimRequest, CompleteRequest, DurableOperation, HeartbeatRequest, Job, JobError, JobEvent,
     JobStore, NewJob, OperationRepository, OperationStoreError, ResolveExpiredSuccessRequest,
 };
+use orchestrator_core::binding_projection::stage_binding_generations;
 use orchestrator_legacy::{
     ApiBindingDesiredState, ApiBindingHealth, ApiBindingObservedState, ApiBindingState, NodeRecord,
     OrchestratorStore, ServiceReleaseContract, TopologyEndpointSpec, TopologyRevision,
@@ -2082,138 +2083,6 @@ fn durable_now_marker() -> String {
         .unwrap_or_default()
         .as_millis();
     format!("unix-ms:{millis}")
-}
-
-/// A workload JWT carries one deployment-wide credential generation. If any
-/// route for a consumer changes, every still-active sibling is therefore
-/// staged with the same next generation. This makes old tokens fail every API
-/// immediately after the Gateway atomically switches the route table.
-fn stage_binding_generations(
-    mut desired: Vec<ApiBinding>,
-    current: Vec<ApiBinding>,
-    revision_id: &str,
-    operation_id: &str,
-    now: &str,
-) -> Vec<ApiBinding> {
-    let mut consumers = current
-        .iter()
-        .map(|binding| binding.consumer_deployment_id.clone())
-        .chain(
-            desired
-                .iter()
-                .map(|binding| binding.consumer_deployment_id.clone()),
-        )
-        .collect::<BTreeSet<_>>();
-    let desired_keys = desired
-        .iter()
-        .map(|binding| {
-            (
-                binding.consumer_deployment_id.clone(),
-                binding.requirement_name.clone(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
-
-    for consumer in std::mem::take(&mut consumers) {
-        let mut wanted = desired
-            .iter()
-            .filter(|binding| binding.consumer_deployment_id == consumer)
-            .collect::<Vec<_>>();
-        let mut active = current
-            .iter()
-            .filter(|binding| {
-                binding.consumer_deployment_id == consumer
-                    && binding.desired_state == "ACTIVE"
-                    && binding.state == ApiBindingState::Active
-            })
-            .collect::<Vec<_>>();
-        wanted.sort_by_key(|binding| binding.requirement_name.as_str());
-        active.sort_by_key(|binding| binding.requirement_name.as_str());
-        let changed = wanted.len() != active.len()
-            || wanted
-                .iter()
-                .zip(active.iter())
-                .any(|(wanted, active)| !same_binding_route(wanted, active));
-        let previous_generation = current
-            .iter()
-            .filter(|binding| binding.consumer_deployment_id == consumer)
-            .map(|binding| {
-                binding
-                    .credential_generation
-                    .max(binding.context_generation)
-            })
-            .max()
-            .unwrap_or(0);
-        let generation = if changed {
-            previous_generation.saturating_add(1).max(1)
-        } else {
-            previous_generation.max(1)
-        };
-        for binding in desired
-            .iter_mut()
-            .filter(|binding| binding.consumer_deployment_id == consumer)
-        {
-            binding.credential_generation = generation;
-            binding.context_generation = generation;
-            if let Some(existing) = current
-                .iter()
-                .find(|existing| existing.binding_id == binding.binding_id)
-            {
-                binding.created_at = existing.created_at.clone();
-            }
-        }
-        for existing in current.iter().filter(|binding| {
-            binding.consumer_deployment_id == consumer
-                && binding.desired_state == "ACTIVE"
-                && !desired_keys.contains(&(
-                    binding.consumer_deployment_id.clone(),
-                    binding.requirement_name.clone(),
-                ))
-        }) {
-            let mut revoked = existing.clone();
-            revoked.topology_revision_id = revision_id.to_string();
-            revoked.credential_generation = generation;
-            revoked.context_generation = generation;
-            revoked.desired_state = ApiBindingDesiredState::Revoked;
-            revoked.observed_state = ApiBindingObservedState::Pending;
-            revoked.health = ApiBindingHealth::Unknown;
-            revoked.drift.clear();
-            revoked.last_operation_id = operation_id.to_string();
-            revoked.state = ApiBindingState::Pending;
-            revoked.updated_at = now.to_string();
-            desired.push(revoked);
-        }
-    }
-    desired.sort_by(|left, right| {
-        (&left.consumer_deployment_id, &left.requirement_name)
-            .cmp(&(&right.consumer_deployment_id, &right.requirement_name))
-    });
-    desired
-}
-
-fn same_binding_route(left: &ApiBinding, right: &ApiBinding) -> bool {
-    left.requirement_name == right.requirement_name
-        && left.api_id == right.api_id
-        && left.api_version == right.api_version
-        && left.consumer_deployment_id == right.consumer_deployment_id
-        && left.consumer_service_id == right.consumer_service_id
-        && left.consumer_node_id == right.consumer_node_id
-        && left.consumer_endpoint == right.consumer_endpoint
-        && left.provider_deployment_id == right.provider_deployment_id
-        && left.provider_service_id == right.provider_service_id
-        && left.provider_node_id == right.provider_node_id
-        && left.provider_endpoint == right.provider_endpoint
-        && left.provider_path == right.provider_path
-        && left.virtual_endpoint == right.virtual_endpoint
-        && left.protocol == right.protocol
-        && left.methods == right.methods
-        && left.auth_mode == right.auth_mode
-        && left.provider_auth_mode == right.provider_auth_mode
-        && left.permission == right.permission
-        && left.timeout_ms == right.timeout_ms
-        && left.link_source_endpoint == right.link_source_endpoint
-        && left.link_target_endpoint == right.link_target_endpoint
-        && left.optional == right.optional
 }
 
 impl From<StorageError> for DurableError {

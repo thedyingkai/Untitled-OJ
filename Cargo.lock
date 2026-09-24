@@ -3301,6 +3301,7 @@ dependencies = [
  "jsonwebtoken",
  "ojos-orchestrator-installer",
  "orchestrator-control-plane",
+ "orchestrator-core",
  "orchestrator-legacy",
  "orchestrator-manager",
  "orchestrator-protocol",

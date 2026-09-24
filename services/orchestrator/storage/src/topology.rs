@@ -1,8 +1,8 @@
 use crate::{SqliteOrchestratorStore, StorageError, StorageResult};
 use orchestrator_control_plane::{Job, JobError, JobStatus, ResolveExpiredSuccessRequest};
+pub use orchestrator_core::binding_projection::TopologyApplyGroupMember;
 use orchestrator_legacy::{
-    ApiBinding, ApiBindingState, TopologyReconciliationState, TopologyRevision, TopologySpec,
-    TopologyStatus,
+    ApiBindingState, TopologyReconciliationState, TopologyRevision, TopologySpec, TopologyStatus,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -23,13 +23,6 @@ pub enum TopologyApplyOutcome {
     Succeeded,
     Failed,
     Degraded,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TopologyApplyGroupMember {
-    pub topology_id: String,
-    pub revision_id: String,
-    pub active_bindings: Vec<ApiBinding>,
 }
 
 impl SqliteOrchestratorStore {

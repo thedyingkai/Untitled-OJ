@@ -21,6 +21,7 @@ jsonwebtoken = "9.3"
 rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 orchestrator-legacy.workspace = true
 orchestrator-control-plane.workspace = true
+orchestrator-core.workspace = true
 orchestrator-manager.workspace = true
 orchestrator-runtime.workspace = true
 orchestrator-storage = { path = "../storage" }

@@ -7,6 +7,7 @@
 
 mod action;
 mod api_binding;
+pub mod binding_projection;
 pub mod composition;
 mod contract_v1;
 mod contribution;
