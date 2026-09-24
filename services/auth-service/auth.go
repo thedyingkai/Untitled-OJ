@@ -4,7 +4,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -12,14 +11,10 @@ import (
 	"os"
 	"time"
 
+	"ojos-auth-service/internal/app"
 	"ojos-auth-service/internal/config"
-	"ojos-auth-service/internal/handler"
-	"ojos-auth-service/internal/svc"
-
-	sharedmw "ojos-shared/middleware"
 
 	"github.com/zeromicro/go-zero/core/conf"
-	"github.com/zeromicro/go-zero/rest"
 )
 
 var configFile = flag.String("f", "etc/auth.yaml", "the config file")
@@ -35,30 +30,14 @@ func main() {
 	flag.Parse()
 
 	var c config.Config
-	conf.MustLoad(*configFile, &c)
-	sharedmw.InstallHTTPErrorHandler()
-
-	svcCtx, err := svc.NewServiceContext(c)
-	if err != nil {
-		log.Fatalf("start auth-service: %v", err)
+	if err := conf.Load(*configFile, &c); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		svcCtx.Close(ctx)
-	}()
-
-	server := rest.MustNewServer(c.RestConf)
-	defer server.Stop()
-
-	server.Use(sharedmw.RecoveryMiddleware(svcCtx.Logger))
-	server.Use(sharedmw.ServiceLoggingMiddleware("auth-service", svcCtx.Logger, svcCtx.Tracer))
-
-	handler.RegisterHandlers(server, svcCtx)
-	sharedmw.RegisterMetricsRoute(server)
-
-	fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
-	server.Start()
+	if err := app.Run(c); err != nil {
+		fmt.Fprintln(os.Stderr, "start auth-service:", err)
+		os.Exit(1)
+	}
 }
 
 func readycheck() error {

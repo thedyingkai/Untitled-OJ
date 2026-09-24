@@ -86,7 +86,7 @@ Problem→Judge 使用 transactional outbox、Redis Stream relay、Judge inbox �
 | 领域约束与计划 | `services/orchestrator/core/src` | 不引入数据库、网络或运行时依赖。 |
 | 持久化与恢复 | `services/orchestrator/storage/src`、`control-plane/src` | 状态以持久记录为准；明确事务和幂等边界。 |
 | 服务契约与 SDK | `tools/ojos-service/src/codegen` | `mod.rs` 编排生成、校验与落盘；各语言模块只负责生成产品 SDK。 |
-| Auth 启动 | `services/auth-service/internal/svc` | `servicecontext.go` 组装与生命周期，`environment.go` 环境配置，`workload_identity.go` 身份与授权。 |
+| GoZero 服务启动 | `services/<id>/internal/app`、`internal/svc` | `app` 组装 HTTP 与依赖；`startup.go` 构造并回滚，`servicecontext.go` 持有资源并关闭，`health.go` 保留各自探针。详见[Go 服务生命周期](service-lifecycle.md)。 |
 | UI 展示与交互 | `manager/web/src/features`、`views` | 视图组装功能表单；API client 不读取 Store；`control-plane/projection` 只转换显式事实；服务端是权限与状态真值。 |
 | 新服务启动 | `services/contest-service/internal/app`、`platform/shared/go/bootstrap` | 进程入口负责配置与信号，应用组装接收显式输入，共享 bootstrap 负责组件生命周期；既有 GoZero 服务仍逐服务保留原适配。 |
 

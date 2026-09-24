@@ -44,7 +44,7 @@ ojos.service.yaml + 引用的 OpenAPI/schema/frontend manifest
 
 参考服务的启动依赖仍为 logging → database/permissions → events → domain → HTTP；事件依赖 database，domain 同时依赖 database、permissions、events。关闭时保留整体 15 秒期限，不把一次 Start 成功当作持续 ready。进程退出与应用关闭由同一上下文衔接，组件构造不得自行退出进程。
 
-新增服务沿用这些职责约定，不复制一套新的生命周期管理器。已有 GoZero 服务目前仍由各自的 `internal/svc` 组装，其路由、中间件和关闭方式没有在本轮被统一替换；迁移它们需要逐服务确认后台任务、连接池和关闭顺序。这里统一的是可执行的参考路径和启动约定，不宣称所有服务都已接入 bootstrap。
+新增服务沿用这些职责约定，不复制一套新的生命周期管理器。已有 6 个 GoZero 服务已分离进程入口、`internal/app` 应用组装与 `internal/svc` 资源构造/清理，启动失败向上返回并释放已取得资源。它们保留 GoZero 的路由、中间件和信号处理，没有全部改接共享 bootstrap；具体入口、失败回滚及仍保留的运行限制见 [Go 服务生命周期](service-lifecycle.md)。
 
 ## 当前过渡边界
 

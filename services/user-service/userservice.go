@@ -4,7 +4,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -12,13 +11,10 @@ import (
 	"os"
 	"time"
 
-	sharedmw "ojos-shared/middleware"
+	"ojos-user-service/internal/app"
 	"ojos-user-service/internal/config"
-	"ojos-user-service/internal/handler"
-	"ojos-user-service/internal/svc"
 
 	"github.com/zeromicro/go-zero/core/conf"
-	"github.com/zeromicro/go-zero/rest"
 )
 
 var configFile = flag.String("f", "etc/userservice.yaml", "the config file")
@@ -34,23 +30,14 @@ func main() {
 	flag.Parse()
 
 	var c config.Config
-	conf.MustLoad(*configFile, &c)
-
-	ctx, err := svc.NewServiceContext(c)
-	if err != nil {
-		log.Fatalf("start user-service: %v", err)
+	if err := conf.Load(*configFile, &c); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	defer ctx.Close(context.Background())
-
-	server := rest.MustNewServer(c.RestConf)
-	defer server.Stop()
-
-	server.Use(sharedmw.ServiceLoggingMiddleware("user-service", nil, nil))
-	handler.RegisterHandlers(server, ctx)
-	sharedmw.RegisterMetricsRoute(server)
-
-	fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
-	server.Start()
+	if err := app.Run(c); err != nil {
+		fmt.Fprintln(os.Stderr, "start user-service:", err)
+		os.Exit(1)
+	}
 }
 
 func readycheck() error {
