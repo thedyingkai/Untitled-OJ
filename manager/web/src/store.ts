@@ -1,3 +1,5 @@
+import { runtimeFor } from "./features/control-plane/runtime";
+import { projectControlPlane } from "./features/control-plane/projection";
 import { defineStore } from "pinia";
 import {
   api,
@@ -22,17 +24,6 @@ import type {
   TopologyRevision,
 } from "./types";
 
-let pollTimer: ReturnType<typeof setInterval> | null = null;
-let layoutTimer: ReturnType<typeof setTimeout> | null = null;
-let visibilityHandler: (() => void) | null = null;
-let coreRefresh: Promise<void> | null = null;
-let coreRefreshGeneration = 0;
-let coreRefreshController: AbortController | null = null;
-let storeRefreshController: AbortController | null = null;
-let layoutLoadController: AbortController | null = null;
-let layoutSaveController: AbortController | null = null;
-const toastTimers = new Map<number, ReturnType<typeof setTimeout>>();
-
 const MAX_TOASTS = 6;
 
 export interface Toast {
@@ -40,8 +31,6 @@ export interface Toast {
   kind: "ok" | "err" | "info";
   text: string;
 }
-
-let toastSeq = 1;
 
 export const useOrchestrator = defineStore("orchestrator", {
   state: () => ({
@@ -107,31 +96,33 @@ export const useOrchestrator = defineStore("orchestrator", {
     },
 
     toast(kind: Toast["kind"], text: string) {
-      const id = toastSeq++;
+      const runtime = runtimeFor(this);
+      const id = runtime.toastSeq++;
       this.toasts.push({ id, kind, text });
       while (this.toasts.length > MAX_TOASTS) {
         const removed = this.toasts.shift();
         if (removed) {
-          const timer = toastTimers.get(removed.id);
+          const timer = runtime.toastTimers.get(removed.id);
           if (timer) clearTimeout(timer);
-          toastTimers.delete(removed.id);
+          runtime.toastTimers.delete(removed.id);
         }
       }
       const timer = setTimeout(() => {
         this.toasts = this.toasts.filter((toast) => toast.id !== id);
-        toastTimers.delete(id);
+        runtime.toastTimers.delete(id);
       }, kind === "err" ? 7000 : 3500);
-      toastTimers.set(id, timer);
+      runtime.toastTimers.set(id, timer);
     },
 
     async refreshCore(force = false) {
-      if (coreRefresh && !force) return coreRefresh;
+      const runtime = runtimeFor(this);
+      if (runtime.coreRefresh && !force) return runtime.coreRefresh;
 
-      if (force) coreRefreshController?.abort("superseded");
+      if (force) runtime.coreRefreshController?.abort("superseded");
       const controller = new AbortController();
-      coreRefreshController = controller;
+      runtime.coreRefreshController = controller;
 
-      const generation = ++coreRefreshGeneration;
+      const generation = ++runtime.coreRefreshGeneration;
       const refresh = (async () => {
         this.loading = true;
         this.coreStatus = "loading";
@@ -161,7 +152,7 @@ export const useOrchestrator = defineStore("orchestrator", {
           const topology = activeTopologyId
             ? await api.topology(activeTopologyId, { signal: controller.signal })
             : null;
-          if (generation !== coreRefreshGeneration) return;
+          if (generation !== runtime.coreRefreshGeneration) return;
           this.health = health;
           this.capabilities = capabilities;
           this.nodes = nodes;
@@ -169,92 +160,12 @@ export const useOrchestrator = defineStore("orchestrator", {
           this.activeTopologyId = activeTopologyId;
           this.topology = topology;
 
-          const endpointStatuses = new Map(
-            (topology?.status?.endpoints ?? []).map((status) => [
-              status.endpoint,
-              status,
-            ]),
-          );
-          const linkStatuses = new Map(
-            (topology?.status?.links ?? []).map((status) => [
-              `${status.source_endpoint}\0${status.target_endpoint}`,
-              status,
-            ]),
-          );
-          const endpointRows: EndpointRow[] =
-            topology?.draft.spec.endpoints.map((endpoint) => {
-              const status = endpointStatuses.get(endpoint.endpoint);
-              return {
-                endpoint: endpoint.endpoint,
-                service_id: endpoint.service_id,
-                protocol: endpoint.protocol,
-                expose:
-                  endpoint.endpoint === topology.draft.spec.root_endpoint
-                    ? topology.draft.spec.authority.exposure_policy
-                    : "",
-                source: "topology-draft",
-                health_path: endpoint.health_path,
-                health: status?.health ?? "UNKNOWN",
-                reachable: status?.reachable ?? false,
-                display_name: endpoint.display_name,
-                note: endpoint.note,
-                config: endpoint.config,
-              };
-            }) ?? [];
-          const linkRows: LinkRow[] =
-            topology?.draft.spec.links.map((link) => ({
-              from: link.source_endpoint,
-              to: link.target_endpoint,
-              protocol: link.protocol,
-              auth_mode: link.auth_mode,
-              scope: link.scope,
-              enabled: link.enabled ? "enabled" : "disabled",
-              source: "topology-draft",
-              health:
-                linkStatuses.get(
-                  `${link.source_endpoint}\0${link.target_endpoint}`,
-                )?.health ?? "UNKNOWN",
-            })) ?? [];
-          const nodeById = new Map(nodes.map((node) => [node.node_id, node]));
-          const enrichedDeployments = deployments.map((deployment) => {
-            const matchingEndpoints = endpointRows.filter(
-              (endpoint) =>
-                deployment.endpoint === endpoint.endpoint ||
-                deployment.endpoints.includes(endpoint.endpoint) ||
-                endpoint.config?.deployment_id === deployment.deployment_id,
-            );
-            const primaryEndpoint = matchingEndpoints[0];
-            return {
-              ...deployment,
-              host_ip:
-                nodeById.get(deployment.node_id)?.host_ip || deployment.node_id,
-              endpoint: primaryEndpoint?.endpoint ?? deployment.endpoint,
-              protocol: primaryEndpoint?.protocol ?? deployment.protocol,
-              health_path: primaryEndpoint?.health_path ?? deployment.health_path,
-              endpoint_health: primaryEndpoint?.health ?? deployment.endpoint_health,
-              reachable: primaryEndpoint?.reachable ?? deployment.reachable,
-              endpoint_count:
-                matchingEndpoints.length || deployment.endpoint_count,
-              endpoints: matchingEndpoints.length
-                ? matchingEndpoints.map((endpoint) => endpoint.endpoint)
-                : deployment.endpoints,
-            };
-          });
-          const serviceRows: ServiceRow[] = enrichedDeployments
-            .filter((deployment) => !!deployment.deployment_id)
-            .map((deployment) => ({
-              id: deployment.deployment_id,
-              deployment_id: deployment.deployment_id,
-              node_id: deployment.node_id,
-              service_id: deployment.service_id,
-              name: deployment.service_id,
-              version: deployment.version,
-              kind: deployment.kind,
-              endpoint: deployment.endpoint,
-              runtime: deployment.runtime,
-              ui: "",
-              health: deployment.endpoint_health,
-            }));
+          const {
+            services: serviceRows,
+            deployments: enrichedDeployments,
+            endpoints: endpointRows,
+            links: linkRows,
+          } = projectControlPlane(nodes, deployments, topology);
           this.services = serviceRows;
           this.deployments = enrichedDeployments;
           this.endpoints = endpointRows;
@@ -264,7 +175,7 @@ export const useOrchestrator = defineStore("orchestrator", {
           this.coreStatus = "ready";
           this.coreError = "";
         } catch (err) {
-          if (generation !== coreRefreshGeneration) return;
+          if (generation !== runtime.coreRefreshGeneration) return;
           if (isRequestCancelled(err)) return;
           if (isAuthRequiredError(err)) {
             // 401 会触发 OIDC 重定向；daemon 其实是通的，轮询期间不再弹 toast。
@@ -281,23 +192,24 @@ export const useOrchestrator = defineStore("orchestrator", {
           this.coreStatus = "error";
           this.coreError = message;
         } finally {
-          if (generation === coreRefreshGeneration) this.loading = false;
+          if (generation === runtime.coreRefreshGeneration) this.loading = false;
         }
       })();
 
-      coreRefresh = refresh;
+      runtime.coreRefresh = refresh;
       try {
         await refresh;
       } finally {
-        if (coreRefresh === refresh) coreRefresh = null;
-        if (coreRefreshController === controller) coreRefreshController = null;
+        if (runtime.coreRefresh === refresh) runtime.coreRefresh = null;
+        if (runtime.coreRefreshController === controller) runtime.coreRefreshController = null;
       }
     },
 
     async loadLayout() {
-      layoutLoadController?.abort("superseded");
+      const runtime = runtimeFor(this);
+      runtime.layoutLoadController?.abort("superseded");
       const controller = new AbortController();
-      layoutLoadController = controller;
+      runtime.layoutLoadController = controller;
       this.layoutStatus = "loading";
       try {
         const topologyId = this.activeTopologyId;
@@ -306,47 +218,50 @@ export const useOrchestrator = defineStore("orchestrator", {
           this.layoutStatus = "ready";
           this.layoutError = "";
         } else {
-          this.layout = await api.getLayout(topologyId, {
+          const layout = await api.getLayout(topologyId, {
             signal: controller.signal,
           });
-          if (layoutLoadController !== controller) return;
+          if (runtime.layoutLoadController !== controller) return;
+          this.layout = layout;
           this.layoutStatus = "ready";
           this.layoutError = "";
         }
       } catch (err) {
-        if (layoutLoadController !== controller || isRequestCancelled(err)) return;
+        if (runtime.layoutLoadController !== controller || isRequestCancelled(err)) return;
         this.layout = {};
         this.layoutStatus = "error";
         this.layoutError = `布局加载失败：${(err as Error).message}`;
         if (!isAuthRequiredError(err)) this.toast("err", this.layoutError);
       } finally {
-        if (layoutLoadController === controller) layoutLoadController = null;
+        if (runtime.layoutLoadController === controller) runtime.layoutLoadController = null;
       }
       this.layoutLoaded = true;
     },
 
     setNodePosition(id: string, position: { x: number; y: number }) {
+      const runtime = runtimeFor(this);
       if (!this.layout.positions) this.layout.positions = {};
       this.layout.positions[id] = {
         x: Math.round(position.x),
         y: Math.round(position.y),
       };
-      if (layoutTimer) clearTimeout(layoutTimer);
-      layoutSaveController?.abort("superseded");
-      layoutTimer = setTimeout(() => {
-        layoutTimer = null;
+      if (runtime.layoutTimer) clearTimeout(runtime.layoutTimer);
+      runtime.layoutSaveController?.abort("superseded");
+      runtime.layoutTimer = setTimeout(() => {
+        runtime.layoutTimer = null;
         void this.saveLayout();
       }, 600);
     },
 
     async saveLayout() {
-      layoutSaveController?.abort("superseded");
+      const runtime = runtimeFor(this);
+      runtime.layoutSaveController?.abort("superseded");
       const controller = new AbortController();
-      layoutSaveController = controller;
+      runtime.layoutSaveController = controller;
       const snapshot = JSON.parse(JSON.stringify(this.layout)) as LayoutState;
       const topologyId = this.activeTopologyId;
       if (!topologyId) {
-        if (layoutSaveController === controller) layoutSaveController = null;
+        if (runtime.layoutSaveController === controller) runtime.layoutSaveController = null;
         this.layoutStatus = "error";
         this.layoutError = "必须先选择 Topology 才能保存布局";
         this.toast("err", this.layoutError);
@@ -357,16 +272,16 @@ export const useOrchestrator = defineStore("orchestrator", {
         await api.putLayout(topologyId, snapshot, {
           signal: controller.signal,
         });
-        if (layoutSaveController !== controller) return;
+        if (runtime.layoutSaveController !== controller) return;
         this.layoutStatus = "ready";
         this.layoutError = "";
       } catch (err) {
-        if (layoutSaveController !== controller || isRequestCancelled(err)) return;
+        if (runtime.layoutSaveController !== controller || isRequestCancelled(err)) return;
         this.layoutStatus = "error";
         this.layoutError = `布局保存失败：${(err as Error).message}`;
         if (!isAuthRequiredError(err)) this.toast("err", this.layoutError);
       } finally {
-        if (layoutSaveController === controller) layoutSaveController = null;
+        if (runtime.layoutSaveController === controller) runtime.layoutSaveController = null;
       }
     },
 
@@ -391,16 +306,17 @@ export const useOrchestrator = defineStore("orchestrator", {
     },
 
     async refreshStore(refresh = false) {
-      storeRefreshController?.abort("superseded");
+      const runtime = runtimeFor(this);
+      runtime.storeRefreshController?.abort("superseded");
       const controller = new AbortController();
-      storeRefreshController = controller;
+      runtime.storeRefreshController = controller;
       // A fresh Desktop registry is a valid empty state. Until the first trusted
       // catalog is registered, catalog.search is deliberately not published.
       if (!this.supportsAction("catalog.search")) {
         this.storeIndex = null;
         this.storeLoadStatus = "ready";
         this.storeError = "";
-        if (storeRefreshController === controller) storeRefreshController = null;
+        if (runtime.storeRefreshController === controller) runtime.storeRefreshController = null;
         return;
       }
       this.storeLoadStatus = "loading";
@@ -408,12 +324,12 @@ export const useOrchestrator = defineStore("orchestrator", {
         const index = await api.storeIndex(refresh, {
           signal: controller.signal,
         });
-        if (storeRefreshController !== controller) return;
+        if (runtime.storeRefreshController !== controller) return;
         this.storeIndex = index;
         this.storeLoadStatus = "ready";
         this.storeError = "";
       } catch (err) {
-        if (storeRefreshController !== controller || isRequestCancelled(err)) return;
+        if (runtime.storeRefreshController !== controller || isRequestCancelled(err)) return;
         this.storeIndex = null;
         this.storeLoadStatus = "error";
         this.storeError = `商店加载失败：${(err as Error).message}`;
@@ -422,20 +338,21 @@ export const useOrchestrator = defineStore("orchestrator", {
           this.toast("err", this.storeError);
         }
       } finally {
-        if (storeRefreshController === controller) storeRefreshController = null;
+        if (runtime.storeRefreshController === controller) runtime.storeRefreshController = null;
       }
     },
 
     startPolling() {
-      if (pollTimer) return;
+      const runtime = runtimeFor(this);
+      if (runtime.pollTimer) return;
       void this.refreshCore(true);
-      visibilityHandler = () => {
+      runtime.visibilityHandler = () => {
         if (document.visibilityState === "visible") {
           void this.refreshCore();
         }
       };
-      document.addEventListener("visibilitychange", visibilityHandler);
-      pollTimer = setInterval(() => {
+      document.addEventListener("visibilitychange", runtime.visibilityHandler);
+      runtime.pollTimer = setInterval(() => {
         if (document.visibilityState === "visible") {
           void this.refreshCore();
         }
@@ -443,36 +360,38 @@ export const useOrchestrator = defineStore("orchestrator", {
     },
 
     stopPolling() {
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
+      const runtime = runtimeFor(this);
+      if (runtime.pollTimer) {
+        clearInterval(runtime.pollTimer);
+        runtime.pollTimer = null;
       }
-      if (visibilityHandler) {
-        document.removeEventListener("visibilitychange", visibilityHandler);
-        visibilityHandler = null;
+      if (runtime.visibilityHandler) {
+        document.removeEventListener("visibilitychange", runtime.visibilityHandler);
+        runtime.visibilityHandler = null;
       }
-      // 已发出的请求不能取消，但它完成后也不得覆盖 stop 之后的状态。
-      coreRefreshController?.abort("polling stopped");
-      coreRefreshController = null;
-      coreRefreshGeneration += 1;
+      // 取消在途请求；即使响应已经到达，也不能覆盖 stop 之后的状态。
+      runtime.coreRefreshController?.abort("polling stopped");
+      runtime.coreRefreshController = null;
+      runtime.coreRefreshGeneration += 1;
       this.loading = false;
       if (this.coreStatus === "loading") this.coreStatus = "idle";
     },
 
     dispose() {
+      const runtime = runtimeFor(this);
       this.stopPolling();
-      storeRefreshController?.abort("application disposed");
-      storeRefreshController = null;
-      layoutLoadController?.abort("application disposed");
-      layoutLoadController = null;
-      layoutSaveController?.abort("application disposed");
-      layoutSaveController = null;
-      if (layoutTimer) {
-        clearTimeout(layoutTimer);
-        layoutTimer = null;
+      runtime.storeRefreshController?.abort("application disposed");
+      runtime.storeRefreshController = null;
+      runtime.layoutLoadController?.abort("application disposed");
+      runtime.layoutLoadController = null;
+      runtime.layoutSaveController?.abort("application disposed");
+      runtime.layoutSaveController = null;
+      if (runtime.layoutTimer) {
+        clearTimeout(runtime.layoutTimer);
+        runtime.layoutTimer = null;
       }
-      for (const timer of toastTimers.values()) clearTimeout(timer);
-      toastTimers.clear();
+      for (const timer of runtime.toastTimers.values()) clearTimeout(timer);
+      runtime.toastTimers.clear();
     },
   },
 });
