@@ -1,5 +1,5 @@
 use crate::{SqliteOrchestratorStore, StorageError, StorageResult};
-use orchestrator_runtime::{
+use orchestrator_protocol::{
     RuntimeDesiredState, RuntimeInstance, RuntimeObservedState, STANDARD_RUNTIME_PROFILE_ID,
     STANDARD_RUNTIME_PROFILE_SHA256,
 };

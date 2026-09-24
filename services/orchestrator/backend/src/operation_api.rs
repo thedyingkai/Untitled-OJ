@@ -5,7 +5,7 @@ use orchestrator_control_plane::{
     PlanOperation, PlannedJob,
 };
 use orchestrator_core::v1_action;
-use orchestrator_runtime::ReleaseReplacementPayload;
+use orchestrator_protocol::ReleaseReplacementPayload;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};

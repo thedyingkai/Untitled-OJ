@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
-use orchestrator_runtime::{
+use orchestrator_protocol::{
     AuthPipelineStep, GatewayPipelineStep, RuntimeMaterializationStep, TypedProvisionerStep,
 };
+
 use reqwest::{Client, Method, StatusCode, Url};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
@@ -945,7 +946,7 @@ impl BuiltInReleasePipelineProvider {
         &self,
         configured: &StorageConnectionConfig,
         service_name: &str,
-        resource: &orchestrator_runtime::StorageResourceSpec,
+        resource: &orchestrator_protocol::StorageResourceSpec,
     ) -> Result<(), PipelineProviderError> {
         let head = self
             .s3_request(configured, Method::HEAD, &resource.bucket, None, Vec::new())
@@ -992,7 +993,7 @@ impl BuiltInReleasePipelineProvider {
         &self,
         configured: &StorageConnectionConfig,
         service_name: &str,
-        resource: &orchestrator_runtime::StorageResourceSpec,
+        resource: &orchestrator_protocol::StorageResourceSpec,
     ) -> Result<(), PipelineProviderError> {
         let marker = s3_marker_key(service_name, resource);
         let response = self
@@ -1113,7 +1114,7 @@ async fn s3_rejected(response: reqwest::Response) -> PipelineProviderError {
 
 fn s3_marker_key(
     service_name: &str,
-    resource: &orchestrator_runtime::StorageResourceSpec,
+    resource: &orchestrator_protocol::StorageResourceSpec,
 ) -> String {
     let prefix = resource.prefix.trim_matches('/');
     if prefix.is_empty() {
@@ -1508,7 +1509,7 @@ impl BuiltInReleasePipelineProvider {
     async fn apply_redis(
         &self,
         service_name: &str,
-        resources: &[orchestrator_runtime::RedisNamespaceSpec],
+        resources: &[orchestrator_protocol::RedisNamespaceSpec],
     ) -> Result<(), PipelineProviderError> {
         let mut by_connection = BTreeMap::<&str, Vec<_>>::new();
         for resource in resources {
@@ -1598,7 +1599,7 @@ impl BuiltInReleasePipelineProvider {
     fn compensate_redis(
         &self,
         service_name: &str,
-        resources: &[orchestrator_runtime::RedisNamespaceSpec],
+        resources: &[orchestrator_protocol::RedisNamespaceSpec],
     ) -> Result<(), PipelineProviderError> {
         for resource in resources {
             // Redis namespaces are deterministic and can contain durable user
@@ -1615,7 +1616,7 @@ impl BuiltInReleasePipelineProvider {
     async fn apply_storage(
         &self,
         service_name: &str,
-        resources: &[orchestrator_runtime::StorageResourceSpec],
+        resources: &[orchestrator_protocol::StorageResourceSpec],
     ) -> Result<(), PipelineProviderError> {
         for resource in resources {
             validate_provider_resource_name("Storage bucket", &resource.bucket)?;
@@ -1687,7 +1688,7 @@ impl BuiltInReleasePipelineProvider {
     async fn compensate_storage(
         &self,
         service_name: &str,
-        resources: &[orchestrator_runtime::StorageResourceSpec],
+        resources: &[orchestrator_protocol::StorageResourceSpec],
     ) -> Result<(), PipelineProviderError> {
         for resource in resources.iter().rev() {
             let state_key = provider_resource_key(service_name, &storage_resource_key(resource));
@@ -2198,7 +2199,7 @@ fn provider_resource_key(service_name: &str, resource_name: &str) -> String {
     format!("{service_name}/{resource_name}")
 }
 
-fn storage_resource_key(resource: &orchestrator_runtime::StorageResourceSpec) -> String {
+fn storage_resource_key(resource: &orchestrator_protocol::StorageResourceSpec) -> String {
     format!(
         "{}:{}:{}:{}",
         resource.connection_id, resource.bucket, resource.prefix, resource.object_type

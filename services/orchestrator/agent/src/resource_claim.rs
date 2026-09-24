@@ -1022,7 +1022,7 @@ pub struct LivePostgreSqlExecutor {
 pub trait ResourceClaimPipelineExecutor: Send + Sync {
     fn ensure(
         &self,
-        step: &orchestrator_runtime::ResourceClaimStepV1,
+        step: &orchestrator_protocol::ResourceClaimStepV1,
     ) -> std::result::Result<ResourceClaimV1, ResourceClaimError>;
 
     fn release_deployment(
@@ -1036,7 +1036,7 @@ pub trait ResourceClaimPipelineExecutor: Send + Sync {
     fn reuse_for_replacement(
         &self,
         old_deployment_id: &str,
-        steps: &[orchestrator_runtime::ResourceClaimStepV1],
+        steps: &[orchestrator_protocol::ResourceClaimStepV1],
     ) -> std::result::Result<Vec<ResourceClaimV1>, ResourceClaimError>;
 
     /// Add the healthy replacement binding. The old binding remains until the
@@ -1053,7 +1053,7 @@ pub trait ResourceClaimPipelineExecutor: Send + Sync {
     /// contacting the provider.
     fn purge(
         &self,
-        payload: &orchestrator_runtime::ResourcePurgePayloadV1,
+        payload: &orchestrator_protocol::ResourcePurgePayloadV1,
     ) -> std::result::Result<ResourceClaimV1, ResourceClaimError> {
         let _ = payload;
         Err(ResourceClaimError::Provider(
@@ -1094,7 +1094,7 @@ impl ResourceClaimPipelineHandle {
 
     pub(crate) async fn ensure(
         &self,
-        step: &orchestrator_runtime::ResourceClaimStepV1,
+        step: &orchestrator_protocol::ResourceClaimStepV1,
     ) -> Result<ResourceClaimV1> {
         let step = step.clone();
         self.execute(move |backend| backend.ensure(&step)).await
@@ -1112,7 +1112,7 @@ impl ResourceClaimPipelineHandle {
     pub(crate) async fn reuse_for_replacement(
         &self,
         old_deployment_id: &str,
-        steps: &[orchestrator_runtime::ResourceClaimStepV1],
+        steps: &[orchestrator_protocol::ResourceClaimStepV1],
     ) -> Result<Vec<ResourceClaimV1>> {
         let old_deployment_id = old_deployment_id.to_string();
         let steps = steps.to_vec();
@@ -1137,7 +1137,7 @@ impl ResourceClaimPipelineHandle {
 
     pub(crate) async fn purge(
         &self,
-        payload: &orchestrator_runtime::ResourcePurgePayloadV1,
+        payload: &orchestrator_protocol::ResourcePurgePayloadV1,
     ) -> Result<ResourceClaimV1> {
         let payload = payload.clone();
         self.execute(move |backend| backend.purge(&payload)).await
@@ -1263,7 +1263,10 @@ where
         Ok(())
     }
 
-    fn claimed(&self, step: &orchestrator_runtime::ResourceClaimStepV1) -> Result<ResourceClaimV1> {
+    fn claimed(
+        &self,
+        step: &orchestrator_protocol::ResourceClaimStepV1,
+    ) -> Result<ResourceClaimV1> {
         step.validate()
             .map_err(|error| ResourceClaimError::Provider(error.to_string()))?;
         if let Some(existing) = self.load(&step.claim_id)? {
@@ -1316,7 +1319,7 @@ impl<E> ResourceClaimPipelineExecutor for LocalResourceClaimManager<E>
 where
     E: PostgreSqlCommandExecutor,
 {
-    fn ensure(&self, step: &orchestrator_runtime::ResourceClaimStepV1) -> Result<ResourceClaimV1> {
+    fn ensure(&self, step: &orchestrator_protocol::ResourceClaimStepV1) -> Result<ResourceClaimV1> {
         let current = self.claimed(step)?;
         let next = if current.status == ResourceClaimStatusV1::Ready {
             // A durable READY claim already has immutable provider evidence and
@@ -1416,7 +1419,7 @@ where
     fn reuse_for_replacement(
         &self,
         old_deployment_id: &str,
-        steps: &[orchestrator_runtime::ResourceClaimStepV1],
+        steps: &[orchestrator_protocol::ResourceClaimStepV1],
     ) -> Result<Vec<ResourceClaimV1>> {
         let old_claim_ids = {
             let state = self.state.lock().map_err(|_| {
@@ -1512,7 +1515,7 @@ where
 
     fn purge(
         &self,
-        payload: &orchestrator_runtime::ResourcePurgePayloadV1,
+        payload: &orchestrator_protocol::ResourcePurgePayloadV1,
     ) -> Result<ResourceClaimV1> {
         payload
             .validate()

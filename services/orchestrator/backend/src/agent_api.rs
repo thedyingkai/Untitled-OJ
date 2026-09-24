@@ -18,7 +18,7 @@ use orchestrator_control_plane::{
     OperationError,
 };
 use orchestrator_protocol::NodeRuntimeFactsV1;
-use orchestrator_runtime::{
+use orchestrator_protocol::{
     ArtifactReference, BindingContextApplyPayload, ManagedServiceContextProjection,
     ManagedServiceContextSpec, OciImageReference, RuntimeDesiredState, RuntimeInstance,
     RuntimeObservedState, RuntimeProfile,
@@ -468,7 +468,7 @@ fn validate_runtime_facts(facts: &NodeRuntimeFactsV1, now_ms: i64) -> Result<(),
     if facts.allowed_contracts.is_empty() {
         return Err(invalid("runtime facts allowed_contracts must not be empty"));
     }
-    let mut profiles = BTreeSet::<orchestrator_runtime::RuntimeProfile>::new();
+    let mut profiles = BTreeSet::<orchestrator_protocol::RuntimeProfile>::new();
     for contract in &facts.allowed_contracts {
         contract
             .validate()
@@ -860,7 +860,7 @@ fn runtime_binding_projection_error(detail: String) -> AgentApiError {
 
 fn apply_runtime_observation(
     stored: &mut StoredRuntimeInstance,
-    observation: &orchestrator_runtime::DeploymentRuntimeObservationV1,
+    observation: &orchestrator_protocol::DeploymentRuntimeObservationV1,
 ) {
     // Health and process state are live availability evidence, not runtime
     // attestation. A workload that is temporarily unhealthy must remain able
@@ -1015,7 +1015,7 @@ fn exchange_workload_credential(
             code: "AGENT_WORKLOAD_ASSIGNMENT_REQUIRED",
             detail: "lease-free refresh requires an existing managed RuntimeInstance".to_string(),
         })?;
-        if runtime.instance.observed_state != orchestrator_runtime::RuntimeObservedState::Running {
+        if runtime.instance.observed_state != orchestrator_protocol::RuntimeObservedState::Running {
             return Err(AgentApiError {
                 status: 409,
                 code: "AGENT_WORKLOAD_NOT_ACTIVE",

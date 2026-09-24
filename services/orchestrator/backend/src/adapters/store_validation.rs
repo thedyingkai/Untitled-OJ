@@ -32,8 +32,8 @@ use orchestrator_manager::catalog_v2::TargetPlatform;
 use orchestrator_manager::store::validation::{
     ReleaseValidationReadPort, ValidateRelease, ValidationContext, ValidationTarget,
 };
+use orchestrator_protocol::{HealthGatePolicy, OciImageReference, RuntimeInstallPayload};
 use orchestrator_protocol::{NodeRuntimeFactsV1, RuntimeContract};
-use orchestrator_runtime::{HealthGatePolicy, OciImageReference, RuntimeInstallPayload};
 use serde_json::Value;
 use std::collections::BTreeMap;
 

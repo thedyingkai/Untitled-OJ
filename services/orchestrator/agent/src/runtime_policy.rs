@@ -1,11 +1,12 @@
 use async_trait::async_trait;
-use orchestrator_runtime::{
-    ContainerRuntime, ContainerSpec, DockerRuntimeFacts, JUDGE_SANDBOX_V1_PROFILE_SHA256,
+use orchestrator_protocol::{
+    ContainerSpec, DockerRuntimeFacts, JUDGE_SANDBOX_V1_PROFILE_SHA256,
     MANAGED_EVENT_CONNECTION_FILE, MANAGED_SERVICE_CREDENTIAL_FILE,
     MANAGED_SERVICE_GATEWAY_CA_FILE, ManagedApiBinding, ManagedEventBinding,
     ManagedEventSubscription, ManagedServiceContextSpec, OciImageReference, RuntimeContext,
-    RuntimeContract, RuntimeProfile, WorkloadCredential, WorkloadFileOwnership,
+    RuntimeContract, RuntimeProfile,
 };
+use orchestrator_runtime::{ContainerRuntime, WorkloadCredential, WorkloadFileOwnership};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -319,7 +320,7 @@ pub async fn recover_pending_runtime_contexts(
             .begin_managed_volume_cleanup(&run.deployment_id, crate::now_ms())
             .map_err(|error| RuntimePolicyError::Compensation(error.to_string()))?;
         if let Some(volume) = volume {
-            let cleanup = if volume.lifecycle == orchestrator_runtime::RETAIN_VOLUME_LIFECYCLE {
+            let cleanup = if volume.lifecycle == orchestrator_protocol::RETAIN_VOLUME_LIFECYCLE {
                 Ok(())
             } else {
                 runtime.remove_managed_volume(&volume).await

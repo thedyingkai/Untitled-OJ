@@ -17,8 +17,8 @@ use orchestrator_core::api_version_matches;
 use orchestrator_core::parse_endpoint_id;
 use orchestrator_core::validate_endpoint_id;
 use orchestrator_manager::store::validation::InstallTopologySelection;
-use orchestrator_runtime::BindingContextApplyPayload;
-use orchestrator_runtime::ManagedServiceContextProjection;
+use orchestrator_protocol::BindingContextApplyPayload;
+use orchestrator_protocol::ManagedServiceContextProjection;
 use serde_json::json;
 use std::collections::BTreeSet;
 

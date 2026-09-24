@@ -8,18 +8,18 @@ use crate::{
     RuntimePolicyError, WorkloadCredentialSupervisor,
 };
 use orchestrator_control_plane::{CompletionStatus, JobKind, NewJobEvent};
-use orchestrator_runtime::{
-    BindingContextApplyPayload, ContainerRuntime, ContainerSpec, HealthGateDecision,
-    HealthGatePolicy, MIGRATION_CHECKSUM_LABEL, MIGRATION_IDENTITY_LABEL, MIGRATION_JOB_ID_LABEL,
+use orchestrator_protocol::{
+    BindingContextApplyPayload, ContainerSpec, HealthGateDecision, HealthGatePolicy,
+    MIGRATION_CHECKSUM_LABEL, MIGRATION_IDENTITY_LABEL, MIGRATION_JOB_ID_LABEL,
     MIGRATION_MANAGED_BY, MIGRATION_MANAGED_BY_LABEL, MIGRATION_RESOURCE_CLAIMS_LABEL,
     MIGRATION_RUNTIME_ROLE, MIGRATION_RUNTIME_ROLE_LABEL, MIGRATION_SERVICE_LABEL,
     MIGRATION_VERSION_LABEL, OciMigrationStep, ReleasePipelinePayload, ReleaseProviderRevision,
     ReleaseReplacementPayload, ReplacementProviderSaga, ResourcePurgePayloadV1,
     ResourceSecretFileMount, RuntimeContext, RuntimeError, RuntimeInstallPayload, RuntimeInstance,
     RuntimeObservedState, RuntimeProfile, RuntimeReplacement, TypedProvisionerStep,
-    WorkloadCredential, evaluate_health_gate, migration_identity_sha256,
-    migration_resource_claims_sha256,
+    evaluate_health_gate, migration_identity_sha256, migration_resource_claims_sha256,
 };
+use orchestrator_runtime::{ContainerRuntime, WorkloadCredential};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -895,7 +895,7 @@ where
             .step_started(
                 &job.job_id,
                 step_index,
-                if volume.lifecycle == orchestrator_runtime::RETAIN_VOLUME_LIFECYCLE {
+                if volume.lifecycle == orchestrator_protocol::RETAIN_VOLUME_LIFECYCLE {
                     "compensate_retain_managed_volume"
                 } else {
                     "compensate_remove_managed_release_volume"
@@ -903,7 +903,7 @@ where
                 crate::now_ms(),
             )
             .map_err(ContextCleanupError::Ledger)?;
-        if volume.lifecycle == orchestrator_runtime::RETAIN_VOLUME_LIFECYCLE {
+        if volume.lifecycle == orchestrator_protocol::RETAIN_VOLUME_LIFECYCLE {
             ledger
                 .finish_managed_volume_cleanup(deployment_id, crate::now_ms())
                 .map_err(ContextCleanupError::Ledger)?;
@@ -1939,7 +1939,7 @@ where
             service_id: migration.service_name.clone(),
             generation: 1,
             image: migration.image.clone(),
-            runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
+            runtime_contract: orchestrator_protocol::RuntimeContract::standard_v1(),
             runtime_context: None,
             resource_secret_file_mounts,
             retained_volume: None,
@@ -4432,10 +4432,10 @@ fn provisioner<'a>(
 }
 
 fn absent_gateway_revision(
-    previous: &orchestrator_runtime::GatewayPipelineStep,
+    previous: &orchestrator_protocol::GatewayPipelineStep,
     revision_id: &str,
     suffix: &str,
-) -> orchestrator_runtime::GatewayPipelineStep {
+) -> orchestrator_protocol::GatewayPipelineStep {
     let mut absent = previous.clone();
     absent.operation_id = format!("{revision_id}:{suffix}:gateway-absent");
     absent.routes.clear();

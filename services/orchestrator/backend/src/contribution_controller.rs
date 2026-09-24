@@ -19,7 +19,7 @@ use orchestrator_core::{
     ContributionTerminationIntentV1, ProjectionReceiptStateV1, ProjectionReceiptV1,
     ProjectionTargetV1, stage_route_collisions,
 };
-use orchestrator_runtime::{RuntimeDesiredState, RuntimeObservedState};
+use orchestrator_protocol::{RuntimeDesiredState, RuntimeObservedState};
 use orchestrator_storage::{ContributionRepository, ContributionRepositoryError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

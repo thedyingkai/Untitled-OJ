@@ -12,7 +12,7 @@ use orchestrator_manager::store::composition::normalize_composition_version;
 use orchestrator_manager::store::composition::plan_composition;
 use orchestrator_manager::store::composition::release_contract_from_document;
 use orchestrator_manager::store::composition::release_graph;
-use orchestrator_runtime::RuntimeObservedState;
+use orchestrator_protocol::RuntimeObservedState;
 use serde_json::Value;
 
 pub(crate) fn build_store_composition_plan(

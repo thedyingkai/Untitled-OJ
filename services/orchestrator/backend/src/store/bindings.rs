@@ -19,7 +19,7 @@ use orchestrator_core::validate_endpoint_id;
 use orchestrator_legacy::OrchestratorActionConsole;
 use orchestrator_manager::store::validation::InstallBindingSelection;
 use orchestrator_manager::store::validation::InstallTopologySelection;
-use orchestrator_runtime::RuntimeObservedState;
+use orchestrator_protocol::RuntimeObservedState;
 use serde_json::Value;
 use serde_json::json;
 use sha2::Digest;

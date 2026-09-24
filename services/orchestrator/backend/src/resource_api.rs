@@ -4,7 +4,7 @@ use orchestrator_control_plane::{
     DurableOperationStatus, JobKind, OperationCoordinator, OperationError, PlanOperation,
     PlannedJob,
 };
-use orchestrator_runtime::{
+use orchestrator_protocol::{
     RESOURCE_PURGE_JOB_SCHEMA_VERSION, ResourcePurgeAuditIntentV1, ResourcePurgePayloadV1,
 };
 use serde::Deserialize;

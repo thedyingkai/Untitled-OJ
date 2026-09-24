@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use orchestrator_core::{
     ContributionRevisionStatusV1, ContributionRevisionV1, endpoint_socket_addr, parse_endpoint_id,
 };
-use orchestrator_runtime::{RuntimeDesiredState, RuntimeObservedState};
+use orchestrator_protocol::{RuntimeDesiredState, RuntimeObservedState};
 use orchestrator_storage::{ContributionRepository, RuntimeManagementMode, StoredRuntimeInstance};
 use serde::Serialize;
 use sha2::{Digest, Sha256};

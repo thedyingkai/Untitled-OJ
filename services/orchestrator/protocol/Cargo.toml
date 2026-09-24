@@ -4,5 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+base64 = "0.22"
+regex.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+url.workspace = true
 serde.workspace = true
 thiserror.workspace = true

@@ -6,9 +6,9 @@ use orchestrator_control_plane::CompletionStatus;
 use orchestrator_core::Endpoint;
 use orchestrator_legacy::EndpointProbe;
 use orchestrator_legacy::TcpEndpointProbe;
-use orchestrator_runtime::RuntimeDesiredState;
-use orchestrator_runtime::RuntimeInstance;
-use orchestrator_runtime::RuntimeObservedState;
+use orchestrator_protocol::RuntimeDesiredState;
+use orchestrator_protocol::RuntimeInstance;
+use orchestrator_protocol::RuntimeObservedState;
 use orchestrator_storage::RuntimeManagementMode;
 use orchestrator_storage::StoredRuntimeInstance;
 use serde_json::Value;
@@ -40,7 +40,7 @@ pub(super) fn process_external_health(
         || payload.endpoint.trim().is_empty()
         || payload.protocol.trim().is_empty()
         || semver::Version::parse(payload.version.trim()).is_err()
-        || orchestrator_runtime::OciImageReference::parse(&payload.artifact_digest).is_err()
+        || orchestrator_protocol::OciImageReference::parse(&payload.artifact_digest).is_err()
     {
         return Err(ExternalHealthFailure {
             status: CompletionStatus::Failed,
@@ -113,7 +113,7 @@ pub(super) fn process_external_health(
             release_version: payload.version.clone(),
             container_id: String::new(),
             artifact_digest: payload.artifact_digest.clone(),
-            runtime_contract: orchestrator_runtime::RuntimeContract::standard_v1(),
+            runtime_contract: orchestrator_protocol::RuntimeContract::standard_v1(),
             runtime_policy_sha256: String::new(),
             effective_runtime_sha256: String::new(),
             runtime_attested: false,

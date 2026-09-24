@@ -6,10 +6,10 @@ use orchestrator_control_plane::DurableOperationStatus;
 use orchestrator_control_plane::JobKind;
 use orchestrator_control_plane::OperationRepository;
 use orchestrator_manager::catalog_v2::ReleaseChannel;
-use orchestrator_runtime::OciImageReference;
-use orchestrator_runtime::ReleasePipelinePayload;
-use orchestrator_runtime::ReleaseProviderRevision;
-use orchestrator_runtime::ReleaseReplacementPayload;
+use orchestrator_protocol::OciImageReference;
+use orchestrator_protocol::ReleasePipelinePayload;
+use orchestrator_protocol::ReleaseProviderRevision;
+use orchestrator_protocol::ReleaseReplacementPayload;
 use serde_json::Value;
 
 #[derive(Debug, Clone)]

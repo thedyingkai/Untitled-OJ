@@ -10,7 +10,7 @@ use orchestrator_core::{
     ContributionActivationStateV1, ContributionRevisionStatusV1, ContributionRevisionV1,
     parse_endpoint_id,
 };
-use orchestrator_runtime::{RuntimeDesiredState, RuntimeObservedState};
+use orchestrator_protocol::{RuntimeDesiredState, RuntimeObservedState};
 use orchestrator_storage::{ContributionRepository, RuntimeManagementMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};

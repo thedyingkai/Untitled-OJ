@@ -305,7 +305,7 @@ fn health(
         .filter(|deployment| {
             matches!(
                 deployment.instance.observed_state,
-                orchestrator_runtime::RuntimeObservedState::Running
+                orchestrator_protocol::RuntimeObservedState::Running
             )
         })
         .count();
@@ -314,7 +314,7 @@ fn health(
         .filter(|deployment| {
             matches!(
                 deployment.instance.observed_state,
-                orchestrator_runtime::RuntimeObservedState::Running
+                orchestrator_protocol::RuntimeObservedState::Running
             ) && !deployment.instance.health.eq_ignore_ascii_case("healthy")
         })
         .count();

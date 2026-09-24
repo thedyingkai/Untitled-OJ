@@ -1,4 +1,4 @@
-use orchestrator_runtime::ArtifactReference;
+use orchestrator_protocol::ArtifactReference;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};

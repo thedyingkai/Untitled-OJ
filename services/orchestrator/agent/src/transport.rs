@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use orchestrator_control_plane::{CompleteRequest, HeartbeatRequest, JobKind, NewJobEvent};
-use orchestrator_runtime::ArtifactReference;
+use orchestrator_protocol::ArtifactReference;
 use orchestrator_runtime::WorkloadCredential;
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client, Identity, Response, Url};

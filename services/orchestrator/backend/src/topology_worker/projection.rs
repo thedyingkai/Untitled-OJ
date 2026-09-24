@@ -8,7 +8,7 @@ use orchestrator_core::ApiBinding;
 use orchestrator_core::ApiBindingState;
 use orchestrator_core::binding_projection::RuntimeProjectionTransition;
 use orchestrator_core::binding_projection::runtime_projection_transition;
-use orchestrator_runtime::RuntimeDesiredState;
+use orchestrator_protocol::RuntimeDesiredState;
 use orchestrator_storage::RuntimeManagementMode;
 use orchestrator_storage::StoredRuntimeInstance;
 use serde::Deserialize;

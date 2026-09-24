@@ -1,5 +1,5 @@
 use crate::{PostgresError, PostgresOrchestratorStore, PostgresResult, StoredRuntimeInstance};
-use orchestrator_runtime::{RuntimeDesiredState, RuntimeObservedState};
+use orchestrator_protocol::{RuntimeDesiredState, RuntimeObservedState};
 use std::collections::BTreeSet;
 
 const RUNTIME_DEPLOYMENT_LOCK_PREFIX: &str = "orchestrator-runtime-deployment:";

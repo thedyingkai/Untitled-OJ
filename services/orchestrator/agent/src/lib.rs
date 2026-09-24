@@ -46,9 +46,8 @@ pub use transport::{
 pub use worker::{AgentWorker, PollOutcome, WorkerConfig, WorkerError};
 pub mod resource_claim;
 
-use orchestrator_runtime::{
-    ContainerRuntime, MigrationContainerInventoryV1, MigrationContainerObservationV1,
-};
+use orchestrator_protocol::{MigrationContainerInventoryV1, MigrationContainerObservationV1};
+use orchestrator_runtime::ContainerRuntime;
 
 const MAX_MIGRATION_RECONCILIATION_WARNINGS: usize = 64;
 

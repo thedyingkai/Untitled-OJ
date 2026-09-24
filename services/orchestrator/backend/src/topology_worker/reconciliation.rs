@@ -27,7 +27,7 @@ use orchestrator_core::TopologyReconciliationState;
 use orchestrator_core::TopologyResourceKind;
 use orchestrator_core::TopologySpec;
 use orchestrator_core::TopologyStatus;
-use orchestrator_runtime::RuntimeObservedState;
+use orchestrator_protocol::RuntimeObservedState;
 use orchestrator_storage::RuntimeManagementMode;
 use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;

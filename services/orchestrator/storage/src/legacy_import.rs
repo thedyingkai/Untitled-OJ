@@ -7,7 +7,7 @@ use orchestrator_legacy::{
     Endpoint, HostService, NodeRecord, TopologyEndpointSpec, TopologyLinkSpec, TopologyRevision,
     TopologySnapshot, TopologySpec, TopologyStatus, parse_endpoint_id,
 };
-use orchestrator_runtime::{
+use orchestrator_protocol::{
     RuntimeContract, RuntimeDesiredState, RuntimeInstance, RuntimeObservedState,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};

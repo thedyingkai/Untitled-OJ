@@ -1,8 +1,9 @@
 use orchestrator_control_plane::{CompletionStatus, JobKind, NewJobEvent};
-use orchestrator_runtime::{
+use orchestrator_protocol::{
     ManagedServiceContextSpec, ManagedVolumeSpec, MigrationContainerIdentityV1,
     ReleaseProviderRevision, RuntimeContext,
 };
+
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
 use std::fs;
@@ -628,12 +629,12 @@ impl AgentLedger {
             || current.state != "MATERIALIZING"
             || spec.deployment_id != deployment_id
             || match spec.runtime_contract.id {
-                orchestrator_runtime::RuntimeProfile::JudgeSandboxV1 => {
+                orchestrator_protocol::RuntimeProfile::JudgeSandboxV1 => {
                     spec.name != current.context.cache_volume_name
                 }
-                orchestrator_runtime::RuntimeProfile::StandardV1 => {
+                orchestrator_protocol::RuntimeProfile::StandardV1 => {
                     !current.context.cache_volume_name.is_empty()
-                        || spec.lifecycle != orchestrator_runtime::RETAIN_VOLUME_LIFECYCLE
+                        || spec.lifecycle != orchestrator_protocol::RETAIN_VOLUME_LIFECYCLE
                 }
             }
         {

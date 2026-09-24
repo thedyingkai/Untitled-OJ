@@ -6,8 +6,8 @@ use orchestrator_core::NodeRecord;
 use orchestrator_core::ServiceReleaseContract;
 use orchestrator_manager::catalog_v2::TargetPlatform;
 use orchestrator_protocol::NodeRuntimeFactsV1;
-use orchestrator_runtime::RuntimeContract;
-use orchestrator_runtime::RuntimeProfile;
+use orchestrator_protocol::RuntimeContract;
+use orchestrator_protocol::RuntimeProfile;
 use serde_json::Value;
 
 pub(crate) const NODE_RUNTIME_FACTS_STALE_MS: i64 = 60_000;

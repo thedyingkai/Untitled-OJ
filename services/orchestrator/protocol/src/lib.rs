@@ -1,9 +1,11 @@
 //! Credential-free wire types shared by the control plane and Node Agent.
 //!
-//! This crate owns serialized reports and closed runtime profile validation.
+//! This crate owns reports, execution payloads and closed runtime validation.
 //! It has no transport, filesystem, database, Docker, or Agent dependency.
 
 mod error;
+pub mod execution;
+pub use execution::*;
 mod node;
 mod profiles;
 

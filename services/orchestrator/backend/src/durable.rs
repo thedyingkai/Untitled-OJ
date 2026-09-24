@@ -1307,7 +1307,7 @@ impl DurableStore {
         at_ms: i64,
     ) -> Result<StoredRuntimeInstance, DurableError> {
         if let Some(reason) = self.managed_runtime_report_unavailable_reason(&runtime, at_ms)? {
-            runtime.instance.observed_state = orchestrator_runtime::RuntimeObservedState::Unknown;
+            runtime.instance.observed_state = orchestrator_protocol::RuntimeObservedState::Unknown;
             runtime.instance.health = "UNKNOWN".to_string();
             runtime.instance.runtime_attested = false;
             runtime.drift_reason = merge_runtime_evidence(&runtime.drift_reason, &reason);
@@ -1328,7 +1328,7 @@ impl DurableStore {
             };
             if let Some(reason) = unavailable {
                 runtime.instance.observed_state =
-                    orchestrator_runtime::RuntimeObservedState::Unknown;
+                    orchestrator_protocol::RuntimeObservedState::Unknown;
                 runtime.instance.health = "UNKNOWN".to_string();
                 runtime.drift_reason = merge_runtime_evidence(&runtime.drift_reason, &reason);
             }
@@ -1379,9 +1379,9 @@ impl DurableStore {
                 ));
                 continue;
             }
-            if runtime.instance.desired_state != orchestrator_runtime::RuntimeDesiredState::Running
+            if runtime.instance.desired_state != orchestrator_protocol::RuntimeDesiredState::Running
                 || runtime.instance.observed_state
-                    != orchestrator_runtime::RuntimeObservedState::Running
+                    != orchestrator_protocol::RuntimeObservedState::Running
                 || !runtime.instance.health.eq_ignore_ascii_case("HEALTHY")
                 || !runtime.drift_reason.trim().is_empty()
                 || (runtime.management_mode == orchestrator_storage::RuntimeManagementMode::Managed
@@ -2042,8 +2042,8 @@ fn ensure_running_healthy_runtime(
     let runtime = storage
         .runtime_with_current_evidence(runtime.clone(), current_time_ms())
         .map_err(|error| TopologyApiBindingError::Storage(error.to_string()))?;
-    if runtime.instance.desired_state != orchestrator_runtime::RuntimeDesiredState::Running
-        || runtime.instance.observed_state != orchestrator_runtime::RuntimeObservedState::Running
+    if runtime.instance.desired_state != orchestrator_protocol::RuntimeDesiredState::Running
+        || runtime.instance.observed_state != orchestrator_protocol::RuntimeObservedState::Running
         || !runtime.instance.health.eq_ignore_ascii_case("HEALTHY")
         || !runtime.drift_reason.is_empty()
         || (runtime.management_mode == orchestrator_storage::RuntimeManagementMode::Managed
