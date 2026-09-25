@@ -1,6 +1,6 @@
 # 架构重构执行计划
 
-本计划以 `0f70120` 为起点。A–F 的边界整理，以及后续 G–K 的执行契约、仓储、服务生命周期、真实集成和对象存储交付均已完成各自列明的范围。保留的技术债与未执行的生产场景在下文单独说明；不把本轮完成等同于所有历史耦合或生产迁移已经结束。当前结构以[架构总览](README.md)和源码为准；契约入口见[服务契约与生成关系](service-authoring.md)。
+本计划以 `0f70120` 为起点。A–F 的边界整理，以及后续 G–M 的执行契约、仓储、服务生命周期、真实集成、对象存储交付与请求一致性均已完成各自列明的范围。保留的技术债与未执行的生产场景在下文单独说明；不把本轮完成等同于所有历史耦合或生产迁移已经结束。当前结构以[架构总览](README.md)和源码为准；契约入口见[服务契约与生成关系](service-authoring.md)。
 
 ## 不改变的产品约束
 
@@ -22,7 +22,7 @@
 | E：客户端与服务开发 | 前端按功能分区，统一服务启动约定，理清 v2/v3 适配 | 状态、表单和接口位于对应功能；新服务不再猜测应编辑哪个契约 | 已完成本轮范围；`fd598e5` 已通过仓库外回归、产品及 Windows/Linux 原生构建 |
 | F：目录和兼容层收尾 | 实现归入职责目录，正式调用方绕过兼容导出 | 文档和实际依赖图一致；旧数据的必要导入能力仍可用 | 已完成本轮范围；依赖边界、文档与最终产品构建已核对 |
 
-A–F 的产品代码为 `fd598e5`，对应的[产品构建](https://github.com/thedyingkai/Untitled-OJ/actions/runs/35946701665)和 [Windows/Linux 原生构建](https://github.com/thedyingkai/Untitled-OJ/actions/runs/35946701671)均已成功。后续 G–K 的实现与真实集成范围独立列于下文，不把早期编译或回归等同于后续环境验收。
+A–F 的产品代码为 `fd598e5`，对应的[产品构建](https://github.com/thedyingkai/Untitled-OJ/actions/runs/35946701665)和 [Windows/Linux 原生构建](https://github.com/thedyingkai/Untitled-OJ/actions/runs/35946701671)均已成功。后续 G–M 的实现与真实集成范围独立列于下文，不把早期编译或回归等同于后续环境验收。
 
 ## 第一批范围与状态
 
@@ -72,7 +72,7 @@ Release 校验、安装和替换共同使用配置、组合规划、Node 能力�
 | J：真实服务验收 | 在仓库外建立隔离的数据库与容器环境，运行当前源码相关集成 | 记录服务版本、源码身份、实际执行和未满足的场景；不访问或重置业务数据 | 已完成：`3278eb5` 的 428 项 Go 回归、2 项环境补验、17 项 Rust 身份回归、真实 Store→Job→Agent→Docker 安装/升级/回滚/卸载/恢复，以及 Gateway/Auth/OIDC 的 17 个集成检查点通过；产品、Windows/Linux 原生包与文档远端构建均通过 |
 | K：对象存储交付 | 根据实际 S3 需求选择可持续维护的供应端，解除产品配置与 MinIO 品牌绑定 | 保留旧配置入口及数据，不把新存储直接挂到旧数据卷；固定交付版本并验证权限、对象生命周期与重启持久化 | 已完成：`d88c9c4` 的 S3 配置/旧 MinIO 兼容、SeaweedFS 4.47 固定摘要配方、34 项 Storage 回归、20 项备份/恢复格式及保护检查、8 项配置 schema 和 3 项运维输入检查通过；真实镜像的 10 个检查点、旧 MinIO 读写与 Compose 启动/初始化重入/正常停止通过；产品、Windows/Linux 原生包与文档远端构建全部通过 |
 | L：存储请求隔离 | 分离桶目录与对象变更的锁，修复取消删除、失败建桶和暂存对象分页 | 慢上传不阻塞健康与元数据读取；取消不删除对象；未完成上传不进入业务列表 | 已完成：`3be0147` 的 5 个修复前失败场景转为通过；39 项 Storage 回归、15 项根级并发竞态检查和 12 个真实 S3 检查点通过；产品、Windows/Linux 原生包与文档远端构建全部通过 |
-| M：S3 下载一致性 | 正文与元数据由同一供应端响应取得，统一 GET/HEAD 的缺失错误分类 | 并发替换不混用版本；空对象执行真实 GET；保留取消、HEAD 和错误响应语义 | 本地验收通过：2 个修复前失败场景转为通过；43 项 Storage 回归、19 项根级并发竞态检查、13 个真实 SeaweedFS 检查点和 4 项旧 MinIO 兼容检查通过；对应提交的远端构建待核对 |
+| M：S3 下载一致性 | 正文与元数据由同一供应端响应取得，统一 GET/HEAD 的缺失错误分类 | 并发替换不混用版本；空对象执行真实 GET；保留取消、HEAD 和错误响应语义 | 已完成：`eb18570` 的 2 个修复前失败场景转为通过；43 项 Storage 回归、19 项根级并发竞态检查、13 个真实 SeaweedFS 检查点和 4 项旧 MinIO 兼容检查通过；产品、Windows/Linux 原生包与文档远端构建全部通过 |
 
 J 批修复了真实集成暴露的权限查询 URL 与凭据接入错误，具体授权边界见[控制面与 Auth 权限边界](control-plane-auth.md)。OIDC 验收使用独立 HTTPS 签名提供方夹具，Auth、Gateway、daemon、PostgreSQL、Redis 和 Docker 都运行真实实现。覆盖三个进程的 SIGTERM 退出及数据库连接释放，不声称覆盖所有服务的在途请求排空、第三方 IdP、跨机器部署、浏览器渲染或历史 0.2 二进制写入升级。
 
@@ -84,7 +84,9 @@ L 批保留对象变更的单实例串行边界，将桶目录读取从慢上传
 
 M 批修复 S3 先 HEAD 再 GET 导致的版本混用：GET 直接采用同一响应的正文和元数据，HEAD 保留独立的只读元数据路径；二者共用“对象缺失”和“供应端不可用”的错误分类。空对象不会因为惰性读取而跳过 GET。SeaweedFS 与旧 MinIO 均完成两个 store 实例间 30 次替换、100 次下载的内容/摘要一致性验收；这属于正确性检查，不是容量压测。未改动接口、配置、SDK 或持久格式，也未扩大为跨实例条件删除保证。
 
-L 批的[产品构建](https://github.com/thedyingkai/Untitled-OJ/actions/runs/36118481611)、[Windows/Linux 原生包](https://github.com/thedyingkai/Untitled-OJ/actions/runs/36118481598)及[文档同步](https://github.com/thedyingkai/Untitled-OJ/actions/runs/36118481630)均通过。M 批另外补跑 109 项下游调用回归；需要 PostgreSQL、Redis 或 Linux 符号链接的 9 项场景在该次下游命令中未执行，不能计入通过数。
+L 批的[产品构建](https://github.com/thedyingkai/Untitled-OJ/actions/runs/36118481611)、[Windows/Linux 原生包](https://github.com/thedyingkai/Untitled-OJ/actions/runs/36118481598)及[文档同步](https://github.com/thedyingkai/Untitled-OJ/actions/runs/36118481630)均通过。M 批对应的[产品构建](https://github.com/thedyingkai/Untitled-OJ/actions/runs/36120191568)、[Windows/Linux 原生包](https://github.com/thedyingkai/Untitled-OJ/actions/runs/36120191473)及[文档同步](https://github.com/thedyingkai/Untitled-OJ/actions/runs/36120191494)也均通过。
+
+M 批另外完成 109 项下游调用回归；首轮跳过的 7 项 PostgreSQL、1 项 Redis 和 1 项 Linux 符号链接场景，随后在隔离环境中全部补跑通过。33 项架构边界核对通过，涵盖 Store 应用、领域规则、后台协调及 HTTP 适配的依赖方向。
 
 本机工作树边界复查发现旧的忽略文件残留，已把测试字节码、Playwright 报告和旧回归编译缓存移至仓库外保留，并移出空测试目录。独立验证目录的提交钩子同时检查物理工作树和 Git 暂存内容；产品仓库不承载检查器。第三方构建依赖与 OJ 题目用例、提交数据不属于此次清理对象。
 
