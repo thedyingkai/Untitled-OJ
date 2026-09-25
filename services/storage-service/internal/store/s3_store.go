@@ -279,7 +279,22 @@ func (s *S3ObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket, ke
 	if err := s.ensureConfiguredBucket(bucket); err != nil {
 		return err
 	}
-	meta, err := s.metadata(r.Context(), bucket, key)
+	var meta types.ObjectMetadata
+	var object io.ReadCloser
+	if r.Method == http.MethodHead {
+		meta, err = s.metadata(r.Context(), bucket, key)
+	} else {
+		// Read headers and body from one provider response. A separate HEAD
+		// could observe an older object, and lazy reads skip GET for empty files.
+		var info minio.ObjectInfo
+		object, info, _, err = (minio.Core{Client: s.client}).GetObject(r.Context(), bucket, key, minio.GetObjectOptions{})
+		if err != nil {
+			err = s.objectReadError(r.Context(), bucket, err)
+		} else {
+			defer object.Close()
+			meta = metadataFromObjectInfo(bucket, info)
+		}
+	}
 	if err != nil {
 		if r.Method == http.MethodHead && errors.Is(err, ErrObjectNotFound) {
 			w.Header().Set(storagecontract.ResultHeader, storagecontract.ResultObjectNotFound)
@@ -297,11 +312,6 @@ func (s *S3ObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket, ke
 		w.Header().Set(storagecontract.ResultHeader, storagecontract.ResultPresent)
 		return nil
 	}
-	object, err := s.client.GetObject(r.Context(), bucket, key, minio.GetObjectOptions{})
-	if err != nil {
-		return err
-	}
-	defer object.Close()
 	written, err := io.CopyN(w, object, meta.SizeBytes)
 	if err != nil {
 		return fmt.Errorf("stream S3 object %s/%s after %d of %d bytes: %w", bucket, key, written, meta.SizeBytes, err)
@@ -364,22 +374,29 @@ func (s *S3ObjectStore) metadata(ctx context.Context, bucket, key string) (types
 	}
 	info, err := s.client.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
 	if err != nil {
-		if isMinIOObjectNotFound(err) {
-			bucketExists, bucketErr := s.client.BucketExists(ctx, bucket)
-			if bucketErr != nil {
-				return types.ObjectMetadata{}, bucketErr
-			}
-			if bucketExists {
-				return types.ObjectMetadata{}, ErrObjectNotFound
-			}
-		}
-		return types.ObjectMetadata{}, err
+		return types.ObjectMetadata{}, s.objectReadError(ctx, bucket, err)
 	}
 	meta := metadataFromObjectInfo(bucket, info)
 	if meta.Key == "" {
 		meta.Key = key
 	}
 	return meta, nil
+}
+
+// A missing or inaccessible bucket is a provider failure, not proof that one
+// object is absent. HEAD and GET preserve the same distinction for callers.
+func (s *S3ObjectStore) objectReadError(ctx context.Context, bucket string, err error) error {
+	if !isMinIOObjectNotFound(err) {
+		return err
+	}
+	bucketExists, bucketErr := s.client.BucketExists(ctx, bucket)
+	if bucketErr != nil {
+		return bucketErr
+	}
+	if bucketExists {
+		return ErrObjectNotFound
+	}
+	return err
 }
 
 func (s *S3ObjectStore) ensureBuckets(ctx context.Context) error {
