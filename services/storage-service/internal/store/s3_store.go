@@ -28,8 +28,14 @@ type S3ObjectStore struct {
 	backend string
 	buckets map[string]struct{}
 	now     func() time.Time
-	mu      sync.Mutex
+
+	// Bucket registration is independent of slow object uploads. Only mutations
+	// share mu; readiness and metadata reads must not wait for an upload body.
+	bucketsMu sync.RWMutex
+	mu        sync.Mutex
 }
+
+const temporaryObjectPrefix = ".ojos-upload/"
 
 // MinIOObjectStore is a source-compatible alias for the legacy constructor.
 type MinIOObjectStore = S3ObjectStore
@@ -95,8 +101,8 @@ func (s *S3ObjectStore) Ready(ctx context.Context) error {
 }
 
 func (s *S3ObjectStore) BucketNames() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.bucketsMu.RLock()
+	defer s.bucketsMu.RUnlock()
 
 	names := make([]string, 0, len(s.buckets))
 	for bucket := range s.buckets {
@@ -136,7 +142,7 @@ func (s *S3ObjectStore) Put(ctx context.Context, bucket, key string, options Put
 		return types.ObjectMetadata{}, err
 	}
 	if options.IfAbsent {
-		if _, err := s.metadataLocked(ctx, bucket, key); err == nil {
+		if _, err := s.metadata(ctx, bucket, key); err == nil {
 			return types.ObjectMetadata{}, ErrPreconditionFailed
 		} else if !errors.Is(err, ErrObjectNotFound) {
 			return types.ObjectMetadata{}, err
@@ -237,6 +243,11 @@ func (s *S3ObjectStore) List(ctx context.Context, bucket, prefix, cursor string,
 			}
 			return ObjectPage{}, object.Err
 		}
+		// Upload staging is provider-owned, not part of the published object
+		// namespace. Keep paging until enough business objects have been read.
+		if strings.HasPrefix(object.Key, temporaryObjectPrefix) {
+			continue
+		}
 		if len(items) <= limit {
 			meta := metadataFromObjectInfo(bucket, object)
 			if meta.SHA256 == "" || meta.UpdatedAt == "" || meta.SizeBytes < 0 {
@@ -302,6 +313,9 @@ func (s *S3ObjectStore) Serve(w http.ResponseWriter, r *http.Request, bucket, ke
 }
 
 func (s *S3ObjectStore) Delete(bucket, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	key, err := cleanObjectKey(key)
 	if err != nil {
 		return err
@@ -320,7 +334,7 @@ func (s *S3ObjectStore) DeleteIfMatches(ctx context.Context, bucket, key, expect
 	if err != nil || expectedSHA256 == "" || expectedSize < 0 {
 		return ErrPreconditionFailed
 	}
-	meta, err := s.metadataLocked(ctx, bucket, key)
+	meta, err := s.metadata(ctx, bucket, key)
 	if err != nil {
 		if errors.Is(err, ErrObjectNotFound) {
 			return nil
@@ -341,17 +355,11 @@ func (s *S3ObjectStore) Metadata(bucket, key string) (types.ObjectMetadata, erro
 }
 
 func (s *S3ObjectStore) metadata(ctx context.Context, bucket, key string) (types.ObjectMetadata, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.metadataLocked(ctx, bucket, key)
-}
-
-func (s *S3ObjectStore) metadataLocked(ctx context.Context, bucket, key string) (types.ObjectMetadata, error) {
 	key, err := cleanObjectKey(key)
 	if err != nil {
 		return types.ObjectMetadata{}, err
 	}
-	if err := s.ensureConfiguredBucketLocked(bucket); err != nil {
+	if err := s.ensureConfiguredBucket(bucket); err != nil {
 		return types.ObjectMetadata{}, err
 	}
 	info, err := s.client.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
@@ -378,7 +386,7 @@ func (s *S3ObjectStore) ensureBuckets(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for bucket := range s.buckets {
+	for _, bucket := range s.BucketNames() {
 		if _, err := s.ensureBucketLocked(ctx, bucket); err != nil {
 			return err
 		}
@@ -399,21 +407,19 @@ func (s *S3ObjectStore) ensureBucketLocked(ctx context.Context, bucket string) (
 			return false, err
 		}
 	}
+	s.bucketsMu.Lock()
+	defer s.bucketsMu.Unlock()
 	_, configured := s.buckets[bucket]
 	s.buckets[bucket] = struct{}{}
 	return !configured || !existed, nil
 }
 
 func (s *S3ObjectStore) ensureConfiguredBucket(bucket string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.ensureConfiguredBucketLocked(bucket)
-}
-
-func (s *S3ObjectStore) ensureConfiguredBucketLocked(bucket string) error {
 	if err := validateBucket(bucket); err != nil {
 		return err
 	}
+	s.bucketsMu.RLock()
+	defer s.bucketsMu.RUnlock()
 	if _, ok := s.buckets[bucket]; !ok {
 		return fmt.Errorf("bucket %s is not configured", bucket)
 	}
@@ -446,7 +452,7 @@ func temporaryObjectKey() (string, error) {
 	if _, err := rand.Read(random); err != nil {
 		return "", fmt.Errorf("generate temporary object identity: %w", err)
 	}
-	return ".ojos-upload/" + hex.EncodeToString(random), nil
+	return temporaryObjectPrefix + hex.EncodeToString(random), nil
 }
 
 func isMinIOObjectNotFound(err error) bool {

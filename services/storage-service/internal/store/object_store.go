@@ -27,7 +27,10 @@ type ObjectStore struct {
 	root    string
 	buckets map[string]struct{}
 	now     func() time.Time
-	mu      sync.Mutex
+
+	// Catalog reads must remain available while mu serializes object mutations.
+	bucketsMu sync.RWMutex
+	mu        sync.Mutex
 }
 
 var safeBucket = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,62}$`)
@@ -127,9 +130,10 @@ func (s *ObjectStore) Ready(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for bucket := range s.buckets {
+	for _, bucket := range s.BucketNames() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		path := s.bucketDir(bucket)
 		info, err := os.Stat(path)
 		if err != nil || !info.IsDir() {
@@ -140,8 +144,8 @@ func (s *ObjectStore) Ready(ctx context.Context) error {
 }
 
 func (s *ObjectStore) BucketNames() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.bucketsMu.RLock()
+	defer s.bucketsMu.RUnlock()
 
 	names := make([]string, 0, len(s.buckets))
 	for bucket := range s.buckets {
@@ -158,14 +162,18 @@ func (s *ObjectStore) EnsureBucket(bucket string) (bool, error) {
 	if err := validateBucket(bucket); err != nil {
 		return false, err
 	}
-	_, existed := s.buckets[bucket]
-	s.buckets[bucket] = struct{}{}
 	if err := os.MkdirAll(s.bucketDir(bucket), 0o755); err != nil {
 		return false, err
 	}
 	if err := os.MkdirAll(s.metaBucketDir(bucket), 0o755); err != nil {
 		return false, err
 	}
+	// Publish only after both required directories exist. A failed filesystem
+	// operation must not leave an unusable bucket in the runtime catalog.
+	s.bucketsMu.Lock()
+	defer s.bucketsMu.Unlock()
+	_, existed := s.buckets[bucket]
+	s.buckets[bucket] = struct{}{}
 	return !existed, nil
 }
 
@@ -363,10 +371,13 @@ func (s *ObjectStore) Delete(bucket, key string) error {
 // DeleteIfMatches makes GC deletion conditional on the immutable identity the
 // caller observed. The same store mutex is used by Put, so a local provider
 // cannot replace an object between verification and removal.
-func (s *ObjectStore) DeleteIfMatches(_ context.Context, bucket, key, expectedSHA256 string, expectedSize int64) error {
+func (s *ObjectStore) DeleteIfMatches(ctx context.Context, bucket, key, expectedSHA256 string, expectedSize int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	expectedSHA256, err := normalizeExpectedSHA256(expectedSHA256)
 	if err != nil || expectedSHA256 == "" || expectedSize < 0 {
 		return ErrPreconditionFailed
@@ -388,6 +399,9 @@ func (s *ObjectStore) DeleteIfMatches(_ context.Context, bucket, key, expectedSH
 	}
 	if meta.SHA256 != expectedSHA256 || meta.SizeBytes != expectedSize {
 		return ErrPreconditionFailed
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
 		return err
@@ -449,7 +463,7 @@ func (s *ObjectStore) metadataForObject(bucket, key, objectPath string, info os.
 }
 
 func (s *ObjectStore) ensureBuckets() error {
-	for bucket := range s.buckets {
+	for _, bucket := range s.BucketNames() {
 		if err := validateBucket(bucket); err != nil {
 			return err
 		}
@@ -504,6 +518,8 @@ func (s *ObjectStore) ensureBucket(bucket string) error {
 	if err := validateBucket(bucket); err != nil {
 		return err
 	}
+	s.bucketsMu.RLock()
+	defer s.bucketsMu.RUnlock()
 	if _, ok := s.buckets[bucket]; !ok {
 		return fmt.Errorf("bucket %s is not configured", bucket)
 	}

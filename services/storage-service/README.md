@@ -24,6 +24,10 @@ Catalog Release 和客户端均由 `ojos service` 生成。旧 `release.yaml`、
 
 `/healthz` 只证明进程存活；`/readyz` 会实际检查 S3 端点及所有配置 bucket。
 
+桶目录使用独立的短时读写锁；健康探针、桶名查询和已发布对象的元数据读取不等待
+慢上传读取完请求体。对象变更仍在同一 store 实例内串行执行，本地条件删除在
+实际移除前检查请求取消。桶创建成功后才登记到运行时目录，失败不会发布半成品配置。
+
 ## 生产配置和身份
 
 生产使用 S3 兼容端点；新的自托管配方使用 SeaweedFS，已有 MinIO 继续兼容。
@@ -70,3 +74,4 @@ Agent 将配置展开为 `OJOS_CONFIG_*`，将 secret 展开为 `OJOS_SECRET_*`�
 容器以非 root 用户运行。S3 上传先写入 provider 内部的随机临时 object，完成
 SHA-256/size 校验后，再以带条件头的单次流式 PUT 原子发布，并在所有返回路径清理
 临时 object；服务不需要本地 spool，因此可直接使用只读根文件系统。
+S3 的 `.ojos-upload/` 暂存对象不进入业务列表，也不占用业务分页的条数和游标。
